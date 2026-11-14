@@ -1,0 +1,215 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 11-15-2026 01:53
+last_updated: 11-15-2026 01:53
+project: Nextron AI outreach
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-scaffold-the-engine-project-with-layer-contracts-and-a-local: backlog
+  1-2-log-structured-redacted-json-lines-and-raise-typed-errors: backlog
+  1-3-persist-through-one-configured-sqlite-engine-units-of-work-a: backlog
+  1-4-enter-the-dashboard-through-a-one-time-code-with-a-hardened: backlog
+  1-5-require-csrf-checked-posts-and-render-untrusted-text-safely: backlog
+  1-6-declare-typed-settings-once-and-edit-them-on-a-settings-page: backlog
+  1-7-store-external-credentials-in-windows-credential-manager-fro: backlog
+  1-8-keep-dev-and-test-away-from-real-people-with-environment-iso: backlog
+  1-9-grant-google-oauth-access-through-a-loopback-flow: backlog
+  1-10-run-durable-jobs-on-three-lanes-with-leases-and-retries: backlog
+  1-11-schedule-periodic-triggers-and-write-the-runner-heartbeat: backlog
+  1-12-send-ops-alerts-by-telegram-and-show-dashboard-notifications: backlog
+  1-13-meter-every-external-call-and-stop-non-essential-work-at-quo: backlog
+  1-14-check-install-readiness-with-nextron-doctor: backlog
+  1-15-see-engine-health-on-one-panel: backlog
+  1-16-back-up-the-database-in-process-daily-and-before-every-migra: backlog
+  1-17-encrypt-each-backup-and-copy-it-off-the-pc: backlog
+  1-18-prove-backups-restore-with-a-monthly-restore-test: backlog
+  1-19-restore-a-backup-and-hold-sending-in-recovery-mode: backlog
+  1-20-spike-register-the-logon-task-and-prove-crash-and-stale-hear: backlog
+  1-21-start-the-engine-at-logon-and-supervise-it-with-run-ps1: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-seed-the-segments-and-their-signal-lists-with-nextron-seed-s: backlog
+  2-2-keep-exactly-one-lead-per-organization: backlog
+  2-3-import-leads-from-csv-with-their-origin-recorded: backlog
+  2-4-browse-leads-and-open-a-lead-page: backlog
+  2-5-crawl-a-lead-s-website-politely-inside-the-egress-filter: backlog
+  2-6-render-near-empty-pages-and-detect-chat-and-booking-widgets: backlog
+  2-7-call-claude-through-one-gateway-with-typed-results-and-meter: backlog
+  2-8-version-extraction-prompts-and-pin-the-active-route-tuple: backlog
+  2-9-detect-signals-with-evidence-from-the-crawled-pages: backlog
+  2-10-find-named-decision-makers-and-pick-the-primary-contact: backlog
+  2-11-collect-hiring-signals-from-careers-pages-and-ats-boards: backlog
+  2-12-confirm-a-uk-lead-s-legal-form-through-companies-house: backlog
+  2-13-find-the-primary-contact-s-email-address-in-the-cheapest-ord: backlog
+  2-14-validate-each-address-and-assign-its-address-class: backlog
+  2-15-score-and-tier-every-enriched-lead: backlog
+  2-16-turn-pasted-signals-into-researched-leads-through-the-signal: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-seed-the-us-and-uk-market-rules: backlog
+  3-2-resolve-each-contact-s-market-and-timezone: backlog
+  3-3-record-suppression-entries-through-one-writer: backlog
+  3-4-gate-every-outreach-path-with-assert_contactable: backlog
+  3-5-manage-the-suppression-list-from-the-dashboard: backlog
+  3-6-evaluate-eligibility-live-and-show-the-reasons: backlog
+  3-7-show-provenance-and-the-eligibility-basis-on-the-lead-page: backlog
+  3-8-issue-and-decode-unsubscribe-tokens: backlog
+  3-9-spike-confirm-the-sending-domains-dns-zones-can-host-the-wor: backlog
+  3-10-deploy-the-unsubscribe-worker: backlog
+  3-11-poll-unsubscribe-requests-into-the-suppression-list: backlog
+  3-12-monitor-unsubscribe-polling-and-re-poll-the-worker-after-a-r: backlog
+  3-13-erase-a-contact-on-request: backlog
+  3-14-erase-personal-data-outside-the-database-and-issue-a-receipt: backlog
+  3-15-export-everything-held-on-a-contact: backlog
+  3-16-keep-an-erasure-ledger-and-reapply-it-after-a-restore: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-seed-the-default-sequence-and-step-briefs: backlog
+  4-2-configure-campaigns-offers-and-variants-with-pause-resume-an: backlog
+  4-3-maintain-approved-company-facts-with-versions: backlog
+  4-4-snapshot-the-sales-playbook-and-pin-it-in-route-tuples: backlog
+  4-5-gate-ai-route-activation-on-test-runs: backlog
+  4-6-build-the-ai-test-sets: backlog
+  4-7-register-the-sending-inboxes-that-sequences-bind-to: backlog
+  4-8-enroll-a-contact-in-a-campaign: backlog
+  4-9-create-a-sequence-s-draft-slots-due-times-and-lifecycle-comm: backlog
+  4-10-show-today-s-capacity-and-pick-leads-to-draft: backlog
+  4-11-fill-in-furqaan-s-signature-and-the-compliance-footer: backlog
+  4-12-store-draft-text-as-immutable-revisions-bound-to-a-hash: backlog
+  4-13-check-every-draft-against-deterministic-grounding-rules: backlog
+  4-14-run-the-ai-grounding-check-and-fail-closed: backlog
+  4-15-draft-step-1-with-opus-from-evidence-and-facts: backlog
+  4-16-draft-signal-inbox-leads-within-15-minutes: backlog
+  4-17-send-bulk-ai-work-through-message-batches: backlog
+  4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-de: backlog
+  4-19-use-segment-fallback-copy-for-hand-picked-tier-c-leads: backlog
+  4-20-regenerate-a-draft-and-flag-stale-ones: backlog
+  4-21-spike-size-ai-cost-and-effort-per-route-against-the-20-budge: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time: backlog
+  5-2-hold-each-approved-draft-as-exactly-one-queued-outboundmessa: backlog
+  5-3-show-the-evidence-facts-and-grounding-result-behind-every-ca: backlog
+  5-4-approve-a-draft-bound-to-the-exact-text-shown: backlog
+  5-5-reject-with-a-reason-skip-or-regenerate-a-card: backlog
+  5-6-edit-a-draft-then-approve-it-once-the-recheck-passes: backlog
+  5-7-decide-every-card-from-the-keyboard-with-the-next-card-in-un: backlog
+  5-8-batch-approve-grounding-passed-follow-ups-from-a-compact-lis: backlog
+  5-9-expire-stale-approvals-and-pull-back-step-1s-whose-event-clo: backlog
+  5-10-regenerate-stale-drafts-before-they-are-due-and-flag-stalled: backlog
+  5-11-set-away-dates-that-pause-new-sequence-selection: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-spike-gmail-send-path-header-reconciliation-and-internal-oau: backlog
+  6-2-connect-a-sending-inbox-through-gmail-oauth-with-an-identity: backlog
+  6-3-pause-resume-and-remove-sending-inboxes: backlog
+  6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total: backlog
+  6-5-check-sending-domain-authentication-on-connect-and-daily: backlog
+  6-6-pause-inboxes-on-blocklistings-and-postmaster-spam-rates: backlog
+  6-7-assemble-plain-text-messages-in-one-thread-per-contact: backlog
+  6-8-sync-each-sending-inbox-every-2-minutes-and-confirm-engine-s: backlog
+  6-9-evaluate-the-closed-send-gate-including-stop-rules-before-ev: backlog
+  6-10-send-each-approved-message-exactly-once: backlog
+  6-11-pace-cold-sends-inside-send-windows-and-catch-up-without-bur: backlog
+  6-12-reconcile-uncertain-sends-and-let-the-operator-resolve-unkno: backlog
+  6-13-pause-inboxes-on-high-bounce-rates-and-policy-bounces: backlog
+  epic-6-retrospective: optional
+
+  epic-7: backlog
+  7-1-route-every-synced-message-in-the-fixed-order-and-link-repli: backlog
+  7-2-act-on-opt-outs-in-the-same-sync-rule-first-reply-ingest-and: backlog
+  7-3-detect-and-log-furqaan-s-manual-replies: backlog
+  7-4-handle-bounces-and-stop-guessing-patterns-that-bounce: backlog
+  7-5-classify-replies-with-the-opus-classification-route: backlog
+  7-6-apply-reply-class-effects-and-advance-pipeline-stages-automa: backlog
+  7-7-review-uncertain-replies-override-classes-and-reverse-rule-o: backlog
+  7-8-draft-hot-lead-replies-with-two-slots-and-the-booking-link: backlog
+  7-9-alert-furqaan-to-hot-leads-by-telegram-internal-email-and-th: backlog
+  7-10-draft-replies-to-objections-not-now-and-data-questions: backlog
+  7-11-hand-a-referral-off-to-the-referred-person: backlog
+  epic-7-retrospective: optional
+
+  epic-8: backlog
+  8-1-keep-supply-jobs-inside-quotas-and-the-ai-budget: backlog
+  8-2-places-search-adapter-that-keeps-only-what-the-maps-terms-al: backlog
+  8-3-turn-places-candidates-into-deduplicated-contactable-leads: backlog
+  8-4-discover-active-uk-companies-through-companies-house: backlog
+  8-5-spike-choose-a-job-aggregator-api-and-confirm-its-terms-allo: backlog
+  8-6-discover-hiring-organizations-through-the-chosen-job-aggrega: backlog
+  8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid: backlog
+  8-8-re-contact-not-now-leads-on-their-chosen-date: backlog
+  8-9-select-the-day-s-new-sequences-automatically-by-tier-and-eve: backlog
+  8-10-top-up-discovery-each-weekday-within-quotas: backlog
+  8-11-restart-a-completed-sequence-only-on-a-new-event-at-least-90: backlog
+  8-12-delete-contacts-personal-data-after-the-retention-period: backlog
+  epic-8-retrospective: optional
+
+  epic-9: backlog
+  9-1-move-leads-through-the-later-pipeline-stages-by-hand-with-de: backlog
+  9-2-prepare-a-grounded-call-prep-sheet-for-each-hot-lead: backlog
+  9-3-email-the-call-prep-sheet-to-furqaan-when-a-call-is-booked: backlog
+  9-4-prompt-for-and-record-each-call-outcome: backlog
+  9-5-draft-a-rebooking-email-after-a-no-show: backlog
+  9-6-report-offer-validation-after-the-first-10-held-calls: backlog
+  9-7-view-the-pipeline-by-stage-with-filters: backlog
+  9-8-show-each-lead-s-complete-history: backlog
+  epic-9-retrospective: optional
+
+  epic-10: backlog
+  10-1-prove-by-contract-that-linkedin-and-instagram-are-never-auto: backlog
+  10-2-configure-the-linkedin-account-its-owner-s-telegram-chat-and: backlog
+  10-3-draft-linkedin-connection-notes-and-first-messages: backlog
+  10-4-prepare-each-weekday-s-linkedin-tasks-in-priority-order: backlog
+  10-5-deliver-each-linkedin-task-to-the-owner-s-telegram-chat: backlog
+  10-6-mark-tasks-sent-skipped-or-accepted-and-log-found-profile-ur: backlog
+  10-7-record-channel-permissions-for-whatsapp-and-instagram: backlog
+  10-8-draft-warm-channel-messages-for-hot-leads-and-log-each-touch: backlog
+  10-9-prepare-a-call-sheet-for-a-hot-lead: backlog
+  epic-10-retrospective: optional
+
+  epic-11: backlog
+  11-1-see-funnel-counts-and-rates-per-contacted-contact: backlog
+  11-2-break-the-funnel-down-and-guard-variant-comparisons: backlog
+  11-3-show-the-supporting-measures-counter-metrics-and-checkpoints: backlog
+  11-4-show-approval-metrics: backlog
+  11-5-edit-segments-in-the-dashboard: backlog
+  11-6-edit-markets-with-the-compliance-rules-locked: backlog
+  11-7-edit-sequences-and-step-briefs: backlog
+  11-8-create-and-edit-campaigns-and-variants: backlog
+  epic-11-retrospective: optional

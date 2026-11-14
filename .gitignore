@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / Cloudflare Worker
+node_modules/
+.wrangler/
+
+# BMAD render cache
+_bmad/render/
+
+# Local runtime data never lives in the repo (it goes in %LOCALAPPDATA%\Nextron), but guard anyway
+*.db
+*.db-wal
+*.db-shm
+*.lock.tmp
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
