@@ -1,0 +1,725 @@
+[project]
+name = "nextron-engine"
+version = "0.1.0"
+description = "Nextron Outreach Engine: a single-user outreach engine that runs on one Windows 11 PC."
+readme = "README.md"
+requires-python = ">=3.14.8,<3.15"
+# Exact pins from the architecture spine's Stack table (SC-1). pydantic-settings is the one
+# compatible-release pin the spine allows (~=2.16; the lock holds 2.16.3).
+dependencies = [
+    "alembic==1.20.1",
+    "anthropic==2.8.0",
+    "apscheduler==3.11.3",
+    "cryptography==50.0.2",
+    "dnspython==2.9.2",
+    "email-validator==2.3.0",
+    "fastapi==0.162.7",
+    "google-api-python-client==2.202.0",
+    "google-auth-oauthlib==1.5.0",
+    "httpx2==2.16.0",
+    "jinja2==3.1.6",
+    "keyring==25.7.0",
+    "playwright==1.65.2",
+    "protego==0.7.0",
+    "pydantic==2.14.3",
+    "pydantic-settings~=2.16",
+    "python-ulid==4.1.0",
+    "selectolax==1.0.2",
+    "sqlalchemy==2.1.8",
+    "trafilatura==2.3.1",
+    "tzdata==2026.6",
+    "uvicorn==0.54.0",
+]
+
+[project.scripts]
+nextron = "nextron.__main__:main"
+
+[dependency-groups]
+dev = [
+    "import-linter==2.16",
+    "pytest==9.2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = ">=0.13.0,<0.14.0"
+
+[tool.uv.build-backend]
+module-name = "nextron"
+module-root = ""
+
+[tool.pytest.ini_options]
+minversion = "9.2"
+testpaths = ["tests/unit", "tests/app", "tests/contracts"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "ai_eval: opt-in AI evaluation suite that calls Claude (AD-12, AD-14); skipped unless selected with -m ai_eval",
+]
+
+# ---------------------------------------------------------------------------------------------
+# Import contracts (architecture spine AD-1). tests/contracts runs lint-imports on every pytest
+# run. Contract ids start with c<group>-; the seven groups are AD-1's seven contracts.
+# ---------------------------------------------------------------------------------------------
+[tool.importlinter]
+root_packages = ["nextron"]
+include_external_packages = true
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c1-layers"
+name = "1 layers: main > web | jobs | adapters > app > ports | db > domain"
+type = "layers"
+layers = [
+    "nextron.main",
+    "nextron.web | nextron.jobs | nextron.adapters",
+    "nextron.app",
+    "nextron.ports | nextron.db",
+    "nextron.domain",
+]
+
+# Also group 1: bootstrap, lock and startup_checks belong to the composition root, so no layer
+# below nextron.main may import them. test_contract_coverage.py keeps the sources complete.
+[[tool.importlinter.contracts]]
+id = "c1-composition-root-helpers"
+name = "1 forbidden: only the composition root imports bootstrap, lock and startup_checks"
+type = "forbidden"
+source_modules = [
+    "nextron.adapters",
+    "nextron.app",
+    "nextron.db",
+    "nextron.domain",
+    "nextron.jobs",
+    "nextron.ports",
+    "nextron.web",
+]
+forbidden_modules = ["nextron.bootstrap", "nextron.lock", "nextron.startup_checks"]
+
+[[tool.importlinter.contracts]]
+id = "c2-delivery"
+name = "2 forbidden: web and jobs never import adapters or db"
+type = "forbidden"
+source_modules = ["nextron.web", "nextron.jobs"]
+forbidden_modules = ["nextron.adapters", "nextron.db"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c3-adapters"
+name = "3 forbidden: adapters never import app or db"
+type = "forbidden"
+source_modules = ["nextron.adapters"]
+forbidden_modules = ["nextron.app", "nextron.db"]
+
+# Group 4. Sources are every non-adapter package; test_contract_coverage.py fails when a new
+# top-level module is missing. Indirect imports are allowed because the composition root reaches
+# SDKs through the adapters it wires; contracts 1 and 2 already stop everything else reaching
+# adapters, so only direct imports need checking here.
+[[tool.importlinter.contracts]]
+id = "c4-sdks-only-in-adapters"
+name = "4 forbidden: third-party SDKs only in adapters"
+type = "forbidden"
+source_modules = [
+    "nextron.__main__",
+    "nextron.app",
+    "nextron.bootstrap",
+    "nextron.db",
+    "nextron.domain",
+    "nextron.jobs",
+    "nextron.lock",
+    "nextron.main",
+    "nextron.ports",
+    "nextron.startup_checks",
+    "nextron.web",
+]
+forbidden_modules = [
+    "anthropic",
+    "googleapiclient",
+    "google_auth_oauthlib",
+    "google",
+    "httpx2",
+    "playwright",
+    "keyring",
+    "cryptography",
+    "selectolax",
+    "trafilatura",
+    "protego",
+    "dns",
+    "email_validator",
+]
+allow_indirect_imports = true
+
+# Also group 4: libraries no nextron module may import at all. pytz and dateutil timezones break
+# the zoneinfo convention; the LinkedIn and Instagram automation clients and selenium seed FR-49.
+# import-linter rejects subpackages of external packages as forbidden modules, so the ban on
+# dateutil.tz is written as a ban on dateutil.
+[[tool.importlinter.contracts]]
+id = "c4-banned-everywhere"
+name = "4 forbidden: no pytz, dateutil or LinkedIn and Instagram automation in any module"
+type = "forbidden"
+source_modules = ["nextron"]
+forbidden_modules = [
+    "pytz",
+    "dateutil",
+    "linkedin_api",
+    "instaloader",
+    "instagrapi",
+    "selenium",
+]
+
+# Also group 4: AD-1's placement of the other third-party libraries. Each contract's sources are
+# every top-level package except the ones allowed the library (test_contract_coverage.py keeps
+# them complete). Indirect imports are allowed for the reason given above contract 4.
+[[tool.importlinter.contracts]]
+id = "c4-sqlalchemy-only-in-db"
+name = "4 forbidden: sqlalchemy and alembic only in db"
+type = "forbidden"
+source_modules = [
+    "nextron.__main__",
+    "nextron.adapters",
+    "nextron.app",
+    "nextron.bootstrap",
+    "nextron.domain",
+    "nextron.jobs",
+    "nextron.lock",
+    "nextron.main",
+    "nextron.ports",
+    "nextron.startup_checks",
+    "nextron.web",
+]
+forbidden_modules = ["sqlalchemy", "alembic"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c4-apscheduler-only-in-jobs"
+name = "4 forbidden: apscheduler only in jobs"
+type = "forbidden"
+source_modules = [
+    "nextron.__main__",
+    "nextron.adapters",
+    "nextron.app",
+    "nextron.bootstrap",
+    "nextron.db",
+    "nextron.domain",
+    "nextron.lock",
+    "nextron.main",
+    "nextron.ports",
+    "nextron.startup_checks",
+    "nextron.web",
+]
+forbidden_modules = ["apscheduler"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c4-pydantic-settings-only-in-composition-root"
+name = "4 forbidden: pydantic_settings only in main and bootstrap"
+type = "forbidden"
+source_modules = [
+    "nextron.__main__",
+    "nextron.adapters",
+    "nextron.app",
+    "nextron.db",
+    "nextron.domain",
+    "nextron.jobs",
+    "nextron.lock",
+    "nextron.ports",
+    "nextron.startup_checks",
+    "nextron.web",
+]
+forbidden_modules = ["pydantic_settings"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c4-web-framework-only-in-web-and-main"
+name = "4 forbidden: fastapi, starlette and uvicorn only in web and main"
+type = "forbidden"
+source_modules = [
+    "nextron.__main__",
+    "nextron.adapters",
+    "nextron.app",
+    "nextron.bootstrap",
+    "nextron.db",
+    "nextron.domain",
+    "nextron.jobs",
+    "nextron.lock",
+    "nextron.ports",
+    "nextron.startup_checks",
+]
+forbidden_modules = ["fastapi", "starlette", "uvicorn"]
+allow_indirect_imports = true
+
+# Group 5. Sources are every package except nextron.adapters.ai: the non-adapter packages, then
+# each non-AI adapter subpackage by name (none exist yet). Add each new adapter here;
+# test_contract_coverage.py fails until you do.
+[[tool.importlinter.contracts]]
+id = "c5-anthropic-only-in-ai"
+name = "5 forbidden: anthropic only in adapters.ai"
+type = "forbidden"
+source_modules = [
+    "nextron.__main__",
+    "nextron.app",
+    "nextron.bootstrap",
+    "nextron.db",
+    "nextron.domain",
+    "nextron.jobs",
+    "nextron.lock",
+    "nextron.main",
+    "nextron.ports",
+    "nextron.startup_checks",
+    "nextron.web",
+]
+forbidden_modules = ["anthropic"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c6-app-dag"
+name = "6 layers: the app DAG"
+type = "layers"
+containers = ["nextron.app"]
+layers = [
+    "replies | discovery | scoring | ops | analytics",
+    "pipeline",
+    "sequencing",
+    "approval",
+    "drafting | sending | research",
+    "compliance | playbook | setup",
+    "notify",
+    "jobqueue",
+    "queries",
+]
+
+# BEGIN GENERATED: contract group 7. Run scripts/gen_owner_contracts.py; do not edit by hand.
+[[tool.importlinter.contracts]]
+id = "c7-owner-setup"
+name = "7 forbidden: setup uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.setup",
+    "nextron.app.queries.setup",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-discovery"
+name = "7 forbidden: discovery uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.discovery",
+    "nextron.app.queries.discovery",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-research"
+name = "7 forbidden: research uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.research",
+    "nextron.app.queries.research",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-scoring"
+name = "7 forbidden: scoring uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.scoring",
+    "nextron.app.queries.scoring",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-sequencing"
+name = "7 forbidden: sequencing uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.sequencing",
+    "nextron.app.queries.sequencing",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-drafting"
+name = "7 forbidden: drafting uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.drafting",
+    "nextron.app.queries.drafting",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-approval"
+name = "7 forbidden: approval uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.approval",
+    "nextron.app.queries.approval",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-sending"
+name = "7 forbidden: sending uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.sending",
+    "nextron.app.queries.sending",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-replies"
+name = "7 forbidden: replies uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.replies",
+    "nextron.app.queries.replies",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-pipeline"
+name = "7 forbidden: pipeline uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.pipeline",
+    "nextron.app.queries.pipeline",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-compliance"
+name = "7 forbidden: compliance uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.compliance",
+    "nextron.app.queries.compliance",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-playbook"
+name = "7 forbidden: playbook uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.playbook",
+    "nextron.app.queries.playbook",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-notify"
+name = "7 forbidden: notify uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.notify",
+    "nextron.app.queries.notify",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-jobqueue"
+name = "7 forbidden: jobqueue uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.jobqueue",
+    "nextron.app.queries.jobqueue",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-ops"
+name = "7 forbidden: ops uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.ops",
+    "nextron.app.queries.ops",
+]
+forbidden_modules = [
+    "nextron.db.repos.analytics",
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "c7-owner-analytics"
+name = "7 forbidden: analytics uses only its own repositories"
+type = "forbidden"
+source_modules = [
+    "nextron.app.analytics",
+    "nextron.app.queries.analytics",
+]
+forbidden_modules = [
+    "nextron.db.repos.approval",
+    "nextron.db.repos.compliance",
+    "nextron.db.repos.discovery",
+    "nextron.db.repos.drafting",
+    "nextron.db.repos.jobqueue",
+    "nextron.db.repos.notify",
+    "nextron.db.repos.ops",
+    "nextron.db.repos.pipeline",
+    "nextron.db.repos.playbook",
+    "nextron.db.repos.replies",
+    "nextron.db.repos.research",
+    "nextron.db.repos.scoring",
+    "nextron.db.repos.sending",
+    "nextron.db.repos.sequencing",
+    "nextron.db.repos.setup",
+]
+allow_indirect_imports = true
+
+# END GENERATED: contract group 7
