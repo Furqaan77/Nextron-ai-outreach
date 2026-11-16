@@ -1,0 +1,13 @@
+# The safe allowlist (AD-13, AD-18): the only places the safe filter, a filter safe block,
+# autoescape false, Markup or __html__ may appear in nextron/web. Checked by
+# tests/contracts/test_web_contracts.py.
+#
+# One line per allowed source line: <posix path>: <stripped source line>. Each entry allows one
+# such line; an entry that matches nothing fails the check. Add an entry only with a reason
+# comment above it, and only for markup the code builds itself from escaped values.
+
+# The rendering helpers build their two fixed snippets with Markup.format, which escapes every
+# argument; plain() escapes the link text first, so nothing untrusted reaches the page raw.
+nextron/web/templating.py: from markupsafe import Markup, escape
+nextron/web/templating.py: _LINK: Final = Markup('<a href="{}" rel="noopener noreferrer">{}</a>')
+nextron/web/templating.py: _CSRF_FIELD: Final = Markup('<input type="hidden" name="csrf_token" value="{}">')

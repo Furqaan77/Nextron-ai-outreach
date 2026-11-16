@@ -64,9 +64,11 @@ with a dashboard session: like every other route, it answers 401 without one.
 ```powershell
 curl.exe -i http://127.0.0.1:8766/health                           # 401 and the locked page
 curl.exe -i -H "Host: evil.example" http://127.0.0.1:8766/health   # 400
+curl.exe -i -X POST -H "Origin: http://evil.example" http://127.0.0.1:8766/   # 401
 ```
 
-(`curl.exe`: in PowerShell 5.1, `curl` is `Invoke-WebRequest`.)
+(`curl.exe`: in PowerShell 5.1, `curl` is `Invoke-WebRequest`.) With a dashboard session cookie,
+that cross-origin POST gets 403 `Request refused: security check failed` instead.
 
 | Exit code | Meaning |
 |---|---|
@@ -101,10 +103,18 @@ Sessions live in the engine's memory, so they end when the engine restarts (or w
 drops its cookie); there is no idle timeout. A request without a session, `GET` included, gets
 401 with a page saying to run `nextron open`; so does a reused, expired or wrong code. A wrong
 code leaves the pending one in place, so a junk `/enter` from another website can't cancel your
-link. Browsers don't scope cookies by port, so the browser sends the `nextron_session` cookie
-to every web server on `127.0.0.1` it visits, not only to the engine, and the environments
-share that one cookie: opening one environment's dashboard ends the browser's session with the
-other. Run `nextron open` again to switch back.
+link. `/enter` also accepts only a navigation the browser started itself (no `Sec-Fetch-Site`
+header, or `none`, which is what a browser sends when `nextron open` launches it). A link from
+another website (`cross-site`), or from a server on another `127.0.0.1` port (`same-site`), gets
+the locked page, is logged as `dashboard_entry_refused` with `reason=cross_site`, and leaves the
+pending code untouched. Browsers don't scope cookies by port, so the browser sends the
+`nextron_session` cookie to every web server on `127.0.0.1` it visits, not only to the engine,
+and the environments share that one cookie: opening one environment's dashboard ends the
+browser's session with the other. Run `nextron open` again to switch back.
+
+After a second `nextron open`, a dashboard tab opened earlier still carries the old session's
+CSRF token while the browser now sends the new session's cookie, so the old tab's actions are
+refused (silently for now, until Story 1.12's notification). Reload the tab.
 
 These protections keep out other websites and other Windows users' processes, not your own:
 any process running as your Windows user can read Credential Manager, and with it the pending
@@ -125,9 +135,74 @@ code.
   `includeIndicatorStyles:false`).
 - The navigation shows each section (Queue, Signal Inbox, Leads/Pipeline, Funnel, Settings,
   Health) once its page route exists.
+- **Every state change is a checked POST.** A page on another port of `127.0.0.1` is same-site,
+  so the browser sends it the `SameSite=Strict` cookie; these checks are what stop it posting to
+  the dashboard:
+  - Every session has its own CSRF token (256 bits, kept for the session's life). Pages carry it
+    in `<body hx-headers='{"X-CSRF-Token": ...}'>`, so every HTMX request sends it, and every
+    `<form>` carries it as the hidden `csrf_token` field (`{{ csrf_field() }}`). Pages that
+    carry it are never cached (`page()` answers with `Cache-Control: no-store`).
+  - **Every form posts through HTMX** (`<form method="post" hx-post="...">`). Under the
+    dashboard's `Referrer-Policy: no-referrer`, a browser's native form submission sends
+    `Origin: null`, which the `Origin` check refuses; HTMX's request keeps the real `Origin`. If
+    the HTMX script ever fails to load, the native fallback is refused with 403: it fails
+    closed.
+  - For any method other than GET and HEAD, before routing, the request needs exactly one
+    `Origin` equal to `http://` plus its `Host` (so `localhost:<port>` posts with the
+    `localhost` origin), and either no `Sec-Fetch-Site` or exactly one `same-origin`. **Every
+    POST must carry `Origin`**: all current browsers send it, so a POST without one is refused.
+  - Every POST route runs `require_csrf` first: the request must present the session's token in
+    an `X-CSRF-Token` header or a `csrf_token` field of an `application/x-www-form-urlencoded`
+    body, and every token it presents must match (compared in constant time). **A plain
+    multipart form can't carry the token, so it is refused** until a story needs one.
+  - A refused request gets **403 `Request refused: security check failed` as plain text**, and
+    the handler never runs. HTMX doesn't swap error responses, so an HTMX control shows nothing
+    for now; the error notification arrives in Story 1.12. It is logged as `request_refused`
+    with `check` = `origin`, `fetch_site` or `csrf_token`, the `method` and the `path`, never
+    with the query string, a header value or a token.
+- **No GET writes to the database.** Every GET handler runs inside a read-only unit of work
+  (see [Database](#database)); any database write in it raises, and the request gets 500.
+  `GET /enter` is the one GET that changes state, by design: it consumes the one-time code and
+  creates a session (neither in the database). A route is exactly a GET or exactly a POST:
+  `create_app` sets a route class that refuses anything else (`PUT`, `HEAD`, GET and POST
+  together, an `async def` or generator GET, a callable object) when the route is added, and
+  refuses to start when a route breaks these rules (a plain `APIRoute`, a POST whose first
+  dependency isn't `require_csrf`, an included router). Write a POST handler like this:
 
-`tests/contracts/test_web_contracts.py` checks the handler, declaration, inline-code and
-autoescaping rules.
+  ```python
+  @app.post("/settings", name="settings_save")     # gets Depends(require_csrf) from the route class
+  @personal_data(False)
+  def settings_save(request: Request) -> Response:
+      with units.open():                           # its own write unit of work (AD-3)
+          setup_api.save(...)
+  ```
+
+  A GET handler renders its page inside its body (`page(request, "x.html")`): the read-only
+  unit of work closes before FastAPI serialises what the handler returns.
+- **Untrusted text renders inert.** Crawled pages, imported rows, Replies and AI output may hold
+  `<script>`, `onerror=`, `hx-post=` or `javascript:` text. Besides autoescaping, templates use:
+  - `{{ value|plain }}`: the escaped text of any value, even `Markup` (`None` renders empty);
+  - `{{ safe_link(url, text) }}`: a link only for an `http`/`https` URL with a hostname, no
+    user name or password (`https://nextronai.com@evil.example/` would look trusted), no
+    control character, space or backslash, no Unicode control, format (bidi override,
+    zero-width), space or line/paragraph separator character, and a port that parses; it
+    renders `<a href="..." rel="noopener noreferrer">`. Anything else (`javascript:`, `data:`,
+    `//host`, `http:\\host`) renders as plain text;
+  - `untrusted_block(text)` from `macros.html`: a `<div class="untrusted" hx-disable>` around
+    the escaped text (or around a `{% call %}` body), so HTMX ignores any `hx-*` attribute
+    inside it; `app.css` keeps its line breaks and wraps long strings.
+- **The safe allowlist.** The `safe` filter (`|safe`, even split across lines, or named as
+  `'safe'` as in `map('safe')`), a `{% filter safe %}` block, any `{% autoescape %}` whose
+  argument isn't literally `true`, `Markup` (under any name) and `__html__` are allowed in
+  `nextron/web` only on lines listed in `tests/contracts/safe_allowlist.txt`
+  (`<posix path>: <stripped source line>`, one entry per line, `#` comments). Today it lists
+  only the three lines of `nextron/web/templating.py` that build the link and the hidden field.
+  An unlisted use, or a listed line that no longer exists, fails the contract tests.
+
+`tests/contracts/test_web_contracts.py` checks the handler, declaration, route, inline-code,
+autoescaping, form and safe-allowlist rules. No form uses GET yet: every `<form>` must have
+`method="post"`, `hx-post` and `{{ csrf_field() }}`, and a future GET filter form must amend that
+contract.
 
 ## Secrets
 
@@ -218,6 +293,17 @@ the sync handler body, not in a `Depends` or a middleware: FastAPI may run a dep
 and teardown on other threadpool threads than the endpoint, and a unit of work is bound to the
 thread that opened it.
 
+**Read-only units of work.** `units.open(read_only=True)` is the unit of work every dashboard GET
+handler runs in. `uow.session` works anywhere in it: the first use begins one read transaction
+(`BEGIN IMMEDIATE`, then `PRAGMA query_only=ON`) that lasts until the handler returns and is
+then rolled back, and a GET that never reads never touches the database. Use cases,
+`uow.transaction()`, commands and `publish` raise `UnitOfWorkError`; the session refuses `add`,
+`delete`, `merge`, `flush` and the bulk methods, and any flush; a statement other than `SELECT`
+or `WITH` raises `ReadOnlySqlError` (`PRAGMA query_only=OFF` included); and a handler that
+leaves changed ORM objects behind raises when it returns. Only `nextron/db/engine.py`
+(`read_only_connection`) sets `query_only`, and it turns it off again before the connection
+goes back to the pool.
+
 ## Logs
 
 `serve` writes `<data dir>\logs\nextron.log`, for example
@@ -267,10 +353,14 @@ uv run lint-imports         # the import contracts on their own
 - `tests/unit`: pure functions, the persistence layer and the composition root, with fakes,
   temporary folders and temporary database files (the `db_engine` and `units` fixtures in
   `tests/conftest.py`; temporary Alembic chains in `tests/migration_chains.py`).
-- `tests/app`: the engine as a real process against temporary folders.
+- `tests/app`: the engine as a real process against temporary folders, and whole pages
+  rendered by a dashboard app (untrusted text on a fixture page).
 - `tests/contracts`: import contracts, the source tree, pins, the lock file and vendored assets.
 - `tests/fakes`: one in-memory fake per port (`FrozenClock` for `Clock`, `InMemorySecrets` for
-  `SecretsPort`).
+  `SecretsPort`), plus `FakeUnits`, which stands in for the unit-of-work factory in dashboard
+  tests (`tests/dashboard.py`) and records each unit opened.
+- `tests/fixtures`: fixture files, such as the hostile-text page
+  `tests/fixtures/templates/untrusted_page.html`.
 - `tests/ai_sets`: synthetic AI test cases only.
 
 ## Layers and import contracts

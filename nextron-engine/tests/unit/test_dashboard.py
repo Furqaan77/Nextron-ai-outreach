@@ -1,5 +1,6 @@
 """The hardened dashboard shell (AD-13): ``/enter``, sessions, the Host check, the security
-headers, ``no-store`` and the base layout, driven through the ASGI interface with fakes."""
+headers, ``no-store`` and the base layout, driven through the ASGI interface with fakes. The
+CSRF, ``Origin`` and ``Sec-Fetch-Site`` checks and the read-only GETs are in ``test_csrf.py``."""
 
 import asyncio
 import json
@@ -21,7 +22,7 @@ from nextron.web.guard import CONTENT_SECURITY_POLICY
 from nextron.web.routing import personal_data
 from nextron.web.sessions import SessionStore
 from tests.asgi import DEFAULT_HOST, Reply, request
-from tests.dashboard import Dashboard
+from tests.dashboard import Dashboard, body_hx_headers
 
 SECURITY_HEADERS = {
     b"content-security-policy": (
@@ -150,6 +151,7 @@ def test_the_session_opens_the_home_page(dashboard: Dashboard) -> None:
 
     assert reply.status == 200
     assert reply.header(b"content-type") == b"text/html; charset=utf-8"
+    assert reply.all(b"cache-control") == [b"no-store"]  # the page carries the CSRF token
     assert Page(reply.text).find("main")
 
 
@@ -681,6 +683,25 @@ def test_the_layout_has_a_brand_nav_notifications_and_main(dashboard: Dashboard)
     assert page.find("nav")
     assert page.find("section", id="notifications", **{"aria-live": "polite"})
     assert page.find("main")
+
+
+def test_the_layout_gives_htmx_the_sessions_csrf_token(dashboard: Dashboard) -> None:
+    first, second = dashboard.open_session(), dashboard.open_session()
+
+    tokens = [
+        body_hx_headers(dashboard.get("/", cookie=cookie).text)["X-CSRF-Token"]
+        for cookie in (first, second, first)
+    ]
+
+    assert tokens[0] == tokens[2] != tokens[1]
+    assert all(isinstance(token, str) and len(token) == 43 for token in tokens)
+
+
+def test_the_locked_page_carries_no_csrf_token(dashboard: Dashboard) -> None:
+    reply = dashboard.get("/")
+
+    assert reply.status == 401
+    assert b"hx-headers" not in reply.body and b"csrf" not in reply.body.lower()
 
 
 def test_the_nav_is_empty_until_a_section_exists(dashboard: Dashboard) -> None:

@@ -1,5 +1,5 @@
-"""``nextron.db.engine``: the six connection settings, the write lock, the transaction-SQL guard
-and the foreign-keys-off connection."""
+"""``nextron.db.engine``: the six connection settings, the write lock, the transaction-SQL guard,
+the foreign-keys-off connection and the read-only connection."""
 
 import logging
 import sqlite3
@@ -8,12 +8,14 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, event, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from nextron.db import engine as engine_module
 from nextron.db.engine import (
     BEGIN_SQL,
     ConnectionSettingError,
+    ReadOnlySqlError,
     TransactionSqlError,
     _on_begin,
     _on_connect,
@@ -21,6 +23,7 @@ from nextron.db.engine import (
     create_engine,
     fk_off_connection,
     leading_keyword,
+    read_only_connection,
 )
 
 
@@ -394,3 +397,196 @@ def test_no_warning_is_logged_when_restore_works(
         engine.dispose()
 
     assert caplog.messages == []
+
+
+# The read-only connection -----------------------------------------------------------------------
+
+
+def test_read_only_connection_begins_immediate_then_turns_query_only_on(
+    scratch: Engine, statements: list[str]
+) -> None:
+    with read_only_connection(scratch) as connection:
+        dbapi = connection.connection.driver_connection
+        assert isinstance(dbapi, sqlite3.Connection)
+
+        assert statements == [BEGIN_SQL]  # the PRAGMAs go straight to the driver
+        assert connection.in_transaction() and dbapi.in_transaction
+        assert pragma(dbapi, "query_only") == 1
+
+
+def test_read_only_connection_holds_the_write_lock_until_exit(scratch: Engine) -> None:
+    other = raw(scratch, timeout=0, isolation_level=None)
+    try:
+        with read_only_connection(scratch):
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT note FROM scratch",
+        "  select 1",
+        "/* x */ SELECT 1",
+        "WITH x AS (SELECT 1) SELECT * FROM x",
+    ],
+)
+def test_read_only_connection_runs_reads(sql: str, scratch: Engine) -> None:
+    with read_only_connection(scratch) as connection:
+        connection.exec_driver_sql(sql).fetchall()
+
+
+READ_ONLY_REFUSED = [
+    "INSERT INTO scratch (note) VALUES ('x')",
+    "insert into scratch (note) values ('x')",
+    "/* x */ REPLACE INTO scratch (note) VALUES ('x')",
+    "UPDATE scratch SET note = 'x'",
+    "DELETE FROM scratch",
+    "PRAGMA query_only=OFF",
+    "pragma query_only = 0",
+    "PRAGMA query_only",
+    "CREATE TABLE other (id INTEGER)",
+    "DROP TABLE scratch",
+    "ATTACH DATABASE ':memory:' AS other",
+    "VACUUM",
+    "ANALYZE",
+    "REINDEX",
+    "EXPLAIN SELECT 1",
+    "VALUES (1)",
+    "",
+]
+
+
+@pytest.mark.parametrize("sql", READ_ONLY_REFUSED)
+def test_read_only_connection_refuses_every_other_statement(sql: str, scratch: Engine) -> None:
+    with read_only_connection(scratch) as connection:
+        dbapi = connection.connection.driver_connection
+        assert isinstance(dbapi, sqlite3.Connection)
+
+        with pytest.raises(ReadOnlySqlError, match="read-only"):
+            connection.exec_driver_sql(sql)
+
+        assert pragma(dbapi, "query_only") == 1  # PRAGMA query_only=OFF never ran
+        assert connection.in_transaction()
+
+    assert notes(scratch) == []
+
+
+def test_read_only_connection_refuses_writes_through_a_session(scratch: Engine) -> None:
+    with read_only_connection(scratch) as connection, Session(bind=connection) as session:
+        with pytest.raises(ReadOnlySqlError):
+            session.execute(text("INSERT INTO scratch (note) VALUES ('x')"))
+        with pytest.raises(TransactionSqlError):  # transaction SQL is still its own error
+            session.execute(text("COMMIT"))
+
+    assert notes(scratch) == []
+
+
+def test_sqlite_itself_refuses_a_write_the_keyword_check_lets_through(scratch: Engine) -> None:
+    sql = "WITH x AS (SELECT 1) INSERT INTO scratch (note) SELECT 'x' FROM x"
+    with read_only_connection(scratch) as connection:
+        with pytest.raises(OperationalError, match="readonly database"):
+            connection.exec_driver_sql(sql)
+
+    assert notes(scratch) == []
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_read_only_connection_returns_a_writable_connection_to_the_pool(
+    raises: bool, scratch: Engine
+) -> None:
+    lent: list[sqlite3.Connection] = []
+
+    def use() -> None:
+        with read_only_connection(scratch) as connection:
+            dbapi = connection.connection.driver_connection
+            assert isinstance(dbapi, sqlite3.Connection)
+            lent.append(dbapi)
+            with pytest.raises(ReadOnlySqlError):
+                connection.exec_driver_sql("INSERT INTO scratch (note) VALUES ('refused')")
+            if raises:
+                raise RuntimeError("boom")
+
+    if raises:
+        with pytest.raises(RuntimeError, match="boom"):
+            use()
+    else:
+        use()
+
+    [dbapi] = lent
+    with scratch.connect() as again:
+        assert again.connection.driver_connection is dbapi  # the same pooled connection
+        assert pragma(dbapi, "query_only") == 0
+        assert not dbapi.in_transaction
+        again.exec_driver_sql("INSERT INTO scratch (note) VALUES ('written')")
+        again.commit()
+
+    assert notes(scratch) == ["written"]
+
+
+def test_read_only_connection_invalidates_a_connection_it_cannot_restore(
+    scratch: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    with read_only_connection(scratch) as connection:
+        dbapi = connection.connection.driver_connection
+        assert isinstance(dbapi, sqlite3.Connection)
+        dbapi.close()  # the connection broke: neither the rollback nor the PRAGMA can run
+
+    assert "query_only_restore_failed" in caplog.messages
+    with scratch.connect() as again:
+        fresh = again.connection.driver_connection
+        assert fresh is not dbapi
+        assert pragma(fresh, "query_only") == 0  # type: ignore[arg-type]
+        again.exec_driver_sql("INSERT INTO scratch (note) VALUES ('written')")
+        again.commit()
+
+    assert notes(scratch) == ["written"]
+
+
+def test_a_base_exception_during_the_restore_still_invalidates_the_connection(
+    scratch: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = engine_module._set_query_only
+
+    def interrupted(dbapi_connection: sqlite3.Connection, on: bool) -> None:
+        if not on:
+            raise KeyboardInterrupt
+        real(dbapi_connection, on)
+
+    monkeypatch.setattr(engine_module, "_set_query_only", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        with read_only_connection(scratch) as connection:
+            dbapi = connection.connection.driver_connection
+            assert isinstance(dbapi, sqlite3.Connection)
+
+    with pytest.raises(sqlite3.ProgrammingError):  # closed, never back in the pool
+        dbapi.execute("SELECT 1")
+    with scratch.connect() as again:
+        fresh = again.connection.driver_connection
+        assert fresh is not dbapi
+        assert pragma(fresh, "query_only") == 0  # type: ignore[arg-type]
+
+
+def test_a_begin_that_times_out_leaves_query_only_off(
+    scratch: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine_module, "BUSY_TIMEOUT_MS", 50)  # read by each new connection
+    engine = create_engine(Path(db_path(scratch)))
+    blocker = raw(scratch, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")  # another process holds the write lock
+    try:
+        with pytest.raises(OperationalError, match="locked"):
+            with read_only_connection(engine):
+                pass
+        with engine.connect() as again:
+            dbapi = again.connection.driver_connection
+            assert pragma(dbapi, "query_only") == 0  # type: ignore[arg-type]
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+        engine.dispose()

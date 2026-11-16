@@ -46,19 +46,33 @@ The rules, each enforced here (a broken rule raises ``UnitOfWorkError``):
   callables, until ``freeze()``. ``UnitOfWorkFactory`` takes only a frozen registry. Only
   ``nextron.main.build_subscribers()`` constructs ``Subscribers`` or registers subscribers
   (``tests/contracts/test_persistence_contracts.py`` checks the source).
+
+**Read-only units of work.** ``units.open(read_only=True)`` is what every dashboard GET handler
+runs in (``nextron.web.routing``); ``uow.read_only`` says which kind is open. It only reads:
+
+- ``@use_case``, ``uow.transaction()``, ``@command`` and ``uow.publish`` raise.
+- ``uow.session`` works anywhere in it. Its first use begins one read transaction through
+  ``nextron.db.engine.read_only_connection`` (``BEGIN IMMEDIATE``, then ``query_only`` on, and
+  only ``SELECT`` or ``WITH`` statements), kept until the unit of work closes and then rolled
+  back. A unit of work that never touches the session never touches the database.
+- The session also refuses ``add``, ``add_all``, ``delete``, ``merge``, ``flush``,
+  ``bulk_save_objects``, ``bulk_insert_mappings`` and ``bulk_update_mappings``, and a
+  ``before_flush`` event refuses any flush, autoflush included. A unit of work that exits
+  cleanly with pending new, changed or deleted ORM objects raises after the rollback.
 """
 
 import functools
 import inspect
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from typing import Any, Final, NoReturn, cast
 
 from sqlalchemy import Connection, Engine, event
 from sqlalchemy.orm import Session, SessionTransaction
 
+from nextron.db.engine import read_only_connection
 from nextron.domain.notifications import NOTIFICATIONS, Notification
 
 REFUSED_SESSION_METHODS: Final = frozenset(
@@ -73,6 +87,19 @@ REFUSED_SESSION_METHODS: Final = frozenset(
         "bind",
         "invalidate",
         "reset",
+    }
+)
+# Refused as well in a read-only unit of work: every way the session would write.
+REFUSED_READ_ONLY_METHODS: Final = frozenset(
+    {
+        "add",
+        "add_all",
+        "delete",
+        "merge",
+        "flush",
+        "bulk_save_objects",
+        "bulk_insert_mappings",
+        "bulk_update_mappings",
     }
 )
 _COMMAND_MARK: Final = "__nextron_command__"
@@ -133,11 +160,15 @@ class Subscribers:
 
 
 class _Transaction:
-    """One ``uow.transaction()`` block: its connection, session and fate."""
+    """One ``uow.transaction()`` block, or a read-only unit's read transaction: its connection,
+    session and fate. ``release`` gives the connection back when the transaction ends."""
 
-    def __init__(self, connection: Connection, session: Session) -> None:
+    def __init__(
+        self, connection: Connection, session: Session, release: Callable[[], object]
+    ) -> None:
         self.connection = connection
         self.session = session
+        self.release = release
         self.doom: str | None = None  # why it must roll back; the first reason wins
         self.cause: BaseException | None = None
         self.ending = False  # set while the unit of work commits or rolls back
@@ -167,9 +198,22 @@ class _Transaction:
         if not self.ending:
             self.doom_with("the transaction was rolled back outside the unit of work")
 
+    def refuse_flush(self, session: Session, flush_context: Any, instances: Any) -> None:
+        reason = "a flush was attempted in a read-only unit of work"
+        self.doom_with(reason)
+        raise UnitOfWorkError(f"{reason}; a dashboard GET only reads, a POST writes")
+
+    def listen(self) -> None:
+        """Hook the events that keep the transaction's end in the unit of work's hands."""
+        event.listen(self.session, "before_commit", self.refuse_session_commit)
+        event.listen(self.session, "after_transaction_end", self.on_session_end)
+        event.listen(self.connection, "commit", self.refuse_connection_commit)
+        event.listen(self.connection, "rollback", self.on_connection_rollback)
+
 
 class GuardedSession:
-    """``uow.session``: the transaction's ORM ``Session`` without its transaction controls."""
+    """``uow.session``: the transaction's ORM ``Session`` without its transaction controls, and
+    in a read-only unit of work without its writes either."""
 
     __slots__ = ("_transaction", "_uow")
 
@@ -187,6 +231,11 @@ class GuardedSession:
                 f"uow.session.{name} is not allowed; the unit of work begins, commits and rolls "
                 "back the transaction and owns its connection"
             )
+        if uow._read_only and name in REFUSED_READ_ONLY_METHODS:
+            uow._refuse(
+                f"uow.session.{name} is not allowed in a read-only unit of work; a dashboard GET "
+                "only reads, a POST writes"
+            )
         return getattr(self._transaction.session, name)
 
     def __repr__(self) -> str:
@@ -196,15 +245,22 @@ class GuardedSession:
 class UnitOfWork:
     """One entry point's unit of work. Only ``UnitOfWorkFactory.open()`` makes one."""
 
-    def __init__(self, engine: Engine, subscribers: Subscribers) -> None:
+    def __init__(self, engine: Engine, subscribers: Subscribers, *, read_only: bool) -> None:
         self._engine = engine
         self._subscribers = subscribers
+        self._read_only = read_only
         self._thread = threading.get_ident()
         self._open = True
         self._use_case: str | None = None  # the use case running now
         self._use_case_called = False
         self._commands = 0  # how deep in commands the call stack is
+        # the open transaction: a use case's transaction() block, or a read-only unit's read
         self._tx: _Transaction | None = None
+
+    @property
+    def read_only(self) -> bool:
+        """Whether this unit of work only reads (a dashboard GET's)."""
+        return self._read_only
 
     # Guards ------------------------------------------------------------------------------------
 
@@ -220,9 +276,17 @@ class UnitOfWork:
             self._tx.doom_with(message)
         raise UnitOfWorkError(message)
 
+    def _refuse_in_read_only(self, what: str) -> None:
+        if self._read_only:
+            self._refuse(
+                f"{what} is not allowed in a read-only unit of work; a dashboard GET only reads, "
+                "a POST writes"
+            )
+
     # Use cases and commands --------------------------------------------------------------------
 
     def _start_use_case(self, name: str) -> None:
+        self._refuse_in_read_only(f"use case {name}")
         if self._commands:
             self._refuse(f"use case {name} was called inside a command")
         if self._use_case is not None:
@@ -236,6 +300,7 @@ class UnitOfWork:
         self._use_case = None
 
     def _start_command(self, name: str) -> None:
+        self._refuse_in_read_only(f"command {name}")
         if self._tx is None:
             raise UnitOfWorkError(f"command {name} runs only inside an open transaction")
         self._commands += 1
@@ -251,6 +316,7 @@ class UnitOfWork:
     def transaction(self) -> Iterator[None]:
         """Open a transaction for the running use case; see the module docstring."""
         self._check_open()
+        self._refuse_in_read_only("uow.transaction()")
         if self._commands:
             self._refuse("a command cannot open a transaction; it joins the open one")
         if self._tx is not None:
@@ -273,13 +339,24 @@ class UnitOfWork:
         try:
             connection.begin()  # the begin event emits BEGIN IMMEDIATE now
             session = Session(bind=connection, join_transaction_mode="rollback_only")
-            tx = _Transaction(connection, session)
-            event.listen(session, "before_commit", tx.refuse_session_commit)
-            event.listen(session, "after_transaction_end", tx.on_session_end)
-            event.listen(connection, "commit", tx.refuse_connection_commit)
-            event.listen(connection, "rollback", tx.on_connection_rollback)
+            tx = _Transaction(connection, session, connection.close)
+            tx.listen()
         except BaseException:
             connection.close()
+            raise
+        return tx
+
+    def _begin_read(self) -> _Transaction:
+        """The read-only unit's read transaction, on a ``query_only`` connection."""
+        stack = ExitStack()
+        try:
+            connection = stack.enter_context(read_only_connection(self._engine))
+            session = Session(bind=connection, join_transaction_mode="rollback_only")
+            tx = _Transaction(connection, session, stack.close)
+            tx.listen()
+            event.listen(session, "before_flush", tx.refuse_flush)
+        except BaseException:
+            stack.close()
             raise
         return tx
 
@@ -296,14 +373,17 @@ class UnitOfWork:
             try:
                 tx.session.close()
             finally:
-                tx.connection.close()  # rolls back whatever is still open
+                tx.release()  # rolls back whatever is still open and closes the connection
         if commit and not committed:
             raise UnitOfWorkError(f"the transaction was rolled back: {tx.doom}") from tx.cause
 
     @property
     def session(self) -> Session:
-        """The open transaction's guarded ORM session; raises outside a transaction."""
+        """The open transaction's guarded ORM session; raises outside a transaction. In a
+        read-only unit of work it exists throughout: the first use begins the read."""
         self._check_open()
+        if self._tx is None and self._read_only:
+            self._tx = self._begin_read()
         if self._tx is None:
             raise UnitOfWorkError("uow.session exists only inside uow.transaction()")
         return cast(Session, GuardedSession(self, self._tx))
@@ -313,6 +393,7 @@ class UnitOfWork:
     def publish(self, notification: Notification) -> None:
         """Run the subscribers of ``type(notification)`` in this transaction, in order."""
         self._check_open()
+        self._refuse_in_read_only("publish")
         if self._tx is None:
             raise UnitOfWorkError("publish needs an open transaction")
         kind = type(notification)
@@ -321,11 +402,24 @@ class UnitOfWork:
         for subscriber in self._subscribers.subscribers_of(kind):
             subscriber(notification)
 
-    def _close(self) -> None:
+    def _close(self, *, clean: bool) -> None:
+        """Close the unit of work, rolling back anything still open. ``clean`` is whether the
+        entry point's block exited without an exception."""
         tx, self._tx = self._tx, None
         self._open = False
-        if tx is not None:
+        if tx is None:
+            return
+        session = tx.session
+        unsaved = False
+        try:
+            unsaved = self._read_only and bool(session.new or session.dirty or session.deleted)
+        finally:
             self._end(tx, commit=False)
+        if clean and unsaved:
+            raise UnitOfWorkError(
+                "a read-only unit of work ended with unsaved changes to ORM objects; they were "
+                "rolled back (a dashboard GET only reads, a POST writes)"
+            )
 
 
 class UnitOfWorkFactory:
@@ -344,20 +438,25 @@ class UnitOfWorkFactory:
         return self._engine
 
     @contextmanager
-    def open(self) -> Iterator[UnitOfWork]:
-        """The entry point's unit of work, current in this context and thread until exit."""
+    def open(self, *, read_only: bool = False) -> Iterator[UnitOfWork]:
+        """The entry point's unit of work, current in this context and thread until exit.
+        ``read_only=True`` opens the read-only kind every dashboard GET runs in."""
+        if not isinstance(read_only, bool):
+            raise TypeError(f"read_only takes a bool, not {type(read_only).__name__}")
         existing = _CURRENT.get()
         if existing is not None and existing._open:
             raise UnitOfWorkError("a unit of work is already open in this context")
-        uow = UnitOfWork(self._engine, self._subscribers)
+        uow = UnitOfWork(self._engine, self._subscribers, read_only=read_only)
         token = _CURRENT.set(uow)
         try:
-            yield uow
-        finally:
             try:
-                uow._close()
-            finally:
-                _CURRENT.reset(token)
+                yield uow
+            except BaseException:
+                uow._close(clean=False)
+                raise
+            uow._close(clean=True)
+        finally:
+            _CURRENT.reset(token)
 
 
 def current() -> UnitOfWork:

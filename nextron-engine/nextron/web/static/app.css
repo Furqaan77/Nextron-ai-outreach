@@ -72,3 +72,10 @@ h1 {
 p {
   color: var(--muted);
 }
+
+/* Untrusted text (crawled, imported, Reply or AI): kept as written, wrapped anywhere so a long
+   unbroken string can't widen the page. */
+.untrusted {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

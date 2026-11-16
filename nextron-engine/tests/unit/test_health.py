@@ -13,6 +13,7 @@ from tests.asgi import request
 from tests.dashboard import Dashboard
 from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.units import FakeUnits
 
 
 class Ticks:
@@ -55,7 +56,7 @@ def test_composition_root_serves_the_package_version(
     monkeypatch.setenv("NEXTRON_ENV", "test")
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / "data"))
     secrets, clock = InMemorySecrets("test"), FrozenClock()
-    app = main.build_app(load_bootstrap(), secrets=secrets, clock=clock)
+    app = main.build_app(load_bootstrap(), units=FakeUnits(), secrets=secrets, clock=clock)
     code = DashboardEntry(secrets, clock).issue_code()  # as nextron open would
     host = [(b"host", b"127.0.0.1:8767")]  # the test port
 

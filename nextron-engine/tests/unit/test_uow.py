@@ -1,4 +1,5 @@
-"""Units of work, use cases, commands and notifications against the story's I/O matrix.
+"""Units of work, use cases, commands, notifications and read-only units of work against the
+I/O matrices of Stories 1.3 and 1.5.
 
 Every test runs on a temporary database at head (``db_engine``) with a ``scratch`` table made by
 raw DDL, mapped by a throwaway ORM base that is not on ``nextron``'s metadata. ``committed()``
@@ -11,16 +12,19 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, func, select, text
+from sqlalchemy import Engine, event, func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_session
 
 from nextron.db import engine as engine_module
-from nextron.db.engine import TransactionSqlError, create_engine
+from nextron.db import eventlog
+from nextron.db.engine import ReadOnlySqlError, TransactionSqlError, create_engine
 from nextron.db.uow import (
+    REFUSED_READ_ONLY_METHODS,
     REFUSED_SESSION_METHODS,
     Subscribers,
     UnitOfWork,
@@ -818,3 +822,325 @@ def test_the_subscriber_count_is_visible_only_inside_the_transaction(
     publish_footer(UnitOfWorkFactory(db_engine, frozen((FooterChanged, count))))
 
     assert seen == [1]
+
+
+# Read-only units of work (Story 1.5) ------------------------------------------------------------
+
+AT = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+
+
+def events_count(engine: Engine) -> int:
+    assert engine.url.database
+    reader = sqlite3.connect(engine.url.database)
+    try:
+        [(count,)] = reader.execute("SELECT count(*) FROM events").fetchall()
+        return int(count)
+    finally:
+        reader.close()
+
+
+def append_event() -> str:
+    return eventlog.append(
+        entity="events",
+        entity_id=MARKET,
+        from_status=None,
+        to_status="created",
+        cause="test",
+        cause_ref=None,
+        actor="operator",
+        at=AT,
+    )
+
+
+@pytest.fixture
+def checkouts(db_engine: Engine) -> list[sqlite3.Connection]:
+    """The driver connection of every pool checkout from now on."""
+    seen: list[sqlite3.Connection] = []
+
+    def record(dbapi_connection: sqlite3.Connection, *args: object) -> None:
+        seen.append(dbapi_connection)
+
+    event.listen(db_engine.pool, "checkout", record)
+    return seen
+
+
+def assert_writes_normally(units: UnitOfWorkFactory, scratch: Engine) -> None:
+    """A write unit of work afterwards commits, on a connection with query_only off."""
+    with units.open():
+        save_note("written after")
+    assert committed(scratch)[-1] == "written after"
+    with scratch.connect() as connection:
+        dbapi = connection.connection.driver_connection
+        assert isinstance(dbapi, sqlite3.Connection)
+        assert dbapi.execute("PRAGMA query_only").fetchone() == (0,)
+
+
+def test_open_takes_read_only_as_a_bool(units: UnitOfWorkFactory) -> None:
+    with units.open() as write:
+        assert write.read_only is False
+    with units.open(read_only=True) as read:
+        assert read.read_only is True
+    for value in (1, "yes", None):
+        with pytest.raises(TypeError, match="read_only takes a bool"):
+            with units.open(read_only=value):  # type: ignore[arg-type]
+                pass
+
+
+def test_a_read_only_unit_that_never_reads_never_touches_the_database(
+    units: UnitOfWorkFactory, checkouts: list[sqlite3.Connection]
+) -> None:
+    with units.open(read_only=True) as uow:
+        assert current() is uow
+
+    assert checkouts == []
+
+
+def test_the_session_reads_anywhere_in_one_read_transaction(
+    units: UnitOfWorkFactory, scratch: Engine, checkouts: list[sqlite3.Connection]
+) -> None:
+    with units.open():
+        save_note("committed")
+    assert scratch.url.database
+    other = sqlite3.connect(scratch.url.database, timeout=0, isolation_level=None)
+    before = len(checkouts)
+    try:
+        with units.open(read_only=True) as uow:
+            assert visible() == ["committed"]
+            assert uow.session.scalar(select(func.count()).select_from(ScratchRow)) == 1
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")  # BEGIN IMMEDIATE held since the first read
+            dbapi = checkouts[-1]
+            assert dbapi.execute("PRAGMA query_only").fetchone() == (1,)
+        assert len(checkouts) == before + 1  # one connection, one read transaction
+        other.execute("BEGIN IMMEDIATE")  # released when the unit of work closed
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+
+
+@use_case
+def read_notes() -> None:
+    visible()
+
+
+@command
+def read_in_a_command() -> None:
+    visible()
+
+
+def _use_case(uow: UnitOfWork) -> None:
+    read_notes()
+
+
+def _transaction(uow: UnitOfWork) -> None:
+    with uow.transaction():
+        pass
+
+
+def _command(uow: UnitOfWork) -> None:
+    read_in_a_command()
+
+
+def _publish(uow: UnitOfWork) -> None:
+    uow.publish(FooterChanged(market_id=MARKET))
+
+
+READ_ONLY_REFUSALS = {
+    "use_case": _use_case,
+    "transaction": _transaction,
+    "command": _command,
+    "publish": _publish,
+}
+
+
+@pytest.mark.parametrize("case", sorted(READ_ONLY_REFUSALS))
+@pytest.mark.parametrize("after_a_read", [False, True])
+def test_a_read_only_unit_refuses_use_cases_transactions_commands_and_publish(
+    case: str, after_a_read: bool, units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    with units.open(read_only=True) as uow:
+        if after_a_read:
+            visible()
+        with pytest.raises(UnitOfWorkError, match="not allowed in a read-only unit of work"):
+            READ_ONLY_REFUSALS[case](uow)
+
+    assert committed(scratch) == []
+    assert events_count(scratch) == 0
+    assert_writes_normally(units, scratch)
+
+
+def _event(uow: UnitOfWork) -> None:
+    append_event()
+
+
+def _insert(uow: UnitOfWork) -> None:
+    uow.session.execute(text("INSERT INTO scratch (note) VALUES ('x')"))
+
+
+def _query_only_off(uow: UnitOfWork) -> None:
+    uow.session.execute(text("PRAGMA query_only=OFF"))
+
+
+def _raw_event_insert(uow: UnitOfWork) -> None:
+    uow.session.execute(
+        text(
+            "INSERT INTO events (id, entity, entity_id, to_status, cause, actor, at) "
+            "VALUES (:id, 'events', :id, 'x', 'x', 'operator', '2026-11-17T09:00:00.000000Z')"
+        ),
+        {"id": MARKET},
+    )
+
+
+SQL_REFUSALS = {
+    "eventlog_append": _event,
+    "insert": _insert,
+    "query_only_off": _query_only_off,
+    "raw_event_insert": _raw_event_insert,
+}
+
+
+@pytest.mark.parametrize("case", sorted(SQL_REFUSALS))
+def test_a_write_statement_in_a_read_only_unit_raises_and_writes_nothing(
+    case: str, units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    with pytest.raises(ReadOnlySqlError):
+        with units.open(read_only=True) as uow:
+            SQL_REFUSALS[case](uow)
+
+    assert committed(scratch) == []
+    assert events_count(scratch) == 0
+    assert_writes_normally(units, scratch)
+
+
+def test_a_caught_write_statement_still_writes_nothing(
+    units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    with units.open(read_only=True) as uow:
+        with pytest.raises(ReadOnlySqlError):
+            _insert(uow)
+        assert visible() == []  # the read transaction carries on
+
+    assert committed(scratch) == []
+    assert_writes_normally(units, scratch)
+
+
+@pytest.mark.parametrize("method", sorted(REFUSED_READ_ONLY_METHODS | REFUSED_SESSION_METHODS))
+def test_the_read_only_session_refuses_every_write_method(
+    method: str, units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    with units.open(read_only=True) as uow:
+        with pytest.raises(UnitOfWorkError, match=f"uow.session.{method} is not allowed"):
+            getattr(uow.session, method)  # reading the name is enough
+
+    assert committed(scratch) == []
+    assert_writes_normally(units, scratch)
+
+
+def test_the_write_methods_stay_available_in_a_write_transaction(
+    units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    @use_case
+    def save() -> None:
+        with current().transaction():
+            current().session.add(ScratchRow(note="added"))
+            current().session.flush()
+
+    with units.open():
+        save()
+
+    assert committed(scratch) == ["added"]
+
+
+def _seed(units: UnitOfWorkFactory) -> None:
+    with units.open():
+        save_note("original")
+
+
+def test_a_dirty_object_raises_at_a_clean_exit_and_changes_nothing(
+    units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    _seed(units)
+
+    with pytest.raises(UnitOfWorkError, match="unsaved changes"):
+        with units.open(read_only=True) as uow:
+            row = uow.session.scalars(select(ScratchRow)).one()
+            row.note = "changed"
+
+    assert committed(scratch) == ["original"]
+    assert_writes_normally(units, scratch)
+
+
+def test_a_dirty_object_is_refused_at_the_next_autoflush(
+    units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    _seed(units)
+
+    with pytest.raises(UnitOfWorkError, match="flush was attempted in a read-only"):
+        with units.open(read_only=True) as uow:
+            row = uow.session.scalars(select(ScratchRow)).one()
+            row.note = "changed"
+            visible()  # autoflush
+
+    assert committed(scratch) == ["original"]
+    assert_writes_normally(units, scratch)
+
+
+@pytest.mark.parametrize("operation", ["add", "delete", "flush", "commit"])
+def test_the_raw_session_through_object_session_cannot_write_either(
+    operation: str, units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    _seed(units)
+
+    with pytest.raises(UnitOfWorkError):
+        with units.open(read_only=True) as uow:
+            row = uow.session.scalars(select(ScratchRow)).one()
+            session = object_session(row)
+            assert session is not None
+            if operation == "add":
+                session.add(ScratchRow(note="sneaked in"))
+            elif operation == "delete":
+                session.delete(row)
+            elif operation == "flush":
+                row.note = "changed"
+                session.flush()
+            else:
+                session.add(ScratchRow(note="sneaked in"))
+                session.commit()
+
+    assert committed(scratch) == ["original"]
+    assert_writes_normally(units, scratch)
+
+
+def test_an_exception_in_a_read_only_unit_is_raised_as_it_is(
+    units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    _seed(units)
+
+    with pytest.raises(KeyError, match="boom"):
+        with units.open(read_only=True) as uow:
+            row = uow.session.scalars(select(ScratchRow)).one()
+            row.note = "changed"  # unsaved, but the KeyError is what the caller sees
+            raise KeyError("boom")
+
+    assert committed(scratch) == ["original"]
+    assert_writes_normally(units, scratch)
+
+
+def test_the_read_only_session_belongs_to_its_thread_and_ends_with_the_unit(
+    units: UnitOfWorkFactory, scratch: Engine
+) -> None:
+    with units.open(read_only=True) as uow:
+        session = uow.session
+        visible()
+        error = run_in_thread(lambda: session.execute(text("SELECT 1")), copy_context=True)
+        assert isinstance(error, UnitOfWorkError) and "another thread" in str(error)
+
+    with pytest.raises(UnitOfWorkError, match="closed"):
+        session.execute(text("SELECT 1"))
+
+
+def test_a_read_only_unit_and_a_write_unit_do_not_nest(units: UnitOfWorkFactory) -> None:
+    with units.open(read_only=True):
+        with pytest.raises(UnitOfWorkError, match="already open"):
+            with units.open():
+                pass

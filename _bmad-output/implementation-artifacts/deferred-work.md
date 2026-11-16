@@ -13,3 +13,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-redacted-json-logging-and-typed-errors.md`
   summary: Add phone-number redaction for Reply text in alerts (AD-15).
   evidence: `redact()` doesn't mask phone numbers (tested with +44 7700 900123). Logs carry IDs only by convention, but AD-15 Telegram alert text requires phone numbers redacted, so it belongs with Story 7.9.
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-csrf-checked-posts-and-safe-untrusted-text.md`
+  summary: Consider an AD-2 amendment so the read-only unit of work (every dashboard GET) begins a deferred read transaction on its query_only connection instead of BEGIN IMMEDIATE.
+  evidence: Under AD-2 every transaction, reads included, takes the write lock, so GET reads serialise with each other, with POST write units and with jobs (busy_timeout 5 s, then a 500). A same-site page can also fire cookie-carrying GETs that each hold the lock briefly. No GET reads the database yet. Revisit before polling panels such as Story 1.15's 30-second health refresh, with a test of concurrent read units and a GET during a long write.

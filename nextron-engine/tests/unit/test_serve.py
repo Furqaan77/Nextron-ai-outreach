@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron import main
-from nextron.bootstrap import ENV_ERROR, BootstrapConfig
+from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
 from nextron.db import migrations
 from nextron.db.migrations import ensure_current, head_revision
 from nextron.db.uow import UnitOfWorkFactory
@@ -51,7 +51,7 @@ class ServerSpy:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, config: BootstrapConfig, reload: bool) -> None:
+    def __call__(self, config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
         probe = InstanceLock(config.data_dir / "nextron.lock")
         try:
             probe.acquire()
@@ -64,6 +64,7 @@ class ServerSpy:
             {
                 "config": config,
                 "reload": reload,
+                "units": units,
                 "data_dir_exists": config.data_dir.is_dir(),
                 "logs_dir_exists": (config.data_dir / "logs").is_dir(),
                 "lock_held": lock_held,
@@ -178,11 +179,49 @@ def test_reload_is_allowed_in_dev(dev: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert kwargs["log_config"] is None
     module_name, _, attribute = str(app).partition(":")
     factory = getattr(importlib.import_module(module_name), attribute)
+    connected: list[UnitOfWorkFactory] = []
+    real_connect = main.connect_database
+
+    def connect(config: BootstrapConfig) -> UnitOfWorkFactory:
+        connected.append(real_connect(config))
+        return connected[-1]
+
+    def never_migrate(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the reload worker must not migrate")
+
+    monkeypatch.setattr(main, "connect_database", connect)
+    monkeypatch.setattr(main, "ensure_current", never_migrate)
     # NEXTRON_ENV=dev, as in the reload worker: the dev port's Host passes the guard, and with
     # no session (and no keyring call) /health answers 401.
-    status, headers, _ = get(factory(), "/health")
+    try:
+        status, headers, _ = get(factory(), "/health")
+        [units] = connected  # the worker reads through its own factory on the data dir's file
+        assert units.engine.url.database == str(dev / "nextron.db")
+    finally:
+        for units in connected:
+            units.engine.dispose()
     assert status == 401
     assert headers[b"x-frame-options"] == b"DENY"
+
+
+def test_connect_database_connects_lazily_and_never_migrates(
+    dev: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def never_migrate(*args: object, **kwargs: object) -> None:
+        raise AssertionError("connect_database must not migrate")
+
+    monkeypatch.setattr(main, "ensure_current", never_migrate)
+    dev.mkdir(parents=True)
+
+    units = main.connect_database(load_bootstrap())
+    try:
+        assert units.engine.url.database == str(dev / "nextron.db")
+        assert not (dev / "nextron.db").exists()  # nothing connected yet
+        with units.open(read_only=True) as uow:  # a GET that never reads
+            assert uow.read_only
+        assert not (dev / "nextron.db").exists()
+    finally:
+        units.engine.dispose()
 
 
 @pytest.mark.parametrize("env", ["test", "prod"])
@@ -285,7 +324,7 @@ def test_busy_port_exits_2_and_releases_the_lock(dev: Path) -> None:
 
 
 def test_uvicorn_startup_failure_exits_2_not_3(dev: Path) -> None:
-    def fail_to_start(config: BootstrapConfig, reload: bool) -> None:
+    def fail_to_start(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
         raise SystemExit(3)  # Uvicorn's STARTUP_FAILURE, e.g. the bind failed
 
     err = io.StringIO()
@@ -314,7 +353,7 @@ def test_data_dir_that_is_a_file_exits_2_naming_the_path(
 
 
 def test_lock_is_released_when_the_server_crashes(dev: Path) -> None:
-    def crash(config: BootstrapConfig, reload: bool) -> None:
+    def crash(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
@@ -543,7 +582,8 @@ def test_a_failed_migration_exits_2_and_logs_the_traceback(
 def test_the_database_engine_is_disposed_when_serve_returns(
     outcome: str, dev: Path, opened: list[UnitOfWorkFactory]
 ) -> None:
-    def server(config: BootstrapConfig, reload: bool) -> None:
+    def server(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
+        assert units is opened[0]  # the server reads through the factory serve opened
         assert opened[0].engine.pool.checkedin() == 1  # the pool holds a connection
         if outcome == "crashes":
             raise RuntimeError("boom")
@@ -556,6 +596,25 @@ def test_the_database_engine_is_disposed_when_serve_returns(
 
     [units] = opened
     assert_disposed(units.engine, dev / "nextron.db")
+
+
+def test_the_served_app_reads_through_the_factory_serve_opened(
+    dev: Path, opened: list[UnitOfWorkFactory], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[object] = []
+    real_build_app = main.build_app
+
+    def spy(config: BootstrapConfig, **kwargs: Any) -> object:
+        built.append(kwargs["units"])
+        return real_build_app(config, **kwargs)
+
+    monkeypatch.setattr(main, "build_app", spy)
+    monkeypatch.setattr(main.uvicorn, "run", lambda app, **kwargs: None)
+
+    assert main.serve(probes=fake_probes(), err=io.StringIO()) == 0
+
+    [units] = opened
+    assert built == [units]
 
 
 def test_the_database_engine_is_disposed_when_the_database_is_refused(

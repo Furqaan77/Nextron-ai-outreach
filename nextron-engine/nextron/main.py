@@ -23,6 +23,7 @@ database, the notification subscriber registry and Uvicorn.
    ``database_migration_failed`` with the traceback. A second instance or a busy port never
    reaches this step.
 7. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
+   The dashboard's GET handlers read through the unit-of-work factory step 6 returned.
    ``engine_started`` (with ``db_revision``) is logged before it and ``engine_stopped`` (with
    ``exit_code``) after. The database engine is disposed when ``serve`` returns. Uvicorn runs
    with ``log_config=None``, so its records go through the root handlers. Uvicorn exits with
@@ -37,7 +38,8 @@ adds a subscriber registers its owner command there, in the order AD-3 lists.
 
 With ``--reload`` (``dev`` only), Uvicorn serves from a worker process that does not write
 ``nextron.log``: only the reloader's own records reach the file. The worker's WARNING and above
-go to stderr, redacted.
+go to stderr, redacted. The worker opens the database with ``connect_database``, which never
+migrates: the reloader brought it to head before starting Uvicorn.
 
 ``doctor`` runs every check, prints PASS or FAIL for each, and exits 0 when none fail, 1 when
 any fails, and 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid. It takes no lock,
@@ -45,7 +47,7 @@ creates nothing and starts no server.
 
 ``build_app`` wires the dashboard (AD-13): its ``DashboardEntry`` reads the one-time code
 through ``KeyringSecrets(<env>)`` (Windows Credential Manager, service ``nextron-engine/<env>``)
-and the ``SystemClock``; tests inject fakes.
+and the ``SystemClock``, and its GET handlers read through ``units``; tests inject fakes.
 
 ``open_dashboard`` (``nextron open``) runs these steps and stops at the first failure:
 
@@ -93,6 +95,7 @@ from nextron.startup_checks import (
     environment_checks,
 )
 from nextron.web.app import create_app
+from nextron.web.routing import Units
 
 HOST: Final = "127.0.0.1"
 WORKERS: Final = 1
@@ -115,7 +118,7 @@ DASHBOARD_OPENED: Final = (
     "opened the dashboard in your browser; the link works once, within 5 minutes"
 )
 
-ServerRunner = Callable[[BootstrapConfig, bool], None]
+ServerRunner = Callable[[BootstrapConfig, bool, UnitOfWorkFactory], None]
 EngineProbe = Callable[[str, int], bool]
 Browser = Callable[[str], bool]
 
@@ -133,13 +136,19 @@ def build_entry(
 
 
 def build_app(
-    config: BootstrapConfig, *, secrets: SecretsPort | None = None, clock: Clock | None = None
+    config: BootstrapConfig,
+    *,
+    units: Units,
+    secrets: SecretsPort | None = None,
+    clock: Clock | None = None,
 ) -> FastAPI:
+    """The dashboard app; its GET handlers read through ``units``."""
     return create_app(
         env=config.env,
         version=__version__,
         port=config.port,
         entry=build_entry(config, secrets=secrets, clock=clock),
+        units=units,
     )
 
 
@@ -152,6 +161,18 @@ def build_subscribers() -> Subscribers:
     return subscribers
 
 
+def connect_database(config: BootstrapConfig) -> UnitOfWorkFactory:
+    """The entry points' unit-of-work factory on ``<data dir>\\nextron.db``, with the frozen
+    subscriber registry. It connects lazily and never migrates."""
+    subscribers = build_subscribers()
+    engine = create_engine(config.data_dir / DB_FILE_NAME)
+    try:
+        return UnitOfWorkFactory(engine, subscribers)
+    except BaseException:
+        engine.dispose()
+        raise
+
+
 def open_database(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
     """Open ``<data dir>\\nextron.db`` and bring it to head; return the entry points' factory and
     the database's revision.
@@ -160,13 +181,11 @@ def open_database(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
     when the database is refused, and whatever made opening or a migration fail; either way the
     engine is disposed first.
     """
-    subscribers = build_subscribers()
-    engine = create_engine(config.data_dir / DB_FILE_NAME)
+    units = connect_database(config)
     try:
-        units = UnitOfWorkFactory(engine, subscribers)
-        before, after = ensure_current(engine)
+        before, after = ensure_current(units.engine)
     except BaseException:
-        engine.dispose()
+        units.engine.dispose()
         raise
     if before != after:
         log.info("database_migrated", extra={"from_revision": before, "to_revision": after})
@@ -174,12 +193,15 @@ def open_database(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
 
 
 def create_app_from_environment() -> FastAPI:
-    """App factory for Uvicorn's reload worker, which starts in a fresh process."""
-    return build_app(load_bootstrap())
+    """App factory for Uvicorn's reload worker, which starts in a fresh process. The reloader
+    has already brought the database to head, so the worker only connects."""
+    config = load_bootstrap()
+    return build_app(config, units=connect_database(config))
 
 
-def run_uvicorn(config: BootstrapConfig, reload: bool) -> None:
-    """Serve on 127.0.0.1 only, with one worker, until Uvicorn stops."""
+def run_uvicorn(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
+    """Serve on 127.0.0.1 only, with one worker, until Uvicorn stops. Without reload the app
+    reads through ``units``; the reload worker builds its own (``create_app_from_environment``)."""
     if reload:
         uvicorn.run(
             "nextron.main:create_app_from_environment",
@@ -194,7 +216,7 @@ def run_uvicorn(config: BootstrapConfig, reload: bool) -> None:
         )
     else:
         uvicorn.run(
-            build_app(config),
+            build_app(config, units=units),
             host=HOST,
             port=config.port,
             workers=WORKERS,
@@ -269,7 +291,7 @@ def serve(
             log.info("engine_started", extra={**identity, "db_revision": db_revision})
             exit_code = EXIT_CRASHED
             try:
-                run_server(config, reload)
+                run_server(config, reload, units)
                 exit_code = EXIT_OK
             except SystemExit as exc:
                 if exc.code in (None, 0):

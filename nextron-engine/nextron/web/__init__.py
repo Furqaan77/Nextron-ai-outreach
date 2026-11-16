@@ -10,11 +10,17 @@ Enforced by contracts today: never ``nextron.adapters`` or ``nextron.db`` (contr
 Convention, not yet enforced: only the ``api`` and ``queries`` modules of ``nextron.app``, and
 nothing from ``nextron.ports``.
 
-Modules: ``app`` (the factory and routes), ``guard`` (the ASGI middleware that checks ``Host``
-and the session and stamps the security headers on every response), ``sessions`` (the in-memory
-session store), ``routing`` (the ``@personal_data`` declaration every route makes),
-``templates/`` (Jinja2, autoescaping on, no inline script or style) and ``static/`` (the vendored
-HTMX build and ``app.css``). ``tests/contracts/test_web_contracts.py`` checks that no route
-handler is ``async def``, that every route declares ``personal_data``, that no template has
-inline script or style, and that autoescaping is on. CSRF checks arrive in Story 1.5.
+Modules: ``app`` (the factory and routes), ``guard`` (the ASGI middleware that checks ``Host``,
+the session, and ``Origin`` and ``Sec-Fetch-Site`` on unsafe methods, and stamps the security
+headers on every response), ``sessions`` (the in-memory session store, with each session's
+CSRF token), ``csrf`` (the ``require_csrf`` dependency every POST runs first), ``routing`` (the
+``@personal_data`` declaration every route makes, and the route class that runs each GET in a
+read-only unit of work and gives each POST the CSRF check), ``templating`` (the ``plain``,
+``safe_link`` and ``csrf_field`` helpers for untrusted text), ``templates/`` (Jinja2,
+autoescaping on, no inline script or style; ``macros.html`` holds ``untrusted_block``) and
+``static/`` (the vendored HTMX build and ``app.css``). ``tests/contracts/test_web_contracts.py``
+checks that no route handler is ``async def``, that every route declares ``personal_data`` and
+keeps the route rules, that no template has inline script or style, that every form posts
+through HTMX (``hx-post``) with ``csrf_field()``, that autoescaping is on, and that the ``safe``
+filter and ``Markup`` appear only where ``tests/contracts/safe_allowlist.txt`` allows them.
 """

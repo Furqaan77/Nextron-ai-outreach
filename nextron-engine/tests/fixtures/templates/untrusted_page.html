@@ -1,0 +1,27 @@
+{#- A fixture page for tests/app/test_untrusted_rendering.py: hostile values through every
+    rendering helper, inside the real base layout. -#}
+{% extends "base.html" %}
+{% from "macros.html" import untrusted_block %}
+{% block title %}Untrusted fixture{% endblock %}
+{% block content %}
+<h1>Untrusted fixture</h1>
+<form method="post" action="/t/save" hx-post="/t/save">
+{{ csrf_field() }}
+<button type="submit">Save</button>
+</form>
+<section id="texts">
+{%- for text in texts %}
+{{ untrusted_block(text) }}
+{%- endfor %}
+</section>
+<section id="called">
+{% call untrusted_block() %}<p class="from">From {{ sender }}</p><p class="said">{{ said|plain }}</p>{% endcall %}
+</section>
+<ul id="links">
+{%- for url in urls %}
+<li>{{ safe_link(url) }}</li>
+{%- endfor %}
+</ul>
+<p id="titled">{{ safe_link(titled_url, titled_text) }}</p>
+<p id="nothing">[{{ nothing|plain }}]</p>
+{% endblock %}

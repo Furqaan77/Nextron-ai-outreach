@@ -24,6 +24,15 @@ change how transactions start. Three events then take over transaction control:
 
 ``fk_off_connection(engine)`` is the one place that turns ``foreign_keys`` off: the startup
 migration (``nextron.db.migrations``) runs on it, following Alembic's SQLite batch guidance.
+
+``read_only_connection(engine)`` is the one place that sets ``query_only``: the read-only unit of
+work (``nextron.db.uow``, every dashboard GET) reads through it. It begins the transaction first
+(``BEGIN IMMEDIATE`` fails under ``query_only``), then sets ``PRAGMA query_only=ON`` and reads it
+back. While the connection is lent, ``before_cursor_execute`` also refuses, with
+``ReadOnlySqlError``, any statement whose leading keyword is not ``SELECT`` or ``WITH``, which
+closes ``PRAGMA query_only=OFF``. On exit it rolls back and turns ``query_only`` off again, so
+the pooled connection writes normally for the next user; if that fails, the connection is
+invalidated.
 """
 
 import logging
@@ -41,7 +50,9 @@ BEGIN_SQL: Final = "BEGIN IMMEDIATE"
 TRANSACTION_KEYWORDS: Final = frozenset(
     {"BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"}
 )
+READ_KEYWORDS: Final = frozenset({"SELECT", "WITH"})  # all a read-only connection may send
 _BEGINNING: Final = "nextron_beginning"  # Connection.info flag set while the begin event runs
+_READ_ONLY: Final = "nextron_read_only"  # Connection.info flag set while query_only is on
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +63,10 @@ class TransactionSqlError(RuntimeError):
 
 class ConnectionSettingError(RuntimeError):
     """A connection setting did not take effect."""
+
+
+class ReadOnlySqlError(RuntimeError):
+    """A statement other than ``SELECT`` or ``WITH`` was sent on a read-only connection."""
 
 
 def leading_keyword(sql: str) -> str:
@@ -115,6 +130,11 @@ def _refuse_transaction_sql(
         raise TransactionSqlError(
             f"{keyword} refused: transactions are opened and ended only by the unit of work"
         )
+    if connection.info.get(_READ_ONLY) and keyword not in READ_KEYWORDS:
+        raise ReadOnlySqlError(
+            f"{keyword or 'the statement'} refused: this connection is read-only "
+            "(a dashboard GET reads; a POST writes)"
+        )
 
 
 def create_engine(db_path: Path) -> Engine:
@@ -167,3 +187,49 @@ def fk_off_connection(engine: Engine) -> Iterator[Connection]:
                 log.warning("foreign_keys_restore_failed", exc_info=True)
             if not restored:
                 connection.invalidate()
+
+
+def _set_query_only(dbapi_connection: sqlite3.Connection, on: bool) -> None:
+    """Set ``query_only`` and read it back."""
+    dbapi_connection.execute(f"PRAGMA query_only={'ON' if on else 'OFF'}")
+    [value] = dbapi_connection.execute("PRAGMA query_only").fetchone()
+    if value != int(on):
+        raise ConnectionSettingError(f"query_only stayed {value}")
+
+
+@contextmanager
+def read_only_connection(engine: Engine) -> Iterator[Connection]:
+    """A connection in one read transaction with ``query_only`` on, for the read-only unit of
+    work only.
+
+    It begins at once (``BEGIN IMMEDIATE``, AD-2), and only then turns ``query_only`` on, because
+    ``BEGIN IMMEDIATE`` fails under it. While it is lent, any statement but ``SELECT`` or
+    ``WITH`` raises ``ReadOnlySqlError``. On exit the transaction is rolled back and
+    ``query_only`` is turned back off before the connection returns to the pool; if that fails,
+    the connection is invalidated, so the pool never hands it out again.
+    """
+    with engine.connect() as connection:
+        connection.begin()  # the begin event emits BEGIN IMMEDIATE now
+        dbapi_connection = connection.connection.driver_connection
+        assert isinstance(dbapi_connection, sqlite3.Connection)
+        try:
+            _set_query_only(dbapi_connection, True)
+        except BaseException:
+            connection.invalidate()  # query_only may be on; never hand it out again
+            raise
+        connection.info[_READ_ONLY] = True
+        try:
+            yield connection
+        finally:
+            connection.info.pop(_READ_ONLY, None)
+            restored = False
+            try:
+                if connection.in_transaction():
+                    connection.rollback()
+                _set_query_only(dbapi_connection, False)
+                restored = True
+            except Exception:  # noqa: BLE001 - the connection is discarded below instead
+                log.warning("query_only_restore_failed", exc_info=True)
+            finally:
+                if not restored:  # also after a BaseException such as KeyboardInterrupt
+                    connection.invalidate()

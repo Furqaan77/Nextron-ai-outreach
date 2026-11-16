@@ -1,8 +1,9 @@
 """Drive an ASGI app in-process (Starlette's TestClient needs httpx, which is not in the Stack).
 
-``request`` sends one HTTP request with any method, query string and header list and returns
-a ``Reply``; ``get`` keeps the old shape (status, headers as a dict, body). The default header
-list is just ``Host: 127.0.0.1:8766``, which is what a dashboard on the ``dev`` port expects.
+``request`` sends one HTTP request with any method, query string, header list and body and
+returns a ``Reply``; ``get`` keeps the old shape (status, headers as a dict, body). The default
+header list is just ``Host: 127.0.0.1:8766``, which is what a dashboard on the ``dev`` port
+expects.
 """
 
 import asyncio
@@ -48,14 +49,16 @@ def request(
     method: str = "GET",
     query: bytes = b"",
     headers: Headers | None = None,
+    body: bytes = b"",
     catch: bool = False,
 ) -> Reply:
-    """Send one request through ``app``. ``headers`` replaces the default ``Host`` header list.
-    With ``catch``, an exception the app raises is returned in ``Reply.error`` instead."""
+    """Send one request through ``app``. ``headers`` replaces the default ``Host`` header list;
+    ``body`` is sent in one piece. With ``catch``, an exception the app raises is returned in
+    ``Reply.error`` instead."""
     messages: list[dict[str, Any]] = []
 
     async def receive() -> dict[str, Any]:
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": body, "more_body": False}
 
     async def send(message: dict[str, Any]) -> None:
         messages.append(message)
@@ -82,8 +85,8 @@ def request(
             raise
         error = exc
     [start] = [m for m in messages if m["type"] == "http.response.start"]  # exactly one response
-    body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
-    return Reply(start["status"], list(start["headers"]), body, error)
+    sent = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+    return Reply(start["status"], list(start["headers"]), sent, error)
 
 
 def get(app: Asgi, path: str) -> tuple[int, dict[bytes, bytes], bytes]:

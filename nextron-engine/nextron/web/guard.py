@@ -7,26 +7,46 @@ For an ``http`` request, in this order:
    IPv6, no header, two headers) gets 400 ``Bad request: unexpected Host header`` before
    routing, which stops DNS rebinding.
 2. Session: any path other than exactly ``/enter`` needs a ``nextron_session`` cookie that
-   names a live session; otherwise 401 with the locked page, GET included.
-3. The app runs.
+   names a live session; otherwise 401 with the locked page, GET included. The CSRF token of
+   the first live ``nextron_session`` value goes into ``scope["nextron.csrf_token"]``, where
+   ``nextron.web.csrf.require_csrf`` and the page renderer read it.
+3. For any method other than ``GET`` and ``HEAD``, before routing (so unknown paths and wrong
+   methods are covered too):
+
+   - ``Origin``: exactly one header, equal byte for byte to ``http://`` plus the request's
+     ``Host`` (a page served from ``localhost:<port>`` posts with that origin, one from
+     ``127.0.0.1:<port>`` with that one);
+   - ``Sec-Fetch-Site``: no header, or exactly one equal to ``same-origin``.
+
+   A failure gets 403 ``Request refused: security check failed`` and is logged as
+   ``request_refused`` (WARNING) with ``check`` set to ``origin`` or ``fetch_site``, the
+   ``method`` and the ``path`` (never the query string or a header value). A page on another
+   port of ``127.0.0.1`` is same-site, so the browser sends it the ``SameSite=Strict`` cookie;
+   these checks, and the CSRF token, are what stop it posting to the dashboard. Under the
+   ``Referrer-Policy: no-referrer`` header, a browser's native form submission sends
+   ``Origin: null``, so every dashboard form posts through HTMX (``hx-post``), whose request
+   keeps the real ``Origin``; a native fallback (HTMX not loaded) is refused here.
+4. The app runs.
 
 Every response that passes through, the guard's own included, carries exactly the
 ``SECURITY_HEADERS`` (replacing any the handler set) and no ``access-control-*`` header. It
 also carries ``Cache-Control: no-store`` (replacing the handler's) unless the matched endpoint
 declared ``personal_data(False)``; the router puts the endpoint in ``scope["endpoint"]``, which
-the guard reads when the response starts. So undeclared, unmatched, 400, 401 and 500 responses
-are never cached.
+the guard reads when the response starts. So undeclared, unmatched, 400, 401, 403 and 500
+responses are never cached.
 
 An exception raised before the response starts produces a 500 ``Internal error`` with the same
 headers, and is then raised again so Uvicorn logs it. ``websocket`` connections are closed
 (the dashboard has none) and ``lifespan`` passes through.
 """
 
+import logging
 from collections.abc import Iterable
 from typing import Final
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from nextron.web.csrf import CSRF_SCOPE_KEY, SECURITY_CHECK_FAILED
 from nextron.web.routing import declared_personal_data
 from nextron.web.sessions import SESSION_COOKIE, SessionStore
 
@@ -43,12 +63,19 @@ SECURITY_HEADERS: Final[tuple[tuple[bytes, bytes], ...]] = (
 )
 NO_STORE: Final = (b"cache-control", b"no-store")
 BAD_HOST_BODY: Final = b"Bad request: unexpected Host header"
+SECURITY_CHECK_FAILED_BODY: Final = SECURITY_CHECK_FAILED.encode("ascii")
 INTERNAL_ERROR_BODY: Final = b"Internal error"
 TEXT_PLAIN: Final = b"text/plain; charset=utf-8"
 TEXT_HTML: Final = b"text/html; charset=utf-8"
 POLICY_VIOLATION: Final = 1008  # WebSocket close code
+SAFE_METHODS: Final = frozenset({"GET", "HEAD"})
+SAME_ORIGIN: Final = b"same-origin"
+ORIGIN_CHECK: Final = "origin"
+FETCH_SITE_CHECK: Final = "fetch_site"
 
 _REPLACED: Final = frozenset(name for name, _ in SECURITY_HEADERS)
+
+log = logging.getLogger(__name__)
 
 
 def _secured(
@@ -73,8 +100,21 @@ def _header_values(scope: Scope, name: bytes) -> list[bytes]:
     return [value for key, value in scope.get("headers", []) if key.lower() == name]
 
 
+def _failed_check(scope: Scope) -> str | None:
+    """Which header check an unsafe-method request fails, or ``None``. The ``Host`` header has
+    already been checked: there is exactly one."""
+    [host] = _header_values(scope, b"host")
+    origins = _header_values(scope, b"origin")
+    if origins != [b"http://" + host]:
+        return ORIGIN_CHECK
+    fetch_sites = _header_values(scope, b"sec-fetch-site")
+    if fetch_sites and fetch_sites != [SAME_ORIGIN]:
+        return FETCH_SITE_CHECK
+    return None
+
+
 class Guard:
-    """Host check, session check and security headers for the dashboard (AD-13)."""
+    """Host, session and unsafe-method checks and security headers for the dashboard (AD-13)."""
 
     def __init__(
         self, app: ASGIApp, *, port: int, sessions: SessionStore, locked_page: bytes
@@ -98,25 +138,41 @@ class Guard:
         hosts = _header_values(scope, b"host")
         return len(hosts) == 1 and hosts[0] in self.allowed_hosts
 
-    def _has_session(self, scope: Scope) -> bool:
+    def _session_csrf_token(self, scope: Scope) -> str | None:
+        """The CSRF token of the first ``nextron_session`` cookie value that names a live
+        session; ``None`` when none does."""
         for header in _header_values(scope, b"cookie"):
             for pair in header.decode("latin-1").split(";"):
                 name, separator, value = pair.partition("=")
-                if (
-                    separator
-                    and name.strip() == SESSION_COOKIE
-                    and self.sessions.is_valid(value.strip())
-                ):
-                    return True
-        return False
+                if separator and name.strip() == SESSION_COOKIE:
+                    csrf_token = self.sessions.csrf_token(value.strip())
+                    if csrf_token is not None:
+                        return csrf_token
+        return None
 
     async def _http(self, scope: Scope, receive: Receive, send: Send) -> None:
         if not self._host_allowed(scope):
             await _respond(send, 400, TEXT_PLAIN, BAD_HOST_BODY)
             return
-        if scope.get("path") != ENTER_PATH and not self._has_session(scope):
+        csrf_token = self._session_csrf_token(scope)
+        if csrf_token is not None:
+            scope[CSRF_SCOPE_KEY] = csrf_token
+        elif scope.get("path") != ENTER_PATH:
             await _respond(send, 401, TEXT_HTML, self.locked_page)
             return
+        if scope.get("method") not in SAFE_METHODS:
+            failed = _failed_check(scope)
+            if failed is not None:
+                log.warning(
+                    "request_refused",
+                    extra={
+                        "check": failed,
+                        "method": scope.get("method"),
+                        "path": scope.get("path"),
+                    },
+                )
+                await _respond(send, 403, TEXT_PLAIN, SECURITY_CHECK_FAILED_BODY)
+                return
 
         started = False
 

@@ -412,7 +412,7 @@ def test_serve_starts_logging_after_the_lock_and_logs_start_and_stop(
         lines = read_lines(dev / "logs" / LOG_FILE_NAME)
         return [line for line in lines if line["logger"] == "nextron.main"]
 
-    def server(config: BootstrapConfig, reload: bool) -> None:
+    def server(config: BootstrapConfig, reload: bool, units: object) -> None:
         seen.append([line["event"] for line in main_lines()])
 
     assert main.serve(probes=fake_probes(), run_server=server, err=io.StringIO()) == 0
@@ -437,7 +437,7 @@ def test_serve_starts_logging_after_the_lock_and_logs_start_and_stop(
 def test_serve_logs_the_cause_and_engine_stopped_when_the_server_fails(
     failure: BaseException, exit_code: int, cause: str, dev: Path
 ) -> None:
-    def fail(config: BootstrapConfig, reload: bool) -> None:
+    def fail(config: BootstrapConfig, reload: bool, units: object) -> None:
         raise failure
 
     if isinstance(failure, SystemExit):
@@ -461,7 +461,7 @@ def test_serve_logs_the_cause_and_engine_stopped_when_the_server_fails(
 
 
 def test_a_crash_logged_by_serve_is_not_logged_again_by_the_hook(dev: Path) -> None:
-    def crash(config: BootstrapConfig, reload: bool) -> None:
+    def crash(config: BootstrapConfig, reload: bool, units: object) -> None:
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError) as raised:
@@ -489,7 +489,7 @@ def test_a_busy_port_is_logged_as_a_failed_startup_check(dev: Path) -> None:
 
 
 class ServerNeverRuns:
-    def __call__(self, config: BootstrapConfig, reload: bool) -> None:
+    def __call__(self, config: BootstrapConfig, reload: bool, units: object) -> None:
         raise AssertionError("the server must not start")
 
 

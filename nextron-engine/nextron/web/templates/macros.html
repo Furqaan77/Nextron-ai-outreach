@@ -1,0 +1,12 @@
+{#- Macros for untrusted text: crawled, imported, Reply or AI text (AD-18, UX-DR4).
+
+    {% from "macros.html" import untrusted_block %}
+    {{ untrusted_block(reply.body) }}               the text, escaped
+    {% call untrusted_block() %}...{% endcall %}    markup built from escaped values
+
+The block is a div with hx-disable, so HTMX ignores any hx-* attribute inside it. -#}
+{% macro untrusted_block(text=None) -%}
+<div class="untrusted" hx-disable>
+{%- if caller is defined %}{{ caller() }}{% else %}{{ text|plain }}{% endif -%}
+</div>
+{%- endmacro %}

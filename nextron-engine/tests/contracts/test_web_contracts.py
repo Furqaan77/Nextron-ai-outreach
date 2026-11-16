@@ -7,6 +7,10 @@
   fails. An ASGI ``async def __call__`` and other async helpers are fine.
 - **Every route declares ``personal_data``.** ``undeclared_routes`` of the built app is empty,
   and ``create_app`` refuses to build an app with an undeclared route.
+- **Route rules.** ``route_rule_problems`` of the built app is empty: every route is an
+  ``APIRoute`` that is exactly a GET run in a read-only unit of work or exactly a POST behind
+  ``require_csrf``. The dashboard route class refuses any other route when it is added, and
+  ``create_app`` refuses to build an app that breaks the rules.
 - **No inline script or style, only self-hosted assets.** No template under
   ``nextron/web/templates`` has an inline ``<script>``, a ``<style>``, a ``style=``, ``on*=``,
   ``hx-on*`` or ``data-hx-on*`` attribute, a ``js:`` or ``javascript:`` value in ``hx-vals``,
@@ -16,25 +20,54 @@
   every ``<link href>``, is a local path. No stylesheet under ``nextron/web/static`` has an
   ``@import`` or an external ``url()``.
 - **Autoescaping is on** in the environment the app renders with.
+- **Forms post through HTMX with a CSRF token.** Every ``<form>`` in the templates has
+  ``method="post"`` and ``hx-post``, and calls ``csrf_field()`` before its ``</form>``. Under
+  ``Referrer-Policy: no-referrer`` a native form submission sends ``Origin: null``, which the
+  guard refuses; HTMX's request keeps the real ``Origin``. (No form uses GET yet; a GET filter
+  form must amend this contract.)
+- **The safe allowlist.** Outside ``tests/contracts/safe_allowlist.txt``, no template (scanned
+  as a whole, so a match may span lines) reaches the ``safe`` filter (``|safe``, a quoted
+  ``'safe'`` filter name inside a Jinja tag such as ``map('safe')``, or a ``{% filter safe %}``
+  block) or turns autoescaping off (any ``{% autoescape %}`` whose argument isn't literally
+  ``true``). No module under ``nextron/web`` names ``Markup`` (a name, an attribute or an
+  import, under any alias), names ``__html__`` (a ``def``, a name, an attribute or an
+  assignment target) or holds a string that the template scan would flag. A use counts on the
+  line where it starts. An allowlist line is ``<posix path>: <stripped source line>`` and allows
+  one such line; ``#`` starts a comment line. An entry that matches nothing fails too.
 """
 
 import ast
+import functools
 import inspect
 import re
 import shutil
+from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.responses import PlainTextResponse
+from fastapi.routing import APIRoute
 from jinja2 import Environment
+from starlette.routing import Route
 
 from nextron.web import app as web_app
 from nextron.web.app import NavLink, template_environment
-from nextron.web.routing import personal_data, require_declared, undeclared_routes
+from nextron.web.csrf import require_csrf
+from nextron.web.routing import (
+    dashboard_route_class,
+    personal_data,
+    require_declared,
+    require_route_rules,
+    route_rule_problems,
+    undeclared_routes,
+)
 from tests.contracts.support import ENGINE_ROOT, PACKAGE, copy_with_probe
-from tests.dashboard import Dashboard
+from tests.dashboard import Dashboard, body_hx_headers
+from tests.fakes.units import FakeUnits
+
+SAFE_ALLOWLIST = Path(__file__).with_name("safe_allowlist.txt")
 
 ROUTE_DECORATORS = frozenset(
     {"get", "post", "put", "patch", "delete", "head", "options", "trace", "api_route", "route"}
@@ -122,7 +155,8 @@ def test_the_run_time_check_catches_an_async_handler() -> None:
     async def slow() -> PlainTextResponse:
         return PlainTextResponse("slow")
 
-    app.add_api_route("/slow", slow, methods=["GET"])
+    # the dashboard route class refuses an async GET, so add a plain APIRoute behind its back
+    app.router.routes.append(APIRoute("/slow", slow, methods=["GET"]))
 
     assert async_route_handlers(app) == ["/slow is served by async def slow"]
 
@@ -193,7 +227,8 @@ def test_undeclared_routes_names_an_undeclared_route() -> None:
     def undeclared() -> PlainTextResponse:
         return PlainTextResponse("undeclared")
 
-    app.add_api_route("/undeclared", undeclared, methods=["GET", "POST"])
+    # the dashboard route class refuses GET and POST together, so add a plain APIRoute
+    app.router.routes.append(APIRoute("/undeclared", undeclared, methods=["GET", "POST"]))
 
     assert undeclared_routes(app) == ["GET POST /undeclared"]
     with pytest.raises(RuntimeError, match="undeclared: GET POST /undeclared"):
@@ -217,6 +252,159 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
 def test_personal_data_takes_a_bool(value: object) -> None:
     with pytest.raises(TypeError):
         personal_data(value)  # type: ignore[arg-type]
+
+
+# Route rules ----------------------------------------------------------------------------------
+
+
+@personal_data(False)
+def _endpoint() -> PlainTextResponse:
+    return PlainTextResponse("x")
+
+
+def test_every_route_of_the_app_keeps_the_route_rules() -> None:
+    app = Dashboard().app
+
+    assert route_rule_problems(app) == []
+    assert {type(route) for route in app.routes} == {app.router.route_class}
+
+
+def test_route_rule_problems_names_each_route_that_breaks_them() -> None:
+    app = Dashboard().app
+    app.router.routes.extend(
+        [
+            APIRoute("/plain-get", _endpoint, methods=["GET"]),
+            APIRoute("/plain-post", _endpoint, methods=["POST"]),
+            APIRoute("/put", _endpoint, methods=["PUT"]),
+            APIRoute("/both", _endpoint, methods=["GET", "POST"]),
+            Route("/starlette", _endpoint, methods=["GET"]),
+        ]
+    )
+
+    assert route_rule_problems(app) == [
+        "GET /plain-get: a GET outside a read-only unit of work",
+        "POST /plain-post: a POST whose first dependency isn't require_csrf",
+        "PUT /put: methods other than exactly GET or exactly POST",
+        "GET POST /both: methods other than exactly GET or exactly POST",
+        "GET /starlette: not an APIRoute",
+    ]
+    with pytest.raises(RuntimeError, match="route rules broken: GET /plain-get"):
+        require_route_rules(app)
+
+
+def test_a_post_depending_on_another_function_named_require_csrf_is_named() -> None:
+    async def lookalike() -> None:
+        pass
+
+    lookalike.__name__ = lookalike.__qualname__ = "require_csrf"  # the name, not the check
+    app = Dashboard().app
+    app.router.routes.append(
+        APIRoute("/fake", _endpoint, methods=["POST"], dependencies=[Depends(lookalike)])
+    )
+
+    assert route_rule_problems(app) == [
+        "POST /fake: a POST whose first dependency isn't require_csrf"
+    ]
+
+
+def test_a_post_that_runs_another_dependency_before_require_csrf_is_named() -> None:
+    async def first() -> None:  # it would run, side effects and all, before the token check
+        pass
+
+    app = Dashboard().app
+    app.router.routes.append(
+        APIRoute(
+            "/late",
+            _endpoint,
+            methods=["POST"],
+            dependencies=[Depends(first), Depends(require_csrf)],
+        )
+    )
+
+    assert route_rule_problems(app) == [
+        "POST /late: a POST whose first dependency isn't require_csrf"
+    ]
+
+
+def test_a_get_that_only_copied_the_read_only_mark_is_named() -> None:
+    app = Dashboard().app
+    [home] = [route for route in app.routes if getattr(route, "name", None) == "home"]
+
+    @functools.wraps(home.endpoint)  # copies the wrapper's attributes, mark included
+    def impostor() -> PlainTextResponse:
+        return PlainTextResponse("x")
+
+    app.router.routes.append(APIRoute("/impostor", impostor, methods=["GET"]))
+
+    assert route_rule_problems(app) == ["GET /impostor: a GET outside a read-only unit of work"]
+
+
+def test_an_included_router_is_named() -> None:
+    """FastAPI's ``include_router`` adds one route for the whole router, whatever route class
+    built its routes; the rules can't see inside it, so it is refused. Add dashboard routes to
+    the app itself."""
+    app = Dashboard().app
+    router = APIRouter()
+    router.add_api_route("/elsewhere", _endpoint, methods=["GET"])
+
+    app.include_router(router)
+
+    included = app.routes[-1]
+    assert getattr(included, "path", None) is None
+    assert route_rule_problems(app) == [f"<{type(included).__name__}>: not an APIRoute"]
+
+
+@pytest.mark.parametrize(
+    "methods", [["PUT"], ["GET", "POST"], ["HEAD"], ["GET", "HEAD"], ["DELETE"], ["PATCH"]]
+)
+def test_the_route_class_refuses_other_methods_when_the_route_is_added(
+    methods: list[str],
+) -> None:
+    app = Dashboard().app
+
+    with pytest.raises(ValueError, match="exactly GET .* or exactly POST"):
+        app.add_api_route("/x", _endpoint, methods=methods)
+
+
+def test_the_route_class_refuses_an_async_or_generator_get() -> None:
+    app = Dashboard().app
+
+    @personal_data(False)
+    async def slow() -> PlainTextResponse:
+        return PlainTextResponse("slow")
+
+    @personal_data(False)
+    def rows() -> object:
+        yield "x"
+
+    for endpoint in (slow, rows):
+        with pytest.raises(TypeError, match="plain sync def"):
+            app.add_api_route("/x", endpoint, methods=["GET"])
+
+
+def test_the_route_class_puts_require_csrf_first_on_a_post() -> None:
+    async def other() -> None:
+        pass
+
+    route_class = dashboard_route_class(FakeUnits())
+    route = route_class("/x", _endpoint, methods=["POST"], dependencies=[Depends(other)])
+
+    assert [dependency.call for dependency in route.dependant.dependencies] == [
+        require_csrf,
+        other,
+    ]
+
+
+def test_create_app_refuses_an_app_that_breaks_the_route_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(web_app, "dashboard_route_class", lambda units: APIRoute)
+
+    with pytest.raises(RuntimeError) as caught:
+        Dashboard()
+
+    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}"):
+        assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
 
 
 # No inline script or style -------------------------------------------------------------------
@@ -303,7 +491,7 @@ def inline_code_problems(root: Path) -> list[str]:
 def test_templates_and_stylesheets_have_no_inline_code() -> None:
     templates = sorted(p.name for p in (PACKAGE / "web" / "templates").glob("*.html"))
 
-    assert templates == ["base.html", "home.html", "locked.html"]
+    assert templates == ["base.html", "home.html", "locked.html", "macros.html"]
     assert inline_code_problems(ENGINE_ROOT) == []
 
 
@@ -438,14 +626,316 @@ def test_the_app_renders_with_autoescaping_on(monkeypatch: pytest.MonkeyPatch) -
 
 def test_the_base_layout_escapes_what_it_is_given() -> None:
     nav = [NavLink('<img src=x onerror="go()">', '/x" onmouseover="go()')]
+    token = "'><script>go()</script>"
 
-    html = template_environment().get_template("base.html").render(nav=nav)
+    html = template_environment().get_template("base.html").render(nav=nav, csrf_token=token)
 
     assert "<img src=x" not in html and 'onmouseover="go()"' not in html
     assert "&lt;img src=x onerror=&#34;go()&#34;&gt;" in html
+    assert "<script>go()" not in html
+    assert body_hx_headers(html) == {"X-CSRF-Token": token}
 
 
 def test_the_autoescape_check_catches_an_unescaped_environment() -> None:
     problems = autoescape_problems(Environment(autoescape=False))
 
     assert problems == ["autoescape is False, not True", "a rendered value was not escaped"]
+
+
+# Forms post through HTMX with a CSRF token ----------------------------------------------------
+
+FORM_TAG = re.compile(r"<form\b[^>]*>", re.IGNORECASE)
+FORM_END = re.compile(r"</form\s*>", re.IGNORECASE)
+POST_METHOD = re.compile(r"""\smethod\s*=\s*(["']?)post\1(?=[\s>/])""", re.IGNORECASE)
+HX_POST = re.compile(r"\shx-post\s*=", re.IGNORECASE)
+CSRF_FIELD_CALL = re.compile(r"\{\{-?\s*csrf_field\(\)\s*-?\}\}")
+
+
+def form_problems(root: Path) -> list[str]:
+    """Each ``<form>`` in ``root``'s templates without ``method="post"``, without ``hx-post``,
+    or without a ``csrf_field()`` call before its ``</form>``."""
+    problems = []
+    for path in sorted((root / "nextron" / "web" / "templates").rglob("*.html")):
+        label = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for start in FORM_TAG.finditer(text):
+            line = text.count("\n", 0, start.start()) + 1
+            if not POST_METHOD.search(start[0]):
+                problems.append(f"{label}:{line} <form> without method=\"post\"")
+            if not HX_POST.search(start[0]):
+                problems.append(f"{label}:{line} <form> without hx-post")
+            end = FORM_END.search(text, start.end())
+            inside = text[start.end() : end.start() if end else len(text)]
+            if not CSRF_FIELD_CALL.search(inside):
+                problems.append(f"{label}:{line} <form> without csrf_field() before </form>")
+    return problems
+
+
+def test_every_form_posts_with_a_csrf_field() -> None:
+    assert form_problems(ENGINE_ROOT) == []
+
+
+@pytest.mark.parametrize(
+    ("template", "why"),
+    [
+        ('<form hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
+        ('<form method="get" hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
+        ('<form method="postal" hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
+        ('<form data-method="post" hx-post="/x">{{ csrf_field() }}</form>', "without method="),
+        # a native submission sends Origin: null under no-referrer, which the guard refuses
+        ('<form method="post">{{ csrf_field() }}</form>', "without hx-post"),
+        ('<form method="post" data-hx-post="/x">{{ csrf_field() }}</form>', "without hx-post"),
+        ('<form method="post" hx-post="/x"></form>', "without csrf_field()"),
+        ('<form method="post" hx-post="/x"></form>{{ csrf_field() }}', "without csrf_field()"),
+        ('<form method="post" hx-post="/x">{{ csrf_token }}</form>', "without csrf_field()"),
+        ('<FORM METHOD="POST" HX-POST="/x">', "without csrf_field()"),
+    ],
+)
+def test_the_form_check_catches_a_form_without_post_hx_post_or_csrf_field(
+    template: str, why: str, tmp_path: Path
+) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "templates" / "_probe.html").write_text(template, "utf-8")
+
+    [problem] = form_problems(root)
+
+    assert problem.startswith("nextron/web/templates/_probe.html:1 ")
+    assert why in problem
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        '<form method="post" hx-post="/x">{{ csrf_field() }}<button>Go</button></form>',
+        "<form method='POST' hx-post='/x'>\n{{- csrf_field() -}}\n</form>",
+        '<form class="f" method=post hx-post="/x">{{csrf_field()}}</form>',
+    ],
+)
+def test_the_form_check_allows_an_htmx_post_form_with_a_csrf_field(
+    template: str, tmp_path: Path
+) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "templates" / "_probe.html").write_text(template, "utf-8")
+
+    assert form_problems(root) == []
+
+
+# The safe allowlist ----------------------------------------------------------------------------
+
+SAFE_FILTER = re.compile(r"\|\s*safe\b", re.IGNORECASE)  # \s* spans lines in the whole text
+SAFE_BLOCK = re.compile(r"\{%[-+]?\s*filter\s+safe\b", re.IGNORECASE)
+AUTOESCAPE_OFF = re.compile(r"\{%[-+]?\s*autoescape\b(?!\s+true\s*[-+]?%\})")  # not literally true
+JINJA_TAG = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.DOTALL)
+SAFE_NAME = re.compile(r"""(['"])safe\1""")  # the filter named as a string, as in map('safe')
+MARKUP = "Markup"
+HTML_DUNDER = "__html__"
+
+
+def template_safe_offsets(text: str) -> list[int]:
+    """Where ``text``, read as a template, reaches the ``safe`` filter or turns autoescaping
+    off: the offset each match starts at."""
+    offsets = [
+        match.start()
+        for pattern in (SAFE_FILTER, SAFE_BLOCK, AUTOESCAPE_OFF)
+        for match in pattern.finditer(text)
+    ]
+    for tag in JINJA_TAG.finditer(text):
+        offsets += [tag.start() + match.start() for match in SAFE_NAME.finditer(tag[0])]
+    return offsets
+
+
+def read_allowlist(path: Path) -> Counter[str]:
+    """The allowlist's entries, ``<posix path>: <stripped source line>``, each counted."""
+    entries: Counter[str] = Counter()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            entries[line] += 1
+    return entries
+
+
+def _markup_lines(tree: ast.AST) -> set[int]:
+    """Lines that name ``Markup`` (also through an import alias), name ``__html__`` or hold a
+    string the template scan flags."""
+    aliases = {MARKUP}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name.rsplit(".", 1)[-1] == MARKUP and alias.asname:
+                    aliases.add(alias.asname)
+    lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any(
+                alias.name.rsplit(".", 1)[-1] in aliases or alias.asname in aliases
+                for alias in node.names
+            ):
+                lines.add(node.lineno)
+        elif isinstance(node, ast.Name) and node.id in aliases:
+            lines.add(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr == MARKUP:
+            lines.add(node.lineno)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == HTML_DUNDER:
+            lines.add(node.lineno)
+        elif (isinstance(node, ast.Name) and node.id == HTML_DUNDER) or (
+            isinstance(node, ast.Attribute) and node.attr == HTML_DUNDER
+        ):
+            lines.add(node.lineno)  # an assignment target is a Name or an Attribute too
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and template_safe_offsets(node.value)
+        ):
+            lines.add(node.lineno)
+    return lines
+
+
+def safe_uses(root: Path) -> Counter[str]:
+    """Every use the allowlist must cover under ``root``, as ``<posix path>: <stripped line>``."""
+    uses: Counter[str] = Counter()
+    web = root / "nextron" / "web"
+    for path in sorted((web / "templates").rglob("*.html")):
+        label = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        source = text.splitlines()
+        numbers = {text.count("\n", 0, offset) + 1 for offset in template_safe_offsets(text)}
+        for number in sorted(numbers):
+            uses[f"{label}: {source[number - 1].strip()}"] += 1
+    for path in sorted(web.rglob("*.py")):
+        label = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        source = text.splitlines()
+        for number in sorted(_markup_lines(ast.parse(text, filename=str(path)))):
+            uses[f"{label}: {source[number - 1].strip()}"] += 1
+    return uses
+
+
+def safe_allowlist_problems(root: Path, allowlist: Path) -> list[str]:
+    """Uses the allowlist doesn't cover, then allowlist entries that match nothing."""
+    uses, allowed = safe_uses(root), read_allowlist(allowlist)
+    problems = [f"not allowlisted: {use}" for use in sorted((uses - allowed).elements())]
+    problems += [f"stale allowlist entry: {entry}" for entry in sorted((allowed - uses).elements())]
+    return problems
+
+
+def test_the_safe_filter_and_markup_appear_only_where_allowlisted() -> None:
+    assert safe_allowlist_problems(ENGINE_ROOT, SAFE_ALLOWLIST) == []
+
+
+def test_the_allowlist_covers_only_the_templating_helpers() -> None:
+    assert {entry.split(":", 1)[0] for entry in read_allowlist(SAFE_ALLOWLIST)} == {
+        "nextron/web/templating.py"
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "use"),
+    [
+        ("_probe.html", "<p>{{ text|safe }}</p>", "<p>{{ text|safe }}</p>"),
+        ("_probe.html", "<p>{{ text | safe }}</p>", "<p>{{ text | safe }}</p>"),
+        ("_probe.html", "<p>{{ text|e|safe }}</p>", "<p>{{ text|e|safe }}</p>"),
+        ("_probe.html", "{% filter safe %}{{ text }}{% endfilter %}", "{% filter safe %}"),
+        ("_probe.html", "{%- filter upper|safe %}x{% endfilter %}", "{%- filter upper|safe %}"),
+        ("_probe.html", "{% autoescape false %}{{ x }}{% endautoescape %}", "{% autoescape"),
+        ("_probe.html", "{% autoescape False %}{{ x }}{% endautoescape %}", "{% autoescape"),
+        ("_probe.html", "{% autoescape 0 %}{{ x }}{% endautoescape %}", "{% autoescape 0 %}"),
+        ("_probe.html", "{% autoescape none %}{{ x }}{% endautoescape %}", "{% autoescape none"),
+        ("_probe.html", "{% autoescape some_flag %}{{ x }}{% endautoescape %}", "some_flag"),
+        ("_probe.html", "{%- autoescape True -%}{{ x }}{% endautoescape %}", "{%- autoescape"),
+        ("_probe.html", "<p>{{ x |\n safe }}</p>", "<p>{{ x |"),
+        ("_probe.html", "<p>\n{{ x\n  | safe }}</p>", "| safe }}</p>"),
+        ("_probe.html", "{{ [x]|map('safe')|join }}", "{{ [x]|map('safe')|join }}"),
+        ("_probe.html", '{{ [x]|map("safe")|join }}', '{{ [x]|map("safe")|join }}'),
+        ("_probe.html", "{{ items\n|map(\n'safe') }}", "'safe') }}"),
+        ("_probe.py", "from markupsafe import Markup", "from markupsafe import Markup"),
+        ("_probe.py", "from markupsafe import Markup as M", "from markupsafe import Markup as M"),
+        ("_probe.py", "import markupsafe\nx = markupsafe.Markup('<b>')", "x = markupsafe.Markup"),
+        ("_probe.py", "from jinja2.utils import markupsafe as m\nx = m.Markup", "x = m.Markup"),
+        ("_probe.py", "class Html:\n    def __html__(self):\n        return ''", "def __html__"),
+        ("_probe.py", "T = '{{ x|safe }}'", "T = '{{ x|safe }}'"),
+        ("_probe.py", 'T = """<p>\n{{ x | safe }}</p>"""', 'T = """<p>'),
+        ("_probe.py", "T = '{{ x |\\n safe }}'", "T = '{{ x |"),
+        ("_probe.py", "T = '{% autoescape false %}'", "T = '{% autoescape false %}'"),
+        ("_probe.py", "T = '{% filter safe %}x{% endfilter %}'", "T = '{% filter safe %}"),
+        ("_probe.py", "T = \"{{ xs|map('safe')|join }}\"", "T = \"{{ xs|map('safe')"),
+        ("_probe.py", "class Html:\n    __html__ = str", "__html__ = str"),
+        ("_probe.py", "def mark(x):\n    x.__html__ = str", "x.__html__ = str"),
+        ("_probe.py", "def show(x):\n    return x.__html__()", "return x.__html__()"),
+    ],
+)
+def test_the_allowlist_check_catches_a_use_outside_the_allowlist(
+    name: str, text: str, use: str, tmp_path: Path
+) -> None:
+    root = web_copy(tmp_path)
+    folder = "templates" if name.endswith(".html") else ""
+    probe = root / "nextron" / "web" / folder / name
+    probe.write_text(text, "utf-8")
+
+    problems = safe_allowlist_problems(root, SAFE_ALLOWLIST)
+
+    assert problems, text
+    assert all(problem.startswith("not allowlisted: nextron/web/") for problem in problems)
+    assert any(use in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{% autoescape true %}{{ x }}{% endautoescape %}",
+        "{%- autoescape true -%}{{ x }}{%- endautoescape -%}",
+        '<p class="safe">safe</p>',
+        "{{ x|plain }} is safe",
+        "{{ x|safest }}",
+        '{{ "safe word"|upper }}',
+    ],
+)
+def test_the_allowlist_check_allows_other_uses_of_the_word_safe(
+    text: str, tmp_path: Path
+) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "templates" / "_probe.html").write_text(text, "utf-8")
+
+    assert safe_allowlist_problems(root, SAFE_ALLOWLIST) == []
+
+
+def test_an_alias_of_markup_is_caught_where_it_is_used(tmp_path: Path) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "_probe.py").write_text(
+        "from markupsafe import Markup as M\n\nX = 1\nY = M('<b>')\n", "utf-8"
+    )
+
+    assert safe_allowlist_problems(root, SAFE_ALLOWLIST) == [
+        "not allowlisted: nextron/web/_probe.py: Y = M('<b>')",
+        "not allowlisted: nextron/web/_probe.py: from markupsafe import Markup as M",
+    ]
+
+
+def test_an_allowlisted_use_passes_and_a_second_copy_does_not(tmp_path: Path) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "templates" / "_probe.html").write_text(
+        "{{ a|safe }}\n{{ a|safe }}\n", "utf-8"
+    )
+    allowlist = tmp_path / "allowlist.txt"
+    allowlist.write_text(
+        SAFE_ALLOWLIST.read_text(encoding="utf-8")
+        + "# a comment line\n\nnextron/web/templates/_probe.html: {{ a|safe }}\n",
+        "utf-8",
+    )
+
+    assert safe_allowlist_problems(root, allowlist) == [
+        "not allowlisted: nextron/web/templates/_probe.html: {{ a|safe }}"
+    ]
+
+
+def test_a_stale_allowlist_entry_fails(tmp_path: Path) -> None:
+    root = web_copy(tmp_path)
+    allowlist = tmp_path / "allowlist.txt"
+    allowlist.write_text(
+        SAFE_ALLOWLIST.read_text(encoding="utf-8")
+        + "nextron/web/templates/home.html: {{ gone|safe }}\n",
+        "utf-8",
+    )
+
+    assert safe_allowlist_problems(root, allowlist) == [
+        "stale allowlist entry: nextron/web/templates/home.html: {{ gone|safe }}"
+    ]
