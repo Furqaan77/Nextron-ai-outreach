@@ -178,9 +178,11 @@ def test_reload_is_allowed_in_dev(dev: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert kwargs["log_config"] is None
     module_name, _, attribute = str(app).partition(":")
     factory = getattr(importlib.import_module(module_name), attribute)
-    status, _, body = get(factory(), "/health")  # NEXTRON_ENV=dev, as in the reload worker
-    assert status == 200
-    assert json.loads(body)["env"] == "dev"
+    # NEXTRON_ENV=dev, as in the reload worker: the dev port's Host passes the guard, and with
+    # no session (and no keyring call) /health answers 401.
+    status, headers, _ = get(factory(), "/health")
+    assert status == 401
+    assert headers[b"x-frame-options"] == b"DENY"
 
 
 @pytest.mark.parametrize("env", ["test", "prod"])

@@ -13,3 +13,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-redacted-json-logging-and-typed-errors.md`
   summary: Add phone-number redaction for Reply text in alerts (AD-15).
   evidence: `redact()` doesn't mask phone numbers (tested with +44 7700 900123). Logs carry IDs only by convention, but AD-15 Telegram alert text requires phone numbers redacted, so it belongs with Story 7.9.
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-4-one-time-code-dashboard-entry-and-hardened-shell.md`
+  summary: Update the repo-root `README.md` (Quick start, line 29) and `HANDOFF.md` (verification commands, line 77), which still show `curl.exe http://127.0.0.1:8766/health` as a working check.
+  evidence: Since Story 1.4 every route, `/health` included, needs a dashboard session, so that command returns 401 and the locked page. Both files are outside `nextron-engine/`, and `HANDOFF.md` is agent context, so they belong to the post-story handoff update. Expect 401 there, or use `nextron open` and the browser.

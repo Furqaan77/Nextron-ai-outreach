@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 01:24
+last_updated: 11-17-2026 03:20
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -39,7 +39,7 @@ development_status:
   1-1-scaffold-the-engine-project-with-layer-contracts-and-a-local: review
   1-2-log-structured-redacted-json-lines-and-raise-typed-errors: review
   1-3-persist-through-one-configured-sqlite-engine-units-of-work-a: review
-  1-4-enter-the-dashboard-through-a-one-time-code-with-a-hardened: backlog
+  1-4-enter-the-dashboard-through-a-one-time-code-with-a-hardened: review
   1-5-require-csrf-checked-posts-and-render-untrusted-text-safely: backlog
   1-6-declare-typed-settings-once-and-edit-them-on-a-settings-page: backlog
   1-7-store-external-credentials-in-windows-credential-manager-fro: backlog

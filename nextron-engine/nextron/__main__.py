@@ -9,8 +9,12 @@ Commands:
   ``dev`` only.
 - ``doctor``: print each startup check as PASS or FAIL (exit 0 when none fail, 1 when any
   fails, 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid).
+- ``open``: open the dashboard in the default browser through a one-time link that works once,
+  within 5 minutes (exit 0: opened; exit 1: the engine isn't running, or the code couldn't be
+  stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
+  invalid).
 
-Later stories add ``open``, ``seed sync`` and ``restore``.
+Later stories add ``seed sync`` and ``restore``.
 """
 
 import argparse
@@ -33,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="restart when the code changes (NEXTRON_ENV=dev only)",
     )
     commands.add_parser("doctor", help="print each startup check as PASS or FAIL")
+    commands.add_parser(
+        "open", help="open the dashboard in the default browser with a one-time link"
+    )
     return parser
 
 
@@ -40,6 +47,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         return engine.serve(reload=args.reload)
+    if args.command == "open":
+        return engine.open_dashboard()
     return engine.doctor()
 
 

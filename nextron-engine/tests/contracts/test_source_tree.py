@@ -37,6 +37,9 @@ FILES = [
     "nextron/domain/notifications.py",
     "nextron/ports/__init__.py",
     "nextron/ports/clock.py",
+    "nextron/ports/errors.py",
+    "nextron/ports/secrets.py",
+    "nextron/domain/open_code.py",
     "nextron/db/__init__.py",
     "nextron/db/engine.py",
     "nextron/db/uow.py",
@@ -54,13 +57,23 @@ FILES = [
     "nextron/app/queries/__init__.py",
     "nextron/adapters/__init__.py",
     "nextron/adapters/ai/__init__.py",
+    "nextron/adapters/clock/__init__.py",
+    "nextron/adapters/secrets/__init__.py",
     "nextron/jobs/__init__.py",
     "nextron/web/__init__.py",
     "nextron/web/app.py",
+    "nextron/web/guard.py",
+    "nextron/web/routing.py",
+    "nextron/web/sessions.py",
+    "nextron/web/templates/base.html",
+    "nextron/web/templates/home.html",
+    "nextron/web/templates/locked.html",
     "nextron/web/static/htmx-2.0.11.min.js",
+    "nextron/web/static/app.css",
     "workers/unsubscribe/.gitkeep",
     "scripts/gen_owner_contracts.py",
     "tests/fakes/clock.py",
+    "tests/fakes/secrets.py",
 ]
 FOLDERS = [
     "nextron/db/alembic/versions",
@@ -108,7 +121,18 @@ def test_app_holds_only_owner_packages_and_queries() -> None:
 
 
 def test_every_package_docstring_states_its_import_rule() -> None:
-    layers = ["domain", "ports", "db", "app", "adapters", "adapters/ai", "jobs", "web"]
+    layers = [
+        "domain",
+        "ports",
+        "db",
+        "app",
+        "adapters",
+        "adapters/ai",
+        "adapters/clock",
+        "adapters/secrets",
+        "jobs",
+        "web",
+    ]
     for layer in layers:
         text = (PACKAGE / layer / "__init__.py").read_text(encoding="utf-8")
         assert "Import rule" in text, f"nextron/{layer}/__init__.py lacks its import rule"

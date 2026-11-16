@@ -1,5 +1,8 @@
-"""``python -m nextron`` as a real process: env refusal, health page, the database at head, the
-log file and the second instance."""
+"""``python -m nextron`` as a real process: env refusal, the guarded health page, the database
+at head, the log file, the second instance, and ``nextron open`` with no engine running.
+
+Nothing here runs ``nextron open`` against a live engine or touches Credential Manager: entering
+the dashboard is covered in-process with fakes (``tests/unit/test_dashboard.py``)."""
 
 import json
 import os
@@ -9,8 +12,10 @@ import subprocess
 import sys
 import sysconfig
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -22,6 +27,15 @@ from tests.migration_chains import stored_revisions
 HEAD = head_revision()
 STARTUP_TIMEOUT_S = 60
 PLANTED_CODE = "Fk" * 20  # a fake 40-character secret, assembled at run time
+SECURITY_HEADERS = {
+    "content-security-policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+        "connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+    ),
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+}
 
 
 def free_port() -> int:
@@ -73,6 +87,8 @@ def running_engine(engine_env: dict[str, str], tmp_path: Path) -> Iterator[subpr
             try:
                 with urllib.request.urlopen(url, timeout=2):
                     break
+            except urllib.error.HTTPError:  # any HTTP answer, the 401 included, means it is up
+                break
             except OSError:
                 if time.monotonic() > deadline:
                     pytest.fail(f"serve did not answer within {STARTUP_TIMEOUT_S}s")
@@ -134,26 +150,50 @@ def test_serve_without_a_valid_env_exits_2(
     assert not (tmp_path / "backups").exists()
 
 
-def test_health_page_and_second_instance(
+def fetch(url: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], str]:
+    """GET ``url``; return status, headers (lowercase names, each of which must appear once)
+    and body, whatever the status."""
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return response.status, _single(response.headers), response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, _single(error.headers), error.read().decode("utf-8")
+
+
+def _single(message: Message) -> dict[str, str]:
+    names = [name.lower() for name in message.keys()]
+    assert len(names) == len(set(names)), names
+    return {name.lower(): value for name, value in message.items()}
+
+
+def test_guarded_health_page_and_second_instance(
     running_engine: subprocess.Popen[bytes], engine_env: dict[str, str], tmp_path: Path
 ) -> None:
     port = engine_env["NEXTRON_PORT"]
-    url = f"http://127.0.0.1:{port}/health?code={PLANTED_CODE}"
-    with urllib.request.urlopen(url, timeout=5) as response:
-        assert response.status == 200
-        payload = json.loads(response.read())
+    status, headers, body = fetch(f"http://127.0.0.1:{port}/health?code={PLANTED_CODE}")
 
-    assert set(payload) == {"env", "version", "uptime_s"}
-    assert payload["env"] == "test"
-    assert payload["version"] == __version__
-    assert isinstance(payload["uptime_s"], int) and payload["uptime_s"] >= 0
+    assert status == 401  # no session
+    assert "nextron open" in body
+    assert "uptime_s" not in body and __version__ not in body
+    for name, value in SECURITY_HEADERS.items():
+        assert headers[name] == value
+    assert headers["cache-control"] == "no-store"
+    assert not [name for name in headers if name.startswith("access-control-")]
+
+    status, headers, body = fetch(
+        f"http://127.0.0.1:{port}/health", headers={"Host": "evil.example"}
+    )
+    assert (status, body) == (400, "Bad request: unexpected Host header")
+    assert headers["x-frame-options"] == "DENY"
 
     data_dir = tmp_path / "data"
     assert (data_dir / "logs").is_dir()
     assert (data_dir / "nextron.lock").is_file()
     assert stored_revisions(data_dir / "nextron.db") == [HEAD]
 
-    lines = wait_for_log_line(data_dir, "uvicorn.access", '"GET /health HTTP/1.1" 200')
+    lines = wait_for_log_line(data_dir, "uvicorn.access", '"GET /health HTTP/1.1" 401')
     [migrated] = [line for line in lines if line["event"] == "database_migrated"]
     assert (migrated["from_revision"], migrated["to_revision"]) == (None, HEAD)
     [started] = [line for line in lines if line["event"] == "engine_started"]
@@ -189,4 +229,22 @@ def test_nextron_console_script_runs_doctor(engine_env: dict[str, str], tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
     lines = result.stdout.splitlines()
     assert [line.split()[0] for line in lines] == ["PASS"] * 4
+    assert not (tmp_path / "data").exists()
+
+
+def test_open_with_no_engine_running_exits_1(engine_env: dict[str, str], tmp_path: Path) -> None:
+    # Hold the port, bound but not listening, for the whole call: nothing else can start
+    # listening on it, so nextron open can't reach Credential Manager or a browser.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            holder.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        holder.bind(("127.0.0.1", 0))
+        engine_env["NEXTRON_PORT"] = str(holder.getsockname()[1])
+
+        result = nextron("open", env=engine_env)
+
+    assert result.returncode == 1
+    assert result.stderr.strip() == "engine not running"
+    assert result.stdout == ""
     assert not (tmp_path / "data").exists()

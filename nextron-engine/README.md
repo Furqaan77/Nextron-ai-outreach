@@ -52,13 +52,21 @@ It takes no lock, creates nothing and starts no server.
 ```powershell
 uv run nextron serve            # or: uv run python -m nextron serve
 uv run nextron serve --reload   # dev only: restart when the code changes
-curl.exe http://127.0.0.1:8766/health   # curl.exe: in PowerShell 5.1, curl is Invoke-WebRequest
+uv run nextron open             # in a second terminal: open the dashboard (see below)
 ```
 
 `serve` validates `NEXTRON_ENV`, runs the startup checks, creates the data dir and its `logs`
 folder, takes an exclusive lock on `<data dir>\nextron.lock`, checks the port, opens the
 database (see [Database](#database)), then runs Uvicorn on `127.0.0.1` with one worker.
-`GET /health` returns `{"env", "version", "uptime_s"}` and nothing else.
+`GET /health` returns `{"env", "version", "uptime_s"}` and nothing else, but only to a browser
+with a dashboard session: like every other route, it answers 401 without one.
+
+```powershell
+curl.exe -i http://127.0.0.1:8766/health                           # 401 and the locked page
+curl.exe -i -H "Host: evil.example" http://127.0.0.1:8766/health   # 400
+```
+
+(`curl.exe`: in PowerShell 5.1, `curl` is `Invoke-WebRequest`.)
 
 | Exit code | Meaning |
 |---|---|
@@ -68,6 +76,71 @@ database (see [Database](#database)), then runs Uvicorn on `127.0.0.1` with one 
 | 3 | another instance is running for this environment |
 
 The supervisor (`scripts/run.ps1`, a later story) restarts the engine on any exit except 3.
+It watches the heartbeat file, not `/health`.
+
+## Open the dashboard
+
+```powershell
+$env:NEXTRON_ENV = "dev"
+uv run nextron open
+```
+
+With the engine running, `nextron open` writes a one-time code to Windows Credential Manager
+and opens the default browser at `http://127.0.0.1:<port>/enter?t=<code>`. The link works once,
+within 5 minutes: the dashboard deletes the code, starts a session, sets the `nextron_session`
+cookie (`HttpOnly; Path=/; SameSite=Strict`) and shows the dashboard home. Run `nextron open`
+again for a new link. The code is never printed or logged.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | the browser was opened |
+| 1 | `engine not running` (nothing was written), the code couldn't be stored in Credential Manager, or the browser couldn't be opened (the code is then withdrawn) |
+| 2 | `NEXTRON_ENV` unset or invalid, or another invalid setting |
+
+Sessions live in the engine's memory, so they end when the engine restarts (or when the browser
+drops its cookie); there is no idle timeout. A request without a session, `GET` included, gets
+401 with a page saying to run `nextron open`; so does a reused, expired or wrong code. A wrong
+code leaves the pending one in place, so a junk `/enter` from another website can't cancel your
+link. Browsers don't scope cookies by port, so the browser sends the `nextron_session` cookie
+to every web server on `127.0.0.1` it visits, not only to the engine, and the environments
+share that one cookie: opening one environment's dashboard ends the browser's session with the
+other. Run `nextron open` again to switch back.
+
+These protections keep out other websites and other Windows users' processes, not your own:
+any process running as your Windows user can read Credential Manager, and with it the pending
+code.
+
+**What the dashboard enforces (AD-13):**
+
+- It answers only `Host: 127.0.0.1:<port>` or `localhost:<port>`; anything else gets 400 before
+  any handler runs, which stops DNS rebinding.
+- Every response carries the strict `Content-Security-Policy`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`, and no CORS header.
+- Every route declares whether it shows personal data, with `@personal_data(True|False)` under
+  the route decorator. Unless it declared `False`, its responses get `Cache-Control: no-store`,
+  and `create_app` refuses to start with an undeclared route.
+- Handlers are sync `def`. Pages load only the vendored HTMX and `app.css`, with no inline
+  script or style. HTMX is configured through `<meta name="htmx-config">` (`allowEval:false`,
+  `allowScriptTags:false`, `selfRequestsOnly:true`, `historyCacheSize:0`,
+  `includeIndicatorStyles:false`).
+- The navigation shows each section (Queue, Signal Inbox, Leads/Pipeline, Funnel, Settings,
+  Health) once its page route exists.
+
+`tests/contracts/test_web_contracts.py` checks the handler, declaration, inline-code and
+autoescaping rules.
+
+## Secrets
+
+Secrets live only in Windows Credential Manager, through `SecretsPort`
+(`nextron/adapters/secrets`), under the service `nextron-engine/<env>`, so `dev` never reads a
+`prod` entry. A value holds at most 1,280 characters; a longer one is refused with "secret
+exceeds 1,280 characters". The adapter always uses Credential Manager (`WinVaultKeyring`),
+whatever `PYTHON_KEYRING_BACKEND` or a keyringrc file says, and keeps entries on this machine
+(they don't roam with a roaming profile). To inspect or remove an entry by hand, open
+Credential Manager > Windows Credentials: keyring keeps one secret at the target
+`nextron-engine/<env>` and every other one at `<name>@nextron-engine/<env>` (for example
+`session/open_code@nextron-engine/dev`). Tests use the in-memory fake `tests/fakes/secrets.py`
+and never touch Credential Manager.
 
 ## Database
 
@@ -196,7 +269,8 @@ uv run lint-imports         # the import contracts on their own
   `tests/conftest.py`; temporary Alembic chains in `tests/migration_chains.py`).
 - `tests/app`: the engine as a real process against temporary folders.
 - `tests/contracts`: import contracts, the source tree, pins, the lock file and vendored assets.
-- `tests/fakes`: one in-memory fake per port (`FrozenClock` for `Clock` so far).
+- `tests/fakes`: one in-memory fake per port (`FrozenClock` for `Clock`, `InMemorySecrets` for
+  `SecretsPort`).
 - `tests/ai_sets`: synthetic AI test cases only.
 
 ## Layers and import contracts

@@ -3,6 +3,9 @@
 Each check is a pure function over a ``Probes`` value, so tests inject fakes and never touch the
 real SQLite library, timezone data, environment or network. ``Probes.system()`` builds the real
 probes. No check makes a network call: the port probe binds a local socket and closes it.
+
+``engine_is_running`` is the probe of ``nextron open``: it connects to the engine's port instead
+of binding it, because a bind probe could take the port from an engine that is starting.
 """
 
 import os
@@ -22,6 +25,7 @@ SQLITE_VERSION: Final = "sqlite_version"
 TZDATA: Final = "tzdata"
 DATA_DIR_OUTSIDE_ONEDRIVE: Final = "data_dir_outside_onedrive"
 PORT_FREE: Final = "port_free"
+ENGINE_PROBE_TIMEOUT_S: Final = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +72,15 @@ def socket_port_is_free(host: str, port: int) -> bool:
         except OSError:
             return False
     return True
+
+
+def engine_is_running(host: str, port: int) -> bool:
+    """Whether something accepts TCP connections on ``host:port`` within 1 second."""
+    try:
+        with socket.create_connection((host, port), timeout=ENGINE_PROBE_TIMEOUT_S):
+            return True
+    except OSError:
+        return False
 
 
 def _parse_version(text: str) -> tuple[int, ...]:

@@ -42,10 +42,28 @@ go to stderr, redacted.
 ``doctor`` runs every check, prints PASS or FAIL for each, and exits 0 when none fail, 1 when
 any fails, and 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid. It takes no lock,
 creates nothing and starts no server.
+
+``build_app`` wires the dashboard (AD-13): its ``DashboardEntry`` reads the one-time code
+through ``KeyringSecrets(<env>)`` (Windows Credential Manager, service ``nextron-engine/<env>``)
+and the ``SystemClock``; tests inject fakes.
+
+``open_dashboard`` (``nextron open``) runs these steps and stops at the first failure:
+
+1. Bootstrap config: exit 2.
+2. Is the engine running? A TCP connect to ``127.0.0.1:<port>`` with a 1 s timeout
+   (``startup_checks.engine_is_running``). No: ``engine not running`` on stderr and exit 1,
+   before any secrets object is built, so no code is written.
+3. ``DashboardEntry.issue_code()`` writes a fresh code to the keyring entry
+   ``session/open_code``. A Credential Manager failure: exit 1.
+4. The default browser opens ``http://127.0.0.1:<port>/enter?t=<code>``. When it can't, the
+   code is withdrawn (best effort) and the command exits 1.
+5. Exit 0. The code is never printed or logged; the link works once, within 5 minutes.
 """
 
+import contextlib
 import logging
 import sys
+import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final, TextIO
@@ -54,17 +72,24 @@ import uvicorn
 from fastapi import FastAPI
 
 from nextron import __version__
+from nextron.adapters.clock import SystemClock
+from nextron.adapters.secrets import KeyringSecrets
+from nextron.app.ops.api import DashboardEntry
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
+from nextron.ports.clock import Clock
+from nextron.ports.errors import AdapterError
+from nextron.ports.secrets import SecretsPort
 from nextron.startup_checks import (
     CheckResult,
     Probes,
     all_checks,
     check_port_free,
+    engine_is_running,
     environment_checks,
 )
 from nextron.web.app import create_app
@@ -81,14 +106,41 @@ EXIT_CRASHED: Final = 1  # serve: an unexpected error (a Python traceback)
 EXIT_CHECKS_FAILED: Final = 1  # doctor: at least one check failed
 EXIT_STARTUP_FAILED: Final = 2  # invalid config or a failed startup check
 EXIT_LOCK_HELD: Final = 3  # another instance runs for this environment
+EXIT_OPEN_FAILED: Final = 1  # open: the engine is down, or the code or the browser failed
+
+ENGINE_NOT_RUNNING: Final = "engine not running"
+CODE_NOT_STORED: Final = "could not store the one-time code in Windows Credential Manager"
+BROWSER_NOT_OPENED: Final = "could not open the default browser"
+DASHBOARD_OPENED: Final = (
+    "opened the dashboard in your browser; the link works once, within 5 minutes"
+)
 
 ServerRunner = Callable[[BootstrapConfig, bool], None]
+EngineProbe = Callable[[str, int], bool]
+Browser = Callable[[str], bool]
 
 log = logging.getLogger(__name__)
 
 
-def build_app(config: BootstrapConfig) -> FastAPI:
-    return create_app(env=config.env, version=__version__)
+def build_entry(
+    config: BootstrapConfig, *, secrets: SecretsPort | None = None, clock: Clock | None = None
+) -> DashboardEntry:
+    """The dashboard's one-time code service: keyring and the system clock unless injected."""
+    return DashboardEntry(
+        secrets if secrets is not None else KeyringSecrets(config.env),
+        clock if clock is not None else SystemClock(),
+    )
+
+
+def build_app(
+    config: BootstrapConfig, *, secrets: SecretsPort | None = None, clock: Clock | None = None
+) -> FastAPI:
+    return create_app(
+        env=config.env,
+        version=__version__,
+        port=config.port,
+        entry=build_entry(config, secrets=secrets, clock=clock),
+    )
 
 
 def build_subscribers() -> Subscribers:
@@ -260,3 +312,43 @@ def doctor(
         status = "PASS" if result.ok else "FAIL"
         print(f"{status}  {result.name:<{width}}  {result.detail}", file=out)
     return EXIT_OK if all(result.ok for result in results) else EXIT_CHECKS_FAILED
+
+
+def open_dashboard(
+    *,
+    secrets: SecretsPort | None = None,
+    clock: Clock | None = None,
+    engine_running: EngineProbe = engine_is_running,
+    browser: Browser = webbrowser.open,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+) -> int:
+    """Open the dashboard in the default browser through a one-time code; return the exit
+    code. Never prints or logs the code."""
+    out = out if out is not None else sys.stdout
+    err = err if err is not None else sys.stderr
+    try:
+        config = load_bootstrap()
+    except BootstrapError as exc:
+        print(exc, file=err)
+        return EXIT_STARTUP_FAILED
+    if not engine_running(HOST, config.port):
+        print(ENGINE_NOT_RUNNING, file=err)
+        return EXIT_OPEN_FAILED
+    entry = build_entry(config, secrets=secrets, clock=clock)
+    try:
+        code = entry.issue_code()
+    except AdapterError:
+        print(CODE_NOT_STORED, file=err)
+        return EXIT_OPEN_FAILED
+    try:
+        opened = bool(browser(f"http://{HOST}:{config.port}/enter?t={code}"))
+    except Exception:  # noqa: BLE001 - any browser failure withdraws the code
+        opened = False
+    if not opened:
+        with contextlib.suppress(AdapterError):
+            entry.withdraw_code()
+        print(BROWSER_NOT_OPENED, file=err)
+        return EXIT_OPEN_FAILED
+    print(DASHBOARD_OPENED, file=out)
+    return EXIT_OK
