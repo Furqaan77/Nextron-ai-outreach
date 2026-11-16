@@ -26,11 +26,12 @@ uv sync --frozen
 $env:NEXTRON_ENV = "dev"
 uv run nextron doctor          # checks the machine
 uv run nextron serve           # dashboard on http://127.0.0.1:8766
-curl.exe http://127.0.0.1:8766/health
+uv run nextron open            # opens the dashboard in your browser (one-time code)
+curl.exe -i http://127.0.0.1:8766/health   # 401 without a session: expected
 uv run pytest                  # full test suite
 uv run lint-imports            # architecture import rules
 ```
 
 ## Status
 
-Planning is complete: 73 requirements, 22 architecture rules, 11 epics and 146 stories. The build is in progress. Stories 1.1–1.3 (scaffold, logging, persistence) are done, and Story 1.4 is next. Live status is in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](_bmad-output/implementation-artifacts/sprint-status.yaml).
+Planning is complete: 73 requirements, 22 architecture rules, 11 epics and 146 stories. The build is in progress. Stories 1.1–1.4 (scaffold, logging, persistence, dashboard entry) are done, and Story 1.5 is next. Live status is in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](_bmad-output/implementation-artifacts/sprint-status.yaml).
