@@ -1,0 +1,347 @@
+<title>Nextron Outreach Engine</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout concept: a single reading column like an operations manual; one wide pipeline diagram; the human "approve" step carries the only stamp-red accent. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #16202e;
+  --muted: #566274;
+  --line: #d9dee6;
+  --ink: #1f3f8f;        /* primary: navy ink */
+  --ink-soft: #e6ecf8;
+  --stamp: #c2362b;      /* accent: the approval stamp, used sparingly */
+  --stamp-soft: #fbe9e7;
+  --ok: #1d7a4f;
+  --ok-soft: #e3f3ea;
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141c; --surface: #161d28; --fg: #e6eaf1; --muted: #9aa6b8; --line: #2a3546;
+    --ink: #8fb0ff; --ink-soft: #1c2840; --stamp: #ff7a6b; --stamp-soft: #3a1d1b;
+    --ok: #5fd39a; --ok-soft: #15301f; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141c; --surface: #161d28; --fg: #e6eaf1; --muted: #9aa6b8; --line: #2a3546;
+  --ink: #8fb0ff; --ink-soft: #1c2840; --stamp: #ff7a6b; --stamp-soft: #3a1d1b;
+  --ok: #5fd39a; --ok-soft: #15301f; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 56px; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -0.02em; }
+h2 { font-size: 1.5rem; letter-spacing: -0.01em; }
+h3 { font-size: 1.05rem; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+section { display: grid; gap: 20px; }
+.lede { font-size: 1.15rem; color: var(--muted); }
+header { display: grid; gap: 14px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font-family: var(--font-mono); font-size: 0.78rem; padding: 3px 10px; border-radius: 999px; background: var(--ink-soft); color: var(--ink); }
+
+/* Pipeline diagram */
+.diagram { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+.diagram svg { display: block; min-width: 820px; width: 100%; height: auto; }
+.d-box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.d-box.human { fill: var(--stamp-soft); stroke: var(--stamp); stroke-width: 2; }
+.d-title { font-family: var(--font-display); font-size: 15px; font-weight: 600; fill: var(--fg); }
+.d-sub { font-family: var(--font-body); font-size: 11.5px; fill: var(--muted); }
+.d-stamp { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; fill: var(--stamp); font-weight: 500; }
+.d-arrow { stroke: var(--ink); stroke-width: 1.75; fill: none; }
+.d-arrowhead { fill: var(--ink); }
+.d-band { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em; fill: var(--muted); }
+.d-rule { stroke: var(--line); stroke-dasharray: 4 4; }
+
+/* Day timeline */
+.day { display: grid; gap: 0; border-left: 2px solid var(--line); margin-left: 6px; }
+.slot { display: grid; grid-template-columns: 150px 1fr; gap: 20px; padding: 14px 0 14px 22px; position: relative; }
+.slot::before { content: ""; position: absolute; left: -7px; top: 22px; width: 12px; height: 12px; border-radius: 50%; background: var(--surface); border: 2px solid var(--ink); }
+.slot.human::before { border-color: var(--stamp); background: var(--stamp); }
+.slot .when { font-family: var(--font-mono); font-size: 0.82rem; color: var(--muted); padding-top: 2px; }
+.slot .what { display: grid; gap: 4px; min-width: 0; }
+.who { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink); }
+.slot.human .who { color: var(--stamp); }
+
+/* Rails */
+.rails { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+.rail { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.rail p { color: var(--muted); font-size: 0.95rem; }
+
+/* Two columns: where it runs */
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.panel { border-radius: 10px; padding: 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.panel.pc { background: var(--ink-soft); }
+.panel.cloud { background: var(--surface); border: 1px solid var(--line); }
+ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+ul.plain li { max-width: 62ch; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.95rem; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); white-space: nowrap; }
+tr.total td { font-weight: 600; border-bottom: none; }
+tr:last-child td { border-bottom: none; }
+
+/* Slices */
+.slices { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.slice { border-top: 3px solid var(--ink); background: var(--surface); border-radius: 0 0 10px 10px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.slice .n { font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink); }
+.slice p { color: var(--muted); font-size: 0.95rem; }
+
+/* Checklist */
+.checklist { display: grid; gap: 8px; }
+.check { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: baseline; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.check .box { width: 14px; height: 14px; border: 2px solid var(--muted); border-radius: 3px; transform: translateY(2px); }
+.check .owner { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
+.tag-block { font-family: var(--font-mono); font-size: 0.7rem; padding: 1px 7px; border-radius: 4px; background: var(--stamp-soft); color: var(--stamp); margin-left: 6px; white-space: nowrap; }
+
+/* Targets */
+.targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.target { padding: 16px 18px; border-left: 3px solid var(--ok); background: var(--ok-soft); border-radius: 0 8px 8px 0; display: grid; gap: 4px; }
+.target .big { font-family: var(--font-display); font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.target .lbl { font-size: 0.9rem; color: var(--muted); }
+
+footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 18px; }
+code { font-family: var(--font-mono); font-size: 0.85em; }
+
+@media (max-width: 560px) {
+  .slot { grid-template-columns: 1fr; gap: 4px; }
+  .check { grid-template-columns: auto 1fr; }
+  .check .owner { grid-column: 2; }
+}
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">Nextron AI · internal build · architecture overview</span>
+  <h1>Nextron Outreach Engine</h1>
+  <p class="lede">A program on one office PC that finds companies with a visible reason to need Nextron, writes short emails in Furqaan's name that cite that reason, and sends nothing until a person approves it. Interested replies reach Furqaan's phone within minutes.</p>
+  <div class="meta">
+    <span class="chip">US + UK first</span>
+    <span class="chip">Law firms · Ops-heavy mid-size companies</span>
+    <span class="chip">Every email human-approved</span>
+    <span class="chip">≈ $70–85 / month at full volume</span>
+  </div>
+</header>
+
+<section aria-labelledby="flow">
+  <span class="eyebrow">How a lead moves through it</span>
+  <h2 id="flow">From a stranger to a booked call</h2>
+  <p>Each step saves its work to the database on the PC before the next step starts, so sleep, a reboot or a lost connection never loses anything. The one step the engine can't do alone is approval.</p>
+  <div class="diagram" role="img" aria-label="Pipeline: Find, Research, Score, Draft, then a human Approve step, then Send, Replies, and Pipeline to booked calls.">
+    <svg viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="d-arrowhead"/>
+        </marker>
+      </defs>
+      <text x="16" y="22" class="d-band">OVERNIGHT · AUTOMATIC</text>
+      <text x="16" y="172" class="d-band">DURING RECIPIENTS' BUSINESS HOURS</text>
+      <line x1="16" y1="150" x2="884" y2="150" class="d-rule"/>
+
+      <rect x="16" y="36" width="190" height="96" rx="8" class="d-box"/>
+      <text x="32" y="64" class="d-title">1 · Find</text>
+      <text x="32" y="86" class="d-sub">Google Places, Companies House,</text>
+      <text x="32" y="102" class="d-sub">your CSV lists, LinkedIn posts</text>
+      <text x="32" y="118" class="d-sub">you paste in</text>
+
+      <rect x="236" y="36" width="190" height="96" rx="8" class="d-box"/>
+      <text x="252" y="64" class="d-title">2 · Research</text>
+      <text x="252" y="86" class="d-sub">Reads the company's own site:</text>
+      <text x="252" y="102" class="d-sub">people, hiring, signals. Every</text>
+      <text x="252" y="118" class="d-sub">fact keeps its source page.</text>
+
+      <rect x="456" y="36" width="190" height="96" rx="8" class="d-box"/>
+      <text x="472" y="64" class="d-title">3 · Score</text>
+      <text x="472" y="86" class="d-sub">Needs a recent event (a hire,</text>
+      <text x="472" y="102" class="d-sub">an expansion). Legal checks:</text>
+      <text x="472" y="118" class="d-sub">market, unsubscribe list.</text>
+
+      <rect x="676" y="36" width="208" height="96" rx="8" class="d-box"/>
+      <text x="692" y="64" class="d-title">4 · Draft</text>
+      <text x="692" y="86" class="d-sub">Claude writes 4 short emails</text>
+      <text x="692" y="102" class="d-sub">using only sourced facts and</text>
+      <text x="692" y="118" class="d-sub">Approved Company Facts.</text>
+
+      <rect x="676" y="186" width="208" height="96" rx="8" class="d-box human"/>
+      <text x="692" y="210" class="d-stamp">HUMAN · ~30 MIN / DAY</text>
+      <text x="692" y="234" class="d-title">5 · Approve</text>
+      <text x="692" y="256" class="d-sub">One key per email. Any edit</text>
+      <text x="692" y="272" class="d-sub">needs approving again.</text>
+
+      <rect x="456" y="186" width="190" height="96" rx="8" class="d-box"/>
+      <text x="472" y="214" class="d-title">6 · Send</text>
+      <text x="472" y="236" class="d-sub">Final legal check, then out</text>
+      <text x="472" y="252" class="d-sub">in their office hours, capped,</text>
+      <text x="472" y="268" class="d-sub">never twice.</text>
+
+      <rect x="236" y="186" width="190" height="96" rx="8" class="d-box"/>
+      <text x="252" y="214" class="d-title">7 · Replies</text>
+      <text x="252" y="236" class="d-sub">Checked every 5 minutes.</text>
+      <text x="252" y="252" class="d-sub">Interested → Telegram + email</text>
+      <text x="252" y="268" class="d-sub">to Furqaan with a draft reply.</text>
+
+      <rect x="16" y="186" width="190" height="96" rx="8" class="d-box"/>
+      <text x="32" y="214" class="d-title">8 · Pipeline</text>
+      <text x="32" y="236" class="d-sub">Call prep sheet, call outcome,</text>
+      <text x="32" y="252" class="d-sub">audit → build. Funnel numbers</text>
+      <text x="32" y="268" class="d-sub">show what's working.</text>
+
+      <path d="M206 84 H232" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M426 84 H452" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M646 84 H672" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M780 132 V182" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M676 234 H650" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M456 234 H430" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M236 234 H210" class="d-arrow" marker-end="url(#ah)"/>
+    </svg>
+  </div>
+</section>
+
+<section aria-labelledby="day">
+  <span class="eyebrow">A normal weekday</span>
+  <h2 id="day">Who does what, and when</h2>
+  <div class="day">
+    <div class="slot">
+      <div class="when">Overnight</div>
+      <div class="what"><span class="who">Engine</span><p>Finds new companies, reads their websites, scores them, and drafts the next batch of emails using Claude's half-price overnight processing.</p></div>
+    </div>
+    <div class="slot human">
+      <div class="when">Before UK opens</div>
+      <div class="what"><span class="who">Mac (or Furqaan) at the PC</span><p>Opens the dashboard and works through the queue: about 20–25 first emails and their due follow-ups. Each card shows the evidence behind every sentence. Approve, edit, or reject with one key.</p></div>
+    </div>
+    <div class="slot">
+      <div class="when">UK and US office hours</div>
+      <div class="what"><span class="who">Engine</span><p>Sends approved emails spread out across each recipient's working day, within each inbox's daily limit. Stops a sequence the moment someone replies or opts out.</p></div>
+    </div>
+    <div class="slot human">
+      <div class="when">Any time a hot reply lands</div>
+      <div class="what"><span class="who">Furqaan, on his phone</span><p>Gets a Telegram message and an email with the reply, the reason we wrote, a drafted answer, two time slots and the booking link. He replies from the Gmail app; the engine notices and logs it.</p></div>
+    </div>
+    <div class="slot">
+      <div class="when">10 minutes, daily</div>
+      <div class="what"><span class="who">LinkedIn account owner</span><p>Gets each prepared LinkedIn note on Telegram and sends it by hand from the LinkedIn app. The engine never touches LinkedIn, because LinkedIn bans automation and account sharing.</p></div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="rails">
+  <span class="eyebrow">What keeps it safe</span>
+  <h2 id="rails">Rules built into the design</h2>
+  <div class="rails">
+    <div class="rail"><h3>One door for every email</h3><p>Only one part of the program can send. At the last second it re-checks the unsubscribe list, office hours, daily limits and the domain's email authentication. Each email is written down before it goes, so a crash can't cause a duplicate.</p></div>
+    <div class="rail"><h3>Approval is tied to the exact words</h3><p>What you approved is what goes out. Change a word and it needs approving again. Approvals older than 3 days return to the queue.</p></div>
+    <div class="rail"><h3>No invented facts</h3><p>Emails may only mention things found on a real page (with its link saved) or listed in Nextron's Approved Company Facts. A checker blocks anything else before it reaches you.</p></div>
+    <div class="rail"><h3>Within the law</h3><p>US and UK only. In the UK, only limited companies and LLPs. One-click unsubscribe in every email, a postal address in the footer, and opt-outs honored immediately and forever. An opt-out blocks every channel: email, LinkedIn notes and call sheets.</p></div>
+    <div class="rail"><h3>"Remove me" wins instantly</h3><p>Any human reply pauses that person's emails the moment it arrives. Opt-out wording is caught by fixed rules, so the AI's reading of a reply can never undo it.</p></div>
+    <div class="rail"><h3>Test mode can't reach prospects</h3><p>Any test copy of the engine has its own database and can only email addresses on an approved list.</p></div>
+    <div class="rail"><h3>The dashboard is private</h3><p>It only answers this PC, and it ignores requests from other websites, so a malicious page can't click "approve" for you.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="where">
+  <span class="eyebrow">What runs where</span>
+  <h2 id="where">Almost everything stays on the PC</h2>
+  <div class="split">
+    <div class="panel pc">
+      <h3>On the office PC</h3>
+      <ul class="plain">
+        <li>The engine itself. It starts automatically at logon and catches up after sleep.</li>
+        <li>The database: leads, evidence, drafts, sent mail and replies.</li>
+        <li>Passwords and access keys, locked in Windows Credential Manager.</li>
+        <li>Nightly backups, plus an encrypted copy kept somewhere else.</li>
+      </ul>
+    </div>
+    <div class="panel cloud">
+      <h3>Online services it talks to</h3>
+      <ul class="plain">
+        <li><strong>Gmail</strong> (sending inboxes on a separate domain, never nextronai.com)</li>
+        <li><strong>Claude</strong>: Haiku reads websites, Opus writes every email and reply</li>
+        <li><strong>Google Places, Companies House, Hunter</strong> for finding companies and emails</li>
+        <li><strong>Telegram</strong> for Furqaan's alerts</li>
+        <li><strong>A tiny free Cloudflare page</strong> that records unsubscribe clicks. It never sees names or emails.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="cost">
+  <span class="eyebrow">Running cost</span>
+  <h2 id="cost">Under $100 a month</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Item</th><th class="num">Month 1</th><th class="num">From month 2</th></tr></thead>
+      <tbody>
+        <tr><td>3 Google Workspace sending inboxes</td><td class="num">~$25</td><td class="num">~$25</td></tr>
+        <tr><td>Sending domain</td><td class="num">~$2</td><td class="num">~$2</td></tr>
+        <tr><td>Claude AI (capped)</td><td class="num">≤ $20</td><td class="num">≤ $20</td></tr>
+        <tr><td>Hunter email checks (2,000 a month)</td><td class="num">$0</td><td class="num">$34–49</td></tr>
+        <tr><td>Places, Companies House, Telegram, Cloudflare, Cal.com</td><td class="num">free tiers</td><td class="num">free tiers</td></tr>
+        <tr class="total"><td>Total</td><td class="num">~$35–50</td><td class="num">~$70–85</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="build">
+  <span class="eyebrow">Build order</span>
+  <h2 id="build">Three releases, first emails as soon as the inboxes are warm</h2>
+  <div class="slices">
+    <div class="slice"><span class="n">Release 1 · First Send</span><h3>Hand-picked leads, end to end</h3><p>Import a list or paste a LinkedIn post. The engine researches, drafts, queues for approval, sends, catches replies and alerts Furqaan, with every compliance rule on. Ready by the time the inboxes finish 14 days of warm-up.</p></div>
+    <div class="slice"><span class="n">Release 2 · Automated supply</span><h3>The engine finds its own leads</h3><p>Automatic discovery, scoring and tiers, monthly re-checks for new signals, call prep sheets and call outcome tracking.</p></div>
+    <div class="slice"><span class="n">Release 3 · Assist and insight</span><h3>LinkedIn list and full analytics</h3><p>The daily LinkedIn to-do list, the full funnel dashboard, settings screens and pipeline polish.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="before">
+  <span class="eyebrow">Outside the software</span>
+  <h2 id="before">Needed before the first email</h2>
+  <div class="checklist">
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Buy the sending domain and 3 inboxes, set up email authentication, start warm-up the same day <span class="tag-block">blocks first send</span></span><span class="owner">Mac · now</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Booking link (Cal.com) on nextronai.com, replacing the email link <span class="tag-block">blocks first send</span></span><span class="owner">Furqaan</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Business postal address for the email footer <span class="tag-block">blocks first send</span></span><span class="owner">Furqaan</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Confirm with a lawyer how US emails identify themselves as solicitations <span class="tag-block">blocks US sends</span></span><span class="owner">Mac</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Privacy notice page and a one-page legitimate-interests note for UK outreach <span class="tag-block">blocks UK sends</span></span><span class="owner">Mac</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Sending inboxes added to the Gmail app on Furqaan's phone</span><span class="owner">Furqaan</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>1–2 case studies with client-confirmed numbers</span><span class="owner">Furqaan</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Updated LinkedIn profile and company page</span><span class="owner">Furqaan</span></div>
+    <div class="check"><span class="box" aria-hidden="true"></span><span>Telegram bot for alerts</span><span class="owner">Furqaan</span></div>
+  </div>
+</section>
+
+<section aria-labelledby="targets">
+  <span class="eyebrow">How we'll know it works</span>
+  <h2 id="targets">Targets</h2>
+  <div class="targets">
+    <div class="target"><span class="big">90 days</span><span class="lbl">to the first paid engagement after the first email, then at least one a month</span></div>
+    <div class="target"><span class="big">4+</span><span class="lbl">discovery calls booked a month from month 2</span></div>
+    <div class="target"><span class="big">1.5%+</span><span class="lbl">of contacted prospects reply positively</span></div>
+    <div class="target"><span class="big">&lt; 2%</span><span class="lbl">bounce rate, and spam complaints under 0.1%</span></div>
+  </div>
+  <p>Email volume is deliberately not a target. Sending more to the wrong people burns the domain and Nextron's name.</p>
+</section>
+
+<footer>
+  <span>Summarizes the BMAD product brief, PRD (FR-1 to FR-73) and architecture spine (AD-1 to AD-22), November 2026.</span>
+  <span>Technical source of truth: <code>_bmad-output/planning-artifacts/architecture/…/ARCHITECTURE-SPINE.md</code></span>
+</footer>
+
+</div>
