@@ -3,12 +3,20 @@
 - The ``ai_eval`` marker is opt-in: its tests are skipped unless ``-m`` selects ``ai_eval``.
 - Every test runs with no ``NEXTRON_*`` variables and an empty temporary ``%LOCALAPPDATA%``, so
   nothing reads the real environment or writes under the real ``%LOCALAPPDATA%\\Nextron``.
+- Every test leaves logging as it found it: ``configure_logging`` (called directly or by
+  ``serve``) replaces the root handlers, so the fixture puts them back and closes the log files.
 """
 
+import logging
 import os
+import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+from nextron.logconfig import SDK_LOGGERS
 
 AI_EVAL = "ai_eval"
 
@@ -32,3 +40,24 @@ def local_app_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     folder.mkdir()
     monkeypatch.setenv("LOCALAPPDATA", str(folder))
     return folder
+
+
+@pytest.fixture(autouse=True)
+def restore_logging() -> Iterator[None]:
+    """Restore what ``configure_logging`` changes: the root logger's handlers, filters and level,
+    the SDK logger levels, ``logging.lastResort``, the exception hooks and warning capture."""
+    root = logging.getLogger()
+    handlers, filters, level = root.handlers[:], root.filters[:], root.level
+    sdk_levels = {name: logging.getLogger(name).level for name in SDK_LOGGERS}
+    hooks = (sys.excepthook, threading.excepthook, logging.lastResort)
+    yield
+    for handler in root.handlers[:]:
+        if handler not in handlers:
+            handler.close()
+    root.handlers[:] = handlers
+    root.filters[:] = filters
+    root.setLevel(level)
+    for name, sdk_level in sdk_levels.items():
+        logging.getLogger(name).setLevel(sdk_level)
+    sys.excepthook, threading.excepthook, logging.lastResort = hooks
+    logging.captureWarnings(False)

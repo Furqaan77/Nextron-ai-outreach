@@ -12,7 +12,8 @@ Layers from the bottom up, and what each may import:
 - ``nextron.web`` and ``nextron.jobs``: ``nextron.app.*.api``, ``nextron.app.queries.*`` and
   domain types.
 - ``nextron.main`` and ``nextron.__main__``: the composition root; may import everything.
-  ``nextron.bootstrap``, ``nextron.startup_checks`` and ``nextron.lock`` are its helpers.
+  ``nextron.bootstrap``, ``nextron.startup_checks``, ``nextron.lock`` and ``nextron.logconfig``
+  are its helpers.
 
 The import-linter contracts in ``pyproject.toml`` enforce the boundaries between these packages
 and ``tests/contracts`` runs them; each package docstring says which of its rules are enforced

@@ -119,6 +119,7 @@ def test_uvicorn_binds_127_0_0_1_with_one_worker(
     assert kwargs["port"] == 8766
     assert kwargs["workers"] == 1
     assert kwargs.get("reload", False) is False
+    assert kwargs["log_config"] is None  # Uvicorn's records go through the root handlers
     assert callable(app)
 
 
@@ -134,6 +135,7 @@ def test_reload_is_allowed_in_dev(dev: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 8766
     assert kwargs["workers"] == 1
+    assert kwargs["log_config"] is None
     module_name, _, attribute = str(app).partition(":")
     factory = getattr(importlib.import_module(module_name), attribute)
     status, _, body = get(factory(), "/health")  # NEXTRON_ENV=dev, as in the reload worker

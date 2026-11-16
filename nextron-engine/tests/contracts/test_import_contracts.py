@@ -144,6 +144,7 @@ def test_banned_libraries_break_lint_in_any_module(
         ("nextron.web", "import nextron.bootstrap", "nextron.bootstrap", HELPERS),
         ("nextron.app", "from nextron import lock", "nextron.lock", HELPERS),
         ("nextron.domain", "import nextron.startup_checks", "nextron.startup_checks", HELPERS),
+        ("nextron.ports", "import nextron.logconfig", "nextron.logconfig", HELPERS),
         ("nextron.app", "import sqlalchemy", "sqlalchemy", "c4-sqlalchemy-only-in-db"),
         ("nextron.web", "import alembic", "alembic", "c4-sqlalchemy-only-in-db"),
         ("nextron.app", "import apscheduler", "apscheduler", "c4-apscheduler-only-in-jobs"),

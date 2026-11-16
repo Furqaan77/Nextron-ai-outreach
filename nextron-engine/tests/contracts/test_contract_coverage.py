@@ -20,6 +20,7 @@ COMPOSITION_ROOT = {
     "nextron.__main__",
     "nextron.bootstrap",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.startup_checks",
 }
 # contract id -> the top-level packages allowed to import what it forbids

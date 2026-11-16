@@ -69,6 +69,43 @@ nothing else.
 
 The supervisor (`scripts/run.ps1`, a later story) restarts the engine on any exit except 3.
 
+## Logs
+
+`serve` writes `<data dir>\logs\nextron.log`, for example
+`%LOCALAPPDATA%\Nextron\dev\logs\nextron.log`. Logging starts only once `serve` holds the lock,
+so a second instance and `doctor` never open the file. Records at WARNING and above also go to
+stderr. Startup failures (`startup_check_failed`, `server_start_failed`), crashes
+(`engine_crashed`, `thread_crashed`) and Python warnings are logged too, and `engine_stopped`
+carries the exit code.
+
+`serve --reload` (dev only) is the exception: Uvicorn serves from a worker process that does
+not write `nextron.log`, so only the reloader's own records reach the file. The worker's
+WARNING and above go to stderr, redacted.
+
+- **Format:** one JSON object per line, UTF-8, with `ts` (UTC, ISO 8601 with milliseconds and
+  `Z`), `level`, `logger`, `event`, any scalar ID fields passed as `extra`, `exc` (the
+  traceback) when there is one, and `stack` with `stack_info=True`. ULIDs, UUIDs, enums, paths
+  and dates in `extra` are written as text. Uvicorn's records, the access log included, are
+  written the same way. Keep event names under 32 characters; a contract test checks literal
+  ones.
+- **Rotation:** at 10 MiB the file rolls over to `nextron.log.1`, and so on up to
+  `nextron.log.9`: 10 files at most.
+- **Level:** INFO. The loggers of `googleapiclient`, `google_auth_oauthlib`, `google.auth`,
+  `google_auth_httplib2`, `httplib2`, `httpx2`, `httpcore2`, `urllib3`, `requests_oauthlib`,
+  `oauthlib` and `anthropic` stay at WARNING.
+- **Redaction:** logs hold IDs only. As a safety net, every message, argument, traceback and
+  string field passes through `nextron.domain.redaction.redact`. It removes URL query strings
+  and fragments and masks URL userinfo, `/bot<token>` paths, `Bearer` and `Basic` credentials,
+  the values of credential fields (`api_key`, `x-api-key`, `token`, `secret`, `password` and
+  similar), email addresses (also `%40`-encoded and Unicode ones), `sk-ant-` keys, base64 blobs
+  and any run of 32 or more key-like characters. 26-character ULIDs survive. It does not mask
+  phone numbers, names or other free text. Use `redact` for any error text you store, too.
+  `AdapterError` redacts its message when it is raised.
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\Nextron\dev\logs\nextron.log" -Tail 20 -Wait
+```
+
 ## Test
 
 ```powershell

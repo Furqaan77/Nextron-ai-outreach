@@ -68,17 +68,23 @@ def contract_statuses(output: str) -> dict[str, str]:
     return statuses
 
 
-def lint_copy_with_probe(
-    tmp_path: Path, package: str, source: str
-) -> tuple[str, subprocess.CompletedProcess[str]]:
-    """Copy ``nextron/`` and ``pyproject.toml`` under ``tmp_path``, add a probe module, lint it.
+def copy_with_probe(tmp_path: Path, package: str, source: str) -> tuple[str, Path]:
+    """Copy ``nextron/`` and ``pyproject.toml`` under ``tmp_path`` and add a probe module.
 
     ``package`` is a dotted package such as ``nextron.domain``. Returns the probe's dotted name
-    and the ``lint-imports`` result. The real source tree is never touched.
+    and the copy's root (the folder holding ``nextron/``). The real source tree is never touched.
     """
     root = tmp_path / "engine"
     shutil.copytree(PACKAGE, root / "nextron", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(PYPROJECT, root / "pyproject.toml")
     module = f"{package}._lint_probe"
     (root / Path(*module.split("."))).with_suffix(".py").write_text(source, encoding="utf-8")
+    return module, root
+
+
+def lint_copy_with_probe(
+    tmp_path: Path, package: str, source: str
+) -> tuple[str, subprocess.CompletedProcess[str]]:
+    """``copy_with_probe``, then lint the copy; returns the probe's name and the result."""
+    module, root = copy_with_probe(tmp_path, package, source)
     return module, run_lint_imports(root)

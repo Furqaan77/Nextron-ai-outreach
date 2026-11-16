@@ -1,4 +1,5 @@
-"""``python -m nextron`` as a real process: env refusal, health page and the second instance."""
+"""``python -m nextron`` as a real process: env refusal, health page, log file and the second
+instance."""
 
 import json
 import os
@@ -17,6 +18,7 @@ import pytest
 from nextron import __version__
 
 STARTUP_TIMEOUT_S = 60
+PLANTED_CODE = "Fk" * 20  # a fake 40-character secret, assembled at run time
 
 
 def free_port() -> int:
@@ -83,6 +85,34 @@ def _read(tmp_path: Path) -> str:
     return (tmp_path / "serve.log").read_text(encoding="utf-8", errors="replace")
 
 
+def log_text(data_dir: Path) -> str:
+    return (data_dir / "logs" / "nextron.log").read_text(encoding="utf-8")
+
+
+def log_lines(data_dir: Path) -> list[dict[str, object]]:
+    """The complete lines of the log; a last line the engine is still writing is left out."""
+    text = log_text(data_dir)
+    complete = text if text.endswith("\n") else text.rpartition("\n")[0]
+    return [json.loads(line) for line in complete.splitlines()]
+
+
+def wait_for_log_line(data_dir: Path, logger: str, needle: str) -> list[dict[str, object]]:
+    """Return the log's lines once one from ``logger`` has ``needle`` in its event."""
+    deadline = time.monotonic() + 10
+    lines: list[dict[str, object]] = []
+    while True:
+        try:
+            lines = log_lines(data_dir)
+        except (OSError, json.JSONDecodeError):  # not created yet, or caught mid-write
+            pass
+        else:
+            if any(line["logger"] == logger and needle in str(line["event"]) for line in lines):
+                return lines
+        if time.monotonic() > deadline:
+            pytest.fail(f"no {logger} line with {needle!r} in {lines}")
+        time.sleep(0.1)
+
+
 @pytest.mark.parametrize("value", [None, "staging"])
 def test_serve_without_a_valid_env_exits_2(
     value: str | None, engine_env: dict[str, str], local_app_data: Path, tmp_path: Path
@@ -105,7 +135,8 @@ def test_health_page_and_second_instance(
     running_engine: subprocess.Popen[bytes], engine_env: dict[str, str], tmp_path: Path
 ) -> None:
     port = engine_env["NEXTRON_PORT"]
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as response:
+    url = f"http://127.0.0.1:{port}/health?code={PLANTED_CODE}"
+    with urllib.request.urlopen(url, timeout=5) as response:
         assert response.status == 200
         payload = json.loads(response.read())
 
@@ -118,11 +149,26 @@ def test_health_page_and_second_instance(
     assert (data_dir / "logs").is_dir()
     assert (data_dir / "nextron.lock").is_file()
 
+    lines = wait_for_log_line(data_dir, "uvicorn.access", '"GET /health HTTP/1.1" 200')
+    [started] = [line for line in lines if line["event"] == "engine_started"]
+    assert (started["logger"], started["env"], started["version"]) == (
+        "nextron.main",
+        "test",
+        __version__,
+    )
+    assert any(line["logger"] == "uvicorn.error" for line in lines)
+    for line in lines:
+        assert {"ts", "level", "logger", "event"} <= set(line)
+    assert PLANTED_CODE not in log_text(data_dir)
+    assert "code=" not in log_text(data_dir)
+
     second = nextron("serve", env=engine_env)
 
     assert second.returncode == 3
     assert second.stderr.strip() == "another Nextron instance is running for test"
     assert running_engine.poll() is None
+    after = log_lines(data_dir)
+    assert [line["event"] for line in after].count("engine_started") == 1
 
 
 def test_nextron_console_script_runs_doctor(engine_env: dict[str, str], tmp_path: Path) -> None:

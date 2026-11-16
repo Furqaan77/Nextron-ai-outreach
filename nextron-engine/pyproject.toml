@@ -80,11 +80,12 @@ layers = [
     "nextron.domain",
 ]
 
-# Also group 1: bootstrap, lock and startup_checks belong to the composition root, so no layer
-# below nextron.main may import them. test_contract_coverage.py keeps the sources complete.
+# Also group 1: bootstrap, lock, logconfig and startup_checks belong to the composition root, so
+# no layer below nextron.main may import them. test_contract_coverage.py keeps the sources
+# complete.
 [[tool.importlinter.contracts]]
 id = "c1-composition-root-helpers"
-name = "1 forbidden: only the composition root imports bootstrap, lock and startup_checks"
+name = "1 forbidden: only the composition root imports bootstrap, lock, logconfig and startup_checks"
 type = "forbidden"
 source_modules = [
     "nextron.adapters",
@@ -95,7 +96,12 @@ source_modules = [
     "nextron.ports",
     "nextron.web",
 ]
-forbidden_modules = ["nextron.bootstrap", "nextron.lock", "nextron.startup_checks"]
+forbidden_modules = [
+    "nextron.bootstrap",
+    "nextron.lock",
+    "nextron.logconfig",
+    "nextron.startup_checks",
+]
 
 [[tool.importlinter.contracts]]
 id = "c2-delivery"
@@ -128,6 +134,7 @@ source_modules = [
     "nextron.domain",
     "nextron.jobs",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.main",
     "nextron.ports",
     "nextron.startup_checks",
@@ -183,6 +190,7 @@ source_modules = [
     "nextron.domain",
     "nextron.jobs",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.main",
     "nextron.ports",
     "nextron.startup_checks",
@@ -203,6 +211,7 @@ source_modules = [
     "nextron.db",
     "nextron.domain",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.main",
     "nextron.ports",
     "nextron.startup_checks",
@@ -223,6 +232,7 @@ source_modules = [
     "nextron.domain",
     "nextron.jobs",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.ports",
     "nextron.startup_checks",
     "nextron.web",
@@ -243,6 +253,7 @@ source_modules = [
     "nextron.domain",
     "nextron.jobs",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.ports",
     "nextron.startup_checks",
 ]
@@ -264,6 +275,7 @@ source_modules = [
     "nextron.domain",
     "nextron.jobs",
     "nextron.lock",
+    "nextron.logconfig",
     "nextron.main",
     "nextron.ports",
     "nextron.startup_checks",
