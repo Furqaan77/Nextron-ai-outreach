@@ -33,4 +33,4 @@ uv run lint-imports            # architecture import rules
 
 ## Status
 
-Planning is complete: 73 requirements, 22 architecture rules, 11 epics and 146 stories. The build is in progress. Story 1.1 (project scaffold) is done, and Story 1.2 is next. Live status is in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](_bmad-output/implementation-artifacts/sprint-status.yaml).
+Planning is complete: 73 requirements, 22 architecture rules, 11 epics and 146 stories. The build is in progress. Stories 1.1–1.3 (scaffold, logging, persistence) are done, and Story 1.4 is next. Live status is in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](_bmad-output/implementation-artifacts/sprint-status.yaml).
