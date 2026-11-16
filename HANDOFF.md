@@ -64,7 +64,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 5. Optional: `/bmad-sprint-planning` with "show sprint status" at any time.
 
 **Conventions established in Story 1.1 (keep them):**
-- **Commits:** one local commit per story, in conventional style (`feat(engine): …`), ending with the Co-Authored-By trailer. No remote is configured and nothing has been pushed. The commits so far used a placeholder identity `Mac <mac@localhost>` because no git identity was set. Set your own with `git config user.name/user.email`.
+- **Commits:** one local commit per story, in conventional style (`feat(engine): …`), ending with the Co-Authored-By trailer. The remote `origin` is https://github.com/Furqaan77/Nextron-ai-outreach.git (branch `main`, first pushed 2026-11-16). Push only when the user explicitly asks. The commits so far used a placeholder identity `Mac <mac@localhost>` because no git identity was set. Set your own with `git config user.name/user.email`.
 - **Verification commands** (run from `nextron-engine/`):
   - `uv sync --frozen`
   - `uv run pytest` (expect all pass, `ai_eval` skipped)
