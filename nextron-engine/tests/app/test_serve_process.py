@@ -1,5 +1,5 @@
-"""``python -m nextron`` as a real process: env refusal, health page, log file and the second
-instance."""
+"""``python -m nextron`` as a real process: env refusal, health page, the database at head, the
+log file and the second instance."""
 
 import json
 import os
@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 
 from nextron import __version__
+from nextron.db.migrations import head_revision
+from tests.migration_chains import stored_revisions
 
+HEAD = head_revision()
 STARTUP_TIMEOUT_S = 60
 PLANTED_CODE = "Fk" * 20  # a fake 40-character secret, assembled at run time
 
@@ -148,13 +151,17 @@ def test_health_page_and_second_instance(
     data_dir = tmp_path / "data"
     assert (data_dir / "logs").is_dir()
     assert (data_dir / "nextron.lock").is_file()
+    assert stored_revisions(data_dir / "nextron.db") == [HEAD]
 
     lines = wait_for_log_line(data_dir, "uvicorn.access", '"GET /health HTTP/1.1" 200')
+    [migrated] = [line for line in lines if line["event"] == "database_migrated"]
+    assert (migrated["from_revision"], migrated["to_revision"]) == (None, HEAD)
     [started] = [line for line in lines if line["event"] == "engine_started"]
-    assert (started["logger"], started["env"], started["version"]) == (
+    assert (started["logger"], started["env"], started["version"], started["db_revision"]) == (
         "nextron.main",
         "test",
         __version__,
+        HEAD,
     )
     assert any(line["logger"] == "uvicorn.error" for line in lines)
     for line in lines:

@@ -1,0 +1,396 @@
+"""``nextron.db.engine``: the six connection settings, the write lock, the transaction-SQL guard
+and the foreign-keys-off connection."""
+
+import logging
+import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy import Engine, event, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from nextron.db.engine import (
+    BEGIN_SQL,
+    ConnectionSettingError,
+    TransactionSqlError,
+    _on_begin,
+    _on_connect,
+    _refuse_transaction_sql,
+    create_engine,
+    fk_off_connection,
+    leading_keyword,
+)
+
+
+def db_path(engine: Engine) -> str:
+    assert engine.url.database
+    return engine.url.database
+
+
+def raw(engine: Engine, **kwargs: object) -> sqlite3.Connection:
+    """A connection outside the engine, as another process would open one."""
+    return sqlite3.connect(db_path(engine), **kwargs)  # type: ignore[arg-type]
+
+
+def pragma(connection: sqlite3.Connection, name: str) -> object:
+    return connection.execute(f"PRAGMA {name}").fetchone()[0]
+
+
+@pytest.fixture
+def statements(db_engine: Engine) -> Iterator[list[str]]:
+    """Every statement the engine sends from now on."""
+    seen: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        seen.append(statement)
+
+    event.listen(db_engine, "before_cursor_execute", record)
+    yield seen
+    event.remove(db_engine, "before_cursor_execute", record)
+
+
+@pytest.fixture
+def scratch(db_engine: Engine) -> Engine:
+    with db_engine.connect() as connection:
+        connection.exec_driver_sql("CREATE TABLE scratch (id INTEGER PRIMARY KEY, note TEXT)")
+        connection.commit()
+    return db_engine
+
+
+def notes(engine: Engine) -> list[str]:
+    reader = raw(engine)
+    try:
+        return [note for (note,) in reader.execute("SELECT note FROM scratch ORDER BY id")]
+    finally:
+        reader.close()
+
+
+# Row: connection settings -----------------------------------------------------------------------
+
+
+def test_every_connection_gets_the_six_settings(db_engine: Engine) -> None:
+    with db_engine.connect() as connection:
+        dbapi = connection.connection.driver_connection
+        assert isinstance(dbapi, sqlite3.Connection)
+
+        assert pragma(dbapi, "journal_mode") == "wal"
+        assert pragma(dbapi, "busy_timeout") == 5000
+        assert pragma(dbapi, "synchronous") == 1  # NORMAL
+        assert pragma(dbapi, "foreign_keys") == 1
+        assert dbapi.isolation_level is None
+        assert dbapi.autocommit == sqlite3.LEGACY_TRANSACTION_CONTROL
+
+
+def test_begin_emits_begin_immediate_for_every_transaction_reads_included(
+    db_engine: Engine, statements: list[str]
+) -> None:
+    with db_engine.connect() as connection:
+        connection.begin()
+        assert statements == [BEGIN_SQL]
+        connection.rollback()
+        connection.execute(text("SELECT 1"))  # autobegin
+
+    assert statements == [BEGIN_SQL, BEGIN_SQL, "SELECT 1"]
+
+
+def test_an_idle_begin_holds_the_write_lock(db_engine: Engine) -> None:
+    other = raw(db_engine, timeout=0, isolation_level=None)
+    try:
+        with db_engine.connect() as connection:
+            connection.begin()  # no statement yet
+
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+            assert other.execute("SELECT count(*) FROM events").fetchone() == (0,)  # WAL read
+
+        other.execute("BEGIN IMMEDIATE")  # free again once the transaction ends
+        other.execute("ROLLBACK")
+    finally:
+        other.close()
+
+
+class FakeCursor:
+    def __init__(self, row: tuple[object, ...]) -> None:
+        self.row = row
+
+    def fetchone(self) -> tuple[object, ...]:
+        return self.row
+
+
+class FakeConnection:
+    """Answers the connect hook's PRAGMAs and records them with the isolation level."""
+
+    def __init__(self, journal_mode: str, *, page_count: int = 0, switched: str = "wal") -> None:
+        self.answers = {
+            "PRAGMA journal_mode": journal_mode,
+            "PRAGMA page_count": page_count,
+            "PRAGMA journal_mode=WAL": switched,
+        }
+        self.isolation_level: str | None = ""
+        self.log: list[str] = []
+
+    def execute(self, sql: str) -> FakeCursor:
+        self.log.append(f"{sql} (isolation_level={self.isolation_level!r})")
+        return FakeCursor((self.answers.get(sql),))
+
+
+SETTINGS = [
+    "PRAGMA busy_timeout=5000 (isolation_level=None)",
+    "PRAGMA synchronous=NORMAL (isolation_level=None)",
+    "PRAGMA foreign_keys=ON (isolation_level=None)",
+]
+READ_MODE = "PRAGMA journal_mode (isolation_level=None)"
+READ_PAGES = "PRAGMA page_count (isolation_level=None)"
+SWITCH = "PRAGMA journal_mode=WAL (isolation_level=None)"
+
+
+def test_the_hooks_are_registered_on_the_engine() -> None:
+    engine = create_engine(Path("unused.db"))  # never connects
+
+    assert event.contains(engine, "connect", _on_connect)
+    assert event.contains(engine, "begin", _on_begin)
+    assert event.contains(engine, "before_cursor_execute", _refuse_transaction_sql)
+
+
+@pytest.mark.parametrize(
+    ("connection", "log"),
+    [
+        (FakeConnection("wal"), [READ_MODE, *SETTINGS]),  # this engine's file
+        (FakeConnection("delete", page_count=0), [READ_MODE, READ_PAGES, SWITCH, *SETTINGS]),
+    ],
+    ids=["wal", "empty file"],
+)
+def test_the_connect_hook_sets_the_settings_in_order(
+    connection: FakeConnection, log: list[str]
+) -> None:
+    _on_connect(connection, None)  # type: ignore[arg-type]
+
+    assert connection.isolation_level is None
+    assert connection.log == log
+
+
+def test_the_connect_hook_refuses_a_non_empty_file_in_another_journal_mode() -> None:
+    connection = FakeConnection("delete", page_count=3)
+
+    with pytest.raises(ConnectionSettingError, match="journal_mode delete, not wal"):
+        _on_connect(connection, None)  # type: ignore[arg-type]
+
+    assert connection.log == [READ_MODE, READ_PAGES]  # nothing switched
+
+
+def test_the_connect_hook_fails_when_wal_does_not_take() -> None:
+    connection = FakeConnection("delete", switched="delete")
+
+    with pytest.raises(ConnectionSettingError, match="journal_mode is delete, not wal"):
+        _on_connect(connection, None)  # type: ignore[arg-type]
+
+    assert connection.log == [READ_MODE, READ_PAGES, SWITCH]
+
+
+def test_a_real_rollback_journal_file_is_refused_untouched(tmp_path: Path) -> None:
+    path = tmp_path / "foreign.db"
+    writer = sqlite3.connect(path)
+    writer.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY)")
+    writer.commit()
+    writer.close()
+    before = path.read_bytes()
+    engine = create_engine(path)
+    try:
+        with pytest.raises(ConnectionSettingError, match="not this engine's database"):
+            engine.connect()
+    finally:
+        engine.dispose()
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("path", [Path(":memory:"), Path("")])
+def test_create_engine_opens_database_files_only(path: Path) -> None:
+    with pytest.raises(ValueError, match="database file"):
+        create_engine(path)
+
+
+def test_create_engine_takes_a_path() -> None:
+    with pytest.raises(TypeError):
+        create_engine("nextron.db")  # type: ignore[arg-type]
+
+
+def test_bound_values_stay_out_of_error_messages(scratch: Engine) -> None:
+    secret = "ann@example.com"
+    with scratch.connect() as connection:
+        connection.exec_driver_sql("INSERT INTO scratch (id, note) VALUES (1, 'x')")
+        with pytest.raises(IntegrityError) as raised:
+            connection.execute(
+                text("INSERT INTO scratch (id, note) VALUES (1, :note)"), {"note": secret}
+            )
+
+    assert "UNIQUE" in str(raised.value)
+    assert secret not in str(raised.value)
+
+
+# Row: raw transaction SQL ---------------------------------------------------------------------
+
+REFUSED = [
+    "COMMIT",
+    "commit",
+    "  COMMIT;",
+    "/* x */ rollback",
+    "-- a comment\nROLLBACK",
+    "/* a */ -- b\n /* c */ END TRANSACTION",
+    "END",
+    "BEGIN",
+    "begin deferred",
+    "BEGIN IMMEDIATE",
+    "SAVEPOINT a",
+    "RELEASE a",
+    "release savepoint a",
+    "\n\tRollBack TO a",
+    "; COMMIT",
+    "/* x */ ; ROLLBACK",
+]
+
+
+@pytest.mark.parametrize("sql", REFUSED)
+def test_transaction_sql_is_refused_and_changes_nothing(sql: str, scratch: Engine) -> None:
+    with scratch.connect() as connection:
+        connection.begin()
+        connection.exec_driver_sql("INSERT INTO scratch (note) VALUES ('pending')")
+
+        with pytest.raises(TransactionSqlError, match="refused"):
+            connection.exec_driver_sql(sql)
+
+        assert connection.in_transaction()
+        assert connection.connection.driver_connection.in_transaction  # type: ignore[union-attr]
+        assert notes(scratch) == []  # nothing committed by it
+        connection.commit()  # and nothing rolled back by it
+
+    assert notes(scratch) == ["pending"]
+
+
+@pytest.mark.parametrize("sql", ["COMMIT", "/* x */ rollback", "SAVEPOINT a"])
+def test_transaction_sql_through_a_session_is_refused(sql: str, scratch: Engine) -> None:
+    with scratch.connect() as connection, Session(bind=connection) as session:
+        with pytest.raises(TransactionSqlError):
+            session.execute(text(sql))
+
+
+def test_a_savepoint_is_refused(scratch: Engine) -> None:
+    with scratch.connect() as connection:
+        connection.begin()
+        with pytest.raises(TransactionSqlError, match="SAVEPOINT"):
+            connection.begin_nested()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 -- COMMIT",
+        "/* BEGIN */ SELECT 2",
+        "SELECT 'COMMIT'",
+        "CREATE TRIGGER t AFTER INSERT ON scratch BEGIN SELECT 1; END",
+        "WITH x AS (SELECT 1) SELECT * FROM x",
+    ],
+)
+def test_other_sql_runs(sql: str, scratch: Engine) -> None:
+    with scratch.connect() as connection:
+        connection.exec_driver_sql(sql)
+        connection.rollback()
+
+
+@pytest.mark.parametrize(
+    ("sql", "keyword"),
+    [
+        ("", ""),
+        ("   ", ""),
+        ("/* unterminated COMMIT", ""),
+        ("-- only a comment", ""),
+        ("--\nselect 1", "SELECT"),
+        ("/**/commit", "COMMIT"),
+        ("RELEASE_x", "RELEASE_X"),
+        ("savepoint\ta", "SAVEPOINT"),
+        (";;  commit", "COMMIT"),
+        ("; /* x */ ;\n-- y\n; end", "END"),
+        (";", ""),
+    ],
+)
+def test_leading_keyword(sql: str, keyword: str) -> None:
+    assert leading_keyword(sql) == keyword
+
+
+def test_the_keyword_scan_is_linear_on_long_whitespace() -> None:
+    assert leading_keyword(" " * 1_000_000 + "x") == "X"
+
+
+# The foreign-keys-off connection --------------------------------------------------------------
+
+
+def test_fk_off_connection_turns_foreign_keys_back_on_for_the_pool(tmp_path: Path) -> None:
+    engine = create_engine(tmp_path / "fk.db")
+    try:
+        with fk_off_connection(engine) as connection:
+            dbapi = connection.connection.driver_connection
+            assert isinstance(dbapi, sqlite3.Connection)
+            assert pragma(dbapi, "foreign_keys") == 0
+            connection.begin()
+            connection.exec_driver_sql("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            # left open: the context manager rolls it back
+
+        with engine.connect() as again:
+            assert again.connection.driver_connection is dbapi  # the same pooled connection
+            assert pragma(dbapi, "foreign_keys") == 1
+            assert again.exec_driver_sql("SELECT count(*) FROM sqlite_master").scalar() == 0
+    finally:
+        engine.dispose()
+
+
+def test_fk_off_connection_invalidates_a_connection_it_cannot_restore(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = create_engine(tmp_path / "fk.db")
+    try:
+        with fk_off_connection(engine) as connection:
+            dbapi = connection.connection.driver_connection
+            assert isinstance(dbapi, sqlite3.Connection)
+            dbapi.execute("BEGIN")  # a transaction SQLAlchemy can't see: PRAGMAs are no-ops now
+
+        assert "foreign_keys_restore_failed" in caplog.messages
+        with pytest.raises(sqlite3.ProgrammingError):  # closed, never back in the pool
+            dbapi.execute("SELECT 1")
+        with engine.connect() as again:
+            fresh = again.connection.driver_connection
+            assert fresh is not dbapi
+            assert pragma(fresh, "foreign_keys") == 1  # type: ignore[arg-type]
+    finally:
+        engine.dispose()
+
+
+def test_fk_off_connection_restores_after_an_exception(tmp_path: Path) -> None:
+    engine = create_engine(tmp_path / "fk.db")
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            with fk_off_connection(engine) as connection:
+                dbapi = connection.connection.driver_connection
+                connection.begin()
+                raise RuntimeError("boom")
+
+        with engine.connect() as again:
+            assert again.connection.driver_connection is dbapi
+            assert pragma(dbapi, "foreign_keys") == 1  # type: ignore[arg-type]
+    finally:
+        engine.dispose()
+
+
+def test_no_warning_is_logged_when_restore_works(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = create_engine(tmp_path / "fk.db")
+    caplog.set_level(logging.WARNING)
+    try:
+        with fk_off_connection(engine):
+            pass
+    finally:
+        engine.dispose()
+
+    assert caplog.messages == []

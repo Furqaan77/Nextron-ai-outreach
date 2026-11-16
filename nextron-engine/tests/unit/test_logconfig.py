@@ -408,14 +408,18 @@ def test_serve_starts_logging_after_the_lock_and_logs_start_and_stop(
     monkeypatch.setattr(main, "configure_logging", spy)
     seen: list[list[str]] = []
 
+    def main_lines() -> list[dict[str, Any]]:  # Alembic logs the first start's migration too
+        lines = read_lines(dev / "logs" / LOG_FILE_NAME)
+        return [line for line in lines if line["logger"] == "nextron.main"]
+
     def server(config: BootstrapConfig, reload: bool) -> None:
-        seen.append([line["event"] for line in read_lines(dev / "logs" / LOG_FILE_NAME)])
+        seen.append([line["event"] for line in main_lines()])
 
     assert main.serve(probes=fake_probes(), run_server=server, err=io.StringIO()) == 0
 
     assert spy.calls == [(dev / "logs", True)]
-    assert seen == [["engine_started"]]
-    lines = read_lines(dev / "logs" / LOG_FILE_NAME)
+    assert seen == [["database_migrated", "engine_started"]]
+    lines = [line for line in main_lines() if line["event"] != "database_migrated"]
     assert [line["event"] for line in lines] == ["engine_started", "engine_stopped"]
     for line in lines:
         assert (line["logger"], line["env"], line["version"]) == (
@@ -442,7 +446,11 @@ def test_serve_logs_the_cause_and_engine_stopped_when_the_server_fails(
         with pytest.raises(RuntimeError):
             main.serve(probes=fake_probes(), run_server=fail, err=io.StringIO())
 
-    lines = read_lines(dev / "logs" / LOG_FILE_NAME)
+    lines = [  # leave out the first start's migration (Alembic and database_migrated)
+        line
+        for line in read_lines(dev / "logs" / LOG_FILE_NAME)
+        if line["logger"] == "nextron.main" and line["event"] != "database_migrated"
+    ]
     assert [line["event"] for line in lines] == ["engine_started", cause, "engine_stopped"]
     assert lines[2]["exit_code"] == exit_code
     if isinstance(failure, SystemExit):

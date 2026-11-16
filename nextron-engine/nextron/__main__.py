@@ -3,7 +3,8 @@
 Commands:
 
 - ``serve [--reload]``: run the engine for ``NEXTRON_ENV`` (exit 0: stopped normally; exit 1:
-  unexpected error; exit 2: invalid config, a failed startup check, an unusable data dir or a
+  unexpected error; exit 2: invalid config, a failed startup check (a database ahead of the
+  code or not this engine's included), an unusable data dir, a failed database migration or a
   server that failed to start; exit 3: another instance holds the lock). ``--reload`` is for
   ``dev`` only.
 - ``doctor``: print each startup check as PASS or FAIL (exit 0 when none fail, 1 when any

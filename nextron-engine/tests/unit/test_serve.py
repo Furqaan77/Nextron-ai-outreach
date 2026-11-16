@@ -3,18 +3,46 @@
 import importlib
 import io
 import json
+import sqlite3
 import zoneinfo
 from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import Engine
 
 from nextron import main
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig
+from nextron.db import migrations
+from nextron.db.migrations import ensure_current, head_revision
+from nextron.db.uow import UnitOfWorkFactory
+from nextron.domain.notifications import NOTIFICATIONS
 from nextron.lock import InstanceLock, LockHeldError
 from nextron.startup_checks import Probes
 from tests.asgi import get
 from tests.fakes.probes import PortProbe, fake_probes
+from tests.migration_chains import (
+    chain,
+    create_table,
+    engine_on,
+    extend,
+    run_sql,
+    sha256,
+    stored_revisions,
+)
+
+HEAD = head_revision()
+
+
+def db_revision(db_file: Path) -> str | None:
+    """The revision stored in ``db_file``, read outside the engine; ``None`` without one."""
+    if not db_file.exists():
+        return None
+    try:
+        [revision] = stored_revisions(db_file)
+    except sqlite3.Error:
+        return None
+    return revision
 
 
 class ServerSpy:
@@ -39,6 +67,7 @@ class ServerSpy:
                 "data_dir_exists": config.data_dir.is_dir(),
                 "logs_dir_exists": (config.data_dir / "logs").is_dir(),
                 "lock_held": lock_held,
+                "db_revision": db_revision(config.data_dir / "nextron.db"),
             }
         )
 
@@ -68,6 +97,17 @@ def dev(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def tree(folder: Path) -> list[Path]:
     return sorted(folder.rglob("*"))
+
+
+def main_log(data_dir: Path) -> list[dict[str, Any]]:
+    """The ``nextron.main`` lines of the log (Alembic logs a migration's steps too)."""
+    text = (data_dir / "logs" / "nextron.log").read_text(encoding="utf-8")
+    lines = [json.loads(line) for line in text.splitlines()]
+    return [line for line in lines if line["logger"] == "nextron.main"]
+
+
+def events(data_dir: Path) -> list[str]:
+    return [line["event"] for line in main_log(data_dir)]
 
 
 # Row: env unset or invalid
@@ -170,6 +210,7 @@ def test_second_instance_exits_3_before_binding_a_port(dev: Path) -> None:
     assert err.strip() == "another Nextron instance is running for dev"
     assert port.calls == []
     assert spy.calls == []
+    assert not (dev / "nextron.db").exists()  # the database is never opened
 
 
 # Rows: old SQLite, no tz data, OneDrive path
@@ -236,6 +277,7 @@ def test_busy_port_exits_2_and_releases_the_lock(dev: Path) -> None:
     assert "startup check failed: port_free: 127.0.0.1:8766" in err
     assert port.calls == [("127.0.0.1", 8766)]
     assert spy.calls == []
+    assert not (dev / "nextron.db").exists()  # the database is never opened
     with InstanceLock(dev / "nextron.lock"):
         pass
 
@@ -278,6 +320,270 @@ def test_lock_is_released_when_the_server_crashes(dev: Path) -> None:
 
     with InstanceLock(dev / "nextron.lock"):
         pass
+
+
+# The database step --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[UnitOfWorkFactory]:
+    """Every unit-of-work factory ``serve`` opens."""
+    factories: list[UnitOfWorkFactory] = []
+    real = main.open_database
+
+    def spy(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
+        units, revision = real(config)
+        factories.append(units)
+        return units, revision
+
+    monkeypatch.setattr(main, "open_database", spy)
+    return factories
+
+
+@pytest.fixture
+def engines(monkeypatch: pytest.MonkeyPatch) -> list[Engine]:
+    """Every database engine ``serve`` creates, whether or not the database step succeeds."""
+    created: list[Engine] = []
+    real = main.create_engine
+
+    def spy(db_path: Path) -> Engine:
+        created.append(real(db_path))
+        return created[-1]
+
+    monkeypatch.setattr(main, "create_engine", spy)
+    return created
+
+
+def assert_disposed(engine: Engine, db_file: Path) -> None:
+    assert engine.pool.checkedin() == 0  # disposed: a fresh, empty pool
+    db_file.unlink()  # nothing holds the file open
+
+
+def db_at_head(data_dir: Path) -> Path:
+    data_dir.mkdir(parents=True)
+    db_file = data_dir / "nextron.db"
+    with engine_on(db_file) as engine:
+        ensure_current(engine)
+    return db_file
+
+
+# Row: fresh data dir
+def test_a_fresh_data_dir_gets_a_database_at_head_before_the_server_starts(dev: Path) -> None:
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    [call] = spy.calls
+    assert call["db_revision"] == HEAD
+    lines = main_log(dev)
+    assert [line["event"] for line in lines] == [
+        "database_migrated",
+        "engine_started",
+        "engine_stopped",
+    ]
+    assert (lines[0]["from_revision"], lines[0]["to_revision"]) == (None, HEAD)
+    assert lines[1]["db_revision"] == HEAD
+
+
+def test_a_database_at_head_is_not_migrated_again(dev: Path) -> None:
+    assert run_serve()[0] == 0
+    assert run_serve()[0] == 0
+
+    assert events(dev).count("database_migrated") == 1
+    assert events(dev).count("engine_started") == 2
+
+
+# Row: DB behind
+def test_a_database_behind_is_upgraded_before_the_server_starts(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_b", create_table("b")))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    assert spy.calls[0]["db_revision"] == "0002_b"
+    [migrated] = [line for line in main_log(dev) if line["event"] == "database_migrated"]
+    assert (migrated["from_revision"], migrated["to_revision"]) == ("0001_a", "0002_b")
+    [started] = [line for line in main_log(dev) if line["event"] == "engine_started"]
+    assert started["db_revision"] == "0002_b"
+
+
+# Rows: DB ahead, foreign DB
+@pytest.mark.parametrize(
+    ("statements", "message"),
+    [
+        (
+            ["UPDATE alembic_version SET version_num = '0099_future'"],
+            "database revision 0099_future is newer than this code",
+        ),
+        (
+            ["INSERT INTO alembic_version (version_num) VALUES ('0002_fork')"],
+            f"the database has 2 Alembic revisions ({HEAD}, 0002_fork); expected one",
+        ),
+        (
+            ["DROP TABLE alembic_version"],
+            "the database has tables but no Alembic revision; it was not made by this engine",
+        ),
+    ],
+)
+def test_a_refused_database_exits_2_and_changes_nothing(
+    statements: list[str], message: str, dev: Path
+) -> None:
+    db_file = db_at_head(dev)
+    run_sql(db_file, *statements)
+    before = sha256(db_file)
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert err.strip() == f"startup check failed: database_revision: {message}"
+    assert spy.calls == []
+    assert sha256(db_file) == before
+    [failed] = main_log(dev)
+    assert (failed["event"], failed["level"], failed["check"]) == (
+        "startup_check_failed",
+        "ERROR",
+        "database_revision",
+    )
+    with InstanceLock(dev / "nextron.lock"):
+        pass
+
+
+def test_a_foreign_rollback_journal_database_exits_2_and_changes_nothing(dev: Path) -> None:
+    dev.mkdir(parents=True)
+    db_file = dev / "nextron.db"
+    run_sql(db_file, "CREATE TABLE contacts (id INTEGER PRIMARY KEY, email TEXT)")
+    before = sha256(db_file)
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert err.strip() == (
+        "startup check failed: database_revision: the database file uses journal_mode delete, "
+        "not wal; it is not this engine's database"
+    )
+    assert spy.calls == []
+    assert sha256(db_file) == before
+    [failed] = main_log(dev)
+    assert (failed["event"], failed["check"]) == ("startup_check_failed", "database_revision")
+
+
+def test_a_file_that_is_not_sqlite_exits_2(dev: Path) -> None:
+    dev.mkdir(parents=True)
+    db_file = dev / "nextron.db"
+    db_file.write_bytes(b"not a database, just some text that is long enough " * 4)
+    before = sha256(db_file)
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert err.startswith(
+        "database startup failed: it could not be opened, or a migration failed and was "
+        "rolled back; the traceback is in "
+    )
+    assert spy.calls == []
+    assert sha256(db_file) == before
+    [failed] = main_log(dev)
+    assert (failed["event"], failed["level"]) == ("database_migration_failed", "ERROR")
+    assert "file is not a database" in failed["exc"]
+
+
+# Row: migration fails (a migration that raises, or one that leaves foreign key violations)
+PARENT_AND_CHILD = """
+op.create_table('parent', sa.Column('id', sa.Integer, primary_key=True))
+op.create_table(
+    'child',
+    sa.Column('id', sa.Integer, primary_key=True),
+    sa.Column('parent_id', sa.Integer, sa.ForeignKey('parent.id'), nullable=False),
+)
+"""
+
+
+@pytest.mark.parametrize(
+    ("body", "cause"),
+    [
+        ("raise RuntimeError('the migration broke')", "RuntimeError: the migration broke"),
+        (
+            "op.execute('INSERT INTO child (id, parent_id) VALUES (1, 42)')",
+            "ForeignKeyCheckError: the upgrade left 1 foreign key violations in child",
+        ),
+    ],
+)
+def test_a_failed_migration_exits_2_and_logs_the_traceback(
+    body: str, cause: str, dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    location = chain(tmp_path, ("0001_a", PARENT_AND_CHILD))
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_fails", body))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert "database startup failed: it could not be opened, or a migration failed" in err
+    assert spy.calls == []
+    assert stored_revisions(dev / "nextron.db") == ["0001_a"]
+    [failed] = main_log(dev)
+    assert (failed["event"], failed["level"]) == ("database_migration_failed", "ERROR")
+    assert cause in failed["exc"]
+    with InstanceLock(dev / "nextron.lock"):
+        pass
+
+
+@pytest.mark.parametrize("outcome", ["stops", "crashes"])
+def test_the_database_engine_is_disposed_when_serve_returns(
+    outcome: str, dev: Path, opened: list[UnitOfWorkFactory]
+) -> None:
+    def server(config: BootstrapConfig, reload: bool) -> None:
+        assert opened[0].engine.pool.checkedin() == 1  # the pool holds a connection
+        if outcome == "crashes":
+            raise RuntimeError("boom")
+
+    if outcome == "crashes":
+        with pytest.raises(RuntimeError):
+            main.serve(probes=fake_probes(), run_server=server, err=io.StringIO())
+    else:
+        assert main.serve(probes=fake_probes(), run_server=server, err=io.StringIO()) == 0
+
+    [units] = opened
+    assert_disposed(units.engine, dev / "nextron.db")
+
+
+def test_the_database_engine_is_disposed_when_the_database_is_refused(
+    dev: Path, engines: list[Engine]
+) -> None:
+    run_sql(db_at_head(dev), "UPDATE alembic_version SET version_num = '0099_future'")
+
+    assert run_serve()[0] == 2
+
+    [engine] = engines
+    assert_disposed(engine, dev / "nextron.db")
+
+
+def test_the_database_engine_is_disposed_when_a_migration_fails(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engines: list[Engine]
+) -> None:
+    location = chain(tmp_path, ("0001_fails", "raise RuntimeError('the migration broke')"))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+
+    assert run_serve()[0] == 2
+
+    [engine] = engines
+    assert_disposed(engine, dev / "nextron.db")
+
+
+def test_build_subscribers_ships_an_empty_frozen_registry() -> None:
+    subscribers = main.build_subscribers()
+
+    assert subscribers.frozen
+    assert all(subscribers.subscribers_of(kind) == () for kind in NOTIFICATIONS)
 
 
 def test_cli_dispatches_serve(monkeypatch: pytest.MonkeyPatch) -> None:

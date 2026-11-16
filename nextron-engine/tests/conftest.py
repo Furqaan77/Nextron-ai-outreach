@@ -5,6 +5,8 @@
   nothing reads the real environment or writes under the real ``%LOCALAPPDATA%\\Nextron``.
 - Every test leaves logging as it found it: ``configure_logging`` (called directly or by
   ``serve``) replaces the root handlers, so the fixture puts them back and closes the log files.
+- ``db_engine`` is a temporary database file at the head revision, disposed after the test;
+  ``units`` opens units of work on it with an empty, frozen subscriber registry.
 """
 
 import logging
@@ -15,7 +17,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import Engine
 
+from nextron.db.engine import create_engine
+from nextron.db.migrations import ensure_current
+from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.logconfig import SDK_LOGGERS
 
 AI_EVAL = "ai_eval"
@@ -61,3 +67,21 @@ def restore_logging() -> Iterator[None]:
         logging.getLogger(name).setLevel(sdk_level)
     sys.excepthook, threading.excepthook, logging.lastResort = hooks
     logging.captureWarnings(False)
+
+
+@pytest.fixture
+def db_engine(tmp_path: Path) -> Iterator[Engine]:
+    """A temporary database file migrated to head; disposed after the test."""
+    engine = create_engine(tmp_path / "db" / "nextron.db")
+    (tmp_path / "db").mkdir()
+    ensure_current(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def units(db_engine: Engine) -> UnitOfWorkFactory:
+    """Units of work on ``db_engine`` with an empty, frozen subscriber registry."""
+    subscribers = Subscribers()
+    subscribers.freeze()
+    return UnitOfWorkFactory(db_engine, subscribers)

@@ -1,4 +1,5 @@
-"""Composition root (AD-1, AD-2, AD-14): wiring, startup checks, the instance lock and Uvicorn.
+"""Composition root (AD-1, AD-2, AD-3, AD-14): wiring, startup checks, the instance lock, the
+database, the notification subscriber registry and Uvicorn.
 
 ``serve`` runs these steps in order and stops at the first failure. The supervisor
 (``scripts/run.ps1``, Story 1.21) relies on the exit codes:
@@ -13,13 +14,26 @@
 5. The port check: exit 2, logged as ``startup_check_failed``. It runs after the lock because a
    second instance of the same environment finds its port taken by the first; it must report
    exit 3, not a busy port.
-6. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
-   ``engine_started`` is logged before it and ``engine_stopped`` (with ``exit_code``) after.
-   Uvicorn runs with ``log_config=None``, so its records go through the root handlers. Uvicorn
-   exits with code 3 when it can't bind or start the app; ``serve`` logs
-   ``server_start_failed`` and reports exit 2, so it never looks like a held lock.
+6. The database, ``<data dir>\\nextron.db`` (``open_database``): created when missing and brought
+   to the code's head revision by ``nextron.db.migrations.ensure_current``, which logs
+   ``database_migrated`` (``from_revision``, ``to_revision``) when it upgrades. A database whose
+   revision is ahead of the code, or a foreign or forked one, is refused untouched: exit 2,
+   logged as ``startup_check_failed`` with ``check=database_revision``. A database that can't
+   be opened, or a failed migration (rolled back), exits 2, logged as
+   ``database_migration_failed`` with the traceback. A second instance or a busy port never
+   reaches this step.
+7. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
+   ``engine_started`` (with ``db_revision``) is logged before it and ``engine_stopped`` (with
+   ``exit_code``) after. The database engine is disposed when ``serve`` returns. Uvicorn runs
+   with ``log_config=None``, so its records go through the root handlers. Uvicorn exits with
+   code 3 when it can't bind or start the app; ``serve`` logs ``server_start_failed`` and
+   reports exit 2, so it never looks like a held lock.
 
 Any other error is logged as ``engine_crashed`` and ends with exit 1.
+
+``build_subscribers`` is the notification subscriber registry (AD-3): the only code that
+constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
+adds a subscriber registers its owner command there, in the order AD-3 lists.
 
 With ``--reload`` (``dev`` only), Uvicorn serves from a worker process that does not write
 ``nextron.log``: only the reloader's own records reach the file. The worker's WARNING and above
@@ -41,8 +55,11 @@ from fastapi import FastAPI
 
 from nextron import __version__
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
+from nextron.db.engine import ConnectionSettingError, create_engine
+from nextron.db.migrations import DatabaseStateError, ensure_current
+from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
-from nextron.logconfig import CRASH_EVENT, configure_logging, mark_logged
+from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.startup_checks import (
     CheckResult,
     Probes,
@@ -55,6 +72,8 @@ from nextron.web.app import create_app
 HOST: Final = "127.0.0.1"
 WORKERS: Final = 1
 LOGS_DIR_NAME: Final = "logs"
+DB_FILE_NAME: Final = "nextron.db"
+DATABASE_REVISION_CHECK: Final = "database_revision"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -70,6 +89,36 @@ log = logging.getLogger(__name__)
 
 def build_app(config: BootstrapConfig) -> FastAPI:
     return create_app(env=config.env, version=__version__)
+
+
+def build_subscribers() -> Subscribers:
+    """The notification subscriber registry (AD-3), frozen. Empty until a story adds one:
+    register each subscriber with ``register_subscriber(<Notification>, <owner command>)``,
+    in the order AD-3 lists, before ``freeze()``."""
+    subscribers = Subscribers()
+    subscribers.freeze()
+    return subscribers
+
+
+def open_database(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
+    """Open ``<data dir>\\nextron.db`` and bring it to head; return the entry points' factory and
+    the database's revision.
+
+    Raises ``DatabaseStateError`` (``DatabaseAheadError`` included) or ``ConnectionSettingError``
+    when the database is refused, and whatever made opening or a migration fail; either way the
+    engine is disposed first.
+    """
+    subscribers = build_subscribers()
+    engine = create_engine(config.data_dir / DB_FILE_NAME)
+    try:
+        units = UnitOfWorkFactory(engine, subscribers)
+        before, after = ensure_current(engine)
+    except BaseException:
+        engine.dispose()
+        raise
+    if before != after:
+        log.info("database_migrated", extra={"from_revision": before, "to_revision": after})
+    return units, after
 
 
 def create_app_from_environment() -> FastAPI:
@@ -148,26 +197,44 @@ def serve(
         if _report_failures([port_check], err):
             log.error("startup_check_failed", extra={"check": port_check.name})
             return EXIT_STARTUP_FAILED
-        identity = {"env": config.env, "version": __version__}
-        log.info("engine_started", extra=identity)
-        exit_code = EXIT_CRASHED
         try:
-            run_server(config, reload)
-            exit_code = EXIT_OK
-        except SystemExit as exc:
-            if exc.code in (None, 0):
+            units, db_revision = open_database(config)
+        except (DatabaseStateError, ConnectionSettingError) as exc:
+            print(f"startup check failed: {DATABASE_REVISION_CHECK}: {exc}", file=err)
+            log.error("startup_check_failed", extra={"check": DATABASE_REVISION_CHECK})
+            return EXIT_STARTUP_FAILED
+        except Exception:
+            print(
+                "database startup failed: it could not be opened, or a migration failed and "
+                f"was rolled back; the traceback is in "
+                f"{config.data_dir / LOGS_DIR_NAME / LOG_FILE_NAME}",
+                file=err,
+            )
+            log.exception("database_migration_failed")
+            return EXIT_STARTUP_FAILED
+        try:
+            identity = {"env": config.env, "version": __version__}
+            log.info("engine_started", extra={**identity, "db_revision": db_revision})
+            exit_code = EXIT_CRASHED
+            try:
+                run_server(config, reload)
                 exit_code = EXIT_OK
-            else:
-                print(f"server failed to start (Uvicorn exit code {exc.code})", file=err)
-                log.error("server_start_failed", extra={"exit_code": exc.code})
-                exit_code = EXIT_STARTUP_FAILED
-        except Exception as exc:
-            log.exception(CRASH_EVENT)
-            mark_logged(exc)  # the uncaught-exception hook would log it a second time
-            raise
+            except SystemExit as exc:
+                if exc.code in (None, 0):
+                    exit_code = EXIT_OK
+                else:
+                    print(f"server failed to start (Uvicorn exit code {exc.code})", file=err)
+                    log.error("server_start_failed", extra={"exit_code": exc.code})
+                    exit_code = EXIT_STARTUP_FAILED
+            except Exception as exc:
+                log.exception(CRASH_EVENT)
+                mark_logged(exc)  # the uncaught-exception hook would log it a second time
+                raise
+            finally:
+                log.info("engine_stopped", extra={**identity, "exit_code": exit_code})
+            return exit_code
         finally:
-            log.info("engine_stopped", extra={**identity, "exit_code": exit_code})
-        return exit_code
+            units.engine.dispose()
     finally:
         lock.release()
 

@@ -174,6 +174,49 @@ def test_placement_contracts_break_lint(
     assert contract_statuses(result.stdout)[contract(contract_id)["name"]] == "BROKEN"
 
 
+APP_DB_SURFACE = "c1-app-db-surface"
+DB_INTERNALS = [
+    "nextron.db.engine",
+    "nextron.db.migrations",
+    "nextron.db.models",
+    "nextron.db.owners",
+    "nextron.db.pii_registry",
+]
+
+
+def test_the_app_db_surface_contract_is_written_as_in_the_story() -> None:
+    surface = contract(APP_DB_SURFACE)
+
+    assert surface["type"] == "forbidden"
+    assert surface["source_modules"] == ["nextron.app"]
+    assert surface["forbidden_modules"] == DB_INTERNALS
+    assert surface["allow_indirect_imports"] is True
+    ids = [c["id"] for c in contracts()]
+    assert ids.index(APP_DB_SURFACE) == ids.index(HELPERS) + 1
+
+
+def test_the_app_importing_db_internals_breaks_lint(tmp_path: Path) -> None:
+    source = "".join(f"import {module}\n" for module in DB_INTERNALS)
+    module, result = lint_copy_with_probe(tmp_path, "nextron.app.setup", source)
+
+    assert result.returncode != 0
+    for line, imported in enumerate(DB_INTERNALS, start=1):
+        assert f"{module} -> {imported} (l.{line})" in result.stdout
+    statuses = contract_statuses(result.stdout)
+    assert statuses[contract(APP_DB_SURFACE)["name"]] == "BROKEN"
+
+
+def test_the_app_may_use_uow_eventlog_and_its_own_repositories(tmp_path: Path) -> None:
+    source = (
+        "from nextron.db import eventlog, uow\n"
+        "from nextron.db.uow import command, current, use_case\n"
+        "import nextron.db.repos.setup\n"
+    )
+    _, result = lint_copy_with_probe(tmp_path, "nextron.app.setup", source)
+
+    assert result.returncode == 0, result.stdout
+
+
 def test_type_checking_imports_are_excluded(tmp_path: Path) -> None:
     source = "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import anthropic\n"
     _, result = lint_copy_with_probe(tmp_path, "nextron.domain", source)
