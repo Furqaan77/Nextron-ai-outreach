@@ -8,6 +8,7 @@ import io
 import json
 import re
 import shutil
+import signal
 import sqlite3
 import zoneinfo
 from pathlib import Path
@@ -407,6 +408,55 @@ def test_lock_is_released_when_the_server_crashes(dev: Path) -> None:
 
     with InstanceLock(dev / "nextron.lock"):
         pass
+
+
+# Row: Stop (Story 1.21): run.ps1 stops the engine with CTRL_BREAK
+@pytest.mark.skipif(not hasattr(signal, "SIGBREAK"), reason="CTRL_BREAK is Windows only")
+@pytest.mark.parametrize("how", ["called", "raised"])
+def test_a_ctrl_break_while_the_server_runs_stops_it_cleanly_and_serve_exits_0(
+    dev: Path, how: str
+) -> None:
+    sigbreak = signal.SIGBREAK  # type: ignore[attr-defined]
+    before = signal.getsignal(sigbreak)
+    seen: list[object] = []
+
+    def server(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
+        handler = signal.getsignal(sigbreak)
+        seen.append(handler)
+        # Uvicorn saves this handler and, after its graceful shutdown, raises the signal again to
+        # it; a CTRL_BREAK before Uvicorn takes the signal over reaches it directly. It must be a
+        # Python handler before anything raises the signal, or the raise would end this process.
+        if not callable(handler) or handler is before:
+            pytest.fail(f"no Python SIGBREAK handler installed: {handler!r}")
+        if how == "called":
+            with pytest.raises(SystemExit) as stopped:
+                handler(sigbreak, None)
+            assert stopped.value.code == 0
+            raise stopped.value
+        signal.raise_signal(sigbreak)  # the handler raises SystemExit(0) here
+        pytest.fail("the SIGBREAK handler returned")
+
+    err = io.StringIO()
+    code = main.serve(probes=fake_probes(), run_server=server, err=err)
+
+    assert (code, err.getvalue()) == (0, "")
+    assert len(seen) == 1
+    assert signal.getsignal(sigbreak) is before  # the previous handler is back
+    [stopped] = [line for line in main_log(dev) if line["event"] == "engine_stopped"]
+    assert stopped["exit_code"] == 0
+
+
+def test_the_ctrl_break_handler_is_back_after_a_server_crash(dev: Path) -> None:
+    sigbreak = getattr(signal, "SIGBREAK", signal.SIGINT)
+    before = signal.getsignal(sigbreak)
+
+    def crash(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory) -> None:
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        main.serve(probes=fake_probes(), run_server=crash, err=io.StringIO())
+
+    assert signal.getsignal(sigbreak) is before
 
 
 # The database step --------------------------------------------------------------------------
