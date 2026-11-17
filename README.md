@@ -34,4 +34,4 @@ uv run lint-imports            # architecture import rules
 
 ## Status
 
-Planning is complete: 73 requirements, 22 architecture rules, 11 epics and 146 stories. The build is in progress. Stories 1.1–1.11 (scaffold, logging, persistence, dashboard entry, CSRF and safe rendering, typed settings, credentials, environment isolation, Google OAuth, durable jobs, triggers and heartbeat) are done, and Story 1.12 is next. Live status is in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](_bmad-output/implementation-artifacts/sprint-status.yaml).
+Planning is complete: 73 requirements, 22 architecture rules, 11 epics and 146 stories. The build is in progress. Stories 1.1–1.12 (scaffold, logging, persistence, dashboard entry, CSRF and safe rendering, typed settings, credentials, environment isolation, Google OAuth, durable jobs, triggers and heartbeat, ops alerts) are done, and Story 1.13 is next. Live status is in [`_bmad-output/implementation-artifacts/sprint-status.yaml`](_bmad-output/implementation-artifacts/sprint-status.yaml).

@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.11 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`; sprint status `review`). **Next: Story 1.12.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.12 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`; sprint status `review`). **Next: Story 1.13.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -64,7 +64,9 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 **Story 1.11 result:** the closed list of 19 AD-10 triggers (registered only after their job type exists, so it ships empty), an APScheduler scheduler that catches up once after sleep, and a heartbeat (`runner_heartbeat` table, migration `0004_1_11_heartbeat`, plus `<data dir>\heartbeat` touched every 30 s). The heartbeat stops when a lane dies, a job overruns `max_runtime`, or the scheduler or event loop stops responding. 3134 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 11 are done.
+**Story 1.12 result:** ops alerts by Telegram (adapter behind `AlertPort`, sink-wrapped outside prod) and in the dashboard. It adds the `alerts` and `notifications` tables (migration `0005_1_12_notify`), the first job type `send_alert`, a `job_dead` alert from an `ops` sweep, a new required setting `alert_chat_id` (numeric Telegram chat id), and a notification area with Dismiss. Nothing has been sent to a real Telegram chat yet. 3416 tests, 29 contracts.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 12 are done.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -74,6 +76,11 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
   - no Cancel while a consent waits;
   - any local request to the listener ends the flow;
   - a grant can't be removed once the client entry is missing.
+- **Story 1.12 items rejected only because they'd change the approved spec:**
+  - an alert whose send job dies stays `pending`;
+  - every Telegram refusal is one code, so a bad token looks the same as a bad chat id;
+  - each dead job gives two dashboard notices until `alert_chat_id` is set, and there is no "send a test alert";
+  - an error notice stays until the page reloads.
 - **Never exercised against the real service:** nothing has talked to real Google, Telegram, Hunter or Claude yet. Every adapter is proven against fakes. Release 2 (Epics 8–9) is 20. Release 3 (Epics 10–11) is 17.
 
 ## 4. How to continue building (exact procedure)
