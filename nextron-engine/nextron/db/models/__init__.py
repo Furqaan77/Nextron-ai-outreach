@@ -5,8 +5,9 @@ is imported: the owner and PII coverage tests, the Alembic drift test and ``env.
 it. ``tests/contracts/test_persistence_contracts.py`` fails on a module left out.
 """
 
-from nextron.db.models import events, jobqueue, metering, notify, ops, playbook, setup
+from nextron.db.models import drafting, events, jobqueue, metering, notify, ops, playbook, setup
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
+from nextron.db.models.drafting import FooterSnapshotRecord
 from nextron.db.models.events import EventRecord
 from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.metering import AiUsageRecord, ApiUsageRecord
@@ -33,6 +34,7 @@ __all__ = [
     "CampaignRecord",
     "CompanyFactRecord",
     "EventRecord",
+    "FooterSnapshotRecord",
     "HeartbeatRecord",
     "JobRecord",
     "MarketRecord",
@@ -45,6 +47,7 @@ __all__ = [
     "Ulid",
     "UtcDateTime",
     "VariantRecord",
+    "drafting",
     "events",
     "jobqueue",
     "metering",

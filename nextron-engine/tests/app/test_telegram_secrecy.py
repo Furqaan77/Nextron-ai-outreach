@@ -196,6 +196,11 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             quota_job_aggregator="",
             ai_budget_monthly="",
             ai_budget_alert_pct="",
+            sender_signature="",
+            legal_name="",
+            postal_address="",
+            optout_line="",
+            privacy_notice_url="",
             us_solicitation_label="",
         ),
     )

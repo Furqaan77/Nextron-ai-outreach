@@ -10,6 +10,10 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
 - ``stored_texts()``: every stored ``{key: canonical text}`` (the Settings page shows them).
 - ``required_unset()``: the keys of the required settings, in declaration order, that have no
   row or whose stored text no longer parses (``nextron doctor`` lists them).
+- ``footer_settings()``: the six footer settings (Story 4.11) as a
+  ``nextron.domain.render.FooterSettings``, each read through ``get``; one that raises
+  ``SettingNotSet`` or ``InvalidSettingValue`` is ``""``, so a stored text that no longer parses
+  counts as missing (fail closed: ``footer_complete`` then blocks sending).
 - ``budget_limits()``: the ``nextron.domain.budget.Limits`` the seven Budget and limits
   settings make: each quota in ``QUOTAS`` (its setting × its ``scale``, so Hunter's credits
   are doubled like its stored units), ``ai_budget_monthly`` and ``ai_budget_alert_pct``. A
@@ -69,6 +73,7 @@ from nextron.domain.budget import QUOTAS, Limits
 from nextron.domain.campaign import CampaignStatus, Lia, StepAngleNote, VariantStatus, may_run
 from nextron.domain.markets import MarketDef
 from nextron.domain.offers import OfferDef
+from nextron.domain.render import FOOTER_SETTING_KEYS, FooterSettings
 from nextron.domain.segments import SegmentDef, segment_from_text
 from nextron.domain.sequences import SequenceDef
 from nextron.domain.settings_schema import (
@@ -116,6 +121,18 @@ def required_unset() -> tuple[str, ...]:
         except InvalidSettingValue:
             unset.append(key)
     return tuple(unset)
+
+
+def footer_settings() -> FooterSettings:
+    """The footer settings now, ``""`` for one that is unset or no longer parses."""
+    values: dict[str, str] = {}
+    for key in FOOTER_SETTING_KEYS:
+        try:
+            value = get(key)
+        except (SettingNotSet, InvalidSettingValue):
+            value = ""
+        values[key] = value if isinstance(value, str) else ""
+    return FooterSettings(**values)
 
 
 def budget_limits() -> Limits:

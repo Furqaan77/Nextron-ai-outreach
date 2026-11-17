@@ -535,6 +535,11 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
     _, page = settings_page(dashboard, session[0])
 
     assert list(page.fields) == [
+        "sender_signature",
+        "legal_name",
+        "postal_address",
+        "optout_line",
+        "privacy_notice_url",
         "us_solicitation_label",
         "sender_timezone",
         "alert_chat_id",
@@ -557,6 +562,65 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "reach only these; everything else is written to the sink folder.; default: none; "
         "leave blank to use it"
     )
+
+
+FOOTER_KEYS = [
+    "sender_signature",
+    "legal_name",
+    "postal_address",
+    "optout_line",
+    "privacy_notice_url",
+    "us_solicitation_label",
+]
+
+
+def test_the_footer_section_shows_the_footer_settings_in_footer_order_each_editable(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    _, page = settings_page(dashboard, session[0])
+
+    legend, shown_fields = page.sections[0]
+    assert legend == "Footer and booking"
+    assert [shown.key for shown in shown_fields] == FOOTER_KEYS
+    for shown in shown_fields:
+        assert shown.tag == "input" and shown.attrs.get("name") == shown.key
+        assert "disabled" not in shown.attrs and "readonly" not in shown.attrs
+    assert [shown.label for shown in shown_fields] == [
+        "Sender signature",
+        "Legal name",
+        "Postal address",
+        "Opt-out line",
+        "Privacy notice URL",
+        "US solicitation label",
+    ]
+    assert page.fields["legal_name"].hint.endswith("No email is sent while it is blank.; required")
+    assert page.fields["privacy_notice_url"].hint.endswith(
+        "No UK email is sent while it is blank.; required"
+    )
+    assert page.fields["optout_line"].value == (
+        "Not relevant? Reply 'no' and I won't contact you again."
+    )
+
+
+def test_the_footer_saves_through_the_page_and_a_set_value_cant_be_cleared(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    token = session[1]
+    footer = {
+        "sender_signature": "Furqaan, Nextron AI",
+        "legal_name": "Nextron AI Ltd",
+        "postal_address": "1 Example Street, London EC1A 1AA",
+        "privacy_notice_url": "https://nextronai.com/privacy",
+    }
+
+    saved = save(dashboard, session, real_body(token, **footer))
+
+    assert saved.status == 200
+    assert {key: get_value(units, key) for key in footer} == footer
+    refused = save(dashboard, session, real_body(token, **{**footer, "legal_name": ""}))
+    shown = SettingsHtml(refused.text).fields["legal_name"]
+    assert shown.attrs["aria-invalid"] == "true" and shown.error is not None
+    assert get_value(units, Key.LEGAL_NAME) == "Nextron AI Ltd"
 
 
 def test_the_alerts_section_shows_the_required_telegram_chat_id(

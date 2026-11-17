@@ -11,6 +11,10 @@ validates (or whose list column isn't a JSON list) raises ``InvalidMarkets``.
 
 - ``all_markets()``: every row as a ``StoredMarket``, by code;
 - ``by_code(code)``: the row of ``code``, or ``None``;
+- ``footer_templates()``: each row's ``id`` and its ``footer_template`` lines, by code, without
+  validating anything else (Story 4.11's ``FooterChanged`` reads it): the lines are ``None``
+  when the column isn't a JSON list of ``str`` (``Setup`` treats such a row, or one whose lines
+  lack a required footer placeholder, as using every placeholder);
 - ``insert(market, at) -> id``: a new row at version 1, created and updated at ``at``;
 - ``update(market_id, market, version, at)``: sets the row's Market fields, version and
   ``updated_at``.
@@ -152,6 +156,26 @@ def all_markets() -> tuple[StoredMarket, ...]:
     """Every stored Market, ordered by code."""
     statement = select(*_COLUMNS).order_by(MarketRecord.code)
     return tuple(_stored(row) for row in current().session.execute(statement))
+
+
+def _template_lines(text: object) -> tuple[str, ...] | None:
+    """A ``footer_template`` column's lines, or ``None`` when it isn't a JSON list of ``str``."""
+    try:
+        lines = json.loads(text)  # type: ignore[arg-type]
+    except (TypeError, ValueError, RecursionError):  # JSONDecodeError is a ValueError
+        return None
+    if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+        return None
+    return tuple(lines)
+
+
+def footer_templates() -> tuple[tuple[str, tuple[str, ...] | None], ...]:
+    """Each stored Market's ``(id, footer template lines or None)``, ordered by code."""
+    statement = select(MarketRecord.id, MarketRecord.footer_template).order_by(MarketRecord.code)
+    return tuple(
+        (market_id, _template_lines(text))
+        for market_id, text in current().session.execute(statement)
+    )
 
 
 def by_code(code: str) -> StoredMarket | None:

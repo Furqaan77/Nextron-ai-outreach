@@ -65,6 +65,18 @@ looser form). By type, the value and its text:
 Suppression, Eligibility, the footer, opt-out handling or Market rules, and no setting holds a
 secret (secrets live only in Windows Credential Manager, AD-12);
 ``tests/contracts/test_settings_contracts.py`` checks the key names and labels.
+
+**The footer settings** (Story 4.11, FR-23, NFR-7), all ``string`` in Footer and booking, in
+footer order: ``sender_signature``, ``legal_name`` and ``postal_address`` (required),
+``optout_line`` (default ``DEFAULT_OPTOUT_LINE``), ``privacy_notice_url`` (required) and Story
+3.1's ``us_solicitation_label`` (blank by default). ``nextron.domain.render`` fills each Market's
+footer template with them. Three rules guard them: ``NO_PRICE_RULE`` (``no_price``, every footer
+text but the URL: ``nextron.domain.prices.names_price`` is false), ``OPTOUT_REPLY_RULE``
+(``optout_reply``: the lowercased opt-out line holds ``reply`` as a word, because opt-out
+handling is reply-based) and ``HTTPS_URL_RULE`` (``https_url``: ``company_facts.is_link`` and an
+``https`` scheme). Being required puts the unset ones in ``nextron doctor``'s
+``required_settings`` check, and a set one can't be cleared; no setting hides, shortens or
+reorders a footer line (``tests/contracts/test_footer_contracts.py``).
 """
 
 import re
@@ -77,6 +89,7 @@ from enum import Enum, StrEnum
 from functools import cache
 from types import MappingProxyType
 from typing import Any, Final, NamedTuple
+from urllib.parse import urlsplit
 
 from nextron.domain.alert import is_telegram_chat_id
 from nextron.domain.backup import (
@@ -86,8 +99,10 @@ from nextron.domain.backup import (
     MIN_ROTATION_DAYS,
 )
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
+from nextron.domain.company_facts import is_link
 from nextron.domain.errors import DomainError
 from nextron.domain.job import MAX_BULK_THREADS
+from nextron.domain.prices import names_price
 from nextron.domain.sink import is_sink_recipient
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
@@ -147,6 +162,12 @@ class Key(StrEnum):
     QUOTA_JOB_AGGREGATOR = "quota_job_aggregator"
     AI_BUDGET_MONTHLY = "ai_budget_monthly"
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
+    # The footer (Story 4.11, FR-23), in footer order.
+    SENDER_SIGNATURE = "sender_signature"
+    LEGAL_NAME = "legal_name"
+    POSTAL_ADDRESS = "postal_address"
+    OPTOUT_LINE = "optout_line"
+    PRIVACY_NOTICE_URL = "privacy_notice_url"
     US_SOLICITATION_LABEL = "us_solicitation_label"
 
 
@@ -827,6 +848,34 @@ PLACES_ENTERPRISE_FREE_MONTHLY: Final = 1_000
 PLACES_PRO_FREE_MONTHLY: Final = 5_000
 MAX_AI_BUDGET: Final = 100 * MICROS_PER_DOLLAR  # the whole engine's monthly ceiling (SM-9)
 
+# The footer (Story 4.11, FR-23, NFR-7). No footer text names a price (the single definition,
+# nextron.domain.prices.names_price); the opt-out line tells the reader to reply, because
+# opt-out handling is reply-based; the privacy notice is an https link.
+_NOT_WORD: Final = re.compile(r"[^a-z0-9]+")
+DEFAULT_OPTOUT_LINE: Final = "Not relevant? Reply 'no' and I won't contact you again."
+NO_EMAIL_WHILE_BLANK: Final = "No email is sent while it is blank."
+
+
+def _holds_reply(value: str) -> bool:
+    """Whether ``value``, lowercased, holds ``reply`` as a word."""
+    return "reply" in _NOT_WORD.sub(" ", value.lower()).split()
+
+
+def _is_https_link(value: str) -> bool:
+    """Whether ``value`` is a link (``company_facts.is_link``) with the ``https`` scheme."""
+    return is_link(value) and urlsplit(value).scheme.lower() == "https"
+
+
+NO_PRICE_RULE: Final = Rule(
+    "no_price", "must not name a price", lambda value: not names_price(value)
+)
+OPTOUT_REPLY_RULE: Final = Rule(
+    "optout_reply",
+    "must tell the reader to reply to opt out (hold the word reply)",
+    _holds_reply,
+)
+HTTPS_URL_RULE: Final = Rule("https_url", "must be an https link", _is_https_link)
+
 SCHEMA: Mapping[str, Setting] = _declare(
     Setting(
         key=Key.SENDER_TIMEZONE,
@@ -998,9 +1047,73 @@ SCHEMA: Mapping[str, Setting] = _declare(
         default=80,
         rules=(minimum(1, "1"), maximum(MAX_PERCENT, "100")),
     ),
-    # The US footer's solicitation label (Story 3.1, NFR-2, OQ-8). Blank by default: the US
-    # footer template's {us_solicitation_label} line is then dropped. Story 4.11 reads it with
-    # the other footer settings and must not declare it again.
+    # The footer (Story 4.11, FR-23, CAN-SPAM, PECR, UK GDPR Art. 14), in footer order:
+    # nextron.domain.render fills each Market's footer template with these values. The four
+    # lines every footer holds are required, so doctor's required_settings check lists them
+    # until they are set, and once set they can't be cleared (NFR-7).
+    Setting(
+        key=Key.SENDER_SIGNATURE,
+        type=SettingType.STRING,
+        section=Section.FOOTER_AND_BOOKING,
+        label="Sender signature",
+        unit=(
+            "The first footer line of every email, such as \"Furqaan, Nextron AI\". "
+            f"{NO_EMAIL_WHILE_BLANK}"
+        ),
+        default=REQUIRED,
+        rules=(max_length(200), NO_PRICE_RULE),
+    ),
+    Setting(
+        key=Key.LEGAL_NAME,
+        type=SettingType.STRING,
+        section=Section.FOOTER_AND_BOOKING,
+        label="Legal name",
+        unit=(
+            "Nextron's registered legal name, the second footer line of every email. "
+            f"{NO_EMAIL_WHILE_BLANK}"
+        ),
+        default=REQUIRED,
+        rules=(max_length(200), NO_PRICE_RULE),
+    ),
+    Setting(
+        key=Key.POSTAL_ADDRESS,
+        type=SettingType.STRING,
+        section=Section.FOOTER_AND_BOOKING,
+        label="Postal address",
+        unit=(
+            "Nextron's postal address on one line, the third footer line of every email "
+            f"(CAN-SPAM). {NO_EMAIL_WHILE_BLANK}"
+        ),
+        default=REQUIRED,
+        rules=(max_length(300), NO_PRICE_RULE),
+    ),
+    Setting(
+        key=Key.OPTOUT_LINE,
+        type=SettingType.STRING,
+        section=Section.FOOTER_AND_BOOKING,
+        label="Opt-out line",
+        unit=(
+            "The fourth footer line of every email; it must tell the reader to reply to opt "
+            "out."
+        ),
+        default=DEFAULT_OPTOUT_LINE,
+        rules=(max_length(200), NO_PRICE_RULE, OPTOUT_REPLY_RULE),
+    ),
+    Setting(
+        key=Key.PRIVACY_NOTICE_URL,
+        type=SettingType.STRING,
+        section=Section.FOOTER_AND_BOOKING,
+        label="Privacy notice URL",
+        unit=(
+            "An https link to Nextron's privacy notice, shown at the end of the privacy line of "
+            "every UK email's footer (UK GDPR Art. 14). No UK email is sent while it is blank."
+        ),
+        default=REQUIRED,
+        rules=(max_length(500), HTTPS_URL_RULE),
+    ),
+    # The US footer's solicitation label (Story 3.1, NFR-2, OQ-8), the last line of Story
+    # 4.11's US footer. Blank by default: the US footer template's {us_solicitation_label} line
+    # is then dropped. Declared once, here; 4.11 added only its no-price rule.
     Setting(
         key=Key.US_SOLICITATION_LABEL,
         type=SettingType.STRING,
@@ -1011,7 +1124,7 @@ SCHEMA: Mapping[str, Setting] = _declare(
             "line (CAN-SPAM; decided with counsel before the first US send, OQ-8)."
         ),
         default="",
-        rules=(max_length(200),),
+        rules=(max_length(200), NO_PRICE_RULE),
     ),
 )
 

@@ -328,6 +328,15 @@ def test_stored_texts_lists_every_stored_row(
 # Required settings (nextron doctor, Story 1.14) -------------------------------------------------
 
 
+# the required footer settings (Story 4.11), set
+FOOTER_SET = {
+    "sender_signature": "Furqaan, Nextron AI",
+    "legal_name": "Nextron AI Ltd",
+    "postal_address": "1 Example Street, London EC1A 1AA",
+    "privacy_notice_url": "https://nextronai.com/privacy",
+}
+
+
 def required_unset(units: UnitOfWorkFactory) -> tuple[str, ...]:
     with units.open(read_only=True):
         return setup_queries.required_unset()
@@ -338,13 +347,28 @@ def test_required_unset_lists_every_required_key_in_declaration_order(
 ) -> None:
     required = [str(found.key) for found in settings_schema.declared() if found.required]
 
-    assert required_unset(units) == ("sender_timezone", "alert_chat_id") == tuple(required)
+    assert (
+        required_unset(units)
+        == (
+            "sender_timezone",
+            "alert_chat_id",
+            "sender_signature",  # the footer (Story 4.11)
+            "legal_name",
+            "postal_address",
+            "privacy_notice_url",
+        )
+        == tuple(required)
+    )
 
 
 def test_required_unset_is_empty_once_every_required_setting_is_set(
     units: UnitOfWorkFactory, setup: Setup
 ) -> None:
-    save(units, setup, {"sender_timezone": "Europe/London", "alert_chat_id": "-1001234567890"})
+    save(
+        units,
+        setup,
+        {"sender_timezone": "Europe/London", "alert_chat_id": "-1001234567890", **FOOTER_SET},
+    )
 
     assert required_unset(units) == ()
 
@@ -352,7 +376,7 @@ def test_required_unset_is_empty_once_every_required_setting_is_set(
 def test_required_unset_counts_a_stored_text_that_no_longer_parses(
     units: UnitOfWorkFactory, setup: Setup, db_engine: Engine
 ) -> None:
-    save(units, setup, {"alert_chat_id": "-1001234567890"})
+    save(units, setup, {"alert_chat_id": "-1001234567890", **FOOTER_SET})
     insert_row(db_engine, "sender_timezone", "Mars/Base")
 
     assert required_unset(units) == ("sender_timezone",)

@@ -157,6 +157,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "retracted_at",
         ),
     },
+    "footer_snapshots": {
+        "drafting": ("id", "market_id", "sha256", "text", "created_at"),
+    },
     "jobs": {
         "jobqueue": (
             "id",

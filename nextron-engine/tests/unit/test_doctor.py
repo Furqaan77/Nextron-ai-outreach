@@ -75,7 +75,18 @@ PLANTED = (
 )
 GRANTED_AT = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
 NOTIFY = grant_spec(GoogleGrant.INTERNAL_NOTIFY)
-SETTINGS = {"sender_timezone": "Europe/London", "alert_chat_id": "-1001234567890"}
+FOOTER_SETTINGS = {  # the required footer settings (Story 4.11)
+    "sender_signature": "Furqaan, Nextron AI",
+    "legal_name": "Nextron AI Ltd",
+    "postal_address": "1 Example Street, London EC1A 1AA",
+    "privacy_notice_url": "https://nextronai.com/privacy",
+}
+SETTINGS = {
+    "sender_timezone": "Europe/London",
+    "alert_chat_id": "-1001234567890",
+    **FOOTER_SETTINGS,
+}
+FOOTER_UNSET = ("sender_signature", "legal_name", "postal_address", "privacy_notice_url")
 
 type Results = dict[str, tuple[str, str]]
 
@@ -311,7 +322,9 @@ def test_a_fresh_install_fails_on_what_it_lacks_and_creates_nothing(data_dir: Pa
     }
     assert results["required_settings"][1] == (
         "required settings not set or no longer valid: Sender's timezone (sender_timezone), "
-        "Telegram alert chat id (alert_chat_id); set them on the Settings page"
+        "Telegram alert chat id (alert_chat_id), Sender signature (sender_signature), "
+        "Legal name (legal_name), Postal address (postal_address), "
+        "Privacy notice URL (privacy_notice_url); set them on the Settings page"
     )
     assert "will be created and migrated on next start" in results["database_revision"][1]
     assert "not imported" in results["internal_notify_grant"][1]
@@ -633,7 +646,7 @@ def test_an_unreadable_credential_manager_fails_the_grant(healthy: Path) -> None
 
 
 def test_an_unset_required_setting_fails_naming_it(data_dir: Path) -> None:
-    make_database(data_dir, {"sender_timezone": "Europe/London"})
+    make_database(data_dir, {"sender_timezone": "Europe/London", **FOOTER_SETTINGS})
 
     code, results = run_doctor()
 
@@ -896,7 +909,7 @@ def test_the_doctor_database_never_creates_a_missing_file(tmp_path: Path) -> Non
     database = main.DoctorDatabase(path)
 
     assert not database.exists()
-    assert database.required_unset() == ("sender_timezone", "alert_chat_id")
+    assert database.required_unset() == ("sender_timezone", "alert_chat_id", *FOOTER_UNSET)
     assert not path.parent.exists()  # no engine was needed
     path.parent.mkdir()
     with pytest.raises(OperationalError, match="unable to open database file"):
