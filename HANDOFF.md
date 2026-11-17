@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`) and **Story 2.2** (merge `8b32024`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`) and **Story 4.1** (merge `8a32d7a`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -119,9 +119,23 @@ Main after both merges: 5017 tests, 29 contracts.
 
 Main after these merges: **6789 tests, 29 contracts.**
 
+**Story 1.18 result:** a monthly restore test, plus "Run restore test now" on the health panel.
+- It decrypts the newest off-PC copy into `<backup dir>\restore_test\` and checks it read-only: SHA-256, integrity, revision at head, and protected-table counts.
+- It records the result in `restore_tests` (migration `0012_1_18_restore_tests`) and deletes the work folder.
+- A failure alerts `restore_test_failed` and shows on the panel.
+- The live database is never touched.
+
+**Story 4.1 result:** `seed/sequences.yaml` holds the default four-Step Sequence and its Step briefs (asks from PRD FR-4, word limits, link and subject rules). Law Step 2 has an ABA 512 angle for the US and an SRA angle for the UK.
+- It syncs in the same `nextron seed sync` transaction, into `sequences` and `step_briefs` (migration `0013_4_1_sequences`).
+- A compliance floor in code: no price, no audit offer, Step 1 on day 0 with footer-only links and a subject under 7 words.
+
+**Fix:** the flaky job-runner shutdown tests were made deterministic (merge `496e2ba`; test-only change).
+
+Main now: **7343 tests, 29 contracts.**
+
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 21 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 23 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -168,6 +182,13 @@ Main after these merges: **6789 tests, 29 contracts.**
   - a conflicting key on a candidate is dropped;
   - a closed duplicate turns a `won` Lead `lost`;
   - a sole trader's firm name in `leads.name` isn't erased with their Contact.
+- **Story 1.18:**
+  - the daily not-due check shows as a fresh `restore_test` success on the panel;
+  - one transient failure (e.g. the off-PC drive unplugged at the slot) uses up that month's test until you click "Run restore test now".
+- **Story 4.1:**
+  - check the Step brief wording in `seed/sequences.yaml` against the Sales Playbook;
+  - the ABA 512 / SRA detectors miss some spellings ("Op. 512", "S.R.A.");
+  - brief text isn't scanned for price wording.
 - **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
