@@ -22,8 +22,10 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   by key; ``segment(key)``: one, or ``None``. ``definition`` is the ``SegmentDef`` decoded by
   ``nextron.domain.segments.segment_from_text``, which raises ``InvalidSegments`` for a stored
   text that no longer validates. Research, scoring and drafting (Stories 2.2 onwards) read the
-  Segments only through these two. ``segment_ids()``: every stored Segment's id, a
-  ``frozenset`` (``Discovery.upsert_lead`` checks a candidate's Segment against it).
+  Segments only through these two and ``segment_by_id(segment_id)`` (Story 2.9: the Segment
+  with that row id, or ``None``, a text that isn't a ULID included; a Lead names its Segment by
+  id). ``segment_ids()``: every stored Segment's id, a ``frozenset`` (``Discovery.upsert_lead``
+  checks a candidate's Segment against it).
 - ``markets()``: every stored Market as a ``SeededMarket(id, code, version, definition)``, by
   code; ``market(code)``: one, or ``None``. ``definition`` is the
   ``nextron.domain.markets.MarketDef`` the ``markets`` repository decodes through
@@ -72,6 +74,7 @@ from nextron.db.repos.setup.segments import StoredSegment
 from nextron.db.repos.setup.sequences import StoredSequence
 from nextron.domain.budget import QUOTAS, Limits
 from nextron.domain.campaign import CampaignStatus, Lia, StepAngleNote, VariantStatus, may_run
+from nextron.domain.ids import is_ulid
 from nextron.domain.markets import MarketDef
 from nextron.domain.offers import OfferDef
 from nextron.domain.render import FOOTER_SETTING_KEYS, FooterSettings
@@ -177,6 +180,14 @@ def segment_ids() -> frozenset[str]:
 def segment(key: str) -> SeededSegment | None:
     """The stored Segment ``key``, or ``None``."""
     stored = segments_repo.by_key(key)
+    return None if stored is None else _seeded(stored)
+
+
+def segment_by_id(segment_id: str) -> SeededSegment | None:
+    """The stored Segment with the row id ``segment_id``, or ``None``."""
+    if not is_ulid(segment_id):
+        return None
+    stored = segments_repo.get(segment_id)
     return None if stored is None else _seeded(stored)
 
 

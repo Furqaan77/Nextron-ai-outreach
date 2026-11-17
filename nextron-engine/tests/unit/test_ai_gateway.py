@@ -1015,14 +1015,14 @@ def test_the_scripted_fake_refuses_what_the_gateway_refuses_without_using_its_sc
     assert fake.calls == [] and list(fake.script) == [ok]
 
 
-# Nothing builds it yet --------------------------------------------------------------------------
+# Only build_app builds it -----------------------------------------------------------------------
 
 
 def test_the_composition_root_imports_neither_the_gateway_nor_the_sdk() -> None:
     """Importing ``nextron.main`` loads neither the AI package nor the SDK, so ``doctor``,
     ``open`` and ``seed sync`` stay quick. ``serve`` imports the routes table inside
-    ``load_prompts`` (Story 2.8) and still builds no AI or HTTP client; Story 2.9 adds the first
-    caller."""
+    ``load_prompts`` (Story 2.8), and ``build_app`` imports the gateway inside the function and
+    builds it lazily (Story 2.9): building it makes no HTTP client and no call."""
     code = (
         "import sys, nextron.__main__, nextron.main\n"
         "print(sorted(name for name in sys.modules\n"

@@ -41,6 +41,10 @@ handler runs in.
 - ``canonicalize_lead(discovery)`` (Story 2.5): calls ``discovery().canonicalize_lead(lead_id,
   run_id)`` once.
 - ``purge_page_text(research)`` (Story 2.5): calls ``research().purge_page_text()`` once.
+- ``extract_lead(extractions)`` (Story 2.9): calls ``extractions().extract_lead(lead_id,
+  run_id)`` once (the research service's ``SignalExtractions``) and returns ``DEFERRED`` when it
+  returns ``False`` (the budget refused the call). A retryable ``AdapterError`` it raises is
+  retried by the runner; any other error fails the job.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -202,3 +206,23 @@ def purge_page_text(research: Callable[[], PurgingPageText]) -> Handler:
         research().purge_page_text()
 
     return handle_purge_page_text
+
+
+class Extracting(Protocol):
+    """What ``extract_lead`` needs of the ``research`` service's ``SignalExtractions``."""
+
+    def extract_lead(self, lead_id: str, run_id: str) -> bool: ...
+
+
+def extract_lead(extractions: Callable[[], Extracting]) -> Handler:
+    """The ``extract_lead`` job's handler: extract the payload's Lead's Signals through
+    ``extractions()``."""
+
+    def handle_extract_lead(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        run_id = _ulid_field(job, RUN_ID_FIELD)
+        if not extractions().extract_lead(lead_id, run_id):
+            return DEFERRED
+        return None
+
+    return handle_extract_lead

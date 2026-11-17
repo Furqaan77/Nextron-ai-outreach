@@ -127,8 +127,9 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``queries.discovery.survivor_of``: ``None`` (not a ULID, unknown, a broken or over-long merge
   chain) answers 404 with ``lead_missing.html``, a merged Lead a 303 ``RedirectResponse`` to
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
-  ``queries.setup.segments``, ``queries.research.contacts`` and
-  ``queries.research.lead_provenance``.
+  ``queries.setup.segments``, ``queries.research.contacts``,
+  ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
+  Evidence and the headquarters zone).
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -186,6 +187,7 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research.extraction import LeadSignals
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Campaigns,
@@ -387,6 +389,7 @@ def create_app(
     restore_tests: RestoreTests,
     lead_imports: LeadImports,
     sending: Sending,
+    lead_signals: LeadSignals,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -401,7 +404,8 @@ def create_app(
     ``health`` gives the health panel its report and the notification area its error count;
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
-    ``sending`` registers the Sending Inboxes panel's inboxes.
+    ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
+    page its Signals, Evidence and headquarters zone.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1073,6 +1077,7 @@ def create_app(
             setup_queries.segments(),
             research_queries.contacts(found.id),
             research_queries.lead_provenance(found.id),
+            lead_signals.view(found.id),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 

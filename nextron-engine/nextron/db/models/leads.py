@@ -11,7 +11,12 @@ Two owners write it, column by column (``nextron.db.owners``):
   ``fk_leads_merged_into_leads``; ``ck_leads_not_self_merged``) and ``created_at``;
 - the pipeline group, owner ``pipeline`` (``nextron.db.repos.pipeline.stages``):
   ``pipeline_stage``, server default ``new``, one of the stages of
-  ``nextron.domain.pipeline_stage`` (``ck_leads_pipeline_stage``).
+  ``nextron.domain.pipeline_stage`` (``ck_leads_pipeline_stage``);
+- the profile group, owner ``research`` (``nextron.db.repos.research.profile``; Story 2.9,
+  migration ``0025_2_9_signals_evidence``): ``hq_tz``, the IANA zone of the Lead's
+  headquarters, and ``hq_evidence_id``, the ``evidence`` row it comes from, both nullable and
+  kept NULL together by the code (no CHECK, because the columns were added in place). The
+  Evidence id has no foreign key: one would make a ``leads``/``evidence`` cycle.
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because two owners write the row. Every column is
@@ -33,6 +38,7 @@ CH_NUMBER_LENGTH: Final = 8
 PLACE_ID_LENGTH: Final = 512
 COUNTRY_CODE_LENGTH: Final = 2
 STAGE_LENGTH: Final = 32
+HQ_TZ_LENGTH: Final = 64
 
 STAGE_CHECK: Final = "pipeline_stage IN ({})".format(
     ",".join(f"'{stage}'" for stage in PipelineStage)
@@ -71,3 +77,5 @@ class LeadRecord(Base):
     pipeline_stage: Mapped[str] = mapped_column(
         String(STAGE_LENGTH), server_default=text("'new'")
     )
+    hq_tz: Mapped[str | None] = mapped_column(String(HQ_TZ_LENGTH))
+    hq_evidence_id: Mapped[str | None] = mapped_column(Ulid)

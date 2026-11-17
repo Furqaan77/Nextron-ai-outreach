@@ -108,7 +108,7 @@ is unresolved. ``build_job_types(..., contact_markets=lambda: contact_markets)``
 registry cycle as for ``backups``.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
-contact_markets, crawls, discovery, research)`` is the job type registry: the only
+contact_markets, crawls, discovery, research, extractions)`` is the job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -127,7 +127,9 @@ trigger), and Story 2.5's ``enrich_lead`` (the bulk lane by default, or interact
 ``enrichment``), ``canonicalize_lead`` (bulk by default, or interactive, priority 45, 2 minutes,
 retry limit 2, ``handlers.canonicalize_lead(discovery)``, ``enrichment``) and
 ``purge_page_text`` (bulk only, priority 20, 10 minutes, retry limit 2,
-``handlers.purge_page_text(research)``, ``other``).
+``handlers.purge_page_text(research)``, ``other``), and Story 2.9's ``extract_lead`` (bulk by
+default, or interactive, priority 45, 15 minutes, retry limit 3,
+``handlers.extract_lead(extractions)``, ``enrichment``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -138,6 +140,15 @@ queue)`` runs the ``enrich_lead`` jobs, ``Discovery(clock, Pipeline(clock), queu
 ``canonicalize_lead`` jobs and ``Research(clock)`` the ``purge_page_text`` jobs; the registry
 reaches them through ``crawls=lambda: crawls``, ``discovery=lambda: discovery`` and
 ``research=lambda: research``, which break the same cycle as ``notify``.
+
+**Signals and Evidence (Story 2.9, AD-8, AD-18).** ``build_app(..., llm=None)`` builds one
+``ClaudeGateway(secrets, meter=meter)`` (``nextron.adapters.ai``, imported inside the function, so
+importing this module still loads neither the AI package nor the SDK) unless an ``llm=`` is
+injected; building it builds no HTTP client and makes no call. ``SignalExtractions(clock, meter,
+llm, research)`` (``nextron.app.research.extraction``) runs the ``extract_lead`` jobs that the
+crawl enqueues, reached through ``extractions=lambda: extractions``, and the dashboard gets
+``LeadSignals(clock)`` (``create_app(..., lead_signals=...)``) for the Lead page's Signals and
+Evidence.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -548,6 +559,7 @@ from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
+from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Campaigns,
@@ -595,6 +607,7 @@ from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB
 from nextron.domain.crawl import CANONICALIZE_LEAD_JOB, ENRICH_LEAD_JOB, PURGE_PAGE_TEXT_JOB
+from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
@@ -640,6 +653,7 @@ from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
+from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
@@ -782,6 +796,7 @@ def build_app(
     backup_targets: BackupTargets | None = None,
     recovery_steps: RecoverySteps | None = None,
     crawler: CrawlerPort | None = None,
+    llm: LlmPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -807,7 +822,10 @@ def build_app(
     the lifespan's startup step (``queue_contact_markets``, after the recovery startup pass)
     queues while any Contact is unresolved. The
     website crawl fetches through ``crawler`` (``HttpCrawler(meter=meter)`` unless injected),
-    which builds its HTTP client on its first fetch."""
+    which builds its HTTP client on its first fetch. The Signal extraction calls Claude through
+    ``llm`` (``ClaudeGateway(secrets, meter=meter)`` unless injected, imported here so that
+    importing this module loads no AI package), which builds its HTTP client on its first
+    call."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -826,8 +844,8 @@ def build_app(
         Recovery(clock),
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
-    # notify, backups, restore_tests, contact_markets, crawls, discovery and research are
-    # bound just below
+    # notify, backups, restore_tests, contact_markets, crawls, discovery, research and
+    # extractions are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -837,6 +855,7 @@ def build_app(
         crawls=lambda: crawls,
         discovery=lambda: discovery,
         research=lambda: research,
+        extractions=lambda: extractions,
     )
     queue = JobQueue(clock, job_types)
     crawls = WebsiteCrawls(
@@ -844,6 +863,11 @@ def build_app(
     )
     discovery = Discovery(clock, Pipeline(clock), queue)
     research = Research(clock)
+    if llm is None:
+        from nextron.adapters.ai import ClaudeGateway  # noqa: PLC0415 - kept out of import time
+
+        llm = ClaudeGateway(secrets, meter=meter)
+    extractions = SignalExtractions(clock, meter, llm, research)
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -903,6 +927,7 @@ def build_app(
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=Sending(clock, env=config.env),
+        lead_signals=LeadSignals(clock),
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -948,6 +973,7 @@ def build_job_types(
     crawls: Callable[[], handlers.Crawling],
     discovery: Callable[[], handlers.Canonicalizing],
     research: Callable[[], handlers.PurgingPageText],
+    extractions: Callable[[], handlers.Extracting],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -957,8 +983,9 @@ def build_job_types(
     ``check_recovery`` jobs call, ``contact_markets`` the ``research`` service's
     ``ContactMarkets`` that ``resolve_contact_markets`` jobs call, ``crawls`` its
     ``WebsiteCrawls`` that ``enrich_lead`` jobs call, ``discovery`` the ``discovery`` service
-    that ``canonicalize_lead`` jobs call, and ``research`` the ``research`` service that
-    ``purge_page_text`` jobs call."""
+    that ``canonicalize_lead`` jobs call, ``research`` the ``research`` service that
+    ``purge_page_text`` jobs call, and ``extractions`` its ``SignalExtractions`` that
+    ``extract_lead`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1059,6 +1086,19 @@ def build_job_types(
             retry_limit=2,
             handler=handlers.purge_page_text(research),
             group=JobGroup.OTHER,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=EXTRACT_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            # one Claude call on up to 180,000 characters, then the apply transaction
+            max_runtime=timedelta(minutes=15),
+            retry_limit=3,
+            handler=handlers.extract_lead(extractions),
+            group=JobGroup.ENRICHMENT,
         )
     )
     job_types.freeze()

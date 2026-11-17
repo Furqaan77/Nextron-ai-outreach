@@ -9,7 +9,8 @@ the running use case's transaction. It stores and returns what it is given and c
 - ``StoredCrawlRun``, ``StoredPage`` (its ``text`` never shows in the ``repr``) and
   ``StoredAtsLink``: one row of each table.
 - ``insert_run(...) -> id``; ``run(run_id)``; ``latest_run(lead_id)``: the Lead's run started
-  last (then the greatest id), or ``None``.
+  last (then the greatest id), or ``None``; ``run_count(lead_id)``: how many runs the Lead
+  holds (Story 2.9: the revision of its ``extract_lead`` job).
 - ``page(lead_id, url)``; ``pages(lead_id)``, by URL; ``insert_page(...) -> id``;
   ``update_page(page_id, ...)``: a new fetch of a stored page.
 - ``ats_link(lead_id, url)``; ``ats_links(lead_id)``, by URL; ``insert_ats_link(...) -> id``;
@@ -24,7 +25,7 @@ the running use case's transaction. It stores and returns what it is given and c
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 from sqlalchemy.orm import aliased
@@ -183,6 +184,14 @@ def run(run_id: str) -> StoredCrawlRun | None:
 def latest_run(lead_id: str) -> StoredCrawlRun | None:
     """The Lead's run started last, or ``None``."""
     return _one_run(CrawlRunRecord.lead_id == lead_id)
+
+
+def run_count(lead_id: str) -> int:
+    """How many crawl runs the Lead holds."""
+    statement = (
+        select(func.count()).select_from(CrawlRunRecord).where(CrawlRunRecord.lead_id == lead_id)
+    )
+    return int(current().session.execute(statement).scalar_one())
 
 
 # Pages ----------------------------------------------------------------------------------------

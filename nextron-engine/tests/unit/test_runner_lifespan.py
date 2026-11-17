@@ -219,6 +219,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "enrich_lead",
         "canonicalize_lead",
         "purge_page_text",
+        "extract_lead",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -523,6 +524,7 @@ def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
         crawls=no_crawls,
         discovery=no_crawls,
         research=no_crawls,
+        extractions=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -723,6 +725,7 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
         crawls=no_crawls,
         discovery=no_crawls,
         research=no_crawls,
+        extractions=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 

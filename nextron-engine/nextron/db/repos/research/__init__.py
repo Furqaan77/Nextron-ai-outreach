@@ -3,5 +3,7 @@
 Only ``nextron.app.research`` and ``nextron.app.queries.research`` import this package (contract
 group 7): ``contacts`` (the ``contacts`` table) and ``provenance`` (``provenance_records``).
 ``crawl`` (Story 2.5) is the repository of the ``crawl_runs``, ``crawled_pages`` and
-``ats_links`` tables.
+``ats_links`` tables. ``signals`` (Story 2.9) is the repository of ``evidence``, ``signals``,
+``signal_evidence`` and ``extraction_runs``, and ``profile`` of the ``leads`` profile group
+(``hq_tz``, ``hq_evidence_id``).
 """

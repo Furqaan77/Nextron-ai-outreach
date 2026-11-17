@@ -38,9 +38,29 @@ source's label; the detail; the retrieval date; the Address Class or "—"). A m
 answers 303 to its survivor's; a text that isn't a ULID, an unknown id or a broken merge chain
 answers 404 with ``lead_missing.html``, which never echoes the id.
 
-``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source; a stored value
-neither knows renders as its own text. Every Lead, Contact and Provenance text renders through
-``|plain`` or ``safe_link`` inside an element carrying ``hx-disable``.
+**Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
+``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
+
+- the header's "HQ timezone" is the Lead's ``hq_tz``, or "—";
+- one ``SignalRow`` per current Signal, first seen first: its type's name (from the Segment,
+  else the key), "Event" or "Attribute", "Tier <n>", its event date or "first seen <date>", its
+  age ("<n> days", "1 day"), "Live" or "Expired", and "Score only" for a score-only Signal
+  (else empty); "No Signals yet." when there are none;
+- one ``EvidenceRow`` per live Evidence row, oldest first: its type ("Quote", "Absence",
+  "Count"), its quote, or what was sought ("Sought: <what>") or counted ("Counted: <what>:
+  <n>") with the pages checked (each a ``safe_link``), what it supports (the names of the
+  Signals it supports, joined with "; ", else its fact as "<label>: <value or number>", else
+  "—"), its source URL (a ``safe_link``, or "—"), its retrieval time (``YYYY-MM-DD HH:MM UTC``)
+  and "AI-extracted" when ``extracted_by`` starts with ``ai:`` (else "—"); "No Evidence yet."
+  when there is none.
+
+Neither section holds an HTMX action.
+
+``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source,
+``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every Signal class, Evidence type
+and fact kind; a stored value none knows renders as its own text. Every Lead, Contact,
+Provenance, Signal and Evidence text renders through ``|plain`` or ``safe_link`` inside an
+element carrying ``hx-disable``.
 """
 
 import re
@@ -53,10 +73,18 @@ from typing import Final
 from urllib.parse import urlencode
 
 from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
-from nextron.app.queries.research import StoredContact, StoredProvenance
+from nextron.app.queries.research import (
+    EvidenceSupport,
+    LeadSignalsView,
+    SignalStatus,
+    StoredContact,
+    StoredProvenance,
+)
 from nextron.app.queries.setup import SeededSegment
 from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
+from nextron.domain.extraction import FactKind
 from nextron.domain.pipeline_stage import PipelineStage
+from nextron.domain.segments import EvidenceType, SignalClass
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
@@ -77,8 +105,15 @@ UNKNOWN_SEGMENT: Final = "Unknown Segment"
 NO_LEADS: Final = "No Leads yet."
 NO_MATCHES: Final = "No Leads match these filters."
 DATE_FORMAT: Final = "%Y-%m-%d"
+TIME_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
 YES: Final = "Yes"
 NO: Final = "No"
+LIVE: Final = "Live"
+EXPIRED: Final = "Expired"
+SCORE_ONLY: Final = "Score only"
+AI_EXTRACTED: Final = "AI-extracted"
+AI_ACTOR_PREFIX: Final = "ai:"
+SUPPORTS_SEPARATOR: Final = "; "
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -113,6 +148,24 @@ SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
 )
 RECORD_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {ProvenanceSubject.CONTACT: "Contact", ProvenanceSubject.ADDRESS: "Address"}
+)
+CLASS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {SignalClass.EVENT: "Event", SignalClass.ATTRIBUTE: "Attribute"}
+)
+EVIDENCE_TYPE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {EvidenceType.QUOTE: "Quote", EvidenceType.ABSENCE: "Absence", EvidenceType.COUNT: "Count"}
+)
+FACT_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        FactKind.WHAT_WE_DO: "What it does",
+        FactKind.LOCATION: "Location",
+        FactKind.TECHNOLOGY: "Technology",
+        FactKind.LAWYERS_AT_OFFICE: "Lawyers at the office",
+        FactKind.LAWYERS_FIRM_WIDE: "Lawyers firm-wide",
+        FactKind.STAFF: "Staff",
+        FactKind.GROUP_STAFF: "Group staff",
+        FactKind.LOCATIONS: "Locations",
+    }
 )
 
 
@@ -353,6 +406,7 @@ class LeadHeader:
     country: str | None
     stage: str
     created: str
+    hq_tz: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,8 +436,40 @@ class ContactRow:
     records: tuple[ProvenanceRow, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SignalRow:
+    """One current Signal as the Lead page shows it."""
+
+    name: str
+    signal_class: str
+    tier: str
+    date: str
+    age: str
+    status: str
+    score_only: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRow:
+    """One live Evidence row as the Lead page shows it: its type, its quote or what was
+    sought or counted (with the number and the pages checked), what it supports, its source
+    URL, its retrieval time and whether AI extracted it."""
+
+    type: str
+    quote: str | None
+    sought: str | None
+    pages_checked: tuple[str, ...]
+    supports: str
+    source_url: str | None
+    retrieved: str
+    extraction: str
+
+
 def lead_header(
-    lead: StoredLead, stage: PipelineStage | None, names: Mapping[str, str]
+    lead: StoredLead,
+    stage: PipelineStage | None,
+    names: Mapping[str, str],
+    hq_tz: str | None = None,
 ) -> LeadHeader:
     """The Lead page's header facts."""
     domain = lead.web_domain
@@ -395,6 +481,75 @@ def lead_header(
         country=lead.country_code,
         stage=stage_label(stage),
         created=day(lead.created_at),
+        hq_tz=hq_tz,
+    )
+
+
+def moment(at: datetime) -> str:
+    """``at`` (aware UTC) as ``YYYY-MM-DD HH:MM UTC``."""
+    return format(at, TIME_FORMAT)
+
+
+def age_text(age: int) -> str:
+    """``<n> days``, or ``1 day``."""
+    return "1 day" if age == 1 else f"{age:,} days"
+
+
+def signal_row(status: SignalStatus) -> SignalRow:
+    """One current Signal as the Lead page shows it."""
+    signal = status.signal
+    return SignalRow(
+        name=status.name,
+        signal_class=CLASS_LABELS.get(signal.signal_class, signal.signal_class),
+        tier=f"Tier {signal.tier}",
+        date=(
+            f"first seen {day(signal.first_seen_at)}"
+            if signal.event_date is None
+            else format(signal.event_date, DATE_FORMAT)
+        ),
+        age=age_text(status.age),
+        status=LIVE if status.live else EXPIRED,
+        score_only=SCORE_ONLY if signal.score_only else "",
+    )
+
+
+def _supports(row: EvidenceSupport) -> str:
+    if row.supports:
+        return SUPPORTS_SEPARATOR.join(row.supports)
+    evidence = row.evidence
+    if evidence.fact is None:
+        return NO_VALUE
+    label = FACT_LABELS.get(evidence.fact, evidence.fact)
+    if evidence.value is not None:
+        return f"{label}: {evidence.value}"
+    if evidence.number is not None:
+        return f"{label}: {evidence.number:,}"
+    return label
+
+
+def _sought(row: EvidenceSupport) -> str | None:
+    evidence = row.evidence
+    if evidence.sought is None:
+        return None
+    if evidence.type == EvidenceType.COUNT:
+        number = NO_VALUE if evidence.number is None else f"{evidence.number:,}"
+        return f"Counted: {evidence.sought}: {number}"
+    return f"Sought: {evidence.sought}"
+
+
+def evidence_row(row: EvidenceSupport) -> EvidenceRow:
+    """One live Evidence row as the Lead page shows it."""
+    evidence = row.evidence
+    is_quote = evidence.type == EvidenceType.QUOTE
+    return EvidenceRow(
+        type=EVIDENCE_TYPE_LABELS.get(evidence.type, evidence.type),
+        quote=evidence.quote if is_quote else None,
+        sought=_sought(row),
+        pages_checked=() if is_quote else evidence.pages_checked,
+        supports=_supports(row),
+        source_url=evidence.source_url,
+        retrieved=moment(evidence.retrieved_at),
+        extraction=AI_EXTRACTED if evidence.extracted_by.startswith(AI_ACTOR_PREFIX) else NO_VALUE,
     )
 
 
@@ -430,11 +585,15 @@ def lead_context(
     segments: Iterable[SeededSegment],
     contacts: Iterable[StoredContact],
     provenance: Mapping[str, Iterable[StoredProvenance]],
+    signals: LeadSignalsView,
 ) -> dict[str, object]:
-    """What ``lead.html`` renders: the header and the Contacts (in the order given, oldest
-    first), each with its Provenance Records from ``provenance`` (by Contact id)."""
+    """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
+    given), and the Contacts (in the order given, oldest first), each with its Provenance
+    Records from ``provenance`` (by Contact id)."""
     return {
-        "lead": lead_header(lead, stage, segment_names(segments)),
+        "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
+        "signals": tuple(signal_row(status) for status in signals.signals),
+        "evidence": tuple(evidence_row(row) for row in signals.evidence),
         "contacts": tuple(
             contact_row(contact, provenance.get(contact.id, ())) for contact in contacts
         ),

@@ -7,6 +7,7 @@ returned; this module stores and returns it as it is and checks nothing.
 
 - ``all_segments()``: every row as a ``StoredSegment``, by key;
 - ``by_key(key)``: the row of ``key``, or ``None``;
+- ``get(segment_id)`` (Story 2.9): the row with that id, or ``None``;
 - ``segment_ids()``: every row's id;
 - ``insert(key, definition, at) -> id``: a new row at version 1, created and updated at ``at``;
 - ``update(segment_id, definition, version, at)``: sets the row's definition, version and
@@ -58,6 +59,13 @@ def all_segments() -> tuple[StoredSegment, ...]:
 def by_key(key: str) -> StoredSegment | None:
     """The stored Segment ``key``, or ``None`` when it has no row."""
     statement = select(*_COLUMNS).where(SegmentRecord.key == str(key))
+    row = current().session.execute(statement).one_or_none()
+    return None if row is None else StoredSegment(*row)
+
+
+def get(segment_id: str) -> StoredSegment | None:
+    """The stored Segment with the row id ``segment_id``, or ``None``."""
+    statement = select(*_COLUMNS).where(SegmentRecord.id == segment_id)
     row = current().session.execute(statement).one_or_none()
     return None if row is None else StoredSegment(*row)
 

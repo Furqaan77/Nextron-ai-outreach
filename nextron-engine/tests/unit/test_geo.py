@@ -1,7 +1,8 @@
 """``nextron.domain.geo`` (FR-2, AD-11; Story 3.2): the vendored US state table (its 51 rows, the
 multi-zone choices, read once and read-only), the malformed-table cases through
-``parse_us_state_zones``, ``Location``'s rules, ``location_zone`` and ``zone_country``.
-Standard library, pytest and ``nextron.domain`` only."""
+``parse_us_state_zones``, ``Location``'s rules, ``location_zone`` and ``zone_country``; and
+(Story 2.9) the table's names and ``place_in``'s place cases. Standard library, pytest and
+``nextron.domain`` only."""
 
 import dataclasses
 from pathlib import Path
@@ -17,6 +18,8 @@ from nextron.domain.geo import (
     Location,
     location_zone,
     parse_us_state_zones,
+    place_in,
+    us_state_names,
     us_state_zones,
     zone_country,
 )
@@ -264,3 +267,75 @@ def test_location_zone(country: str, region: str | None, zone: str | None) -> No
 )
 def test_zone_country(zone: str, country: str | None) -> None:
     assert zone_country(zone) == country
+
+
+# The place a text names (Story 2.9) -------------------------------------------------------------
+
+
+def test_the_state_names_come_from_the_same_table() -> None:
+    names = us_state_names()
+
+    assert set(names) == set(us_state_zones())
+    assert (names["NY"], names["DC"], names["WV"]) == (
+        "New York",
+        "District of Columbia",
+        "West Virginia",
+    )
+    assert us_state_names() is names
+    with pytest.raises(TypeError):
+        names["ZZ"] = "Nowhere"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("text", "place"),
+    [
+        # US: a state code after a comma, with or without a ZIP
+        ("Chicago, IL 60601", Location("US", "IL")),
+        ("Portland, OR 97201-1234", Location("US", "OR")),
+        ("Suite 200, Austin, TX.", Location("US", "TX")),
+        ("Washington, D.C.", Location("US", "DC")),
+        ("Washington D.C. 20001", Location("US", "DC")),
+        ("Washington, DC", Location("US", "DC")),
+        # full state names, longest first, any case
+        ("Based in Texas", Location("US", "TX")),
+        ("Charleston, West Virginia", Location("US", "WV")),
+        ("Headquartered in New York City", Location("US", "NY")),
+        ("ILLINOIS", Location("US", "IL")),
+        ("District of Columbia", Location("US", "DC")),
+        # a state code is preferred over full names
+        ("New York and Chicago, IL", Location("US", "IL")),
+        ("123 Washington Street, Boston, MA 02108", Location("US", "MA")),
+        # GB
+        ("London, UK", Location("GB")),
+        ("Leeds, U.K.", Location("GB")),
+        ("Manchester, United Kingdom", Location("GB")),
+        ("Glasgow, Scotland", Location("GB")),
+        ("Cardiff, Wales", Location("GB")),
+        ("Belfast, Northern Ireland", Location("GB")),
+        ("Offices across Great Britain", Location("GB")),
+        ("York, england", Location("GB")),
+        ("1 Poultry, London EC2R 8EJ", Location("GB")),
+        ("Manchester M1 1AE", Location("GB")),
+        ("London EC1A1BB", Location("GB")),
+        # not British
+        ("Offices across New England", None),
+        ("Sydney, New South Wales", None),
+        ("uk-based", None),  # lowercase: not the abbreviation
+        # unknown: both countries, two states, or nothing
+        ("Chicago, IL and London, UK", None),
+        ("Chicago, IL and Dallas, TX", None),
+        ("Texas and Ohio", None),
+        ("Offices on Washington Street, London, UK", None),  # a state name and the UK
+        ("Paris, France", None),
+        ("Smith, AB", None),  # not a state code
+        ("Smith & Jones, LLP", None),
+        ("", None),
+    ],
+)
+def test_place_in(text: str, place: Location | None) -> None:
+    assert place_in(text) == place
+
+
+def test_place_in_takes_a_str() -> None:
+    with pytest.raises(TypeError):
+        place_in(None)  # type: ignore[arg-type]

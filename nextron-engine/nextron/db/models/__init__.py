@@ -19,6 +19,7 @@ from nextron.db.models import (
     research,
     sending,
     setup,
+    signals,
 )
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
 from nextron.db.models.compliance import SuppressionEntryRecord, UnsubTokenRecord
@@ -52,6 +53,12 @@ from nextron.db.models.setup import (
     StepBriefRecord,
     VariantRecord,
 )
+from nextron.db.models.signals import (
+    EvidenceRecord,
+    ExtractionRunRecord,
+    SignalEvidenceRecord,
+    SignalRecord,
+)
 
 __all__ = [
     "AiRouteActivationRecord",
@@ -67,6 +74,8 @@ __all__ = [
     "CrawlRunRecord",
     "CrawledPageRecord",
     "EventRecord",
+    "EvidenceRecord",
+    "ExtractionRunRecord",
     "FooterSnapshotRecord",
     "HeartbeatRecord",
     "JobRecord",
@@ -83,6 +92,8 @@ __all__ = [
     "SendingInboxRecord",
     "SequenceRecord",
     "SettingRecord",
+    "SignalEvidenceRecord",
+    "SignalRecord",
     "StepBriefRecord",
     "SuppressionEntryRecord",
     "Ulid",
@@ -103,5 +114,6 @@ __all__ = [
     "research",
     "sending",
     "setup",
+    "signals",
     "ulid_pk",
 ]
