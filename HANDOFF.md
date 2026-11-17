@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`) and **Story 4.2** (merge `c511e23`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`) and **Story 4.11** (merge `8cd08e5`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -185,11 +185,23 @@ The User-Agent is `NextronBot/1.0`. It has never fetched a real website; it is t
 - A UK Campaign can't be activated without a recorded LIA, enforced by DB triggers.
 - Pause and resume.
 
-Main now: **10383 tests, 29 contracts.**
+**Story 3.3 result:** the Suppression List. It is the `suppression_entries` table (migration `0022_3_3_suppression_entries`), with hashed keys for address, domain, person and profile.
+- **Permanent:** DB triggers forbid deletes and key changes. Only `reply_rule` entries can be voided, and no-expiry is enforced by contract.
+- **One writer:** `Compliance.suppress` is the only code that can write it, and a contract fails on any other mention of the table.
+- **Closes the Lead:** an opt-out closes the Lead's pipeline as `lost`.
+
+**Story 4.11 result:** the compliance footer.
+- **Five settings:** `sender_signature`, `legal_name`, `postal_address`, `optout_line` and `privacy_notice_url`. Four are required, so doctor fails until they are set.
+- **Code:** `domain/render.py` builds and checks it. `footer_complete` lists what's missing, and sending will be blocked while anything is missing.
+- **UK privacy line:** it states where the details came from.
+- **Snapshots:** they go in `footer_snapshots`.
+- **Contract:** NFR-7 keeps the footer keys in their own section, and no footer text may name a price.
+
+Main now: **10923 tests, 29 contracts.**
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 33 are done (Story 3.3 is built and waiting to merge). Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 35 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -265,6 +277,14 @@ Main now: **10383 tests, 29 contracts.**
   - lawyer-bio pages can use up the 15-page budget;
   - EU Greenhouse and Lever boards aren't in `ats_hosts`;
   - http-only sites, and sites with bad certificates, are unreachable.
+- **Fill in the footer settings before any send** (Story 4.11): signature, legal name, postal address and privacy-notice URL. The opt-out line has a default.
+- **Story 3.3 items rejected only because they'd change the approved spec:**
+  - an opt-out from a `won` client closes the Lead as `lost`;
+  - a sole trader's own-name domain stays in plain text after erasure (OQ-A10);
+  - a repeat opt-out writes no new audit row.
+- **Story 4.11:**
+  - a UK Contact whose source has no privacy phrase (`operator`, `pattern`) can't be drafted;
+  - a future `booking_link` setting must relax the "exactly six footer keys" contract.
 - **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
