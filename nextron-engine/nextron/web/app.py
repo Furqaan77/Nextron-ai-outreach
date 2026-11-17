@@ -72,6 +72,17 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   again, with the Segment choices read in a read-only one: a refusal by its field, the summary
   above a fresh form, or a stopped import's summary above the form with the origin and default
   kept, always 200.
+- ``GET /leads`` (``pipeline_page``, the navigation's Leads/Pipeline section) and ``GET
+  /leads/{lead_id}`` (``lead_page``, registered after ``/leads/import``), both
+  ``@personal_data(True)``: the Leads list and the Lead page (Story 2.4); see
+  ``nextron.web.leads_page``. The list reads its query string through
+  ``leads_page.list_filters`` (a bad one is ``MalformedForm``, 400), then
+  ``queries.discovery.lead_list`` and ``queries.setup.segments``. The Lead page reads
+  ``queries.discovery.survivor_of``: ``None`` (not a ULID, unknown, a broken or over-long merge
+  chain) answers 404 with ``lead_missing.html``, a merged Lead a 303 ``RedirectResponse`` to
+  ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
+  ``queries.setup.segments``, ``queries.research.contacts`` and
+  ``queries.research.lead_provenance``.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -120,7 +131,10 @@ from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth
+from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import notify as notify_queries
+from nextron.app.queries import pipeline as pipeline_queries
+from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
     Credentials,
@@ -139,6 +153,7 @@ from nextron.web import credentials_page as credential_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
 from nextron.web import lead_import_page as import_rows
+from nextron.web import leads_page as lead_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
@@ -641,6 +656,40 @@ def create_app(
             )
             return import_answer(request, **context)
         return import_answer(request, **import_rows.form_context(summary=summary))
+
+    @app.get("/leads", name="pipeline_page")
+    @personal_data(True)  # a Lead's name can be a sole trader's name
+    def pipeline_page(request: Request) -> HTMLResponse:
+        segments = setup_queries.segments()
+        filters = lead_rows.list_filters(request.query_params.multi_items(), segments)
+        found = discovery_queries.lead_list(
+            stage=filters.stage,
+            segment_id=filters.segment_id,
+            search=filters.search,
+            page=filters.page,
+        )
+        context = lead_rows.list_context(filters, found, segments)
+        return page(request, lead_rows.LIST_TEMPLATE, **context)
+
+    # after /leads/import, so that path stays the import page
+    @app.get("/leads/{lead_id}", name="lead_page")
+    @personal_data(True)
+    def lead_page(request: Request, lead_id: str) -> Response:
+        found = discovery_queries.survivor_of(lead_id)
+        if found is None:  # never echoes the id
+            missing = page(request, lead_rows.MISSING_TEMPLATE)
+            missing.status_code = 404
+            return missing
+        if found.id != lead_id:
+            return RedirectResponse(f"/leads/{found.id}", status_code=303, headers=NO_STORE)
+        context = lead_rows.lead_context(
+            found,
+            pipeline_queries.stage(found.id),
+            setup_queries.segments(),
+            research_queries.contacts(found.id),
+            research_queries.lead_provenance(found.id),
+        )
+        return page(request, lead_rows.LEAD_TEMPLATE, **context)
 
     require_declared(app)
     require_route_rules(app)

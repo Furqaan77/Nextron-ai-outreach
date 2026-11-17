@@ -14,14 +14,23 @@ nothing; ``nextron.app.discovery`` does.
 - ``insert(...) -> id``: a new row; ``pipeline_stage`` is left to its server default (``new``);
 - ``set_keys(lead_id, **keys)``: sets the named key columns;
 - ``mark_merged(loser_id, survivor_id, cleared_keys)``: sets ``merged_into`` and clears each
-  key column named in ``cleared_keys``, in one statement.
+  key column named in ``cleared_keys``, in one statement;
+- ``ListedLead``, ``listed(*, stage, segment_id, search, limit, offset)`` and
+  ``count_listed(*, stage, segment_id, search)`` (Story 2.4): the Leads list's page of rows
+  and their count. Both keep only Leads that aren't merged (``merged_into IS NULL``) and, for
+  each argument that isn't ``None``, those at ``pipeline_stage == stage``, those in
+  ``segment_id``, and those whose name or ``web_domain`` contains ``search`` (SQLite ``LIKE``,
+  so ASCII letters ignore case; ``%``, ``_`` and the escape character are matched literally).
+  ``listed`` orders newest first (``created_at DESC, id DESC``). They read the pipeline
+  group's ``pipeline_stage`` column of the same rows, read-only, so the stage filter and the
+  paging stay in one statement; only ``nextron.db.repos.pipeline.stages`` writes it (AD-3).
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
@@ -130,3 +139,75 @@ def mark_merged(loser_id: str, survivor_id: str, cleared_keys: tuple[str, ...]) 
         .where(LeadRecord.id == loser_id)
         .values(merged_into=survivor_id, **values)
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ListedLead:
+    """One row of the Leads list: a Lead's identity facts and its Pipeline Stage as stored."""
+
+    id: str
+    name: str
+    web_domain: str | None
+    segment_id: str
+    country_code: str | None
+    pipeline_stage: str
+    created_at: datetime
+
+
+_LISTED_COLUMNS = (
+    LeadRecord.id,
+    LeadRecord.name,
+    LeadRecord.web_domain,
+    LeadRecord.segment_id,
+    LeadRecord.country_code,
+    LeadRecord.pipeline_stage,  # the pipeline group's column, read only
+    LeadRecord.created_at,
+)
+
+
+def _listed_where(
+    *, stage: str | None, segment_id: str | None, search: str | None
+) -> list[ColumnElement[bool]]:
+    conditions: list[ColumnElement[bool]] = [LeadRecord.merged_into.is_(None)]
+    if stage is not None:
+        conditions.append(LeadRecord.pipeline_stage == stage)
+    if segment_id is not None:
+        conditions.append(LeadRecord.segment_id == segment_id)
+    if search is not None:
+        conditions.append(
+            or_(
+                LeadRecord.name.contains(search, autoescape=True),
+                LeadRecord.web_domain.contains(search, autoescape=True),
+            )
+        )
+    return conditions
+
+
+def listed(
+    *,
+    stage: str | None,
+    segment_id: str | None,
+    search: str | None,
+    limit: int,
+    offset: int,
+) -> tuple[ListedLead, ...]:
+    """At most ``limit`` Leads that aren't merged and match the filters, newest first, after
+    skipping ``offset``."""
+    statement = (
+        select(*_LISTED_COLUMNS)
+        .where(*_listed_where(stage=stage, segment_id=segment_id, search=search))
+        .order_by(LeadRecord.created_at.desc(), LeadRecord.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return tuple(ListedLead(*row) for row in current().session.execute(statement))
+
+
+def count_listed(*, stage: str | None, segment_id: str | None, search: str | None) -> int:
+    """How many Leads that aren't merged match the filters."""
+    statement = (
+        select(func.count())
+        .select_from(LeadRecord)
+        .where(*_listed_where(stage=stage, segment_id=segment_id, search=search))
+    )
+    return int(current().session.execute(statement).scalar_one())

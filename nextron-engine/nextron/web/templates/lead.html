@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{#- The Lead page (nextron.web.leads_page): the header facts, then each Contact with its
+    Provenance Records. Every Lead, Contact and Provenance text is imported or crawled: it
+    renders only through |plain or safe_link, inside an element carrying hx-disable. -#}
+{% block title %}Nextron: Lead{% endblock %}
+{%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
+{% block content %}
+<header class="lead-header" hx-disable>
+<h1>{{ lead.name|plain }}</h1>
+<dl class="lead-facts">
+<dt>Website</dt>
+<dd>{% if lead.website %}{{ safe_link(lead.website_url, lead.website) }}{% else %}No website on record{% endif %}</dd>
+<dt>Segment</dt>
+<dd>{{ lead.segment|plain }}</dd>
+<dt>Country</dt>
+<dd>{{ or_dash(lead.country) }}</dd>
+<dt>Pipeline Stage</dt>
+<dd>{{ lead.stage|plain }}</dd>
+<dt>Created</dt>
+<dd>{{ lead.created }}</dd>
+</dl>
+</header>
+<p><a href="/leads">All Leads</a></p>
+<section class="lead-contacts" aria-labelledby="contacts-heading">
+<h2 id="contacts-heading">Contacts</h2>
+{%- if not contacts %}
+<p>No Contacts yet.</p>
+{%- else %}
+<table class="lead-table contact-table" hx-disable>
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Email</th><th scope="col">Address Class</th><th scope="col">LinkedIn</th><th scope="col">Primary</th></tr>
+</thead>
+<tbody>
+{%- for contact in contacts %}
+<tr class="contact-row"><td>{{ or_dash(contact.name) }}</td><td>{{ or_dash(contact.role) }}</td><td>{{ or_dash(contact.email) }}</td><td>{{ or_dash(contact.address_class) }}</td><td>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td></tr>
+<tr class="provenance-row"><td colspan="6">
+{%- if contact.records %}
+<table class="provenance-table">
+<thead>
+<tr><th scope="col">Record</th><th scope="col">Source</th><th scope="col">Detail</th><th scope="col">Retrieved</th><th scope="col">Address Class</th></tr>
+</thead>
+<tbody>
+{%- for record in contact.records %}
+<tr><td>{{ record.record|plain }}{% if record.address %} {{ record.address|plain }}{% endif %}</td><td>{{ record.source|plain }}</td><td>{{ record.detail|plain }}</td><td>{{ record.retrieved }}</td><td>{{ or_dash(record.address_class) }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="no-provenance">No Provenance Record.</p>
+{%- endif %}
+</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>
+{% endblock %}

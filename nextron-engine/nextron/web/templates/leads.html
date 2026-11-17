@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{#- The Leads list (nextron.web.leads_page): the filter form, the count line, the table and the
+    pager. The filter form is a native GET form: no hx-post and no csrf_field(), so the session's
+    token never reaches a URL. A Lead's name and domain are imported or crawled text: they render
+    only through |plain, inside the table's hx-disable. -#}
+{% block title %}Nextron: Leads{% endblock %}
+{% block content %}
+<h1>Leads</h1>
+<p><a href="/leads/import">Import Leads from a CSV file</a></p>
+<form class="lead-filters" method="get" action="/leads" role="search">
+<div class="field">
+<label for="filter-stage">Pipeline Stage</label>
+<select id="filter-stage" name="stage">
+<option value=""{% if not stage_options|selectattr("selected")|list %} selected{% endif %}>All stages</option>
+{%- for option in stage_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="filter-segment">Segment</label>
+<select id="filter-segment" name="segment">
+<option value=""{% if not segment_options|selectattr("selected")|list %} selected{% endif %}>All Segments</option>
+{%- for option in segment_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="filter-q">Name or website</label>
+<input type="text" id="filter-q" name="q" maxlength="200" value="{{ search }}">
+</div>
+<div class="filter-actions">
+<button type="submit">Filter</button>
+{%- if filtered %}
+<a href="/leads">Clear filters</a>
+{%- endif %}
+</div>
+</form>
+<p class="lead-count" role="status">{{ count_text }}</p>
+{%- if rows %}
+<table class="lead-table" hx-disable>
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Website</th><th scope="col">Segment</th><th scope="col">Country</th><th scope="col">Stage</th><th scope="col">Created</th></tr>
+</thead>
+<tbody>
+{%- for row in rows %}
+<tr><td><a href="{{ row.href }}">{{ row.name|plain }}</a></td><td>{% if row.website %}{{ row.website|plain }}{% else %}—{% endif %}</td><td>{{ row.segment|plain }}</td><td>{% if row.country %}{{ row.country|plain }}{% else %}—{% endif %}</td><td>{{ row.stage|plain }}</td><td>{{ row.created }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if pager %}
+<nav class="pager" aria-label="Pages">
+{%- if pager.previous %}
+<a href="{{ pager.previous }}" rel="prev">Previous</a>
+{%- endif %}
+<span>Page {{ "{:,}".format(pager.page) }} of {{ "{:,}".format(pager.pages) }}</span>
+{%- if pager.next %}
+<a href="{{ pager.next }}" rel="next">Next</a>
+{%- endif %}
+</nav>
+{%- endif %}
+{% endblock %}

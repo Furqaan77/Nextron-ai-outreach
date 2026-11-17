@@ -1,0 +1,829 @@
+"""The Leads list (``GET /leads``) and the Lead page (``GET /leads/{lead_id}``) (Story 2.4;
+FR-51, FR-13, UX-DR17, UX-DR18, AD-3, AD-13) through ``Dashboard(units=...)`` on a temporary
+database at head with the real subscriber registry and the shipped Segments, the HTML parsed
+into a tree: every page row of the I/O matrix (the list, the filters, paging, bad parameters, a
+CSV-imported Lead's page, merged and missing Leads, hostile text, the empty cases),
+``no-store``, the lock without a session, the route order, the nav link, the label tables and
+the queries-only import rule."""
+
+import ast
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
+
+import pytest
+from sqlalchemy import Engine
+
+from nextron import main
+from nextron.app.discovery.api import Discovery
+from nextron.app.pipeline.api import Pipeline
+from nextron.app.queries.setup import SeededSegment
+from nextron.app.research.api import Research
+from nextron.app.setup.api import Setup
+from nextron.db.uow import UnitOfWorkFactory, current, use_case
+from nextron.domain import seed_yaml
+from nextron.domain.contacts import ContactCandidate, ProvenanceSource
+from nextron.domain.leads import LeadIdentity, LeadSource
+from nextron.domain.pipeline_stage import PipelineStage
+from nextron.domain.segments import validate_segments
+from nextron.web import leads_page
+from nextron.web.forms import MALFORMED_FORM
+from nextron.web.leads_page import SOURCE_LABELS, STAGE_LABELS
+from tests.asgi import Reply
+from tests.contracts.support import PACKAGE
+from tests.dashboard import Dashboard, upload
+from tests.fakes.clock import FrozenClock
+
+T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
+ORIGIN = "Law Society directory, Manchester"
+UNKNOWN = "01KA0000000000000000000000"  # a ULID no Lead has
+VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"})
+LIST_HEADER = ["Name", "Website", "Segment", "Country", "Stage", "Created"]
+CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary"]
+RECORD_HEADER = ["Record", "Source", "Detail", "Retrieved", "Address Class"]
+
+
+# The parsed page --------------------------------------------------------------------------------
+
+
+@dataclass(eq=False)
+class Node:
+    """One element: its tag, attributes, parent and children (elements and text)."""
+
+    tag: str
+    attrs: dict[str, str | None]
+    parent: "Node | None"
+    children: list["Node | str"] = field(default_factory=list)
+
+    def walk(self) -> Iterator["Node"]:
+        for child in self.children:
+            if isinstance(child, Node):
+                yield child
+                yield from child.walk()
+
+    def find_all(self, tag: str, **attrs: str) -> list["Node"]:
+        """Each descendant ``tag`` whose attributes include ``attrs`` (``class_`` matches one
+        class)."""
+        wanted = {key.rstrip("_"): value for key, value in attrs.items()}
+        found = []
+        for node in self.walk():
+            if node.tag != tag:
+                continue
+            if all(
+                value in (node.attrs.get("class") or "").split()
+                if key == "class"
+                else node.attrs.get(key) == value
+                for key, value in wanted.items()
+            ):
+                found.append(node)
+        return found
+
+    def find(self, tag: str, **attrs: str) -> "Node":
+        [found] = self.find_all(tag, **attrs)
+        return found
+
+    @property
+    def text(self) -> str:
+        parts: list[str] = []
+
+        def collect(node: Node) -> None:
+            for child in node.children:
+                if isinstance(child, Node):
+                    collect(child)
+                else:
+                    parts.append(child)
+
+        collect(self)
+        return " ".join("".join(parts).split())
+
+    def ancestors(self) -> Iterator["Node"]:
+        node = self.parent
+        while node is not None:
+            yield node
+            node = node.parent
+
+
+class Tree(HTMLParser):
+    """The page as a tree of ``Node``; ``texts`` holds each text with its element."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.root = Node("#root", {}, None)
+        self.texts: list[tuple[str, Node]] = []
+        self._open = self.root
+        self.feed(html)
+        self.close()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        node = Node(tag, dict(attrs), self._open)
+        self._open.children.append(node)
+        if tag not in VOID:
+            self._open = node
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open.children.append(Node(tag, dict(attrs), self._open))
+
+    def handle_endtag(self, tag: str) -> None:
+        node: Node | None = self._open
+        while node is not None and node is not self.root and node.tag != tag:
+            node = node.parent
+        if node is not None and node is not self.root and node.parent is not None:
+            self._open = node.parent
+
+    def handle_data(self, data: str) -> None:
+        self._open.children.append(data)
+        self.texts.append((data, self._open))
+
+    def find_all(self, tag: str, **attrs: str) -> list[Node]:
+        return self.root.find_all(tag, **attrs)
+
+    def find(self, tag: str, **attrs: str) -> Node:
+        return self.root.find(tag, **attrs)
+
+    @property
+    def text(self) -> str:
+        return self.root.text
+
+    def disabled(self, needle: str) -> list[bool]:
+        """For each text holding ``needle``: whether an ancestor carries ``hx-disable``."""
+        return [
+            any("hx-disable" in node.attrs for node in (element, *element.ancestors()))
+            for text, element in self.texts
+            if needle in text
+        ]
+
+
+def cells(row: Node) -> list[str]:
+    return [
+        cell.text for cell in row.children if isinstance(cell, Node) and cell.tag in ("td", "th")
+    ]
+
+
+def options_of(select: Node) -> list[Node]:
+    return select.find_all("option")
+
+
+def table_rows(table: Node) -> list[list[str]]:
+    """The rows of ``table`` itself (not of a table inside it), header first."""
+    found = []
+    for row in table.find_all("tr"):
+        nearest = next(node for node in row.ancestors() if node.tag == "table")
+        if nearest is table:
+            found.append(cells(row))
+    return found
+
+
+# The world --------------------------------------------------------------------------------------
+
+
+@dataclass
+class World:
+    """The dashboard on real units of work, with Discovery and Research to add Leads."""
+
+    dashboard: Dashboard
+    units: UnitOfWorkFactory
+    engine: Engine
+    clock: FrozenClock
+    cookie: bytes
+    discovery: Discovery
+    research: Research
+    law: str
+    ops: str
+
+    def transact[R](self, fn: Callable[[], R]) -> R:
+        @use_case
+        def caller() -> R:
+            with current().transaction():
+                return fn()
+
+        with self.units.open():
+            return caller()
+
+    def lead(
+        self,
+        name: str,
+        domain: str | None,
+        *,
+        minutes: int = 0,
+        segment: str | None = None,
+        country: str | None = "GB",
+        ch_number: str | None = None,
+    ) -> str:
+        self.clock.set(T + timedelta(minutes=minutes))
+        identity = LeadIdentity(
+            name,
+            segment or self.law,
+            web_domain=domain,
+            ch_number=ch_number,
+            country_code=country,
+        )
+        upserted = self.transact(lambda: self.discovery.upsert_lead(identity, LeadSource.CSV))
+        self.clock.set(T)
+        return upserted.lead_id
+
+    def merge(self, survivor: str, loser: str) -> None:
+        self.transact(lambda: self.discovery.merge(survivor, loser))
+
+    def add(
+        self,
+        lead_id: str,
+        candidate: ContactCandidate,
+        *,
+        detail: str = ORIGIN,
+        source: ProvenanceSource = ProvenanceSource.CSV,
+        seconds: int = 0,
+    ) -> str:
+        self.clock.set(T + timedelta(seconds=seconds))
+        added = self.transact(
+            lambda: self.research.add_contact(
+                lead_id, candidate, source=source, detail=detail, retrieved_at=T
+            )
+        )
+        self.clock.set(T)
+        return added.contact_id
+
+    def sql(self, statement: str, params: tuple[object, ...] = ()) -> list[Any]:
+        with self.engine.connect() as connection:
+            result = connection.exec_driver_sql(statement, params)
+            rows = result.all() if result.returns_rows else []
+            connection.commit()
+        return [tuple(row) for row in rows]
+
+    def stage(self, lead_id: str, stage: PipelineStage) -> None:
+        self.sql("UPDATE leads SET pipeline_stage = ? WHERE id = ?", (str(stage), lead_id))
+
+    def get(self, path: str, query: str = "") -> Reply:
+        return self.dashboard.get(path, cookie=self.cookie, query=query.encode())
+
+    def page(self, path: str, query: str = "") -> Tree:
+        reply = self.get(path, query)
+        assert reply.status == 200, reply
+        assert reply.header(b"cache-control") == b"no-store"
+        return Tree(reply.text)
+
+
+@pytest.fixture
+def world(db_engine: Engine) -> World:
+    clock = FrozenClock(T)
+    units = UnitOfWorkFactory(db_engine, main.build_subscribers(clock=clock))
+    segments = validate_segments(seed_yaml.parse(SHIPPED.read_text(encoding="utf-8")))
+    with units.open():
+        Setup(clock).sync_segments(segments)
+    dashboard = Dashboard(units=units, clock=FrozenClock(T))
+    cookie = dashboard.open_session()
+    discovery, research = Discovery(clock, Pipeline(clock)), Research(clock)
+    found = World(dashboard, units, db_engine, clock, cookie, discovery, research, "", "")
+    [(law,), (ops,)] = found.sql("SELECT id FROM segments ORDER BY key")
+    found.law, found.ops = law, ops
+    return found
+
+
+# The Leads list ---------------------------------------------------------------------------------
+
+
+def test_the_list_shows_each_lead_newest_first_without_merged_leads(world: World) -> None:
+    a = world.lead("Smith Law", "smith-law.co.uk", minutes=0)
+    b = world.lead("Smith Law LLP", "smithlaw.co.uk", minutes=1)
+    c = world.lead(
+        "Jones Ops", None, minutes=60 * 24, segment=world.ops, country=None, ch_number="12345678"
+    )
+    world.merge(a, b)
+    world.stage(a, PipelineStage.CALL_BOOKED)
+
+    page = world.page("/leads")
+
+    assert page.find("title").text == "Nextron: Leads"
+    assert page.find("h1").text == "Leads"
+    assert page.find("a", href="/leads/import").text == "Import Leads from a CSV file"
+    table = page.find("table", class_="lead-table")
+    assert "hx-disable" in table.attrs
+    assert table_rows(table) == [
+        LIST_HEADER,
+        ["Jones Ops", "—", "Ops-Automation", "—", "New", "2026-11-18"],
+        ["Smith Law", "smith-law.co.uk", "Law-PrivateAI", "GB", "Call booked", "2026-11-17"],
+    ]
+    links = [row.find("a").attrs["href"] for row in table.find_all("tr")[1:]]
+    assert links == [f"/leads/{c}", f"/leads/{a}"]
+    assert page.find("p", class_="lead-count").text == "Showing 1–2 of 2 Leads"
+    assert not page.find_all("nav", class_="pager")
+    assert not page.find("main").find_all("a", href="/leads")  # no filter: no "Clear filters"
+
+
+def test_the_filter_form_is_a_get_form_without_a_token(world: World) -> None:
+    page = world.page("/leads")
+
+    [form] = page.find_all("form")
+    assert form.attrs["method"] == "get"
+    assert form.attrs["action"] == "/leads"
+    assert "hx-post" not in form.attrs
+    assert not form.find_all("input", name="csrf_token")
+    names = [node.attrs["name"] for node in form.walk() if "name" in node.attrs]
+    assert names == ["stage", "segment", "q"]  # a named button would 400 every submission
+    reply = world.get("/leads")
+    form_html = reply.text[reply.text.index("<form") : reply.text.index("</form>")]
+    token = world.dashboard.csrf_token(world.cookie)
+    assert token in reply.text  # in <body hx-headers>, for HTMX
+    assert token not in form_html and "csrf" not in form_html.lower()
+    stage = form.find("select", name="stage")
+    options = [(o.attrs["value"], o.text, "selected" in o.attrs) for o in options_of(stage)]
+    assert options == [("", "All stages", True)] + [
+        (str(s), STAGE_LABELS[s], False) for s in PipelineStage
+    ]
+    segment = form.find("select", name="segment")
+    options = [(o.attrs["value"], o.text, "selected" in o.attrs) for o in options_of(segment)]
+    assert options == [
+        ("", "All Segments", True),
+        ("law_private_ai", "Law-PrivateAI", False),
+        ("ops_automation", "Ops-Automation", False),
+    ]
+    search = form.find("input", name="q")
+    assert (search.attrs["type"], search.attrs["maxlength"], search.attrs["value"]) == (
+        "text",
+        "200",
+        "",
+    )
+    assert form.find("label", **{"for": "filter-q"}).text == "Name or website"
+    assert form.find("button").text == "Filter"
+    assert page.find("p", class_="lead-count").text == "No Leads yet."
+
+
+def test_the_filters_keep_their_values(world: World) -> None:
+    a = world.lead("Smith_Law", "a.co.uk", minutes=0)
+    b = world.lead("SmithXLaw", "b.co.uk", minutes=1)
+    c = world.lead("Smith_Ops", "c.co.uk", minutes=2, segment=world.ops)
+    world.lead("Smith_Partners", "d.co.uk", minutes=3)  # still at New
+    for lead_id in (a, b, c):
+        world.stage(lead_id, PipelineStage.CONTACTED)
+
+    page = world.page("/leads", "stage=contacted&segment=law_private_ai&q=Smith_")
+
+    rows = table_rows(page.find("table", class_="lead-table"))
+    assert [row[0] for row in rows[1:]] == ["Smith_Law"]
+    assert page.find("p", class_="lead-count").text == "Showing 1–1 of 1 Lead"
+    selected = [o.attrs["value"] for o in page.find_all("option") if "selected" in o.attrs]
+    assert selected == ["contacted", "law_private_ai"]
+    assert page.find("input", name="q").attrs["value"] == "Smith_"
+    assert page.find("main").find("a", href="/leads").text == "Clear filters"
+
+
+def test_no_match_says_so(world: World) -> None:
+    world.lead("Smith Law", "smith-law.co.uk")
+
+    page = world.page("/leads", "q=nobody")
+
+    assert page.find("p", class_="lead-count").text == "No Leads match these filters."
+    assert not page.find_all("table")
+    assert page.find("main").find("a", href="/leads").text == "Clear filters"
+
+
+def test_blank_parameters_are_unset(world: World) -> None:
+    world.lead("Smith Law", "smith-law.co.uk")
+
+    page = world.page("/leads", "stage=&segment=+&q=+++&page=%09")
+
+    assert page.find("p", class_="lead-count").text == "Showing 1–1 of 1 Lead"
+    assert not page.find("main").find_all("a", href="/leads")
+
+
+def test_the_search_text_is_collapsed_and_escaped_in_its_value(world: World) -> None:
+    reply = world.get("/leads", "q=%22%3E%3Cscript%3Ex%3C%2Fscript%3E++a")
+
+    assert reply.status == 200
+    assert "<script>x" not in reply.text
+    assert Tree(reply.text).find("input", name="q").attrs["value"] == '"><script>x</script> a'
+
+
+def many(
+    world: World, count: int, *, name: str = "Firm {n:03}", domain: str = "firm{n}.co.uk"
+) -> list[str]:
+    """``count`` Leads, a minute apart, oldest first, in one transaction; ``name`` and
+    ``domain`` are formatted with ``n``."""
+
+    def add() -> list[str]:
+        ids = []
+        for n in range(count):
+            world.clock.set(T + timedelta(minutes=n))
+            identity = LeadIdentity(
+                name.format(n=n), world.law, web_domain=domain.format(n=n)
+            )
+            ids.append(world.discovery.upsert_lead(identity, LeadSource.CSV).lead_id)
+        world.clock.set(T)
+        return ids
+
+    return world.transact(add)
+
+
+def test_paging_keeps_the_filters(world: World) -> None:
+    ids = many(world, 51)
+    world.lead("Other", "other.co.uk", minutes=999, segment=world.ops)
+    query = "segment=law_private_ai&q=Firm+0"  # matches Firm 000 to Firm 050
+
+    first = world.page("/leads", query)
+    second = world.page("/leads", query + "&page=2")
+    past = world.page("/leads", query + "&page=9")
+
+    first_rows = table_rows(first.find("table", class_="lead-table"))
+    assert [row[0] for row in first_rows[1:]] == [f"Firm {n:03}" for n in range(50, 0, -1)]
+    hrefs = [a.attrs["href"] for a in first.find("table", class_="lead-table").find_all("a")]
+    assert hrefs == [f"/leads/{lead_id}" for lead_id in ids[:0:-1]]
+    assert first.find("p", class_="lead-count").text == "Showing 1–50 of 51 Leads"
+    pager = first.find("nav", class_="pager")
+    assert pager.text == "Page 1 of 2 Next"
+    [next_link] = pager.find_all("a")
+    href = next_link.attrs["href"] or ""
+    assert next_link.attrs["rel"] == "next"
+    assert urlsplit(href).path == "/leads"
+    assert parse_qsl(urlsplit(href).query) == [
+        ("segment", "law_private_ai"),
+        ("q", "Firm 0"),
+        ("page", "2"),
+    ]
+    rows = table_rows(second.find("table", class_="lead-table"))
+    assert [row[0] for row in rows[1:]] == ["Firm 000"]
+    assert second.find("p", class_="lead-count").text == "Showing 51–51 of 51 Leads"
+    pager = second.find("nav", class_="pager")
+    assert pager.text == "Previous Page 2 of 2"
+    assert pager.find("a").attrs["rel"] == "prev"
+    assert parse_qsl(urlsplit(pager.find("a").attrs["href"] or "").query)[-1] == ("page", "1")
+    assert table_rows(past.find("table", class_="lead-table")) == rows
+    assert past.find("p", class_="lead-count").text == "Showing 51–51 of 51 Leads"
+    pager = past.find("nav", class_="pager")
+    assert pager.text == "Previous Page 2 of 2"
+    assert parse_qsl(urlsplit(pager.find("a").attrs["href"] or "").query) == [
+        ("segment", "law_private_ai"),
+        ("q", "Firm 0"),
+        ("page", "1"),
+    ]
+
+
+def follow(world: World, href: str | None) -> Tree:
+    """The page at ``href``, a link the dashboard rendered."""
+    parts = urlsplit(href or "")
+    assert parts.path == "/leads" and not parts.scheme and not parts.netloc
+    return world.page(parts.path, parts.query)
+
+
+def test_the_pager_links_encode_the_search_and_round_trip(world: World) -> None:
+    text = "A&B+C 50% Firm"
+    many(world, 51, name=text + " {n:03}", domain="ab{n}.co.uk")
+    many(world, 3, name="Other {n}", domain="other{n}.co.uk")  # not matched
+
+    first = world.page("/leads", urlencode({"q": text}))
+    next_href = first.find("nav", class_="pager").find("a").attrs["href"]
+    second = follow(world, next_href)
+    previous_href = second.find("nav", class_="pager").find("a").attrs["href"]
+    back = follow(world, previous_href)
+
+    assert parse_qsl(urlsplit(next_href or "").query) == [("q", text), ("page", "2")]
+    assert first.find("p", class_="lead-count").text == "Showing 1–50 of 51 Leads"
+    rows = table_rows(second.find("table", class_="lead-table"))
+    assert [row[0] for row in rows[1:]] == [f"{text} 000"]
+    assert second.find("p", class_="lead-count").text == "Showing 51–51 of 51 Leads"
+    assert second.find("input", name="q").attrs["value"] == text
+    assert parse_qsl(urlsplit(previous_href or "").query) == [("q", text), ("page", "1")]
+    assert table_rows(back.find("table", class_="lead-table")) == table_rows(
+        first.find("table", class_="lead-table")
+    )
+    assert back.find("p", class_="lead-count").text == "Showing 1–50 of 51 Leads"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "stage=bogus",
+        "stage=NEW",
+        "segment=nope",
+        "page=0",
+        "page=abc",
+        "page=-1",
+        "page=1.5",
+        "page=12345678",
+        "page=%EF%BC%91",  # a fullwidth digit
+        "q=a&q=b",
+        "stage=new&stage=new",
+        "foo=1",
+        "csrf_token=x",
+        "q=" + "a" * 201,
+        "q=a%00b",
+    ],
+)
+def test_a_bad_query_parameter_is_refused(world: World, query: str) -> None:
+    reply = world.get("/leads", query)
+
+    assert reply.status == 400
+    assert reply.text == MALFORMED_FORM
+    assert reply.header(b"cache-control") == b"no-store"
+
+
+def test_the_longest_search_and_page_are_accepted(world: World) -> None:
+    world.lead("Smith Law", "smith-law.co.uk")
+
+    assert world.get("/leads", "q=" + "a" * 200 + "&page=9999999").status == 200
+    assert world.get("/leads", "q=+" + "a" * 199 + "++").status == 200
+    assert world.get("/leads", "page=0000001").status == 200
+
+
+# The Lead page ----------------------------------------------------------------------------------
+
+
+def import_csv(world: World, *lines: str) -> None:
+    data, headers = upload(
+        ("\r\n".join(lines) + "\r\n").encode("utf-8"),
+        csrf_token=world.dashboard.csrf_token(world.cookie),
+        origin=ORIGIN,
+        default_segment="law_private_ai",
+    )
+    reply = world.dashboard.post(
+        "/leads/import",
+        cookie=world.cookie,
+        token=world.dashboard.csrf_token(world.cookie),
+        headers=headers,
+        body=data,
+    )
+    assert reply.status == 200 and "Imported: 1." in reply.text, reply.text
+
+
+def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> None:
+    import_csv(
+        world,
+        "Organization name,Website,Country,Contact name,Role,Email,LinkedIn URL",
+        "Smith Law,https://www.smith-law.co.uk/team,UK,Jane Doe,Partner,Jane@Smith-Law.co.uk,"
+        "linkedin.com/in/Jane-Doe",
+    )
+    listed = world.page("/leads")
+    href = listed.find("table", class_="lead-table").find("a").attrs["href"] or ""
+
+    page = world.page(href)
+
+    assert page.find("title").text == "Nextron: Lead"
+    header = page.find("header", class_="lead-header")
+    assert "hx-disable" in header.attrs
+    assert header.find("h1").text == "Smith Law"
+    facts = [node.text for node in header.find("dl").walk() if node.tag in ("dt", "dd")]
+    assert facts == [
+        "Website",
+        "smith-law.co.uk",
+        "Segment",
+        "Law-PrivateAI",
+        "Country",
+        "GB",
+        "Pipeline Stage",
+        "New",
+        "Created",
+        "2026-11-17",
+    ]
+    website = header.find("a")
+    assert website.attrs == {"href": "https://smith-law.co.uk/", "rel": "noopener noreferrer"}
+    assert page.find("main").find("a", href="/leads").text == "All Leads"
+    assert page.find("h2").text == "Contacts"
+    table = page.find("table", class_="contact-table")
+    assert "hx-disable" in table.attrs
+    assert table_rows(table)[0] == CONTACT_HEADER
+    [contact] = table.find_all("tr", class_="contact-row")
+    assert cells(contact) == [
+        "Jane Doe",
+        "Partner",
+        "jane@smith-law.co.uk",
+        "guessed",
+        "https://www.linkedin.com/in/jane-doe",
+        "No",
+    ]
+    linkedin = contact.find("a")
+    assert linkedin.attrs["href"] == "https://www.linkedin.com/in/jane-doe"
+    assert linkedin.attrs["rel"] == "noopener noreferrer"
+    records = table_rows(table.find("table", class_="provenance-table"))
+    assert records[0] == RECORD_HEADER
+    assert sorted(records[1:]) == [
+        ["Address jane@smith-law.co.uk", "CSV import", ORIGIN, "2026-11-17", "guessed"],
+        ["Contact", "CSV import", ORIGIN, "2026-11-17", "—"],
+    ]
+
+
+def test_a_lead_without_a_website_or_country_says_so(world: World) -> None:
+    lead = world.lead("Jones Ops", None, country=None, ch_number="12345678")
+
+    header = world.page(f"/leads/{lead}").find("header", class_="lead-header")
+
+    assert "No website on record" in header.text
+    assert not header.find_all("a")
+    assert header.find("dl").find_all("dd")[2].text == "—"
+
+
+def test_the_empty_cases(world: World) -> None:
+    empty = world.lead("Smith Law", "smith-law.co.uk")
+    lead = world.lead("Jones Law", "jones.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Doe"))
+    world.add(lead, ContactCandidate(email="info@jones.co.uk"), seconds=1)
+    world.sql("DELETE FROM provenance_records WHERE contact_id = ?", (jane,))
+
+    nothing = world.page(f"/leads/{empty}")
+    page = world.page(f"/leads/{lead}")
+
+    assert nothing.find("section", class_="lead-contacts").text == "Contacts No Contacts yet."
+    assert not nothing.find_all("table")
+    first, second = page.find_all("tr", class_="contact-row")
+    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No"]
+    assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No"]
+    rows = page.find_all("tr", class_="provenance-row")
+    assert rows[0].text == "No Provenance Record."
+    assert rows[1].find_all("table", class_="provenance-table")
+
+
+def test_the_primary_flag_and_every_source_label(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    for n, source in enumerate(ProvenanceSource):
+        candidate = ContactCandidate(name=f"Person {n}")
+        world.add(lead, candidate, source=source, detail=f"from {n}", seconds=n)
+    world.sql("UPDATE contacts SET is_primary = 1 WHERE name = 'Person 0'")
+
+    page = world.page(f"/leads/{lead}")
+
+    primaries = [cells(row)[5] for row in page.find_all("tr", class_="contact-row")]
+    assert primaries == ["Yes"] + ["No"] * (len(ProvenanceSource) - 1)
+    sources = [
+        table_rows(table)[1][1] for table in page.find_all("table", class_="provenance-table")
+    ]
+    assert sources == [SOURCE_LABELS[source] for source in ProvenanceSource]
+
+
+def test_a_merged_lead_redirects_to_the_end_of_its_chain(world: World) -> None:
+    a = world.lead("Alpha", "alpha.co.uk", minutes=0)
+    b = world.lead("Alpha Two", "alpha2.co.uk", minutes=1)
+    c = world.lead("Alpha Three", "alpha3.co.uk", minutes=2)
+    world.merge(b, c)  # C -> B
+    world.merge(a, b)  # B -> A
+
+    for loser in (b, c):
+        reply = world.get(f"/leads/{loser}")
+        assert reply.status == 303
+        assert reply.header(b"location") == f"/leads/{a}".encode()
+        assert reply.header(b"cache-control") == b"no-store"
+    assert world.get(f"/leads/{a}").status == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/leads/{UNKNOWN}",
+        f"/leads/{UNKNOWN.lower()}",
+        "/leads/abc",
+        "/leads/%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+        "/leads/NOT-A-LEAD-ZZZZ",
+    ],
+)
+def test_a_missing_lead_is_404_without_echoing_the_id(world: World, path: str) -> None:
+    world.lead("Smith Law", "smith-law.co.uk")
+
+    reply = world.get(path)
+
+    assert reply.status == 404
+    assert reply.header(b"cache-control") == b"no-store"
+    page = Tree(reply.text)
+    assert page.find("h1").text == "Lead not found"
+    assert page.find("main").find("a", href="/leads").text == "All Leads"
+    assert page.find("title").text == "Nextron: Lead not found"
+    for echoed in (UNKNOWN, UNKNOWN.lower(), "alert(1)", "NOT-A-LEAD"):
+        assert echoed not in reply.text
+    assert page.find("main").text == (
+        "Lead not found No Lead has this address. Open the Lead from the Leads list. All Leads"
+    )
+
+
+def test_a_merge_loop_is_404(world: World) -> None:
+    a = world.lead("Alpha", "alpha.co.uk")
+    b = world.lead("Bravo", "bravo.co.uk")
+    world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (b, a))
+    world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (a, b))  # a loop
+
+    assert world.get(f"/leads/{a}").status == 404
+
+
+# Hostile text -----------------------------------------------------------------------------------
+
+
+NAME = "<script>x</script>"
+ROLE = "<img src=x onerror=y>"
+DETAIL = '<b hx-get="/x">'
+
+
+def test_hostile_text_is_escaped_inside_hx_disable(world: World) -> None:
+    lead = world.lead(NAME, "smith-law.co.uk")
+    world.add(lead, ContactCandidate(name="Jane <i>Doe</i>", role=ROLE), detail=DETAIL)
+
+    listed = world.get("/leads")
+    page = world.get(f"/leads/{lead}")
+
+    for reply in (listed, page):
+        assert reply.status == 200
+        for raw in ("<script>x", "<img src", "<b hx-get", "<i>Doe"):
+            assert raw not in reply.text
+    listed_tree, page_tree = Tree(listed.text), Tree(page.text)
+    assert listed_tree.disabled(NAME) == [True]
+    assert page_tree.disabled(NAME) == [True]
+    assert page_tree.disabled(ROLE) == [True]
+    assert page_tree.disabled(DETAIL) == [True]
+    assert page_tree.disabled("Jane <i>Doe</i>") == [True]
+    for tree in (listed_tree, page_tree):
+        assert [node.attrs.get("src") for node in tree.find_all("script")] == [
+            "/static/htmx-2.0.11.min.js"
+        ]
+        assert not tree.find_all("img") and not tree.find_all("b") and not tree.find_all("i")
+
+
+# Route rules, nav and labels --------------------------------------------------------------------
+
+
+def test_without_a_session_both_pages_are_locked(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    for path in ("/leads", f"/leads/{lead}"):
+        reply = world.dashboard.get(path)
+        assert reply.status == 401
+        assert "Smith Law" not in reply.text
+
+
+def test_both_routes_are_gets_declaring_personal_data(world: World) -> None:
+    routes = {
+        getattr(route, "name", None): route
+        for route in world.dashboard.app.routes
+        if getattr(route, "name", None) in ("pipeline_page", "lead_page", "lead_import_page")
+    }
+
+    assert getattr(routes["pipeline_page"], "path") == "/leads"
+    assert getattr(routes["lead_page"], "path") == "/leads/{lead_id}"
+    for name in ("pipeline_page", "lead_page"):
+        assert getattr(routes[name], "methods") == {"GET"}
+        endpoint = getattr(routes[name], "endpoint")
+        assert getattr(endpoint, "__nextron_personal_data__") is True
+    paths = [getattr(route, "path", None) for route in world.dashboard.app.routes]
+    assert paths.index("/leads/import") < paths.index("/leads/{lead_id}")
+
+
+def test_the_import_page_is_still_the_import_page(world: World) -> None:
+    page = world.page("/leads/import")
+
+    assert page.find("h1").text == "Import Leads from a CSV file"
+    assert world.dashboard.get("/leads/import", cookie=world.cookie).status == 200
+
+
+def test_the_nav_links_the_leads_list(world: World) -> None:
+    page = world.page("/leads")
+
+    nav = page.find("nav", **{"aria-label": "Sections"})
+    links = [(a.attrs["href"], a.text) for a in nav.find_all("a")]
+    assert links == [
+        ("/leads", "Leads/Pipeline"),
+        ("/settings", "Settings"),
+        ("/health/panel", "Health"),
+    ]
+
+
+def test_segment_options_are_by_name_whatever_the_key_order() -> None:
+    shipped = validate_segments(seed_yaml.parse(SHIPPED.read_text(encoding="utf-8")))[0]
+    segments = [
+        SeededSegment(f"0{n}" + "0" * 24, key, 1, replace(shipped, key=key, name=name))
+        for n, (key, name) in enumerate([("alpha", "Zeta"), ("mid", "alpha"), ("zulu", "Beta")])
+    ]
+
+    options = leads_page.segment_options(segments, "zulu")
+
+    assert [(o.value, o.label, o.selected) for o in options] == [
+        ("mid", "alpha", False),
+        ("zulu", "Beta", True),
+        ("alpha", "Zeta", False),
+    ]
+    assert not any(o.selected for o in leads_page.segment_options(segments, None))
+
+
+def test_every_stage_and_source_has_a_label() -> None:
+    assert list(STAGE_LABELS) == list(PipelineStage)
+    assert list(SOURCE_LABELS) == list(ProvenanceSource)
+    assert STAGE_LABELS[PipelineStage.CALL_BOOKED] == "Call booked"
+    assert SOURCE_LABELS[ProvenanceSource.OPERATOR] == "Entered by Mac"
+    assert leads_page.stage_label("retired") == "retired"  # an unknown stored value
+    assert leads_page.source_label("carrier_pigeon") == "carrier_pigeon"
+
+
+def test_the_view_module_reads_only_through_queries() -> None:
+    tree = ast.parse((PACKAGE / "web" / "leads_page.py").read_text(encoding="utf-8"))
+    modules = [
+        name
+        for node in ast.walk(tree)
+        for name in (
+            [alias.name for alias in node.names]
+            if isinstance(node, ast.Import)
+            else [node.module or ""]
+            if isinstance(node, ast.ImportFrom)
+            else []
+        )
+    ]
+
+    app_modules = [name for name in modules if name.startswith("nextron.app")]
+    assert app_modules  # not vacuous
+    assert all(name.startswith("nextron.app.queries.") for name in app_modules), app_modules
+    assert not [name for name in modules if name.startswith("nextron.db")]
