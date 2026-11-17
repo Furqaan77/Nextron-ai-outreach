@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`) and **Story 4.11** (merge `8cd08e5`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`) and **Story 1.21** (merge `932cd0a`). **Epic 1 is complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -197,11 +197,20 @@ The User-Agent is `NextronBot/1.0`. It has never fetched a real website; it is t
 - **Snapshots:** they go in `footer_snapshots`.
 - **Contract:** NFR-7 keeps the footer keys in their own section, and no footer text may name a price.
 
-Main now: **10923 tests, 29 contracts.**
+**Story 1.21 result:** `scripts/run.ps1` supervises the engine.
+- **Process control:** each start runs in a kill-on-close job object, so stopping the task ends the whole uv/python tree.
+- **Restart backoff:** 5 s, doubling to 5 min.
+- **Ending supervision:** exit 3 ends it, and so do 5 exit-2s in a row.
+- **Stale-heartbeat detection:** a 900 s grace before the first beat.
+- **Graceful stop:** `-Stop`/`-Restart` send CTRL_BREAK, and `serve` then exits 0. `-Status` reports state.
+- **Logon task:** `scripts/install_logon_task.ps1` registers it. It dry-runs by default and refuses elevation.
+- **Safety contract:** no code outside `tests/task_scheduler_guard.py` may name a state-changing Task Scheduler command.
+
+Main now: **10990 tests, 29 contracts.**
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 35 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 36 are done (all of Epic 1). Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -268,6 +277,8 @@ Main now: **10923 tests, 29 contracts.**
 - **Story 1.19:**
   - the environment guard on restore reads file names only, so a renamed prod copy would be accepted in dev;
   - `pre_restore` safety copies are never rotated.
+- **Install the logon task yourself (Story 1.21).** The steps are in `nextron-engine/README.md` under "Start at logon and supervision", with check rows in `docs/spikes/oq-a9-logon-task.md`. Use a separate clean checkout for prod and run from a normal, non-admin PowerShell. Nothing was registered during the build.
+- **Story 1.21 items for you:** a start that hangs past the 15-min grace is retried without limit, and each retry leaves a `pre_migrate` copy. There is no alert if the supervisor itself dies, and the task priority stays 7. Decide whether you want more than AD-20.
 - **Logon task (Story 1.20):** your at-the-PC steps (registration, start at logon, sleep/wake, unregister) are in `docs/spikes/oq-a9-logon-task.md`. Story 1.21 will finalise them.
 - **Story 4.2 default Offer:** a ladder of a reply, then an audit ($2,500–$3,500, credited to a build), then a build ($10k–$30k). It is commercial configuration only: drafts never contain a price. Check the figures.
 - **Story 3.2:**
