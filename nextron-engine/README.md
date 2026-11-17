@@ -46,16 +46,69 @@ Relative paths resolve against this folder. Every other setting lives in the dat
 $env:NEXTRON_ENV = "dev"
 ```
 
-## Check the machine
+## Check readiness
 
 ```powershell
-uv run nextron doctor
+uv run nextron doctor                 # the environment NEXTRON_ENV names
+uv run nextron doctor --env prod      # another environment, for this run only
+uv run nextron doctor --json          # the same results as JSON
 ```
 
-Prints each startup check as PASS or FAIL: the SQLite version (3.51.3 or later), timezone data
-(`Europe/London`), a data dir outside OneDrive, no persistent `NEXTRON_ENV=prod`, and a free
-port. Exits 0 when nothing fails, 1 when a check fails, and 2 when `NEXTRON_ENV` (or another
-variable above) is unset or invalid. It takes no lock, creates nothing and starts no server.
+`nextron doctor` lists everything an install still lacks before the engine can run safely, so a
+first install or an upgrade can be confirmed green before real work starts (FR-56). Each check
+has an id, a status (`ok`, `warn` or `fail`) and a one-line message:
+
+| Check | `ok` | `warn` | `fail` |
+|---|---|---|---|
+| `python_version` | Python 3.14.8 or later | | older, or unreadable |
+| `sqlite_version` | SQLite 3.51.3 or later | | older, or unreadable |
+| `tzdata` | `ZoneInfo("Europe/London")` loads | | it doesn't: run `uv sync --frozen` |
+| `prod_env_not_persistent` | no persistent `NEXTRON_ENV=prod` (see below); the message names the environment and where it came from (`--env` or `NEXTRON_ENV`) | | a persistent `prod`, or an unreadable registry |
+| `data_dir_outside_onedrive` | the data dir is outside OneDrive | | it is inside OneDrive |
+| `backup_dir_separate` | the backup dir is separate from the data dir and outside OneDrive | | it is the data dir (in any case), inside it, contains it, or is inside OneDrive (the data dir's rules: under `%OneDrive%`, `%OneDriveCommercial%` or `%OneDriveConsumer%`, or a path segment starting with "OneDrive") |
+| `port_free` | the dashboard port is free, or it is busy and `<data dir>\heartbeat` is under 2 minutes old: this environment's running engine holds it | | busy with no fresh heartbeat (a hung engine shows the same), or the probe fails |
+| `required_credentials` | the 5 required credentials (see [Credentials](#credentials)) are set, each 1,280 characters or fewer | | lists the labels that are not set, too long, or unreadable in Credential Manager |
+| `internal_notify_grant` | the Google `internal_notify` grant is stored and Google refreshed it | Google can't be reached: run doctor again later | the Desktop client is not imported, the grant is missing or needs re-consent, Credential Manager fails, or another error (by its code) |
+| `required_settings` | every required setting (`sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
+| `database_revision` | the database is at the code's head revision | no database file, an empty one, or one behind head: "will migrate on next start" | a revision this code doesn't know ("newer than this code"), or not this engine's database |
+
+The table looks like this (some rows left out):
+
+```text
+status  check                      message
+ok      python_version             Python 3.14.8 (needs 3.14.8 or later)
+...
+warn    database_revision          no database file yet; it will be created and migrated on next start
+10 ok, 1 warn, 0 fail
+```
+
+`--json` prints the same list as `[{"id", "status", "message"}, ...]` (ASCII-only), and
+nothing else. No message ever holds a secret value, an account address or an error's text: only
+an error's type name or code.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | nothing is `fail` (warnings allowed) |
+| 1 | at least one check is `fail` |
+| 2 | `NEXTRON_ENV` (or another variable above) is unset or invalid; `--env` takes only `dev`, `test` or `prod` |
+
+**What doctor never does.** It takes no lock (it runs while the engine runs), configures no
+logging (it never opens `nextron.log`), and builds no app, runner, scheduler or heartbeat
+writer. It opens `<data dir>\nextron.db` read-only (`mode=ro`) and never creates, migrates or
+writes it; a missing data dir or database stays missing. Like the engine, it begins each read
+with `BEGIN IMMEDIATE`; on a read-only file that opens a read transaction, so a read doesn't
+wait for the engine's writes. Reading may leave empty `nextron.db-wal` and `nextron.db-shm`
+files; the engine reuses them, and SQLite deletes them when the engine's last connection closes
+at a clean stop.
+
+**The Google refresh.** When the Desktop client and the `internal_notify` grant are stored,
+doctor asks Google for one fresh access token through the same code the engine uses, so
+"refreshable" is proven, not guessed. With no client or grant, or a grant already marked
+"needs re-consent", nothing is sent. The access token is dropped at once. That one call is kept
+in doctor's memory only: it writes no `api_usage` row and doesn't appear on the Quotas page
+(`google_oauth` has no quota). If Google answers `invalid_grant`, the grant is marked "needs
+re-consent" in Credential Manager, as the engine would mark it. Reading credentials also moves
+any entry still in the pre-Story 1.9 layout to its own target (see [Secrets](#secrets)).
 
 `prod_env_not_persistent` reads `NEXTRON_ENV` from the persistent user environment
 (`HKCU\Environment`) and machine environment

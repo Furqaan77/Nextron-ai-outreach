@@ -269,18 +269,21 @@ def test_guarded_health_page_and_second_instance(
     assert [line["event"] for line in after].count("engine_started") == 1
 
 
-def test_nextron_console_script_runs_doctor(engine_env: dict[str, str], tmp_path: Path) -> None:
+def test_nextron_console_script_runs_doctor_help(
+    engine_env: dict[str, str], tmp_path: Path
+) -> None:
+    """``--help`` only: a real ``nextron doctor`` would read this PC's Credential Manager (decision
+    7). ``main.doctor`` itself is covered end to end with fakes in ``tests/unit/test_doctor.py``."""
     script = shutil.which("nextron", path=sysconfig.get_path("scripts"))
     assert script, "the nextron console script is not installed; run uv sync --frozen"
 
     result = subprocess.run(
-        [script, "doctor"], env=engine_env, capture_output=True, text=True, timeout=120
+        [script, "doctor", "--help"], env=engine_env, capture_output=True, text=True, timeout=120
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    lines = result.stdout.splitlines()
-    assert [line.split()[0] for line in lines] == ["PASS"] * 5
-    assert lines[3].split()[1] == "prod_env_not_persistent"
+    assert "--json" in result.stdout
+    assert "--env" in result.stdout
     assert not (tmp_path / "data").exists()
 
 

@@ -66,6 +66,55 @@ def test_env_unset_or_invalid_is_refused(
     assert list(local_app_data.iterdir()) == []
 
 
+# Story 1.14: nextron doctor --env ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("nextron_env", ["dev", None, "staging"], ids=["dev", "unset", "invalid"])
+def test_a_given_env_overrides_nextron_env_with_its_own_defaults(
+    nextron_env: str | None, local_app_data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if nextron_env is None:
+        monkeypatch.delenv("NEXTRON_ENV")
+    else:
+        monkeypatch.setenv("NEXTRON_ENV", nextron_env)
+
+    config = load_bootstrap("prod")
+
+    assert config.env == "prod"
+    assert config.port == 8765
+    assert config.data_dir == local_app_data / "Nextron" / "prod"
+    assert config.backup_dir == local_app_data / "Nextron" / "backups" / "prod"
+    assert list(local_app_data.iterdir()) == []
+
+
+def test_the_other_variables_still_apply_with_a_given_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEXTRON_ENV", "dev")
+    monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("NEXTRON_PORT", "9100")
+
+    config = load_bootstrap("test")
+
+    assert (config.env, config.data_dir, config.port) == ("test", tmp_path / "data", 9100)
+
+
+@pytest.mark.parametrize("env", ["staging", "DEV", "", "prod "])
+def test_an_invalid_given_env_is_refused(env: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEXTRON_ENV", "dev")
+
+    with pytest.raises(BootstrapError) as raised:
+        load_bootstrap(env)
+
+    assert str(raised.value) == ENV_ERROR
+
+
+def test_no_given_env_reads_nextron_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEXTRON_ENV", "dev")
+
+    assert load_bootstrap(None).env == load_bootstrap().env == "dev"
+
+
 def test_each_setting_can_be_overridden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEXTRON_ENV", "test")
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / "data"))

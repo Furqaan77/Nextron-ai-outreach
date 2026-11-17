@@ -82,13 +82,17 @@ class BootstrapConfig(BaseSettings):
         return Path(os.path.normpath(path))
 
 
-def load_bootstrap() -> BootstrapConfig:
+def load_bootstrap(env: str | None = None) -> BootstrapConfig:
     """Read the bootstrap configuration from the environment.
 
-    Raises ``BootstrapError`` with ``ENV_ERROR`` when ``NEXTRON_ENV`` is unset or invalid, and
-    with a short summary for any other invalid value. Creates no file or directory.
+    A given ``env`` (``nextron doctor --env``) overrides ``NEXTRON_ENV`` for this call; the other
+    variables still apply, and the defaults are that environment's. Raises ``BootstrapError``
+    with ``ENV_ERROR`` when the environment is unset or invalid, and with a short summary for
+    any other invalid value. Creates no file or directory.
     """
     try:
+        if env is not None:  # init values take priority over the environment variables
+            return BootstrapConfig(env=env)  # type: ignore[call-arg, arg-type]
         return BootstrapConfig()  # type: ignore[call-arg]  # values come from the environment
     except ValidationError as exc:
         errors = exc.errors()

@@ -1,5 +1,5 @@
 """``nextron.db.engine``: the six connection settings, the write lock, the transaction-SQL guard,
-the foreign-keys-off connection and the read-only connection."""
+the foreign-keys-off connection, the read-only connection and the read-only engine."""
 
 import logging
 import sqlite3
@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import Engine, event, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from nextron.db import engine as engine_module
 from nextron.db.engine import (
@@ -21,6 +22,7 @@ from nextron.db.engine import (
     _on_connect,
     _refuse_transaction_sql,
     create_engine,
+    create_read_only_engine,
     fk_off_connection,
     leading_keyword,
     read_only_connection,
@@ -590,3 +592,213 @@ def test_a_begin_that_times_out_leaves_query_only_off(
         blocker.execute("ROLLBACK")
         blocker.close()
         engine.dispose()
+
+
+# The read-only engine (nextron doctor) ----------------------------------------------------------
+
+
+@pytest.fixture
+def at_rest(scratch: Engine) -> Path:
+    """The ``scratch`` database file with one note, every engine connection closed (so its WAL
+    is checkpointed into the file); returns its path."""
+    with scratch.connect() as connection:
+        connection.exec_driver_sql("INSERT INTO scratch (note) VALUES ('kept')")
+        connection.commit()
+    scratch.dispose()
+    return Path(db_path(scratch))
+
+
+def file_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def test_the_read_only_engine_reads_with_its_settings(at_rest: Path) -> None:
+    engine = create_read_only_engine(at_rest)
+    seen: list[str] = []
+
+    def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        with engine.connect() as connection:
+            dbapi = connection.connection.driver_connection
+            assert isinstance(dbapi, sqlite3.Connection)
+            assert connection.exec_driver_sql("SELECT note FROM scratch").scalars().all() == [
+                "kept"
+            ]
+            assert pragma(dbapi, "journal_mode") == "wal"
+            assert pragma(dbapi, "busy_timeout") == 5000
+            assert dbapi.isolation_level is None
+            assert dbapi.autocommit == sqlite3.LEGACY_TRANSACTION_CONTROL
+    finally:
+        engine.dispose()
+
+    assert seen[:2] == [BEGIN_SQL, "SELECT note FROM scratch"]  # AD-2's begin, reads included
+    assert isinstance(engine.pool, NullPool)
+    assert engine.hide_parameters
+    assert engine.url.database == str(at_rest)
+    assert event.contains(engine, "begin", _on_begin)
+    assert event.contains(engine, "before_cursor_execute", _refuse_transaction_sql)
+
+
+def test_a_missing_file_is_never_created(tmp_path: Path) -> None:
+    folder = tmp_path / "data"
+    folder.mkdir()
+    engine = create_read_only_engine(folder / "nextron.db")
+    try:
+        with pytest.raises(OperationalError, match="unable to open database file"):
+            engine.connect()
+    finally:
+        engine.dispose()
+
+    assert list(folder.iterdir()) == []
+
+
+def test_reads_work_while_another_connection_holds_an_open_read(at_rest: Path) -> None:
+    other = sqlite3.connect(at_rest, isolation_level=None)
+    engine = create_read_only_engine(at_rest)
+    try:
+        other.execute("BEGIN")
+        assert other.execute("SELECT count(*) FROM scratch").fetchone() == (1,)  # holds a read
+        with engine.connect() as connection:
+            notes_read = connection.exec_driver_sql("SELECT note FROM scratch").scalars().all()
+        other.execute("ROLLBACK")
+    finally:
+        engine.dispose()
+        other.close()
+
+    assert notes_read == ["kept"]
+
+
+def test_reads_work_while_the_engine_holds_the_write_lock(at_rest: Path) -> None:
+    writer = sqlite3.connect(at_rest, isolation_level=None)
+    engine = create_read_only_engine(at_rest)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO scratch (note) VALUES ('uncommitted')")
+        with engine.connect() as connection:
+            notes_read = connection.exec_driver_sql("SELECT note FROM scratch").scalars().all()
+        writer.execute("ROLLBACK")
+    finally:
+        engine.dispose()
+        writer.close()
+
+    assert notes_read == ["kept"]  # a read transaction: no wait, and no uncommitted row
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "INSERT INTO scratch (note) VALUES ('written')",
+        "UPDATE scratch SET note = 'changed'",
+        "DELETE FROM scratch",
+        "CREATE TABLE more (id INTEGER)",
+        "PRAGMA user_version = 7",
+    ],
+    ids=["insert", "update", "delete", "create", "pragma"],
+)
+def test_a_write_is_refused_and_the_file_is_unchanged(at_rest: Path, sql: str) -> None:
+    before = file_bytes(at_rest)
+    engine = create_read_only_engine(at_rest)
+    try:
+        with engine.connect() as connection:
+            with pytest.raises(OperationalError, match="readonly database"):
+                connection.exec_driver_sql(sql)
+                connection.commit()
+    finally:
+        engine.dispose()
+
+    assert file_bytes(at_rest) == before
+    reader = sqlite3.connect(at_rest)
+    try:
+        assert reader.execute("SELECT note FROM scratch").fetchall() == [("kept",)]
+        assert reader.execute("PRAGMA user_version").fetchone() == (0,)
+    finally:
+        reader.close()
+
+
+def test_the_transaction_guard_applies(at_rest: Path) -> None:
+    engine = create_read_only_engine(at_rest)
+    try:
+        with engine.connect() as connection, pytest.raises(TransactionSqlError):
+            connection.exec_driver_sql("COMMIT")
+    finally:
+        engine.dispose()
+
+
+def test_a_read_only_unit_of_work_reads_through_it(at_rest: Path) -> None:
+    engine = create_read_only_engine(at_rest)
+    try:
+        with read_only_connection(engine) as connection:
+            assert connection.exec_driver_sql("SELECT note FROM scratch").scalars().all() == [
+                "kept"
+            ]
+            with pytest.raises(ReadOnlySqlError):
+                connection.exec_driver_sql("DELETE FROM scratch")
+    finally:
+        engine.dispose()
+
+
+def test_a_non_wal_file_is_refused_untouched_by_the_read_only_engine(tmp_path: Path) -> None:
+    path = tmp_path / "foreign.db"
+    writer = sqlite3.connect(path)
+    writer.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY)")
+    writer.commit()
+    writer.close()
+    before = path.read_bytes()
+    engine = create_read_only_engine(path)
+    try:
+        with pytest.raises(ConnectionSettingError, match="journal_mode delete, not wal"):
+            engine.connect()
+    finally:
+        engine.dispose()
+
+    assert path.read_bytes() == before
+    assert sorted(item.name for item in tmp_path.iterdir() if item.name.startswith("foreign")) == [
+        "foreign.db"
+    ]
+
+
+def test_an_empty_file_is_read_and_never_switched_to_wal(tmp_path: Path) -> None:
+    path = tmp_path / "empty.db"
+    path.write_bytes(b"")
+    engine = create_read_only_engine(path)
+    try:
+        with engine.connect() as connection:
+            tables = connection.exec_driver_sql("SELECT name FROM sqlite_master").all()
+            dbapi = connection.connection.driver_connection
+            assert isinstance(dbapi, sqlite3.Connection)
+            assert pragma(dbapi, "journal_mode") == "delete"
+    finally:
+        engine.dispose()
+
+    assert tables == []
+    assert path.read_bytes() == b""
+
+
+def test_a_path_with_spaces_and_a_hash_opens(tmp_path: Path) -> None:
+    folder = tmp_path / "Nextron AI #1 (dev)"
+    folder.mkdir()
+    path = folder / "nextron.db"
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+    writer.close()
+    engine = create_read_only_engine(path)
+    try:
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("SELECT count(*) FROM t").scalar() == 0
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("path", [Path(":memory:"), Path("")])
+def test_create_read_only_engine_opens_database_files_only(path: Path) -> None:
+    with pytest.raises(ValueError, match="database file"):
+        create_read_only_engine(path)
+
+
+def test_create_read_only_engine_takes_a_path() -> None:
+    with pytest.raises(TypeError, match="pathlib.Path"):
+        create_read_only_engine("nextron.db")  # type: ignore[arg-type]

@@ -34,7 +34,10 @@ from nextron.logconfig import (
     configure_logging,
     utc_timestamp,
 )
+from tests.fakes.clock import FrozenClock
+from tests.fakes.google_oauth import FakeGoogleOAuth
 from tests.fakes.probes import PortProbe, fake_probes
+from tests.fakes.secrets import InMemorySecrets
 
 ULID = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
 EMAIL = "ann.lee@example.co.uk"
@@ -516,7 +519,14 @@ def test_doctor_never_opens_the_log_file(dev: Path, monkeypatch: pytest.MonkeyPa
     spy = LoggingSpy()
     monkeypatch.setattr(main, "configure_logging", spy)
 
-    main.doctor(probes=fake_probes(), out=io.StringIO(), err=io.StringIO())
+    main.doctor(
+        probes=fake_probes(),
+        secrets=InMemorySecrets("dev"),
+        google_oauth=FakeGoogleOAuth(),
+        clock=FrozenClock(),
+        out=io.StringIO(),
+        err=io.StringIO(),
+    )
 
     assert spy.calls == []
     assert not dev.exists()

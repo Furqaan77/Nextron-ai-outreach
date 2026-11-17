@@ -7,8 +7,11 @@ Commands:
   code or not this engine's included), an unusable data dir, a failed database migration or a
   server that failed to start; exit 3: another instance holds the lock). ``--reload`` is for
   ``dev`` only.
-- ``doctor``: print each startup check as PASS or FAIL (exit 0 when none fail, 1 when any
-  fails, 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid).
+- ``doctor [--env {dev,test,prod}] [--json]``: check that this install is ready, and print each
+  check's status (``ok``, ``warn`` or ``fail``) and message as a table, or as JSON with
+  ``--json``. ``--env`` checks that environment instead of ``NEXTRON_ENV`` (exit 0 when nothing
+  fails, warnings allowed; 1 when a check fails; 2 when ``NEXTRON_ENV`` or another bootstrap
+  setting is invalid, or the arguments are).
 - ``open``: open the dashboard in the default browser through a one-time link that works once,
   within 5 minutes (exit 0: opened; exit 1: the engine isn't running, or the code couldn't be
   stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
@@ -22,6 +25,7 @@ import sys
 from collections.abc import Sequence
 
 from nextron import main as engine
+from nextron.bootstrap import ENVIRONMENTS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +40,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="restart when the code changes (NEXTRON_ENV=dev only)",
     )
-    commands.add_parser("doctor", help="print each startup check as PASS or FAIL")
+    doctor = commands.add_parser(
+        "doctor", help="check that this install is ready to run, and print each check"
+    )
+    doctor.add_argument(
+        "--env",
+        choices=ENVIRONMENTS,
+        help="the environment to check, instead of NEXTRON_ENV (for this run only)",
+    )
+    doctor.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help='print the results as JSON: [{"id", "status", "message"}, ...]',
+    )
     commands.add_parser(
         "open", help="open the dashboard in the default browser with a one-time link"
     )
@@ -49,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return engine.serve(reload=args.reload)
     if args.command == "open":
         return engine.open_dashboard()
-    return engine.doctor()
+    return engine.doctor(env=args.env, as_json=args.as_json)
 
 
 if __name__ == "__main__":

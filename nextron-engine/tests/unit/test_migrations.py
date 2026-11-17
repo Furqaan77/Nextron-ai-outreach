@@ -21,6 +21,7 @@ from nextron.db.migrations import (
     current_revision,
     ensure_current,
     head_revision,
+    known_revisions,
 )
 from tests.migration_chains import (
     chain,
@@ -68,6 +69,20 @@ def test_a_database_at_head_is_left_alone(db_file: Path) -> None:
 
 def test_head_revision_is_this_storys_migration() -> None:
     assert head_revision() == HEAD
+
+
+def test_known_revisions_are_every_revision_in_the_chain() -> None:
+    files = {path.stem for path in (SCRIPT_LOCATION / "versions").glob("*.py")}
+
+    assert known_revisions() == files
+    assert HEAD in known_revisions()
+
+
+def test_known_revisions_of_a_temporary_chain(tmp_path: Path) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")), ("0002_b", create_table("b")))
+
+    assert known_revisions(location) == frozenset({"0001_a", "0002_b"})
+    assert head_revision(location) == "0002_b"
 
 
 def test_the_startup_migration_raises_no_alembic_warnings(tmp_path: Path) -> None:

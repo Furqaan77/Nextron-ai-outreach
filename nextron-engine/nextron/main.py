@@ -100,9 +100,22 @@ With ``--reload`` (``dev`` only), Uvicorn serves from a worker process that does
 go to stderr, redacted. The worker opens the database with ``connect_database``, which never
 migrates: the reloader brought it to head before starting Uvicorn.
 
-``doctor`` runs every check, prints PASS or FAIL for each, and exits 0 when none fail, 1 when
-any fails, and 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid. It takes no lock,
-creates nothing and starts no server.
+**Doctor (FR-56).** ``build_doctor_checks()`` is the doctor check registry: the only code that
+constructs ``DoctorChecks`` or calls ``register_check`` (``nextron.startup_checks``). It
+registers eleven ``DoctorCheck``s, each binding a pure check function to a ``DoctorContext``
+(``config``, ``env_source``, ``probes``, ``secrets``, ``google``, ``database``), then freezes
+it; later stories register their checks there. ``doctor(env=..., as_json=...)`` loads the
+bootstrap config (``--env`` overrides ``NEXTRON_ENV`` for the run), runs the registry
+(``run_checks``) and prints the results as a table, or as JSON, and nothing else. It exits 0
+when nothing is ``fail`` (warnings allowed), 1 otherwise, and 2 when the bootstrap config is
+invalid. It opens the database read-only (``DoctorDatabase``, on
+``nextron.db.engine.create_read_only_engine``): it never creates, migrates or writes
+``nextron.db``. It takes no lock, configures no logging and builds no app, runner, scheduler or
+heartbeat writer. Its ``GoogleAccess`` refreshes the ``internal_notify`` grant once through
+``GoogleOAuthClient(meter=DoctorMeter())``: the meter keeps that call in memory only, so doctor
+writes no usage row; with no client or grant stored, or a grant already marked for re-consent,
+nothing is sent to Google. Its browser always refuses and its allowlist is empty, because
+doctor never starts a consent flow.
 
 ``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
 Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
@@ -161,8 +174,8 @@ import logging
 import sys
 import webbrowser
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
-from datetime import timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -183,11 +196,19 @@ from nextron.app.ops.api import Budget, DashboardEntry, DeadJobAlerts, Heartbeat
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
-from nextron.db.engine import ConnectionSettingError, create_engine
+from nextron.db.engine import ConnectionSettingError, create_engine, create_read_only_engine
 from nextron.db.metering import UsageMeter
-from nextron.db.migrations import DatabaseStateError, ensure_current
+from nextron.db.migrations import (
+    DatabaseStateError,
+    current_revision,
+    ensure_current,
+    head_revision,
+    known_revisions,
+)
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
+from nextron.domain import settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
+from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.job import JobType, JobTypes, Lane
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
@@ -206,12 +227,39 @@ from nextron.ports.mail import MailPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
 from nextron.startup_checks import (
+    BACKUP_DIR_SEPARATE,
+    DATA_DIR_OUTSIDE_ONEDRIVE,
+    DATABASE_REVISION,
+    INTERNAL_NOTIFY_GRANT,
+    PORT_FREE,
+    PROD_ENV_NOT_PERSISTENT,
+    PYTHON_VERSION,
+    REQUIRED_CREDENTIALS,
+    REQUIRED_SETTINGS,
+    SQLITE_VERSION,
+    TZDATA,
+    CheckFailed,
     CheckResult,
+    DoctorCheck,
+    DoctorChecks,
     Probes,
-    all_checks,
+    Status,
+    check_backup_dir_separate,
+    check_data_dir_outside_onedrive,
+    check_database_revision,
+    check_internal_notify_grant,
     check_port_free,
+    check_prod_env_not_persistent,
+    check_python_version,
+    check_required_credentials,
+    check_required_settings,
+    check_sqlite_version,
+    check_tzdata,
     engine_is_running,
     environment_checks,
+    format_json,
+    format_table,
+    run_checks,
 )
 from nextron.web.app import Lifespan, create_app
 from nextron.web.routing import Units
@@ -222,7 +270,9 @@ LOGS_DIR_NAME: Final = "logs"
 DB_FILE_NAME: Final = "nextron.db"
 SINK_DIR_NAME: Final = "sink"
 HEARTBEAT_FILE_NAME: Final = "heartbeat"
-DATABASE_REVISION_CHECK: Final = "database_revision"
+DATABASE_REVISION_CHECK: Final = DATABASE_REVISION
+ENV_SOURCE_FLAG: Final = "--env"
+ENV_SOURCE_VARIABLE: Final = "NEXTRON_ENV"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -550,9 +600,9 @@ def run_uvicorn(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory)
 
 
 def _report_failures(results: list[CheckResult], err: TextIO) -> bool:
-    failures = [result for result in results if not result.ok]
+    failures = [result for result in results if result.status is Status.FAIL]
     for result in failures:
-        print(f"startup check failed: {result.name}: {result.detail}", file=err)
+        print(f"startup check failed: {result.id}: {result.message}", file=err)
     return bool(failures)
 
 
@@ -593,7 +643,7 @@ def serve(
         configure_logging(config.data_dir / LOGS_DIR_NAME)
         port_check = check_port_free(HOST, config.port, probes)
         if _report_failures([port_check], err):
-            log.error("startup_check_failed", extra={"check": port_check.name})
+            log.error("startup_check_failed", extra={"check": port_check.id})
             return EXIT_STARTUP_FAILED
         try:
             units, db_revision = open_database(config)
@@ -637,27 +687,187 @@ def serve(
         lock.release()
 
 
+class DoctorMeter:
+    """``doctor``'s ``UsageMeterPort``: it keeps each recorded call in memory (``calls``) and
+    writes nothing, so doctor's own Google refresh never reaches ``api_usage`` or the Quotas
+    page. ``snapshot`` returns an empty ``Usage``."""
+
+    def __init__(self) -> None:
+        self.calls: list[ApiCall | AiCall] = []
+
+    def record(self, call: ApiCall | AiCall) -> None:
+        self.calls.append(call)
+
+    def snapshot(self, now: datetime) -> Usage:
+        return Usage(month=month_of(now), api=(), ai_calls=0, ai_cost_micros=0)
+
+
+class DoctorDatabase:
+    """``doctor``'s read-only view of the database file at ``path``: it never creates,
+    migrates or writes it. The read-only engine (``create_read_only_engine``) is built on first
+    use; ``close()`` disposes it."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._units: UnitOfWorkFactory | None = None
+
+    def exists(self) -> bool:
+        """Whether the database file is there."""
+        return self._path.exists()
+
+    def _read_only_units(self) -> UnitOfWorkFactory:
+        if self._units is None:
+            engine = create_read_only_engine(self._path)
+            try:
+                self._units = UnitOfWorkFactory(engine, build_subscribers())
+            except BaseException:
+                engine.dispose()
+                raise
+        return self._units
+
+    def revision(self) -> str | None:
+        """The database's revision, ``None`` for an empty one. A database that isn't this
+        engine's raises ``CheckFailed`` with the reason."""
+        try:
+            return current_revision(self._read_only_units().engine)
+        except (DatabaseStateError, ConnectionSettingError) as exc:
+            raise CheckFailed(str(exc)) from None
+
+    def required_unset(self) -> tuple[str, ...]:
+        """The required settings that are unset or no longer valid: every one when there is no
+        database file, else ``queries.setup.required_unset()`` in a read-only unit of work."""
+        if not self.exists():
+            return tuple(
+                str(found.key) for found in settings_schema.declared() if found.required
+            )
+        with self._read_only_units().open(read_only=True):
+            return setup_queries.required_unset()
+
+    def close(self) -> None:
+        """Dispose the read-only engine, if one was built."""
+        units, self._units = self._units, None
+        if units is not None:
+            units.engine.dispose()
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorContext:
+    """What the doctor checks read: the bootstrap config, where its environment came from
+    (``--env`` or ``NEXTRON_ENV``), the machine probes, the environment's secrets, its Google
+    access and its database, read-only."""
+
+    config: BootstrapConfig
+    env_source: str
+    probes: Probes
+    secrets: SecretsPort
+    google: GoogleAccess
+    database: DoctorDatabase = field(repr=False)
+
+
+def build_doctor_checks() -> DoctorChecks[DoctorContext]:
+    """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, in the order
+    doctor prints them. Later stories register their checks here, before ``freeze()``."""
+    checks: DoctorChecks[DoctorContext] = DoctorChecks()
+    for check in (
+        DoctorCheck(PYTHON_VERSION, lambda c: check_python_version(c.probes)),
+        DoctorCheck(SQLITE_VERSION, lambda c: check_sqlite_version(c.probes)),
+        DoctorCheck(TZDATA, lambda c: check_tzdata(c.probes)),
+        DoctorCheck(
+            PROD_ENV_NOT_PERSISTENT,
+            lambda c: check_prod_env_not_persistent(c.probes, c.config.env, c.env_source),
+        ),
+        DoctorCheck(
+            DATA_DIR_OUTSIDE_ONEDRIVE,
+            lambda c: check_data_dir_outside_onedrive(c.config.data_dir, c.probes),
+        ),
+        DoctorCheck(
+            BACKUP_DIR_SEPARATE,
+            lambda c: check_backup_dir_separate(c.config.data_dir, c.config.backup_dir, c.probes),
+        ),
+        DoctorCheck(
+            PORT_FREE,
+            lambda c: check_port_free(
+                HOST, c.config.port, c.probes, heartbeat=c.config.data_dir / HEARTBEAT_FILE_NAME
+            ),
+        ),
+        DoctorCheck(REQUIRED_CREDENTIALS, lambda c: check_required_credentials(c.secrets.read)),
+        DoctorCheck(
+            INTERNAL_NOTIFY_GRANT, lambda c: check_internal_notify_grant(c.google.access_token)
+        ),
+        DoctorCheck(
+            REQUIRED_SETTINGS, lambda c: check_required_settings(c.database.required_unset)
+        ),
+        DoctorCheck(
+            DATABASE_REVISION_CHECK,
+            lambda c: check_database_revision(
+                c.database.exists(),
+                c.database.revision,
+                head=head_revision(),
+                known=known_revisions(),
+            ),
+        ),
+    ):
+        checks.register_check(check)
+    checks.freeze()
+    return checks
+
+
+def _never_open_browser(url: str) -> bool:
+    """``doctor``'s browser: doctor never starts a consent flow, so it never opens one."""
+    return False
+
+
 def doctor(
     *,
+    env: str | None = None,
+    as_json: bool = False,
     probes: Probes | None = None,
+    secrets: SecretsPort | None = None,
+    google_oauth: GoogleOAuthPort | None = None,
+    clock: Clock | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
-    """Print every startup check as PASS or FAIL; return 0 when none failed, else 1."""
+    """Run every doctor check for ``env`` (``NEXTRON_ENV`` unless given) and print the results
+    as a table, or as JSON with ``as_json``; return 0 when nothing is ``fail``, 1 otherwise and
+    2 for an invalid bootstrap config. Secrets are keyring, Google is ``GoogleOAuthClient`` with
+    a ``DoctorMeter`` and the clock is the system clock, unless injected."""
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     try:
-        config = load_bootstrap()
+        config = load_bootstrap(env)
     except BootstrapError as exc:
         print(exc, file=err)
         return EXIT_STARTUP_FAILED
     probes = probes if probes is not None else Probes.system()
-    results = all_checks(config.data_dir, HOST, config.port, probes)
-    width = max(len(result.name) for result in results)
-    for result in results:
-        status = "PASS" if result.ok else "FAIL"
-        print(f"{status}  {result.name:<{width}}  {result.detail}", file=out)
-    return EXIT_OK if all(result.ok for result in results) else EXIT_CHECKS_FAILED
+    clock = clock if clock is not None else SystemClock()
+    secrets = secrets if secrets is not None else KeyringSecrets(config.env)
+    google = GoogleAccess(
+        secrets,
+        clock,
+        oauth=google_oauth if google_oauth is not None else GoogleOAuthClient(meter=DoctorMeter()),
+        listen=LoopbackListener,
+        files=LocalClientFiles(),
+        browser=_never_open_browser,
+        env=config.env,
+        allowlist=tuple,  # doctor never starts a consent flow, so it reads no allowlist
+    )
+    database = DoctorDatabase(config.data_dir / DB_FILE_NAME)
+    context = DoctorContext(
+        config=config,
+        env_source=ENV_SOURCE_FLAG if env is not None else ENV_SOURCE_VARIABLE,
+        probes=probes,
+        secrets=secrets,
+        google=google,
+        database=database,
+    )
+    try:
+        results = run_checks(build_doctor_checks(), context)
+    finally:
+        database.close()
+    print(format_json(results) if as_json else format_table(results), file=out)
+    failed = any(result.status is Status.FAIL for result in results)
+    return EXIT_CHECKS_FAILED if failed else EXIT_OK
 
 
 def open_dashboard(

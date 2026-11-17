@@ -8,6 +8,8 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   one it is the default, and a required setting nobody has set raises ``SettingNotSet``, so no
   consumer runs on a missing value by accident. An undeclared key raises ``UnknownSetting``.
 - ``stored_texts()``: every stored ``{key: canonical text}`` (the Settings page shows them).
+- ``required_unset()``: the keys of the required settings, in declaration order, that have no
+  row or whose stored text no longer parses (``nextron doctor`` lists them).
 - ``budget_limits()``: the ``nextron.domain.budget.Limits`` the seven Budget and limits
   settings make: each quota in ``QUOTAS`` (its setting × its ``scale``, so Hunter's credits
   are doubled like its stored units), ``ai_budget_monthly`` and ``ai_budget_alert_pct``. A
@@ -20,7 +22,15 @@ from typing import Any
 
 from nextron.db.repos.setup import settings as settings_repo
 from nextron.domain.budget import QUOTAS, Limits
-from nextron.domain.settings_schema import REQUIRED, Key, SettingNotSet, parse, setting
+from nextron.domain.settings_schema import (
+    REQUIRED,
+    InvalidSettingValue,
+    Key,
+    SettingNotSet,
+    declared,
+    parse,
+    setting,
+)
 
 
 def get(key: str) -> Any:
@@ -37,6 +47,26 @@ def get(key: str) -> Any:
 def stored_texts() -> dict[str, str]:
     """Every stored setting's canonical text, by key."""
     return settings_repo.stored_texts()
+
+
+def required_unset() -> tuple[str, ...]:
+    """The required settings' keys, in declaration order, that have no row or whose stored text
+    fails ``parse``."""
+    stored = settings_repo.stored_texts()
+    unset = []
+    for found in declared():
+        if not found.required:
+            continue
+        key = str(found.key)
+        text = stored.get(key)
+        if text is None:
+            unset.append(key)
+            continue
+        try:
+            parse(found, text)
+        except InvalidSettingValue:
+            unset.append(key)
+    return tuple(unset)
 
 
 def budget_limits() -> Limits:

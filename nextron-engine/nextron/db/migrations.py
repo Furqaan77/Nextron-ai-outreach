@@ -18,6 +18,11 @@ underscores only, at most 31 characters.
   (``ForeignKeyCheckError``) before the transaction commits. Any failure rolls the whole upgrade
   back and leaves the revision as it was.
 
+``head_revision()`` is the revision this code migrates to, ``known_revisions()`` every revision id
+in its chain, and ``current_revision(engine)`` the database's own (``None`` for an empty one;
+several revisions, or tables but no revision, raise ``DatabaseStateError``). ``nextron doctor``
+reads them on a read-only engine and never migrates.
+
 The ``pre_migrate`` backup before an upgrade arrives in Story 1.16.
 """
 
@@ -67,6 +72,12 @@ def _script(config: Config) -> tuple[ScriptDirectory, str]:
 def head_revision(script_location: Path | None = None) -> str:
     """The revision this code migrates to."""
     return _script(alembic_config(script_location))[1]
+
+
+def known_revisions(script_location: Path | None = None) -> frozenset[str]:
+    """Every revision id in the chain this code knows, head included."""
+    script, _head = _script(alembic_config(script_location))
+    return frozenset(revision.revision for revision in script.walk_revisions())
 
 
 def _stored_revision(connection: Connection) -> str | None:

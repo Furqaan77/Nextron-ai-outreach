@@ -1,16 +1,24 @@
-"""Startup checks (AD-2, AD-14): pure functions over injected probes."""
+"""Startup and readiness checks (AD-2, AD-14, AD-20, FR-56): pure functions over injected probes
+and callables, the doctor check registry, ``run_checks`` and the two output formats."""
 
 import ast
+import json
+import os
 import socket
+import sys
+import time
 import zoneinfo
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any
 
 import pytest
 
 from nextron import startup_checks as checks
+from nextron.domain import credentials
+from nextron.ports.errors import AdapterError
+from nextron.startup_checks import CheckFailed, CheckResult, DoctorCheck, DoctorChecks, Status
 from tests.fakes.probes import PortProbe, fake_probes
 
 DATA_DIR = PureWindowsPath(r"C:\Users\mac\AppData\Local\Nextron\dev")
@@ -23,16 +31,49 @@ DATA_DIR = PureWindowsPath(r"C:\Users\mac\AppData\Local\Nextron\dev")
 def test_sqlite_version(version: str, ok: bool) -> None:
     result = checks.check_sqlite_version(fake_probes(sqlite_version=version))
 
-    assert result.name == "sqlite_version"
-    assert result.ok is ok
-    assert version in result.detail
+    assert result.id == "sqlite_version"
+    assert result.status is (Status.OK if ok else Status.FAIL)
+    assert version in result.message
 
 
-def test_sqlite_version_probe_failure_fails_the_check() -> None:
+def test_sqlite_version_probe_failure_fails_the_check_naming_only_the_type() -> None:
     def broken() -> str:
         raise RuntimeError("no sqlite")
 
-    assert not checks.check_sqlite_version(fake_probes(sqlite_version=broken)).ok
+    result = checks.check_sqlite_version(fake_probes(sqlite_version=broken))
+
+    assert result.status is Status.FAIL
+    assert result.message == "cannot read the SQLite version (RuntimeError)"
+
+
+@pytest.mark.parametrize(
+    ("version", "ok"),
+    [
+        ((3, 14, 7), False),
+        ((3, 13, 12), False),
+        ((3, 14, 8), True),
+        ((3, 14, 10), True),
+        ((3, 15, 0), True),
+    ],
+)
+def test_python_version(version: tuple[int, ...], ok: bool) -> None:
+    result = checks.check_python_version(fake_probes(python_version=version))
+
+    assert result.id == "python_version"
+    assert result.status is (Status.OK if ok else Status.FAIL)
+    assert ".".join(map(str, version)) in result.message
+    assert "3.14.8" in result.message
+
+
+def test_python_version_probe_failure_fails_the_check_naming_only_the_type() -> None:
+    def broken() -> tuple[int, ...]:
+        raise OSError("secret detail")
+
+    result = checks.check_python_version(fake_probes(python_version=broken))
+
+    assert result == CheckResult(
+        "python_version", Status.FAIL, "cannot read the Python version (OSError)"
+    )
 
 
 def test_tzdata_passes_when_europe_london_loads() -> None:
@@ -42,7 +83,7 @@ def test_tzdata_passes_when_europe_london_loads() -> None:
         loaded.append(name)
         return object()
 
-    assert checks.check_tzdata(fake_probes(load_zone=load)).ok
+    assert checks.check_tzdata(fake_probes(load_zone=load)).status is Status.OK
     assert loaded == ["Europe/London"]
 
 
@@ -52,9 +93,9 @@ def test_tzdata_fails_when_zoneinfo_raises() -> None:
 
     result = checks.check_tzdata(fake_probes(load_zone=missing))
 
-    assert result.name == "tzdata"
-    assert not result.ok
-    assert "Europe/London" in result.detail
+    assert result.id == "tzdata"
+    assert result.status is Status.FAIL
+    assert "Europe/London" in result.message
 
 
 @pytest.mark.parametrize(
@@ -73,8 +114,8 @@ def test_data_dir_inside_onedrive_fails(data_dir: str, environ: dict[str, str]) 
         PureWindowsPath(data_dir), fake_probes(environ=environ)
     )
 
-    assert result.name == "data_dir_outside_onedrive"
-    assert not result.ok
+    assert result.id == "data_dir_outside_onedrive"
+    assert result.status is Status.FAIL
 
 
 @pytest.mark.parametrize(
@@ -92,7 +133,7 @@ def test_data_dir_outside_onedrive_passes(data_dir: str) -> None:
         PureWindowsPath(data_dir), fake_probes(environ=environ)
     )
 
-    assert result.ok, result.detail
+    assert result.status is Status.OK, result.message
 
 
 def test_port_check_uses_the_probe() -> None:
@@ -100,26 +141,151 @@ def test_port_check_uses_the_probe() -> None:
 
     result = checks.check_port_free("127.0.0.1", 8766, fake_probes(port=probe))
 
-    assert result.name == "port_free"
-    assert not result.ok
-    assert "127.0.0.1:8766" in result.detail
+    assert result == CheckResult(
+        "port_free", Status.FAIL, "127.0.0.1:8766 is already in use by another process"
+    )
     assert probe.calls == [("127.0.0.1", 8766)]
 
 
 def test_port_check_passes_when_free() -> None:
-    assert checks.check_port_free("127.0.0.1", 8766, fake_probes()).ok
+    assert checks.check_port_free("127.0.0.1", 8766, fake_probes()).status is Status.OK
 
 
-def test_all_checks_run_in_order() -> None:
-    names = [r.name for r in checks.all_checks(DATA_DIR, "127.0.0.1", 8766, fake_probes())]
+def test_a_port_probe_failure_fails_naming_only_the_type() -> None:
+    def broken(host: str, port: int) -> bool:
+        raise PermissionError("secret detail")
 
-    assert names == [
-        "sqlite_version",
-        "tzdata",
-        "data_dir_outside_onedrive",
-        "prod_env_not_persistent",
-        "port_free",
-    ]
+    result = checks.check_port_free("127.0.0.1", 8766, fake_probes(port_is_free=broken))
+
+    assert result == CheckResult(
+        "port_free", Status.FAIL, "cannot probe 127.0.0.1:8766 (PermissionError)"
+    )
+
+
+HEARTBEAT = DATA_DIR / "heartbeat"
+
+
+def _age(seconds: float | None) -> Callable[[PurePath], float | None]:
+    def file_age(path: PurePath) -> float | None:
+        assert path == HEARTBEAT
+        return seconds
+
+    return file_age
+
+
+# Row: Port --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("age", "status"),
+    [
+        (30.0, Status.OK),
+        (0.0, Status.OK),
+        (119.9, Status.OK),
+        (120.0, Status.FAIL),
+        (300.0, Status.FAIL),
+        (None, Status.FAIL),
+        (-5.0, Status.OK),  # a just-touched file whose mtime runs slightly ahead
+        (-300.0, Status.FAIL),  # from the future: the clock was set back, so not fresh
+    ],
+    ids=["30s", "0s", "119.9s", "120s", "300s", "missing", "minus-5s", "minus-300s"],
+)
+def test_a_busy_port_is_ok_only_with_a_fresh_heartbeat(age: float | None, status: Status) -> None:
+    probes = fake_probes(port=PortProbe(free=False), file_age=_age(age))
+
+    result = checks.check_port_free("127.0.0.1", 8766, probes, heartbeat=HEARTBEAT)
+
+    assert result.id == "port_free"
+    assert result.status is status
+    if status is Status.OK:
+        assert "held by this environment's running engine" in result.message
+    else:
+        assert "already in use" in result.message
+        assert f"{HEARTBEAT} is missing or not within the last 2 minutes" in result.message
+
+
+def test_a_heartbeat_read_error_counts_as_no_heartbeat() -> None:
+    def broken(path: PurePath) -> float | None:
+        raise PermissionError("secret detail")
+
+    probes = fake_probes(port=PortProbe(free=False), file_age=broken)
+
+    result = checks.check_port_free("127.0.0.1", 8766, probes, heartbeat=HEARTBEAT)
+
+    assert result.status is Status.FAIL
+    assert "secret detail" not in result.message
+
+
+def test_a_free_port_never_reads_the_heartbeat() -> None:
+    def never(path: PurePath) -> float | None:
+        raise AssertionError("a free port needs no heartbeat")
+
+    result = checks.check_port_free(
+        "127.0.0.1", 8766, fake_probes(file_age=never), heartbeat=HEARTBEAT
+    )
+
+    assert result == CheckResult("port_free", Status.OK, "127.0.0.1:8766 is free")
+
+
+# Row: Backup dir --------------------------------------------------------------------------------
+
+BACKUP_DIR = PureWindowsPath(r"C:\Users\mac\AppData\Local\Nextron\backups\dev")
+
+
+@pytest.mark.parametrize(
+    ("backup_dir", "environ", "reason"),
+    [
+        (r"c:\users\MAC\appdata\local\nextron\DEV", {}, "is the data dir"),
+        (r"C:\Users\mac\AppData\Local\Nextron\dev\backups", {}, "is inside the data dir"),
+        (r"C:\Users\mac\AppData\Local\Nextron", {}, "contains the data dir"),
+        (
+            r"C:\Users\mac\OneDrive\Backups",
+            {"OneDrive": r"C:\Users\mac\OneDrive"},
+            "is inside %OneDrive%",
+        ),
+        (
+            r"D:\OneDrive - Nextron AI\backups",
+            {},
+            'has the path segment "OneDrive - Nextron AI"',
+        ),
+    ],
+    ids=[
+        "equal-other-case",
+        "inside-the-data-dir",
+        "containing-it",
+        "onedrive-variable",
+        "onedrive-segment",
+    ],
+)
+def test_a_backup_dir_that_is_not_separate_fails(
+    backup_dir: str, environ: dict[str, str], reason: str
+) -> None:
+    result = checks.check_backup_dir_separate(
+        DATA_DIR, PureWindowsPath(backup_dir), fake_probes(environ=environ)
+    )
+
+    assert result.id == "backup_dir_separate"
+    assert result.status is Status.FAIL
+    assert reason in result.message
+    assert "NEXTRON_BACKUP_DIR" in result.message
+
+
+@pytest.mark.parametrize(
+    "backup_dir",
+    [
+        str(BACKUP_DIR),  # the default
+        r"C:\Users\mac\AppData\Local\Nextron\dev-backups",  # a sibling sharing a prefix
+        r"E:\Backups\Nextron",
+    ],
+)
+def test_a_separate_backup_dir_passes(backup_dir: str) -> None:
+    environ = {"OneDrive": r"C:\Users\mac\OneDrive"}
+
+    result = checks.check_backup_dir_separate(
+        DATA_DIR, PureWindowsPath(backup_dir), fake_probes(environ=environ)
+    )
+
+    assert result.status is Status.OK, result.message
 
 
 def test_environment_checks_leave_out_the_port_and_the_persistent_env() -> None:
@@ -132,7 +298,7 @@ def test_environment_checks_leave_out_the_port_and_the_persistent_env() -> None:
         DATA_DIR, fake_probes(port=probe, persistent_variable=persistent)
     )
 
-    assert [r.name for r in results] == ["sqlite_version", "tzdata", "data_dir_outside_onedrive"]
+    assert [r.id for r in results] == ["sqlite_version", "tzdata", "data_dir_outside_onedrive"]
     assert probe.calls == []
 
 
@@ -153,10 +319,10 @@ def test_a_persistent_prod_fails_naming_the_scopes(values: dict[str, str], scope
         fake_probes(persistent_variable=lambda name: values)
     )
 
-    assert result.name == "prod_env_not_persistent"
-    assert not result.ok
-    assert result.detail.startswith("NEXTRON_ENV=prod must only be set by the logon task")
-    assert f"set persistently in the {scopes};" in result.detail
+    assert result.id == "prod_env_not_persistent"
+    assert result.status is Status.FAIL
+    assert result.message.startswith("NEXTRON_ENV=prod must only be set by the logon task")
+    assert f"set persistently in the {scopes};" in result.message
 
 
 @pytest.mark.parametrize(
@@ -171,8 +337,20 @@ def test_no_persistent_prod_passes(values: dict[str, str]) -> None:
 
     result = checks.check_prod_env_not_persistent(fake_probes(persistent_variable=persistent))
 
-    assert result.ok, result.detail
+    assert result.status is Status.OK, result.message
     assert asked == ["NEXTRON_ENV"]
+
+
+@pytest.mark.parametrize("source", ["--env", "NEXTRON_ENV"])
+@pytest.mark.parametrize("values", [{}, {"user": "prod"}], ids=["none", "user-prod"])
+def test_the_persistent_env_message_names_the_env_and_its_source(
+    source: str, values: dict[str, str]
+) -> None:
+    result = checks.check_prod_env_not_persistent(
+        fake_probes(persistent_variable=lambda name: values), "dev", source
+    )
+
+    assert result.message.endswith(f"; this run is dev, from {source}")
 
 
 def test_a_probe_failure_fails_the_persistent_env_check() -> None:
@@ -181,8 +359,9 @@ def test_a_probe_failure_fails_the_persistent_env_check() -> None:
 
     result = checks.check_prod_env_not_persistent(fake_probes(persistent_variable=broken))
 
-    assert not result.ok
-    assert "PermissionError" in result.detail
+    assert result.status is Status.FAIL
+    assert "PermissionError" in result.message
+    assert "access denied" not in result.message
 
 
 class FakeKey:
@@ -301,8 +480,25 @@ def test_socket_probe_sees_a_bound_port(reuse_address: bool) -> None:
 def test_system_probes_pass_on_this_machine() -> None:
     probes = checks.Probes.system()
 
-    assert checks.check_sqlite_version(probes).ok
-    assert checks.check_tzdata(probes).ok
+    assert checks.check_sqlite_version(probes).status is Status.OK
+    assert checks.check_tzdata(probes).status is Status.OK
+    assert checks.check_python_version(probes).status is Status.OK
+    assert probes.python_version() == tuple(sys.version_info[:3])
+    assert probes.file_age is checks.file_age_seconds
+
+
+def test_file_age_seconds(tmp_path: Path) -> None:
+    beat = tmp_path / "heartbeat"
+
+    assert checks.file_age_seconds(beat) is None
+    assert not beat.exists()
+    beat.touch()
+    age = checks.file_age_seconds(beat)
+    assert age is not None and -5 < age < 60
+    old = time.time() - 300
+    os.utime(beat, (old, old))
+    age = checks.file_age_seconds(beat)
+    assert age is not None and 295 < age < 360
 
 
 def test_system_probes_read_the_live_onedrive_variable(
@@ -314,8 +510,8 @@ def test_system_probes_read_the_live_onedrive_variable(
         tmp_path / "Nextron" / "dev", checks.Probes.system()
     )
 
-    assert not result.ok
-    assert "%OneDrive%" in result.detail
+    assert result.status is Status.FAIL
+    assert "%OneDrive%" in result.message
 
 
 def test_system_probes_see_a_listening_socket() -> None:
@@ -326,4 +522,477 @@ def test_system_probes_see_a_listening_socket() -> None:
 
         result = checks.check_port_free("127.0.0.1", port, checks.Probes.system())
 
-    assert not result.ok
+    assert result.status is Status.FAIL
+
+
+# Row: Credential --------------------------------------------------------------------------------
+
+REQUIRED = [found for found in credentials.declared() if found.required]
+PLANTED = "QZXPLANTEDSECRET"
+
+
+class Reader:
+    """A ``SecretsPort.read`` stand-in: ``values`` by secret name; ``failing`` names raise
+    ``keyring_failed``."""
+
+    def __init__(self, values: dict[str, str], failing: frozenset[str] = frozenset()) -> None:
+        self.values = values
+        self.failing = failing
+        self.asked: list[str] = []
+
+    def __call__(self, name: str) -> str | None:
+        self.asked.append(name)
+        if name in self.failing:
+            raise AdapterError(False, "keyring_failed", f"read of secret {name} failed")
+        return self.values.get(name)
+
+
+def all_set() -> dict[str, str]:
+    return {found.secret_name: f"{PLANTED}-{found.key}" for found in REQUIRED}
+
+
+def test_the_required_credentials_are_the_five_declared_ones() -> None:
+    assert [str(found.key) for found in REQUIRED] == [
+        "claude",
+        "hunter",
+        "companies_house",
+        "telegram_bot",
+        "unsubscribe_bearer",
+    ]
+
+
+def test_every_required_credential_set_passes_and_reads_only_the_required_ones() -> None:
+    read = Reader(all_set() | {"prospeo/api_key": "x" * 5000})  # optional: not read
+
+    result = checks.check_required_credentials(read)
+
+    assert result.id == "required_credentials"
+    assert result.status is Status.OK
+    assert read.asked == [found.secret_name for found in REQUIRED]
+    assert PLANTED not in result.message
+
+
+def test_a_missing_credential_fails_naming_its_label() -> None:
+    values = all_set()
+    del values["hunter/api_key"]
+
+    result = checks.check_required_credentials(Reader(values))
+
+    assert result.status is Status.FAIL
+    assert "not set: Hunter API key;" in result.message
+    assert PLANTED not in result.message
+
+
+@pytest.mark.parametrize(
+    ("value", "status"),
+    [
+        ("x" * 1280, Status.OK),
+        ("x" * 1281, Status.FAIL),
+        ("x" * 1279 + "\N{GRINNING FACE}", Status.FAIL),  # 1,280 characters, 1,281 units
+        ("x" * 1278 + "\N{GRINNING FACE}", Status.OK),  # 1,280 units
+    ],
+    ids=["1280", "1281", "1281-units", "1280-units"],
+)
+def test_a_credential_over_1280_utf16_units_fails(value: str, status: Status) -> None:
+    result = checks.check_required_credentials(Reader(all_set() | {"telegram/bot_token": value}))
+
+    assert result.status is status
+    if status is Status.FAIL:
+        assert "over 1,280 characters: Telegram bot token;" in result.message
+        assert "xxxx" not in result.message
+
+
+def test_an_unreadable_credential_fails_naming_its_label() -> None:
+    read = Reader(all_set(), failing=frozenset({"unsub/bearer"}))
+
+    result = checks.check_required_credentials(read)
+
+    assert result.status is Status.FAIL
+    assert "unreadable (Windows Credential Manager failed): Unsubscribe Endpoint bearer secret" in (
+        result.message
+    )
+    assert "keyring_failed" not in result.message
+
+
+def test_every_problem_is_listed_at_once() -> None:
+    read = Reader(
+        {"anthropic/api_key": "x" * 1281, "telegram/bot_token": "ok"},
+        failing=frozenset({"unsub/bearer"}),
+    )
+
+    result = checks.check_required_credentials(read)
+
+    assert result.message == (
+        "required credentials not set: Hunter API key, Companies House API key; "
+        "over 1,280 characters: Claude API key; "
+        "unreadable (Windows Credential Manager failed): Unsubscribe Endpoint bearer secret; "
+        "enter them on the Credentials page"
+    )
+
+
+# Row: Grant -------------------------------------------------------------------------------------
+
+TOKEN = "ya29.QZXPLANTEDTOKEN"
+
+
+def grant(outcome: AdapterError | None) -> tuple[Callable[[str], str], list[str]]:
+    asked: list[str] = []
+
+    def access_token(name: str) -> str:
+        asked.append(name)
+        if outcome is not None:
+            raise outcome
+        return TOKEN
+
+    return access_token, asked
+
+
+def test_a_refreshable_grant_passes_without_showing_the_token() -> None:
+    access_token, asked = grant(None)
+
+    result = checks.check_internal_notify_grant(access_token)
+
+    assert result.id == "internal_notify_grant"
+    assert result.status is Status.OK
+    assert asked == ["internal_notify"]
+    assert TOKEN not in result.message
+
+
+def test_google_unreachable_is_a_warning() -> None:
+    access_token, _ = grant(AdapterError(True, "google_unavailable", f"down {TOKEN}"))
+
+    result = checks.check_internal_notify_grant(access_token)
+
+    assert result.status is Status.WARN
+    assert "google_unavailable" in result.message
+    assert TOKEN not in result.message
+
+
+@pytest.mark.parametrize(
+    ("code", "says"),
+    [
+        ("google_client_not_imported", "the Google Desktop client is not imported"),
+        ("google_not_granted", "internal_notify is not granted"),
+        ("google_needs_reconsent", "internal_notify needs re-consent"),
+        ("google_invalid_grant", "internal_notify needs re-consent"),
+        ("keyring_failed", "Windows Credential Manager could not be read (keyring_failed)"),
+        ("google_rejected", "internal_notify could not be refreshed (google_rejected)"),
+        ("google_bad_response", "internal_notify could not be refreshed (google_bad_response)"),
+    ],
+)
+def test_every_other_grant_error_fails_by_code(code: str, says: str) -> None:
+    access_token, _ = grant(AdapterError(False, code, f"detail {TOKEN} mac@nextronai.com"))
+
+    result = checks.check_internal_notify_grant(access_token)
+
+    assert result.status is Status.FAIL
+    assert says in result.message
+    assert TOKEN not in result.message and "mac@" not in result.message
+
+
+def test_a_grant_check_that_raises_something_else_propagates() -> None:
+    def broken(name: str) -> str:
+        raise RuntimeError("not an adapter error")
+
+    with pytest.raises(RuntimeError):
+        checks.check_internal_notify_grant(broken)
+
+
+# Row: Settings ----------------------------------------------------------------------------------
+
+
+def test_no_unset_required_setting_passes() -> None:
+    result = checks.check_required_settings(lambda: ())
+
+    assert result == CheckResult(
+        "required_settings", Status.OK, "every required setting is set and valid"
+    )
+
+
+def test_unset_required_settings_fail_naming_label_and_key() -> None:
+    result = checks.check_required_settings(lambda: ("sender_timezone", "alert_chat_id"))
+
+    assert result.status is Status.FAIL
+    assert result.message == (
+        "required settings not set or no longer valid: Sender's timezone (sender_timezone), "
+        "Telegram alert chat id (alert_chat_id); set them on the Settings page"
+    )
+
+
+def test_unreadable_settings_fail_naming_only_the_error_type() -> None:
+    def broken() -> tuple[str, ...]:
+        raise CheckFailed("planted detail")
+
+    result = checks.check_required_settings(broken)
+
+    assert result == CheckResult(
+        "required_settings", Status.FAIL, "the settings could not be read (CheckFailed)"
+    )
+
+
+# Row: Behind, Ahead / foreign -------------------------------------------------------------------
+
+HEAD_REVISION = "0006_1_13_metering"
+KNOWN = frozenset({"0005_1_12_notify", HEAD_REVISION})
+
+
+def revision_check(exists: bool, revision: Callable[[], str | None]) -> CheckResult:
+    return checks.check_database_revision(exists, revision, head=HEAD_REVISION, known=KNOWN)
+
+
+def test_no_database_file_warns_and_reads_nothing() -> None:
+    def never() -> str | None:
+        raise AssertionError("no file: nothing to read")
+
+    result = revision_check(False, never)
+
+    assert result == CheckResult(
+        "database_revision",
+        Status.WARN,
+        "no database file yet; it will be created and migrated on next start",
+    )
+
+
+@pytest.mark.parametrize(
+    ("revision", "status", "message"),
+    [
+        (HEAD_REVISION, Status.OK, f"the database is at head ({HEAD_REVISION})"),
+        (
+            "0005_1_12_notify",
+            Status.WARN,
+            f"the database is at 0005_1_12_notify, behind {HEAD_REVISION}; "
+            "it will migrate on next start",
+        ),
+        (None, Status.WARN, "the database is empty; it will migrate on next start"),
+        (
+            "0099_future",
+            Status.FAIL,
+            "database revision 0099_future is newer than this code; run the newer code or "
+            "restore a backup",
+        ),
+    ],
+    ids=["head", "behind", "empty", "ahead"],
+)
+def test_the_database_revision(revision: str | None, status: Status, message: str) -> None:
+    assert revision_check(True, lambda: revision) == CheckResult(
+        "database_revision", status, message
+    )
+
+
+def test_a_check_failed_shows_its_message() -> None:
+    def foreign() -> str | None:
+        raise CheckFailed("the database has tables but no Alembic revision")
+
+    result = revision_check(True, foreign)
+
+    assert result == CheckResult(
+        "database_revision", Status.FAIL, "the database has tables but no Alembic revision"
+    )
+
+
+def test_any_other_read_error_names_only_its_type() -> None:
+    def broken() -> str | None:
+        raise PermissionError("planted detail")
+
+    result = revision_check(True, broken)
+
+    assert result == CheckResult(
+        "database_revision", Status.FAIL, "the database could not be read (PermissionError)"
+    )
+
+
+# The registry -----------------------------------------------------------------------------------
+
+
+def ok(check_id: str, message: str = "fine") -> DoctorCheck[object]:
+    return DoctorCheck(check_id, lambda context: CheckResult(check_id, Status.OK, message))
+
+
+@pytest.mark.parametrize(
+    "check_id",
+    ["", "Python", "1st", "a-b", "a b", "a\n", "x" * 65, "é", 7, None],
+    ids=["empty", "upper", "digit-first", "dash", "space", "newline", "65", "accent", "int",
+         "none"],
+)
+def test_a_bad_check_id_is_refused(check_id: object) -> None:
+    with pytest.raises(TypeError):
+        DoctorCheck(check_id, lambda context: None)  # type: ignore[arg-type]
+
+
+def test_the_longest_id_is_accepted() -> None:
+    longest = "a" * 64
+
+    assert ok(longest).id == longest
+
+
+def test_run_must_be_callable() -> None:
+    with pytest.raises(TypeError):
+        DoctorCheck("a", "not callable")  # type: ignore[arg-type]
+
+
+def test_the_registry_keeps_registration_order_and_refuses_a_repeated_id() -> None:
+    registry: DoctorChecks[object] = DoctorChecks()
+    first, second = ok("zeta"), ok("alpha")
+    registry.register_check(first)
+    registry.register_check(second)
+
+    with pytest.raises(ValueError, match="zeta"):
+        registry.register_check(ok("zeta"))
+    with pytest.raises(TypeError):
+        registry.register_check("zeta")  # type: ignore[arg-type]
+
+    assert registry.checks == (first, second)
+    assert not registry.frozen
+
+
+def test_the_registry_refuses_registration_after_freeze() -> None:
+    registry: DoctorChecks[object] = DoctorChecks()
+    registry.register_check(ok("a"))
+    registry.freeze()
+
+    with pytest.raises(RuntimeError):
+        registry.register_check(ok("b"))
+
+    assert registry.frozen
+    assert [check.id for check in registry.checks] == ["a"]
+
+
+def test_run_checks_needs_a_frozen_registry() -> None:
+    registry: DoctorChecks[object] = DoctorChecks()
+    registry.register_check(ok("a"))
+
+    with pytest.raises(RuntimeError):
+        checks.run_checks(registry, object())
+
+
+def frozen(*items: DoctorCheck[Any]) -> DoctorChecks[Any]:
+    registry: DoctorChecks[Any] = DoctorChecks()
+    for item in items:
+        registry.register_check(item)
+    registry.freeze()
+    return registry
+
+
+# Row: Crash -------------------------------------------------------------------------------------
+
+
+def test_a_crashed_check_fails_naming_its_type_and_the_rest_still_run() -> None:
+    contexts: list[object] = []
+
+    def boom(context: object) -> CheckResult:
+        contexts.append(context)
+        raise RuntimeError("planted detail")
+
+    def last(context: object) -> CheckResult:
+        contexts.append(context)
+        return CheckResult("last", Status.WARN, "still ran")
+
+    context = object()
+    results = checks.run_checks(
+        frozen(ok("first"), DoctorCheck("boom", boom), DoctorCheck("last", last)), context
+    )
+
+    assert results == [
+        CheckResult("first", Status.OK, "fine"),
+        CheckResult("boom", Status.FAIL, "the check crashed (RuntimeError)"),
+        CheckResult("last", Status.WARN, "still ran"),
+    ]
+    assert contexts == [context, context]
+
+
+@pytest.mark.parametrize(
+    "returned",
+    [
+        None,
+        "ok",
+        CheckResult("other", Status.OK, "the wrong id"),
+        CheckResult("mine", "ok", "a plain string status"),  # type: ignore[arg-type]
+        CheckResult("mine", Status.OK, None),  # type: ignore[arg-type]
+    ],
+    ids=["none", "str", "wrong-id", "str-status", "no-message"],
+)
+def test_a_check_that_returns_no_result_fails(returned: object) -> None:
+    def mine_run(context: object) -> CheckResult:
+        return returned  # type: ignore[return-value]
+
+    mine: DoctorCheck[Any] = DoctorCheck("mine", mine_run)
+
+    results = checks.run_checks(frozen(mine, ok("next")), None)
+
+    assert results == [
+        CheckResult("mine", Status.FAIL, "the check returned no result"),
+        CheckResult("next", Status.OK, "fine"),
+    ]
+
+
+def test_line_breaks_in_a_message_become_spaces() -> None:
+    results = checks.run_checks(frozen(ok("a", "one\ntwo\r\nthree\rfour\u2028five")), None)
+
+    assert results[0].message == "one two three four five"
+
+
+def test_a_base_exception_is_not_swallowed() -> None:
+    def interrupted(context: object) -> CheckResult:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        checks.run_checks(frozen(DoctorCheck("a", interrupted)), None)
+
+
+# The formats ------------------------------------------------------------------------------------
+
+RESULTS = [
+    CheckResult("python_version", Status.OK, "Python 3.14.8 (needs 3.14.8 or later)"),
+    CheckResult("database_revision", Status.WARN, "the database is empty; it will migrate"),
+    CheckResult("tzdata", Status.FAIL, 'ZoneInfo("Europe/London") failed'),
+]
+
+
+def test_format_table() -> None:
+    assert checks.format_table(RESULTS) == (
+        "status  check              message\n"
+        "ok      python_version     Python 3.14.8 (needs 3.14.8 or later)\n"
+        "warn    database_revision  the database is empty; it will migrate\n"
+        'fail    tzdata             ZoneInfo("Europe/London") failed\n'
+        "1 ok, 1 warn, 1 fail"
+    )
+
+
+def test_format_table_pads_to_the_header_when_every_id_is_short() -> None:
+    assert checks.format_table([CheckResult("a", Status.OK, "")]) == (
+        "status  check  message\nok      a\n1 ok, 0 warn, 0 fail"
+    )
+
+
+def test_format_json() -> None:
+    text = checks.format_json(RESULTS)
+
+    assert text == (
+        "[\n"
+        "  {\n"
+        '    "id": "python_version",\n'
+        '    "status": "ok",\n'
+        '    "message": "Python 3.14.8 (needs 3.14.8 or later)"\n'
+        "  },\n"
+        "  {\n"
+        '    "id": "database_revision",\n'
+        '    "status": "warn",\n'
+        '    "message": "the database is empty; it will migrate"\n'
+        "  },\n"
+        "  {\n"
+        '    "id": "tzdata",\n'
+        '    "status": "fail",\n'
+        '    "message": "ZoneInfo(\\"Europe/London\\") failed"\n'
+        "  }\n"
+        "]"
+    )
+    assert json.loads(text) == [
+        {"id": r.id, "status": str(r.status), "message": r.message} for r in RESULTS
+    ]
+
+
+def test_format_json_is_ascii_only() -> None:
+    text = checks.format_json([CheckResult("a", Status.OK, r"data dir D:\Données")])
+
+    assert text.isascii()
+    assert json.loads(text)[0]["message"] == r"data dir D:\Données"

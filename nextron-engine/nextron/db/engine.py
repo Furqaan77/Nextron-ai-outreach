@@ -22,6 +22,18 @@ change how transactions start. Three events then take over transaction control:
   Transactions belong to the unit of work (``nextron.db.uow``); this also refuses
   ``Session.begin_nested()``.
 
+``create_read_only_engine(db_path)`` is ``nextron doctor``'s engine: it never creates, migrates or
+writes the file. Each connection is ``sqlite3.connect(<file URI>?mode=ro, uri=True,
+autocommit=LEGACY_TRANSACTION_CONTROL)`` (SQLite refuses every write on it), with ``NullPool``
+and ``hide_parameters=True``. Its ``connect`` event sets ``isolation_level = None``, requires
+``journal_mode`` ``wal`` or an empty file (``page_count`` 0; it never switches the mode), else
+``ConnectionSettingError``, and sets ``busy_timeout``. The ``begin`` and
+``before_cursor_execute`` events above apply too: on a read-only file ``BEGIN IMMEDIATE`` opens
+a read transaction, so a read doesn't wait for another connection's writes. A missing file
+raises on connect and is never created. Reading a WAL file may leave empty ``-wal`` and ``-shm``
+files next to it; the engine reuses them, and SQLite deletes them when the engine's last
+connection closes at a clean stop.
+
 ``fk_off_connection(engine)`` is the one place that turns ``foreign_keys`` off: the startup
 migration (``nextron.db.migrations``) runs on it, following Alembic's SQLite batch guidance.
 
@@ -44,6 +56,7 @@ from typing import Any, Final
 
 import sqlalchemy
 from sqlalchemy import URL, Connection, Engine, event
+from sqlalchemy.pool import NullPool
 
 BUSY_TIMEOUT_MS: Final = 5000
 BEGIN_SQL: Final = "BEGIN IMMEDIATE"
@@ -149,6 +162,43 @@ def create_engine(db_path: Path) -> Engine:
         hide_parameters=True,  # bound values can hold personal data; errors and logs show none
     )
     event.listen(engine, "connect", _on_connect)
+    event.listen(engine, "begin", _on_begin)
+    event.listen(engine, "before_cursor_execute", _refuse_transaction_sql)
+    return engine
+
+
+def _on_read_only_connect(dbapi_connection: sqlite3.Connection, connection_record: Any) -> None:
+    dbapi_connection.isolation_level = None
+    [mode] = dbapi_connection.execute("PRAGMA journal_mode").fetchone()
+    if str(mode).lower() != "wal":
+        [pages] = dbapi_connection.execute("PRAGMA page_count").fetchone()
+        if pages != 0:
+            raise ConnectionSettingError(
+                f"the database file uses journal_mode {mode}, not wal; "
+                "it is not this engine's database"
+            )
+    dbapi_connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+
+
+def create_read_only_engine(db_path: Path) -> Engine:
+    """A read-only engine on the SQLite file ``db_path``, which must exist; see the module
+    docstring. Nothing it does creates or changes the file."""
+    if not isinstance(db_path, Path):
+        raise TypeError("db_path must be a pathlib.Path to a database file")
+    if db_path.name in ("", ".", "..", ":memory:"):
+        raise ValueError("create_read_only_engine opens a database file, not an in-memory one")
+    uri = db_path.absolute().as_uri() + "?mode=ro"
+
+    def connect() -> sqlite3.Connection:
+        return sqlite3.connect(uri, uri=True, autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL)
+
+    engine = sqlalchemy.create_engine(
+        URL.create("sqlite+pysqlite", database=str(db_path)),
+        creator=connect,
+        poolclass=NullPool,
+        hide_parameters=True,  # bound values can hold personal data; errors and logs show none
+    )
+    event.listen(engine, "connect", _on_read_only_connect)
     event.listen(engine, "begin", _on_begin)
     event.listen(engine, "before_cursor_execute", _refuse_transaction_sql)
     return engine
