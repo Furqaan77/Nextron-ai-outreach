@@ -391,7 +391,9 @@ The Segments (FR-1) come from `seed/segments.yaml` until the Slice 3 editing scr
 (AD-12): Law-PrivateAI and Ops-Automation, each with its industry keywords, size range, ranked
 decision-maker roles, disqualifiers, weighted Signal types (the PRD's FR-1 table, row for row)
 and discovery queries. The Markets (FR-2) come from `seed/markets.yaml`: the US and UK
-cold-email rules (see [Markets](#markets)). Both files are required. Edit them, then load them:
+cold-email rules (see [Markets](#markets)). The Sequences (FR-4) come from
+`seed/sequences.yaml`: the default four-Step Sequence and its Step briefs (see
+[Sequences](#sequences)). All three files are required. Edit them, then load them:
 
 ```powershell
 uv run nextron seed sync                 # the environment NEXTRON_ENV names
@@ -405,21 +407,25 @@ segments: 2 changed, 0 unchanged
 markets: 2 changed, 0 unchanged
   us: created (version 1)
   uk: created (version 1)
+sequences: 1 changed, 0 unchanged
+  default: created (version 1)
 ```
 
-Each block's first line counts the Segments (or Markets) created or changed, then the unchanged
-ones; a line follows for each one created, changed (`changed (version 1 -> 2)`) or stored but no
-longer in the file (`not in seed/segments.yaml, left as it is (version 1)`, or `not in
-seed/markets.yaml, ...`: a Segment or Market is never deleted, since Leads and snapshots point
-to it). Running it again on the same files prints `segments: 0 changed, 2 unchanged` and
-`markets: 0 changed, 2 unchanged` and writes nothing.
+Each block's first line counts the Segments (or Markets, or Sequences) created or changed, then
+the unchanged ones; a line follows for each one created, changed (`changed (version 1 -> 2)`)
+or stored but no longer in the file (`not in seed/segments.yaml, left as it is (version 1)`, or
+`not in seed/markets.yaml, ...` or `not in seed/sequences.yaml, ...`: a Segment, Market or
+Sequence is never deleted, since Leads, Campaigns and snapshots point to it). Running it again
+on the same files prints `segments: 0 changed, 2 unchanged`, `markets: 0 changed, 2 unchanged`
+and `sequences: 0 changed, 1 unchanged` and writes nothing.
 
-**What a sync does.** It upserts each Segment by key into the `segments` table and then each
-Market by code into the `markets` table (both owner `setup`): a new one is stored at version 1,
-a changed definition gets the next version, and each of those appends one `events` row (entity
-`segments` or `markets`, `v1` or `v<n>` to `v<n+1>`, cause `seed_sync`, actor `seed`). Both
-files are read and validated before the database is touched, and both tables are written in one
-transaction, so a failure anywhere changes nothing in either. Signal-type and disqualifier keys
+**What a sync does.** It upserts each Segment by key into the `segments` table, then each
+Market by code into the `markets` table, then each Sequence by key into the `sequences` and
+`step_briefs` tables (all owner `setup`): a new one is stored at version 1, a changed definition
+gets the next version, and each of those appends one `events` row (entity `segments`, `markets`
+or `sequences`, `v1` or `v<n>` to `v<n+1>`, cause `seed_sync`, actor `seed`). All three files
+are read and validated before the database is touched, and all the tables are written in one
+transaction, so a failure anywhere changes nothing in any of them. Signal-type and disqualifier keys
 stay unique across every stored Segment: if a Segment that is no longer in the file (one whose
 key you renamed, say) still uses a key the file uses, the sync is refused before anything is
 written, naming the file's field (`seed/segments.yaml:
@@ -461,7 +467,7 @@ problem exits 1 before the database is opened.
 | Exit code | Meaning |
 |---|---|
 | 0 | synced (or nothing to change) |
-| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:` or `seed/markets.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
+| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:`, `seed/markets.yaml:` or `seed/sequences.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
 | 2 | `NEXTRON_ENV` (or another bootstrap variable) is unset or invalid; `--env` takes only `dev`, `test` or `prod` |
 
 Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
@@ -531,6 +537,63 @@ and renders a template with `render_footer_template(template, values)`. No setti
 dashboard route changes a Market rule (NFR-7): `tests/contracts/test_market_contracts.py` fails
 on a POST route that names a Market, a `nextron/web` module that names the sync, or a `leads`
 column that names a market.
+
+### Sequences
+
+A Sequence (FR-4, Story 4.1) is the Steps a Campaign sends, in order, each with its brief.
+`seed/sequences.yaml` ships one, `default`: the PRD's four Steps on days 0, 3, 7 and 14, with
+the briefs of the PRD's FR-4 table (Sales Playbook §3; the PRD governs where the two differ,
+FR-71, so Step 1 asks only "Worth a look?", never for a meeting). A Step has no number: its
+number is its position in the list.
+
+| Field | Step 1 | Step 2 | Step 3 | Step 4 | Rule |
+|---|---|---|---|---|---|
+| `delay_days` | 0 | 3 | 7 | 14 | 0 to 365; Step 1 is 0, and each later Step is after the one before |
+| `purpose` | Event-led cold email | New angle | Proof | Respectful close | a clean text of at most 200 characters |
+| `word_limit`, `word_comparison` | 80, `under` | 70, `at_most` | 70, `at_most` | 50, `at_most` | 1 to 150; `under` is fewer words than the limit, `at_most` no more |
+| `allowed_content` | 3 items | 1 item | 2 items | 3 items | 1 to 10 distinct texts |
+| `ask` | the PRD's Ask cell | the PRD's Ask cell | the PRD's Ask cell | the PRD's Ask cell | a clean text of at most 200 characters |
+| `link_rule` | `footer_only` | `footer_only` | `footer_only` | `footer_only` | `footer_only`: no link in the body; the signature and footer hold the only links |
+| `no_price`, `no_audit` | `true` | `true` | `true` | `true` | always `true` |
+| `subject_rule` | 7, `under`, 2 guidance items | (none) | (none) | (none) | Step 1 only: `word_limit` 1 to 20, `word_comparison`, 1 to 10 `guidance` texts |
+| `segment_angles` | (none) | Law-PrivateAI: `us` and `uk` | (none) | (none) | 0 to 20 `segment`, `market`, `angle` entries, no pair twice |
+
+A sequence has exactly `key` (`[a-z][a-z0-9_]`, at most 31 characters, unique), `name` (at most
+100 characters) and `steps` (1 to 6); a Step has the fields above, `subject_rule` and
+`segment_angles` optional. Missing and unknown fields are refused. Law-PrivateAI's Step 2 angle
+is one entry per Market: ABA Formal Opinion 512 is the `us` entry and the SRA notice the `uk`
+entry, so drafting hands a US prompt only ABA 512 and a UK prompt only the SRA notice.
+
+**The compliance floor.** A seed edit can't loosen these; each is refused naming its field:
+`no_price` and `no_audit` are true on every Step; Step 1 is on day 0, keeps its links to the
+footer and has a subject rule of fewer than 7 words (at most 7 with `under`, or 6 with
+`at_most`); only Step 1 has a subject rule, since follow-ups reply in Step 1's thread (AD-22); an
+angle that names ABA Formal Opinion 512 belongs to a `US` Market and one that names the SRA
+notice to a `GB` Market; no `name`, `purpose`, `allowed_content` item, `ask` or `guidance` item
+names either regulation; and every angle names a Segment of `seed/segments.yaml` and a Market of
+`seed/markets.yaml` from the same sync (a typo can't silently drop the Law angle).
+
+**Validation** (`nextron/domain/sequences.py`) names the first problem by its path, a Step by its
+number: `seed/sequences.yaml: sequences[default].steps[2].ask: missing`, or
+`seed/sequences.yaml: sequences[default].steps[3].delay_days: must be more than Step 2's
+delay_days (7)`. The angle checks run when the sync starts, before anything is written:
+`seed/sequences.yaml: sequences[default].steps[2].segment_angles[1].angle: names ABA Formal
+Opinion 512, which only a US Market's angle may (market uk is GB)`.
+
+**Storage.** A Sequence is one `sequences` row (its `key`, `name` and `version`) and one
+`step_briefs` row per Step, keyed (`sequence_id`, `step`), with typed columns and canonical JSON
+for `allowed_content`, `subject_rule` (NULL when the Step has none) and `segment_angles` (`[]`
+for none). A Sequence's version and its `events` row cover its briefs. A changed Sequence
+updates only the brief rows that differ, adds rows for new Steps and deletes the rows of Steps
+no longer in it; a Sequence that is no longer in the file is left as it is.
+
+**Reading the Sequences.** Other code reads them through `queries.setup.sequences()` (each
+`SeededSequence` with its `id`, `key`, `version` and decoded `SequenceDef`, its Step briefs in
+Step order) and `queries.setup.sequence(key)`; a stored Sequence that no longer validates raises
+`InvalidSequences`. Campaigns (4.2), Draft slots and due times (4.9), the grounding rules (4.13)
+and drafting (4.15, 4.18) read the briefs this way; `nextron.domain.sequences.max_words(limit,
+comparison)` turns a limit into a word count. Only `_sync_sequences` writes the Sequences
+(`tests/contracts/test_sequence_contracts.py`).
 
 ## Secrets
 
@@ -779,6 +842,7 @@ the log line carries the copy's `file` name.
 | `0007_1_16_backups` | `backups`: one row per backup, its five checks and `ix_backups_started_at` (see [Backups](#backups)) | `ops` |
 | `0008_2_1_segments` | `segments` (unique `key`, `ck_segments_version`) (see [Seeds](#seeds)) | `setup` |
 | `0009_3_1_markets` | `markets` (unique `code` and `country_code`, `ck_markets_version`) (see [Markets](#markets)) | `setup` |
+| `0010_4_1_sequences` | `sequences` (unique `key`, `ck_sequences_version`) and `step_briefs` (the first foreign key, to `sequences.id` with no cascade; unique on `sequence_id` and `step`; three checks) (see [Sequences](#sequences)) | `setup` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

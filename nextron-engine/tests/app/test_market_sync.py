@@ -17,7 +17,7 @@ import pytest
 from nextron import main
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup import api as setup_api
-from nextron.app.setup.api import MarketSync, SeedSync, SegmentSync, Setup
+from nextron.app.setup.api import MarketSync, SeedSync, SegmentSync, SequenceSync, Setup
 from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
 from nextron.db.repos.setup.markets import StoredMarket
@@ -33,12 +33,14 @@ from nextron.domain.markets import (
     validate_markets,
 )
 from nextron.domain.segments import validate_segments
+from nextron.domain.sequences import SequenceDef, validate_sequences
 from nextron.domain.settings_schema import TIMEZONE_REASON, Key
 from tests.fakes.clock import DEFAULT_NOW, FrozenClock
 from tests.migration_chains import run_sql, sha256
 
 SEGMENTS_TEXT = (main.SEED_DIR / main.SEGMENTS_FILE_NAME).read_text(encoding="utf-8")
 MARKETS_TEXT = (main.SEED_DIR / main.MARKETS_FILE_NAME).read_text(encoding="utf-8")
+SEQUENCES_TEXT = (main.SEED_DIR / main.SEQUENCES_FILE_NAME).read_text(encoding="utf-8")
 LATER = DEFAULT_NOW + timedelta(days=3)
 STAMP = "2026-11-16T09:00:00.000000Z"
 LATER_STAMP = "2026-11-19T09:00:00.000000Z"
@@ -53,6 +55,9 @@ MARKETS_FIRST = (
     "markets: 2 changed, 0 unchanged\n  us: created (version 1)\n  uk: created (version 1)\n"
 )
 MARKETS_UNCHANGED = "markets: 0 changed, 2 unchanged\n"
+# Story 4.1: the sequences block follows the markets block
+SEQUENCES_FIRST = "sequences: 1 changed, 0 unchanged\n  default: created (version 1)\n"
+SEQUENCES_UNCHANGED = "sequences: 0 changed, 1 unchanged\n"
 
 CA_BLOCK = """\
   - code: ca
@@ -122,6 +127,7 @@ def seed_dir(
     folder = tmp_path / name
     folder.mkdir()
     (folder / main.SEGMENTS_FILE_NAME).write_text(segments, encoding="utf-8", newline="")
+    (folder / main.SEQUENCES_FILE_NAME).write_text(SEQUENCES_TEXT, encoding="utf-8", newline="")
     path = folder / main.MARKETS_FILE_NAME
     if isinstance(markets, bytes):
         path.write_bytes(markets)
@@ -193,6 +199,10 @@ def shipped_markets() -> tuple[MarketDef, ...]:
     return validate_markets(seed_yaml.parse(MARKETS_TEXT))
 
 
+def shipped_sequences() -> tuple[SequenceDef, ...]:  # Story 4.1: sync_seed's third argument
+    return validate_sequences(seed_yaml.parse(SEQUENCES_TEXT))
+
+
 def stored_definitions(units: UnitOfWorkFactory) -> tuple[MarketDef, ...]:
     with units.open(read_only=True):
         return tuple(seeded.definition for seeded in setup_queries.markets())
@@ -204,7 +214,11 @@ def stored_definitions(units: UnitOfWorkFactory) -> tuple[MarketDef, ...]:
 def test_the_first_sync_creates_the_us_and_uk_at_version_1(database: Path) -> None:
     run = sync()
 
-    assert (run.code, run.out, run.err) == (0, SEGMENTS_FIRST + MARKETS_FIRST, "")
+    assert (run.code, run.out, run.err) == (
+        0,
+        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST,
+        "",
+    )
     uk, us = market_rows(database)
     legal_forms = (
         '["ltd","plc","private-limited-guarant-nsc",'
@@ -276,7 +290,11 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 
     run = sync(clock=FrozenClock(LATER))
 
-    assert (run.code, run.out, run.err) == (0, SEGMENTS_UNCHANGED + MARKETS_UNCHANGED, "")
+    assert (run.code, run.out, run.err) == (
+        0,
+        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED,
+        "",
+    )
     assert table_dump(database) == before
 
 
@@ -305,7 +323,9 @@ def test_a_changed_uk_gets_version_2_and_one_event(
 
     assert (run.code, run.err) == (0, "")
     assert run.out == (
-        SEGMENTS_UNCHANGED + "markets: 1 changed, 1 unchanged\n  uk: changed (version 1 -> 2)\n"
+        SEGMENTS_UNCHANGED
+        + "markets: 1 changed, 1 unchanged\n  uk: changed (version 1 -> 2)\n"
+        + SEQUENCES_UNCHANGED
     )
     uk_after, us_after = market_rows(database)
     assert us_after == us_before
@@ -318,7 +338,7 @@ def test_a_changed_uk_gets_version_2_and_one_event(
     ]
     # and the next sync of the same file changes nothing
     again = sync(seed_dir(tmp_path, edited(old, new), "again"))
-    assert again.out == SEGMENTS_UNCHANGED + MARKETS_UNCHANGED
+    assert again.out == SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
 
 
 # The I/O matrix: a CA Market added, and left out -------------------------------------------------
@@ -333,7 +353,9 @@ def test_a_disabled_ca_market_loads_without_code_changes(
 
     assert (run.code, run.err) == (0, "")
     assert run.out == (
-        SEGMENTS_UNCHANGED + "markets: 1 changed, 2 unchanged\n  ca: created (version 1)\n"
+        SEGMENTS_UNCHANGED
+        + "markets: 1 changed, 2 unchanged\n  ca: created (version 1)\n"
+        + SEQUENCES_UNCHANGED
     )
     assert market_row(database, "ca")[2:5] == ("Canada", 0, "CA")
     markets = stored_definitions(units)
@@ -363,6 +385,7 @@ def test_a_stored_market_not_in_the_file_is_left_as_it_is(
         SEGMENTS_UNCHANGED
         + MARKETS_UNCHANGED
         + "  ca: not in seed/markets.yaml, left as it is (version 1)\n"
+        + SEQUENCES_UNCHANGED
     )
     assert market_row(database, "ca") == ca_row
     assert event_rows(database) == events_before
@@ -400,6 +423,7 @@ def test_the_nullable_columns_change_both_ways(
         assert run.out == (
             SEGMENTS_UNCHANGED
             + f"markets: 1 changed, 1 unchanged\n  us: changed (version {versions})\n"
+            + SEQUENCES_UNCHANGED
         )
         check(text, window, legal_forms)
     assert [row[3] for row in event_rows(database)][-2:] == ["v2", "v3"]
@@ -561,7 +585,7 @@ def test_a_markets_file_of_exactly_1_mib_is_read(database: Path, tmp_path: Path)
 
     run = sync(seed_dir(tmp_path, text))
 
-    assert (run.code, run.out) == (0, SEGMENTS_FIRST + MARKETS_FIRST)
+    assert (run.code, run.out) == (0, SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST)
 
 
 def test_a_markets_file_that_is_not_utf8_is_refused(database: Path, tmp_path: Path) -> None:
@@ -589,8 +613,10 @@ def test_a_markets_file_with_a_bom_and_crlf_line_ends_is_read(
 ) -> None:
     run = sync(seed_dir(tmp_path, "﻿" + MARKETS_TEXT.replace("\n", "\r\n")))
 
-    assert (run.code, run.out) == (0, SEGMENTS_FIRST + MARKETS_FIRST)
-    assert sync().out == SEGMENTS_UNCHANGED + MARKETS_UNCHANGED  # the same definitions
+    assert (run.code, run.out) == (0, SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST)
+    assert sync().out == (  # the same definitions
+        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+    )
 
 
 # The I/O matrix: atomic --------------------------------------------------------------------------
@@ -637,12 +663,13 @@ def test_sync_seed_runs_both_syncs_in_one_transaction(units: UnitOfWorkFactory) 
             return real()
 
         uow.transaction = counted  # type: ignore[method-assign]
-        result = Setup(CountingClock()).sync_seed(segments, markets)
+        result = Setup(CountingClock()).sync_seed(segments, markets, shipped_sequences())
 
     assert opened == ["clock", "transaction"]
     assert result == SeedSync(
         SegmentSync((("law_private_ai", 1), ("ops_automation", 1)), (), (), ()),
         MarketSync((("us", 1), ("uk", 1)), (), (), ()),
+        SequenceSync((("default", 1),), (), (), ()),
     )
 
 
@@ -780,7 +807,7 @@ def test_the_sync_logs_its_counts(
         [0, 1, 1, 1],  # us changed, uk unchanged, ca not in the file
     ]
     names = [r.getMessage() for r in caplog.records if r.getMessage().endswith("_synced")]
-    assert names == ["segments_synced", "markets_synced"] * 4
+    assert names == ["segments_synced", "markets_synced", "sequences_synced"] * 4
 
 
 def test_sync_markets_returns_what_it_did(units: UnitOfWorkFactory) -> None:
@@ -842,7 +869,7 @@ def test_sync_seed_refuses_bad_markets_before_any_transaction(
     with units.open() as uow:
         monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(ValueError, match="sync_markets got a code more than once: us"):
-            Setup(FrozenClock()).sync_seed(segments, [us, us])
+            Setup(FrozenClock()).sync_seed(segments, [us, us], shipped_sequences())
 
     assert query(database, "SELECT count(*) FROM segments") == [(0,)]
 

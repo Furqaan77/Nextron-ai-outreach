@@ -84,6 +84,29 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "updated_at",
         ),
     },
+    "sequences": {
+        "setup": ("id", "key", "name", "version", "created_at", "updated_at"),
+    },
+    "step_briefs": {
+        "setup": (
+            "id",
+            "sequence_id",
+            "step",
+            "delay_days",
+            "purpose",
+            "word_limit",
+            "word_comparison",
+            "allowed_content",
+            "ask",
+            "link_rule",
+            "no_price",
+            "no_audit",
+            "subject_rule",
+            "segment_angles",
+            "created_at",
+            "updated_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 20:57
+last_updated: 11-17-2026 22:14
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -97,8 +97,8 @@ development_status:
   3-16-keep-an-erasure-ledger-and-reapply-it-after-a-restore: backlog
   epic-3-retrospective: optional
 
-  epic-4: backlog
-  4-1-seed-the-default-sequence-and-step-briefs: backlog
+  epic-4: in-progress
+  4-1-seed-the-default-sequence-and-step-briefs: review
   4-2-configure-campaigns-offers-and-variants-with-pause-resume-an: backlog
   4-3-maintain-approved-company-facts-with-versions: backlog
   4-4-snapshot-the-sales-playbook-and-pin-it-in-route-tuples: backlog

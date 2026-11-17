@@ -16,15 +16,16 @@ Commands:
   within 5 minutes (exit 0: opened; exit 1: the engine isn't running, or the code couldn't be
   stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
   invalid).
-- ``seed sync [--env {dev,test,prod}]``: load ``seed/segments.yaml`` and ``seed/markets.yaml``
-  into the database in one transaction: create each new Segment and Market, give each changed
-  one a new version, and leave a stored one the file no longer lists as it is; print
-  ``segments: <n> changed, <m> unchanged`` and a line per Segment created, changed or not in the
-  file, then ``markets: <n> changed, <m> unchanged`` and a line per Market. ``--env`` syncs that
-  environment instead of ``NEXTRON_ENV``. The database must exist and be migrated: start the
-  engine once first (exit 0: synced; exit 1: a file is missing, unreadable or invalid (the
-  message names the file and the line or field), the database is missing, behind, ahead of the
-  code ("newer than this code") or not this engine's, or the sync failed, and nothing was
+- ``seed sync [--env {dev,test,prod}]``: load ``seed/segments.yaml``, ``seed/markets.yaml`` and
+  ``seed/sequences.yaml`` into the database in one transaction: create each new Segment, Market
+  and Sequence, give each changed one a new version, and leave a stored one the file no longer
+  lists as it is; print ``segments: <n> changed, <m> unchanged`` and a line per Segment created,
+  changed or not in the file, then ``markets: <n> changed, <m> unchanged`` and a line per
+  Market, then ``sequences: <n> changed, <m> unchanged`` and a line per Sequence. ``--env``
+  syncs that environment instead of ``NEXTRON_ENV``. The database must exist and be migrated:
+  start the engine once first (exit 0: synced; exit 1: a file is missing, unreadable or invalid
+  (the message names the file and the line or field), the database is missing, behind, ahead of
+  the code ("newer than this code") or not this engine's, or the sync failed, and nothing was
   changed; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is invalid, or the arguments
   are).
 
@@ -70,13 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     seed = commands.add_parser("seed", help="load the seed files into the database")
     seed_commands = seed.add_subparsers(dest="seed_command", required=True, metavar="subcommand")
-    sync = seed_commands.add_parser(
-        "sync",
-        help=(
-            "create or update the Segments and Markets from seed/segments.yaml and "
-            "seed/markets.yaml (never re-scores a Lead)"
-        ),
+    sync_help = (
+        "create or update the Segments, Markets and Sequences from seed/segments.yaml, "
+        "seed/markets.yaml and seed/sequences.yaml (never re-scores a Lead)"
     )
+    sync = seed_commands.add_parser("sync", help=sync_help, description=sync_help)
     sync.add_argument(
         "--env",
         choices=ENVIRONMENTS,

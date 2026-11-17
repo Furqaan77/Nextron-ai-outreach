@@ -59,6 +59,11 @@ repeats a value longer than 40 characters.
 optional field present. ``segment_from_text(text)`` is its inverse: ``json.loads`` plus the
 same validation of one segment (keys unique within it); a text that no longer validates, or
 isn't JSON, raises ``InvalidSegments``.
+
+**The regulation detectors.** ``mentions_aba_512(text)`` and ``mentions_sra_notice(text)`` tell
+whether a text names ABA Formal Opinion 512 or the SRA notice; ``represents_market_fact(text)``
+is either. The Sequences (``nextron.domain.sequences``, Story 4.1) use the two to keep each
+regulation in its own Market's angle.
 """
 
 import json
@@ -213,20 +218,34 @@ class SegmentDef:
 _NOT_WORD: Final = re.compile(r"[^a-z0-9]+")
 
 
+def _normal_words(text: str) -> tuple[list[str], str]:
+    """``text`` lowercased, with each run of characters other than ``[a-z0-9]`` made one space:
+    its words, and the result padded with one space at each end (for phrase checks)."""
+    normal = _NOT_WORD.sub(" ", text.lower()).strip()
+    return normal.split(), f" {normal} "
+
+
+def mentions_aba_512(text: str) -> bool:
+    """Whether ``text`` names ABA Formal Opinion 512: after ``represents_market_fact``'s
+    normalising, its words include both ``aba`` and ``512``, or it contains the phrase
+    ``formal opinion``."""
+    words, padded = _normal_words(text)
+    return ("aba" in words and "512" in words) or " formal opinion " in padded
+
+
+def mentions_sra_notice(text: str) -> bool:
+    """Whether ``text`` names the SRA notice: after ``represents_market_fact``'s normalising,
+    its words include ``sra``, or it contains the phrase ``solicitors regulation authority``."""
+    words, padded = _normal_words(text)
+    return "sra" in words or " solicitors regulation authority " in padded
+
+
 def represents_market_fact(text: str) -> bool:
     """Whether ``text`` names ABA Formal Opinion 512 or the SRA notice: lowercased, with each
     run of characters other than ``[a-z0-9]`` made one space, its words include ``sra``, or
     contain the phrase ``solicitors regulation authority`` or ``formal opinion``, or include
-    both ``aba`` and ``512``."""
-    normal = _NOT_WORD.sub(" ", text.lower()).strip()
-    words = normal.split()
-    padded = f" {normal} "
-    return (
-        "sra" in words
-        or " solicitors regulation authority " in padded
-        or " formal opinion " in padded
-        or ("aba" in words and "512" in words)
-    )
+    both ``aba`` and ``512`` (``mentions_aba_512`` or ``mentions_sra_notice``)."""
+    return mentions_aba_512(text) or mentions_sra_notice(text)
 
 
 # Validation ------------------------------------------------------------------------------------
