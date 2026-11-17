@@ -65,6 +65,7 @@ SIGNALS: Final = {
     "signals": [],
     "profile_facts": [],
     "size_clues": [{"kind": " Staff", "number": 40, "block_id": "p1", "quote": "40 staff"}],
+    "job_postings": [],
 }
 
 
@@ -1018,7 +1019,10 @@ def test_the_scripted_fake_refuses_what_the_gateway_refuses_without_using_its_sc
 
 
 def test_the_composition_root_imports_neither_the_gateway_nor_the_sdk() -> None:
-    """Story 2.9 adds the first caller: until then ``serve`` builds no AI or HTTP client."""
+    """Importing ``nextron.main`` loads neither the AI package nor the SDK, so ``doctor``,
+    ``open`` and ``seed sync`` stay quick. ``serve`` imports the routes table inside
+    ``load_prompts`` (Story 2.8) and still builds no AI or HTTP client; Story 2.9 adds the first
+    caller."""
     code = (
         "import sys, nextron.__main__, nextron.main\n"
         "print(sorted(name for name in sys.modules\n"

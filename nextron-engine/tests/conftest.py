@@ -17,7 +17,9 @@
   ``gethostbyname``, ``gethostbyname_ex``, ``gethostbyaddr`` and ``getnameinfo``;
   ``socket.socket.connect``, ``connect_ex``, ``sendto`` and (where it exists) ``sendmsg``; and
   on Windows asyncio's ``IocpProactor.connect`` and ``sendto``. Ports resolve to their fakes
-  (``tests.fakes.PORT_FAKES``).
+  (``tests.fakes.PORT_FAKES``). Only an item marked ``ai_eval`` may also look up
+  ``api.anthropic.com`` and connect to the addresses it resolves to (``allowed_hosts``,
+  ``live_guard.AI_EVAL_HOSTS``; Story 2.8).
 - Every test leaves logging as it found it: ``configure_logging`` (called directly or by
   ``serve``) replaces the root handlers, so the fixture puts them back and closes the log files.
 - ``db_engine`` is a temporary database file at the head revision, disposed after the test;
@@ -38,7 +40,7 @@ from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.logconfig import SDK_LOGGERS
-from tests.live_guard import guard_live_constructors, guard_network
+from tests.live_guard import AI_EVAL_HOSTS, guard_live_constructors, guard_network
 
 AI_EVAL = "ai_eval"
 
@@ -72,10 +74,17 @@ def live_adapters_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     guard_live_constructors(monkeypatch)
 
 
+def allowed_hosts(node: pytest.Item) -> frozenset[str]:
+    """The hosts ``node`` may reach besides loopback: the Claude API for an ``ai_eval`` item,
+    else none."""
+    return AI_EVAL_HOSTS if node.get_closest_marker(AI_EVAL) is not None else frozenset()
+
+
 @pytest.fixture(autouse=True)
-def network_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lookups of, and connections to, anything but loopback raise ``NetworkInTests``."""
-    guard_network(monkeypatch)
+def network_refused(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lookups of, and connections to, anything but loopback raise ``NetworkInTests`` (an
+    ``ai_eval`` item may also reach the Claude API: ``allowed_hosts``)."""
+    guard_network(monkeypatch, allowed_hosts=allowed_hosts(request.node))
 
 
 @pytest.fixture(autouse=True)

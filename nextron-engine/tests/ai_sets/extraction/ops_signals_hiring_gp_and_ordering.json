@@ -1,0 +1,44 @@
+{
+  "case": "ops_signals_hiring_gp_and_ordering",
+  "route": "extract_signals",
+  "segment": "ops_automation",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "p1",
+      "source": "website",
+      "text": "Keystone Supply Co.\nKeystone Supply is a wholesale distributor of janitorial and packaging products, serving 1,200 customers from our warehouse in Columbus, Ohio. Our team of 85 people ships same day. keystone-supply.test"
+    },
+    {
+      "id": "p2",
+      "source": "website",
+      "text": "Open positions\nOrder Entry Clerk (full time). You will key customer purchase orders into Microsoft Dynamics GP and confirm ship dates by phone."
+    },
+    {
+      "id": "p3",
+      "source": "website",
+      "text": "How to order\nDownload our PDF order form, fill it in and email it to our sales desk. We do not offer online ordering."
+    }
+  ],
+  "expect": {
+    "signals": [
+      {
+        "signal_type": "ops_hiring_manual_entry",
+        "block_id": "p2",
+        "quote": "Order Entry Clerk (full time)"
+      },
+      {
+        "signal_type": "ops_dynamics_gp",
+        "block_id": "p2",
+        "quote": "key customer purchase orders into Microsoft Dynamics GP"
+      },
+      {
+        "signal_type": "ops_manual_ordering",
+        "block_id": "p3",
+        "quote": "Download our PDF order form, fill it in and email it to our sales desk"
+      }
+    ],
+    "people": [],
+    "forbidden_signals": []
+  }
+}

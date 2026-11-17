@@ -54,7 +54,7 @@ module-root = ""
 
 [tool.pytest.ini_options]
 minversion = "9.2"
-testpaths = ["tests/unit", "tests/app", "tests/contracts"]
+testpaths = ["tests/unit", "tests/app", "tests/contracts", "tests/ai_eval"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
     "ai_eval: opt-in AI evaluation suite that calls Claude (AD-12, AD-14); skipped unless selected with -m ai_eval",

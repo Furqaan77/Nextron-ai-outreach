@@ -1,0 +1,24 @@
+{
+  "case": "law_inbox_confidentiality_post",
+  "route": "signal_inbox_parse",
+  "segment": "law_private_ai",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "item",
+      "source": "signal_inbox",
+      "text": "Helen Marsh, Managing Partner at Marsh & Cole Solicitors (marshcole.test)\nWe spent last month testing AI drafting tools and stopped every trial. None of them could tell us where client data goes, and client confidentiality is not something we will gamble with. Has any small firm found a private option?"
+    }
+  ],
+  "expect": {
+    "signals": [
+      {
+        "signal_type": "law_ai_confidentiality_post",
+        "block_id": "item",
+        "quote": "client confidentiality is not something we will gamble with"
+      }
+    ],
+    "people": [],
+    "forbidden_signals": []
+  }
+}

@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0011_2_2_leads"
+HEAD = "0012_2_8_ai_routes"
 
 
 @pytest.fixture

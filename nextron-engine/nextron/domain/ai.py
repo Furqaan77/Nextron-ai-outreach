@@ -18,10 +18,17 @@ exactly what one call runs. It is frozen, and ``system_prompt`` never shows in i
 - ``schema_version`` is an ``int`` (not a ``bool``) from 1 to 9,999;
 - ``system_prompt`` is a non-blank ``str`` (not only whitespace) that encodes as UTF-8.
 
-``prompt_sha256`` is the hex SHA-256 of the system prompt's UTF-8, so the text and its hash can
-never disagree. ``key`` is ``<model>:<effort>:<prompt_version>:s<schema_version>:<the first 12
-hex of prompt_sha256>``: it fits ``budget.MODEL_PATTERN`` and is what ``ai_usage.route_tuple``
-stores.
+``prompt_sha256`` is the hex SHA-256 of the system prompt's UTF-8 (``text_sha256``), so the
+text and its hash can never disagree. ``key`` is
+``<model>:<effort>:<prompt_version>:s<schema_version>:<the first 12 hex of prompt_sha256>``: it
+fits ``budget.MODEL_PATTERN`` and is what ``ai_usage.route_tuple`` stores. ``actor`` is
+``ai:<route>@<prompt_version>``: it
+fullmatches ``nextron.db.eventlog.ACTOR_PATTERN``, and it is what every stored result of the
+call records as its ``extracted_by`` or actor (Stories 2.9 onwards).
+
+**``RouteSpec(route, model, effort, prompt_version, schema_version)``** (Story 2.8) is a route
+candidate as data, without the prompt's text: what ``Playbook.sync_prompts`` activates. It is
+frozen and checked by ``check_route_fields``.
 
 **``UntrustedBlock(subject, source, block_id, text)``** is one piece of untrusted text (a
 crawled page, a pasted Signal Inbox item) for the user turn. It is frozen, and ``text`` never
@@ -133,6 +140,11 @@ def check_token_limits(max_tokens: object, max_tokens_cap: object, ceiling: int)
         raise ValueError(f"max_tokens_cap must be at most {ceiling:,}")
 
 
+def text_sha256(text: str) -> str:
+    """The hex SHA-256 of ``text``'s UTF-8: a ``RouteTuple``'s ``prompt_sha256``."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def check_urgency(urgency: object) -> Urgency:
     """``urgency``, or ``TypeError`` unless it is an ``Urgency``."""
     if not isinstance(urgency, Urgency):
@@ -166,7 +178,7 @@ class RouteTuple:
     @property
     def prompt_sha256(self) -> str:
         """The hex SHA-256 of the system prompt's UTF-8."""
-        return hashlib.sha256(self.system_prompt.encode("utf-8")).hexdigest()
+        return text_sha256(self.system_prompt)
 
     @property
     def key(self) -> str:
@@ -174,6 +186,27 @@ class RouteTuple:
         return (
             f"{self.model}:{self.effort.value}:{self.prompt_version}:s{self.schema_version}:"
             f"{self.prompt_sha256[:PROMPT_HASH_PREFIX]}"
+        )
+
+    @property
+    def actor(self) -> str:
+        """``ai:<route>@<prompt_version>``: what a stored result of the call records."""
+        return f"ai:{self.route}@{self.prompt_version}"
+
+
+@dataclass(frozen=True, slots=True)
+class RouteSpec:
+    """A route candidate as data: a ``RouteTuple`` without the system prompt's text."""
+
+    route: str
+    model: str
+    effort: Effort
+    prompt_version: str
+    schema_version: int
+
+    def __post_init__(self) -> None:
+        check_route_fields(
+            self.route, self.model, self.effort, self.prompt_version, self.schema_version
         )
 
 

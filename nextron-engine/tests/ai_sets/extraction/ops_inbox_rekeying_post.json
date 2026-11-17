@@ -1,0 +1,24 @@
+{
+  "case": "ops_inbox_rekeying_post",
+  "route": "signal_inbox_parse",
+  "segment": "ops_automation",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "item",
+      "source": "signal_inbox",
+      "text": "Karen Lowe, VP Operations at Northgate Industrial Supply (northgate-supply.test)\nEvery morning two of my team re-key forty PDF purchase orders into our ERP by hand. Typos cost us a pallet last week. There has to be a better way."
+    }
+  ],
+  "expect": {
+    "signals": [
+      {
+        "signal_type": "ops_rekeying_post",
+        "block_id": "item",
+        "quote": "re-key forty PDF purchase orders into our ERP by hand"
+      }
+    ],
+    "people": [],
+    "forbidden_signals": []
+  }
+}

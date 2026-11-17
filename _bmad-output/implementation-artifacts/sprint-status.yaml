@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 21:35
+last_updated: 11-17-2026 23:16
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -67,7 +67,7 @@ development_status:
   2-5-crawl-a-lead-s-website-politely-inside-the-egress-filter: backlog
   2-6-render-near-empty-pages-and-detect-chat-and-booking-widgets: backlog
   2-7-call-claude-through-one-gateway-with-typed-results-and-meter: review
-  2-8-version-extraction-prompts-and-pin-the-active-route-tuple: backlog
+  2-8-version-extraction-prompts-and-pin-the-active-route-tuple: review
   2-9-detect-signals-with-evidence-from-the-crawled-pages: backlog
   2-10-find-named-decision-makers-and-pick-the-primary-contact: backlog
   2-11-collect-hiring-signals-from-careers-pages-and-ats-boards: backlog

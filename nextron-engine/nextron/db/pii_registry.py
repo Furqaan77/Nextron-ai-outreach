@@ -87,6 +87,30 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "pipeline_stage": PiiClass.NONE,
     },
+    # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
+    # a hash and times.
+    "prompt_snapshots": {
+        "id": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "prompt_version": PiiClass.NONE,
+        "sha256": PiiClass.NONE,
+        "text": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+    },
+    "ai_route_activations": {
+        "id": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "model": PiiClass.NONE,
+        "effort": PiiClass.NONE,
+        "prompt_version": PiiClass.NONE,
+        "prompt_sha256": PiiClass.NONE,
+        "schema_version": PiiClass.NONE,
+        "actor": PiiClass.NONE,
+        "bootstrap": PiiClass.NONE,
+        "test_run_id": PiiClass.NONE,
+        "activated_at": PiiClass.NONE,
+        "deactivated_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

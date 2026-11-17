@@ -98,6 +98,25 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         ),
         "pipeline": ("pipeline_stage",),
     },
+    "prompt_snapshots": {
+        "playbook": ("id", "route", "prompt_version", "sha256", "text", "created_at"),
+    },
+    "ai_route_activations": {
+        "playbook": (
+            "id",
+            "route",
+            "model",
+            "effort",
+            "prompt_version",
+            "prompt_sha256",
+            "schema_version",
+            "actor",
+            "bootstrap",
+            "test_run_id",
+            "activated_at",
+            "deactivated_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

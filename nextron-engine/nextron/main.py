@@ -42,7 +42,24 @@ database, the notification subscriber registry and Uvicorn.
      copy's row and rotates (a failed rotation only logs ``backup_rotation_failed``). If
      recording fails, ``backup_record_failed`` (ERROR) is logged and
      startup continues: the copy stays on disk.
-7. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
+7. The prompts (Story 2.8): ``sync_prompts(units, load_prompts, err, log_file)`` runs the
+   loader (``serve(load_prompts=...)``, ``load_prompts`` unless injected) outside any unit of
+   work, then ``Playbook(SystemClock()).sync_prompts(files, defaults)`` in one unit of work:
+   it stores each new prompt version and bootstrap-activates each route's default that has no
+   active tuple (``nextron.app.playbook.api``). ``load_prompts(folder=None)`` reads
+   ``manifest.lock`` and every ``*.md`` file at any depth of ``folder`` (the AI package's
+   ``prompts`` folder unless given), named by its ``/``-separated path relative to ``folder``, so
+   a stray or misnamed one is refused, as strict UTF-8 with universal newlines, checks them with
+   ``nextron.domain.prompts.verify`` and returns them with ``routes.default_specs()``. It imports
+   ``nextron.adapters.ai.routes`` inside the function, so ``doctor``, ``open`` and ``seed sync``
+   never load the AI package or the ``anthropic`` SDK, and importing this module loads neither.
+   ``InvalidPrompts`` (a file and the lock disagree, an unlisted or misnamed file, a default
+   without its file, or a stored version whose text changed) exits 2, printing ``startup check
+   failed: prompts: <message>`` and logging ``startup_check_failed`` with ``check=prompts``.
+   Any other failure exits 2, printing ``prompt sync failed (<type>); the traceback is in
+   <log file>`` and logging ``prompt_sync_failed`` with the traceback. Either way the
+   transaction rolled back, so nothing was stored or activated, and the server never starts.
+8. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
    The dashboard's GET handlers read through the unit-of-work factory step 6 returned.
    ``engine_started`` (with ``db_revision``) is logged before it and ``engine_stopped`` (with
    ``exit_code``) after. The database engine is disposed when ``serve`` returns. Uvicorn runs
@@ -320,6 +337,7 @@ from nextron.app.ops.api import (
     TakenBackup,
 )
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.playbook.api import Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
@@ -352,11 +370,21 @@ from nextron.domain.backup import (
     LOCAL_DIR_NAME,
     BackupKind,
 )
+from nextron.domain.ai import RouteSpec
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import LeadsMerged
+from nextron.domain.prompts import (
+    MANIFEST_FILE_NAME,
+    PROMPT_SUFFIX,
+    InvalidPrompts,
+    PromptFile,
+    decode_prompt,
+    parse_manifest,
+    verify,
+)
 from nextron.domain.seed_yaml import SeedSyntaxError
 from nextron.domain.segments import InvalidSegments, validate_segments
 from nextron.domain.settings_schema import Key
@@ -426,6 +454,7 @@ DATABASE_REVISION_CHECK: Final = DATABASE_REVISION
 ENV_SOURCE_FLAG: Final = "--env"
 ENV_SOURCE_VARIABLE: Final = "NEXTRON_ENV"
 PRE_MIGRATE_BACKUP_CHECK: Final = "pre_migrate_backup"
+PROMPTS_CHECK: Final = "prompts"
 FALLBACK_TIMEZONE: Final = "UTC"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
@@ -456,6 +485,7 @@ DASHBOARD_OPENED: Final = (
 )
 
 ServerRunner = Callable[[BootstrapConfig, bool, UnitOfWorkFactory], None]
+PromptLoader = Callable[[], tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]]
 EngineProbe = Callable[[str, int], bool]
 Browser = Callable[[str], bool]
 
@@ -908,6 +938,52 @@ def run_uvicorn(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory)
         )
 
 
+def load_prompts(
+    folder: Path | None = None,
+) -> tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]:
+    """The verified prompt files of ``folder`` (``routes.PROMPTS_DIR`` unless given) and each
+    route's default candidate; ``InvalidPrompts`` when they and ``manifest.lock`` disagree. File
+    I/O only: it opens no unit of work. It imports the AI routes table here, so the other
+    commands never load the AI package or its SDK."""
+    from nextron.adapters.ai import routes  # noqa: PLC0415 - only serve loads the AI package
+
+    root = folder if folder is not None else routes.PROMPTS_DIR
+    try:
+        manifest = (root / MANIFEST_FILE_NAME).read_bytes()
+    except FileNotFoundError:
+        raise InvalidPrompts(f"{MANIFEST_FILE_NAME}: the file doesn't exist") from None
+    entries = parse_manifest(decode_prompt(manifest, MANIFEST_FILE_NAME))
+    files: dict[str, str] = {}
+    for path in sorted(root.rglob(f"*{PROMPT_SUFFIX}")):  # any depth: verify refuses a stray one
+        if path.is_file():
+            name = path.relative_to(root).as_posix()
+            files[name] = decode_prompt(path.read_bytes(), name)
+    return verify(entries, files), routes.default_specs()
+
+
+def sync_prompts(
+    units: UnitOfWorkFactory, load: PromptLoader, err: TextIO, log_file: Path
+) -> bool:
+    """``serve``'s prompt step: ``load()`` outside any unit of work, then
+    ``Playbook.sync_prompts`` in one. False, after printing and logging why, when it failed."""
+    try:
+        files, defaults = load()
+        with units.open():
+            Playbook(SystemClock()).sync_prompts(files, defaults)
+    except InvalidPrompts as exc:
+        print(f"startup check failed: {PROMPTS_CHECK}: {exc.message}", file=err)
+        log.error("startup_check_failed", extra={"check": PROMPTS_CHECK})
+        return False
+    except Exception as exc:  # noqa: BLE001 - logged with its traceback; startup stops
+        log.exception("prompt_sync_failed")
+        print(
+            f"prompt sync failed ({type(exc).__name__}); the traceback is in {log_file}",
+            file=err,
+        )
+        return False
+    return True
+
+
 def _report_failures(results: list[CheckResult], err: TextIO) -> bool:
     failures = [result for result in results if result.status is Status.FAIL]
     for result in failures:
@@ -921,6 +997,7 @@ def serve(
     probes: Probes | None = None,
     run_server: ServerRunner = run_uvicorn,
     err: TextIO | None = None,
+    load_prompts: PromptLoader = load_prompts,
 ) -> int:
     """Start the engine for ``NEXTRON_ENV``; return the process exit code."""
     err = err if err is not None else sys.stderr
@@ -991,6 +1068,9 @@ def serve(
         try:
             if pre_migrate.taken is not None:  # a verified copy, and the upgrade succeeded
                 record_pre_migrate(units, local, pre_migrate.taken)
+            log_file = config.data_dir / LOGS_DIR_NAME / LOG_FILE_NAME
+            if not sync_prompts(units, load_prompts, err, log_file):
+                return EXIT_STARTUP_FAILED
             identity = {"env": config.env, "version": __version__}
             log.info("engine_started", extra={**identity, "db_revision": db_revision})
             exit_code = EXIT_CRASHED

@@ -55,6 +55,14 @@ patches:
 - on Windows, asyncio's Proactor, which skips both of those for an IP literal:
   ``asyncio.windows_events.IocpProactor.connect`` (``ConnectEx``) and ``sendto`` (by the
   address, when one is given).
+
+**The ai_eval allowance (Story 2.8).** ``guard_network(monkeypatch, allowed_hosts=...)`` also
+lets a test look up each host in ``allowed_hosts`` (by name, case-insensitive, through
+``getaddrinfo``, ``gethostbyname`` or ``gethostbyname_ex``), and then connect or send only to
+the addresses those lookups returned. Reverse lookups stay loopback-only. ``tests/conftest.py``
+passes ``AI_EVAL_HOSTS`` (``api.anthropic.com``, the Claude API) only to items marked
+``ai_eval``, which are skipped unless ``-m ai_eval`` selects them. Every other test gets no
+allowed host.
 """
 
 import dataclasses
@@ -211,6 +219,7 @@ def allow_live_constructor(monkeypatch: pytest.MonkeyPatch, module: str, name: s
 # Network ------------------------------------------------------------------------------------
 
 LOCAL_NAMES: Final = frozenset({"localhost"})
+AI_EVAL_HOSTS: Final = frozenset({"api.anthropic.com"})  # the Claude API: ai_eval items only
 _INET_FAMILIES: Final = frozenset({socket.AF_INET, socket.AF_INET6})
 
 
@@ -236,11 +245,57 @@ def is_local_host(host: object) -> bool:
     return address.is_loopback or (mapped is not None and mapped.is_loopback)
 
 
-def _check_address(sock: socket.socket, address: object, call: str) -> None:
+def _host_text(host: object) -> str | None:
+    """``host`` as text, or ``None`` when it is neither a ``str`` nor ASCII ``bytes``."""
+    if isinstance(host, bytes):
+        try:
+            return host.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    return host if isinstance(host, str) else None
+
+
+def _address_text(host: object) -> str | None:
+    """The canonical text of the IP address ``host`` (any scope id dropped), or ``None``."""
+    text = _host_text(host)
+    if text is None:
+        return None
+    try:
+        return str(ipaddress.ip_address(text.split("%", 1)[0]))
+    except ValueError:
+        return None
+
+
+class _Allowance:
+    """The hosts a test may look up, and the addresses those lookups returned."""
+
+    def __init__(self, hosts: frozenset[str]) -> None:
+        self.hosts = frozenset(host.lower() for host in hosts)
+        self.addresses: set[str] = set()
+
+    def allows_lookup(self, host: object) -> bool:
+        text = _host_text(host)
+        return text is not None and text.lower().rstrip(".") in self.hosts
+
+    def allows_address(self, host: object) -> bool:
+        address = _address_text(host)
+        return address is not None and address in self.addresses
+
+    def remember(self, host: object) -> None:
+        address = _address_text(host)
+        if address is not None:
+            self.addresses.add(address)
+
+
+def _check_address(
+    sock: socket.socket, address: object, call: str, allowance: _Allowance | None = None
+) -> None:
     unix = getattr(socket, "AF_UNIX", None)
     if unix is not None and sock.family == unix:
         return  # a local socket file
     host = address[0] if isinstance(address, tuple) and address else address
+    if sock.family in _INET_FAMILIES and allowance is not None and allowance.allows_address(host):
+        return  # an address an allowed host resolved to
     if sock.family not in _INET_FAMILIES or not is_local_host(host):
         raise NetworkInTests(f"tests must not {call} {host!r}: only loopback is allowed")
 
@@ -260,10 +315,40 @@ def _guarded_lookup(real: Callable[..., Any], call: str) -> Callable[..., Any]:
     return lookup
 
 
-def guard_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Refuse lookups of and connections to anything but loopback; see the module docstring."""
-    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
-        monkeypatch.setattr(socket, name, _guarded_lookup(getattr(socket, name), "look up"))
+def _allowed_lookup(
+    real: Callable[..., Any], name: str, allowance: _Allowance
+) -> Callable[..., Any]:
+    """``real`` (the forward lookup ``name``): an allowed host goes through and the addresses
+    it resolves to are remembered; any other host but loopback is refused."""
+
+    def lookup(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if not allowance.allows_lookup(host):
+            _check_host(host, "look up")
+            return real(host, *args, **kwargs)
+        found = real(host, *args, **kwargs)
+        if name == "getaddrinfo":  # [(family, type, proto, canonname, sockaddr), ...]
+            for entry in found:
+                sockaddr = entry[4]
+                allowance.remember(sockaddr[0] if isinstance(sockaddr, tuple) else sockaddr)
+        elif name == "gethostbyname":  # one address
+            allowance.remember(found)
+        else:  # gethostbyname_ex: (hostname, aliases, addresses)
+            for address in found[2]:
+                allowance.remember(address)
+        return found
+
+    return lookup
+
+
+def guard_network(
+    monkeypatch: pytest.MonkeyPatch, allowed_hosts: frozenset[str] = frozenset()
+) -> None:
+    """Refuse lookups of and connections to anything but loopback, and the addresses the
+    ``allowed_hosts`` resolve to; see the module docstring."""
+    allowance = _Allowance(frozenset(allowed_hosts))
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex"):
+        monkeypatch.setattr(socket, name, _allowed_lookup(getattr(socket, name), name, allowance))
+    monkeypatch.setattr(socket, "gethostbyaddr", _guarded_lookup(socket.gethostbyaddr, "look up"))
     real_getnameinfo = socket.getnameinfo
 
     def getnameinfo(sockaddr: Any, flags: Any) -> Any:
@@ -278,16 +363,16 @@ def guard_network(monkeypatch: pytest.MonkeyPatch) -> None:
     real_sendto = socket.socket.sendto
 
     def connect(self: socket.socket, address: Any) -> None:
-        _check_address(self, address, "connect to")
+        _check_address(self, address, "connect to", allowance)
         return real_connect(self, address)
 
     def connect_ex(self: socket.socket, address: Any) -> int:
-        _check_address(self, address, "connect to")
+        _check_address(self, address, "connect to", allowance)
         return real_connect_ex(self, address)
 
     def sendto(self: socket.socket, data: Any, *args: Any) -> int:
         if args:  # sendto(data, address) or sendto(data, flags, address)
-            _check_address(self, args[-1], "send to")
+            _check_address(self, args[-1], "send to", allowance)
         return real_sendto(self, data, *args)
 
     monkeypatch.setattr(socket.socket, "connect", connect)
@@ -301,7 +386,7 @@ def guard_network(monkeypatch: pytest.MonkeyPatch) -> None:
             # sendmsg(buffers[, ancdata[, flags[, address]]])
             address = args[2] if len(args) > 2 else kwargs.get("address")
             if address is not None:
-                _check_address(self, address, "send to")
+                _check_address(self, address, "send to", allowance)
             return real_sendmsg(self, buffers, *args, **kwargs)
 
         monkeypatch.setattr(socket.socket, "sendmsg", sendmsg)
@@ -313,14 +398,14 @@ def guard_network(monkeypatch: pytest.MonkeyPatch) -> None:
         real_proactor_sendto = IocpProactor.sendto
 
         def proactor_connect(self: Any, conn: socket.socket, address: Any) -> Any:
-            _check_address(conn, address, "connect to")
+            _check_address(conn, address, "connect to", allowance)
             return real_proactor_connect(self, conn, address)
 
         def proactor_sendto(
             self: Any, conn: socket.socket, buf: Any, flags: int = 0, addr: Any = None
         ) -> Any:
             if addr is not None:
-                _check_address(conn, addr, "send to")
+                _check_address(conn, addr, "send to", allowance)
             return real_proactor_sendto(self, conn, buf, flags, addr)
 
         monkeypatch.setattr(IocpProactor, "connect", proactor_connect)
