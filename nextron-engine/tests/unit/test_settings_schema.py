@@ -1,6 +1,6 @@
 """``nextron.domain.settings_schema``: the text forms (the Types row), the declaration checks,
-access through ``setting``/``declared``, and the ``sender_timezone`` declaration. No message
-ever holds the value it refused."""
+access through ``setting``/``declared``, and the ``sender_timezone`` and ``sink_allowlist``
+declarations (Story 1.8's Setting row). No message ever holds the value it refused."""
 
 import ast
 from collections.abc import Mapping
@@ -499,8 +499,76 @@ def test_sender_timezone_is_declared_required_in_the_sender_section() -> None:
     )
     assert found.required and found.rules == () and found.timezone_key is None
     assert setting("sender_timezone") is found
-    assert declared() == (found,)
-    assert [key.value for key in Key] == ["sender_timezone"]
+
+
+def test_the_declared_keys_are_the_sender_timezone_and_the_sink_allowlist() -> None:
+    assert [key.value for key in Key] == ["sender_timezone", "sink_allowlist"]
+    assert declared() == (setting(Key.SENDER_TIMEZONE), setting(Key.SINK_ALLOWLIST))
+
+
+# Row: Setting (sink_allowlist) ------------------------------------------------------------------
+
+SINK_UNIT = (
+    "One email address or numeric Telegram chat id per line. Outside prod, email and alerts "
+    "reach only these; everything else is written to the sink folder."
+)
+SINK_REASON = "each line must be an email address or a numeric Telegram chat id"
+
+
+def test_sink_allowlist_is_an_empty_list_in_the_engine_section() -> None:
+    found = setting(Key.SINK_ALLOWLIST)
+
+    assert (found.key, found.type, found.section) == (
+        "sink_allowlist",
+        SettingType.LIST,
+        Section.ENGINE,
+    )
+    assert (found.label, found.unit) == ("Dev and test allowlist", SINK_UNIT)
+    assert found.default == () and not found.required and found.timezone_key is None
+    [rule] = found.rules
+    assert (rule.name, rule.message) == ("sink_recipient", SINK_REASON)
+    assert default_text(found) == ""
+
+
+def test_sink_allowlist_stores_email_addresses_and_chat_ids() -> None:
+    found = setting(Key.SINK_ALLOWLIST)
+
+    assert parse(found, "a@b.co\n123") == ("a@b.co", "123")
+    assert parse(found, " Mac@Example.com \r\n\r\n-100123 ") == ("Mac@Example.com", "-100123")
+    assert encode(found, ("a@b.co", "123")) == "a@b.co\n123"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "@chan",  # a Telegram user name, which can be handed to someone else
+        "a@b",  # one label after the @
+        "12a",
+        "a@b.co\n@chan",  # one bad line refuses the list
+        "0",
+        "-0",
+        "1" * 21,
+        "straße@x.com",  # not ASCII
+        "a@x.com, b@y.com",  # two addresses on one line
+    ],
+)
+def test_sink_allowlist_refuses_anything_but_addresses_and_chat_ids(text: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.SINK_ALLOWLIST), text)
+
+    assert (raised.value.key, raised.value.rule, raised.value.reason) == (
+        "sink_allowlist",
+        "sink_recipient",
+        SINK_REASON,
+    )
+    assert text not in str(raised.value)
+
+
+def test_sink_allowlist_encode_refuses_an_invalid_entry() -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        encode(setting(Key.SINK_ALLOWLIST), ("a@b.co", "@chan"))
+
+    assert raised.value.rule == "sink_recipient"
 
 
 def test_the_schema_is_read_only_and_in_declaration_order() -> None:
@@ -661,7 +729,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     schema = declare(named("extra_one", T.STRING))
 
     assert schema_problems(schema) == [
-        "Key members not declared: sender_timezone",
+        "Key members not declared: sender_timezone, sink_allowlist",
         "declared but not in Key: extra_one",
     ]
     assert schema_problems(schema, keys=["extra_one"]) == []

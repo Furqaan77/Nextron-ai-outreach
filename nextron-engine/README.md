@@ -19,8 +19,18 @@ uv sync --frozen
 
 ## Choose an environment
 
-`NEXTRON_ENV` is required and has no default. Each environment has its own data dir, port and
-lock, so `dev`, `test` and `prod` can run side by side. Only the logon task sets `prod`.
+`NEXTRON_ENV` is required and has no default. Each environment has its own data dir, database,
+port, lock and Credential Manager namespace (`nextron-engine/<env>`), so `dev`, `test` and `prod`
+can run side by side without touching each other's files or credentials. Outside `prod`, email
+and alerts reach only an allowlist (see [Dev and test sink](#dev-and-test-sink)).
+
+**Only the logon task sets `prod`.** Never set `NEXTRON_ENV=prod` as a persistent user or
+machine environment variable (System Properties > Environment Variables, or `setx`): every
+process started on the PC, a test run included, would then run as `prod` and could email real
+people. Set the variable in each terminal instead, as below; it lasts only for that terminal.
+`nextron doctor` fails when it finds a persistent `prod`. Setting `NEXTRON_ENV=prod` in a
+PowerShell `$PROFILE`, a terminal profile or an editor's terminal settings is just as dangerous,
+and `doctor` can't see it: never put `prod` there.
 
 | Variable | Default |
 |---|---|
@@ -43,9 +53,18 @@ uv run nextron doctor
 ```
 
 Prints each startup check as PASS or FAIL: the SQLite version (3.51.3 or later), timezone data
-(`Europe/London`), a data dir outside OneDrive, and a free port. Exits 0 when nothing fails,
-1 when a check fails, and 2 when `NEXTRON_ENV` (or another variable above) is unset or invalid.
-It takes no lock, creates nothing and starts no server.
+(`Europe/London`), a data dir outside OneDrive, no persistent `NEXTRON_ENV=prod`, and a free
+port. Exits 0 when nothing fails, 1 when a check fails, and 2 when `NEXTRON_ENV` (or another
+variable above) is unset or invalid. It takes no lock, creates nothing and starts no server.
+
+`prod_env_not_persistent` reads `NEXTRON_ENV` from the persistent user environment
+(`HKCU\Environment`) and machine environment
+(`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`). It fails with
+`NEXTRON_ENV=prod must only be set by the logon task`, naming the scope, when either holds
+`prod` (in any case, spaces ignored), and also when the registry can't be read. Delete the
+variable in System Properties > Environment Variables, then open a new terminal. Only `doctor`
+runs this check: the logon task's own `prod` start inherits any persistent value, so refusing
+one at `serve` would also stop the real engine, not just the stray processes it endangers.
 
 ## Run the engine
 
@@ -404,6 +423,53 @@ the page, has a fake adapter send it as a bearer header to a failing transport, 
 requests that carry it, removes it, and then finds it in no HTTP response, log record (checked
 before redaction), database column or file.
 
+## Dev and test sink
+
+In `dev` and `test`, email and alerts reach only the people on the `sink_allowlist` setting
+(AD-14). Every other message is written to a file instead of being sent.
+
+- **The allowlist** is "Dev and test allowlist" in the Engine section of the Settings page: one
+  email address or numeric Telegram chat id per line. A Telegram `@username` is refused, because
+  a user name can be handed to someone else. It is empty by default, so nothing is delivered
+  until you list your own test inboxes and chats. Addresses match regardless of ASCII case
+  (`Mac@Example.com` matches `mac@example.com`); nothing else is normalised (no spaces are
+  stripped, and `straße@x.com` never matches `strasse@x.com`).
+- **It is read on every send**, so a change on the Settings page applies to the next message. If
+  it can't be read (a locked database, or a stored list that no longer passes its rule), the
+  message is recorded, never delivered, and the sink logs `sink_allowlist_unreadable` as a
+  WARNING.
+- **Everyone else is recorded** in `<data dir>\sink\<YYYY-MM-DD>.jsonl` (the UTC date), one
+  ASCII JSON object per line: `time`, `port` (`mail` or `alert`), `recipient`, `subject` (mail
+  only) and `text`. The send reports success with `sink=true`, and no external service is
+  contacted. If the line can't be written, the send fails with `sink_write_failed` and nothing
+  is sent.
+
+  ```text
+  {"time":"2026-11-17T23:59:59.000000Z","port":"alert","recipient":"-100123","text":"..."}
+  ```
+
+- **The sink files hold recipient addresses and message text.** They stay in the environment's
+  own data dir (never under OneDrive). Delete them when you no longer need them; retention
+  arrives with the retention story. Logs carry only `sink_passed`, `sink_recorded` and
+  `sink_allowlist_unreadable` with the `port`, never a recipient, subject or text.
+
+**How it is wired.** Every `mail` or `alert` adapter is registered once in
+`nextron.main.ROLE_ADAPTERS` as `RoleAdapter(name, role, adapter_type, build)` and built only by
+`build_role_adapter`, which wraps it in `MailSink` or `AlertSink` (`nextron/adapters/sink`)
+everywhere except `prod`. The registry is empty until the first adapter (Telegram, Story 1.12).
+
+```python
+alert = build_role_adapter("telegram", AdapterContext(config, secrets, clock), units=units)
+delivery = alert.send(AlertMessage(chat_id, text))   # dev/test: delivered or recorded
+```
+
+`tests/contracts/test_sink_contracts.py` fails when an adapter class that sends an
+`AlertMessage` or a `MailMessage` isn't registered for its role, when an adapter's `send`
+doesn't annotate its message parameter, when any module under `nextron/` refers to a sender
+outside `main.py`'s `ROLE_ADAPTERS` assignment (an adapter package may use its own), when a
+registered adapter isn't wrapped outside `prod`, or when either message gains a field the sink
+doesn't check.
+
 ## Database
 
 One SQLite file per environment: `<data dir>\nextron.db`, for example
@@ -543,12 +609,40 @@ uv run lint-imports         # the import contracts on their own
 - `tests/app`: the engine as a real process against temporary folders, and whole pages
   rendered by a dashboard app (untrusted text on a fixture page).
 - `tests/contracts`: import contracts, the source tree, pins, the lock file and vendored assets.
-- `tests/fakes`: one in-memory fake per port (`FrozenClock` for `Clock`, `InMemorySecrets` for
-  `SecretsPort`), plus `FakeUnits`, which stands in for the unit-of-work factory in dashboard
-  tests (`tests/dashboard.py`) and records each unit opened.
+- `tests/fakes`: one in-memory fake per port, listed in `tests.fakes.PORT_FAKES` (`FrozenClock`
+  for `Clock`, `InMemorySecrets` for `SecretsPort`, `InMemoryAlert` for `AlertPort`,
+  `InMemoryMail` for `MailPort`), plus `FakeUnits`, which stands in for the unit-of-work factory
+  in dashboard tests (`tests/dashboard.py`) and records each unit opened.
+  `tests/contracts/test_test_isolation.py` fails when a port has no fake there, or a fake
+  doesn't match its port.
 - `tests/fixtures`: fixture files, such as the hostile-text page
   `tests/fixtures/templates/untrusted_page.html`.
 - `tests/ai_sets`: synthetic AI test cases only.
+
+**Every test is isolated** (`tests/conftest.py`, `tests/live_guard.py`; AD-14):
+
+- It runs as `NEXTRON_ENV=test`, with no other `NEXTRON_*` variable and an empty temporary
+  `%LOCALAPPDATA%`, so the data dir is `<temp>\Nextron\test`. A test of the unset case calls
+  `monkeypatch.delenv("NEXTRON_ENV")`.
+- **No live adapter can be built.** `nextron.adapters.secrets.default_backend` (Credential
+  Manager) and the `build` of every `ROLE_ADAPTERS` entry raise `LiveAdapterInTests`, so
+  `KeyringSecrets("test")`, or `main.build_app` without injected secrets, fails. Inject a fake
+  (or patch `main.KeyringSecrets`). A test that has neutralised what a constructor reaches may
+  restore it with `allow_live_constructor(monkeypatch, module, name)`.
+- **Credential Manager can't be called.** `WinVaultKeyring`'s `get_password`, `set_password`,
+  `delete_password` and `get_credential` raise `LiveAdapterInTests` too, so a `WinVaultKeyring`
+  built directly, or `keyring.get_password(...)`, never reaches it. `allow_live_constructor`
+  never restores these.
+- **No test reaches the network.** These raise `NetworkInTests` for anything but a loopback
+  address or `localhost`: the lookups `socket.getaddrinfo`, `gethostbyname`,
+  `gethostbyname_ex`, `gethostbyaddr` and `getnameinfo`; `socket.socket.connect`, `connect_ex`,
+  `sendto` and (where the platform has it) `sendmsg`; and on Windows asyncio's
+  `IocpProactor.connect` and `sendto`, which skip the others for an IP literal.
+- `tests/live_guard.py` classifies every package under `nextron/adapters`: guarded (with its
+  live constructors), no external system (with the reason; none of its modules may send mail or
+  alerts), or not yet built (it holds only its `__init__.py` and defines nothing). A new live
+  adapter adds its constructors there; the isolation contract fails until every package is
+  classified.
 
 ## Layers and import contracts
 
@@ -566,5 +660,7 @@ uv run python scripts/gen_owner_contracts.py          # rewrite pyproject.toml
 uv run python scripts/gen_owner_contracts.py --check  # what the tests run
 ```
 
-When you add an adapter under `nextron/adapters/`, add it to contract 5 and give its port a fake
-in `tests/fakes`; a contract test fails until contract 5 lists it.
+When you add an adapter under `nextron/adapters/`, add it to contract 5, give its port a fake
+in `tests/fakes` (listed in `PORT_FAKES`), and classify the package in `tests/live_guard.py`; the
+contract tests fail until you do. A `mail` or `alert` adapter is also registered in
+`nextron.main.ROLE_ADAPTERS` (see [Dev and test sink](#dev-and-test-sink)).

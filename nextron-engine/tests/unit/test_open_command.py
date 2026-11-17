@@ -82,7 +82,9 @@ def run_open(
     return code, out.getvalue(), err.getvalue(), probe, browser
 
 
-def test_an_invalid_env_exits_2(no_keyring: None) -> None:
+def test_an_unset_env_exits_2(no_keyring: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NEXTRON_ENV")
+
     code, out, err, probe, browser = run_open()
 
     assert code == 2

@@ -1,8 +1,20 @@
 """Shared pytest setup.
 
 - The ``ai_eval`` marker is opt-in: its tests are skipped unless ``-m`` selects ``ai_eval``.
-- Every test runs with no ``NEXTRON_*`` variables and an empty temporary ``%LOCALAPPDATA%``, so
-  nothing reads the real environment or writes under the real ``%LOCALAPPDATA%\\Nextron``.
+- Every test runs as ``NEXTRON_ENV=test``, with no other ``NEXTRON_*`` variable and an empty
+  temporary ``%LOCALAPPDATA%``, so the data dir defaults to
+  ``<temp LOCALAPPDATA>\\Nextron\\test`` and nothing reads the real environment or writes under
+  the real ``%LOCALAPPDATA%\\Nextron``. A test of the unset case calls
+  ``monkeypatch.delenv("NEXTRON_ENV")``.
+- No test reaches a real external system (AD-14, ``tests/live_guard.py``). These raise
+  ``LiveAdapterInTests``: ``nextron.adapters.secrets.default_backend``, the ``build`` of each
+  ``nextron.main.ROLE_ADAPTERS`` entry, and ``WinVaultKeyring``'s ``get_password``,
+  ``set_password``, ``delete_password`` and ``get_credential``. These raise ``NetworkInTests``
+  for any host but a loopback address or ``localhost``: ``socket.getaddrinfo``,
+  ``gethostbyname``, ``gethostbyname_ex``, ``gethostbyaddr`` and ``getnameinfo``;
+  ``socket.socket.connect``, ``connect_ex``, ``sendto`` and (where it exists) ``sendmsg``; and
+  on Windows asyncio's ``IocpProactor.connect`` and ``sendto``. Ports resolve to their fakes
+  (``tests.fakes.PORT_FAKES``).
 - Every test leaves logging as it found it: ``configure_logging`` (called directly or by
   ``serve``) replaces the root handlers, so the fixture puts them back and closes the log files.
 - ``db_engine`` is a temporary database file at the head revision, disposed after the test;
@@ -23,6 +35,7 @@ from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.logconfig import SDK_LOGGERS
+from tests.live_guard import guard_live_constructors, guard_network
 
 AI_EVAL = "ai_eval"
 
@@ -38,14 +51,28 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture(autouse=True)
 def local_app_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """An empty ``%LOCALAPPDATA%`` and no ``NEXTRON_*`` variables; returns the folder."""
+    """An empty ``%LOCALAPPDATA%``, ``NEXTRON_ENV=test`` and no other ``NEXTRON_*`` variable;
+    returns the folder."""
     for name in list(os.environ):
         if name.upper().startswith("NEXTRON_"):
             monkeypatch.delenv(name)
     folder = tmp_path / "LocalAppData"
     folder.mkdir()
     monkeypatch.setenv("LOCALAPPDATA", str(folder))
+    monkeypatch.setenv("NEXTRON_ENV", "test")
     return folder
+
+
+@pytest.fixture(autouse=True)
+def live_adapters_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every live adapter constructor raises ``LiveAdapterInTests`` (``tests/live_guard.py``)."""
+    guard_live_constructors(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def network_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lookups of, and connections to, anything but loopback raise ``NetworkInTests``."""
+    guard_network(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

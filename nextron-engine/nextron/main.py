@@ -51,6 +51,27 @@ one-time code, and its ``Credentials``, which store the external credentials; it
 stores the settings; all three share one ``SystemClock``; and its handlers open their units of
 work through ``units``. Tests inject the secrets and the clock.
 
+**Role adapters and the sink (AD-14).** Every adapter with the ``mail`` or ``alert`` role
+(``SinkRole``) is registered once in ``ROLE_ADAPTERS`` as a ``RoleAdapter(name, role,
+adapter_type, build)``, and built only by ``build_role_adapter(name, context, units=units)``,
+the one function that reads ``ROLE_ADAPTERS``. It looks the name up (``LookupError`` unless it
+is registered exactly once), calls ``build(AdapterContext(config, secrets, clock))``, and checks
+that the result is an ``adapter_type`` that implements its role's port (``TypeError``
+otherwise). In ``prod`` it returns that adapter. Anywhere else
+(``nextron.domain.sink.sink_applies``) it returns the adapter wrapped in its role's sink
+(``nextron.adapters.sink``: ``MailSink`` or ``AlertSink``), which records to
+``<data dir>\\sink`` and reads the allowlist through ``read_sink_allowlist`` on every send. A
+live ``mail`` or ``alert`` adapter could be obtained outside ``prod`` only by constructing it
+directly, which ``tests/contracts/test_sink_contracts.py`` refuses anywhere in this module but
+the ``ROLE_ADAPTERS`` assignment. The registry ships empty: Stories 1.12 (Telegram), 6.x (Gmail)
+and 7.9 add the entries.
+
+``read_sink_allowlist(units)`` returns ``queries.setup.get(Key.SINK_ALLOWLIST)``, read in its
+own read-only unit of work inside a fresh ``contextvars.Context()``: a port call happens inside
+its caller's unit of work, between that unit's transactions, and a second ``units.open()`` in
+the same context would raise. The read-only unit takes ``BEGIN IMMEDIATE`` on its first read,
+so it must never run while the caller holds a transaction open.
+
 ``open_dashboard`` (``nextron open``) runs these steps and stops at the first failure:
 
 1. Bootstrap config: exit 2.
@@ -65,11 +86,16 @@ work through ``units``. Tests inject the secrets and the clock.
 """
 
 import contextlib
+import contextvars
+import functools
 import logging
 import sys
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, TextIO
 
 import uvicorn
@@ -78,16 +104,22 @@ from fastapi import FastAPI
 from nextron import __version__
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.secrets import KeyringSecrets
+from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.app.ops.api import DashboardEntry
+from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
+from nextron.domain.settings_schema import Key
+from nextron.domain.sink import sink_applies
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
+from nextron.ports.alert import AlertPort
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
+from nextron.ports.mail import MailPort
 from nextron.ports.secrets import SecretsPort
 from nextron.startup_checks import (
     CheckResult,
@@ -104,6 +136,7 @@ HOST: Final = "127.0.0.1"
 WORKERS: Final = 1
 LOGS_DIR_NAME: Final = "logs"
 DB_FILE_NAME: Final = "nextron.db"
+SINK_DIR_NAME: Final = "sink"
 DATABASE_REVISION_CHECK: Final = "database_revision"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
@@ -159,6 +192,95 @@ def build_app(
         credentials=Credentials(secrets, clock),
         units=units,
     )
+
+
+class SinkRole(StrEnum):
+    """The roles whose adapters reach people, so are wrapped in a sink outside ``prod``."""
+
+    MAIL = "mail"
+    ALERT = "alert"
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterContext:
+    """What a role adapter's ``build`` may use: the bootstrap config, the environment's secrets
+    and the clock."""
+
+    config: BootstrapConfig
+    secrets: SecretsPort
+    clock: Clock
+
+
+@dataclass(frozen=True, slots=True)
+class RoleAdapter:
+    """One registered ``mail`` or ``alert`` adapter: ``build(context)`` returns an
+    ``adapter_type``."""
+
+    name: str
+    role: SinkRole
+    adapter_type: type
+    build: Callable[[AdapterContext], object]
+
+    def __post_init__(self) -> None:
+        if not (isinstance(self.name, str) and self.name):
+            raise TypeError("a role adapter's name must be a non-empty str")
+        if not isinstance(self.role, SinkRole):
+            raise TypeError(f"role adapter {self.name}: the role must be a SinkRole")
+        if not isinstance(self.adapter_type, type):
+            raise TypeError(f"role adapter {self.name}: adapter_type must be a class")
+        if not callable(self.build):
+            raise TypeError(f"role adapter {self.name}: build must be callable")
+
+
+# The role adapter registry (AD-14): the only place a mail or alert adapter is constructed.
+# Stories 1.12, 6.x and 7.9 add the entries. Only build_role_adapter reads it.
+ROLE_ADAPTERS: tuple[RoleAdapter, ...] = ()
+
+ROLE_PORTS: Final[Mapping[SinkRole, type]] = MappingProxyType(
+    {SinkRole.MAIL: MailPort, SinkRole.ALERT: AlertPort}
+)
+ROLE_SINKS: Final[Mapping[SinkRole, type[MailSink] | type[AlertSink]]] = MappingProxyType(
+    {SinkRole.MAIL: MailSink, SinkRole.ALERT: AlertSink}
+)
+
+
+def read_sink_allowlist(units: Units) -> tuple[str, ...]:
+    """The ``sink_allowlist`` setting, read in its own read-only unit of work inside a fresh
+    ``contextvars.Context()``, so it works while the caller's unit of work is open (between its
+    transactions)."""
+
+    def read() -> tuple[str, ...]:
+        with units.open(read_only=True):
+            return tuple(setup_queries.get(Key.SINK_ALLOWLIST))
+
+    return contextvars.Context().run(read)
+
+
+def build_role_adapter(
+    name: str, context: AdapterContext, *, units: Units
+) -> AlertPort | MailPort:
+    """Build the role adapter registered as ``name``; outside ``prod``, wrapped in its role's
+    sink. Raises ``LookupError`` unless ``name`` is registered exactly once, and ``TypeError``
+    when ``build`` returns something other than an ``adapter_type`` that implements the role's
+    port."""
+    matches = [entry for entry in ROLE_ADAPTERS if entry.name == name]
+    if len(matches) != 1:
+        raise LookupError(f"{len(matches)} adapters are registered as {name!r}; expected one")
+    [entry] = matches
+    adapter = entry.build(context)
+    if not isinstance(adapter, entry.adapter_type):
+        raise TypeError(
+            f"role adapter {entry.name} built a {type(adapter).__name__}, "
+            f"not a {entry.adapter_type.__name__}"
+        )
+    port = ROLE_PORTS[entry.role]
+    if not isinstance(adapter, port):
+        raise TypeError(f"role adapter {entry.name} does not implement {port.__name__}")
+    if not sink_applies(context.config.env):
+        return adapter  # type: ignore[return-value]  # an AlertPort or MailPort, checked above
+    recorder = SinkRecorder(context.config.data_dir / SINK_DIR_NAME, context.clock)
+    allowlist = functools.partial(read_sink_allowlist, units)
+    return ROLE_SINKS[entry.role](adapter, allowlist, recorder)  # type: ignore[arg-type]
 
 
 def build_subscribers() -> Subscribers:

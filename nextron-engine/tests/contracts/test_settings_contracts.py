@@ -128,7 +128,7 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
     assert schema_problems(bad) == [
         "Footer-Address: the key must match [a-z][a-z0-9_]{0,30} (at most 31 characters)",
         "footer_postal_address: the label is empty",
-        "Key members not declared: sender_timezone",
+        "Key members not declared: sender_timezone, sink_allowlist",
         "declared but not in Key: Footer-Address, footer_postal_address",
     ]
 

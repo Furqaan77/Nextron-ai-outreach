@@ -79,6 +79,7 @@ from types import MappingProxyType
 from typing import Any, Final, NamedTuple
 
 from nextron.domain.errors import DomainError
+from nextron.domain.sink import is_sink_recipient
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 REQUIRED_RULE: Final = "required"
@@ -125,6 +126,7 @@ class Key(StrEnum):
     ``SCHEMA``; ``schema_problems`` fails when the two differ."""
 
     SENDER_TIMEZONE = "sender_timezone"
+    SINK_ALLOWLIST = "sink_allowlist"
 
 
 class _Required(Enum):
@@ -783,6 +785,12 @@ def declared() -> tuple[Setting, ...]:
 
 # The schema -----------------------------------------------------------------------------------
 
+SINK_RECIPIENT_RULE: Final = Rule(
+    "sink_recipient",
+    "each line must be an email address or a numeric Telegram chat id",
+    lambda value: all(is_sink_recipient(item) for item in value),
+)
+
 SCHEMA: Mapping[str, Setting] = _declare(
     Setting(
         key=Key.SENDER_TIMEZONE,
@@ -791,6 +799,20 @@ SCHEMA: Mapping[str, Setting] = _declare(
         label="Sender's timezone",
         unit="IANA timezone name, such as America/Los_Angeles",
         default=REQUIRED,
+    ),
+    # Outside prod, the sink (nextron.adapters.sink) delivers mail and alerts only to these
+    # recipients (AD-14). Empty by default: nothing is delivered until Mac lists his own.
+    Setting(
+        key=Key.SINK_ALLOWLIST,
+        type=SettingType.LIST,
+        section=Section.ENGINE,
+        label="Dev and test allowlist",
+        unit=(
+            "One email address or numeric Telegram chat id per line. Outside prod, email and "
+            "alerts reach only these; everything else is written to the sink folder."
+        ),
+        default=(),
+        rules=(SINK_RECIPIENT_RULE,),
     ),
 )
 

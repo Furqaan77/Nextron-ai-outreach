@@ -24,6 +24,7 @@ from nextron.ports.secrets import (
     secret_length,
 )
 from tests.fakes.secrets import InMemorySecrets
+from tests.live_guard import allow_live_constructor
 
 EMOJI = "\U0001f511"  # outside the BMP: two UTF-16 code units
 BACKEND_TEXT = "backend detail " + "Pw" + "Leak9"  # must never reach an AdapterError
@@ -273,6 +274,8 @@ def test_the_default_backend_is_win_vault_constructed_only(
 
     for method in ("get_password", "set_password", "delete_password", "get_credential"):
         monkeypatch.setattr(WinVaultKeyring, method, never)
+    # Every backend call is neutralised above, so the live constructor may run here.
+    allow_live_constructor(monkeypatch, "nextron.adapters.secrets", "default_backend")
     monkeypatch.setattr(keyring, "get_keyring", never)
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
 

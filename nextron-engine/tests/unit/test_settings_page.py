@@ -509,10 +509,47 @@ def test_the_sender_section_shows_the_sender_timezone_as_required(
 ) -> None:
     _, page = settings_page(dashboard, session[0])
 
-    assert page.legends == ["Sender"]
-    [shown] = page.fields.values()
+    assert page.legends == ["Sender", "Engine"]
+    shown = page.fields["sender_timezone"]
     assert (shown.key, shown.label, shown.value) == ("sender_timezone", "Sender's timezone", "")
     assert shown.hint == "IANA timezone name, such as America/Los_Angeles; required"
+
+
+def test_the_engine_section_shows_the_empty_sink_allowlist(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    _, page = settings_page(dashboard, session[0])
+
+    assert list(page.fields) == ["sender_timezone", "sink_allowlist"]
+    shown = page.fields["sink_allowlist"]
+    assert (shown.tag, shown.label, shown.value) == ("textarea", "Dev and test allowlist", "")
+    assert shown.hint == (
+        "One email address or numeric Telegram chat id per line. Outside prod, email and alerts "
+        "reach only these; everything else is written to the sink folder.; default: none; "
+        "leave blank to use it"
+    )
+
+
+def test_the_sink_allowlist_saves_addresses_and_chat_ids_and_refuses_anything_else(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    token = session[1]
+
+    saved = save(
+        dashboard, session, fields_body(token, sender_timezone="", sink_allowlist="a@b.co\r\n123")
+    )
+
+    assert SettingsHtml(saved.text).notices == [("status", "Settings saved.")]
+    assert stored(units) == {"sink_allowlist": "a@b.co\n123"}
+    assert get_value(units, Key.SINK_ALLOWLIST) == ("a@b.co", "123")
+    for refused_text in ("@chan", "a@b", "12a"):
+        refused = save(
+            dashboard, session, fields_body(token, sender_timezone="", sink_allowlist=refused_text)
+        )
+        field = SettingsHtml(refused.text).fields["sink_allowlist"]
+        assert field.error == "each line must be an email address or a numeric Telegram chat id"
+        assert field.value == refused_text
+        assert stored(units) == {"sink_allowlist": "a@b.co\n123"}
 
 
 def test_saving_mars_base_stores_nothing_and_america_los_angeles_is_saved(
@@ -520,14 +557,20 @@ def test_saving_mars_base_stores_nothing_and_america_los_angeles_is_saved(
 ) -> None:
     token = session[1]
 
-    refused = save(dashboard, session, fields_body(token, sender_timezone="Mars/Base"))
+    refused = save(
+        dashboard, session, fields_body(token, sender_timezone="Mars/Base", sink_allowlist="")
+    )
     refused_page = SettingsHtml(refused.text)
 
     assert refused.status == 200
     assert refused_page.fields["sender_timezone"].error == TIMEZONE_REASON
     assert stored(units) == {}
 
-    saved = save(dashboard, session, fields_body(token, sender_timezone="America/Los_Angeles"))
+    saved = save(
+        dashboard,
+        session,
+        fields_body(token, sender_timezone="America/Los_Angeles", sink_allowlist=""),
+    )
     saved_page = SettingsHtml(saved.text)
 
     assert saved.status == 200

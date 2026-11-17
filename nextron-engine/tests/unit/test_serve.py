@@ -21,6 +21,7 @@ from nextron.lock import InstanceLock, LockHeldError
 from nextron.startup_checks import Probes
 from tests.asgi import get
 from tests.fakes.probes import PortProbe, fake_probes
+from tests.fakes.secrets import InMemorySecrets
 from tests.migration_chains import (
     chain,
     create_table,
@@ -96,6 +97,20 @@ def dev(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return data_dir
 
 
+@pytest.fixture
+def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> list[InMemorySecrets]:
+    """``main.KeyringSecrets`` builds in-memory secrets (the live keyring is refused in tests);
+    returns every one built."""
+    built: list[InMemorySecrets] = []
+
+    def keyring_secrets(env: str) -> InMemorySecrets:
+        built.append(InMemorySecrets(env))
+        return built[-1]
+
+    monkeypatch.setattr(main, "KeyringSecrets", keyring_secrets)
+    return built
+
+
 def tree(folder: Path) -> list[Path]:
     return sorted(folder.rglob("*"))
 
@@ -116,7 +131,9 @@ def events(data_dir: Path) -> list[str]:
 def test_env_unset_or_invalid_exits_2_and_creates_nothing(
     value: str | None, local_app_data: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if value is not None:
+    if value is None:
+        monkeypatch.delenv("NEXTRON_ENV")
+    else:
         monkeypatch.setenv("NEXTRON_ENV", value)
 
     code, err, spy = run_serve()
@@ -148,7 +165,7 @@ def test_dev_start_prepares_folders_takes_the_lock_and_serves(
 
 
 def test_uvicorn_binds_127_0_0_1_with_one_worker(
-    dev: Path, monkeypatch: pytest.MonkeyPatch
+    dev: Path, fake_keyring: list[InMemorySecrets], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runs: list[tuple[object, dict[str, Any]]] = []
     monkeypatch.setattr(main.uvicorn, "run", lambda app, **kwargs: runs.append((app, kwargs)))
@@ -162,9 +179,12 @@ def test_uvicorn_binds_127_0_0_1_with_one_worker(
     assert kwargs.get("reload", False) is False
     assert kwargs["log_config"] is None  # Uvicorn's records go through the root handlers
     assert callable(app)
+    assert [secrets.service for secrets in fake_keyring] == ["nextron-engine/dev"]
 
 
-def test_reload_is_allowed_in_dev(dev: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reload_is_allowed_in_dev(
+    dev: Path, fake_keyring: list[InMemorySecrets], monkeypatch: pytest.MonkeyPatch
+) -> None:
     runs: list[tuple[object, dict[str, Any]]] = []
     monkeypatch.setattr(main.uvicorn, "run", lambda app, **kwargs: runs.append((app, kwargs)))
 
@@ -192,9 +212,12 @@ def test_reload_is_allowed_in_dev(dev: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(main, "connect_database", connect)
     monkeypatch.setattr(main, "ensure_current", never_migrate)
     # NEXTRON_ENV=dev, as in the reload worker: the dev port's Host passes the guard, and with
-    # no session (and no keyring call) /health answers 401.
+    # no session (and no keyring call) /health answers 401. The worker builds its own keyring
+    # adapter for dev (in-memory here: tests never build the live one).
     try:
         status, headers, _ = get(factory(), "/health")
+        assert [secrets.service for secrets in fake_keyring] == ["nextron-engine/dev"]
+        assert fake_keyring[0].calls == []
         [units] = connected  # the worker reads through its own factory on the data dir's file
         assert units.engine.url.database == str(dev / "nextron.db")
     finally:
@@ -599,7 +622,10 @@ def test_the_database_engine_is_disposed_when_serve_returns(
 
 
 def test_the_served_app_reads_through_the_factory_serve_opened(
-    dev: Path, opened: list[UnitOfWorkFactory], monkeypatch: pytest.MonkeyPatch
+    dev: Path,
+    opened: list[UnitOfWorkFactory],
+    fake_keyring: list[InMemorySecrets],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     built: list[object] = []
     real_build_app = main.build_app

@@ -54,7 +54,9 @@ def test_default_playbook_is_the_repository_playbook() -> None:
 def test_env_unset_or_invalid_is_refused(
     value: str | None, local_app_data: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if value is not None:
+    if value is None:
+        monkeypatch.delenv("NEXTRON_ENV")
+    else:
         monkeypatch.setenv("NEXTRON_ENV", value)
 
     with pytest.raises(BootstrapError) as raised:

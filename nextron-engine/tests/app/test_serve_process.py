@@ -228,7 +228,8 @@ def test_nextron_console_script_runs_doctor(engine_env: dict[str, str], tmp_path
 
     assert result.returncode == 0, result.stdout + result.stderr
     lines = result.stdout.splitlines()
-    assert [line.split()[0] for line in lines] == ["PASS"] * 4
+    assert [line.split()[0] for line in lines] == ["PASS"] * 5
+    assert lines[3].split()[1] == "prod_env_not_persistent"
     assert not (tmp_path / "data").exists()
 
 

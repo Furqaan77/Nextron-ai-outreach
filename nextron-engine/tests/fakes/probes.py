@@ -22,6 +22,10 @@ def _load_zone(name: str) -> object:
     return object()
 
 
+def _no_persistent_variable(name: str) -> Mapping[str, str]:
+    return {}  # set in neither the user nor the machine environment
+
+
 def fake_probes(
     *,
     sqlite_version: str = "3.53.1",
@@ -35,5 +39,6 @@ def fake_probes(
         "load_zone": _load_zone,
         "environ": environ if environ is not None else {},
         "port_is_free": port if port is not None else PortProbe(),
+        "persistent_variable": _no_persistent_variable,
     }
     return Probes(**(values | overrides))

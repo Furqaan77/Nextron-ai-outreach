@@ -6,6 +6,15 @@ probes. No check makes a network call: the port probe binds a local socket and c
 
 ``engine_is_running`` is the probe of ``nextron open``: it connects to the engine's port instead
 of binding it, because a bind probe could take the port from an engine that is starting.
+
+``prod_env_not_persistent`` (AD-14) runs only in ``doctor`` (``all_checks``), not before
+``serve`` (``environment_checks``): the logon task's own ``prod`` start inherits any persistent
+value, so refusing one at ``serve`` would also stop the real engine, not just the stray
+processes it endangers. It fails when the persistent
+user or machine environment (``HKCU\\Environment`` or
+``HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment``) sets
+``NEXTRON_ENV`` to ``prod`` (any case, spaces ignored), because then every process started on
+the PC, a test run included, would be ``prod``. It also fails when the registry can't be read.
 """
 
 import os
@@ -15,7 +24,9 @@ import zoneinfo
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePath
-from typing import Final
+from typing import Any, Final
+
+from nextron.domain.sink import PROD
 
 MIN_SQLITE_VERSION: Final = (3, 51, 3)
 REQUIRED_ZONE: Final = "Europe/London"
@@ -25,7 +36,17 @@ SQLITE_VERSION: Final = "sqlite_version"
 TZDATA: Final = "tzdata"
 DATA_DIR_OUTSIDE_ONEDRIVE: Final = "data_dir_outside_onedrive"
 PORT_FREE: Final = "port_free"
+PROD_ENV_NOT_PERSISTENT: Final = "prod_env_not_persistent"
 ENGINE_PROBE_TIMEOUT_S: Final = 1.0
+
+ENV_VARIABLE: Final = "NEXTRON_ENV"
+PERSISTENT_PROD: Final = "NEXTRON_ENV=prod must only be set by the logon task"
+USER_SCOPE: Final = "user"
+MACHINE_SCOPE: Final = "machine"
+USER_ENVIRONMENT_KEY: Final = "Environment"  # under HKEY_CURRENT_USER
+MACHINE_ENVIRONMENT_KEY: Final = (  # under HKEY_LOCAL_MACHINE
+    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +66,8 @@ class Probes:
     load_zone: Callable[[str], object]
     environ: Mapping[str, str]
     port_is_free: Callable[[str, int], bool]
+    # name -> its persistent value by scope ("user", "machine"); an absent scope is unset
+    persistent_variable: Callable[[str], Mapping[str, str]]
 
     @classmethod
     def system(cls) -> Probes:
@@ -53,6 +76,7 @@ class Probes:
             load_zone=zoneinfo.ZoneInfo,
             environ=os.environ,
             port_is_free=socket_port_is_free,
+            persistent_variable=read_persistent_variable,
         )
 
 
@@ -81,6 +105,33 @@ def engine_is_running(host: str, port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def read_persistent_variable(name: str, *, registry: Any = None) -> dict[str, str]:
+    """The persistent values of the environment variable ``name``, by scope: ``user``
+    (``HKCU\\Environment``) and ``machine`` (``HKLM\\...\\Session Manager\\Environment``).
+
+    ``registry`` is ``winreg`` unless a test injects a stand-in; ``winreg`` is imported only
+    here, when the probe runs. A missing key or value counts as absent, and so does a value that
+    isn't a string (Windows builds the environment from string values only). Any other registry
+    error propagates.
+    """
+    if registry is None:
+        import winreg as registry  # noqa: PLC0415 - Windows-only, imported when probed
+    scopes = (
+        (USER_SCOPE, registry.HKEY_CURRENT_USER, USER_ENVIRONMENT_KEY),
+        (MACHINE_SCOPE, registry.HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT_KEY),
+    )
+    values: dict[str, str] = {}
+    for scope, hive, path in scopes:
+        try:
+            with registry.OpenKey(hive, path) as key:
+                value, _kind = registry.QueryValueEx(key, name)
+        except FileNotFoundError:
+            continue
+        if isinstance(value, str):
+            values[scope] = value
+    return values
 
 
 def _parse_version(text: str) -> tuple[int, ...]:
@@ -160,6 +211,36 @@ def check_port_free(host: str, port: int, probes: Probes) -> CheckResult:
     return CheckResult(PORT_FREE, True, f"{host}:{port} is free")
 
 
+def check_prod_env_not_persistent(probes: Probes) -> CheckResult:
+    """Fail when ``NEXTRON_ENV`` is persistently ``prod`` in the user or machine environment,
+    or when the registry can't be read; see the module docstring."""
+    try:
+        values = probes.persistent_variable(ENV_VARIABLE)
+        scopes = [
+            scope for scope, value in values.items() if value.strip().casefold() == PROD
+        ]
+    except Exception as exc:  # noqa: BLE001 - any probe failure fails the check
+        return CheckResult(
+            PROD_ENV_NOT_PERSISTENT,
+            False,
+            f"cannot read the persistent {ENV_VARIABLE} from the registry "
+            f"({type(exc).__name__}); check it in System Properties > Environment Variables",
+        )
+    if scopes:
+        where = f"{' and '.join(scopes)} environment{'s' if len(scopes) > 1 else ''}"
+        return CheckResult(
+            PROD_ENV_NOT_PERSISTENT,
+            False,
+            f"{PERSISTENT_PROD}, but it is set persistently in the {where}; delete it in "
+            "System Properties > Environment Variables",
+        )
+    return CheckResult(
+        PROD_ENV_NOT_PERSISTENT,
+        True,
+        f"no persistent user or machine {ENV_VARIABLE}=prod (only the logon task sets prod)",
+    )
+
+
 def environment_checks(data_dir: PurePath, probes: Probes) -> list[CheckResult]:
     """The checks that run before the instance lock: SQLite, tzdata and OneDrive."""
     return [
@@ -170,5 +251,10 @@ def environment_checks(data_dir: PurePath, probes: Probes) -> list[CheckResult]:
 
 
 def all_checks(data_dir: PurePath, host: str, port: int, probes: Probes) -> list[CheckResult]:
-    """Every startup check, in the order ``doctor`` prints them."""
-    return [*environment_checks(data_dir, probes), check_port_free(host, port, probes)]
+    """Every startup check, in the order ``doctor`` prints them. ``serve`` runs the same
+    checks except ``prod_env_not_persistent`` (see the module docstring)."""
+    return [
+        *environment_checks(data_dir, probes),
+        check_prod_env_not_persistent(probes),
+        check_port_free(host, port, probes),
+    ]
