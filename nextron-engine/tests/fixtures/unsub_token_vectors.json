@@ -1,0 +1,154 @@
+{
+  "format": "nextron-unsub-token/1",
+  "description": "Story 3.8 unsubscribe token vectors. token = base64url without padding of kid (1 byte) || nonce (12) || AES-256-GCM-SIV(k_tok[kid], nonce, no AAD, addr_hash (32) || issued_at (8, unsigned big-endian Unix seconds)) (56) || HMAC-SHA256(k_edge[kid], the 69 bytes before it)[:12]: 81 bytes, 108 characters. addr_hash = SHA-256('address:' + normalize_email(address)), the engine's key_hash('address', address): the address stripped, NFC'd and lowercased, with its domain in IDNA ASCII (for these ASCII vectors, just trimmed and lowercased). Only the engine computes addr_hash; the Worker checks only the tag. Keys are base64url without padding. 'edge' is what the Worker, which holds only k_edge, decides: accept exactly when the tag verifies. These keys are test keys only and must never be deployed.",
+  "keys": {
+    "1": {
+      "k_tok": "m6wmcjVQG91-MEwRvgxPufQ2XeFiXkdPYoIJ6mvL-7A",
+      "k_edge": "eD7BrXf-UWVWl3jkHXeY_NeSNQ7nPis7OgllF-c3a-4"
+    },
+    "2": {
+      "k_tok": "ZwnxAwpORZ0VI85atb-OKx03cRJwKZWyc0IDxAuZbQo",
+      "k_edge": "SHrFQD2JVcziqg6326oULXJEGajrqb_jwe23S2SlFr8"
+    }
+  },
+  "valid": [
+    {
+      "name": "kid1_plain",
+      "kid": 1,
+      "nonce": "773a0d531472f1e560c39ec7",
+      "address": "jane.doe@example.com",
+      "addr_hash": "5413f375b6d7da43865c05ee5aee1ff200d3e9657e50729a77cdd9bf430d44a4",
+      "issued_at": 1790000000,
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "token_hash": "ecdbb286b7d0bdc9975e6cb3a400a2658743814a821914f966a81a3f0307f2ec"
+    },
+    {
+      "name": "kid1_normalised",
+      "kid": 1,
+      "nonce": "7b16be5afcf1082888135664",
+      "address": "  J.Smith+News@Example.CO.UK ",
+      "addr_hash": "048e38b3fb1fa53dd3129bc5c9ea825b8803a61e46174f17df03cde503a57395",
+      "issued_at": 1795123456,
+      "token": "AXsWvlr88QgoiBNWZGRNwSXAbEuKTB093SlVE_jkPiB35BpFFsT504DxYqUNZI9RRzxUPZRbnuVnRLGdIZkNwA2fljjphBeq-8MKx3vbI0CC",
+      "token_hash": "8767a71f134f520eaa5d2224cc78462dcd78705080bd094245584610fd77e121"
+    },
+    {
+      "name": "kid2_plain",
+      "kid": 2,
+      "nonce": "6c01acbb67847dd1956162f6",
+      "address": "ops@example.org",
+      "addr_hash": "86eb31646f5ffe624a999ab2cbcb11e75861728dd317039219a784b2573d007d",
+      "issued_at": 1800000000,
+      "token": "AmwBrLtnhH3RlWFi9ij7uVzrQtDE545mrrH-N6LglgjM0qHqf2XUQ_k53Ay00Q2dbC_9T8iOuF2stnvoe1mzgUoha4NdFDh2556BfUypZMMg",
+      "token_hash": "31fd938c381b3e902780f9ac26c255dc0c6e1372cc5f678eae14ead26dfaa8d3"
+    },
+    {
+      "name": "kid2_far_future",
+      "kid": 2,
+      "nonce": "da65def9e11f58333a54a6b2",
+      "address": "zed@example.net",
+      "addr_hash": "1cc2d6ef5d890cd0cb5c308c53c87c32a6301ba54702e0824ad63e8407b58572",
+      "issued_at": 4102444800,
+      "token": "Atpl3vnhH1gzOlSmsra06bvbzhOT9pMv56Cc4UVZebTawFEcQ3Oytufey-YRbGth__x5_QePRmT2aXc7r-W57CMVpMm0OGZJihwWcQFKuwn9",
+      "token_hash": "b8c4bb66dd2d9f550fdaaa8d3f4f98badaf6a85f0fd532f59936c30f1adedc6f"
+    }
+  ],
+  "tampered": [
+    {
+      "name": "tag_flipped",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZb",
+      "reason": "bad_tag",
+      "edge": "reject"
+    },
+    {
+      "name": "ciphertext_flipped",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVpnzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "bad_tag",
+      "edge": "reject"
+    },
+    {
+      "name": "nonce_flipped",
+      "token": "AXc6DVOUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "bad_tag",
+      "edge": "reject"
+    },
+    {
+      "name": "kid_swapped_to_2",
+      "token": "Anc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "bad_tag",
+      "edge": "reject"
+    },
+    {
+      "name": "kid_zero",
+      "token": "AHc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "unknown_kid",
+      "edge": "reject"
+    },
+    {
+      "name": "kid_unknown_3",
+      "token": "A3c6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "unknown_kid",
+      "edge": "reject"
+    },
+    {
+      "name": "kid_unknown_255",
+      "token": "_3c6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "unknown_kid",
+      "edge": "reject"
+    },
+    {
+      "name": "retagged_garbage_ciphertext",
+      "token": "AR4LgKcEi_0_9wMYFaurq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urElDnFuTAvHXoIDgL",
+      "reason": "bad_ciphertext",
+      "edge": "accept"
+    },
+    {
+      "name": "encrypted_under_kid2_k_tok",
+      "token": "AeFiTnU4ZS2kosX8SHTdNMgzyoqRnujrb9EHXtInl0ub1rzMJW0rxDPRqR14rVKET2aQouPCtbGf0Jg3Z0AbRhco0BYiF7_xWD6BERbg9eaa",
+      "reason": "bad_ciphertext",
+      "edge": "accept"
+    },
+    {
+      "name": "truncated_107",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZ",
+      "reason": "malformed",
+      "edge": "reject"
+    },
+    {
+      "name": "extended_109",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZaA",
+      "reason": "malformed",
+      "edge": "reject"
+    },
+    {
+      "name": "padded",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa=",
+      "reason": "malformed",
+      "edge": "reject"
+    },
+    {
+      "name": "standard_base64_plus",
+      "token": "+Xc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "malformed",
+      "edge": "reject"
+    },
+    {
+      "name": "standard_base64_slash",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1vIjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZ/",
+      "reason": "malformed",
+      "edge": "reject"
+    },
+    {
+      "name": "space_inside",
+      "token": "AXc6DVMUcvHlYMOex6ezXn58IyVonzJvDaMoFjZlkDBPURo8n1 IjgA0PUI-2JK_WKbav-7O3WcAt2gKnSo8lFSecE2scHgbHVB9nL6oSEZa",
+      "reason": "malformed",
+      "edge": "reject"
+    },
+    {
+      "name": "empty",
+      "token": "",
+      "reason": "malformed",
+      "edge": "reject"
+    }
+  ]
+}

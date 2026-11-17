@@ -152,6 +152,7 @@ class Key(StrEnum):
     AI_BUDGET_MONTHLY = "ai_budget_monthly"
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
     US_SOLICITATION_LABEL = "us_solicitation_label"
+    UNSUB_ACTIVE_KID = "unsub_active_kid"
 
 
 class _Required(Enum):
@@ -865,6 +866,10 @@ MAX_QUOTA: Final = 100_000
 PLACES_ENTERPRISE_FREE_MONTHLY: Final = 1_000
 PLACES_PRO_FREE_MONTHLY: Final = 5_000
 MAX_AI_BUDGET: Final = 100 * MICROS_PER_DOLLAR  # the whole engine's monthly ceiling (SM-9)
+# nextron.domain.unsub_token.MIN_KID and MAX_KID (importing it here would be circular, through
+# contactability and markets; tests/unit/test_settings_schema.py checks they match).
+UNSUB_MIN_KID: Final = 1
+UNSUB_MAX_KID: Final = 255
 
 SCHEMA: Mapping[str, Setting] = _declare(
     # The From name of every cold email (Story 4.7, FR-32). Required: until it is set,
@@ -1083,6 +1088,27 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(max_length(200),),
+    ),
+    # Which unsubscribe token key id new tokens are encoded under (Story 3.8, AD-15), read at
+    # each issue. The kid's keys live in Windows Credential Manager (Credentials page,
+    # Unsubscribe token keys); doctor's unsub_token_keys check tests them. Not a secret: it only
+    # names which keyring entries to use.
+    Setting(
+        key=Key.UNSUB_ACTIVE_KID,
+        type=SettingType.INTEGER,
+        section=Section.SENDING,
+        label="Unsubscribe token key id",
+        unit=(
+            f"{UNSUB_MIN_KID} to {UNSUB_MAX_KID}. New unsubscribe links are made with this "
+            "key id's keys (Credentials page, Unsubscribe token keys). Enter the next id's keys "
+            "there and in the unsubscribe Worker before you change it; links already sent keep "
+            "working."
+        ),
+        default=UNSUB_MIN_KID,
+        rules=(
+            minimum(UNSUB_MIN_KID, str(UNSUB_MIN_KID)),
+            maximum(UNSUB_MAX_KID, str(UNSUB_MAX_KID)),
+        ),
     ),
 )
 

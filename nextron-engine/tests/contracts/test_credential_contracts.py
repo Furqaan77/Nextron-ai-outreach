@@ -11,13 +11,24 @@
 - **Keys are safe in markup.** Each key fullmatches ``KEY_PATTERN`` (``[a-z][a-z0-9_]{0,30}``),
   so it can go into ``id="credential-<key>"`` and ``hx-target="#credential-<key>"`` as it is.
 - **Labels are unique,** so no two rows of the Credentials page look the same.
+- **The unsubscribe token key family** (Story 3.8, ``UNSUB_KEYS``) keeps the same rules for
+  every kid from 1 to 255: each ``secret_name(kid)`` and ``meta_name(kid)`` is a valid secret
+  name, none uses a reserved prefix or is a ``REGISTRY`` credential's name, no two family
+  members share one, each mapping key is its ``UnsubKey`` (every member declared) and fits
+  ``KEY_PATTERN``, and no label is another family member's or a credential's.
 """
 
 from collections.abc import Mapping
 from typing import Final
 
 from nextron.domain import credentials as registry
-from nextron.domain.credentials import KEY_PATTERN, Credential, CredentialKey
+from nextron.domain.credentials import (
+    KEY_PATTERN,
+    Credential,
+    CredentialKey,
+    UnsubKey,
+    UnsubKeyCredential,
+)
 from nextron.ports.secrets import is_secret_name
 
 RESERVED_PREFIXES: Final = ("meta/", "session/", "google/", "gmail/")
@@ -96,4 +107,76 @@ def test_the_check_catches_a_bad_probe_registry() -> None:
         "Upper_Key: the mapping key is not the credential's CredentialKey",
         "Upper_Key: the key doesn't match KEY_PATTERN, so it isn't safe in an id",
         "CredentialKey members not declared: companies_house",
+    ]
+
+
+
+def unsub_key_problems(
+    family: Mapping[str, UnsubKeyCredential], credentials: Mapping[str, Credential]
+) -> list[str]:
+    """Everything wrong with the unsubscribe token key ``family``, as ``"<key>: <why>"``."""
+    problems = []
+    taken = {found.secret_name: key for key, found in credentials.items()}
+    labels = {found.label: key for key, found in credentials.items()}
+    for key, found in family.items():
+        if found.key != key or not isinstance(found.key, UnsubKey):
+            problems.append(f"{key}: the mapping key is not the key's UnsubKey")
+        if not (isinstance(key, str) and KEY_PATTERN.fullmatch(key)):
+            problems.append(f"{key}: the key doesn't match KEY_PATTERN, so it isn't safe in an id")
+        bad = sorted(
+            {
+                kind
+                for kid in range(1, 256)
+                for kind, name in (
+                    ("secret_name", found.secret_name(kid)),
+                    ("meta_name", found.meta_name(kid)),
+                )
+                if not is_secret_name(name)
+            }
+        )
+        problems += [f"{key}: a {kind} is not a valid secret name" for kind in bad]
+        for kid in range(1, 256):
+            name = found.secret_name(kid)
+            if name.startswith(RESERVED_PREFIXES):
+                problems.append(f"{key}: secret_name {name!r} uses a reserved prefix")
+                break
+            owner = taken.setdefault(name, key)
+            if owner != key:
+                problems.append(f"{key}: secret_name {name!r} is also {owner}'s")
+                break
+        first = labels.setdefault(found.label, key)
+        if first != key:
+            problems.append(f"{key}: label {found.label!r} is also {first}'s")
+    if missing := [str(member) for member in UnsubKey if member not in family]:
+        problems.append(f"UnsubKey members not declared: {', '.join(missing)}")
+    return problems
+
+
+def test_the_unsubscribe_token_key_family_keeps_the_contracts() -> None:
+    assert unsub_key_problems(registry.UNSUB_KEYS, registry.REGISTRY) == []
+    assert [found.key for found in registry.declared_unsub_keys()] == list(UnsubKey)
+
+
+def test_the_family_check_catches_a_bad_probe_family() -> None:
+    probe = {
+        "k_tok": UnsubKeyCredential(UnsubKey.K_TOK, "Claude API key", "unsub/k_tok"),
+        "k_edge": UnsubKeyCredential(UnsubKey.K_TOK, "Edge", "meta/edge"),
+        "other": UnsubKeyCredential(UnsubKey.K_EDGE, "Other", "unsub/k_tok"),
+        "Bad Key": UnsubKeyCredential("Bad Key", "Bad", "Bad Key"),  # type: ignore[arg-type]
+    }
+
+    assert unsub_key_problems(probe, registry.REGISTRY) == [
+        "k_tok: label 'Claude API key' is also claude's",
+        "k_edge: the mapping key is not the key's UnsubKey",
+        "k_edge: secret_name 'meta/edge/1' uses a reserved prefix",
+        "other: the mapping key is not the key's UnsubKey",
+        "other: secret_name 'unsub/k_tok/1' is also k_tok's",
+        "Bad Key: the mapping key is not the key's UnsubKey",
+        "Bad Key: the key doesn't match KEY_PATTERN, so it isn't safe in an id",
+        "Bad Key: a meta_name is not a valid secret name",
+        "Bad Key: a secret_name is not a valid secret name",
+    ]
+    only_k_tok = {"k_tok": registry.UNSUB_KEYS["k_tok"]}
+    assert unsub_key_problems(only_k_tok, registry.REGISTRY) == [
+        "UnsubKey members not declared: k_edge"
     ]

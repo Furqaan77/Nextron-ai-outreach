@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain.google_oauth import (
     CLIENT_SECRET_NAME,
     WEB_CLIENT,
@@ -173,9 +174,13 @@ def answered_row(reply: Reply, element_id: str) -> Row:
 
 
 @pytest.fixture
-def dashboard() -> Dashboard:
+def dashboard(units: UnitOfWorkFactory) -> Dashboard:
+    # real units of work: the Credentials page's unsubscribe token keys read the database
     return Dashboard(
-        secrets=InMemorySecrets("test"), clock=FrozenClock(T), allowlist=[MAC, "x@gmail.com"]
+        secrets=InMemorySecrets("test"),
+        clock=FrozenClock(T),
+        allowlist=[MAC, "x@gmail.com"],
+        units=units,
     )
 
 
@@ -282,8 +287,8 @@ def test_the_page_shows_the_client_row_and_each_grant_not_granted(
     assert "Dev and test allowlist" in section.all("p", class_="google-allowlist")[0].text
 
 
-def test_prod_has_no_allowlist_note() -> None:
-    dashboard = Dashboard(env="prod")
+def test_prod_has_no_allowlist_note(units: UnitOfWorkFactory) -> None:
+    dashboard = Dashboard(env="prod", units=units)
 
     html = Html(page(dashboard, (dashboard.open_session(), "")))
 

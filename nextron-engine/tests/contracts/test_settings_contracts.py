@@ -14,7 +14,10 @@
 - **No secret in settings.** No key name or label contains ``secret``, ``password``,
   ``passphrase``, ``token``, ``api_key``, ``bearer``, ``credential`` or ``private``, or holds
   ``key``, ``pass``, ``pwd`` or ``passwd`` as a word: secrets live only in Windows Credential
-  Manager (AD-12), never in the ``settings`` table.
+  Manager (AD-12), never in the ``settings`` table. The one exception, ``NAMED_NOT_SECRET``, is
+  ``unsub_active_kid`` ("Unsubscribe token key id", Story 3.8): the id, 1 to 255, of the keys to
+  use, which only picks Credential Manager entries. It passes only with exactly that key, that
+  label and the ``integer`` type, which can't hold a key or a token.
 """
 
 import re
@@ -62,6 +65,11 @@ SECRET_WORDS: Final = (  # matched anywhere in the key name or label
     "private",
 )
 SECRET_TOKENS: Final = ("key", "pass", "pwd", "passwd")  # matched as whole words
+# key -> the exact label of a setting that names a secret's word but is an integer id, never a
+# secret (the type is checked too).
+NAMED_NOT_SECRET: Final[Mapping[str, str]] = MappingProxyType(
+    {"unsub_active_kid": "Unsubscribe token key id"}  # which keys to use (Story 3.8)
+)
 
 
 def words(text: str) -> str:
@@ -90,6 +98,8 @@ def secret_problems(schema: Mapping[str, Setting]) -> list[str]:
     (<words>)"``."""
     problems = []
     for key, found in schema.items():
+        if NAMED_NOT_SECRET.get(key) == found.label and found.type is SettingType.INTEGER:
+            continue  # an integer id that names which secret to use, never a secret
         texts = (words(found.key), words(found.label))
         found_words = [word for word in SECRET_WORDS if any(word in text for text in texts)]
         found_words += [
@@ -133,7 +143,7 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
             "backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
             "quota_places_pro, quota_prospeo_credits, sender_name, sender_timezone, "
-            "sink_allowlist, us_solicitation_label"
+            "sink_allowlist, unsub_active_kid, us_solicitation_label"
         ),
         "declared but not in Key: Footer-Address, footer_postal_address",
     ]
@@ -224,6 +234,16 @@ SECRET_PROBES = [
     (setting("telegram_bot", label="Bot token"), "token"),
     (setting("hunter_access", label="Hunter API key"), "api_key, key"),
     (setting("smtp_login", label="SMTP pass"), "pass"),
+    # the one exception holds only for its own key, label and integer type
+    (setting("unsub_active_kid", label="Unsubscribe token key id"), "token, key"),
+    (
+        setting("unsub_active_kid", SettingType.INTEGER, label="Unsubscribe token key"),
+        "token, key",
+    ),
+    (
+        setting("unsub_token_key", SettingType.INTEGER, label="Unsubscribe token key id"),
+        "token, key",
+    ),
 ]
 
 
@@ -243,6 +263,8 @@ def test_the_secret_check_catches_a_secret_name(found: Setting, named: str) -> N
         setting("footer_postal_address", label="Footer postal address"),
         setting("keyword_list", label="Keywords"),  # "key" only as a whole word
         setting("passing_score", SettingType.INTEGER),  # "pass" only as a whole word
+        # an integer key id, which only picks Credential Manager entries (Story 3.8)
+        setting("unsub_active_kid", SettingType.INTEGER, label="Unsubscribe token key id"),
     ],
     ids=lambda found: found.key,
 )

@@ -330,7 +330,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
-        "12 ok, 0 warn, 0 fail",
+        "13 ok, 0 warn, 0 fail",
     ]
     assert panel.tables == [*NEVER_RUN, READINESS_TABLE]
     assert panel.forms == [
@@ -382,7 +382,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
-        "12 ok, 0 warn, 0 fail",
+        "13 ok, 0 warn, 0 fail",
     ]
     assert panel.tables[:2] == [
         [["Job type", "Last success"], ["backup_db", "never"],

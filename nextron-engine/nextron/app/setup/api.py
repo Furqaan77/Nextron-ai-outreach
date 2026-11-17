@@ -110,8 +110,9 @@ load in the same transaction; ``nextron.app.ops.api.Seeds.sync_seed`` is the use
   ``markets_synced``, then ``sequences_synced``, each with the four ``*_count`` fields.
 
 ``Credentials`` (AD-12, FR-56, NFR-18) stores the external credentials declared in
-``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. It touches
-no database, so its methods are not ``@use_case``s and need no unit of work; one
+``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. Its
+methods are not ``@use_case``s: the credential methods touch no database and need no unit of
+work, and the unsubscribe token key methods (below) only read, in the caller's unit of work. One
 ``threading.Lock`` runs them one at a time. Each credential has two keyring entries: its own
 (``secret_name``), which holds the value, and ``meta/<secret_name>``, which holds only the
 value's last-updated time (``encode_updated_at``). An undeclared key raises
@@ -135,6 +136,40 @@ value's last-updated time (``encode_updated_at``). An undeclared key raises
 - An ``AdapterError`` while saving or removing logs ``credential_store_failed`` (``credential``,
   ``operation`` = ``save`` or ``remove``, and the error's ``code``) and raises
   ``CredentialStoreFailed``; ``status(key)`` then shows what is stored.
+
+**Unsubscribe token keys** (Story 3.8, AD-15): the per-kid ``k_tok`` and ``k_edge``
+(``nextron.domain.credentials.UNSUB_KEYS``, keyring entries ``unsub/<key>/<kid>`` and
+``meta/unsub/<key>/<kid>``). These methods read the database in the caller's unit of work (the
+dashboard runs them inside ``units.open(read_only=True)``), always before any keyring call; a
+read-only unit's ``BEGIN IMMEDIATE`` then serialises the keyring writes with token issuance, so
+no token can be issued between the check and the write. An unknown key raises
+``UnknownCredential`` and a kid outside 1 to 255 ``TypeError`` or ``ValueError``, before any
+read.
+
+- ``unsub_keys()`` reads the ``unsub_active_kid`` setting and ``newest_unsub_tokens()``, then
+  the keyring. It returns an ``UnsubKidKeys(kid, role, newest_token_at, keys)`` for the active
+  kid, the next one (active + 1, while it is 255 or less) and every kid with a token, by kid.
+  ``role`` is ``active``, else ``in_use`` (a token under 2 years old, ``key_in_use``), else
+  ``next`` (active + 1), else ``retired``. ``keys`` holds an ``UnsubKeyStatus(credential, kid,
+  state, updated_at, valid)`` for ``k_tok`` and ``k_edge``, read as ``status`` reads one;
+  ``valid`` says the stored value is a 32-byte base64url key (``parse_key``), and the value is
+  dropped at once. ``unsub_key_status(kid, key)`` gives one, reading only the keyring.
+- ``save_unsub_key(kid, key, text)`` strips ``text``: blank raises ``InvalidCredentialValue``
+  with ``ENTER_A_VALUE``, and anything ``parse_key`` refuses with ``NOT_A_KEY``; nothing is
+  read or written then. It reads ``newest_unsub_token(kid)``, then the stored value and the
+  kid's other key: a value equal to the other key raises ``InvalidCredentialValue`` with
+  ``SAME_KEY`` (Cloudflare holds ``k_edge``, so it must never be the decryption key). While
+  ``key_in_use`` holds, replacing a valid stored key raises ``UnsubKeyInUse`` ("Key <kid>
+  still has tokens under 2 years old"), because a new value breaks those tokens too. A key
+  that isn't set, or isn't a valid key, can always be entered (one restored from escrow). It
+  writes the canonical text (``encode_key``), then the meta entry, logs ``unsub_key_saved``
+  (``credential``, ``kid``) and returns the ``set`` status.
+- ``remove_unsub_key(kid, key)`` reads ``newest_unsub_token(kid)``; while ``key_in_use`` holds
+  it raises ``UnsubKeyInUse`` and deletes nothing. Otherwise it deletes the entry, then its
+  meta entry, logs ``unsub_key_removed`` and returns the ``not set`` status.
+- A keyring failure while saving or removing logs ``unsub_key_store_failed`` (``credential``,
+  ``kid``, ``operation`` and the error's ``code``) and raises ``CredentialStoreFailed`` (its
+  ``key`` is the keyring entry's name); a failed read logs ``unsub_key_read_failed``.
 
 Every log record names the credential's key, never its value.
 
@@ -228,6 +263,8 @@ from enum import StrEnum
 from secrets import token_urlsafe
 from typing import Final, NoReturn
 
+from nextron.app.queries import compliance as compliance_queries
+from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import segments as segments_repo
@@ -239,8 +276,11 @@ from nextron.domain import settings_schema
 from nextron.domain.credentials import (
     Credential,
     InvalidCredentialValue,
+    UnsubKeyCredential,
     decode_updated_at,
+    declared_unsub_keys,
     encode_updated_at,
+    unsub_key,
 )
 from nextron.domain.google_oauth import (
     CLIENT_META_NAME,
@@ -297,8 +337,17 @@ from nextron.domain.settings_schema import (
     REQUIRED_RULE,
     InvalidSettings,
     InvalidSettingValue,
+    Key,
 )
 from nextron.domain.sink import sink_applies
+from nextron.domain.unsub_token import (
+    MAX_KID,
+    UnsubKeyInUse,
+    check_kid,
+    encode_key,
+    key_in_use,
+    parse_key,
+)
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import (
@@ -319,16 +368,26 @@ from nextron.ports.secrets import (
     MAX_SECRET_LENGTH,
     SECRET_TOO_LONG,
     SecretsPort,
+    read_unsub_key,
     secret_length,
 )
 
 SETTINGS_CHANGED: Final = "settings_changed"
 CANNOT_CLEAR: Final = "is required and can't be cleared once set"
 ENTER_A_VALUE: Final = "enter a value"
+NOT_A_KEY: Final = (
+    "enter a 32-byte key in base64url: 43 characters of A-Z, a-z, 0-9, - and _ (or 44 ending "
+    "in =)"
+)
+SAME_KEY: Final = "k_tok and k_edge of a key id must differ"
 CREDENTIAL_SAVED: Final = "credential_saved"
 CREDENTIAL_REMOVED: Final = "credential_removed"
 CREDENTIAL_STORE_FAILED: Final = "credential_store_failed"
 CREDENTIAL_READ_FAILED: Final = "credential_read_failed"
+UNSUB_KEY_SAVED: Final = "unsub_key_saved"
+UNSUB_KEY_REMOVED: Final = "unsub_key_removed"
+UNSUB_KEY_STORE_FAILED: Final = "unsub_key_store_failed"
+UNSUB_KEY_READ_FAILED: Final = "unsub_key_read_failed"
 SEGMENTS_SYNCED: Final = "segments_synced"
 SEGMENTS_ENTITY: Final = "segments"
 MARKETS_SYNCED: Final = "markets_synced"
@@ -822,6 +881,37 @@ class CredentialStatus:
     updated_at: datetime | None
 
 
+class UnsubKeyRole(StrEnum):
+    """What an unsubscribe-token kid is to the engine, as the Credentials page shows it."""
+
+    ACTIVE = "active"  # unsub_active_kid: new tokens are encoded under it
+    NEXT = "next"  # active + 1: enter its keys (and the Worker's) before switching to it
+    IN_USE = "in_use"  # it has a token under 2 years old: its keys can't change
+    RETIRED = "retired"  # every token is 2 years old or more
+
+
+@dataclass(frozen=True, slots=True)
+class UnsubKeyStatus:
+    """One unsubscribe-token key of one kid: its state, its last-updated time when it is set
+    and the time is known, and whether the stored value is a 32-byte base64url key."""
+
+    credential: UnsubKeyCredential
+    kid: int
+    state: CredentialState
+    updated_at: datetime | None
+    valid: bool
+
+
+@dataclass(frozen=True, slots=True)
+class UnsubKidKeys:
+    """One kid on the Credentials page: its role, its newest token's time and its two keys."""
+
+    kid: int
+    role: UnsubKeyRole
+    newest_token_at: datetime | None
+    keys: tuple[UnsubKeyStatus, ...]
+
+
 class CredentialStoreFailed(Exception):
     """Credential Manager failed while saving or removing the credential ``key``."""
 
@@ -895,6 +985,104 @@ class Credentials:
             updated_at = None
         return CredentialStatus(found, CredentialState.SET, updated_at)
 
+    # Unsubscribe token keys (Story 3.8) -----------------------------------------------------
+
+    def unsub_keys(self) -> tuple[UnsubKidKeys, ...]:
+        """The active kid, the next one and every kid with a token, by kid; see the module
+        docstring. Reads the database in the caller's unit of work, then the keyring."""
+        active = check_kid(setup_queries.get(Key.UNSUB_ACTIVE_KID))
+        newest = compliance_queries.newest_unsub_tokens()
+        kids = {active, *newest}
+        if active < MAX_KID:
+            kids.add(active + 1)
+        now = self._clock.now()
+        with self._lock:
+            return tuple(
+                UnsubKidKeys(
+                    kid,
+                    _unsub_role(kid, active, newest.get(kid), now),
+                    newest.get(kid),
+                    tuple(self._unsub_status(found, kid) for found in declared_unsub_keys()),
+                )
+                for kid in sorted(kids)
+            )
+
+    def unsub_key_status(self, kid: int, key: str) -> UnsubKeyStatus:
+        """The status of the unsubscribe-token key ``key`` of ``kid``; reads only the
+        keyring."""
+        found = unsub_key(key)
+        kid = check_kid(kid)
+        with self._lock:
+            return self._unsub_status(found, kid)
+
+    def save_unsub_key(self, kid: int, key: str, text: str) -> UnsubKeyStatus:
+        """Store ``text``, a 32-byte base64url key, as ``key`` of ``kid``, with its time; see
+        the module docstring."""
+        found = unsub_key(key)
+        kid = check_kid(kid)
+        stripped = text.strip() if isinstance(text, str) else ""
+        if not stripped:
+            raise InvalidCredentialValue(found.key, ENTER_A_VALUE)
+        raw = parse_key(stripped)
+        if raw is None:
+            raise InvalidCredentialValue(found.key, NOT_A_KEY)
+        newest = compliance_queries.newest_unsub_token(kid)
+        name = found.secret_name(kid)
+        with self._lock:
+            now = self._clock.now()
+            try:
+                stored = parse_key(self._secrets.read(name)) is not None  # the value isn't kept
+                other = next(o for o in declared_unsub_keys() if o.key != found.key)
+                other_raw = read_unsub_key(self._secrets, other.key, kid)
+            except AdapterError as failed:
+                _unsub_store_failed(found, kid, SAVE, failed)
+            if other_raw is not None and hmac.compare_digest(other_raw, raw):
+                raise InvalidCredentialValue(found.key, SAME_KEY)  # Cloudflare holds k_edge
+            if stored and key_in_use(newest, now):
+                raise UnsubKeyInUse(kid)
+            stamp = encode_updated_at(now)
+            try:
+                self._secrets.write(name, encode_key(raw))
+                self._secrets.write(found.meta_name(kid), stamp)
+            except AdapterError as failed:
+                _unsub_store_failed(found, kid, SAVE, failed)
+            log.info(UNSUB_KEY_SAVED, extra={"credential": str(found.key), "kid": kid})
+            return UnsubKeyStatus(found, kid, CredentialState.SET, decode_updated_at(stamp), True)
+
+    def remove_unsub_key(self, kid: int, key: str) -> UnsubKeyStatus:
+        """Delete ``key`` of ``kid`` and its time, unless ``kid`` has a token under 2 years old
+        (``UnsubKeyInUse``); see the module docstring."""
+        found = unsub_key(key)
+        kid = check_kid(kid)
+        newest = compliance_queries.newest_unsub_token(kid)
+        with self._lock:
+            if key_in_use(newest, self._clock.now()):
+                raise UnsubKeyInUse(kid)
+            try:
+                self._secrets.delete(found.secret_name(kid))
+                self._secrets.delete(found.meta_name(kid))
+            except AdapterError as failed:
+                _unsub_store_failed(found, kid, REMOVE, failed)
+            log.info(UNSUB_KEY_REMOVED, extra={"credential": str(found.key), "kid": kid})
+            return UnsubKeyStatus(found, kid, CredentialState.NOT_SET, None, False)
+
+    def _unsub_status(self, found: UnsubKeyCredential, kid: int) -> UnsubKeyStatus:
+        try:
+            value = self._secrets.read(found.secret_name(kid))
+        except AdapterError as failed:
+            _unsub_read_failed(found, kid, VALUE_ENTRY, failed)
+            return UnsubKeyStatus(found, kid, CredentialState.UNKNOWN, None, False)
+        if value is None:
+            return UnsubKeyStatus(found, kid, CredentialState.NOT_SET, None, False)
+        valid = parse_key(value) is not None
+        del value  # the value isn't kept
+        try:
+            updated_at = decode_updated_at(self._secrets.read(found.meta_name(kid)))
+        except AdapterError as failed:
+            _unsub_read_failed(found, kid, META_ENTRY, failed)
+            updated_at = None
+        return UnsubKeyStatus(found, kid, CredentialState.SET, updated_at, valid)
+
 
 def _read_failed(found: Credential, entry: str, failed: AdapterError) -> None:
     log.warning(
@@ -909,6 +1097,38 @@ def _store_failed(found: Credential, operation: str, failed: AdapterError) -> No
         extra={"credential": str(found.key), "operation": operation, "code": failed.code},
     )
     raise CredentialStoreFailed(found.key) from None
+
+
+def _unsub_role(kid: int, active: int, newest: datetime | None, now: datetime) -> UnsubKeyRole:
+    if kid == active:
+        return UnsubKeyRole.ACTIVE
+    if key_in_use(newest, now):  # before next: a lowered active kid's old one keeps its tokens
+        return UnsubKeyRole.IN_USE
+    return UnsubKeyRole.NEXT if kid == active + 1 else UnsubKeyRole.RETIRED
+
+
+def _unsub_read_failed(
+    found: UnsubKeyCredential, kid: int, entry: str, failed: AdapterError
+) -> None:
+    log.warning(
+        UNSUB_KEY_READ_FAILED,
+        extra={"credential": str(found.key), "kid": kid, "entry": entry, "code": failed.code},
+    )
+
+
+def _unsub_store_failed(
+    found: UnsubKeyCredential, kid: int, operation: str, failed: AdapterError
+) -> NoReturn:
+    log.warning(
+        UNSUB_KEY_STORE_FAILED,
+        extra={
+            "credential": str(found.key),
+            "kid": kid,
+            "operation": operation,
+            "code": failed.code,
+        },
+    )
+    raise CredentialStoreFailed(found.secret_name(kid)) from None
 
 
 # Google OAuth ---------------------------------------------------------------------------------

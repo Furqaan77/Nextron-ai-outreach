@@ -115,6 +115,25 @@ def test_each_rule(text: str, expected: str) -> None:
     assert redact(text) == expected
 
 
+def test_unsubscribe_tokens_and_keys_are_masked_whole() -> None:
+    """Story 3.8: a token (108 base64url characters) and a token key (43, or 44 with "=") are
+    always masked by rules 8 and 9, wherever their alphabet puts "-" or "_"."""
+    token = "AXc6" + "DVMU-cvH_lYM" * 8 + "Oex6ezXn"  # 108 characters
+    key = "m6wm" + "G91-MEwR" * 4 + "Pu_7A01"  # 43 characters
+
+    assert len(token) == 108 and len(key) == 43
+    assert redact(f"token {token} sent") == "token <key> sent"
+    link = f"link https://u.example.com/u/{token} ok"
+    assert redact(link) == "link https://u.example.com/u/<key> ok"
+    assert redact(f"k_tok={key}") == "k_tok=<key>"
+    assert redact(f"k_edge {key}=") == "k_edge <key>="  # the padding alone is no secret
+    assert redact(f"/{token}/{key}") == "/<key>/<key>"
+    # a log line holding both a token and the address it was issued for
+    line = f"unsubscribe from jane.doe+news@firm.co.uk with token {token} done"
+    assert redact(line) == "unsubscribe from <email> with token <key> done"
+    assert redact(f"opt-out jane.doe@firm.co.uk/{token}") == "opt-out <email>/<key>"
+
+
 def test_query_string_is_removed_before_its_email_and_key_are_seen() -> None:
     text = f"https://h.io/p?e=ann@x.co&k={FORTY_CHAR_KEY}"
 

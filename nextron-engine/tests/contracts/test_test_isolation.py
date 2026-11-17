@@ -142,6 +142,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "LlmPort",
         "MailPort",
         "SecretsPort",
+        "TokenCodecPort",
         "UsageMeterPort",
     }
     assert fake_problems(protocols, PORT_FAKES) == []

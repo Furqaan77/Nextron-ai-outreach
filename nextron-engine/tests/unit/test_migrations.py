@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0019_3_3_suppression_entries"
+HEAD = "0020_3_8_unsub_tokens"
 
 
 @pytest.fixture

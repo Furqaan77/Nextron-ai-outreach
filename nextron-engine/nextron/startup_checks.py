@@ -89,8 +89,17 @@ The doctor checks here, in the order ``doctor`` runs them:
   start" with no database file, an empty one or a known revision behind head; ``fail`` for a
   revision this code doesn't know ("newer than this code"), a ``CheckFailed`` (its message) or
   any other error (its type name).
+- ``unsub_token_keys`` (Story 3.8, AD-15): the active kid's unsubscribe token keys work. It
+  reads the ``unsub_active_kid`` setting first (``active_kid()``, the database: the schema
+  default with no database file), then ``unsub/k_tok/<kid>`` and ``unsub/k_edge/<kid>`` through
+  Credential Manager (each value is dropped at once). It fails when the setting can't be read
+  (by type name) or isn't 1 to 255, or when either key is missing, isn't a 32-byte base64url
+  key (``nextron.domain.unsub_token.parse_key``) or can't be read, naming each such keyring
+  entry, or when the two are the same key (Cloudflare would then hold the decryption key);
+  otherwise it is ``ok``.
 """
 
+import hmac
 import json
 import os
 import re
@@ -113,12 +122,13 @@ from nextron.domain.backup import (
     offpc_problem,
     same_volume,
 )
-from nextron.domain.credentials import CredentialKey
+from nextron.domain.credentials import CredentialKey, UnsubKey, declared_unsub_keys, unsub_key
 from nextron.domain.google_oauth import GoogleGrant
 from nextron.domain.health import HEARTBEAT_FRESH
 from nextron.domain.readiness import CheckResult, Status, tally
 from nextron.domain.settings_schema import setting
 from nextron.domain.sink import PROD
+from nextron.domain.unsub_token import check_kid, parse_key
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import (
     GOOGLE_CLIENT_NOT_IMPORTED,
@@ -146,6 +156,7 @@ INTERNAL_NOTIFY_GRANT: Final = "internal_notify_grant"
 OFFPC_BACKUP: Final = "offpc_backup"
 REQUIRED_SETTINGS: Final = "required_settings"
 DATABASE_REVISION: Final = "database_revision"
+UNSUB_TOKEN_KEYS: Final = "unsub_token_keys"
 ENGINE_PROBE_TIMEOUT_S: Final = 1.0
 
 ENV_VARIABLE: Final = "NEXTRON_ENV"
@@ -568,6 +579,61 @@ def check_internal_notify_grant(
         INTERNAL_NOTIFY_GRANT,
         Status.OK,
         f"{grant} is granted and Google refreshed its access token",
+    )
+
+
+UNSUB_KEYS_FIX: Final = "enter them in Unsubscribe token keys on the Credentials page"
+
+
+def check_unsub_token_keys(
+    read: Callable[[str], str | None], active_kid: Callable[[], object]
+) -> CheckResult:
+    """``ok`` when the active kid's ``k_tok`` and ``k_edge`` are set, are 32-byte base64url
+    keys and differ; ``fail`` otherwise, naming each keyring entry at fault. ``active_kid``
+    reads the ``unsub_active_kid`` setting (called first); ``read`` is ``SecretsPort.read``."""
+    try:
+        kid = check_kid(active_kid())
+    except Exception as exc:  # noqa: BLE001 - any read failure fails the check, not a crash
+        return CheckResult(
+            UNSUB_TOKEN_KEYS,
+            Status.FAIL,
+            f"the Unsubscribe token key id setting (unsub_active_kid) could not be read "
+            f"({type(exc).__name__}); set it on the Settings page",
+        )
+    problems: list[str] = []
+    keys: dict[str, bytes] = {}
+    for found in declared_unsub_keys():
+        name = found.secret_name(kid)
+        try:
+            text = read(name)
+        except AdapterError:
+            problems.append(f"{name} could not be read (Windows Credential Manager failed)")
+            continue
+        raw = parse_key(text)
+        if not text:
+            problems.append(f"{name} is not set")
+        elif raw is None:
+            problems.append(f"{name} is not a 32-byte base64url key")
+        else:
+            keys[found.key] = raw
+        del text  # the value isn't kept
+    k_tok, k_edge = keys.get(UnsubKey.K_TOK), keys.get(UnsubKey.K_EDGE)
+    if k_tok is not None and k_edge is not None and hmac.compare_digest(k_tok, k_edge):
+        problems.append(
+            f"{unsub_key(UnsubKey.K_TOK).secret_name(kid)} and "
+            f"{unsub_key(UnsubKey.K_EDGE).secret_name(kid)} are the same key; make a new k_edge"
+        )
+    if problems:
+        return CheckResult(
+            UNSUB_TOKEN_KEYS,
+            Status.FAIL,
+            f"unsubscribe token keys of key id {kid}: {'; '.join(problems)}; {UNSUB_KEYS_FIX}",
+        )
+    names = " and ".join(found.secret_name(kid) for found in declared_unsub_keys())
+    return CheckResult(
+        UNSUB_TOKEN_KEYS,
+        Status.OK,
+        f"the unsubscribe token keys of key id {kid} ({names}) are set and differ",
     )
 
 

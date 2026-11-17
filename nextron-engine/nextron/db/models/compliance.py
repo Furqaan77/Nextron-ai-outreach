@@ -1,5 +1,6 @@
-"""The ``compliance`` service's tables (FR-50, FR-63, AD-3, AD-4, AD-16, AD-17; migration
-``0019_3_3_suppression_entries``), owned by ``compliance`` (``nextron.db.repos.compliance``).
+"""The ``compliance`` service's tables (FR-50, FR-63, FR-70, AD-3, AD-4, AD-15, AD-16, AD-17;
+migrations ``0019_3_3_suppression_entries`` and ``0020_3_8_unsub_tokens``), owned by
+``compliance`` (``nextron.db.repos.compliance``).
 
 **``suppression_entries``**: the Suppression List, one row per suppressed key.
 
@@ -35,12 +36,31 @@ PII classes (``nextron.db.pii_registry``): ``value_hash`` is ``keep_hash`` (it i
 kept after an erasure so the person stays suppressed), ``void_reason`` is ``redact`` (the
 Operator's free text) and every other column is ``none``: no column holds a plaintext address,
 name or profile URL.
+
+**``unsub_tokens``** (Story 3.8): one row per issued unsubscribe token, so 3.11 can tell a
+token it issued and the Credentials page can tell how recently each kid was used. It never
+holds the token, the address or the address hash.
+
+- ``id``; ``token_hash``, ``nextron.domain.unsub_token.token_hash`` of the token
+  (``ck_unsub_tokens_token_hash``: 64 lowercase hex characters; unique,
+  ``uq_unsub_tokens_token_hash``); ``om_id``, the ULID of the OutboundMessage it was issued for,
+  with no foreign key (unique, ``uq_unsub_tokens_om_id``: one token per message); ``kid``, the
+  key id it was encoded under (``ck_unsub_tokens_kid``: 1 to 255); ``issued_at``, in whole
+  seconds (``ck_unsub_tokens_issued_at``). Every column is NOT NULL.
+- ``ix_unsub_tokens_kid_issued_at`` serves "the newest token of each kid".
+
+Three triggers (migration ``0020_3_8_unsub_tokens``) make the records permanent, so the 2-year
+key check can't be defeated by deleting rows: ``trg_unsub_tokens_no_delete`` aborts any
+``DELETE``, ``trg_unsub_tokens_immutable`` any ``UPDATE``, and ``trg_unsub_tokens_no_reuse`` an
+``INSERT`` whose ``id``, ``token_hash`` or ``om_id`` exists (so ``INSERT OR REPLACE`` can't
+replace one), each with "unsubscribe token records are permanent". Every column is PII class
+``none``.
 """
 
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, Index, String, Text, text
+from sqlalchemy import CheckConstraint, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -68,6 +88,10 @@ VOIDED_CHECK: Final = (
     "AND (status = 'voided') = (void_reason IS NOT NULL)"
 )
 ACTIVE_WHERE: Final = "status = 'active'"
+TOKEN_HASH_LENGTH: Final = 64  # nextron.domain.unsub_token.token_hash
+TOKEN_HASH_CHECK: Final = "length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'"
+KID_CHECK: Final = "kid BETWEEN 1 AND 255"  # nextron.domain.unsub_token.MIN_KID, MAX_KID
+WHOLE_SECONDS_CHECK: Final = "issued_at LIKE '%.000000Z'"
 
 
 class SuppressionEntryRecord(Base):
@@ -100,3 +124,23 @@ class SuppressionEntryRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     voided_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     void_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class UnsubTokenRecord(Base):
+    """One issued unsubscribe token: its hash, its message, its kid and when it was issued."""
+
+    __tablename__ = "unsub_tokens"
+    __table_args__ = (
+        Index("uq_unsub_tokens_token_hash", "token_hash", unique=True),
+        Index("uq_unsub_tokens_om_id", "om_id", unique=True),
+        Index("ix_unsub_tokens_kid_issued_at", "kid", "issued_at"),
+        CheckConstraint(TOKEN_HASH_CHECK, name="token_hash"),
+        CheckConstraint(KID_CHECK, name="kid"),
+        CheckConstraint(WHOLE_SECONDS_CHECK, name="issued_at"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    token_hash: Mapped[str] = mapped_column(String(TOKEN_HASH_LENGTH))
+    om_id: Mapped[str] = mapped_column(Ulid)
+    kid: Mapped[int] = mapped_column(Integer)
+    issued_at: Mapped[datetime] = mapped_column(UtcDateTime)

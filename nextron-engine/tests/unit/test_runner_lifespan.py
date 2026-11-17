@@ -9,7 +9,7 @@ threads, beats once (the ``runner_heartbeat`` row and ``<data dir>\\heartbeat``)
 stops them, and building the app starts none.
 
 The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
-``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the twelve
+``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the thirteen
 doctor rows in order (``port_free`` ok without a probe, the grant ok without a refresh) and the
 dead job, and writes nothing; a wiring that ran doctor's own forms would be caught.
 
@@ -412,6 +412,7 @@ DOCTOR_IDS = [
     "offpc_backup",
     "required_settings",
     "database_revision",
+    "unsub_token_keys",
 ]
 REFRESH_TOKEN = "1//stored-refresh-token"
 
@@ -548,11 +549,11 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
         cookie = entered.header(b"set-cookie")
         assert entered.status == 303 and cookie is not None
         before = database_dump(units)
-        read_in_transaction: list[bool] = []
+        read_in_transaction: list[tuple[str, bool]] = []
         real_read = secrets.read
 
         def recording_read(name: str) -> str | None:
-            read_in_transaction.append(in_transaction())
+            read_in_transaction.append((name, in_transaction()))
             return real_read(name)
 
         secrets.read = recording_read  # type: ignore[method-assign]
@@ -581,8 +582,11 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
                 "(nextron doctor does)",
             )
             assert oauth.calls == [] and port.calls == []  # no refresh and no port probe
-            # every Credential Manager read ran before the read transaction (and its lock)
-            assert read_in_transaction and not any(read_in_transaction)
+            # every Credential Manager read ran before the read transaction (and its lock), but
+            # the last check's two: unsub_token_keys reads the active kid first (Story 3.8)
+            inside = [name for name, inside in read_in_transaction if inside]
+            assert inside == ["unsub/k_tok/1", "unsub/k_edge/1"]
+            assert [name for name, _ in read_in_transaction[-2:]] == inside
         else:  # the test sees the broken wiring
             assert oauth.calls == [("refresh", REFRESH_TOKEN)]
             assert port.calls == [("127.0.0.1", config.port)]
@@ -597,6 +601,11 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
         assert statuses["database_revision"] == (
             "ok",
             f"the database is at head ({head_revision()})",
+        )
+        assert statuses["unsub_token_keys"] == (  # EngineDatabase read the default kid, 1
+            "fail",
+            "unsubscribe token keys of key id 1: unsub/k_tok/1 is not set; unsub/k_edge/1 is "
+            "not set; enter them in Unsubscribe token keys on the Credentials page",
         )
     finally:
         units.engine.dispose()

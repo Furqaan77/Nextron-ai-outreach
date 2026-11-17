@@ -292,8 +292,9 @@ nothing is sent to Google. Its browser always refuses and its allowlist is empty
 doctor never starts a consent flow.
 
 ``DoctorContext.database`` is a ``ReadinessDatabase`` (``exists``, ``revision``,
-``required_unset`` and ``offpc_dir``): ``DoctorDatabase`` for ``doctor`` (``offpc_dir`` is blank
-with no database file), ``EngineDatabase`` in the engine.
+``required_unset``, ``offpc_dir`` and ``unsub_active_kid``): ``DoctorDatabase`` for ``doctor``
+(``offpc_dir`` is blank and ``unsub_active_kid`` the schema default with no database file),
+``EngineDatabase`` in the engine.
 
 **Health (AD-10, AD-20, FR-58, OP-9).** ``build_health_issues(*, budget)`` is the health-issue
 registry: the only code that constructs ``HealthIssues`` or calls ``register_source``
@@ -323,8 +324,10 @@ never calls Google, so a GET makes no refresh, no ``api_usage`` row and no re-co
 (``queries.setup.required_unset``) and ``backup_offpc_dir`` in the caller's unit of work: the
 GET's read-only one; ``offpc_backup`` reads the Backup passphrase before that setting, and the
 checks that read the database come last, so the Credential Manager and registry reads before
-them never hold the read transaction (``build_doctor_checks`` states the order rule). Building
-the app runs no check.
+them never hold the read transaction (``build_doctor_checks`` states the order rule). The one
+exception is the last check, ``unsub_token_keys`` (Story 3.8): its keyring entries' names
+depend on the ``unsub_active_kid`` setting, so it reads that first and then its two Credential
+Manager entries under the read lock. Building the app runs no check.
 
 ``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
 Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
@@ -581,6 +584,7 @@ from nextron.startup_checks import (
     REQUIRED_SETTINGS,
     SQLITE_VERSION,
     TZDATA,
+    UNSUB_TOKEN_KEYS,
     CheckFailed,
     CheckResult,
     DoctorCheck,
@@ -599,6 +603,7 @@ from nextron.startup_checks import (
     check_required_settings,
     check_sqlite_version,
     check_tzdata,
+    check_unsub_token_keys,
     engine_is_running,
     environment_checks,
     format_json,
@@ -1438,10 +1443,11 @@ class DoctorMeter:
 
 
 class ReadinessDatabase(Protocol):
-    """What the ``offpc_backup``, ``required_settings`` and ``database_revision`` checks read:
-    whether the database file exists, its revision (``None`` when empty; a database that isn't
-    this engine's raises ``CheckFailed``), the required settings that are unset or no longer
-    valid, and the ``backup_offpc_dir`` setting."""
+    """What the ``offpc_backup``, ``required_settings``, ``database_revision`` and
+    ``unsub_token_keys`` checks read: whether the database file exists, its revision (``None``
+    when empty; a database that isn't this engine's raises ``CheckFailed``), the required
+    settings that are unset or no longer valid, the ``backup_offpc_dir`` setting and the
+    ``unsub_active_kid`` setting."""
 
     def exists(self) -> bool: ...
 
@@ -1450,6 +1456,8 @@ class ReadinessDatabase(Protocol):
     def required_unset(self) -> tuple[str, ...]: ...
 
     def offpc_dir(self) -> str: ...
+
+    def unsub_active_kid(self) -> int: ...
 
 
 class DoctorDatabase:
@@ -1501,6 +1509,14 @@ class DoctorDatabase:
         with self._read_only_units().open(read_only=True):
             return str(setup_queries.get(Key.BACKUP_OFFPC_DIR))
 
+    def unsub_active_kid(self) -> int:
+        """The ``unsub_active_kid`` setting: its schema default when there is no database
+        file, else read in a read-only unit of work (an error propagates)."""
+        if not self.exists():
+            return int(settings_schema.setting(Key.UNSUB_ACTIVE_KID).default)
+        with self._read_only_units().open(read_only=True):
+            return int(setup_queries.get(Key.UNSUB_ACTIVE_KID))
+
     def close(self) -> None:
         """Dispose the read-only engine, if one was built."""
         units, self._units = self._units, None
@@ -1537,6 +1553,10 @@ class EngineDatabase:
         """The ``backup_offpc_dir`` setting, read in the current unit of work."""
         return str(setup_queries.get(Key.BACKUP_OFFPC_DIR))
 
+    def unsub_active_kid(self) -> int:
+        """The ``unsub_active_kid`` setting, read in the current unit of work."""
+        return int(setup_queries.get(Key.UNSUB_ACTIVE_KID))
+
 
 @dataclass(frozen=True, slots=True)
 class DoctorContext:
@@ -1556,18 +1576,22 @@ class DoctorContext:
 
 
 def build_doctor_checks() -> DoctorChecks[DoctorContext]:
-    """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14 and Story
-    1.17's ``offpc_backup`` (after ``internal_notify_grant``), twelve in all, in the order
-    doctor prints them (the health panel shows the same list). With ``DoctorContext.in_engine``,
-    ``port_free`` and ``internal_notify_grant`` take their no-probe, no-network forms. Later
-    stories register their checks here, before ``freeze()``.
+    """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, Story 1.17's
+    ``offpc_backup`` (after ``internal_notify_grant``) and Story 3.8's ``unsub_token_keys``
+    (last, after ``database_revision``), thirteen in all, in the order doctor prints them (the
+    health panel shows the same list). With ``DoctorContext.in_engine``, ``port_free`` and
+    ``internal_notify_grant`` take their no-probe, no-network forms. Later stories register
+    their checks here, before ``freeze()``.
 
     The order rule: the health panel runs this registry inside a GET's read-only unit of work,
     where the first check that reads the database (``offpc_backup``'s setting read, then
     ``required_settings`` and ``database_revision``) begins the read transaction (AD-2's
     ``BEGIN IMMEDIATE``). Any check that reads Credential Manager, the registry or the network
     goes before them, and ``offpc_backup`` reads the Backup passphrase before its setting, so
-    none of those reads runs while that lock is held. A check that calls the network (or the
+    none of those reads runs while that lock is held. The one exception is
+    ``unsub_token_keys``: its two keyring entries' names depend on the ``unsub_active_kid``
+    setting, so it can't read Credential Manager first. It runs last, so only its own two local
+    Credential Manager reads happen under the read lock. A check that calls the network (or the
     off-PC folder) also needs an in-engine form (``c.in_engine``) that doesn't, because a GET
     makes no network call; ``offpc_backup`` touches no folder at all."""
     checks: DoctorChecks[DoctorContext] = DoctorChecks()
@@ -1616,6 +1640,10 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
                 head=head_revision(),
                 known=known_revisions(),
             ),
+        ),
+        DoctorCheck(
+            UNSUB_TOKEN_KEYS,
+            lambda c: check_unsub_token_keys(c.secrets.read, c.database.unsub_active_kid),
         ),
     ):
         checks.register_check(check)

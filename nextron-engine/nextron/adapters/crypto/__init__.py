@@ -3,8 +3,13 @@ AES-256-GCM stream in 64 KiB chunks, over ``cryptography``.
 
 Import rule: ``nextron.ports``, ``nextron.domain``, ``cryptography`` and the standard library.
 It is pure computation over the binary streams it is given: it opens no file, reaches nothing
-outside this process and logs nothing. It has no port of its own: the folder adapter
-(``nextron.adapters.backup_target``) is its only user, and its tests call it directly.
+outside this process and logs nothing. The backup format has no port of its own: the folder
+adapter (``nextron.adapters.backup_target``) is its only user, and its tests call it directly.
+
+The package also holds the unsubscribe token codec (Story 3.8),
+``nextron.adapters.crypto.unsub_token.TokenCodec``: the ``TokenCodecPort`` (AES-256-GCM-SIV and
+a truncated HMAC-SHA256 tag), which reads its per-kid keys from Windows Credential Manager
+through the ``SecretsPort`` it is given and is otherwise pure computation too.
 
 **Format v1.** A 40-byte header, then the chunks:
 

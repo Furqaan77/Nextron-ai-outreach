@@ -1219,3 +1219,122 @@ def test_format_json_is_ascii_only() -> None:
 
     assert text.isascii()
     assert json.loads(text)[0]["message"] == r"data dir D:\Données"
+
+
+# Row: unsub_token_keys (Story 3.8) ----------------------------------------------------------------
+
+K_TOK_TEXT = "QZXPLANTEDKTOK" + "A" * 28 + "Q"  # a 32-byte base64url key
+K_EDGE_TEXT = "QZXPLANTEDKEDGE" + "A" * 27 + "Q"
+
+
+class UnsubKeys:
+    """A ``SecretsPort.read`` and an ``active_kid`` that record the order they are called in."""
+
+    def __init__(self, kid: object = 1, **entries: object) -> None:
+        self.order: list[str] = []
+        self._kid = kid
+        self._entries = {"unsub/k_tok/1": K_TOK_TEXT, "unsub/k_edge/1": K_EDGE_TEXT, **entries}
+
+    def read(self, name: str) -> str | None:
+        self.order.append(f"read {name}")
+        found = self._entries.get(name)
+        if isinstance(found, Exception):
+            raise found
+        return found  # type: ignore[return-value]
+
+    def active_kid(self) -> object:
+        self.order.append("active_kid")
+        if isinstance(self._kid, Exception):
+            raise self._kid
+        return self._kid
+
+    def check(self) -> CheckResult:
+        return checks.check_unsub_token_keys(self.read, self.active_kid)
+
+
+def test_the_active_kids_two_distinct_keys_are_ok_read_after_the_setting() -> None:
+    keys = UnsubKeys()
+
+    result = keys.check()
+
+    assert result == CheckResult(
+        "unsub_token_keys",
+        Status.OK,
+        "the unsubscribe token keys of key id 1 (unsub/k_tok/1 and unsub/k_edge/1) are set "
+        "and differ",
+    )
+    assert keys.order == ["active_kid", "read unsub/k_tok/1", "read unsub/k_edge/1"]
+
+
+@pytest.mark.parametrize(
+    ("entries", "problem"),
+    [
+        ({"unsub/k_tok/1": None}, "unsub/k_tok/1 is not set"),
+        ({"unsub/k_edge/1": None}, "unsub/k_edge/1 is not set"),
+        ({"unsub/k_tok/1": ""}, "unsub/k_tok/1 is not set"),
+        ({"unsub/k_tok/1": K_TOK_TEXT[:-1]}, "unsub/k_tok/1 is not a 32-byte base64url key"),
+        ({"unsub/k_edge/1": "+" * 43}, "unsub/k_edge/1 is not a 32-byte base64url key"),
+        (
+            {"unsub/k_tok/1": AdapterError(False, "keyring_failed", "read failed")},
+            "unsub/k_tok/1 could not be read (Windows Credential Manager failed)",
+        ),
+        (
+            {"unsub/k_edge/1": K_TOK_TEXT + "="},  # the same key, padded
+            "unsub/k_tok/1 and unsub/k_edge/1 are the same key; make a new k_edge",
+        ),
+        (
+            {"unsub/k_tok/1": None, "unsub/k_edge/1": None},
+            "unsub/k_tok/1 is not set; unsub/k_edge/1 is not set",
+        ),
+    ],
+    ids=[
+        "k_tok_missing",
+        "k_edge_missing",
+        "k_tok_empty",
+        "k_tok_short",
+        "k_edge_standard_base64",
+        "unreadable",
+        "equal",
+        "both_missing",
+    ],
+)
+def test_a_missing_malformed_unreadable_or_equal_key_fails_naming_its_entry(
+    entries: dict[str, object], problem: str
+) -> None:
+    result = UnsubKeys(**entries).check()
+
+    assert result == CheckResult(
+        "unsub_token_keys",
+        Status.FAIL,
+        f"unsubscribe token keys of key id 1: {problem}; enter them in Unsubscribe token keys "
+        "on the Credentials page",
+    )
+    assert K_TOK_TEXT not in result.message and K_EDGE_TEXT not in result.message
+
+
+def test_the_active_kid_picks_the_entries() -> None:
+    keys = UnsubKeys(kid=7, **{"unsub/k_tok/7": K_EDGE_TEXT, "unsub/k_edge/7": K_TOK_TEXT})
+
+    assert keys.check().status is Status.OK
+    assert keys.order == ["active_kid", "read unsub/k_tok/7", "read unsub/k_edge/7"]
+    assert "unsub/k_tok/2 is not set" in UnsubKeys(kid=2).check().message
+
+
+@pytest.mark.parametrize(
+    ("kid", "type_name"),
+    [(RuntimeError("no settings table"), "RuntimeError"), (0, "ValueError"), ("1", "TypeError")],
+)
+def test_a_setting_that_cant_be_read_fails_with_no_keyring_read(
+    kid: object, type_name: str
+) -> None:
+    keys = UnsubKeys(kid=kid)
+
+    result = keys.check()
+
+    assert result == CheckResult(
+        "unsub_token_keys",
+        Status.FAIL,
+        f"the Unsubscribe token key id setting (unsub_active_kid) could not be read "
+        f"({type_name}); set it on the Settings page",
+    )
+    assert keys.order == ["active_kid"]

@@ -19,7 +19,9 @@ live constructor ``default_backend``), ``sink`` (the dev and test sink), ``googl
 downloaded client file; live constructor ``default_http_client``), ``telegram`` (ops alerts
 through the Telegram Bot API's ``sendMessage`` over ``httpx2``, the ``alert`` role's first
 adapter; live constructor ``default_http_client``), ``crypto`` (the backup file format: scrypt
-and AES-256-GCM over ``cryptography``; pure computation with no port of its own),
+and AES-256-GCM over ``cryptography``, pure computation with no port of its own; and the
+unsubscribe token codec ``TokenCodec``, the ``TokenCodecPort``: AES-256-GCM-SIV and HMAC-SHA256
+under the per-kid keys it reads through the ``SecretsPort`` it is given),
 ``backup_target`` (``FolderBackupTarget``, the ``BackupTargetPort``: encrypted backup copies in
 the off-PC folder, through ``crypto``) and ``ai`` (the Claude gateway, ``ClaudeGateway``, the
 ``LlmPort`` over the ``anthropic`` SDK on ``httpx2``, with its route candidates, output schemas,

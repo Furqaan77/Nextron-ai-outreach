@@ -221,6 +221,15 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "void_reason",
         ),
     },
+    "unsub_tokens": {
+        "compliance": (
+            "id",
+            "token_hash",
+            "om_id",
+            "kid",
+            "issued_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

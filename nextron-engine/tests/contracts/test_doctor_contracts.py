@@ -3,9 +3,9 @@
 - **One registry.** Only ``build_doctor_checks()`` in ``nextron/main.py`` constructs
   ``DoctorChecks`` or calls ``register_check``, under any alias (the same AST check as the job
   and trigger registries, ``tests/contracts/test_job_contracts.py``).
-- **It ships frozen** with exactly Story 1.14's eleven checks and Story 1.17's
-  ``offpc_backup`` (twelve), in the order doctor prints them; each later story that adds a check
-  extends ``CHECKS``.
+- **It ships frozen** with exactly Story 1.14's eleven checks, Story 1.17's ``offpc_backup`` and
+  Story 3.8's ``unsub_token_keys`` (thirteen), in the order doctor prints them; each later story
+  that adds a check extends ``CHECKS``.
 
 The AST check's proofs run it on a temporary copy of the tree with a probe module
 (``tests/contracts/support.py``), never on the real tree.
@@ -43,6 +43,7 @@ CHECKS = (
     "offpc_backup",
     "required_settings",
     "database_revision",
+    "unsub_token_keys",
 )
 UNUSED = '"""unused"""\n'
 
@@ -108,7 +109,7 @@ def test_the_registry_check_catches_another_function_in_main(tmp_path: Path) -> 
     assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
-def test_the_registry_ships_frozen_with_the_twelve_checks_in_order() -> None:
+def test_the_registry_ships_frozen_with_the_thirteen_checks_in_order() -> None:
     checks = main.build_doctor_checks()
 
     assert isinstance(checks, DoctorChecks)

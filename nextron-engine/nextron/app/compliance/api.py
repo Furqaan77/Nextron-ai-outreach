@@ -1,12 +1,14 @@
-"""Public command API of the ``compliance`` service (AD-3, AD-4, AD-16, AD-17, FR-50, FR-63).
+"""Public command API of the ``compliance`` service (AD-3, AD-4, AD-15, AD-16, AD-17, FR-50,
+FR-63, FR-70).
 
 Other services and the delivery layers change ``compliance`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-``Compliance(clock)`` owns the Suppression List (``suppression_entries``) and applies the
-SuppressionEntry machine (``nextron.domain.suppression_entry``). Its ``suppress`` is the only
-code that writes the list (``tests/contracts/test_suppression_contracts.py``). An entry is
-permanent: nothing here, or anywhere, removes one or ages one out.
+``Compliance(clock, *, codec=None)`` owns the Suppression List (``suppression_entries``) and
+applies the SuppressionEntry machine (``nextron.domain.suppression_entry``). Its ``suppress`` is
+the only code that writes the list (``tests/contracts/test_suppression_contracts.py``). An entry
+is permanent: nothing here, or anywhere, removes one or ages one out. It also issues the
+unsubscribe tokens (``unsub_tokens``) through ``codec``, a ``TokenCodecPort``.
 
 - ``@command suppress(subject, scope, source, cause_ref) -> SuppressResult(written, existing)``:
 
@@ -36,17 +38,37 @@ permanent: nothing here, or anywhere, removes one or ages one out.
 
   Nothing is logged: the ``events`` rows are the audit, and neither they nor the notification
   hold an address, a name or a URL.
+
+- ``@command issue_unsub_token(om) -> str`` (Story 3.8) issues the one unsubscribe token of an
+  OutboundMessage, in the caller's transaction (Story 5.2 calls it at enqueue). ``om`` has
+  ``id``, a ULID (otherwise ``ValueError``), and ``to_address``, a ``str`` (otherwise
+  ``TypeError``); with no ``codec`` it raises ``TypeError`` first. Then:
+
+  1. a token record for ``om.id`` raises ``TokenAlreadyIssued`` ("token already issued for this
+     message") before any keyring read;
+  2. the kid is ``queries.setup.get(Key.UNSUB_ACTIVE_KID)``;
+  3. ``issued_at`` is the clock's now, at whole seconds;
+  4. ``codec.encode(kid, addr_hash_of(om.to_address), <issued_at as Unix seconds>)`` (two
+     local Credential Manager reads), then one ``unsub_tokens`` row (``token_hash`` of the
+     token, ``om.id``, the kid, ``issued_at``), and the token is returned.
+
+  Any failure propagates and dooms the caller's transaction: a missing key
+  (``AdapterError`` ``unsub_key_missing``) rolls the enqueue back, so no message goes out
+  without a working link. It logs nothing and writes no ``events`` row; only the token's hash
+  is stored.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Protocol
 
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
+from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
 from nextron.db.uow import command, current
 from nextron.domain.contactability import (
     ContactSubject,
@@ -57,8 +79,11 @@ from nextron.domain.contactability import (
 )
 from nextron.domain.ids import is_ulid
 from nextron.domain.notifications import SubjectSuppressed
+from nextron.domain.settings_schema import Key
 from nextron.domain.suppression_entry import CREATION, OPT_OUT_SOURCES, SuppressionSource
+from nextron.domain.unsub_token import TokenAlreadyIssued, addr_hash_of, token_hash
 from nextron.ports.clock import Clock
+from nextron.ports.token_codec import TokenCodecPort
 
 ENTITY: Final = "suppression_entries"
 OPERATOR_ACTOR: Final = "operator"
@@ -90,6 +115,16 @@ def _check_arguments(subject: object, scope: object, source: object, cause_ref: 
         raise ValueError("suppress: cause_ref must be None or a ULID")
 
 
+class OutboundAddress(Protocol):
+    """What ``issue_unsub_token`` reads of an OutboundMessage: its id and its To address."""
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def to_address(self) -> str: ...
+
+
 def _unique(keys: tuple[SuppressionKey, ...]) -> tuple[SuppressionKey, ...]:
     """``keys`` in order, each (``kind``, ``value_hash``) once."""
     seen: set[tuple[str, str]] = set()
@@ -105,8 +140,9 @@ def _unique(keys: tuple[SuppressionKey, ...]) -> tuple[SuppressionKey, ...]:
 class Compliance:
     """The Suppression List; see the module docstring."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, *, codec: TokenCodecPort | None = None) -> None:
         self._clock = clock
+        self._codec = codec
 
     @command
     def suppress(
@@ -174,3 +210,24 @@ class Compliance:
             )
         )
         return result
+
+    @command
+    def issue_unsub_token(self, om: OutboundAddress) -> str:
+        """Issue and record the one unsubscribe token of ``om``; see the module docstring."""
+        if self._codec is None:
+            raise TypeError("issue_unsub_token needs a TokenCodecPort codec")
+        om_id = om.id
+        if not is_ulid(om_id):
+            raise ValueError("issue_unsub_token: om.id must be a ULID")
+        address = om.to_address
+        if not isinstance(address, str):
+            raise TypeError(f"issue_unsub_token: to_address is a str, not {type(address).__name__}")
+        if unsub_tokens_repo.for_om(om_id) is not None:
+            raise TokenAlreadyIssued()
+        kid = setup_queries.get(Key.UNSUB_ACTIVE_KID)
+        issued_at = self._clock.now().replace(microsecond=0)
+        token = self._codec.encode(kid, addr_hash_of(address), int(issued_at.timestamp()))
+        unsub_tokens_repo.insert(
+            token_hash=token_hash(token), om_id=om_id, kid=kid, issued_at=issued_at
+        )
+        return token
