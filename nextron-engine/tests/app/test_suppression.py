@@ -20,6 +20,7 @@ from sqlalchemy import Engine
 from nextron import main
 from nextron.app.compliance.api import ACTORS, Compliance, SuppressResult
 from nextron.app.discovery.api import Discovery
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import research as research_queries
 from nextron.app.research.api import Research
@@ -167,6 +168,27 @@ class World:
         ]
 
 
+def no_jobs() -> Any:
+    """``build_job_types``'s services: no job runs in these tests."""
+    raise AssertionError("no job runs in these tests")
+
+
+def queue_on(clock: FrozenClock) -> JobQueue:
+    """A job queue on the real job types; ``upsert_lead`` enqueues a CSV Lead's crawl there
+    (Story 2.5)."""
+    job_types = main.build_job_types(
+        alerts=no_jobs,
+        backups=no_jobs,
+        restore_tests=no_jobs,
+        recovery=no_jobs,
+        contact_markets=no_jobs,
+        crawls=no_jobs,
+        discovery=no_jobs,
+        research=no_jobs,
+    )
+    return JobQueue(clock, job_types)
+
+
 @pytest.fixture
 def world(db_engine: Engine) -> World:
     clock = FrozenClock(T0)
@@ -178,7 +200,7 @@ def world(db_engine: Engine) -> World:
         units,
         db_engine,
         clock,
-        Discovery(clock, Pipeline(clock)),
+        Discovery(clock, Pipeline(clock), queue_on(clock)),
         Research(clock),
         Compliance(clock),
     )

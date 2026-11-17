@@ -17,6 +17,7 @@ from sqlalchemy import Engine
 
 from nextron import main
 from nextron.app.discovery.api import Discovery
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import CLOSE_EVENTS, Pipeline
 from nextron.app.setup.api import Setup
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
@@ -77,6 +78,27 @@ class World:
         return [self.sql(f"SELECT * FROM {table} ORDER BY rowid") for table in ("leads", "events")]
 
 
+def no_jobs() -> Any:
+    """``build_job_types``'s services: no job runs in these tests."""
+    raise AssertionError("no job runs in these tests")
+
+
+def queue_on(clock: FrozenClock) -> JobQueue:
+    """A job queue on the real job types; ``upsert_lead`` enqueues a CSV Lead's crawl there
+    (Story 2.5)."""
+    job_types = main.build_job_types(
+        alerts=no_jobs,
+        backups=no_jobs,
+        restore_tests=no_jobs,
+        recovery=no_jobs,
+        contact_markets=no_jobs,
+        crawls=no_jobs,
+        discovery=no_jobs,
+        research=no_jobs,
+    )
+    return JobQueue(clock, job_types)
+
+
 @pytest.fixture
 def world(db_engine: Engine) -> World:
     clock = FrozenClock(T0)
@@ -87,7 +109,7 @@ def world(db_engine: Engine) -> World:
     found = World(units, db_engine, clock, Pipeline(clock))
     [(segment,), *_] = found.sql("SELECT id FROM segments ORDER BY key")
     identity = LeadIdentity(name="Firm LLP", segment_id=segment, web_domain="firm.co.uk")
-    discovery = Discovery(clock, found.pipeline)
+    discovery = Discovery(clock, found.pipeline, queue_on(clock))
     found.lead_id = found.transact(
         lambda: discovery.upsert_lead(identity, LeadSource.CSV)
     ).lead_id
