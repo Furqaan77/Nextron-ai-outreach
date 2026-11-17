@@ -38,6 +38,7 @@ nextron = "nextron.__main__:main"
 dev = [
     "import-linter==2.16",
     "pytest==9.2.0",
+    "pytest-xdist==3.8.0",
 ]
 
 [build-system]
@@ -57,6 +58,9 @@ testpaths = ["tests/unit", "tests/app", "tests/contracts"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
     "ai_eval: opt-in AI evaluation suite that calls Claude (AD-12, AD-14); skipped unless selected with -m ai_eval",
+    # pytest-xdist registers this marker too; listing it here keeps --strict-markers happy when a
+    # run disables the plugin (-p no:xdist). See README "Test" for the fixed-port rule.
+    "xdist_group(name): with -n N --dist loadgroup, run every test of the group on one worker, one after another",
 ]
 
 # ---------------------------------------------------------------------------------------------
