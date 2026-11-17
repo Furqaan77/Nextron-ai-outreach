@@ -292,6 +292,7 @@ FILES = [
     "tests/live_guard.py",
     "tests/task_scheduler_guard.py",
     "tests/fake_serve.py",
+    "tests/processes.py",
     "tests/contracts/safe_allowlist.txt",
 ]
 FOLDERS = [
