@@ -78,7 +78,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0020_2_5_crawl"
+HEAD = "0021_4_2_campaigns"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -89,6 +89,10 @@ COMPANY_FACTS_TRIGGERS = frozenset(  # Story 4.3: append-only fact versions
         "trg_company_facts_immutable",
     }
 )
+CAMPAIGNS_TRIGGERS = frozenset(  # Story 4.2: no UK Campaign runs without its LIA (NFR-3)
+    {"trg_campaigns_lia_insert", "trg_campaigns_lia_update"}
+)
+VARIANTS_TRIGGERS = frozenset({"trg_variants_at_most_two"})  # Story 4.2: at most 2 Variants
 
 
 def _parse(path: Path) -> ast.Module:
@@ -788,19 +792,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0021_next"}], None),
-        ([{"revision": "0021-next"}], "the chain does not load"),
-        ([{"revision": "0021_Next"}], "the id does not match"),
+        ([{"revision": "0022_next"}], None),
+        ([{"revision": "0022-next"}], "the chain does not load"),
+        ([{"revision": "0022_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0022_next"}], "the id starts 0022, but it is revision 21"),
-        ([{"revision": "0021_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0021_next", "file": "0021_other"}], "the id is not its file name"),
-        ([{"revision": "0021_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0021_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0021_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0021_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0023_next"}], "the id starts 0023, but it is revision 22"),
+        ([{"revision": "0022_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0022_next", "file": "0022_other"}], "the id is not its file name"),
+        ([{"revision": "0022_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0022_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0022_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0022_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0021_a"}, {"revision": "0022_b", "down": HEAD}],
+            [{"revision": "0022_a"}, {"revision": "0023_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],
@@ -906,6 +910,22 @@ def company_facts_triggers(engine: Engine) -> set[str]:
 
 def test_the_company_facts_triggers_exist_at_head(db_engine: Engine) -> None:
     assert company_facts_triggers(db_engine) == COMPANY_FACTS_TRIGGERS
+
+
+def table_triggers(engine: Engine, table: str) -> set[str]:
+    with engine.connect() as connection:
+        return {
+            name
+            for (name,) in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+                (table,),
+            )
+        }
+
+
+def test_the_campaigns_and_variants_triggers_exist_at_head(db_engine: Engine) -> None:
+    assert table_triggers(db_engine, "campaigns") == CAMPAIGNS_TRIGGERS
+    assert table_triggers(db_engine, "variants") == VARIANTS_TRIGGERS
 
 
 def test_the_trigger_check_catches_a_batch_rebuild_of_events(db_engine: Engine) -> None:

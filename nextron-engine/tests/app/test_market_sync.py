@@ -19,12 +19,20 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.setup import api as setup_api
 from nextron.app.ops.api import SeedSync, Seeds
 from nextron.app.playbook.api import CompanyFactSync
-from nextron.app.setup.api import MarketSync, SegmentSync, SequenceSync, Setup
+from nextron.app.setup.api import (
+    CampaignSync,
+    MarketSync,
+    OfferSync,
+    SegmentSync,
+    SequenceSync,
+    Setup,
+)
 from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
 from nextron.db.repos.setup.markets import StoredMarket
 from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain import seed_yaml
+from nextron.domain.campaign import CampaignDef, validate_campaigns
 from nextron.domain.company_facts import SeedFact, validate_company_facts
 from nextron.domain.markets import (
     InvalidMarkets,
@@ -35,6 +43,7 @@ from nextron.domain.markets import (
     render_footer_template,
     validate_markets,
 )
+from nextron.domain.offers import OfferDef, validate_offers
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import SequenceDef, validate_sequences
 from nextron.domain.settings_schema import TIMEZONE_REASON, Key
@@ -45,6 +54,9 @@ SEGMENTS_TEXT = (main.SEED_DIR / main.SEGMENTS_FILE_NAME).read_text(encoding="ut
 MARKETS_TEXT = (main.SEED_DIR / main.MARKETS_FILE_NAME).read_text(encoding="utf-8")
 SEQUENCES_TEXT = (main.SEED_DIR / main.SEQUENCES_FILE_NAME).read_text(encoding="utf-8")
 FACTS_TEXT = (main.SEED_DIR / main.COMPANY_FACTS_FILE_NAME).read_text(encoding="utf-8")
+OFFERS_TEXT = (main.SEED_DIR / main.OFFERS_FILE_NAME).read_text(encoding="utf-8")  # Story 4.2
+CAMPAIGNS_TEXT = (main.SEED_DIR / main.CAMPAIGNS_FILE_NAME).read_text(encoding="utf-8")
+CAMPAIGN_KEYS = ("law_private_ai_us", "law_private_ai_uk", "ops_automation_us", "ops_automation_uk")
 SHIPPED_FACT_IDS = (
     "nextron_team",
     "legal_ai",
@@ -85,6 +97,13 @@ FACTS_FIRST = (
     "  sra_ai_notice: created (version 1)\n"
 )
 FACTS_UNCHANGED = "company_facts: 0 changed, 8 unchanged\n"
+# Story 4.2: the offers and campaigns blocks follow the company_facts block
+OFFERS_CAMPAIGNS_FIRST = (
+    "offers: 1 changed, 0 unchanged\n  default: created (version 1)\n"
+    "campaigns: 4 changed, 0 unchanged\n"
+    + "".join(f"  {key}: created (version 1)\n" for key in CAMPAIGN_KEYS)
+)
+OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
 
 CA_BLOCK = """\
   - code: ca
@@ -156,6 +175,8 @@ def seed_dir(
     (folder / main.SEGMENTS_FILE_NAME).write_text(segments, encoding="utf-8", newline="")
     (folder / main.SEQUENCES_FILE_NAME).write_text(SEQUENCES_TEXT, encoding="utf-8", newline="")
     (folder / main.COMPANY_FACTS_FILE_NAME).write_text(FACTS_TEXT, encoding="utf-8", newline="")
+    (folder / main.OFFERS_FILE_NAME).write_text(OFFERS_TEXT, encoding="utf-8", newline="")
+    (folder / main.CAMPAIGNS_FILE_NAME).write_text(CAMPAIGNS_TEXT, encoding="utf-8", newline="")
     path = folder / main.MARKETS_FILE_NAME
     if isinstance(markets, bytes):
         path.write_bytes(markets)
@@ -235,6 +256,14 @@ def shipped_facts() -> tuple[SeedFact, ...]:  # Story 4.3: sync_seed's fourth ar
     return validate_company_facts(seed_yaml.parse(FACTS_TEXT))
 
 
+def shipped_offers() -> tuple[OfferDef, ...]:  # Story 4.2: sync_seed's fifth argument
+    return validate_offers(seed_yaml.parse(OFFERS_TEXT))
+
+
+def shipped_campaigns() -> tuple[CampaignDef, ...]:  # and its sixth
+    return validate_campaigns(seed_yaml.parse(CAMPAIGNS_TEXT))
+
+
 def stored_definitions(units: UnitOfWorkFactory) -> tuple[MarketDef, ...]:
     with units.open(read_only=True):
         return tuple(seeded.definition for seeded in setup_queries.markets())
@@ -248,7 +277,7 @@ def test_the_first_sync_creates_the_us_and_uk_at_version_1(database: Path) -> No
 
     assert (run.code, run.out, run.err) == (
         0,
-        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST,
+        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST,
         "",
     )
     uk, us = market_rows(database)
@@ -324,7 +353,8 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 
     assert (run.code, run.out, run.err) == (
         0,
-        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED,
+        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED,
         "",
     )
     assert table_dump(database) == before
@@ -357,7 +387,7 @@ def test_a_changed_uk_gets_version_2_and_one_event(
     assert run.out == (
         SEGMENTS_UNCHANGED
         + "markets: 1 changed, 1 unchanged\n  uk: changed (version 1 -> 2)\n"
-        + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+        + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     uk_after, us_after = market_rows(database)
     assert us_after == us_before
@@ -371,7 +401,8 @@ def test_a_changed_uk_gets_version_2_and_one_event(
     # and the next sync of the same file changes nothing
     again = sync(seed_dir(tmp_path, edited(old, new), "again"))
     assert again.out == (
-        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
 
 
@@ -389,7 +420,7 @@ def test_a_disabled_ca_market_loads_without_code_changes(
     assert run.out == (
         SEGMENTS_UNCHANGED
         + "markets: 1 changed, 2 unchanged\n  ca: created (version 1)\n"
-        + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+        + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     assert market_row(database, "ca")[2:5] == ("Canada", 0, "CA")
     markets = stored_definitions(units)
@@ -419,7 +450,7 @@ def test_a_stored_market_not_in_the_file_is_left_as_it_is(
         SEGMENTS_UNCHANGED
         + MARKETS_UNCHANGED
         + "  ca: not in seed/markets.yaml, left as it is (version 1)\n"
-        + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+        + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     assert market_row(database, "ca") == ca_row
     assert event_rows(database) == events_before
@@ -457,7 +488,7 @@ def test_the_nullable_columns_change_both_ways(
         assert run.out == (
             SEGMENTS_UNCHANGED
             + f"markets: 1 changed, 1 unchanged\n  us: changed (version {versions})\n"
-            + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+            + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
         )
         check(text, window, legal_forms)
     assert [row[3] for row in event_rows(database)][-2:] == ["v2", "v3"]
@@ -621,7 +652,7 @@ def test_a_markets_file_of_exactly_1_mib_is_read(database: Path, tmp_path: Path)
 
     assert (run.code, run.out) == (
         0,
-        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST,
+        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST,
     )
 
 
@@ -652,10 +683,11 @@ def test_a_markets_file_with_a_bom_and_crlf_line_ends_is_read(
 
     assert (run.code, run.out) == (
         0,
-        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST,
+        SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST,
     )
     assert sync().out == (  # the same definitions
-        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+        SEGMENTS_UNCHANGED + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
 
 
@@ -704,7 +736,12 @@ def test_sync_seed_runs_both_syncs_in_one_transaction(units: UnitOfWorkFactory) 
 
         uow.transaction = counted  # type: ignore[method-assign]
         result = Seeds(CountingClock()).sync_seed(
-            segments, markets, shipped_sequences(), shipped_facts()
+            segments,
+            markets,
+            shipped_sequences(),
+            shipped_facts(),
+            shipped_offers(),
+            shipped_campaigns(),
         )
 
     assert opened == ["clock", "transaction"]
@@ -715,6 +752,8 @@ def test_sync_seed_runs_both_syncs_in_one_transaction(units: UnitOfWorkFactory) 
         CompanyFactSync(
             tuple((fact_id, 1) for fact_id in SHIPPED_FACT_IDS), (), (), (), ()
         ),
+        OfferSync((("default", 1),), (), (), ()),
+        CampaignSync(tuple((key, 1) for key in CAMPAIGN_KEYS), (), (), ()),
     )
 
 
@@ -857,6 +896,8 @@ def test_the_sync_logs_its_counts(
         "segments_synced",
         "markets_synced",
         "sequences_synced",
+        "offers_synced",
+        "campaigns_synced",
         "company_facts_synced",
     ] * 4
 
@@ -921,7 +962,12 @@ def test_sync_seed_refuses_bad_markets_before_any_transaction(
         monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(ValueError, match="sync_markets got a code more than once: us"):
             Seeds(FrozenClock()).sync_seed(
-                segments, [us, us], shipped_sequences(), shipped_facts()
+                segments,
+                [us, us],
+                shipped_sequences(),
+                shipped_facts(),
+                shipped_offers(),
+                shipped_campaigns(),
             )
 
     assert query(database, "SELECT count(*) FROM segments") == [(0,)]

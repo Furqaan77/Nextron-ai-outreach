@@ -21,13 +21,21 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.setup import api as setup_api
 from nextron.app.ops.api import SeedSync, Seeds
 from nextron.app.playbook.api import CompanyFactSync
-from nextron.app.setup.api import MarketSync, SegmentSync, SequenceSync
+from nextron.app.setup.api import (
+    CampaignSync,
+    MarketSync,
+    OfferSync,
+    SegmentSync,
+    SequenceSync,
+)
 from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
 from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain import seed_yaml
+from nextron.domain.campaign import CampaignDef, validate_campaigns
 from nextron.domain.company_facts import SeedFact, validate_company_facts
 from nextron.domain.markets import MarketDef, validate_markets
+from nextron.domain.offers import OfferDef, validate_offers
 from nextron.domain.segments import SegmentDef, validate_segments
 from nextron.domain.sequences import (
     REGULATION_REASON,
@@ -43,6 +51,9 @@ SEGMENTS_TEXT = (main.SEED_DIR / main.SEGMENTS_FILE_NAME).read_text(encoding="ut
 MARKETS_TEXT = (main.SEED_DIR / main.MARKETS_FILE_NAME).read_text(encoding="utf-8")
 SEQUENCES_TEXT = (main.SEED_DIR / main.SEQUENCES_FILE_NAME).read_text(encoding="utf-8")
 FACTS_TEXT = (main.SEED_DIR / main.COMPANY_FACTS_FILE_NAME).read_text(encoding="utf-8")
+OFFERS_TEXT = (main.SEED_DIR / main.OFFERS_FILE_NAME).read_text(encoding="utf-8")  # Story 4.2
+CAMPAIGNS_TEXT = (main.SEED_DIR / main.CAMPAIGNS_FILE_NAME).read_text(encoding="utf-8")
+CAMPAIGN_KEYS = ("law_private_ai_us", "law_private_ai_uk", "ops_automation_us", "ops_automation_uk")
 SHIPPED_FACT_IDS = (
     "nextron_team",
     "legal_ai",
@@ -81,6 +92,13 @@ FACTS_FIRST = (
     "  sra_ai_notice: created (version 1)\n"
 )
 FACTS_UNCHANGED = "company_facts: 0 changed, 8 unchanged\n"
+# Story 4.2: the offers and campaigns blocks follow the company_facts block
+OFFERS_CAMPAIGNS_FIRST = (
+    "offers: 1 changed, 0 unchanged\n  default: created (version 1)\n"
+    "campaigns: 4 changed, 0 unchanged\n"
+    + "".join(f"  {key}: created (version 1)\n" for key in CAMPAIGN_KEYS)
+)
+OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
 
 STEP_3_ASK = "        ask: Offer to send more detail by reply (no link or attachment)\n"
 STEP_5 = """\
@@ -165,6 +183,8 @@ def seed_dir(tmp_path: Path, sequences: str | bytes | None, name: str = "seed") 
     (folder / main.SEGMENTS_FILE_NAME).write_text(SEGMENTS_TEXT, encoding="utf-8", newline="")
     (folder / main.MARKETS_FILE_NAME).write_text(MARKETS_TEXT, encoding="utf-8", newline="")
     (folder / main.COMPANY_FACTS_FILE_NAME).write_text(FACTS_TEXT, encoding="utf-8", newline="")
+    (folder / main.OFFERS_FILE_NAME).write_text(OFFERS_TEXT, encoding="utf-8", newline="")
+    (folder / main.CAMPAIGNS_FILE_NAME).write_text(CAMPAIGNS_TEXT, encoding="utf-8", newline="")
     path = folder / main.SEQUENCES_FILE_NAME
     if isinstance(sequences, bytes):
         path.write_bytes(sequences)
@@ -246,13 +266,25 @@ def shipped_facts() -> tuple[SeedFact, ...]:  # Story 4.3: sync_seed's fourth ar
     return validate_company_facts(seed_yaml.parse(FACTS_TEXT))
 
 
+def shipped_offers() -> tuple[OfferDef, ...]:  # Story 4.2: sync_seed's fifth argument
+    return validate_offers(seed_yaml.parse(OFFERS_TEXT))
+
+
+def shipped_campaigns() -> tuple[CampaignDef, ...]:  # and its sixth
+    return validate_campaigns(seed_yaml.parse(CAMPAIGNS_TEXT))
+
+
 # The I/O matrix: first and second sync ------------------------------------------------------------
 
 
 def test_the_first_sync_creates_the_default_sequence_at_version_1(database: Path) -> None:
     run = sync()
 
-    assert (run.code, run.out, run.err) == (0, OTHERS_FIRST + SEQUENCES_FIRST + FACTS_FIRST, "")
+    assert (run.code, run.out, run.err) == (
+        0,
+        OTHERS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST,
+        "",
+    )
     [(sequence_id, key, name, version, created, updated)] = sequence_rows(database)
     assert (key, name, version, created, updated) == (
         "default",
@@ -282,6 +314,8 @@ def test_the_first_sync_creates_the_default_sequence_at_version_1(database: Path
         "markets",
         "markets",
         "sequences",
+        "offers",  # Story 4.2: the Offers' and Campaigns' events follow the Sequences'
+        *["campaigns"] * 4,
         *["company_facts"] * 8,  # Story 4.3: the facts' events come last
     ]
 
@@ -330,7 +364,7 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 
     assert (run.code, run.out, run.err) == (
         0,
-        OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED,
+        OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED,
         "",
     )
     assert table_dump(database) == before
@@ -353,7 +387,7 @@ def test_a_changed_ask_gets_version_2_one_event_and_only_its_brief_row(
     assert (run.code, run.err) == (0, "")
     assert run.out == (
         OTHERS_UNCHANGED + "sequences: 1 changed, 0 unchanged\n"
-        "  default: changed (version 1 -> 2)\n" + FACTS_UNCHANGED
+        "  default: changed (version 1 -> 2)\n" + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     [after] = sequence_rows(database)
     assert (after[0], after[3], after[4], after[5]) == (before[0], 2, STAMP, LATER_STAMP)
@@ -373,7 +407,9 @@ def test_a_changed_ask_gets_version_2_one_event_and_only_its_brief_row(
     assert len(event_rows(database, "segments")) == 2  # nothing else changed
     # and the next sync of the same file changes nothing
     again = sync(seed_dir(tmp_path, changed, "again"))
-    assert again.out == OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+    assert again.out == (
+        OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
+    )
 
 
 def test_a_renamed_sequence_changes_only_its_sequence_row(database: Path, tmp_path: Path) -> None:
@@ -471,7 +507,9 @@ def test_edited_subject_guidance_and_allowed_content_change_only_their_rows(
     assert seeded is not None
     assert seeded.definition == shipped_sequences(text)[0]
     again = sync(seed_dir(tmp_path, text, "again"))
-    assert again.out == OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED
+    assert again.out == (
+        OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
+    )
 
 
 def test_a_removed_middle_step_moves_the_later_steps_up(
@@ -489,7 +527,7 @@ def test_a_removed_middle_step_moves_the_later_steps_up(
     assert (run.code, run.err) == (0, "")
     assert run.out == (
         OTHERS_UNCHANGED + "sequences: 1 changed, 0 unchanged\n"
-        "  default: changed (version 1 -> 2)\n" + FACTS_UNCHANGED
+        "  default: changed (version 1 -> 2)\n" + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     assert sequence_rows(database)[0][3] == 2
     assert event_rows(database)[1:] == [
@@ -532,7 +570,7 @@ def test_a_stored_sequence_not_in_the_file_is_left_as_it_is(
         OTHERS_UNCHANGED
         + SEQUENCES_UNCHANGED
         + "  old: not in seed/sequences.yaml, left as it is (version 1)\n"
-        + FACTS_UNCHANGED
+        + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     assert sequence_rows(database)[1] == old_before
     assert brief_rows(database, "old") == old_briefs
@@ -810,11 +848,22 @@ def test_sync_seed_returns_what_it_did_to_the_sequences(units: UnitOfWorkFactory
     segments, markets = shipped_segments(), shipped_markets()
 
     with units.open():
-        first = Seeds(FrozenClock()).sync_seed(segments, markets, [default, other], shipped_facts())
+        first = Seeds(FrozenClock()).sync_seed(
+            segments,
+            markets,
+            [default, other],
+            shipped_facts(),
+            shipped_offers(),
+            shipped_campaigns(),
+        )
     with units.open():
-        second = Seeds(FrozenClock()).sync_seed(segments, markets, [renamed], shipped_facts())
-    with units.open():
-        third = Seeds(FrozenClock()).sync_seed(segments, markets, (), shipped_facts())
+        second = Seeds(FrozenClock()).sync_seed(
+            segments, markets, [renamed], shipped_facts(), shipped_offers(), shipped_campaigns()
+        )
+    with units.open():  # no Sequence, so no Campaign
+        third = Seeds(FrozenClock()).sync_seed(
+            segments, markets, (), shipped_facts(), shipped_offers(), ()
+        )
 
     assert first == SeedSync(
         SegmentSync((("law_private_ai", 1), ("ops_automation", 1)), (), (), ()),
@@ -823,6 +872,8 @@ def test_sync_seed_returns_what_it_did_to_the_sequences(units: UnitOfWorkFactory
         CompanyFactSync(
             tuple((fact_id, 1) for fact_id in SHIPPED_FACT_IDS), (), (), (), ()
         ),
+        OfferSync((("default", 1),), (), (), ()),
+        CampaignSync(tuple((key, 1) for key in CAMPAIGN_KEYS), (), (), ()),
     )
     assert second.sequences == SequenceSync((), (("default", 1, 2),), (), (("aa_other", 1),))
     assert third.sequences == SequenceSync((), (), (), (("aa_other", 1), ("default", 2)))
@@ -855,6 +906,8 @@ def test_sync_seed_logs_the_sequences_counts(
         "segments_synced",
         "markets_synced",
         "sequences_synced",
+        "offers_synced",
+        "campaigns_synced",
         "company_facts_synced",
     ] * 4
 
@@ -920,7 +973,12 @@ def test_sync_seed_refuses_bad_sequences_before_any_transaction(
         monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(error, match=match):
             Seeds(FrozenClock()).sync_seed(
-                shipped_segments(), shipped_markets(), make(default), shipped_facts()
+                shipped_segments(),
+                shipped_markets(),
+                make(default),
+                shipped_facts(),
+                shipped_offers(),
+                shipped_campaigns(),
             )
 
     assert sha256(database) == before
@@ -951,7 +1009,12 @@ def test_sync_seed_checks_the_angles_against_its_own_segments_and_markets(
         monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(InvalidSequences) as caught:
             Seeds(FrozenClock()).sync_seed(
-                chosen_segments, chosen_markets, shipped_sequences(), shipped_facts()
+                chosen_segments,
+                chosen_markets,
+                shipped_sequences(),
+                shipped_facts(),
+                shipped_offers(),
+                shipped_campaigns(),
             )
 
     assert caught.value.field == field
@@ -963,7 +1026,9 @@ def test_a_hand_built_sequence_is_stored_as_validation_returns_it(
     [default] = shipped_sequences()
     segments, markets = shipped_segments(), shipped_markets()
     with units.open():
-        Seeds(FrozenClock()).sync_seed(segments, markets, [default], shipped_facts())
+        Seeds(FrozenClock()).sync_seed(
+            segments, markets, [default], shipped_facts(), shipped_offers(), shipped_campaigns()
+        )
     loose = dataclasses.replace(
         default,
         steps=tuple(
@@ -978,7 +1043,9 @@ def test_a_hand_built_sequence_is_stored_as_validation_returns_it(
     )
 
     with units.open():
-        result = Seeds(FrozenClock()).sync_seed(segments, markets, [loose], shipped_facts())
+        result = Seeds(FrozenClock()).sync_seed(
+            segments, markets, [loose], shipped_facts(), shipped_offers(), shipped_campaigns()
+        )
 
     assert result.sequences.unchanged == ("default",)
 
@@ -1013,8 +1080,8 @@ def test_the_queries_return_sequences_by_key_and_nothing_before_a_sync(
         assert setup_queries.sequence("default") is None
     stored = [dataclasses.replace(default, key=key) for key in ("zz", "aa", "mm")]
     with units.open():
-        Seeds(FrozenClock()).sync_seed(
-            shipped_segments(), shipped_markets(), stored, shipped_facts()
+        Seeds(FrozenClock()).sync_seed(  # no default Sequence, so no Campaign
+            shipped_segments(), shipped_markets(), stored, shipped_facts(), shipped_offers(), ()
         )
 
     with units.open(read_only=True):

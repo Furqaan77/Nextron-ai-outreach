@@ -34,6 +34,20 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   ``InvalidSequences`` for a stored Sequence that no longer validates. Campaigns (4.2), Draft
   slots and due times (4.9), the grounding rules (4.13) and drafting (4.15, 4.18) read the
   Sequences only through these two.
+- ``offers()``: every stored Offer as a ``SeededOffer(id, key, version, definition)``, by key;
+  ``offer(key)``: one, or ``None``. ``definition`` is the ``nextron.domain.offers.OfferDef`` the
+  ``offers`` repository decodes through ``offer_from_form``, which raises ``InvalidOffers`` for a
+  row that no longer validates. An Offer is commercial configuration, never Draft wording.
+- ``campaigns()``: every stored Campaign as a ``SeededCampaign(id, key, name, version,
+  segment_id, market_id, offer_id, sequence_id, status, lia, variants)``, by key;
+  ``campaign(campaign_id)``: one, or ``None``. ``status`` is a ``CampaignStatus``, ``lia`` the
+  recorded ``Lia`` or ``None``, and ``variants`` a tuple of ``SeededVariant(id, name, status,
+  step_angles)`` ordered by name. A row set that no longer validates raises
+  ``InvalidCampaigns``. Enrollment (4.8) reads the LIA it records as the eligibility basis here.
+- ``campaign_active(campaign_id) -> bool``: the single answer to "may this Campaign run?"
+  (AD-5's ``campaign_active``): ``nextron.domain.campaign.may_run`` on the stored status, the
+  stored LIA and the Market's **current** ``country_code``, read live with the Campaign. An
+  unknown id is ``False``.
 
 All read through the current unit of work, read-only ones included.
 """
@@ -41,15 +55,21 @@ All read through the current unit of work, read-only ones included.
 from dataclasses import dataclass
 from typing import Any
 
+from nextron.db.repos.setup import campaigns as campaigns_repo
 from nextron.db.repos.setup import markets as markets_repo
+from nextron.db.repos.setup import offers as offers_repo
 from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import sequences as sequences_repo
 from nextron.db.repos.setup import settings as settings_repo
+from nextron.db.repos.setup.campaigns import StoredCampaign
 from nextron.db.repos.setup.markets import StoredMarket
+from nextron.db.repos.setup.offers import StoredOffer
 from nextron.db.repos.setup.segments import StoredSegment
 from nextron.db.repos.setup.sequences import StoredSequence
 from nextron.domain.budget import QUOTAS, Limits
+from nextron.domain.campaign import CampaignStatus, Lia, StepAngleNote, VariantStatus, may_run
 from nextron.domain.markets import MarketDef
+from nextron.domain.offers import OfferDef
 from nextron.domain.segments import SegmentDef, segment_from_text
 from nextron.domain.sequences import SequenceDef
 from nextron.domain.settings_schema import (
@@ -195,3 +215,105 @@ def sequence(key: str) -> SeededSequence | None:
     """The stored Sequence ``key``, or ``None``."""
     stored = sequences_repo.by_key(key)
     return None if stored is None else _seeded_sequence(stored)
+
+
+@dataclass(frozen=True, slots=True)
+class SeededOffer:
+    """A stored Offer: its row id, key and version, and its decoded definition."""
+
+    id: str
+    key: str
+    version: int
+    definition: OfferDef
+
+
+def _seeded_offer(stored: StoredOffer) -> SeededOffer:
+    return SeededOffer(
+        id=stored.id, key=stored.key, version=stored.version, definition=stored.offer
+    )
+
+
+def offers() -> tuple[SeededOffer, ...]:
+    """Every stored Offer, by key."""
+    return tuple(_seeded_offer(stored) for stored in offers_repo.all_offers())
+
+
+def offer(key: str) -> SeededOffer | None:
+    """The stored Offer ``key``, or ``None``."""
+    stored = offers_repo.by_key(key)
+    return None if stored is None else _seeded_offer(stored)
+
+
+@dataclass(frozen=True, slots=True)
+class SeededVariant:
+    """A stored Variant of a Campaign."""
+
+    id: str
+    name: str
+    status: VariantStatus
+    step_angles: tuple[StepAngleNote, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SeededCampaign:
+    """A stored Campaign: its row id, key, name and version, the ids it uses, its status, its
+    recorded LIA (or ``None``) and its Variants by name."""
+
+    id: str
+    key: str
+    name: str
+    version: int
+    segment_id: str
+    market_id: str
+    offer_id: str
+    sequence_id: str
+    status: CampaignStatus
+    lia: Lia | None
+    variants: tuple[SeededVariant, ...]
+
+
+def _seeded_campaign(stored: StoredCampaign) -> SeededCampaign:
+    return SeededCampaign(
+        id=stored.id,
+        key=stored.key,
+        name=stored.name,
+        version=stored.version,
+        segment_id=stored.segment_id,
+        market_id=stored.market_id,
+        offer_id=stored.offer_id,
+        sequence_id=stored.sequence_id,
+        status=stored.status,
+        lia=stored.lia,
+        variants=tuple(
+            SeededVariant(
+                id=variant.id,
+                name=variant.name,
+                status=variant.status,
+                step_angles=variant.step_angles,
+            )
+            for variant in stored.variants
+        ),
+    )
+
+
+def campaigns() -> tuple[SeededCampaign, ...]:
+    """Every stored Campaign, by key."""
+    return tuple(_seeded_campaign(stored) for stored in campaigns_repo.all_campaigns())
+
+
+def campaign(campaign_id: str) -> SeededCampaign | None:
+    """The stored Campaign ``campaign_id``, or ``None``."""
+    if not isinstance(campaign_id, str):
+        return None
+    stored = campaigns_repo.by_id(campaign_id)
+    return None if stored is None else _seeded_campaign(stored)
+
+
+def campaign_active(campaign_id: str) -> bool:
+    """Whether the Campaign ``campaign_id`` may run now; see the module docstring."""
+    if not isinstance(campaign_id, str):
+        return False
+    stored = campaigns_repo.by_id(campaign_id)
+    if stored is None:
+        return False
+    return may_run(stored.status, stored.country_code, stored.lia)

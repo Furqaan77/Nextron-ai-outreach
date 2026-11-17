@@ -19,8 +19,10 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain import seed_yaml
+from nextron.domain.campaign import validate_campaigns
 from nextron.domain.company_facts import validate_company_facts
 from nextron.domain.markets import validate_markets
+from nextron.domain.offers import validate_offers
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
 from nextron.web.csrf import SECURITY_CHECK_FAILED
@@ -54,6 +56,8 @@ def seeded(units: UnitOfWorkFactory) -> UnitOfWorkFactory:
             validate_markets(read(main.MARKETS_FILE_NAME)),
             validate_sequences(read(main.SEQUENCES_FILE_NAME)),
             validate_company_facts(read(main.COMPANY_FACTS_FILE_NAME)),
+            validate_offers(read(main.OFFERS_FILE_NAME)),  # Story 4.2
+            validate_campaigns(read(main.CAMPAIGNS_FILE_NAME)),
         )
     return units
 

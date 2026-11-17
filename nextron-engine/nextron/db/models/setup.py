@@ -43,14 +43,46 @@ typed columns: ``delay_days`` (``ck_step_briefs_delay_days``: at least 0), ``pur
 (a canonical JSON list, ``[]`` for none), with ``created_at`` and ``updated_at``. Every other
 column is NOT NULL. Briefs hold rules and angles, never a person, so no column of either table
 is personal data.
+
+``offers`` holds one row per Offer (FR-3, Story 4.2), written only by
+``nextron.db.repos.setup.offers`` (migration ``0021_4_2_campaigns``): its ``key`` (unique,
+``uq_offers_key``), its ``name``, its ``ladder`` (the canonical JSON list of its rungs' file
+forms, ``nextron.domain.offers.offer_form``), its ``version`` (``ck_offers_version``: at least 1),
+``created_at`` and ``updated_at``.
+
+``campaigns`` holds one row per Campaign (FR-3, AD-4, NFR-3, Story 4.2), written only by
+``nextron.db.repos.setup.campaigns`` (same migration): its ``key`` (unique,
+``uq_campaigns_key``), its ``name``, the ``segment_id``, ``market_id``, ``offer_id`` and
+``sequence_id`` it uses (foreign keys to ``segments``, ``markets``, ``offers`` and
+``sequences``, no cascade; one Campaign per Segment and Market,
+``uq_campaigns_segment_id_market_id``), its ``status`` (``ck_campaigns_status``: ``draft``,
+``active`` or ``paused``), its legitimate-interests assessment ``lia_ref`` and ``lia_date``
+(both NULL until the Operator records it, then both set: ``ck_campaigns_lia``), its ``version``
+(``ck_campaigns_version``: at least 1; it covers its Variants too), ``created_at`` and
+``updated_at``. Two triggers, ``trg_campaigns_lia_insert`` and ``trg_campaigns_lia_update``,
+abort a row whose status isn't ``draft``, whose Market's ``country_code`` is ``GB`` and whose
+LIA isn't recorded (NFR-3, a fail-closed backstop).
+
+``variants`` holds one row per Variant of a Campaign, written by the same repository: its
+``campaign_id`` (a foreign key to ``campaigns``, no cascade), its ``name`` (unique per Campaign,
+``uq_variants_campaign_id_name``), its ``status`` (``ck_variants_status``: ``active`` or
+``inactive``), its ``step_angles`` (a canonical JSON list of ``{step, note}`` objects, ``[]``
+for none), ``created_at`` and ``updated_at``. The trigger ``trg_variants_at_most_two`` aborts an
+``INSERT`` when the Campaign already has 2 Variants. A later migration that rebuilds either
+table in batch mode must create its triggers again.
+
+Every column of the three tables but ``lia_ref`` and ``lia_date`` is NOT NULL. Offers,
+Campaigns and Variants hold configuration, and the LIA reference is the Operator's own record
+name, never a person, so no column is personal data.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     ForeignKey,
     Integer,
     String,
@@ -74,6 +106,18 @@ SEQUENCE_NAME_LENGTH: Final = 100  # nextron.domain.sequences.MAX_NAME
 BRIEF_TEXT_LENGTH: Final = 200  # nextron.domain.sequences.MAX_TEXT: purpose, ask
 WORD_COMPARISON_LENGTH: Final = 8  # under, at_most
 LINK_RULE_LENGTH: Final = 16  # footer_only
+OFFER_KEY_LENGTH: Final = 32  # nextron.domain.offers.KEY_PATTERN allows 31 characters
+OFFER_NAME_LENGTH: Final = 100  # nextron.domain.offers.MAX_NAME
+CAMPAIGN_KEY_LENGTH: Final = 32  # nextron.domain.campaign.KEY_PATTERN allows 31 characters
+CAMPAIGN_NAME_LENGTH: Final = 100  # nextron.domain.campaign.MAX_NAME
+STATUS_LENGTH: Final = 8  # draft, active, paused; active, inactive
+LIA_REF_LENGTH: Final = 200  # nextron.domain.campaign.MAX_LIA_REF
+VARIANT_NAME_LENGTH: Final = 40  # nextron.domain.campaign.MAX_VARIANT_NAME
+CAMPAIGN_STATUS_CHECK: Final = "status IN ('draft', 'active', 'paused')"
+CAMPAIGN_LIA_CHECK: Final = (
+    "(lia_ref IS NULL AND lia_date IS NULL) OR (lia_ref IS NOT NULL AND lia_date IS NOT NULL)"
+)
+VARIANT_STATUS_CHECK: Final = "status IN ('active', 'inactive')"
 
 
 class SettingRecord(Base):
@@ -166,5 +210,64 @@ class StepBriefRecord(Base):
     no_audit: Mapped[bool] = mapped_column(Boolean)
     subject_rule: Mapped[str | None] = mapped_column(Text)
     segment_angles: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class OfferRecord(Base):
+    """One stored Offer, its ladder as canonical JSON."""
+
+    __tablename__ = "offers"
+    __table_args__ = (CheckConstraint("version >= 1", name="version"),)
+
+    id: Mapped[str] = ulid_pk()
+    key: Mapped[str] = mapped_column(String(OFFER_KEY_LENGTH), unique=True)
+    name: Mapped[str] = mapped_column(String(OFFER_NAME_LENGTH))
+    ladder: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class CampaignRecord(Base):
+    """One stored Campaign; its Variants are ``VariantRecord`` rows."""
+
+    __tablename__ = "campaigns"
+    __table_args__ = (
+        UniqueConstraint("segment_id", "market_id"),
+        CheckConstraint(CAMPAIGN_STATUS_CHECK, name="status"),
+        CheckConstraint(CAMPAIGN_LIA_CHECK, name="lia"),
+        CheckConstraint("version >= 1", name="version"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    key: Mapped[str] = mapped_column(String(CAMPAIGN_KEY_LENGTH), unique=True)
+    name: Mapped[str] = mapped_column(String(CAMPAIGN_NAME_LENGTH))
+    segment_id: Mapped[str] = mapped_column(Ulid, ForeignKey("segments.id"))
+    market_id: Mapped[str] = mapped_column(Ulid, ForeignKey("markets.id"))
+    offer_id: Mapped[str] = mapped_column(Ulid, ForeignKey("offers.id"))
+    sequence_id: Mapped[str] = mapped_column(Ulid, ForeignKey("sequences.id"))
+    status: Mapped[str] = mapped_column(String(STATUS_LENGTH))
+    lia_ref: Mapped[str | None] = mapped_column(String(LIA_REF_LENGTH))
+    lia_date: Mapped[date | None] = mapped_column(Date)
+    version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class VariantRecord(Base):
+    """One Variant of a stored Campaign."""
+
+    __tablename__ = "variants"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "name"),
+        CheckConstraint(VARIANT_STATUS_CHECK, name="status"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    campaign_id: Mapped[str] = mapped_column(Ulid, ForeignKey("campaigns.id"))
+    name: Mapped[str] = mapped_column(String(VARIANT_NAME_LENGTH))
+    status: Mapped[str] = mapped_column(String(STATUS_LENGTH))
+    step_angles: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)

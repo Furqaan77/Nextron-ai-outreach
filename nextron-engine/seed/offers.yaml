@@ -1,0 +1,44 @@
+# The Offers (FR-3): the commercial ladder a Campaign leads to. An Offer is a key, a name and a
+# ladder of rungs in order: first only a reply (FR-4: the first ask is only a reply), then the
+# fixed-fee Private AI & Workflow Audit, credited in full toward a build, then a build. Each rung
+# has its kind (reply, audit or build) and a name, plus its price range in whole US dollars
+# (price_usd_min and price_usd_max) and optional terms.
+#
+# This is commercial configuration for the Operator and later call prep, never Draft wording:
+# no Step names a price or proposes the audit, and a Draft cites only the audit_offer Approved
+# Company Fact, which names no price. The prices are the Glossary's assumed values, to be
+# validated on the first 10 held calls (FR-69).
+#
+# The engine refuses an Offer whose first rung isn't a reply, a reply rung with a price, an
+# audit or build rung without both prices or with price_usd_min above price_usd_max, and a kind
+# listed twice in one ladder.
+#
+# `nextron seed sync` loads this file into the database together with segments.yaml,
+# markets.yaml, sequences.yaml, company_facts.yaml and campaigns.yaml (AD-12): it creates each
+# Offer that is new, gives each changed one a new version, and leaves alone an Offer that is
+# stored but no longer listed here. The engine must have been started once (nextron serve), so
+# the database exists and is migrated.
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py): mappings and
+# lists indented with spaces, one-line [a, b] lists, 'single' or "double" quoted text, plain
+# text, whole numbers and true/false. Anything else (tabs, anchors, {...}, multi-line text, or
+# a plain value such as yes, no, null, 1.5, a date or a time) is refused with its line number,
+# so the file is never misread. Write a value in quotes when it holds ": " or starts with a
+# special character.
+
+offers:
+  - key: default
+    name: Reply, then the audit, then a build
+    ladder:
+      - kind: reply
+        name: A reply
+        terms: The first ask is only a reply; Steps never name a price or propose the audit.
+      - kind: audit
+        name: Private AI & Workflow Audit
+        price_usd_min: 2500
+        price_usd_max: 3500
+        terms: Fixed fee, credited in full toward a build.
+      - kind: build
+        name: Build
+        price_usd_min: 10000
+        price_usd_max: 30000

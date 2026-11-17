@@ -38,6 +38,8 @@ SHIPPED_TEXT = SHIPPED.read_text(encoding="utf-8")
 SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME  # Story 3.1: the second seed file
 SHIPPED_SEQUENCES = main.SEED_DIR / main.SEQUENCES_FILE_NAME  # Story 4.1: the third seed file
 SHIPPED_FACTS = main.SEED_DIR / main.COMPANY_FACTS_FILE_NAME  # Story 4.3: the fourth
+SHIPPED_OFFERS = main.SEED_DIR / main.OFFERS_FILE_NAME  # Story 4.2: the fifth
+SHIPPED_CAMPAIGNS = main.SEED_DIR / main.CAMPAIGNS_FILE_NAME  # and the sixth
 LATER = DEFAULT_NOW + timedelta(days=3)
 KEYS = ("law_private_ai", "ops_automation")
 
@@ -77,6 +79,8 @@ def seed_dir(tmp_path: Path, text: str | bytes, name: str = "seed") -> Path:
     (folder / main.MARKETS_FILE_NAME).write_bytes(SHIPPED_MARKETS.read_bytes())
     (folder / main.SEQUENCES_FILE_NAME).write_bytes(SHIPPED_SEQUENCES.read_bytes())
     (folder / main.COMPANY_FACTS_FILE_NAME).write_bytes(SHIPPED_FACTS.read_bytes())
+    (folder / main.OFFERS_FILE_NAME).write_bytes(SHIPPED_OFFERS.read_bytes())
+    (folder / main.CAMPAIGNS_FILE_NAME).write_bytes(SHIPPED_CAMPAIGNS.read_bytes())
     path = folder / main.SEGMENTS_FILE_NAME
     if isinstance(text, bytes):
         path.write_bytes(text)
@@ -165,7 +169,20 @@ FACTS_FIRST = (
     "  sra_ai_notice: created (version 1)\n"
 )
 FACTS_UNCHANGED = "company_facts: 0 changed, 8 unchanged\n"
-SUMMARY_FIRST = SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST
+# Story 4.2: the offers and campaigns blocks follow the company_facts block
+OFFERS_CAMPAIGNS_FIRST = (
+    "offers: 1 changed, 0 unchanged\n"
+    "  default: created (version 1)\n"
+    "campaigns: 4 changed, 0 unchanged\n"
+    "  law_private_ai_us: created (version 1)\n"
+    "  law_private_ai_uk: created (version 1)\n"
+    "  ops_automation_us: created (version 1)\n"
+    "  ops_automation_uk: created (version 1)\n"
+)
+OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
+SUMMARY_FIRST = (
+    SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST
+)
 
 
 # The I/O matrix -----------------------------------------------------------------------------------
@@ -204,7 +221,8 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
         "segments: 0 changed, 2 unchanged\n"
         + MARKETS_UNCHANGED
         + SEQUENCES_UNCHANGED
-        + FACTS_UNCHANGED,
+        + FACTS_UNCHANGED
+        + OFFERS_CAMPAIGNS_UNCHANGED,
         "",
     )
     assert table_dump(database) == before
@@ -229,6 +247,7 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
         + MARKETS_UNCHANGED
         + SEQUENCES_UNCHANGED
         + FACTS_UNCHANGED
+        + OFFERS_CAMPAIGNS_UNCHANGED
     )
     law_after, ops_after = segment_rows(database)
     assert law_after == law_before
@@ -247,6 +266,7 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
         + MARKETS_UNCHANGED
         + SEQUENCES_UNCHANGED
         + FACTS_UNCHANGED
+        + OFFERS_CAMPAIGNS_UNCHANGED
     )
 
 
@@ -303,10 +323,11 @@ def test_a_stored_segment_not_in_the_file_is_left_as_it_is(
         + MARKETS_FIRST
         + SEQUENCES_FIRST
         + FACTS_FIRST
+        + OFFERS_CAMPAIGNS_FIRST
     )
     assert segment_rows(database)[1] == old_row  # law, old, ops by key
-    # 2 Segments, 2 Markets, 1 Sequence, 8 Approved Company Facts
-    assert len(event_rows(database)) == len(events_before) + 13
+    # 2 Segments, 2 Markets, 1 Sequence, 8 Approved Company Facts, 1 Offer, 4 Campaigns
+    assert len(event_rows(database)) == len(events_before) + 18
 
 
 @pytest.mark.parametrize(
@@ -640,6 +661,7 @@ def test_a_seed_file_with_a_bom_and_crlf_line_ends_is_read(database: Path, tmp_p
         + MARKETS_UNCHANGED
         + SEQUENCES_UNCHANGED
         + FACTS_UNCHANGED
+        + OFFERS_CAMPAIGNS_UNCHANGED
     )
 
 

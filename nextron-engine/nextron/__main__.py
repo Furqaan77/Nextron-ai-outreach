@@ -17,13 +17,16 @@ Commands:
   stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
   invalid).
 - ``seed sync [--env {dev,test,prod}]``: load ``seed/segments.yaml``, ``seed/markets.yaml``,
-  ``seed/sequences.yaml`` and ``seed/company_facts.yaml`` into the database in one transaction:
-  create each new Segment, Market, Sequence and Approved Company Fact, give each changed one a
-  new version, and leave a stored one the file no longer lists as it is (a fact the Operator
-  edited or retracted on the facts page keeps the Operator's version: a changed seed entry is
-  reported as a conflict); print ``segments: <n> changed, <m> unchanged`` and a line per
-  Segment created, changed or not in the file, then the same for ``markets``, ``sequences`` and
-  ``company_facts`` (with ``, <c> conflict(s)`` and a line per conflict). ``--env`` syncs that
+  ``seed/sequences.yaml``, ``seed/company_facts.yaml``, ``seed/offers.yaml`` and
+  ``seed/campaigns.yaml`` into the database in one transaction: create each new Segment, Market,
+  Sequence, Approved Company Fact, Offer and Campaign, give each changed one a new version, and
+  leave a stored one the file no longer lists as it is (a fact the Operator edited or retracted
+  on the facts page keeps the Operator's version: a changed seed entry is reported as a
+  conflict; a Campaign is created as a draft, and the seed never sets its status or its
+  legitimate-interests assessment); print ``segments: <n> changed, <m> unchanged`` and a line
+  per Segment created, changed or not in the file, then the same for ``markets``,
+  ``sequences``, ``company_facts`` (with ``, <c> conflict(s)`` and a line per conflict),
+  ``offers`` and ``campaigns``. ``--env`` syncs that
   environment instead of ``NEXTRON_ENV``. The database must exist and be migrated: start the
   engine once first (exit 0: synced; exit 1: a file is missing, unreadable or invalid (the
   message names the file and the line or field), the database is missing, behind, ahead of the
@@ -79,10 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     seed = commands.add_parser("seed", help="load the seed files into the database")
     seed_commands = seed.add_subparsers(dest="seed_command", required=True, metavar="subcommand")
     sync_help = (
-        "create or update the Segments, Markets, Sequences and Approved Company Facts from "
-        "seed/segments.yaml, seed/markets.yaml, seed/sequences.yaml and "
-        "seed/company_facts.yaml (never re-scores a Lead; a fact the Operator edited or "
-        "retracted keeps the Operator's version)"
+        "create or update the Segments, Markets, Sequences, Approved Company Facts, Offers and "
+        "Campaigns from seed/segments.yaml, seed/markets.yaml, seed/sequences.yaml, "
+        "seed/company_facts.yaml, seed/offers.yaml and seed/campaigns.yaml (never re-scores a "
+        "Lead; a fact the Operator edited or retracted keeps the Operator's version; a Campaign "
+        "starts as a draft, and only the Operator activates it and records its LIA)"
     )
     sync = seed_commands.add_parser("sync", help=sync_help, description=sync_help)
     sync.add_argument(

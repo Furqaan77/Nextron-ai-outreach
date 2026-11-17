@@ -39,11 +39,14 @@ from nextron.db.models.playbook import (
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
 from nextron.db.models.setup import (
+    CampaignRecord,
     MarketRecord,
+    OfferRecord,
     SegmentRecord,
     SequenceRecord,
     SettingRecord,
     StepBriefRecord,
+    VariantRecord,
 )
 
 __all__ = [
@@ -54,6 +57,7 @@ __all__ = [
     "AtsLinkRecord",
     "BackupRecord",
     "Base",
+    "CampaignRecord",
     "CompanyFactRecord",
     "ContactRecord",
     "CrawlRunRecord",
@@ -64,6 +68,7 @@ __all__ = [
     "LeadRecord",
     "MarketRecord",
     "NotificationRecord",
+    "OfferRecord",
     "PromptSnapshotRecord",
     "ProvenanceRecord",
     "RecoveryStateRecord",
@@ -76,6 +81,7 @@ __all__ = [
     "StepBriefRecord",
     "Ulid",
     "UtcDateTime",
+    "VariantRecord",
     "crawl",
     "events",
     "jobqueue",

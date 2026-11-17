@@ -1,0 +1,84 @@
+{#- The Campaigns section of the Settings page (nextron.web.campaigns_page): rendered inside
+    settings.html, and alone as the answer to POST /settings/campaigns/activate, /pause, /resume
+    and /lia, each swapped in for this whole panel. Stored text is escaped with |plain. -#}
+{%- macro described(form, name) -%}
+id="{{ form.prefix }}-{{ name }}" name="{{ name }}"
+{%- if form.errors.get(name) %} aria-describedby="{{ form.prefix }}-{{ name }}-error" aria-invalid="true"{% endif %}
+{%- endmacro %}
+{%- macro field_error(form, name) -%}
+{%- if form.errors.get(name) %}
+<p class="field-error" id="{{ form.prefix }}-{{ name }}-error">{{ form.errors.get(name)|plain }}</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro lia_fields(form) %}
+<div class="field">
+<label for="{{ form.prefix }}-lia_ref">Legitimate-interests assessment reference</label>
+<input type="text" {{ described(form, "lia_ref") }} value="{{ form.values.get('lia_ref', '')|plain }}">
+{{- field_error(form, "lia_ref") }}
+</div>
+<div class="field">
+<label for="{{ form.prefix }}-lia_date">Assessment date</label>
+<input type="date" {{ described(form, "lia_date") }} value="{{ form.values.get('lia_date', '')|plain }}">
+<p class="hint">The date of the assessment; not in the future.</p>
+{{- field_error(form, "lia_date") }}
+</div>
+{%- endmacro -%}
+{%- set panel = campaigns_panel -%}
+<section id="campaigns-panel" class="campaigns" aria-labelledby="campaigns-heading">
+<h2 id="campaigns-heading">Campaigns</h2>
+{%- if panel.notice %}
+<p class="notice" role="status">{{ panel.notice|plain }}</p>
+{%- endif %}
+{%- if panel.alert %}
+<p class="notice notice-refused" role="alert">{{ panel.alert|plain }}</p>
+{%- endif %}
+{%- if not panel.campaigns and not panel.unavailable %}
+<p>No Campaigns yet. Run <code>nextron seed sync</code> to load them.</p>
+{%- endif %}
+{%- for campaign in panel.campaigns %}
+<section class="campaign" aria-labelledby="campaign-{{ campaign.id }}-heading">
+<h3 id="campaign-{{ campaign.id }}-heading">{{ campaign.name|plain }}</h3>
+<dl class="campaign-details">
+<dt>Status</dt><dd>{{ campaign.status|plain }}</dd>
+<dt>Segment</dt><dd>{{ campaign.segment|plain }}</dd>
+<dt>Market</dt><dd>{{ campaign.market|plain }}</dd>
+<dt>Offer</dt><dd>{{ campaign.offer|plain }}</dd>
+<dt>Sequence</dt><dd>{{ campaign.sequence|plain }}</dd>
+<dt>Variants</dt><dd>{{ campaign.variants|plain }}</dd>
+</dl>
+{%- if campaign.lia_text %}
+<p class="campaign-lia">{{ campaign.lia_text|plain }}</p>
+{%- endif %}
+{%- if campaign.action == "activate" %}
+<form method="post" hx-post="/settings/campaigns/activate" hx-target="#campaigns-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="campaign" value="{{ campaign.id }}">
+{%- if campaign.activate_lia %}
+{{- lia_fields(campaign.activate_lia) }}
+{%- endif %}
+<button type="submit" aria-label="Activate {{ campaign.name|plain }}">Activate</button>
+</form>
+{%- elif campaign.action == "pause" %}
+<form method="post" hx-post="/settings/campaigns/pause" hx-target="#campaigns-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="campaign" value="{{ campaign.id }}">
+<button type="submit" class="secondary" aria-label="Pause {{ campaign.name|plain }}">Pause</button>
+</form>
+{%- elif campaign.action == "resume" %}
+<form method="post" hx-post="/settings/campaigns/resume" hx-target="#campaigns-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="campaign" value="{{ campaign.id }}">
+<button type="submit" aria-label="Resume {{ campaign.name|plain }}">Resume</button>
+</form>
+{%- endif %}
+{%- if campaign.save_lia %}
+<form method="post" hx-post="/settings/campaigns/lia" hx-target="#campaigns-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="campaign" value="{{ campaign.id }}">
+{{- lia_fields(campaign.save_lia) }}
+<button type="submit" class="secondary" aria-label="Save the LIA of {{ campaign.name|plain }}">Save the LIA</button>
+</form>
+{%- endif %}
+</section>
+{%- endfor %}
+</section>

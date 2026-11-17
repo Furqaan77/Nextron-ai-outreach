@@ -151,6 +151,10 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/static/{name}",
         "/settings",
         "/settings",
+        "/settings/campaigns/activate",
+        "/settings/campaigns/pause",
+        "/settings/campaigns/resume",
+        "/settings/campaigns/lia",
         "/facts",
         "/facts/add",
         "/facts/edit",
@@ -297,6 +301,10 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         assert route in str(caught.value)
     for route in (
         "POST /settings",
+        "POST /settings/campaigns/activate",
+        "POST /settings/campaigns/pause",
+        "POST /settings/campaigns/resume",
+        "POST /settings/campaigns/lia",
         "POST /credentials/save",
         "POST /credentials/remove",
         "POST /credentials/google/client",
@@ -484,6 +492,10 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
     for route in (
         "POST /settings",
+        "POST /settings/campaigns/activate",
+        "POST /settings/campaigns/pause",
+        "POST /settings/campaigns/resume",
+        "POST /settings/campaigns/lia",
         "POST /credentials/save",
         "POST /credentials/remove",
         "POST /credentials/google/client",
@@ -584,6 +596,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
 
     assert templates == [
         "base.html",
+        "campaigns_panel.html",
         "credential_row.html",
         "credentials.html",
         "facts.html",

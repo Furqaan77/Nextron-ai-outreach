@@ -178,6 +178,41 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "lia_date": PiiClass.NONE,
         "basis_recorded_at": PiiClass.NONE,
     },
+    # Story 4.2. Offers, Campaigns and Variants are configuration; the LIA reference names the
+    # Operator's own assessment record, never a person.
+    "offers": {
+        "id": PiiClass.NONE,
+        "key": PiiClass.NONE,
+        "name": PiiClass.NONE,
+        "ladder": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
+    "campaigns": {
+        "id": PiiClass.NONE,
+        "key": PiiClass.NONE,
+        "name": PiiClass.NONE,
+        "segment_id": PiiClass.NONE,
+        "market_id": PiiClass.NONE,
+        "offer_id": PiiClass.NONE,
+        "sequence_id": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "lia_ref": PiiClass.NONE,
+        "lia_date": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
+    "variants": {
+        "id": PiiClass.NONE,
+        "campaign_id": PiiClass.NONE,
+        "name": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "step_angles": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Story 4.3. Approved Company Facts are claims about Nextron, its work, its Offer and public
     # regulation, never about a person.
     "company_facts": {

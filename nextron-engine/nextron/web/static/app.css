@@ -650,3 +650,45 @@ button.secondary {
   margin: 0;
   overflow-wrap: anywhere;
 }
+
+/* The Settings page's Campaigns section: one bordered section per Campaign, its details as a
+   definition list, then the form its status offers and, for a UK Campaign, its LIA. */
+.campaigns {
+  margin: 2rem 0 0;
+}
+
+.campaign {
+  max-width: 48rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.campaign h3 {
+  margin: 0 0 0.5rem;
+}
+
+.campaign-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.campaign-details dt {
+  font-weight: 600;
+}
+
+.campaign-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.campaign-lia {
+  margin: 0 0 0.75rem;
+}
+
+.campaign form {
+  margin: 0 0 0.75rem;
+}

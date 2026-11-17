@@ -178,6 +178,37 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "basis_recorded_at",
         ),
     },
+    "offers": {
+        "setup": ("id", "key", "name", "ladder", "version", "created_at", "updated_at"),
+    },
+    "campaigns": {
+        "setup": (
+            "id",
+            "key",
+            "name",
+            "segment_id",
+            "market_id",
+            "offer_id",
+            "sequence_id",
+            "status",
+            "lia_ref",
+            "lia_date",
+            "version",
+            "created_at",
+            "updated_at",
+        ),
+    },
+    "variants": {
+        "setup": (
+            "id",
+            "campaign_id",
+            "name",
+            "status",
+            "step_angles",
+            "created_at",
+            "updated_at",
+        ),
+    },
     "company_facts": {
         "playbook": (
             "id",
