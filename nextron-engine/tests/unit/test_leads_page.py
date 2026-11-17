@@ -29,6 +29,7 @@ from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource
 from nextron.domain.leads import LeadIdentity, LeadSource
+from nextron.domain.markets import validate_markets
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import validate_segments
 from nextron.web import leads_page
@@ -41,6 +42,7 @@ from tests.fakes.clock import FrozenClock
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
+SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME
 ORIGIN = "Law Society directory, Manchester"
 UNKNOWN = "01KA0000000000000000000000"  # a ULID no Lead has
 VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"})
@@ -570,6 +572,9 @@ def import_csv(world: World, *lines: str) -> None:
 
 
 def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> None:
+    markets = validate_markets(seed_yaml.parse(SHIPPED_MARKETS.read_text(encoding="utf-8")))
+    with world.units.open():  # Story 3.2's import blocks a row outside the enabled Markets
+        Setup(world.clock).sync_markets(markets)
     import_csv(
         world,
         "Organization name,Website,Country,Contact name,Role,Email,LinkedIn URL",
