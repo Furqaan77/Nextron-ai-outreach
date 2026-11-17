@@ -16,6 +16,7 @@ import sys
 import types
 import typing
 import urllib.request
+import webbrowser
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
@@ -23,6 +24,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 import pytest
 from keyring.backends.Windows import WinVaultKeyring
 
+import nextron.adapters.google_oauth as google_oauth_adapter
 import nextron.ports
 from nextron import main
 from nextron.adapters.secrets import KeyringSecrets
@@ -37,6 +39,7 @@ from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 from tests.live_guard import (
     ADAPTER_PACKAGES,
+    BROWSER_CALLS,
     CREDENTIAL_MANAGER_CALLS,
     LIVE_CONSTRUCTORS,
     Guarded,
@@ -129,7 +132,10 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
 
     assert {port.__name__ for port in protocols} == {
         "AlertPort",
+        "ClientFilePort",
         "Clock",
+        "ConsentListener",
+        "GoogleOAuthPort",
         "MailPort",
         "SecretsPort",
     }
@@ -271,6 +277,27 @@ def test_credential_manager_cant_be_called_even_on_a_directly_built_backend(
         getattr(backend, method)(*arguments)  # its calls stay refused
 
 
+def test_the_google_http_client_cant_be_built() -> None:
+    assert ("nextron.adapters.google_oauth", "default_http_client") in LIVE_CONSTRUCTORS
+    with pytest.raises(LiveAdapterInTests):
+        google_oauth_adapter.default_http_client()
+    client = google_oauth_adapter.GoogleOAuthClient()  # lazy: building it reaches nothing
+    with pytest.raises(LiveAdapterInTests):
+        client.revoke("token")
+
+
+@pytest.mark.parametrize("name", BROWSER_CALLS)
+def test_no_test_can_open_the_default_browser(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert set(BROWSER_CALLS) == {"open", "open_new", "open_new_tab"}
+
+    with pytest.raises(LiveAdapterInTests, match="default browser"):
+        getattr(webbrowser, name)("http://127.0.0.1:1/")
+    with pytest.raises(LookupError):
+        allow_live_constructor(monkeypatch, "webbrowser", name)
+    with pytest.raises(LiveAdapterInTests, match="default browser"):
+        main.open_in_browser("http://127.0.0.1:1/")  # it looks webbrowser.open up when called
+
+
 def test_only_guarded_constructors_can_be_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(LookupError):
         allow_live_constructor(monkeypatch, "nextron.adapters.clock", "SystemClock")
@@ -368,7 +395,7 @@ def classification_problems(
 def test_every_adapter_package_is_classified_once() -> None:
     packages = adapter_packages()
 
-    assert packages == {"ai", "clock", "secrets", "sink"}
+    assert packages == {"ai", "clock", "google_oauth", "secrets", "sink"}
     assert classification_problems(packages, ADAPTER_PACKAGES, LIVE_CONSTRUCTORS) == []
 
 
@@ -382,13 +409,14 @@ def test_the_ai_package_is_not_built_yet_and_defines_nothing() -> None:
 
 
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
-    for name in ("ai", "clock", "secrets", "sink", "telegram"):
+    for name in ("ai", "clock", "google_oauth", "secrets", "sink", "telegram"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "__init__.py").write_text("")
     (tmp_path / "ai" / "gateway.py").write_text("")
     modules = {
         "nextron.adapters.ai": [probe_module("nextron.adapters.ai", "route = 'haiku'")],
         "nextron.adapters.clock": package_modules("nextron.adapters.clock"),
+        "nextron.adapters.google_oauth": package_modules("nextron.adapters.google_oauth"),
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),
         "nextron.adapters.telegram": [probe_module("nextron.adapters.telegram", "x = 1")],

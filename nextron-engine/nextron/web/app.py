@@ -20,11 +20,19 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
 - ``GET /settings`` (``settings_page``) and ``POST /settings`` (``settings_save``): the Settings
   page and its save, both ``@personal_data(True)``; see ``nextron.web.settings_page``. The POST
   saves through ``setup`` (``Setup.save``) in its own unit of work.
-- ``GET /credentials`` (``credentials_page``), ``POST /credentials/save`` (``credential_save``)
+- ``GET /credentials`` (``credentials_page``, ``@personal_data(True)``, because its Google
+  section shows each grant's account address), ``POST /credentials/save`` (``credential_save``)
   and ``POST /credentials/remove`` (``credential_remove``): the write-only Credentials page and
-  its per-row save and two-step remove, all ``@personal_data(False)``; see
+  its per-row save and two-step remove, the POSTs ``@personal_data(False)``; see
   ``nextron.web.credentials_page``. They go through ``credentials`` (``Credentials``), which
   touches no database, so the POSTs open no unit of work.
+- ``POST /credentials/google/client`` (``google_client_import``), ``POST
+  /credentials/google/grant`` (``google_grant_start``), ``GET /credentials/google/grant/{grant}``
+  (``google_grant_row``) and ``POST /credentials/google/remove`` (``google_grant_remove``): the
+  Google section's client import, Grant, polled row and two-step remove; see
+  ``nextron.web.google_page``. They go through ``google`` (``GoogleAccess``), which touches no
+  database. Only ``google_grant_start`` starts a consent flow; Google's redirect is served by
+  the flow's own listener, never by a dashboard route.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -58,11 +66,19 @@ from starlette.routing import BaseRoute
 
 from nextron.app.ops.api import DashboardEntry
 from nextron.app.queries import setup as setup_queries
-from nextron.app.setup.api import Credentials, CredentialStoreFailed, Setup
+from nextron.app.setup.api import (
+    Credentials,
+    CredentialStoreFailed,
+    GoogleAccess,
+    GrantStatus,
+    Setup,
+)
 from nextron.domain.credentials import InvalidCredentialValue
+from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
+from nextron.web import google_page as google_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
 from nextron.web.forms import FormFields, MalformedForm, form_fields, malformed_form
@@ -146,14 +162,15 @@ def create_app(
     entry: DashboardEntry,
     setup: Setup,
     credentials: Credentials,
+    google: GoogleAccess,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
-    ``units.open()``. ``setup`` stores the settings, and ``credentials`` the external
-    credentials (in Credential Manager, not the database). ``monotonic`` is injectable so tests
-    control the uptime.
+    ``units.open()``. ``setup`` stores the settings, ``credentials`` the external credentials
+    and ``google`` the Google client and grants (both in Credential Manager, not the database).
+    ``monotonic`` is injectable so tests control the uptime.
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()
@@ -255,10 +272,18 @@ def create_app(
         )
 
     @app.get("/credentials", name="credentials_page")
-    @personal_data(False)
+    @personal_data(True)  # the Google section shows each grant's account address
     def credentials_page(request: Request) -> HTMLResponse:
         rows = credential_rows.page_rows(credentials.statuses())
-        return page(request, credential_rows.PAGE_TEMPLATE, rows=rows, env=env)
+        client = google.client_status()
+        return page(
+            request,
+            credential_rows.PAGE_TEMPLATE,
+            rows=rows,
+            env=env,
+            client=google_rows.client_row(client),
+            google_rows=google_rows.grant_rows(google.grant_statuses(), client),
+        )
 
     @app.post("/credentials/save", name="credential_save")
     @personal_data(False)
@@ -296,6 +321,80 @@ def create_app(
         return row_answer(
             request, credential_rows.credential_row(status, notice=credential_rows.removed())
         )
+
+    def client_answer(request: Request, row: google_rows.ClientRow) -> HTMLResponse:
+        return page(request, google_rows.CLIENT_ROW_TEMPLATE, client=row)
+
+    def client_refused(request: Request, notice: credential_rows.Notice) -> HTMLResponse:
+        # 200, so HTMX swaps the row in; it shows what Credential Manager holds now
+        return client_answer(request, google_rows.client_row(google.client_status(), notice=notice))
+
+    def grant_answer(
+        request: Request,
+        grant: str,
+        *,
+        status: GrantStatus | None = None,
+        notice: credential_rows.Notice | None = None,
+        confirming: bool = False,
+    ) -> HTMLResponse:
+        current = status if status is not None else google.grant_status(grant)
+        row = google_rows.grant_row(
+            current, google.client_status(), notice=notice, confirming=confirming
+        )
+        return page(request, google_rows.GRANT_ROW_TEMPLATE, row=row)
+
+    @app.post("/credentials/google/client", name="google_client_import")
+    @personal_data(False)
+    def google_client_import(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        path_text = google_rows.submitted_path(fields)
+        try:
+            result = google.import_client(path_text)
+        except InvalidClientFile as refused:  # nothing stored; the file is where it was
+            return client_refused(request, google_rows.not_imported(refused.reason))
+        except CredentialStoreFailed:
+            return client_refused(request, google_rows.store_failed())
+        notice = google_rows.imported(result.file_deleted)
+        return client_answer(
+            request, google_rows.client_row(result.status, notice=notice, reload_hint=True)
+        )
+
+    @app.post("/credentials/google/grant", name="google_grant_start")
+    @personal_data(True)
+    def google_grant_start(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        grant = google_rows.submitted_grant(fields)
+        try:
+            status = google.start_grant(grant)  # the only call that starts a consent flow
+        except ClientNotImported:
+            return grant_answer(request, grant, notice=google_rows.import_first())
+        except CredentialStoreFailed:
+            return grant_answer(request, grant, notice=google_rows.store_failed())
+        return grant_answer(request, grant, status=status)
+
+    @app.get("/credentials/google/grant/{grant}", name="google_grant_row")
+    @personal_data(True)
+    def google_grant_row(request: Request, grant: str) -> Response:
+        if not google_rows.is_grant(grant):
+            return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
+        return grant_answer(request, grant)
+
+    @app.post("/credentials/google/remove", name="google_grant_remove")
+    @personal_data(True)
+    def google_grant_remove(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        grant, confirmed = google_rows.submitted_remove(fields)
+        if not confirmed:  # the first click only asks; nothing is revoked or deleted
+            return grant_answer(request, grant, confirming=True)
+        try:
+            removal = google.remove_grant(grant)
+        except CredentialStoreFailed:
+            return grant_answer(request, grant, notice=google_rows.store_failed())
+        notice = google_rows.removed_notice(removal.revocation)
+        return grant_answer(request, grant, status=removal.status, notice=notice)
 
     require_declared(app)
     require_route_rules(app)

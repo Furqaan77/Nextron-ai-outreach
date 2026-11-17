@@ -12,4 +12,9 @@ that reaches its external system (such as ``nextron.adapters.secrets.default_bac
 test can build it, and ``tests/contracts/test_test_isolation.py`` fails until every adapter
 package is classified. A ``mail`` or ``alert`` adapter is built only through
 ``nextron.main.ROLE_ADAPTERS``, which wraps it in the dev and test sink (``adapters.sink``).
+
+The adapters so far: ``clock`` (the system clock), ``secrets`` (Windows Credential Manager;
+live constructor ``default_backend``), ``sink`` (the dev and test sink) and ``google_oauth``
+(Google's OAuth endpoints over ``httpx2``, the one-shot consent listener on ``127.0.0.1`` and the
+downloaded client file; live constructor ``default_http_client``). ``ai`` is reserved.
 """

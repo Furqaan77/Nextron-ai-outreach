@@ -150,6 +150,10 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/credentials",
         "/credentials/save",
         "/credentials/remove",
+        "/credentials/google/client",
+        "/credentials/google/grant",
+        "/credentials/google/grant/{grant}",
+        "/credentials/google/remove",
     ]
     assert async_route_handlers(app) == []
 
@@ -261,9 +265,17 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /static/{name}",
         "GET /settings",
         "GET /credentials",
+        "GET /credentials/google/grant/{grant}",
     ):
         assert route in str(caught.value)
-    for route in ("POST /settings", "POST /credentials/save", "POST /credentials/remove"):
+    for route in (
+        "POST /settings",
+        "POST /credentials/save",
+        "POST /credentials/remove",
+        "POST /credentials/google/client",
+        "POST /credentials/google/grant",
+        "POST /credentials/google/remove",
+    ):
         assert route in str(caught.value)
 
 
@@ -429,9 +441,17 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /static/{name}",
         "GET /settings",
         "GET /credentials",
+        "GET /credentials/google/grant/{grant}",
     ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
-    for route in ("POST /settings", "POST /credentials/save", "POST /credentials/remove"):
+    for route in (
+        "POST /settings",
+        "POST /credentials/save",
+        "POST /credentials/remove",
+        "POST /credentials/google/client",
+        "POST /credentials/google/grant",
+        "POST /credentials/google/remove",
+    ):
         assert f"{route}: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
 
@@ -523,6 +543,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "base.html",
         "credential_row.html",
         "credentials.html",
+        "google_client_row.html",
+        "google_grant_row.html",
         "home.html",
         "locked.html",
         "macros.html",

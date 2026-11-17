@@ -331,15 +331,23 @@ Secrets live only in Windows Credential Manager, through `SecretsPort`
 `prod` entry. A value holds at most 1,280 characters; a longer one is refused with "secret
 exceeds 1,280 characters". The adapter always uses Credential Manager (`WinVaultKeyring`),
 whatever `PYTHON_KEYRING_BACKEND` or a keyringrc file says, and keeps entries on this machine
-(they don't roam with a roaming profile). To inspect or remove an entry by hand, open
-Credential Manager > Windows Credentials: keyring keeps one secret at the target
-`nextron-engine/<env>` and every other one at `<name>@nextron-engine/<env>` (for example
-`session/open_code@nextron-engine/dev`). Because keyring moves entries between that shared
-target and the `<name>@...` targets on every write and delete, two calls at once could lose or
-delete each other's entry; the adapter therefore makes every Credential Manager call, from every
-part of the engine, one at a time under one lock. That lock covers one process only: `nextron
-open` writes its one-time code from its own process. Tests use the in-memory fake
-`tests/fakes/secrets.py` and never touch Credential Manager.
+(they don't roam with a roaming profile).
+
+**Each secret has its own Credential Manager target**, `nextron-engine/<env>/<name>`, with the
+secret's name as the user name: for example `nextron-engine/dev/session/open_code` or
+`nextron-engine/prod/google/postmaster`. To inspect or remove an entry by hand, open Credential
+Manager > Windows Credentials. Keyring moves a target's previous value to
+`<name>@<target>` when it overwrites it; the adapter deletes that copy right after each write.
+Because no two secrets ever share a target, two writers of different secrets (the engine and
+`nextron open`, or the engine's own background threads) can't lose or delete each other's
+entry. Within the engine every Credential Manager call still runs one at a time under one lock.
+
+**Entries from before Story 1.9 move on their own.** Earlier versions kept every secret under
+one shared target, `nextron-engine/<env>`, or `<name>@nextron-engine/<env>`. The first time the
+engine reads a secret that isn't at its own target yet, it reads the old entry, writes it to the
+new target, deletes the old one and goes on; each secret moves once, when it is first needed,
+so starting the engine touches nothing. Deleting a secret removes it from both layouts. Tests
+use the in-memory fake `tests/fakes/secrets.py` and never touch Credential Manager.
 
 ### Credentials
 
@@ -422,6 +430,56 @@ not set")` when there is none. `tests/app/test_credential_secrecy.py` saves a pl
 the page, has a fake adapter send it as a bearer header to a failing transport, sends refused
 requests that carry it, removes it, and then finds it in no HTTP response, log record (checked
 before redaction), database column or file.
+
+#### Google
+
+Below the credential rows, the **Google** section holds the Google Desktop client and two
+grants: `internal_notify` (scope `gmail.send`, for internal notification email) and
+`postmaster` (scope `postmaster.readonly`, for Postmaster Tools spam rates). Refresh tokens live
+in Credential Manager; access tokens stay in the engine's memory and are never written anywhere.
+
+1. **Import the Desktop client once.** In Google Cloud Console create an OAuth client of type
+   "Desktop app" and download its JSON. In File Explorer select the file, press Ctrl+Shift+C
+   ("Copy as path"), paste the path into the client row and press Import. The path must be a
+   full path on a drive of this PC (`C:\...`, not a network share), to a regular file (not a
+   shortcut or link) ending in `.json`, of at most 64 KiB. Only the client ID and secret are
+   stored, as `google/client_config`, with the import time in `meta/google/client_config`; the
+   file is then deleted. If it can't be deleted the row says so: delete it yourself. A file that
+   isn't a Desktop app client (a Web application client, say) is refused, left where it is and
+   not stored. Importing a different client ends the existing grants: grant them again.
+2. **Grant.** Press Grant on a row. The engine opens a one-time listener on `127.0.0.1` on a
+   free port and Google's consent page in your default browser (PKCE S256, a random `state`,
+   `prompt=select_account consent`). Choose the account and allow access within 5 minutes; the
+   row says "Waiting for consent in your browser until HH:MM:SS UTC." and refreshes itself every
+   2 seconds. Google sends the browser back to the listener, never to the dashboard; the tab then
+   says you can close it. Only that POST starts a flow; no GET ever does. The refresh token is
+   stored as `google/<grant>` and the account and time as `meta/google/<grant>`; the row says
+   "Granted for <account>, YYYY-MM-DD HH:MM UTC".
+3. **What is refused.** A wrong or missing `state`, the 5-minute timeout, a declined consent, an
+   unticked permission, a missing refresh token, or an ID token that isn't for this client store
+   nothing, and the row reads "Consent failed: <why>." `internal_notify` must be an
+   `@nextronai.com` account ("internal_notify must be a nextronai.com account"). **Outside
+   `prod`**, the account must also be on the "Dev and test allowlist" setting (Settings, Engine),
+   so add your own address there before granting in `dev` or `test`. A refused token is revoked
+   at Google.
+4. **Grant again, or remove.** Granting again replaces the stored token and revokes the old
+   one, unless a stored grant (the new one included) uses the same Google account; removing
+   (two steps, like a credential) revokes the token and deletes both entries, even when Google
+   can't be reached. Google's revoke ends Nextron's whole grant for that Google account, so a
+   token is not revoked while a stored grant uses the same account; the row then says "It was
+   not revoked, because a stored grant uses the same Google account, and revoking it would end
+   that grant too." If revoking fails, the row says to remove Nextron at
+   myaccount.google.com/permissions by hand.
+5. **Needs re-consent.** When Google refuses a stored grant on refresh (`invalid_grant`: the
+   access was revoked), the row reads "Needs re-consent: Google refused
+   the stored grant on ... UTC. Grant it again." and the engine stops calling Google for it
+   until you grant it again.
+
+Logs carry only the grant, a reason and an error code (`google_client_imported`,
+`google_consent_started`, `google_consent_failed`, `google_grant_stored`,
+`google_token_revoked`, `google_grant_needs_reconsent` and so on), never a token, the client
+secret, the code, the state, a URL, the path or the account. `tests/app/test_google_secrecy.py`
+plants each of those and finds it in no response, log record, error, database column or file.
 
 ## Dev and test sink
 
@@ -611,8 +669,13 @@ uv run lint-imports         # the import contracts on their own
 - `tests/contracts`: import contracts, the source tree, pins, the lock file and vendored assets.
 - `tests/fakes`: one in-memory fake per port, listed in `tests.fakes.PORT_FAKES` (`FrozenClock`
   for `Clock`, `InMemorySecrets` for `SecretsPort`, `InMemoryAlert` for `AlertPort`,
-  `InMemoryMail` for `MailPort`), plus `FakeUnits`, which stands in for the unit-of-work factory
-  in dashboard tests (`tests/dashboard.py`) and records each unit opened.
+  `InMemoryMail` for `MailPort`, and in `tests/fakes/google_oauth.py` `FakeGoogleOAuth` for
+  `GoogleOAuthPort`, `FakeConsentListener` for `ConsentListener` and `FakeClientFiles` for
+  `ClientFilePort`, with `id_token(...)`, an unsigned ID token builder), plus `FakeUnits`, which
+  stands in for the unit-of-work factory in dashboard tests (`tests/dashboard.py`) and records
+  each unit opened. `tests/dashboard.py`'s `Dashboard` builds `GoogleAccess` on these fakes with
+  a recording browser and an `allowlist` field, and keeps each consent flow's job in `jobs`
+  until a test calls `run_jobs()`.
   `tests/contracts/test_test_isolation.py` fails when a port has no fake there, or a fake
   doesn't match its port.
 - `tests/fixtures`: fixture files, such as the hostile-text page
@@ -625,14 +688,20 @@ uv run lint-imports         # the import contracts on their own
   `%LOCALAPPDATA%`, so the data dir is `<temp>\Nextron\test`. A test of the unset case calls
   `monkeypatch.delenv("NEXTRON_ENV")`.
 - **No live adapter can be built.** `nextron.adapters.secrets.default_backend` (Credential
-  Manager) and the `build` of every `ROLE_ADAPTERS` entry raise `LiveAdapterInTests`, so
-  `KeyringSecrets("test")`, or `main.build_app` without injected secrets, fails. Inject a fake
+  Manager), `nextron.adapters.google_oauth.default_http_client` (Google's OAuth endpoints, built
+  on a `GoogleOAuthClient`'s first call) and the `build` of every `ROLE_ADAPTERS` entry raise
+  `LiveAdapterInTests`, so `KeyringSecrets("test")`, or `main.build_app` without injected
+  secrets, fails. Inject a fake
   (or patch `main.KeyringSecrets`). A test that has neutralised what a constructor reaches may
   restore it with `allow_live_constructor(monkeypatch, module, name)`.
 - **Credential Manager can't be called.** `WinVaultKeyring`'s `get_password`, `set_password`,
   `delete_password` and `get_credential` raise `LiveAdapterInTests` too, so a `WinVaultKeyring`
   built directly, or `keyring.get_password(...)`, never reaches it. `allow_live_constructor`
   never restores these.
+- **No test opens a browser.** `webbrowser.open`, `open_new` and `open_new_tab` raise
+  `LiveAdapterInTests`, and `allow_live_constructor` never restores them; `main.open_in_browser`
+  looks `webbrowser.open` up when it is called, so it is refused too. Inject a recording browser
+  (`browser=` on `open_dashboard` and `build_app`).
 - **No test reaches the network.** These raise `NetworkInTests` for anything but a loopback
   address or `localhost`: the lookups `socket.getaddrinfo`, `gethostbyname`,
   `gethostbyname_ex`, `gethostbyaddr` and `getnameinfo`; `socket.socket.connect`, `connect_ex`,

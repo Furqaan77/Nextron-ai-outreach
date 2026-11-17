@@ -1,0 +1,21 @@
+{#- The Google Desktop client's row (nextron.web.google_page): rendered inside credentials.html,
+    and alone as the answer to POST /credentials/google/client, which HTMX swaps in for this
+    row. It never holds the client secret or the path. -#}
+<div class="credential google-client" id="google-client">
+<h3>Google Desktop client</h3>
+<p class="credential-need">needed before any Google grant</p>
+<p class="credential-state">{{ client.state }}</p>
+{%- if client.notice %}
+<p class="notice{% if client.notice.role == 'alert' %} notice-refused{% endif %}" role="{{ client.notice.role }}">{{ client.notice.text }}</p>
+{%- endif %}
+{%- if client.reload_hint %}
+<p class="hint">Reload this page to grant Google access.</p>
+{%- endif %}
+<form method="post" hx-post="/credentials/google/client" hx-target="#google-client" hx-swap="outerHTML">
+{{ csrf_field() }}
+<label for="google-client-path">Path of the downloaded client_secret.json</label>
+<input type="text" id="google-client-path" name="path" autocomplete="off" spellcheck="false" aria-describedby="google-client-hint">
+<p class="hint" id="google-client-hint">In File Explorer, select the file, press Ctrl+Shift+C ("Copy as path") and paste it here. It must be a Desktop app client. Only its client ID and secret are stored, in Windows Credential Manager, and the file is deleted once they are. Importing a different client ends the existing grants: grant them again.</p>
+<button type="submit">Import</button>
+</form>
+</div>

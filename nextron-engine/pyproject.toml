@@ -278,8 +278,8 @@ forbidden_modules = ["fastapi", "starlette", "uvicorn"]
 allow_indirect_imports = true
 
 # Group 5. Sources are every package except nextron.adapters.ai: the non-adapter packages, then
-# each non-AI adapter subpackage by name (clock, secrets and sink so far). Add each new adapter
-# here; test_contract_coverage.py fails until you do.
+# each non-AI adapter subpackage by name (clock, google_oauth, secrets and sink so far). Add each
+# new adapter here; test_contract_coverage.py fails until you do.
 [[tool.importlinter.contracts]]
 id = "c5-anthropic-only-in-ai"
 name = "5 forbidden: anthropic only in adapters.ai"
@@ -298,6 +298,7 @@ source_modules = [
     "nextron.startup_checks",
     "nextron.web",
     "nextron.adapters.clock",
+    "nextron.adapters.google_oauth",
     "nextron.adapters.secrets",
     "nextron.adapters.sink",
 ]

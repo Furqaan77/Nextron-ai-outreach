@@ -3,9 +3,9 @@
 - **Every keyring name is valid.** Each credential's ``secret_name`` and ``meta_name`` passes
   ``is_secret_name``, so ``SecretsPort`` never refuses a declared credential.
 - **Names don't collide.** No two credentials share a ``secret_name`` (so none share a
-  ``meta_name``), and no ``secret_name`` starts with ``meta/`` (the companion time entries) or
-  ``session/`` (the dashboard's one-time code), so a credential can never overwrite another
-  entry.
+  ``meta_name``), and no ``secret_name`` starts with ``meta/`` (the companion time entries),
+  ``session/`` (the dashboard's one-time code), ``google/`` (the Google client and grants) or
+  ``gmail/`` (the Sending Inboxes, Epic 6), so a credential can never overwrite another entry.
 - **The registry is keyed by its own keys.** Each entry's mapping key is its ``Credential.key``,
   a ``CredentialKey`` member, and every member is declared.
 - **Keys are safe in markup.** Each key fullmatches ``KEY_PATTERN`` (``[a-z][a-z0-9_]{0,30}``),
@@ -20,7 +20,7 @@ from nextron.domain import credentials as registry
 from nextron.domain.credentials import KEY_PATTERN, Credential, CredentialKey
 from nextron.ports.secrets import is_secret_name
 
-RESERVED_PREFIXES: Final = ("meta/", "session/")
+RESERVED_PREFIXES: Final = ("meta/", "session/", "google/", "gmail/")
 LONG_NAME: Final = "extra/" + "x" * 200  # over MAX_SECRET_NAME_LENGTH
 
 

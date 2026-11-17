@@ -8,7 +8,9 @@ a real external system to raise ``LiveAdapterInTests``:
 
 - each ``(module, name)`` in ``LIVE_CONSTRUCTORS``, such as
   ``nextron.adapters.secrets.default_backend`` (Windows Credential Manager), so
-  ``KeyringSecrets("test")`` and ``main.build_app`` without injected secrets raise;
+  ``KeyringSecrets("test")`` and ``main.build_app`` without injected secrets raise, and
+  ``nextron.adapters.google_oauth.default_http_client`` (Google's OAuth endpoints), so a
+  ``GoogleOAuthClient()`` raises on its first call;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
 
@@ -24,6 +26,11 @@ adapter.
 directly, or ``keyring.get_password(...)`` through keyring's own backend choice, never reaches
 the real Credential Manager. ``allow_live_constructor`` never restores these: a test that
 restores ``default_backend`` gets a backend whose calls still raise.
+
+**The default browser.** It patches ``webbrowser.open``, ``open_new`` and ``open_new_tab``
+(``BROWSER_CALLS``) to raise ``LiveAdapterInTests``, so neither ``nextron open`` nor a Google
+consent flow can open a real browser; ``allow_live_constructor`` never restores them. Inject a
+recording browser instead.
 
 **Adapter packages.** ``ADAPTER_PACKAGES`` classifies every package under
 ``nextron/adapters`` exactly once: ``Guarded`` (its live constructors, each listed in
@@ -51,6 +58,7 @@ import importlib
 import ipaddress
 import socket
 import sys
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
@@ -64,6 +72,7 @@ ROLE_ADAPTER_MODULE: Final = "nextron.main"
 
 LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.secrets", "default_backend"),
+    ("nextron.adapters.google_oauth", "default_http_client"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -72,6 +81,8 @@ CREDENTIAL_MANAGER_CALLS: Final = (
     "delete_password",
     "get_credential",
 )
+# The webbrowser functions that open the real default browser; never restored.
+BROWSER_CALLS: Final = ("open", "open_new", "open_new_tab")
 
 
 class LiveAdapterInTests(RuntimeError):
@@ -103,6 +114,7 @@ class NotYetBuilt:
 
 ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "secrets": Guarded(("default_backend",)),
+    "google_oauth": Guarded(("default_http_client",)),
     "clock": NoExternalSystem("reads the system clock; reaches no external system"),
     "sink": NoExternalSystem(
         "writes JSON lines under the data dir and only calls the adapter it wraps"
@@ -151,6 +163,9 @@ def guard_live_constructors(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             WinVaultKeyring, method, _refusing(what, vars(WinVaultKeyring)[method])
         )
+    for name in BROWSER_CALLS:
+        what = f"default browser (webbrowser.{name})"
+        monkeypatch.setattr(webbrowser, name, _refusing(what, getattr(webbrowser, name)))
 
 
 def allow_live_constructor(monkeypatch: pytest.MonkeyPatch, module: str, name: str) -> None:

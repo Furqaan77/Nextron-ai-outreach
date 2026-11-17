@@ -1,14 +1,15 @@
 """The Credentials page (AD-12, FR-56, NFR-18, UX-DR27): one write-only row per credential.
 
-``create_app`` serves it; every route is ``@personal_data(False)`` and answers through ``page()``,
-which sends ``Cache-Control: no-store``. No route ever shows, echoes or logs a value, even a
-refused one.
+``create_app`` serves it; every route answers through ``page()``, which sends ``Cache-Control:
+no-store``. The two POSTs here are ``@personal_data(False)``; ``GET /credentials`` is
+``@personal_data(True)``, because its Google section (``nextron.web.google_page``) shows each
+grant's account address. No route ever shows, echoes or logs a value, even a refused one.
 
 - ``GET /credentials`` (``credentials_page``) renders ``credentials.html``, which extends
   ``base.html``: an introduction that names the environment the values are stored for and asks
   Mac to decline any browser offer to save or fill a password there, a link back to Settings,
   then ``credential_row.html`` once per credential, in registry order
-  (``nextron.domain.credentials``).
+  (``nextron.domain.credentials``), then the Google section.
 - ``POST /credentials/save`` (``credential_save``) takes exactly the fields ``credential`` and
   ``value``, each once (``csrf_token`` aside), with a declared ``credential``
   (``submitted_save``), and runs ``Credentials.save``. It answers with the row alone, which HTMX
@@ -143,7 +144,8 @@ def store_failed() -> Notice:
     return Notice(Role.ALERT, STORE_FAILED)
 
 
-def _single(fields: FormFields, name: str) -> str:
+def single_value(fields: FormFields, name: str) -> str:
+    """The one value of the field ``name``; raises ``MalformedForm`` when it is repeated."""
     values = fields[name]
     if len(values) != 1:
         raise MalformedForm(REPEATED_FIELD)
@@ -162,8 +164,8 @@ def submitted_save(fields: FormFields) -> tuple[str, str]:
     and ``credential`` is declared."""
     if set(fields) - {CSRF_FIELD} != {CREDENTIAL_FIELD, VALUE_FIELD}:
         raise MalformedForm(WRONG_FIELDS)
-    key = _single(fields, CREDENTIAL_FIELD)
-    value = _single(fields, VALUE_FIELD)
+    key = single_value(fields, CREDENTIAL_FIELD)
+    value = single_value(fields, VALUE_FIELD)
     return _declared_key(key), value
 
 
@@ -174,8 +176,8 @@ def submitted_remove(fields: FormFields) -> tuple[str, bool]:
     names = set(fields) - {CSRF_FIELD}
     if names not in ({CREDENTIAL_FIELD}, {CREDENTIAL_FIELD, CONFIRM_FIELD}):
         raise MalformedForm(WRONG_FIELDS)
-    key = _single(fields, CREDENTIAL_FIELD)
+    key = single_value(fields, CREDENTIAL_FIELD)
     confirmed = CONFIRM_FIELD in names
-    if confirmed and _single(fields, CONFIRM_FIELD) != CONFIRMED:
+    if confirmed and single_value(fields, CONFIRM_FIELD) != CONFIRMED:
         raise MalformedForm(WRONG_FIELDS)
     return _declared_key(key), confirmed

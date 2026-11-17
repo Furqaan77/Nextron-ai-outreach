@@ -1,0 +1,40 @@
+{#- One Google grant's row (nextron.web.google_page): rendered inside credentials.html, and alone
+    as the answer to POST /credentials/google/grant, POST /credentials/google/remove and
+    GET /credentials/google/grant/<grant>, which HTMX swaps in for this row. While a consent
+    flow waits, the row polls that GET every 2 seconds. It never holds a token. -#}
+<div class="credential google-grant" id="google-grant-{{ row.grant }}"{% if row.waiting %} hx-get="/credentials/google/grant/{{ row.grant }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<h3>{{ row.label }}</h3>
+<p class="credential-need">Google scope {{ row.scope }}</p>
+<p class="credential-state">{{ row.state }}</p>
+{%- if row.waiting %}
+<p class="notice google-waiting">{{ row.waiting }}</p>
+{%- endif %}
+{%- if row.notice %}
+<p class="notice{% if row.notice.role == 'alert' %} notice-refused{% endif %}" role="{{ row.notice.role }}">{{ row.notice.text }}</p>
+{%- endif %}
+{%- if row.confirming %}
+<p class="notice notice-refused" role="alert">Remove the {{ row.label }} grant? Nextron revokes it at Google unless another grant uses the same Google account.</p>
+<form class="credential-actions" method="post" hx-post="/credentials/google/remove" hx-target="#google-grant-{{ row.grant }}" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="grant" value="{{ row.grant }}">
+<input type="hidden" name="confirm" value="yes">
+<button type="submit">Yes, remove it</button>
+<a href="/credentials">Cancel</a>
+</form>
+{%- else %}
+{%- if row.can_grant %}
+<form class="credential-actions" method="post" hx-post="/credentials/google/grant" hx-target="#google-grant-{{ row.grant }}" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="grant" value="{{ row.grant }}">
+<button type="submit">{% if row.grant_again %}Grant again{% else %}Grant{% endif %}</button>
+</form>
+{%- endif %}
+{%- if row.removable %}
+<form class="credential-actions" method="post" hx-post="/credentials/google/remove" hx-target="#google-grant-{{ row.grant }}" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="grant" value="{{ row.grant }}">
+<button type="submit" class="secondary">Remove</button>
+</form>
+{%- endif %}
+{%- endif %}
+</div>

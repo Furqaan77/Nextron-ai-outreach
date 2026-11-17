@@ -174,7 +174,8 @@ button.secondary {
   border-radius: 4px;
 }
 
-.credential h2 {
+.credential h2,
+.credential h3 {
   margin: 0;
   font-size: 1.1rem;
 }
@@ -199,7 +200,8 @@ button.secondary {
   font-weight: 600;
 }
 
-.credential input[type="password"] {
+.credential input[type="password"],
+.credential input[type="text"] {
   box-sizing: border-box;
   width: 100%;
   margin: 0.25rem 0;
@@ -220,4 +222,19 @@ button.secondary {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem 1rem;
+}
+
+/* The Google section of the Credentials page: the client row and one row per grant, reusing
+   the credential row styles. A waiting grant row polls itself until the flow ends. */
+.google {
+  max-width: 48rem;
+  margin-top: 2rem;
+}
+
+.google > h2 {
+  font-size: 1.25rem;
+}
+
+.google-waiting {
+  font-weight: 600;
 }

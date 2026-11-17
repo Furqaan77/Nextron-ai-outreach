@@ -131,6 +131,11 @@ class Page(HTMLParser):
     def row_forms(self, key: str) -> list[Element]:
         return [form_ for form_ in self.forms if form_.row == key]
 
+    @property
+    def credential_forms(self) -> list[Element]:
+        """The forms of the credential rows; the Google section's forms aside."""
+        return [form_ for form_ in self.forms if form_.row is not None]
+
     def inside(self, form_: Element, tag: str) -> list[Element]:
         index = self.forms.index(form_)
         return [e for e in self.elements if e.form == index and e.tag == tag]
@@ -367,8 +372,12 @@ def test_every_form_posts_through_htmx_to_its_own_row_with_the_csrf_token(
     dashboard.credentials.save("telegram_bot", MARK)
     _, page = credentials_page(dashboard, session[0])
 
-    assert len(page.forms) == len(KEYS) + 1
-    for form_ in page.forms:
+    assert len(page.credential_forms) == len(KEYS) + 1
+    # every other form is the Google section's (tests/unit/test_google_page.py)
+    assert {
+        str(form_.attrs["hx-post"]) for form_ in page.forms if form_.row is None
+    } == {"/credentials/google/client"}
+    for form_ in page.credential_forms:
         key = form_.row
         assert key in KEYS
         assert {name: form_.attrs.get(name) for name in ("method", "hx-target", "hx-swap")} == {
@@ -671,7 +680,9 @@ def test_a_failing_read_shows_every_row_as_unknown(
     _, page = credentials_page(dashboard, session[0])
 
     assert [page.state(key) for key in KEYS] == [UNREADABLE] * len(KEYS)
-    assert [form_.attrs["hx-post"] for form_ in page.forms] == ["/credentials/save"] * len(KEYS)
+    assert [form_.attrs["hx-post"] for form_ in page.credential_forms] == [
+        "/credentials/save"
+    ] * len(KEYS)
 
 
 def test_a_failed_save_with_a_failing_read_shows_unknown(

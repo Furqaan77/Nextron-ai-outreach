@@ -46,10 +46,19 @@ any fails, and 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid. I
 creates nothing and starts no server.
 
 ``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
-Manager, service ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
-one-time code, and its ``Credentials``, which store the external credentials; its ``Setup``
-stores the settings; all three share one ``SystemClock``; and its handlers open their units of
-work through ``units``. Tests inject the secrets and the clock.
+Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
+one-time code, its ``Credentials``, which store the external credentials, and its
+``GoogleAccess``, which holds the Google client and grants; its ``Setup`` stores the settings;
+all of them share one ``SystemClock``; and its handlers open their units of work through
+``units``. Tests inject the secrets and the clock.
+
+**Google OAuth (AD-12, AD-14).** ``GoogleAccess`` gets ``GoogleOAuthClient()``, which builds its
+HTTP client only on its first call to Google; ``LoopbackListener``, the class, which builds one
+listener per consent flow; ``LocalClientFiles()``; the environment; ``browser``, which defaults
+to ``open_in_browser`` (``webbrowser.open``, looked up when it is called); and
+``functools.partial(read_sink_allowlist, units)``, read only outside ``prod``. Building the app
+therefore constructs no HTTP client, no listener and no browser. Tests inject ``google_oauth``
+and ``browser`` (or build ``GoogleAccess`` themselves with fakes).
 
 **Role adapters and the sink (AD-14).** Every adapter with the ``mail`` or ``alert`` role
 (``SinkRole``) is registered once in ``ROLE_ADAPTERS`` as a ``RoleAdapter(name, role,
@@ -103,11 +112,12 @@ from fastapi import FastAPI
 
 from nextron import __version__
 from nextron.adapters.clock import SystemClock
+from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.app.ops.api import DashboardEntry
 from nextron.app.queries import setup as setup_queries
-from nextron.app.setup.api import Credentials, Setup
+from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
@@ -119,6 +129,7 @@ from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mar
 from nextron.ports.alert import AlertPort
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
+from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.mail import MailPort
 from nextron.ports.secrets import SecretsPort
 from nextron.startup_checks import (
@@ -171,18 +182,38 @@ def build_entry(
     )
 
 
+def open_in_browser(url: str) -> bool:
+    """Open ``url`` in the default browser; whether it opened. ``webbrowser.open`` is looked up
+    now, not when this module was imported."""
+    return bool(webbrowser.open(url))
+
+
 def build_app(
     config: BootstrapConfig,
     *,
     units: Units,
     secrets: SecretsPort | None = None,
     clock: Clock | None = None,
+    google_oauth: GoogleOAuthPort | None = None,
+    browser: Browser | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
-    object, keyring unless injected, serves the entry code and the credentials; one clock, the
-    system clock unless injected, serves them and the settings."""
+    object, keyring unless injected, serves the entry code, the credentials and the Google
+    grants; one clock, the system clock unless injected, serves them and the settings. Google
+    is reached through ``google_oauth`` (``GoogleOAuthClient()`` unless injected) and the
+    consent page opens with ``browser`` (``open_in_browser`` unless injected)."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
+    google = GoogleAccess(
+        secrets,
+        clock,
+        oauth=google_oauth if google_oauth is not None else GoogleOAuthClient(),
+        listen=LoopbackListener,
+        files=LocalClientFiles(),
+        browser=browser if browser is not None else open_in_browser,
+        env=config.env,
+        allowlist=functools.partial(read_sink_allowlist, units),
+    )
     return create_app(
         env=config.env,
         version=__version__,
@@ -190,6 +221,7 @@ def build_app(
         entry=build_entry(config, secrets=secrets, clock=clock),
         setup=Setup(clock),
         credentials=Credentials(secrets, clock),
+        google=google,
         units=units,
     )
 
@@ -472,12 +504,13 @@ def open_dashboard(
     secrets: SecretsPort | None = None,
     clock: Clock | None = None,
     engine_running: EngineProbe = engine_is_running,
-    browser: Browser = webbrowser.open,
+    browser: Browser | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
-    """Open the dashboard in the default browser through a one-time code; return the exit
-    code. Never prints or logs the code."""
+    """Open the dashboard in the default browser (``browser``, ``open_in_browser`` unless
+    injected) through a one-time code; return the exit code. Never prints or logs the code."""
+    browser = browser if browser is not None else open_in_browser
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     try:

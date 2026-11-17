@@ -7,7 +7,9 @@ database, keyring service (``nextron-engine/<env>``) and port, and neither touch
   else exists under ``Nextron\\``.
 - In-process: two dashboards built by ``main.build_app`` share one recording keyring backend
   through the real ``KeyringSecrets``. A Hunter key saved in ``dev`` leaves ``test`` "Not set",
-  and every backend call uses the app's own ``nextron-engine/<env>`` service.
+  and every backend call stays in the app's own ``nextron-engine/<env>`` namespace: the
+  secret's own target ``nextron-engine/<env>/<name>``, keyring's copy of it
+  (``<name>@nextron-engine/<env>/<name>``), or a legacy entry under ``nextron-engine/<env>``.
 
 Nothing here touches Windows Credential Manager or the network beyond 127.0.0.1.
 """
@@ -307,11 +309,17 @@ def test_a_credential_saved_in_dev_is_not_set_in_test(
 
     for env, calls in calls_by_env.items():
         assert calls, env
-        assert {service for _, service, _ in calls} == {f"nextron-engine/{env}"}, env
-    assert ("set", "nextron-engine/dev", "hunter/api_key") in calls_by_env["dev"]
-    assert ("get", "nextron-engine/test", "hunter/api_key") in calls_by_env["test"]
-    assert [key for key in backend.store if key[0] == "nextron-engine/test"] == []
-    assert backend.store[("nextron-engine/dev", "hunter/api_key")] == PLANTED
+        namespace = f"nextron-engine/{env}"
+        for _, service, name in calls:
+            assert service in {
+                f"{namespace}/{name}",  # the secret's own target
+                f"{name}@{namespace}/{name}",  # keyring's copy of its previous value
+                namespace,  # a legacy entry
+            }, (env, service, name)
+    assert ("set", "nextron-engine/dev/hunter/api_key", "hunter/api_key") in calls_by_env["dev"]
+    assert ("get", "nextron-engine/test/hunter/api_key", "hunter/api_key") in calls_by_env["test"]
+    assert [key for key in backend.store if "nextron-engine/test" in key[0]] == []
+    assert backend.store[("nextron-engine/dev/hunter/api_key", "hunter/api_key")] == PLANTED
 
 
 def test_each_environment_has_its_own_data_dir_database_keyring_service_and_port(

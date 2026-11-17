@@ -1,7 +1,10 @@
 """``SecretsPort``: the keyring adapter and the in-memory fake behave the same (AD-12, AD-14).
 
-``KeyringSecrets`` runs on ``DictKeyring``, a keyring backend in a dict, so no test touches the
-real Windows Credential Manager. The default backend is only constructed, never called.
+``KeyringSecrets`` runs on ``DictKeyring``, a keyring backend in a dict, and, for the layout of
+Credential Manager targets, on ``VaultInMemory``: ``WinVaultKeyring``'s own ``get_password``,
+``set_password`` and ``delete_password`` over an in-memory credential table instead of
+``win32cred``. No test touches the real Windows Credential Manager. The default backend is only
+constructed, never called.
 """
 
 import threading
@@ -10,7 +13,7 @@ from collections.abc import Callable
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
-from keyring.backends.Windows import WinVaultKeyring
+from keyring.backends.Windows import DecodingCredential, WinVaultKeyring
 from keyring.compat import properties
 from keyring.errors import KeyringError, PasswordDeleteError
 
@@ -28,6 +31,10 @@ from tests.live_guard import allow_live_constructor
 
 EMOJI = "\U0001f511"  # outside the BMP: two UTF-16 code units
 BACKEND_TEXT = "backend detail " + "Pw" + "Leak9"  # must never reach an AdapterError
+# WinVaultKeyring's own methods, taken before any test's guard replaces them (tests/live_guard.py)
+WIN_VAULT_METHODS = {
+    name: vars(WinVaultKeyring)[name] for name in ("get_password", "set_password", "delete_password")
+}
 
 
 class DictKeyring(KeyringBackend):
@@ -67,6 +74,14 @@ class DictKeyring(KeyringBackend):
 Factory = Callable[[str, dict[tuple[str, str], str]], SecretsPort]
 
 
+def entry(secrets: SecretsPort, name: str) -> tuple[str, str]:
+    """Where ``secrets`` keeps ``name`` in its store, as ``(service, user name)``: the keyring
+    adapter at the secret's own target, the fake under its service."""
+    if isinstance(secrets, KeyringSecrets):
+        return (secrets.target(name), name)
+    return (getattr(secrets, "service"), name)
+
+
 def keyring_secrets(env: str, store: dict[tuple[str, str], str]) -> SecretsPort:
     return KeyringSecrets(env, backend=DictKeyring(store))
 
@@ -93,7 +108,7 @@ def test_write_read_overwrite_and_delete(make: Factory) -> None:
     assert secrets.read("session/open_code") == "first"
     secrets.write("session/open_code", "second")
     assert secrets.read("session/open_code") == "second"
-    assert store == {("nextron-engine/dev", "session/open_code"): "second"}
+    assert store == {entry(secrets, "session/open_code"): "second"}
     secrets.delete("session/open_code")
     assert secrets.read("session/open_code") is None
     assert store == {}
@@ -216,7 +231,7 @@ def test_a_dev_process_cannot_read_a_prod_entry(make: Factory) -> None:
     assert dev.read("telegram_bot_token") is None
     dev.delete("telegram_bot_token")
     assert prod.read("telegram_bot_token") == "prod-value"
-    assert shared == {("nextron-engine/prod", "telegram_bot_token"): "prod-value"}
+    assert shared == {entry(prod, "telegram_bot_token"): "prod-value"}
 
 
 # Row: backend fails (KeyringError, OSError, RuntimeError)
@@ -263,7 +278,7 @@ def test_password_delete_error_means_missing() -> None:
 
     secrets.delete("session/open_code")
 
-    assert backend.calls == ["delete"]
+    assert backend.calls == ["delete", "delete"]  # its own target, then a legacy entry
 
 
 def test_the_default_backend_is_win_vault_constructed_only(
@@ -333,8 +348,8 @@ def test_two_instances_never_call_the_backend_at_once(second: str) -> None:
 
     assert blocked and started_before_release == 1
     assert backend.most == 1
-    assert backend.started == 2
-    assert store[("nextron-engine/dev", "session/open_code")] == "code"
+    assert backend.started >= 2
+    assert store[("nextron-engine/dev/session/open_code", "session/open_code")] == "code"
 
 
 def test_an_injected_backend_keeps_its_own_persistence() -> None:
@@ -343,3 +358,160 @@ def test_an_injected_backend_keeps_its_own_persistence() -> None:
     KeyringSecrets("dev", backend=backend)
 
     assert not hasattr(backend, "persist") and "_persist" not in vars(backend)
+
+
+# One Credential Manager target per secret --------------------------------------------------------
+
+
+class VaultInMemory(WinVaultKeyring):
+    """``WinVaultKeyring``'s own ``get_password``, ``set_password`` and ``delete_password`` (its
+    target layout: a value at ``service``, a displaced one moved to ``<user>@<service>``) over
+    an in-memory credential table instead of ``win32cred``. ``changed`` records every target
+    written or deleted."""
+
+    get_password = WIN_VAULT_METHODS["get_password"]
+    set_password = WIN_VAULT_METHODS["set_password"]
+    delete_password = WIN_VAULT_METHODS["delete_password"]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.targets: dict[str, tuple[str, str]] = {}  # target -> (user name, value)
+        self.changed: list[str] = []
+
+    def _read_credential(self, target: str) -> DecodingCredential | None:
+        found = self.targets.get(target)
+        if found is None:
+            return None
+        user, value = found
+        return DecodingCredential({"UserName": user, "CredentialBlob": value.encode("utf-16-le")})
+
+    def _set_password(self, target: str, username: str, password: str) -> None:
+        self.changed.append(target)
+        self.targets[target] = (username, password)
+
+    def _delete_password(self, target: str) -> None:
+        self.changed.append(target)
+        self.targets.pop(target, None)
+
+    def legacy_write(self, service: str, name: str, value: str) -> None:
+        """Write as the adapter did before Story 1.9: every secret under one service."""
+        self.set_password(service, name, value)
+        self.changed.clear()
+
+
+def own_targets(name: str, env: str = "dev") -> set[str]:
+    """Every target that may hold ``name``: its own, keyring's copy of it, and the legacy
+    ones."""
+    service = f"nextron-engine/{env}"
+    return {
+        f"{service}/{name}",
+        f"{name}@{service}/{name}",
+        service,  # the shared legacy target, which held the last one written
+        f"{name}@{service}",
+    }
+
+
+def test_a_secret_lives_at_its_own_target_with_its_name_as_the_user() -> None:
+    vault = VaultInMemory()
+    secrets = KeyringSecrets("dev", backend=vault)
+
+    secrets.write("session/open_code", "code")
+    secrets.write("hunter/api_key", "key")
+
+    assert vault.targets == {
+        "nextron-engine/dev/session/open_code": ("session/open_code", "code"),
+        "nextron-engine/dev/hunter/api_key": ("hunter/api_key", "key"),
+    }
+    assert secrets.target("hunter/api_key") == "nextron-engine/dev/hunter/api_key"
+    assert secrets.read("session/open_code") == "code"
+    assert secrets.read("hunter/api_key") == "key"
+
+
+def test_a_write_drops_keyrings_copy_of_the_previous_value() -> None:
+    vault = VaultInMemory()
+    secrets = KeyringSecrets("dev", backend=vault)
+
+    secrets.write("hunter/api_key", "first")
+    secrets.write("hunter/api_key", "second")
+
+    # set_password moved "first" to hunter/api_key@<target>; the adapter deleted that copy
+    assert vault.targets == {"nextron-engine/dev/hunter/api_key": ("hunter/api_key", "second")}
+    assert secrets.read("hunter/api_key") == "second"
+
+
+def test_writing_a_touches_only_as_targets() -> None:
+    vault = VaultInMemory()
+    secrets = KeyringSecrets("dev", backend=vault)
+    vault.legacy_write("nextron-engine/dev", "b", "legacy-b")  # b holds the shared target
+    secrets.write("c", "new-c")
+    secrets.write("a", "first")
+    before = {target: held for target, held in vault.targets.items() if held[0] != "a"}
+    vault.changed.clear()
+
+    secrets.write("a", "second")
+
+    assert set(vault.changed) <= own_targets("a")
+    assert {target: held for target, held in vault.targets.items() if held[0] != "a"} == before
+    assert secrets.read("b") == "legacy-b"
+    assert secrets.read("c") == "new-c"
+    assert secrets.read("a") == "second"
+
+
+def test_a_legacy_entry_moves_to_its_own_target_on_first_read() -> None:
+    vault = VaultInMemory()
+    vault.legacy_write("nextron-engine/dev", "a", "A")
+    vault.legacy_write("nextron-engine/dev", "b", "B")  # moves a to a@nextron-engine/dev
+    assert vault.targets == {
+        "a@nextron-engine/dev": ("a", "A"),
+        "nextron-engine/dev": ("b", "B"),
+    }
+    secrets = KeyringSecrets("dev", backend=vault)
+
+    assert secrets.read("a") == "A"
+    assert vault.targets == {
+        "nextron-engine/dev/a": ("a", "A"),
+        "nextron-engine/dev": ("b", "B"),  # b's legacy entry is untouched
+    }
+    assert secrets.read("b") == "B"
+    assert vault.targets == {
+        "nextron-engine/dev/a": ("a", "A"),
+        "nextron-engine/dev/b": ("b", "B"),
+    }
+    vault.changed.clear()
+
+    assert (secrets.read("a"), secrets.read("b"), secrets.read("missing")) == ("A", "B", None)
+    assert vault.changed == []  # moved once; later reads change nothing
+
+
+def test_a_legacy_entry_of_another_environment_is_never_moved() -> None:
+    vault = VaultInMemory()
+    vault.legacy_write("nextron-engine/prod", "a", "prod-A")
+
+    assert KeyringSecrets("dev", backend=vault).read("a") is None
+    assert vault.targets == {"nextron-engine/prod": ("a", "prod-A")}
+
+
+def test_delete_removes_both_layouts_and_nothing_else() -> None:
+    vault = VaultInMemory()
+    vault.legacy_write("nextron-engine/dev", "a", "legacy-A")
+    vault.legacy_write("nextron-engine/dev", "b", "legacy-B")
+    secrets = KeyringSecrets("dev", backend=vault)
+    vault.targets["nextron-engine/dev/a"] = ("a", "new-A")  # a move that never finished
+
+    secrets.delete("a")
+
+    assert vault.targets == {"nextron-engine/dev": ("b", "legacy-B")}
+    assert secrets.read("a") is None
+    assert secrets.read("b") == "legacy-B"
+    secrets.delete("a")  # nothing left: does nothing
+
+
+def test_writing_over_a_legacy_entry_deletes_it() -> None:
+    vault = VaultInMemory()
+    vault.legacy_write("nextron-engine/dev", "a", "legacy-A")
+    secrets = KeyringSecrets("dev", backend=vault)
+
+    secrets.write("a", "new-A")
+
+    assert vault.targets == {"nextron-engine/dev/a": ("a", "new-A")}
+
