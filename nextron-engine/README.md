@@ -2801,6 +2801,77 @@ failure, a refused connection or a 404 is final.
 hosts** (one host per line: `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`
 and `jobs.ashbyhq.com` by default; a URL, an upper-case name or a never-fetch host is refused).
 
+## Rendering and contact methods
+
+Some websites build their content with JavaScript, so the crawl stores almost no text for them,
+and chat or booking widgets that scripts add are invisible in the raw HTML. A missing chat
+widget must not become "contact form only" (Story 2.9) when a visitor would see one (FR-10,
+AD-9, AD-10, AD-18, NFR-34; Story 2.6).
+
+**One-time setup: install Chromium.** Playwright (pinned at 1.65.2) is installed with the engine,
+but its browser is a separate download. Run this once, from `nextron-engine`:
+
+```
+uv run playwright install chromium
+```
+
+Until then every render fails as `render_unavailable` and each page keeps its crawled text;
+nothing alerts on it (the run's `errors` count shows it).
+
+**Detection** (`nextron/domain/widgets.py`). Every stored page is checked for five contact
+methods: a **form**, **chat**, **booking**, a **phone** number and an **after-hours** line. It
+reads the page's raw HTML before any stripping, its script, iframe and link URLs, and its
+visible text:
+
+- chat widgets: Intercom, Drift, LiveChat, Tawk.to, Zendesk Chat, HubSpot chat, Tidio,
+  Smith.ai, Ngage, ApexChat, Intaker, Podium, Olark, Crisp, Freshchat, Zoho SalesIQ, LiveAgent
+  and JivoChat, by their script or iframe host, their loader code in the HTML, or their name in
+  the text;
+- booking: Calendly, Cal.com, Acuity, Clio Grow, LawTap, Microsoft Bookings, HubSpot meetings,
+  Setmore, SimplyBook.me, YouCanBook.me, Zoho Bookings and Google Calendar appointment pages, by
+  an embed or a link to them, or their name in the text;
+- forms: HubSpot, Typeform, Jotform, Wufoo, Formstack, Cognito, Microsoft and Google forms by
+  host, Gravity Forms, Contact Form 7 and WPForms by their markup, and any `<form>` with a text
+  area or a phone field;
+- phone: a `tel:` link, or a US or UK number in the text;
+- generic wording: "live chat", "chat with us", "book online", "24/7", "out of hours",
+  "emergency line" and the like.
+
+Each page's findings are stored in `page_contact_methods` (one row per method, signature and
+source, with what matched: a host, never a full URL, or the words as the page writes them; at
+most 200 characters, classed as personal data because it may be a phone number).
+
+**Rendering** (`nextron/adapters/renderer`, `PlaywrightRenderer`). When any page a crawl stored
+has under 500 characters of text, the crawl queues `render_pages` (bulk lane, priority 40, key
+`render_pages:<lead>:<date>`, one site at a time). That job, and only it, renders up to 3 of the
+run's near-empty pages (the homepage first, then by page kind and URL), each in a fresh headless
+Chromium:
+
+- the browser itself reaches nothing: it can't resolve a name, its proxy is a dead local port,
+  WebRTC can't send UDP, service workers are blocked and every WebSocket is closed;
+- every request it makes is intercepted and fetched by the crawler, through the same egress
+  filter and denylist, DNS pinning and redirect checks, metered as `web` / `render`. Only GET
+  requests for the page itself (on the Lead's site, at most 6 navigations), scripts,
+  stylesheets and JSON or text data are fetched; images, fonts, media, frames, popups and
+  everything else are refused. A render makes at most 100 requests and stops fetching once
+  20 MiB have been read (the body that crosses the mark is never handed to the page);
+- no cookie, referrer or origin is sent, no download is kept, and nothing is stored between
+  renders;
+- the page is read 20 s after navigation at the latest, with the crawler's hidden-content rules;
+  a rendered page over 5 MiB, or one left on Chromium's error page, is a failed render, and a
+  browser session that hangs (a script that never yields) is given up after a minute.
+
+The rendered text replaces the stored text when it isn't empty; what the render shows is added
+to the page's contact methods. A failed render keeps the crawled text, adds one to the run's
+`errors`, and is never retried. When the month's AI budget is spent, the job waits an hour.
+
+**The Lead's contact methods.** Once a crawl's pages are all checked (straight away when none
+needs rendering, else after `render_pages`), the Lead's `contact_methods` is set: every page
+checked, and for each of the five methods the pages it was found on
+(`queries.research.contact_methods`, for the Lead page and Story 2.9). A crawl that stored no
+page leaves the previous value; a `render_pages` job for a run that is no longer the Lead's
+latest, or a Lead merged meanwhile, writes nothing.
+
 ## Engine health
 
 The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page

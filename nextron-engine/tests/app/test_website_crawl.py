@@ -38,6 +38,7 @@ from nextron.ports.crawler import FetchedPage, Robots
 from nextron.ports.errors import AdapterError
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import ScriptedCrawler, html_page, robots_txt
+from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -86,6 +87,7 @@ class World:
     clock: FrozenClock
     meter: InMemoryUsageMeter
     crawler: ScriptedCrawler
+    renderer: ScriptedRenderer
     queue: JobQueue
     crawls: WebsiteCrawls
     discovery: Discovery
@@ -157,6 +159,7 @@ def world(db_engine: Engine) -> World:
         Setup(clock).sync_segments(segments)
     meter = InMemoryUsageMeter(clock)
     crawler = ScriptedCrawler()
+    renderer = ScriptedRenderer()
     job_types = main.build_job_types(
         alerts=no_jobs,
         backups=no_jobs,
@@ -174,8 +177,9 @@ def world(db_engine: Engine) -> World:
         clock,
         meter,
         crawler,
+        renderer,
         queue,
-        WebsiteCrawls(clock, meter, crawler, queue),
+        WebsiteCrawls(clock, meter, crawler, renderer, queue),
         Discovery(clock, Pipeline(clock), queue),
         Research(clock),
         "",
@@ -256,7 +260,8 @@ def test_a_happy_crawl_stores_the_home_and_keyword_pages_and_the_ats_link(world:
         run.id,
     )
     assert (link.first_seen_at, link.last_seen_at) == (T0, T0)
-    assert world.jobs() == []  # no other domain, so nothing to canonicalize
+    # no other domain, so nothing to canonicalize; the near-empty pages are rendered next
+    assert [row[0] for row in world.jobs()] == ["render_pages"]
 
 
 def test_iframe_and_script_ats_embeds_are_recorded_and_other_hosts_are_not(
@@ -566,7 +571,8 @@ def test_a_home_on_another_domain_sets_final_domain_and_enqueues_canonicalize(
     assert world.crawler.urls() == [HOME, "https://www.new-firm.co.uk/team"]
     assert world.crawler.calls[-1].site == "new-firm.co.uk"
     assert world.pages(lead)[HOME].final_url == landed
-    [job] = world.jobs()
+    job, render = world.jobs()
+    assert render[0] == "render_pages"  # the pages are near-empty (Story 2.6)
     assert job == (
         "canonicalize_lead",
         f"canonicalize_lead:{lead}:2026-11-17",
@@ -685,7 +691,7 @@ def test_a_home_that_lands_on_a_shared_platform_stores_and_enqueues_nothing(
         assert world.crawler.urls() == [HOME]
     else:
         assert (run.outcome, run.final_domain) == ("ok", "smith-law.wixsite.com")
-        assert [row[0] for row in world.jobs()] == ["canonicalize_lead"]
+        assert [row[0] for row in world.jobs()] == ["canonicalize_lead", "render_pages"]
 
 
 # Row: Unreachable -------------------------------------------------------------------------------

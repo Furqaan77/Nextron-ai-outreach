@@ -23,8 +23,18 @@ last changed.
 (``ck_ats_links_tag``: ``a``, ``iframe`` or ``script``), ``first_seen_at`` and
 ``last_seen_at``.
 
-A page's text may quote a person, so ``crawled_pages.text`` is PII class ``redact``; every other
-column (IDs, URLs of public pages, codes, counts, hashes and times) is ``none``.
+``page_contact_methods`` (Story 2.6, migration ``0022_2_6_contact_methods``): one row per page
+and contact method detected on it, by signature and source
+(``uq_page_contact_methods_page_id_method_signature_source``): ``page_id``
+(``fk_page_contact_methods_page_id_crawled_pages``, indexed by
+``ix_page_contact_methods_page_id``), ``method`` (``ck_page_contact_methods_method``: one of
+``nextron.domain.widgets.ContactMethod``), ``signature``, ``source``
+(``ck_page_contact_methods_source``: one of ``nextron.domain.widgets.MatchSource``), ``matched``
+and ``detected_at``. It has no ``lead_id``: on a merge its rows follow their page.
+
+A page's text may quote a person, so ``crawled_pages.text`` is PII class ``redact``; so is
+``page_contact_methods.matched``, which may hold a phone number. Every other column (IDs, URLs
+of public pages, codes, counts, hashes and times) is ``none``.
 """
 
 from datetime import datetime
@@ -35,6 +45,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.crawl import LINK_TAGS, CrawlOutcome, PageKind
+from nextron.domain.widgets import MAX_MATCHED, ContactMethod, MatchSource
 
 DOMAIN_LENGTH: Final = 253  # nextron.domain.identity.MAX_DOMAIN_LENGTH
 URL_LENGTH: Final = 2048  # nextron.domain.fetch_policy.MAX_URL_LENGTH
@@ -52,6 +63,13 @@ COUNTS_CHECK: Final = (
 )
 KIND_CHECK: Final = "kind IN ({})".format(",".join(f"'{kind}'" for kind in PageKind))
 TAG_CHECK: Final = "tag IN ({})".format(",".join(f"'{tag}'" for tag in LINK_TAGS))
+METHOD_LENGTH: Final = 16
+SIGNATURE_LENGTH: Final = 32
+SOURCE_LENGTH: Final = 8
+METHOD_CHECK: Final = "method IN ({})".format(
+    ",".join(f"'{method}'" for method in ContactMethod)
+)
+SOURCE_CHECK: Final = "source IN ({})".format(",".join(f"'{source}'" for source in MatchSource))
 
 
 class CrawlRunRecord(Base):
@@ -119,3 +137,23 @@ class AtsLinkRecord(Base):
     tag: Mapped[str] = mapped_column(String(TAG_LENGTH))
     first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
     last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class PageContactMethodRecord(Base):
+    """One contact method detected on a crawled page, by one signature from one source."""
+
+    __tablename__ = "page_contact_methods"
+    __table_args__ = (
+        Index("ix_page_contact_methods_page_id", "page_id"),
+        UniqueConstraint("page_id", "method", "signature", "source"),
+        CheckConstraint(METHOD_CHECK, name="method"),
+        CheckConstraint(SOURCE_CHECK, name="source"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    page_id: Mapped[str] = mapped_column(Ulid, ForeignKey("crawled_pages.id"))
+    method: Mapped[str] = mapped_column(String(METHOD_LENGTH))
+    signature: Mapped[str] = mapped_column(String(SIGNATURE_LENGTH))
+    source: Mapped[str] = mapped_column(String(SOURCE_LENGTH))
+    matched: Mapped[str] = mapped_column(String(MAX_MATCHED))
+    detected_at: Mapped[datetime] = mapped_column(UtcDateTime)

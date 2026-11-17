@@ -278,7 +278,12 @@ RESTORE_FORM = {
 }
 RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
-    [["Job type", "Last success"], ["enrich_lead", "never"], ["canonicalize_lead", "never"]],
+    [
+        ["Job type", "Last success"],
+        ["enrich_lead", "never"],
+        ["canonicalize_lead", "never"],
+        ["render_pages", "never"],
+    ],
     [
         ["Job type", "Last success"],
         ["backup_db", "never"],

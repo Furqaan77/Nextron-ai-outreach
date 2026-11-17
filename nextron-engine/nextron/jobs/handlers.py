@@ -41,6 +41,8 @@ handler runs in.
 - ``canonicalize_lead(discovery)`` (Story 2.5): calls ``discovery().canonicalize_lead(lead_id,
   run_id)`` once.
 - ``purge_page_text(research)`` (Story 2.5): calls ``research().purge_page_text()`` once.
+- ``render_pages(crawls)`` (Story 2.6): calls ``crawls().render_pages(lead_id, run_id)`` once
+  and returns ``DEFERRED`` when it returns ``False`` (the budget refused the renders).
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -154,9 +156,12 @@ def resolve_contact_markets(markets: Callable[[], MarketBackfilling]) -> Handler
 
 
 class Crawling(Protocol):
-    """What ``enrich_lead`` needs of the ``research`` service's ``WebsiteCrawls``."""
+    """What ``enrich_lead`` and ``render_pages`` need of the ``research`` service's
+    ``WebsiteCrawls``."""
 
     def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool: ...
+
+    def render_pages(self, lead_id: str, run_id: str) -> bool: ...
 
 
 def enrich_lead(crawls: Callable[[], Crawling]) -> Handler:
@@ -169,6 +174,20 @@ def enrich_lead(crawls: Callable[[], Crawling]) -> Handler:
         return None
 
     return handle_enrich_lead
+
+
+def render_pages(crawls: Callable[[], Crawling]) -> Handler:
+    """The ``render_pages`` job's handler: render the payload's run's near-empty pages through
+    ``crawls()``."""
+
+    def handle_render_pages(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        run_id = _ulid_field(job, RUN_ID_FIELD)
+        if not crawls().render_pages(lead_id, run_id):
+            return DEFERRED
+        return None
+
+    return handle_render_pages
 
 
 class Canonicalizing(Protocol):

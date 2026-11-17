@@ -142,6 +142,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "GoogleOAuthPort",
         "LlmPort",
         "MailPort",
+        "RendererPort",
         "SecretsPort",
         "UsageMeterPort",
     }
@@ -414,6 +415,7 @@ def test_every_adapter_package_is_classified_once() -> None:
         "crypto",
         "email_syntax",
         "google_oauth",
+        "renderer",
         "secrets",
         "sink",
         "telegram",
@@ -450,6 +452,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "crypto",
         "email_syntax",
         "google_oauth",
+        "renderer",
         "secrets",
         "sink",
     )
@@ -465,6 +468,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "nextron.adapters.crypto": package_modules("nextron.adapters.crypto"),
         "nextron.adapters.email_syntax": package_modules("nextron.adapters.email_syntax"),
         "nextron.adapters.google_oauth": package_modules("nextron.adapters.google_oauth"),
+        "nextron.adapters.renderer": package_modules("nextron.adapters.renderer"),
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),
         "nextron.adapters.telegram": package_modules("nextron.adapters.telegram"),

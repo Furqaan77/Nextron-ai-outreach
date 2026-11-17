@@ -88,8 +88,10 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
   batches of ``BACKFILL_BATCH`` (200), one transaction per batch, resolving each, and returns
   how many it resolved, logged as ``contact_markets_resolved`` (``count`` only).
 
-**``WebsiteCrawls(clock, meter, crawler, queue)``** crawls Leads' websites (Story 2.5) and owns
-``crawl_runs``, ``crawled_pages`` and ``ats_links``.
+**``WebsiteCrawls(clock, meter, crawler, renderer, queue)``** crawls Leads' websites (Story
+2.5), renders their near-empty pages (Story 2.6) and owns ``crawl_runs``, ``crawled_pages``,
+``ats_links``, ``page_contact_methods`` and the Lead's profile group (``leads.contact_methods``,
+written only through ``nextron.db.repos.research.profile``).
 
 ``@use_case enrich_lead(lead_id, *, may_retry) -> bool`` (the ``enrich_lead`` job):
 
@@ -130,8 +132,10 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    ``HTML_MEDIA_TYPES`` is dropped; a page whose final URL is already stored is skipped.
    The run stops when ``crawl_max_pages`` pages (the homepage included) are stored, or once
    ``RUN_DEADLINE`` (10 minutes on the clock) has passed since it started.
-   ``pages_fetched`` counts the 2xx answers, the homepage included; ``renders`` is 0 (Story 2.6
-   renders).
+   ``pages_fetched`` counts the 2xx answers, the homepage included; ``renders`` is 0 here
+   (``render_pages`` adds to it). Each stored page carries ``nextron.domain.widgets.detect``
+   over its raw HTML, its links (``(tag, url)``) and its visible text, before any stripping
+   matters. The renderer is never called here.
 5. **Apply transaction.** When the Lead was merged meanwhile, the run is inserted as
    ``lead_merged`` and nothing else is written. Otherwise the run is inserted (outcome ``ok``
    unless step 2 or 3 ended it); each stored page is upserted on ``(lead_id, url)`` with its
@@ -140,16 +144,47 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    hash, else kept); and every ``a``, ``iframe`` and ``script`` link of a stored page that
    ``check_url`` accepts and whose host is in ``ats_hosts`` is upserted on ``(lead_id, url)``
    (``first_seen_at`` kept, ``last_seen_at``, ``run_id`` and ``page_id`` updated; the first page
-   that holds it in the run). With a ``final_domain``, ``canonicalize_lead`` is enqueued
-   (payload ``{v, lead_id, run_id}``).
+   that holds it in the run). Each upserted page's ``page_contact_methods`` rows are replaced
+   by its detections (``detected_at`` now). With a ``final_domain``, ``canonicalize_lead`` is
+   enqueued (payload ``{v, lead_id, run_id}``). When any stored page ``needs_render`` (under
+   500 characters of text), ``render_pages`` is enqueued (the same payload, discriminator and
+   concurrency key, from ``lead_job_keys``); otherwise, when the run stored at least one page,
+   the Lead's ``contact_methods`` is set (below). A run that stored nothing leaves it as it was.
 6. **Afterwards** it logs ``crawl_finished`` (``lead_id``, ``run_id``, ``outcome``,
-   ``error_code``, ``pages_fetched``, ``pages_stored``, ``pages_skipped_robots``, ``errors``).
+   ``error_code``, ``pages_fetched``, ``pages_stored``, ``pages_skipped_robots``, ``errors``,
+   ``render_queued``).
    Then, when ``may_retry`` holds, the run isn't ``lead_merged`` and its ``error_code``
    ``is_retryable`` (a timeout or a 5xx from robots.txt or the homepage), it raises
    ``AdapterError(True, "crawl_retry", ...)`` so the job runs again; without ``may_retry`` (the
    job's last attempt) the job completes and no dead-job alert follows. It returns ``True``.
 
-No page text, HTML or URL is logged; the run's row holds codes and counts only.
+``@use_case render_pages(lead_id, run_id) -> bool`` (the ``render_pages`` job, Story 2.6):
+
+1. **First transaction.** The budget check as in ``enrich_lead`` returns ``False`` when it
+   fails. A run that is unknown (``unknown_run``; a text that isn't a ULID included), belongs to
+   another Lead (``other_lead``), whose Lead is merged (``merged_lead``) or that isn't the
+   Lead's latest (``stale_run``) logs ``render_skipped`` (``lead_id``, ``run_id``, ``reason``)
+   and returns ``True``. The candidates are the run's pages that still have text and
+   ``needs_render``, by ``PageKind`` order then URL, the first ``MAX_RENDERS`` (3).
+2. **Rendering**, with no transaction open: each candidate's ``final_url`` through the
+   ``RendererPort``, ``site`` the run's ``final_domain`` (else its ``site_domain``), at
+   ``MIN_INTERVAL_S``. A rendered page is detected (``widgets.detect`` over the rendered HTML,
+   links and text); an ``AdapterError`` counts one error, keeps the crawled text and is never
+   retried.
+3. **Apply transaction.** When the Lead was merged meanwhile, or the run is no longer the
+   Lead's latest (a crawl finished during the renders), nothing is written. Otherwise a
+   non-empty rendered text replaces the page's ``text`` and ``content_hash`` (``changed_at``
+   moves to the render's time when the hash changed); the render's detections the page doesn't
+   hold yet are added (``detected_at`` the render's time); the run's ``renders`` (successes)
+   and ``errors`` grow; and the Lead's ``contact_methods`` is set.
+4. It logs ``render_finished`` (``lead_id``, ``run_id``, ``pages``, ``renders``, ``errors``,
+   ``error_codes``, ``applied``) and returns ``True``.
+
+**The Lead's ``contact_methods``** is ``nextron.domain.widgets.encode(summarize(run_id, now,
+pages))`` over the run's pages (``crawled_pages`` whose ``run_id`` is the run), each with the
+methods of its ``page_contact_methods`` rows: every page checked, and each method's pages.
+
+No page text, HTML, URL or matched text is logged; the run's row holds codes and counts only.
 """
 
 import logging
@@ -165,6 +200,7 @@ from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research.contacts import StoredContact
 from nextron.db.uow import command, current, use_case
@@ -177,8 +213,10 @@ from nextron.domain.crawl import (
     HTML_MEDIA_TYPES,
     LEAD_ID_FIELD,
     MAX_DEPTH,
+    MAX_RENDERS,
     MIN_INTERVAL_S,
     PAYLOAD_VERSION,
+    RENDER_PAGES_JOB,
     RUN_DEADLINE,
     RUN_ID_FIELD,
     TEXT_RETENTION,
@@ -189,6 +227,7 @@ from nextron.domain.crawl import (
     http_code,
     is_retryable,
     lead_job_keys,
+    needs_render,
     text_hash,
 )
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
@@ -200,6 +239,7 @@ from nextron.domain.leads import is_shared_platform
 from nextron.domain.machines import Transition
 from nextron.domain.notifications import LeadsMerged
 from nextron.domain.settings_schema import Key
+from nextron.domain.widgets import Detection, detect, encode, summarize
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import (
     FETCH_CONNECT_FAILED,
@@ -212,6 +252,7 @@ from nextron.ports.crawler import (
     Robots,
 )
 from nextron.ports.errors import AdapterError
+from nextron.ports.renderer import RendererPort
 from nextron.ports.usage_meter import UsageMeterPort
 
 log = logging.getLogger(__name__)
@@ -238,6 +279,12 @@ TOO_MANY_REQUESTS: Final = 429  # a robots.txt 429 is read like a 5xx, not like 
 THROTTLE_STATUSES: Final = frozenset({429, 503})  # a page answering one stops the run
 SHARED_PLATFORM: Final = "shared_platform"  # the homepage landed on a shared platform
 KIND_ORDER: Final = {kind: index for index, kind in enumerate(PageKind)}
+RENDER_SKIPPED: Final = "render_skipped"
+RENDER_FINISHED: Final = "render_finished"
+# Why render_pages rendered nothing, as logged
+UNKNOWN_RUN: Final = "unknown_run"
+OTHER_LEAD: Final = "other_lead"
+STALE_RUN: Final = "stale_run"
 
 type Assignment = Transition[AddressClass, AddressCause]
 type RobotsRule = Callable[[str], bool]
@@ -563,6 +610,31 @@ class _Page:
     fetched_at: datetime
     text: str = field(repr=False)
     links: tuple[PageLink, ...] = field(repr=False)
+    detections: tuple[Detection, ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    """A page ``render_pages`` renders."""
+
+    page_id: str
+    final_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Rendered:
+    """What one render gave: its text and detections, or the error code it failed with."""
+
+    page_id: str
+    at: datetime
+    text: str = field(default="", repr=False)
+    detections: tuple[Detection, ...] = field(default=(), repr=False)
+    error_code: str | None = None
+
+
+def _embeds(links: Iterable[PageLink]) -> list[tuple[str, str]]:
+    """A page's links as ``nextron.domain.widgets.detect`` takes them."""
+    return [(link.tag, link.url) for link in links]
 
 
 @dataclass(slots=True)
@@ -580,6 +652,7 @@ class _Run:
     pages_skipped_robots: int = 0
     errors: int = 0
     throttled: bool = False
+    render_queued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,11 +668,17 @@ class WebsiteCrawls:
     """Polite crawls of Leads' websites; see the module docstring."""
 
     def __init__(
-        self, clock: Clock, meter: UsageMeterPort, crawler: CrawlerPort, queue: JobQueue
+        self,
+        clock: Clock,
+        meter: UsageMeterPort,
+        crawler: CrawlerPort,
+        renderer: RendererPort,
+        queue: JobQueue,
     ) -> None:
         self._clock = clock
         self._meter = meter
         self._crawler = crawler
+        self._renderer = renderer
         self._queue = queue
 
     @use_case
@@ -644,6 +723,7 @@ class WebsiteCrawls:
                 "pages_stored": len(run.pages),
                 "pages_skipped_robots": run.pages_skipped_robots,
                 "errors": run.errors,
+                "render_queued": run.render_queued,
             },
         )
         if may_retry and run.outcome is not CrawlOutcome.LEAD_MERGED and is_retryable(
@@ -827,6 +907,7 @@ class WebsiteCrawls:
             fetched_at=self._clock.now(),
             text=fetched.text,
             links=fetched.links,
+            detections=detect(fetched.html, _embeds(fetched.links), fetched.text),
         )
 
     # The apply transaction ---------------------------------------------------------------------
@@ -855,6 +936,8 @@ class WebsiteCrawls:
             run.outcome = CrawlOutcome.LEAD_MERGED
             return run_id
         page_ids = [self._upsert_page(run.lead_id, run_id, page) for page in run.pages]
+        for page_id, page in zip(page_ids, run.pages, strict=True):
+            crawl_repo.replace_contact_methods(page_id, page.detections, now)
         seen: set[str] = set()
         for page_id, page in zip(page_ids, run.pages, strict=True):
             for link in page.links:
@@ -876,6 +959,22 @@ class WebsiteCrawls:
                 },
                 concurrency_key=concurrency_key,
             )
+        if any(needs_render(page.text) for page in run.pages):
+            discriminator, concurrency_key = lead_job_keys(run.site, now)
+            self._queue.enqueue(
+                RENDER_PAGES_JOB,
+                scope=run.lead_id,
+                discriminator=discriminator,
+                payload={
+                    VERSION_FIELD: PAYLOAD_VERSION,
+                    LEAD_ID_FIELD: run.lead_id,
+                    RUN_ID_FIELD: run_id,
+                },
+                concurrency_key=concurrency_key,
+            )
+            run.render_queued = True
+        elif run.pages:
+            self._set_contact_methods(run.lead_id, run_id, now)
         return run_id
 
     @staticmethod
@@ -928,3 +1027,128 @@ class WebsiteCrawls:
             )
         else:
             crawl_repo.touch_ats_link(stored.id, run_id=run_id, page_id=page_id, at=now)
+
+    @staticmethod
+    def _set_contact_methods(lead_id: str, run_id: str, now: datetime) -> None:
+        """Set the Lead's ``contact_methods`` to ``summarize`` over the run's pages."""
+        pages = crawl_repo.run_pages(run_id)
+        page_ids = {page.id for page in pages}
+        methods: dict[str, set[str]] = {}
+        for row in crawl_repo.contact_methods_of(lead_id):
+            if row.page_id in page_ids:
+                methods.setdefault(row.page_id, set()).add(row.method)
+        summary = summarize(
+            run_id, now, [(page.url, sorted(methods.get(page.id, ()))) for page in pages]
+        )
+        profile_repo.set_contact_methods(lead_id, encode(summary))
+
+    # Rendering (Story 2.6) ---------------------------------------------------------------------
+
+    @use_case
+    def render_pages(self, lead_id: str, run_id: str) -> bool:
+        """Render the run's near-empty pages and record what they show; see the module
+        docstring."""
+        uow = current()
+        now = self._clock.now()
+        with uow.transaction():
+            limits = setup_queries.budget_limits()
+            if not allow(BudgetClass.BLOCKABLE, self._meter.snapshot(now), limits):
+                return False
+            skipped, site, candidates = self._render_plan(lead_id, run_id)
+        if skipped is not None:
+            log.info(
+                RENDER_SKIPPED, extra={"lead_id": lead_id, "run_id": run_id, "reason": skipped}
+            )
+            return True
+        results = [self._render(candidate, site) for candidate in candidates]
+        with uow.transaction():
+            applied = self._apply_renders(lead_id, run_id, results)
+        log.info(
+            RENDER_FINISHED,
+            extra={
+                "lead_id": lead_id,
+                "run_id": run_id,
+                "pages": len(results),
+                "renders": sum(1 for result in results if result.error_code is None),
+                "errors": sum(1 for result in results if result.error_code is not None),
+                "error_codes": sorted(
+                    {result.error_code for result in results if result.error_code is not None}
+                ),
+                "applied": applied,
+            },
+        )
+        return True
+
+    @staticmethod
+    def _render_plan(lead_id: str, run_id: str) -> tuple[str | None, str, list[_Candidate]]:
+        """Step 1 of ``render_pages``: why nothing is rendered (or ``None``), the site the
+        renders are pinned to, and the pages to render."""
+        run = crawl_repo.run(run_id) if is_ulid(run_id) else None
+        if run is None:
+            return UNKNOWN_RUN, "", []
+        if run.lead_id != lead_id:
+            return OTHER_LEAD, "", []
+        lead = discovery_queries.lead(lead_id)
+        if lead is None or lead.merged_into is not None:
+            return MERGED_LEAD, "", []
+        latest = crawl_repo.latest_run(lead_id)
+        if latest is None or latest.id != run_id:
+            return STALE_RUN, "", []
+        pages = sorted(
+            (
+                page
+                for page in crawl_repo.run_pages(run_id)
+                if page.text is not None and needs_render(page.text)
+            ),
+            key=lambda page: (KIND_ORDER[PageKind(page.kind)], page.url),
+        )
+        site = run.final_domain if run.final_domain is not None else run.site_domain
+        return None, site, [_Candidate(page.id, page.final_url) for page in pages[:MAX_RENDERS]]
+
+    def _render(self, candidate: _Candidate, site: str) -> _Rendered:
+        """Step 2 of ``render_pages``, with no transaction open: one page rendered and
+        detected, or the code it failed with."""
+        try:
+            rendered = self._renderer.render(
+                candidate.final_url, site=site, min_interval_s=MIN_INTERVAL_S
+            )
+        except AdapterError as error:
+            return _Rendered(candidate.page_id, self._clock.now(), error_code=error.code)
+        return _Rendered(
+            candidate.page_id,
+            self._clock.now(),
+            text=rendered.text,
+            detections=detect(rendered.html, _embeds(rendered.links), rendered.text),
+        )
+
+    def _apply_renders(self, lead_id: str, run_id: str, results: list[_Rendered]) -> bool:
+        """Step 3 of ``render_pages``, in the caller's transaction: whether anything was
+        written (nothing once the Lead was merged or a newer run was recorded)."""
+        lead = discovery_queries.lead(lead_id)
+        if lead is None or lead.merged_into is not None:
+            return False
+        latest = crawl_repo.latest_run(lead_id)
+        if latest is None or latest.id != run_id:  # a crawl finished during the renders
+            return False
+        pages = {page.id: page for page in crawl_repo.run_pages(run_id)}
+        renders = errors = 0
+        for result in results:
+            if result.error_code is not None:
+                errors += 1
+                continue
+            renders += 1
+            page = pages.get(result.page_id)
+            if page is None:
+                continue
+            if result.text:
+                digest = text_hash(result.text)
+                crawl_repo.set_page_text(
+                    page.id,
+                    text=result.text,
+                    content_hash=digest,
+                    changed_at=page.changed_at if digest == page.content_hash else result.at,
+                )
+            crawl_repo.add_contact_methods(page.id, result.detections, result.at)
+        crawl_repo.add_render_counts(run_id, renders=renders, errors=errors)
+        self._set_contact_methods(lead_id, run_id, self._clock.now())
+        return True

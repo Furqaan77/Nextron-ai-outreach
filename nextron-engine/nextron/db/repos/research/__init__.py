@@ -3,5 +3,6 @@
 Only ``nextron.app.research`` and ``nextron.app.queries.research`` import this package (contract
 group 7): ``contacts`` (the ``contacts`` table) and ``provenance`` (``provenance_records``).
 ``crawl`` (Story 2.5) is the repository of the ``crawl_runs``, ``crawled_pages`` and
-``ats_links`` tables.
+``ats_links`` tables, and of ``page_contact_methods`` (Story 2.6). ``profile`` (Story 2.6)
+reads and writes the Lead's profile group, the ``research`` columns of ``leads``.
 """

@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0021_4_2_campaigns"
+HEAD = "0022_2_6_contact_methods"
 
 
 @pytest.fixture

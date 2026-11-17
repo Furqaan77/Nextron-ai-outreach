@@ -218,6 +218,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "resolve_contact_markets",
         "enrich_lead",
         "canonicalize_lead",
+        "render_pages",
         "purge_page_text",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
@@ -245,6 +246,22 @@ def raw_query(units: UnitOfWorkFactory, statement: str, params: tuple[object, ..
         return connection.execute(statement, params).fetchall()
     finally:
         connection.close()
+
+
+def test_the_built_renderer_fetches_through_the_crawls_own_crawler(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 2.6: one ``HttpCrawler`` serves the crawl and the renderer, so a render's page
+    fetches are paced with the crawl's per site; building them launches no browser."""
+    crawlers = spy(monkeypatch, "HttpCrawler")
+    renderers = spy(monkeypatch, "PlaywrightRenderer")
+
+    build(units)
+
+    [crawler] = crawlers
+    [renderer] = renderers
+    assert renderer._fetcher is crawler  # noqa: SLF001 - the wiring under test
+    assert renderer._browser is None  # noqa: SLF001 - default_browser, looked up per render
 
 
 def test_the_built_runner_sweeps_dead_jobs_into_job_dead_alerts(

@@ -114,6 +114,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "merged_into": PiiClass.NONE,
         "created_at": PiiClass.NONE,
         "pipeline_stage": PiiClass.NONE,
+        # Story 2.6: the methods a firm's website offers and the URLs of its public pages
+        "contact_methods": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.
@@ -288,6 +290,17 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "tag": PiiClass.NONE,
         "first_seen_at": PiiClass.NONE,
         "last_seen_at": PiiClass.NONE,
+    },
+    # Story 2.6. What matched may be a phone number or a page's own words, so it is redacted;
+    # it is not purged with the page text. The rest are IDs, codes and times.
+    "page_contact_methods": {
+        "id": PiiClass.NONE,
+        "page_id": PiiClass.NONE,
+        "method": PiiClass.NONE,
+        "signature": PiiClass.NONE,
+        "source": PiiClass.NONE,
+        "matched": PiiClass.REDACT,
+        "detected_at": PiiClass.NONE,
     },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.

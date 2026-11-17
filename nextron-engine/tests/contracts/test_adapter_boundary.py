@@ -203,6 +203,15 @@ def crawler_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tu
     yield "fetch_page", lambda: adapter.fetch_page(
         "https://smith-law.example.com/team", site="example.com", min_interval_s=1.0
     )
+    yield "fetch_resource", lambda: adapter.fetch_resource(  # Story 2.6, for the renderer
+        "https://widget.example.com/loader.js",
+        site=None,
+        accepts=lambda media_type: True,
+        accept_header="*/*",
+        operation="render",
+        deadline=None,
+        min_interval_s=None,
+    )
 
 
 # Every adapter class whose __init__ takes an http client, with its driver.

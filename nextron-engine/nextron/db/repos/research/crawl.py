@@ -1,5 +1,5 @@
 """The crawl tables' repository (FR-10, AD-3, AD-17): the only code that reads or writes
-``crawl_runs``, ``crawled_pages`` and ``ats_links``.
+``crawl_runs``, ``crawled_pages``, ``ats_links`` and ``page_contact_methods``.
 
 Every function runs explicit Core statements through the current unit of work's session
 (``nextron.db.uow.current()``): reads work in a read-only unit of work too, writes only inside
@@ -18,20 +18,42 @@ the running use case's transaction. It stores and returns what it is given and c
   hash; returns how many rows it changed.
 - ``reparent(loser_id, survivor_id)``: moves every run of the Lead ``loser_id``, and each page
   and ATS link whose ``url`` the survivor doesn't already hold, to ``survivor_id``; a moved link
-  whose page stayed with the loser then points at the survivor's page with the same URL.
+  whose page stayed with the loser then points at the survivor's page with the same URL. A
+  page's ``page_contact_methods`` rows have no ``lead_id``: they follow their page.
+
+Story 2.6:
+
+- ``run_pages(run_id)``: the pages the run last fetched, by URL; ``set_page_text(page_id,
+  text, content_hash, changed_at)``: a rendered page's text; ``add_render_counts(run_id,
+  renders, errors)``: adds to the run's two counts.
+- ``StoredContactMethod`` (its ``matched`` never shows in the ``repr``): one
+  ``page_contact_methods`` row. ``replace_contact_methods(page_id, detections, at)`` deletes the
+  page's rows and inserts one per ``nextron.domain.widgets.Detection``;
+  ``add_contact_methods(page_id, detections, at) -> int`` inserts those whose ``(method,
+  signature, source)`` the page doesn't hold yet and returns how many;
+  ``contact_methods_of(lead_id)`` lists the rows of every page of the Lead, by the page's URL,
+  then method, signature and source.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import ColumnElement, select
+from sqlalchemy import delete as delete_rows
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 from sqlalchemy.orm import aliased
 
 from nextron.db.models.base import new_id
-from nextron.db.models.crawl import AtsLinkRecord, CrawledPageRecord, CrawlRunRecord
+from nextron.db.models.crawl import (
+    AtsLinkRecord,
+    CrawledPageRecord,
+    CrawlRunRecord,
+    PageContactMethodRecord,
+)
 from nextron.db.uow import current
+from nextron.domain.widgets import Detection
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +134,28 @@ _PAGE_COLUMNS = (
     CrawledPageRecord.text,
     CrawledPageRecord.text_purge_after,
     CrawledPageRecord.changed_at,
+)
+@dataclass(frozen=True, slots=True)
+class StoredContactMethod:
+    """One ``page_contact_methods`` row; its ``matched`` never shows in the ``repr``."""
+
+    id: str
+    page_id: str
+    method: str
+    signature: str
+    source: str
+    matched: str = field(repr=False)
+    detected_at: datetime
+
+
+_METHOD_COLUMNS = (
+    PageContactMethodRecord.id,
+    PageContactMethodRecord.page_id,
+    PageContactMethodRecord.method,
+    PageContactMethodRecord.signature,
+    PageContactMethodRecord.source,
+    PageContactMethodRecord.matched,
+    PageContactMethodRecord.detected_at,
 )
 _LINK_COLUMNS = (
     AtsLinkRecord.id,
@@ -273,6 +317,37 @@ def update_page(
     )
 
 
+def run_pages(run_id: str) -> tuple[StoredPage, ...]:
+    """The pages the run ``run_id`` last fetched, by URL."""
+    statement = (
+        select(*_PAGE_COLUMNS)
+        .where(CrawledPageRecord.run_id == run_id)
+        .order_by(CrawledPageRecord.url)
+    )
+    return tuple(StoredPage(*row) for row in current().session.execute(statement))
+
+
+def set_page_text(page_id: str, *, text: str, content_hash: str, changed_at: datetime) -> None:
+    """Replace the page ``page_id``'s text (a render's) and its hash."""
+    current().session.execute(
+        update_rows(CrawledPageRecord)
+        .where(CrawledPageRecord.id == page_id)
+        .values(text=text, content_hash=content_hash, changed_at=changed_at)
+    )
+
+
+def add_render_counts(run_id: str, *, renders: int, errors: int) -> None:
+    """Add ``renders`` and ``errors`` to the run ``run_id``'s counts."""
+    current().session.execute(
+        update_rows(CrawlRunRecord)
+        .where(CrawlRunRecord.id == run_id)
+        .values(
+            renders=CrawlRunRecord.renders + renders,
+            errors=CrawlRunRecord.errors + errors,
+        )
+    )
+
+
 def purge_text(now: datetime) -> int:
     """Null every page text whose ``text_purge_after`` is ``now`` or earlier; the count."""
     result = current().session.execute(
@@ -341,6 +416,71 @@ def touch_ats_link(link_id: str, *, run_id: str, page_id: str, at: datetime) -> 
         .where(AtsLinkRecord.id == link_id)
         .values(run_id=run_id, page_id=page_id, last_seen_at=at)
     )
+
+
+# Contact methods ------------------------------------------------------------------------------
+
+
+def _insert_contact_methods(
+    page_id: str, detections: Iterable[Detection], at: datetime
+) -> int:
+    rows = [
+        {
+            "id": new_id(),
+            "page_id": page_id,
+            "method": str(detection.method),
+            "signature": detection.signature,
+            "source": str(detection.source),
+            "matched": detection.matched,
+            "detected_at": at,
+        }
+        for detection in detections
+    ]
+    if rows:
+        current().session.execute(insert_rows(PageContactMethodRecord), rows)
+    return len(rows)
+
+
+def replace_contact_methods(page_id: str, detections: Iterable[Detection], at: datetime) -> None:
+    """The page ``page_id``'s contact methods are now ``detections``, detected ``at``."""
+    current().session.execute(
+        delete_rows(PageContactMethodRecord).where(PageContactMethodRecord.page_id == page_id)
+    )
+    _insert_contact_methods(page_id, detections, at)
+
+
+def add_contact_methods(page_id: str, detections: Iterable[Detection], at: datetime) -> int:
+    """Add each of ``detections`` the page ``page_id`` doesn't hold yet; how many were added."""
+    statement = select(
+        PageContactMethodRecord.method,
+        PageContactMethodRecord.signature,
+        PageContactMethodRecord.source,
+    ).where(PageContactMethodRecord.page_id == page_id)
+    held = {tuple(row) for row in current().session.execute(statement)}
+    new: list[Detection] = []
+    for detection in detections:
+        key = (str(detection.method), detection.signature, str(detection.source))
+        if key not in held:
+            held.add(key)
+            new.append(detection)
+    return _insert_contact_methods(page_id, new, at)
+
+
+def contact_methods_of(lead_id: str) -> tuple[StoredContactMethod, ...]:
+    """The contact methods of every page of the Lead ``lead_id``, by page URL, then method,
+    signature and source."""
+    statement = (
+        select(*_METHOD_COLUMNS)
+        .join(CrawledPageRecord, CrawledPageRecord.id == PageContactMethodRecord.page_id)
+        .where(CrawledPageRecord.lead_id == lead_id)
+        .order_by(
+            CrawledPageRecord.url,
+            PageContactMethodRecord.method,
+            PageContactMethodRecord.signature,
+            PageContactMethodRecord.source,
+        )
+    )
+    return tuple(StoredContactMethod(*row) for row in current().session.execute(statement))
 
 
 # Merges ---------------------------------------------------------------------------------------

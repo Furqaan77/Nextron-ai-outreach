@@ -111,19 +111,25 @@ limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``), ``check_re
 trigger), and Story 2.5's ``enrich_lead`` (the bulk lane by default, or interactive, priority
 40, ``max_runtime`` 20 minutes, retry limit 3, ``handlers.enrich_lead(crawls)``, group
 ``enrichment``), ``canonicalize_lead`` (bulk by default, or interactive, priority 45, 2 minutes,
-retry limit 2, ``handlers.canonicalize_lead(discovery)``, ``enrichment``) and
-``purge_page_text`` (bulk only, priority 20, 10 minutes, retry limit 2,
-``handlers.purge_page_text(research)``, ``other``).
+retry limit 2, ``handlers.canonicalize_lead(discovery)``, ``enrichment``),
+Story 2.6's ``render_pages`` (bulk only, priority 40, the ``enrich_lead`` chain's, 5 minutes,
+retry limit 2, ``handlers.render_pages(crawls)``, ``enrichment``) and ``purge_page_text`` (bulk
+only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(research)``,
+``other``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
 **The website crawl (Story 2.5, AD-9, AD-18).** ``build_app`` builds one
 ``HttpCrawler(meter=meter)`` (``nextron.adapters.crawler``) unless a ``crawler=`` is injected;
-building it builds no HTTP client and resolves nothing. ``WebsiteCrawls(clock, meter, crawler,
-queue)`` runs the ``enrich_lead`` jobs, ``Discovery(clock, Pipeline(clock), queue)`` the
-``canonicalize_lead`` jobs and ``Research(clock)`` the ``purge_page_text`` jobs; the registry
-reaches them through ``crawls=lambda: crawls``, ``discovery=lambda: discovery`` and
-``research=lambda: research``, which break the same cycle as ``notify``.
+building it builds no HTTP client and resolves nothing. It also builds one
+``PlaywrightRenderer(meter=meter, fetcher=<that HttpCrawler>)`` (``nextron.adapters.renderer``,
+Story 2.6) unless a ``renderer=`` is injected, so a render's fetches share the crawl's pacing
+per site; building it launches nothing (each render starts its own browser).
+``WebsiteCrawls(clock, meter, crawler, renderer, queue)`` runs the ``enrich_lead`` and
+``render_pages`` jobs, ``Discovery(clock, Pipeline(clock), queue)`` the ``canonicalize_lead``
+jobs and ``Research(clock)`` the ``purge_page_text`` jobs; the registry reaches them through
+``crawls=lambda: crawls``, ``discovery=lambda: discovery`` and ``research=lambda: research``,
+which break the same cycle as ``notify``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -499,6 +505,7 @@ from nextron.adapters.clock import SystemClock
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
+from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
@@ -574,7 +581,12 @@ from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB
-from nextron.domain.crawl import CANONICALIZE_LEAD_JOB, ENRICH_LEAD_JOB, PURGE_PAGE_TEXT_JOB
+from nextron.domain.crawl import (
+    CANONICALIZE_LEAD_JOB,
+    ENRICH_LEAD_JOB,
+    PURGE_PAGE_TEXT_JOB,
+    RENDER_PAGES_JOB,
+)
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
@@ -621,6 +633,7 @@ from nextron.ports.crawler import CrawlerPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.mail import MailPort
+from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
 from nextron.startup_checks import (
@@ -760,6 +773,7 @@ def build_app(
     backup_targets: BackupTargets | None = None,
     recovery_steps: RecoverySteps | None = None,
     crawler: CrawlerPort | None = None,
+    renderer: RendererPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -785,7 +799,9 @@ def build_app(
     the lifespan's startup step (``queue_contact_markets``, after the recovery startup pass)
     queues while any Contact is unresolved. The
     website crawl fetches through ``crawler`` (``HttpCrawler(meter=meter)`` unless injected),
-    which builds its HTTP client on its first fetch."""
+    which builds its HTTP client on its first fetch, and renders through ``renderer``
+    (``PlaywrightRenderer(meter=meter)`` on that same ``HttpCrawler`` unless injected), which
+    starts a browser only for each render."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -817,8 +833,14 @@ def build_app(
         research=lambda: research,
     )
     queue = JobQueue(clock, job_types)
+    # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
+    http_crawler = HttpCrawler(meter=meter)
     crawls = WebsiteCrawls(
-        clock, meter, crawler if crawler is not None else HttpCrawler(meter=meter), queue
+        clock,
+        meter,
+        crawler if crawler is not None else http_crawler,
+        renderer if renderer is not None else PlaywrightRenderer(meter=meter, fetcher=http_crawler),
+        queue,
     )
     discovery = Discovery(clock, Pipeline(clock), queue)
     research = Research(clock)
@@ -934,9 +956,9 @@ def build_job_types(
     ``RestoreTests`` that ``restore_test`` jobs call, ``recovery`` the ``RecoveryRunner`` that
     ``check_recovery`` jobs call, ``contact_markets`` the ``research`` service's
     ``ContactMarkets`` that ``resolve_contact_markets`` jobs call, ``crawls`` its
-    ``WebsiteCrawls`` that ``enrich_lead`` jobs call, ``discovery`` the ``discovery`` service
-    that ``canonicalize_lead`` jobs call, and ``research`` the ``research`` service that
-    ``purge_page_text`` jobs call."""
+    ``WebsiteCrawls`` that ``enrich_lead`` and ``render_pages`` jobs call, ``discovery`` the
+    ``discovery`` service that ``canonicalize_lead`` jobs call, and ``research`` the
+    ``research`` service that ``purge_page_text`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1024,6 +1046,19 @@ def build_job_types(
             max_runtime=timedelta(minutes=2),
             retry_limit=2,
             handler=handlers.canonicalize_lead(discovery),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RENDER_PAGES_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=40,  # the enrich_lead chain's: priority is set per job type
+            # up to 3 renders of 20 s each, each with its own browser launch
+            max_runtime=timedelta(minutes=5),
+            retry_limit=2,  # a failed render never raises: only recording the run is retried
+            handler=handlers.render_pages(crawls),
             group=JobGroup.ENRICHMENT,
         )
     )
