@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`) and **Story 1.21** (merge `932cd0a`). **Epic 1 is complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`), **Story 1.21** (merge `932cd0a`), **Story 3.8** (merge `f29d1f6`), **Story 2.9** (merge `c5781f1`), **Story 4.4** (merge `f437364`), **Story 2.6** (merge `1e53e10`) and **Story 3.4** (merge `6826855`). **Epic 1 is complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -206,11 +206,33 @@ The User-Agent is `NextronBot/1.0`. It has never fetched a real website; it is t
 - **Logon task:** `scripts/install_logon_task.ps1` registers it. It dry-runs by default and refuses elevation.
 - **Safety contract:** no code outside `tests/task_scheduler_guard.py` may name a state-changing Task Scheduler command.
 
-Main now: **10990 tests, 29 contracts.**
+**Story 3.8 result:** unsubscribe tokens.
+- **Format:** 108-character AES-GCM-SIV tokens with an HMAC edge tag the Cloudflare Worker can check. The shared test vectors in `tests/fixtures/unsub_token_vectors.json` are binding for Story 3.10.
+- **Storage:** only token hashes are stored, in permanent `unsub_tokens` rows.
+- **Keys:** each kid has a `k_tok` and a `k_edge` in Credential Manager, set on the Credentials page. They can't be replaced while that kid has tokens under 2 years old.
+- **Doctor:** a new check, `unsub_token_keys`, makes 13 checks.
+
+**Story 2.9 result:** Claude reads a Lead's changed pages (`extract_lead`).
+- **What is kept:** a proposed Signal is stored only if its quote is on the page, its type belongs to the Segment, and any date is stated in the quote.
+- **Evidence:** it is append-only (DB triggers), and it is reconciled on each run.
+- **Lead page:** it gets a headquarters timezone and new Signals and Evidence sections.
+- **Gateway:** `ClaudeGateway` is wired.
+- **Never live:** no real Claude call has been made.
+
+**Story 4.4 result:** the Sales Playbook (`docs/playbook/`) is snapshotted and pinned in AI route tuples (`playbook_snapshots`, `ai_route_tuples`, `playbook_checks`). A view at `/ai`, under Settings, shows the routes, tuples and Playbook versions. A Playbook problem warns but never stops `serve`.
+
+**Story 2.6 result:** pages with under 500 characters are rendered in a headless Chromium. Every browser request goes through the crawler's egress filter, and the browser itself can reach nothing. Chat, booking, form, phone and after-hours widgets are detected per page and per Lead (`contact_methods`). Signal extraction waits for rendering when a render is needed.
+
+**Story 3.4 result:** `assert_contactable` is the one contactability gate.
+- **Where it runs:** `upsert_lead` and every `add_contact` source call it before writing.
+- **Blocked:** suppressed keys, and Lost or Disqualified Leads.
+- **Contract:** `test_ad16_callers.py` lists every AD-16 caller in the spine. It fails any future caller (email finder, enroll, draft, approve, send) that doesn't wire the gate.
+
+Main now: **12469 tests, 29 contracts.**
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 36 are done (all of Epic 1). Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 41 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -277,6 +299,15 @@ Main now: **10990 tests, 29 contracts.**
 - **Story 1.19:**
   - the environment guard on restore reads file names only, so a renamed prod copy would be accepted in dev;
   - `pre_restore` safety copies are never rotated.
+- **Install Chromium once for page rendering (Story 2.6):** run `uv run playwright install chromium` from `nextron-engine`. Until you do, near-empty pages aren't rendered, and nothing alerts.
+- **Unsubscribe token keys (Story 3.8):** set them on the Credentials page before sending. A key re-entered from escrow isn't checked against the original (needs your OK to add a key-check value).
+- **Footer contract exception:** the setting label "Unsubscribe token key id" trips the rule against footer words outside the footer section. The merge added a narrow typed exception instead of renaming the label. Say if you'd rather rename it.
+- **Story 2.9 items rejected only because they'd change the approved spec:**
+  - merged Leads can carry duplicate Signals;
+  - undated Events never age;
+  - a failed AI run has no retry;
+  - a missing Claude key gives one dead-job alert per Lead.
+- **Story 2.6:** widgets loaded by a tag manager are missed (a false "no chat"), and phone numbers matched on pages are never purged.
 - **Install the logon task yourself (Story 1.21).** The steps are in `nextron-engine/README.md` under "Start at logon and supervision", with check rows in `docs/spikes/oq-a9-logon-task.md`. Use a separate clean checkout for prod and run from a normal, non-admin PowerShell. Nothing was registered during the build.
 - **Story 1.21 items for you:** a start that hangs past the 15-min grace is retried without limit, and each retry leaves a `pre_migrate` copy. There is no alert if the supervisor itself dies, and the task priority stays 7. Decide whether you want more than AD-20.
 - **Logon task (Story 1.20):** your at-the-PC steps (registration, start at logon, sleep/wake, unregister) are in `docs/spikes/oq-a9-logon-task.md`. Story 1.21 will finalise them.
