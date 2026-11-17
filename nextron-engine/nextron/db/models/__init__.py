@@ -11,7 +11,12 @@ from nextron.db.models.events import EventRecord
 from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.metering import AiUsageRecord, ApiUsageRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
-from nextron.db.models.ops import BackupRecord, HeartbeatRecord, RestoreTestRecord
+from nextron.db.models.ops import (
+    BackupRecord,
+    HeartbeatRecord,
+    RecoveryStateRecord,
+    RestoreTestRecord,
+)
 from nextron.db.models.setup import SettingRecord
 
 __all__ = [
@@ -24,6 +29,7 @@ __all__ = [
     "HeartbeatRecord",
     "JobRecord",
     "NotificationRecord",
+    "RecoveryStateRecord",
     "RestoreTestRecord",
     "SettingRecord",
     "Ulid",

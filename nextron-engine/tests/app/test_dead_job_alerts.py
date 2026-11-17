@@ -45,6 +45,11 @@ def no_restore_tests() -> Any:
     raise AssertionError("no restore_test job runs in these tests")
 
 
+def no_recovery() -> Any:
+    """``build_job_types``'s ``recovery`` where no ``check_recovery`` job runs."""
+    raise AssertionError("no check_recovery job runs in these tests")
+
+
 def fail_with_value_error(job: Job) -> None:
     raise ValueError(f"enrichment failed for job {job.id}")
 
@@ -127,7 +132,10 @@ def build_world(
     port = InMemoryAlert()
     built: dict[str, Notify] = {}
     registered = main.build_job_types(
-        alerts=lambda: built["notify"], backups=no_backups, restore_tests=no_restore_tests
+        alerts=lambda: built["notify"],
+        backups=no_backups,
+        restore_tests=no_restore_tests,
+        recovery=no_recovery,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))  # the real, registered one

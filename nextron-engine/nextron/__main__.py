@@ -16,8 +16,15 @@ Commands:
   within 5 minutes (exit 0: opened; exit 1: the engine isn't running, or the code couldn't be
   stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
   invalid).
+- ``restore <file> [--yes]``: put the backup copy ``file`` (``nextron-<env>-<stamp>.db``, or
+  ``.db.enc`` encrypted with the Backup passphrase) back as this environment's database, with
+  the engine stopped, and turn recovery mode on, which holds sending until every recovery step
+  is done. The current database is saved to ``<backup dir>\\pre_restore\\`` first. Without
+  ``--yes`` it asks you to type ``yes`` (exit 0: restored; exit 1: refused, cancelled or failed,
+  the engine running included; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is invalid,
+  or an environment check failed).
 
-Later stories add ``seed sync`` and ``restore``.
+A later story adds ``seed sync``.
 """
 
 import argparse
@@ -57,6 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "open", help="open the dashboard in the default browser with a one-time link"
     )
+    restore = commands.add_parser(
+        "restore",
+        help="restore a backup copy with the engine stopped, and hold sending in recovery mode",
+    )
+    restore.add_argument(
+        "file", help="the backup copy: nextron-<env>-<stamp>.db, or .db.enc (encrypted)"
+    )
+    restore.add_argument(
+        "--yes", action="store_true", help="restore without asking you to type yes"
+    )
     return parser
 
 
@@ -66,6 +83,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return engine.serve(reload=args.reload)
     if args.command == "open":
         return engine.open_dashboard()
+    if args.command == "restore":
+        return engine.restore(args.file, yes=args.yes)
     return engine.doctor(env=args.env, as_json=args.as_json)
 
 

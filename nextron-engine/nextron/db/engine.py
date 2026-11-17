@@ -45,6 +45,12 @@ stays consistent while the engine commits. A missing source raises and creates n
 paths become percent-encoded file URIs (``_file_uri``); a UNC path (a backup dir on a network
 share, ``\\\\nas\\share\\...``) is written with an empty authority, ``file:////nas/share/...``,
 because SQLite refuses the ``file://nas/...`` form ("invalid uri authority").
+``copy_database(..., immutable_source=True)`` (Story 1.19, the restore's copy of a backup file)
+opens the source as ``open_copy`` does (``mode=ro&immutable=1``), so nothing is created or
+changed beside a file that isn't a live database. The restore also copies a checked candidate
+into the live file with it (``immutable_source`` off): the destination's write is one
+transaction, so a failure leaves the live database as it was, and a ``-wal`` left by a crash is
+read and then checkpointed away when the destination connection closes.
 
 ``open_copy(path)`` is a context manager on a copy: ``sqlite3.connect(<file URI>?mode=ro&
 immutable=1)``. It never writes the copy, never creates ``-wal`` or ``-shm`` files and doesn't
@@ -230,13 +236,17 @@ def _file_uri(path: Path, mode: str) -> str:
     return f"{uri}?mode={mode}"
 
 
-def copy_database(db_path: Path, target: Path) -> None:
+def copy_database(db_path: Path, target: Path, *, immutable_source: bool = False) -> None:
     """Copy the database file ``db_path`` into ``target`` with SQLite's backup API; see the
-    module docstring. ``target`` must already exist, empty."""
+    module docstring. ``target`` must already exist, empty. With ``immutable_source`` the
+    source is opened as ``open_copy`` opens a copy (``mode=ro&immutable=1``)."""
     if not (isinstance(db_path, Path) and isinstance(target, Path)):
         raise TypeError("copy_database takes two pathlib.Path values")
+    source_uri = _file_uri(db_path, "ro")
+    if immutable_source:
+        source_uri += "&immutable=1"
     source = sqlite3.connect(
-        _file_uri(db_path, "ro"), uri=True, autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL
+        source_uri, uri=True, autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL
     )
     try:
         source.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")

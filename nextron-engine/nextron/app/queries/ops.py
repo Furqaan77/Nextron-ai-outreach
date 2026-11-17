@@ -34,6 +34,16 @@ The restore test (Story 1.18):
 - ``newest_offpc_copy()``: the ``BackupRow`` whose off-PC copy a restore test fetches: the newest
   one ``copied`` off the PC and not yet rotated out, or ``None``.
 
+Restore and recovery mode (Story 1.19):
+
+- ``recovery_mode() -> bool``: whether recovery mode is on (a ``recovery_state`` row is
+  ``on``). This is the gate: every send path calls it in its own transaction and holds its
+  sends while it is true, because a restored database has forgotten every opt-out, erasure and
+  send made after its copy was taken. The notification area's banner reads it too.
+- ``recovery_state()``: the ``on`` ``RecoveryRow`` when recovery mode is on, else the newest
+  row of any mode (by ``restored_at``, then id), or ``None`` before the first restore. The
+  health panel's Recovery section shows it.
+
 It reads through the current unit of work, read-only ones included.
 """
 
@@ -41,9 +51,11 @@ from typing import Final
 
 from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
+from nextron.db.repos.ops import recovery as recovery_repo
 from nextron.db.repos.ops import restore_tests as restore_tests_repo
 from nextron.db.repos.ops.backups import BackupRow
 from nextron.db.repos.ops.heartbeat import HeartbeatRow
+from nextron.db.repos.ops.recovery import RecoveryRow
 from nextron.db.repos.ops.restore_tests import RestoreTestRow
 from nextron.domain.backup import (
     BACKUP_FAILED,
@@ -93,6 +105,16 @@ def newest_restore_test(kind: RestoreTestKind) -> RestoreTestRow | None:
 def newest_offpc_copy() -> BackupRow | None:
     """The newest backup copied off the PC whose copy is not rotated out, or ``None``."""
     return backups_repo.newest_offpc_copy()
+
+
+def recovery_mode() -> bool:
+    """Whether recovery mode is on: the gate every send path checks."""
+    return recovery_repo.active() is not None
+
+
+def recovery_state() -> RecoveryRow | None:
+    """The ``on`` recovery row, else the newest one of any mode, or ``None``."""
+    return recovery_repo.newest()
 
 
 def _restore_issues() -> tuple[HealthIssue, ...]:

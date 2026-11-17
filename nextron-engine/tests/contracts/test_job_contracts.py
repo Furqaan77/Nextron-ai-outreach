@@ -4,8 +4,9 @@
   ``JobTypes`` or calls ``register_job_type``, and only ``build_triggers()`` there constructs
   ``Triggers`` or calls ``register_trigger``, under any alias.
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
-  (``send_alert``, Story 1.12, and ``backup_db``, Story 1.16, with their settings); the
-  triggers are exactly ``backup_db``'s daily schedule (Story 1.16).
+  (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18, and
+  ``check_recovery``, Story 1.19, with their settings); the triggers are exactly ``backup_db``'s
+  and ``restore_test``'s daily schedules and ``check_recovery``'s ``Every`` with ``active``.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -14,7 +15,7 @@
   ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup`` and the domain; ``triggers.py``:
   the domain; ``scheduler.py``: ``apscheduler``, ``nextron.app.jobqueue.api``,
   ``nextron.jobs.triggers`` and the domain; ``heartbeat.py``: ``nextron.app.ops.api``;
-  ``handlers.py``: the domain.
+  ``handlers.py`` and ``recovery.py``: the domain.
 - **Indexes and checks.** Every table's indexes (partial ones' ``sqlite_where`` included) and
   checks are the same in the model and in the database at head. Alembic's drift comparison sees
   neither a ``WHERE`` clause nor a check, so this compares the SQL itself; ``jobs`` is the first
@@ -42,7 +43,7 @@ from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
 from nextron.domain.job import Job, JobGroup, JobTypes, Lane
-from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
 MAIN = "nextron/main.py"
@@ -53,6 +54,7 @@ TRIGGERS_PY = "nextron/jobs/triggers.py"
 SCHEDULER_PY = "nextron/jobs/scheduler.py"
 HEARTBEAT_PY = "nextron/jobs/heartbeat.py"
 HANDLERS_PY = "nextron/jobs/handlers.py"
+RECOVERY_PY = "nextron/jobs/recovery.py"
 UNUSED = '"""unused"""\n'
 
 
@@ -83,6 +85,7 @@ JOBS_IMPORTS: ImportRules = {
     ),
     HEARTBEAT_PY: (("nextron.app.ops.api",), ()),
     HANDLERS_PY: (("nextron.domain",), ()),
+    RECOVERY_PY: (("nextron.domain",), ()),
 }
 
 
@@ -283,6 +286,17 @@ class RecordingBackups:
         return "01JD0000000000000000000002"
 
 
+class RecordingRecovery:
+    """Stands in for the job layer's ``RecoveryRunner``."""
+
+    def __init__(self) -> None:
+        self.checks = 0
+
+    def check(self) -> bool:
+        self.checks += 1
+        return False
+
+
 class RecordingRestoreTests:
     """Stands in for the ``ops`` service's ``RestoreTests``."""
 
@@ -294,10 +308,11 @@ class RecordingRestoreTests:
         return None
 
 
-def test_build_job_types_is_frozen_and_registers_send_alert_backup_db_and_restore_test() -> None:
+def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> None:
     alerts = RecordingAlerts()
     backups = RecordingBackups()
     restore_tests = RecordingRestoreTests()
+    recovery = RecordingRecovery()
     calls: list[str] = []
 
     def lookup() -> RecordingAlerts:
@@ -312,13 +327,20 @@ def test_build_job_types_is_frozen_and_registers_send_alert_backup_db_and_restor
         calls.append("restore tests looked up")
         return restore_tests
 
+    def recovery_lookup() -> RecordingRecovery:
+        calls.append("recovery looked up")
+        return recovery
+
     job_types = main.build_job_types(
-        alerts=lookup, backups=backups_lookup, restore_tests=restore_tests_lookup
+        alerts=lookup,
+        backups=backups_lookup,
+        restore_tests=restore_tests_lookup,
+        recovery=recovery_lookup,
     )
 
     assert isinstance(job_types, JobTypes)
     assert job_types.frozen
-    assert job_types.names() == ("send_alert", "backup_db", "restore_test")
+    assert job_types.names() == ("send_alert", "backup_db", "restore_test", "check_recovery")
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,
@@ -357,33 +379,69 @@ def test_build_job_types_is_frozen_and_registers_send_alert_backup_db_and_restor
     restore_tick = Job("01JD0000000000000000000004", "restore_test", Lane.BULK, {"v": 1}, 1)
     assert restore_test.handler(restore_tick) is None  # type: ignore[func-returns-value]
     assert (calls[-1], restore_tests.kinds) == ("restore tests looked up", ["monthly"])
+    check_recovery = job_types.get("check_recovery")
+    assert (
+        check_recovery.default_lane,
+        check_recovery.lanes,
+        check_recovery.priority,
+        check_recovery.max_runtime,
+        check_recovery.retry_limit,
+        check_recovery.group,
+    ) == (
+        Lane.REALTIME,
+        frozenset({Lane.REALTIME}),
+        85,
+        timedelta(minutes=10),
+        2,
+        JobGroup.BACKUP,
+    )
+    recovery_tick = Job("01JD0000000000000000000005", "check_recovery", Lane.REALTIME, {"v": 1}, 1)
+    assert check_recovery.handler(recovery_tick) is None  # type: ignore[func-returns-value]
+    assert (calls[-1], recovery.checks) == ("recovery looked up", 1)
     main_registry = main.build_job_types(
-        alerts=lookup, backups=backups_lookup, restore_tests=restore_tests_lookup
+        alerts=lookup,
+        backups=backups_lookup,
+        restore_tests=restore_tests_lookup,
+        recovery=recovery_lookup,
     )
     assert main_registry is not job_types  # a new registry each time
 
 
-def test_build_triggers_registers_the_daily_backup_then_the_restore_test() -> None:
+def test_build_triggers_registers_the_backup_the_restore_test_then_the_recovery_check() -> None:
     job_types = main.build_job_types(
-        alerts=RecordingAlerts, backups=RecordingBackups, restore_tests=RecordingRestoreTests
+        alerts=RecordingAlerts,
+        backups=RecordingBackups,
+        restore_tests=RecordingRestoreTests,
+        recovery=RecordingRecovery,
     )
     schedule = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
     restore_schedule = lambda: DailyRun(time(4, 15), "UTC")  # noqa: E731
+    recovery_active = lambda: True  # noqa: E731
 
     triggers = main.build_triggers(
-        job_types, backup_schedule=schedule, restore_test_schedule=restore_schedule
+        job_types,
+        backup_schedule=schedule,
+        restore_test_schedule=restore_schedule,
+        recovery_active=recovery_active,
     )
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore] = triggers.specs()
+    [spec, restore, recovery] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
     assert (restore.trigger, restore.job_type) == (Trigger.RESTORE_TEST, "restore_test")
     assert restore.schedule == DailyAt(restore_schedule, fallback=DailyRun(time(11, 0), "UTC"))
+    assert (recovery.trigger, recovery.job_type) == (Trigger.CHECK_RECOVERY, "check_recovery")
+    assert recovery.schedule == Every(
+        timedelta(minutes=1), at_startup=True, active=recovery_active
+    )
     built_again = main.build_triggers(
-        job_types, backup_schedule=schedule, restore_test_schedule=restore_schedule
+        job_types,
+        backup_schedule=schedule,
+        restore_test_schedule=restore_schedule,
+        recovery_active=recovery_active,
     )
     assert built_again is not triggers  # a new registry each time
 
@@ -505,6 +563,7 @@ def test_a_nested_modules_relative_imports_resolve_against_its_own_package(
         (SCHEDULER_PY, "apscheduler"),
         (HEARTBEAT_PY, "nextron.app.ops.api"),
         (HANDLERS_PY, "nextron.domain.job"),
+        (RECOVERY_PY, "nextron.domain.recovery"),
     ],
 )
 def test_each_jobs_module_imports_only_what_it_may(module: str, needle: str) -> None:

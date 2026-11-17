@@ -66,6 +66,11 @@ def no_restore_tests() -> Any:
     raise AssertionError("no restore_test job runs in these tests")
 
 
+def no_recovery() -> Any:
+    """``build_job_types``'s ``recovery`` where no ``check_recovery`` job runs."""
+    raise AssertionError("no check_recovery job runs in these tests")
+
+
 @dataclass
 class World:
     """The ``notify`` service on real units of work, its queue and its job types."""
@@ -162,7 +167,10 @@ def world_on(
 ) -> World:
     built: dict[str, Notify] = {}
     job_types = main.build_job_types(
-        alerts=lambda: built["notify"], backups=no_backups, restore_tests=no_restore_tests
+        alerts=lambda: built["notify"],
+        backups=no_backups,
+        restore_tests=no_restore_tests,
+        recovery=no_recovery,
     )
     queue = JobQueue(clock, job_types)
     factory: Any = port if callable(port) and not isinstance(port, AlertPort) else lambda: port

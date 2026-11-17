@@ -1,8 +1,13 @@
 {#- The notification area (UX-DR5): GET /notifications, which base.html loads into
     #notification-list once per page view, and the answer to POST /notifications/dismiss, which
-    HTMX swaps into the same list. It starts with the engine health error count, linked to the
-    health panel, when there are errors. It renders nothing at all when no notification is
-    undismissed and no error needs attention, so the list stays empty and takes no space. -#}
+    HTMX swaps into the same list. While recovery mode is on (Story 1.19) it starts with the
+    recovery banner, linked to the health panel; every page loads the area, so every page shows
+    it. Then comes the engine health error count, linked to the health panel, when there are
+    errors. It renders nothing at all when recovery mode is off, no notification is undismissed
+    and no error needs attention, so the list stays empty and takes no space. -#}
+{%- if recovery -%}
+<p class="recovery-banner" role="alert"><a href="/health/panel">{{ RECOVERY_BANNER }}</a></p>
+{%- endif -%}
 {%- if health_text -%}
 <p class="health-count"><a href="/health/panel">{{ health_text }}</a></p>
 {%- endif -%}

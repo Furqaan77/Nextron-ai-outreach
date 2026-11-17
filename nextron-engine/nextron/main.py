@@ -56,8 +56,8 @@ Any other error is logged as ``engine_crashed`` and ends with exit 1.
 constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists.
 
-**Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests)`` is the job type
-registry: the only
+**Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery)`` is the job
+type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -66,7 +66,9 @@ minutes, retry limit 5, ``handlers.send_alert(alerts)``, group ``other``: the pa
 have none for alerts), ``backup_db`` (Story 1.16: the bulk lane only, priority 80,
 ``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``) and
 ``restore_test`` (Story 1.18: the bulk lane only, priority 70, ``max_runtime`` 30 minutes, retry
-limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``).
+limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``) and ``check_recovery``
+(Story 1.19: the realtime lane only, priority 85, ``max_runtime`` 10 minutes, retry limit 2,
+``handlers.check_recovery(recovery)``, group ``backup``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -95,13 +97,16 @@ dashboard notice once a month. The meter needs the hook, the hook needs ``budget
 ``budget`` needs the meter: the lambda breaks the cycle, with ``budget`` bound just below it.
 Building the app builds no adapter or HTTP client and records nothing.
 
-**Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule, restore_test_schedule)``
-is the trigger registry: the only code that constructs ``Triggers`` or calls
+**Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule, restore_test_schedule,
+recovery_active)`` is the trigger registry: the only code that constructs ``Triggers`` or calls
 ``register_trigger``. Register each AD-10 ``Trigger`` there, after its job type (a firing
 enqueues the job type with the trigger's own name), then it is frozen. So far: ``backup_db``
 (Story 1.16), a ``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``, then
 ``restore_test`` (Story 1.18), a ``DailyAt(restore_test_schedule,
-fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``. ``build_app``
+fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``, then ``check_recovery`` (Story 1.19), an
+``Every(CHECK_PERIOD, at_startup=True, active=recovery_active)``: every minute, and at start,
+but the scheduler enqueues it only while ``recovery_active()`` returns ``True``, so no job row is
+made once recovery is over. ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
 
@@ -143,6 +148,71 @@ dashboard gets it (``create_app(..., restore_tests=restore_tests)``) for the hea
 daily an hour after ``backup_time``; the job tests only when no monthly test has started this
 calendar month, and a month's slot missed while the engine was off is made up once at start.
 
+**Recovery mode (Story 1.19; AD-2, AD-5, AD-17, AD-20, OP-8).** ``build_recovery_steps()`` is
+the recovery step registry (``nextron.domain.recovery.RecoverySteps``): the only code that
+constructs one or calls ``register_step`` (``tests/contracts/test_recovery_contracts.py``). It
+ships empty and frozen; Stories 3.12, 3.16 and 6.12 register their ``RecoveryHandler``s there.
+``build_app(..., recovery_steps=None)`` builds one ``Recovery(clock)`` (``nextron.app.ops.api``)
+and one ``RecoveryRunner(units, recovery, recovery_steps or build_recovery_steps())``
+(``nextron.jobs.recovery``), passes ``recovery=lambda: recovery_runner`` to
+``build_job_types`` and ``recovery_active=functools.partial(read_recovery_mode, units)`` to
+``build_triggers``, and its ``startup`` to ``engine_lifespan``. ``read_recovery_mode(units)``
+reads ``queries.ops.recovery_mode()`` in a read-only unit of work inside a fresh
+``contextvars.Context()``. While recovery mode is on, the notification area shows the banner,
+the health panel lists the steps, and every later send path holds its sends.
+
+**Restore (Story 1.19).** ``restore(file, *, yes=False, ...)`` (``nextron restore <file>
+[--yes]``) puts a backup copy back as this environment's database, and nothing else ever
+replaces it. It exits 0 when restored, 1 when refused, cancelled or failed, and 2 for an
+invalid bootstrap config or a failed environment check. Its steps, in order:
+
+1. Bootstrap config and ``environment_checks``: exit 2.
+2. ``mkdir`` of the data dir and ``logs``, then ``<data dir>\\nextron.lock``. When the engine
+   holds it, it prints ``stop the engine before restoring`` and exits 1, with no log record and
+   no other change: the running engine owns the log file.
+3. ``configure_logging``.
+4. **The file** must be an existing regular file whose name ends ``.db`` or ``.db.enc``
+   (``copy_format``), named for this environment when it keeps a backup copy's name
+   (``copy_env``; a renamed file isn't checked, so keep the names), not the live database
+   itself and not inside the restore's work folder. A plain ``.db`` with a
+   non-empty ``<file>-wal`` beside it is a live database, not a backup copy, and is refused.
+5. **The work folder.** ``clear_work_folders(<data dir>\\restore, "nextron-<env>-", ...)``,
+   then a new ``tempfile.mkdtemp(prefix="nextron-<env>-")`` folder in it, always removed at the
+   end (``remove_work_folder``; a failure logs ``restore_cleanup_failed``).
+6. **The candidate**, ``<work>\\candidate.db``: an encrypted copy is decrypted into it through
+   ``targets(file.parent).get(file.name, ...)`` (``FolderBackupTarget`` with the environment's
+   secrets unless injected), a plain one is copied with ``copy_candidate`` (SQLite's backup API,
+   the file opened ``immutable``). The given file, and every file beside it, is never changed.
+7. **The checks**: ``inspect_copy(candidate)`` must show integrity ``ok``, a revision and a
+   revision this code knows.
+8. ``backup_at`` is ``backup_time(file.name, newest_event_at(candidate), now)``.
+9. **Without ``--yes``** it prints what it will do and asks ``Type yes to restore: ``. Only
+   ``yes`` (stripped, any case) goes on; anything else, ``EOFError`` or ``KeyboardInterrupt``
+   prints ``restore cancelled; nothing was changed`` and exits 1.
+10. When ``<data dir>\\nextron.db`` exists, ``save_current`` copies it into ``<backup
+    dir>\\pre_restore\\<copy_name(env, now)>`` (logging ``pre_restore_backup_taken``,
+    ``file``). If that fails the restore refuses, and tells Mac to move a damaged
+    ``nextron.db`` (with its ``-wal`` and ``-shm``) aside himself.
+11. ``ensure_current(create_engine(candidate))`` upgrades the candidate, logging
+    ``restore_candidate_migrated`` (``from_revision``, ``to_revision``) when it did.
+12. ``Recovery(clock).begin(...)`` in a unit of work on the candidate's own
+    ``UnitOfWorkFactory`` turns recovery mode on in it; then its engine is disposed. A failure
+    in step 11 or 12 discards the ``pre_restore`` copy (best effort), so nothing was changed.
+13. ``swap_in(candidate, <data dir>\\nextron.db)``: SQLite's backup API, one write transaction.
+    A failure leaves the database unchanged (an empty file ``swap_in`` created on a new PC is
+    discarded) and keeps the ``pre_restore`` copy, whose full path the message names.
+14. ``restored_check`` must show integrity ``ok``, the head revision and exactly the new row as
+    the one ``on`` row; otherwise it prints ``the restored database could not be verified
+    (...)``, naming the ``pre_restore`` copy's full path and telling Mac not to start the
+    engine (run ``nextron restore`` again, or restore the safety copy), and exits 1.
+15. It prints the result and logs ``database_restored`` (INFO: ``file``, ``from_revision``,
+    ``to_revision``, ``recovery_id``, ``pre_restore``), then exits 0.
+
+A refusal or a failure in steps 4 to 13 prints one line ending ``nothing was changed`` (``the
+database is unchanged`` at step 13) and logs ``restore_refused`` (WARNING, ``reason``) or
+``restore_failed`` (ERROR, ``stage``, ``code``). Logs carry file names only, never a path. The
+lock is always released.
+
 **The heartbeat (AD-20, NFR-14).** ``build_app`` builds one ``Heartbeat(clock, heartbeat
 file)`` (``nextron.app.ops.api``), whose file is ``<data dir>\\heartbeat``
 (``HEARTBEAT_FILE_NAME``), and one ``HeartbeatWriter(units, heartbeat, runner, scheduler)``
@@ -152,10 +222,13 @@ thread and the keeper are alive, no running job has passed its ``max_runtime`` a
 scheduler's event loop answers its probe. The supervisor (``scripts/run.ps1``, Story 1.21)
 restarts the engine when the file is more than 5 minutes old.
 
-**The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer)`` to
-``create_app``, so all three start when the server starts and stop when it stops, in whichever
-process serves the app (the reload worker included). Building the app starts nothing. Startup
-runs ``runner.start`` through ``asyncio.to_thread``, then ``scheduler.start()`` on the event
+**The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer,
+recovery_runner.startup)`` to ``create_app``, so all three start when the server starts and stop
+when it stops, in whichever process serves the app (the reload worker included). Building the
+app starts nothing. Startup first runs the recovery steps' startup pass (``recovery_startup``)
+through ``asyncio.to_thread``; if it raises (``recovery_state`` can't be read or written), the
+server doesn't start: Uvicorn exits 3, and ``serve`` reports ``server_start_failed`` and exits 2,
+which fails closed. Then it runs ``runner.start`` through ``asyncio.to_thread``, then ``scheduler.start()`` on the event
 loop (APScheduler needs the running loop), then ``writer.start`` through ``asyncio.to_thread``.
 Shutdown runs in reverse: ``writer.stop`` (to a thread), ``await scheduler.stop()``, then
 ``runner.stop`` (to a thread), which waits up to 15 s for running handlers and then releases
@@ -200,7 +273,8 @@ there. ``build_app`` builds one
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
 (``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
 ``create_app(..., health=health, queue=queue)``: the health panel (``GET /health/panel``)
-shows its report and the notification area its error count.
+shows its report (its Recovery section from ``queries.ops.recovery_state()``, Story 1.19) and
+the notification area its error count.
 
 **The doctor in the engine.** The panel's readiness list is the doctor registry itself, run on
 ``DoctorContext(config, ENV_SOURCE_VARIABLE, probes, secrets, google,
@@ -272,7 +346,9 @@ import contextlib
 import contextvars
 import functools
 import logging
+import os
 import sys
+import tempfile
 import webbrowser
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
@@ -303,8 +379,11 @@ from nextron.app.ops.api import (
     Heartbeat,
     LocalBackups,
     OffpcBackups,
+    Recovery,
     RestoreTests,
     TakenBackup,
+    clear_work_folders,
+    remove_work_folder,
 )
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
@@ -321,7 +400,14 @@ from nextron.db.migrations import (
     head_revision,
     known_revisions,
 )
-from nextron.db.repos.ops.snapshot import inspect_copy, snapshot
+from nextron.db.repos.ops.restore import (
+    copy_candidate,
+    newest_event_at,
+    restored_check,
+    save_current,
+    swap_in,
+)
+from nextron.db.repos.ops.snapshot import INTEGRITY_PASSED, discard, inspect_copy, snapshot
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain import settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
@@ -330,18 +416,31 @@ from nextron.domain.backup import (
     DEFAULT_BACKUP_TIME,
     LOCAL_DIR_NAME,
     BackupKind,
+    copy_name,
 )
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
+from nextron.domain.recovery import (
+    CHECK_PERIOD,
+    CHECK_RECOVERY_JOB,
+    ENCRYPTED,
+    PRE_RESTORE_DIR_NAME,
+    RESTORE_WORK_DIR_NAME,
+    RecoverySteps,
+    backup_time,
+    copy_env,
+    copy_format,
+)
 from nextron.domain.restore_test import DEFAULT_RESTORE_TEST_TIME, RESTORE_TEST_JOB
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
 from nextron.jobs import handlers
 from nextron.jobs.heartbeat import HeartbeatWriter
+from nextron.jobs.recovery import RecoveryRunner
 from nextron.jobs.runner import Runner
 from nextron.jobs.scheduler import Scheduler
-from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.ports.alert import AlertPort
@@ -419,6 +518,18 @@ DASHBOARD_OPENED: Final = (
     "opened the dashboard in your browser; the link works once, within 5 minutes"
 )
 
+EXIT_RESTORE_FAILED: Final = 1  # restore: refused, cancelled or failed
+STOP_THE_ENGINE: Final = "stop the engine before restoring"
+NOTHING_CHANGED: Final = "nothing was changed"
+DATABASE_UNCHANGED: Final = "the database is unchanged"
+RESTORE_CANCELLED: Final = "restore cancelled; nothing was changed"
+CONFIRM_PROMPT: Final = "Type yes to restore: "
+CONFIRM_ANSWER: Final = "yes"
+CANDIDATE_NAME: Final = "candidate.db"
+WAL_SUFFIX: Final = "-wal"
+RESTORE_CLEANUP_FAILED: Final = "restore_cleanup_failed"
+RESTORE_TIME_FORMAT: Final = "%Y-%m-%d %H:%M:%S UTC"
+
 ServerRunner = Callable[[BootstrapConfig, bool, UnitOfWorkFactory], None]
 EngineProbe = Callable[[str, int], bool]
 Browser = Callable[[str], bool]
@@ -452,6 +563,7 @@ def build_app(
     browser: Browser | None = None,
     probes: Probes | None = None,
     backup_targets: BackupTargets | None = None,
+    recovery_steps: RecoverySteps | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -468,7 +580,9 @@ def build_app(
     PC through ``backup_targets`` (``FolderBackupTarget`` with these secrets unless injected);
     ``RestoreTests`` fetches the newest off-PC copy back through the same targets and checks
     it (the ``restore_test`` job); the scheduler reads the daily times when it starts, never
-    when the app is built."""
+    when the app is built. The ``RecoveryRunner`` runs the recovery steps of ``recovery_steps``
+    (``build_recovery_steps()`` unless injected) at startup, before the runner, and from the
+    ``check_recovery`` job while recovery mode is on."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -482,11 +596,17 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
+    recovery_runner = RecoveryRunner(
+        units,
+        Recovery(clock),
+        recovery_steps if recovery_steps is not None else build_recovery_steps(),
+    )
     # notify, backups and restore_tests are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
         restore_tests=lambda: restore_tests,
+        recovery=lambda: recovery_runner,
     )
     queue = JobQueue(clock, job_types)
     telegram = functools.partial(
@@ -509,6 +629,7 @@ def build_app(
         job_types,
         backup_schedule=functools.partial(read_backup_schedule, units, backups),
         restore_test_schedule=functools.partial(read_restore_test_schedule, units, restore_tests),
+        recovery_active=functools.partial(read_recovery_mode, units),
     )
     scheduler = Scheduler(units, queue, triggers)
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
@@ -543,7 +664,7 @@ def build_app(
         backups=backups,
         restore_tests=restore_tests,
         units=units,
-        lifespan=engine_lifespan(runner, scheduler, writer),
+        lifespan=engine_lifespan(runner, scheduler, writer, recovery_runner.startup),
     )
 
 
@@ -564,12 +685,14 @@ def build_job_types(
     alerts: Callable[[], handlers.AlertSending],
     backups: Callable[[], handlers.BackingUp],
     restore_tests: Callable[[], handlers.RestoreTesting],
+    recovery: Callable[[], handlers.RecoveryChecking],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
     returns the ``notify`` service that ``send_alert`` jobs call, ``backups`` the ``ops``
-    service's ``Backups`` that ``backup_db`` jobs call, and ``restore_tests`` its
-    ``RestoreTests`` that ``restore_test`` jobs call."""
+    service's ``Backups`` that ``backup_db`` jobs call, ``restore_tests`` its
+    ``RestoreTests`` that ``restore_test`` jobs call, and ``recovery`` the
+    ``RecoveryRunner`` that ``check_recovery`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -609,6 +732,19 @@ def build_job_types(
             group=JobGroup.BACKUP,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_RECOVERY_JOB,
+            default_lane=Lane.REALTIME,
+            lanes=frozenset({Lane.REALTIME}),
+            priority=85,
+            # quick: each step's handler enqueues its work, it doesn't do it
+            max_runtime=timedelta(minutes=10),
+            retry_limit=2,  # the trigger fires every minute while recovery mode is on
+            handler=handlers.check_recovery(recovery),
+            group=JobGroup.BACKUP,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -630,12 +766,14 @@ def build_triggers(
     *,
     backup_schedule: Callable[[], DailyRun],
     restore_test_schedule: Callable[[], DailyRun],
+    recovery_active: Callable[[], bool],
 ) -> Triggers:
     """The trigger registry (AD-10), frozen: register each trigger with
     ``register_trigger(Trigger.X, Every(...))`` or ``DailyAt(...)``, after its job type, before
     ``freeze()``. ``backup_schedule`` returns the daily backup's ``DailyRun`` and
     ``restore_test_schedule`` the daily restore-test check's; the scheduler calls them when it
-    starts."""
+    starts. ``recovery_active`` says whether recovery mode is on; the scheduler calls it before
+    each ``check_recovery`` firing."""
     triggers = Triggers(job_types)
     triggers.register_trigger(
         Trigger.BACKUP_DB,
@@ -647,6 +785,9 @@ def build_triggers(
             restore_test_schedule,
             fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, FALLBACK_TIMEZONE),
         ),
+    )
+    triggers.register_trigger(
+        Trigger.CHECK_RECOVERY, Every(CHECK_PERIOD, at_startup=True, active=recovery_active)
     )
     triggers.freeze()
     return triggers
@@ -708,6 +849,30 @@ def read_restore_test_schedule(units: Units, tests: RestoreTests) -> DailyRun:
     return contextvars.Context().run(read)
 
 
+def build_recovery_steps() -> RecoverySteps:
+    """The recovery step registry (Story 1.19), frozen: the only code that constructs
+    ``RecoverySteps`` or calls ``register_step``. Empty until a story adds a handler: Story 3.16
+    registers ``reapply_erasure_ledger``, Story 6.12 ``mark_oms_unknown`` and
+    ``reingest_mailboxes``, and Story 3.12 ``repoll_unsubscribes``, each with
+    ``register_step(RecoveryHandler(step, owner, run, startup))`` before ``freeze()``. A step
+    with no handler becomes ``not_applicable``."""
+    steps = RecoverySteps()
+    steps.freeze()
+    return steps
+
+
+def read_recovery_mode(units: Units) -> bool:
+    """Whether recovery mode is on: ``queries.ops.recovery_mode()`` read in its own read-only
+    unit of work inside a fresh ``contextvars.Context()``; the ``check_recovery`` trigger's
+    ``active``."""
+
+    def read() -> bool:
+        with units.open(read_only=True):
+            return ops_queries.recovery_mode()
+
+    return contextvars.Context().run(read)
+
+
 def read_backup_schedule(units: Units, backups: Backups) -> DailyRun:
     """The daily backup's ``DailyRun``: ``backups.schedule()`` read in its own read-only unit
     of work inside a fresh ``contextvars.Context()``, so it works whatever the caller has
@@ -743,15 +908,20 @@ class PreMigrateBackup:
 
 
 def engine_lifespan(
-    runner: Runner, scheduler: Scheduler, writer: HeartbeatWriter
+    runner: Runner,
+    scheduler: Scheduler,
+    writer: HeartbeatWriter,
+    recovery_startup: Callable[[], None],
 ) -> Lifespan:
-    """The app's lifespan: start the runner (on a worker thread), the scheduler (on the event
-    loop) and the heartbeat writer (on a worker thread) when the server starts, and stop them
-    in reverse when it stops. Each part that started is stopped even when a later start, or the
-    server, failed."""
+    """The app's lifespan: run the recovery steps' startup pass (``recovery_startup``, on a
+    worker thread; if it raises, the server doesn't start), then start the runner (on a worker
+    thread), the scheduler (on the event loop) and the heartbeat writer (on a worker thread)
+    when the server starts, and stop them in reverse when it stops. Each part that started is
+    stopped even when a later start, or the server, failed."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await asyncio.to_thread(recovery_startup)  # before the runner: a failure stops the start
         async with contextlib.AsyncExitStack() as started:
             await asyncio.to_thread(runner.start)
             started.push_async_callback(asyncio.to_thread, runner.stop)
@@ -1361,3 +1531,384 @@ def open_dashboard(
         return EXIT_OPEN_FAILED
     print(DASHBOARD_OPENED, file=out)
     return EXIT_OK
+
+
+# Restore (Story 1.19) ---------------------------------------------------------------------------
+
+
+class RestoreRefused(Exception):
+    """The restore refused before changing anything: ``reason`` is logged, ``text`` printed."""
+
+    def __init__(self, reason: str, text: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.text = text
+
+
+class RestoreFailed(Exception):
+    """A restore step failed: ``stage`` and ``code`` are logged, ``text`` and ``outcome`` (what
+    is left as it was, ``nothing was changed`` unless given) printed."""
+
+    def __init__(self, stage: str, code: str, text: str, outcome: str = NOTHING_CHANGED) -> None:
+        super().__init__(stage)
+        self.stage = stage
+        self.code = code
+        self.text = text
+        self.outcome = outcome
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    """Whether ``path`` is ``folder`` or inside it, both resolved and compared with
+    ``normcase``."""
+    try:
+        inner = os.path.normcase(str(path.resolve()))
+        outer = os.path.normcase(str(folder.resolve()))
+    except OSError:
+        return False
+    return inner == outer or inner.startswith(outer.rstrip("\\/") + os.sep)
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
+def _check_restore_file(config: BootstrapConfig, file: Path) -> None:
+    """Step 4: refuse anything but this environment's backup copy; ``RestoreRefused``."""
+    name = file.name
+    try:
+        regular = file.is_file()
+    except OSError:
+        regular = False
+    if not regular:
+        raise RestoreRefused("file_missing", f"{file} is not a file")
+    fmt = copy_format(name)
+    if fmt is None:
+        raise RestoreRefused(
+            "not_a_copy", f"{name} is not a backup copy: the name must end .db or .db.enc"
+        )
+    env = copy_env(name)
+    if env is not None and env != config.env:
+        raise RestoreRefused(
+            "other_environment", f"{name} is a backup of {env}, and this is {config.env}"
+        )
+    if _same_file(file, config.data_dir / DB_FILE_NAME):
+        raise RestoreRefused("live_database", f"{name} is the live database itself")
+    if _inside(file, config.data_dir / RESTORE_WORK_DIR_NAME):
+        raise RestoreRefused("in_work_folder", f"{name} is inside the restore's work folder")
+    if fmt != ENCRYPTED:
+        wal = file.with_name(name + WAL_SUFFIX)
+        try:
+            live = wal.is_file() and wal.stat().st_size > 0
+        except OSError as exc:
+            raise RestoreFailed(
+                "file", error_code(exc), f"{name}{WAL_SUFFIX} could not be read"
+            ) from exc
+        if live:
+            raise RestoreRefused(
+                "live_database",
+                f"{name} has a non-empty {name}{WAL_SUFFIX} beside it, so it is a live "
+                "database, not a backup copy",
+            )
+
+
+@dataclass
+class _Restore:
+    """One ``nextron restore`` run, with the lock held and logging configured."""
+
+    config: BootstrapConfig
+    file: Path
+    yes: bool
+    targets: Callable[[], BackupTargets]
+    clock: Clock
+    ask: Callable[[str], str]
+    out: TextIO
+    err: TextIO
+
+    @property
+    def db_path(self) -> Path:
+        return self.config.data_dir / DB_FILE_NAME
+
+    def run(self) -> int:
+        """Steps 4 to 15; see the module docstring."""
+        try:
+            _check_restore_file(self.config, self.file)
+            work_parent = self.config.data_dir / RESTORE_WORK_DIR_NAME
+            prefix = f"nextron-{self.config.env}-"
+            clear_work_folders(work_parent, prefix, RESTORE_CLEANUP_FAILED)
+            try:
+                work_parent.mkdir(parents=True, exist_ok=True)
+                work = Path(tempfile.mkdtemp(prefix=prefix, dir=work_parent))
+            except OSError as exc:
+                raise RestoreFailed(
+                    "work_folder", error_code(exc), "the restore's work folder could not be made"
+                ) from exc
+            try:
+                return self._restore(work / CANDIDATE_NAME)
+            finally:
+                remove_work_folder(work, RESTORE_CLEANUP_FAILED)
+        except RestoreRefused as refused:
+            print(f"restore refused: {refused.text}; {NOTHING_CHANGED}", file=self.err)
+            log.warning("restore_refused", extra={"reason": refused.reason})
+            return EXIT_RESTORE_FAILED
+        except RestoreFailed as failed:
+            print(
+                f"restore failed: {failed.text} ({failed.code}); {failed.outcome}", file=self.err
+            )
+            log.error("restore_failed", extra={"stage": failed.stage, "code": failed.code})
+            return EXIT_RESTORE_FAILED
+
+    def _candidate(self, candidate: Path) -> None:
+        """Step 6: decrypt or copy the file into ``candidate``; the file is never changed."""
+        try:
+            if copy_format(self.file.name) == ENCRYPTED:
+                self.targets()(self.file.parent).get(self.file.name, candidate)
+            else:
+                copy_candidate(self.file, candidate)
+        except AdapterError as exc:
+            raise RestoreRefused(exc.code, f"the copy could not be decrypted ({exc.code})") from exc
+        except Exception as exc:
+            raise RestoreFailed(
+                "candidate", error_code(exc), "the copy could not be read"
+            ) from exc
+
+    def _confirmed(self, revision: str, head: str, backup_at: datetime) -> bool:
+        """Step 9: print what will happen and ask for ``yes``."""
+        kind = "an encrypted" if copy_format(self.file.name) == ENCRYPTED else "a plain"
+        upgrade = "" if revision == head else f", upgraded to {head}"
+        print(
+            f"Restore {self.file.name} ({kind} copy at revision {revision}{upgrade}) into "
+            f"{self.db_path}.",
+            file=self.out,
+        )
+        print(
+            f"The copy was taken at {backup_at:{RESTORE_TIME_FORMAT}} at the latest; recovery "
+            "mode holds sending until the recovery steps have caught up from then.",
+            file=self.out,
+        )
+        if self.db_path.exists():
+            folder = self.config.backup_dir / PRE_RESTORE_DIR_NAME
+            print(f"The current database is saved to {folder} first.", file=self.out)
+        else:
+            print("There is no current database to save.", file=self.out)
+        try:
+            answer = self.ask(CONFIRM_PROMPT)
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return isinstance(answer, str) and answer.strip().casefold() == CONFIRM_ANSWER
+
+    def _save_current(self, now: datetime) -> Path | None:
+        """Step 10: the safety copy of the current database, or ``None`` when there is none."""
+        if not self.db_path.exists():
+            return None
+        target = self.config.backup_dir / PRE_RESTORE_DIR_NAME / copy_name(self.config.env, now)
+        try:
+            save_current(self.db_path, target)
+        except Exception as exc:
+            raise RestoreFailed(
+                "pre_restore",
+                error_code(exc),
+                f"the current database could not be saved to {target.parent}; if it is "
+                f"damaged, move {DB_FILE_NAME}, {DB_FILE_NAME}-wal and {DB_FILE_NAME}-shm out "
+                f"of {self.config.data_dir} yourself, then restore again",
+            ) from exc
+        log.info("pre_restore_backup_taken", extra={"file": target.name})
+        return target
+
+    def _prepare(
+        self, candidate: Path, backup_at: datetime, pre_restore: Path | None
+    ) -> tuple[str, str]:
+        """Steps 11 and 12, on the candidate: upgrade it, then turn recovery mode on in it.
+        Returns the revision it upgraded to and the new recovery row's ULID."""
+        engine = create_engine(candidate)
+        try:
+            try:
+                before, after = ensure_current(engine)
+            except Exception as exc:
+                raise RestoreFailed(
+                    "migrate", error_code(exc), "the copy could not be upgraded"
+                ) from exc
+            if before != after:
+                log.info(
+                    "restore_candidate_migrated",
+                    extra={"from_revision": before, "to_revision": after},
+                )
+            try:
+                with UnitOfWorkFactory(engine, build_subscribers()).open():
+                    row = Recovery(self.clock).begin(
+                        backup_at=backup_at,
+                        source_name=self.file.name,
+                        pre_restore_name=None if pre_restore is None else pre_restore.name,
+                    )
+            except Exception as exc:
+                raise RestoreFailed(
+                    "recovery", error_code(exc), "recovery mode could not be turned on"
+                ) from exc
+        finally:
+            engine.dispose()
+        return after, row.id
+
+    def _restore(self, candidate: Path) -> int:
+        """Steps 6 to 15 in the work folder."""
+        self._candidate(candidate)
+        found = inspect_copy(candidate)  # step 7
+        if found.integrity != INTEGRITY_PASSED:
+            raise RestoreRefused(
+                "integrity_failed", f"the copy failed its integrity check ({found.integrity})"
+            )
+        if found.revision is None:
+            raise RestoreRefused("no_revision", "the copy has no Alembic revision")
+        if not found.revision_known:
+            raise RestoreRefused(
+                "revision_unknown",
+                f"the copy's revision {found.revision} is unknown to this code (newer code "
+                "made it)",
+            )
+        now = self.clock.now()  # step 8
+        try:
+            backup_at = backup_time(self.file.name, newest_event_at(candidate), now)
+        except Exception as exc:
+            raise RestoreFailed(
+                "backup_time", error_code(exc), "the copy's newest event could not be read"
+            ) from exc
+        if not self.yes and not self._confirmed(found.revision, found.head, backup_at):
+            print(RESTORE_CANCELLED, file=self.err)
+            log.warning("restore_refused", extra={"reason": "cancelled"})
+            return EXIT_RESTORE_FAILED
+        pre_restore = self._save_current(now)  # step 10
+        try:
+            revision, recovery_id = self._prepare(candidate, backup_at, pre_restore)
+        except RestoreFailed:
+            if pre_restore is not None:  # nothing was changed: no safety copy is left either
+                discard(pre_restore)
+            raise
+        try:  # step 13
+            swap_in(candidate, self.db_path)
+        except Exception as exc:
+            outcome = DATABASE_UNCHANGED
+            if pre_restore is not None:
+                outcome += f"; its safety copy is at {pre_restore}"
+            raise RestoreFailed(
+                "swap", error_code(exc), "the copy could not be swapped in", outcome
+            ) from exc
+        problem = self._verify(revision, recovery_id)  # step 14
+        if problem is not None:
+            before = (
+                f"the database from before the restore is at {pre_restore}; do not start the "
+                "engine: run nextron restore again, or restore the safety copy"
+                if pre_restore is not None
+                else "there was no database before the restore; do not start the engine: run "
+                "nextron restore again"
+            )
+            print(
+                f"the restored database could not be verified ({problem}); {before}",
+                file=self.err,
+            )
+            log.error("restore_failed", extra={"stage": "verify", "code": problem})
+            return EXIT_RESTORE_FAILED
+        print(  # step 15
+            f"Restored {self.file.name} into {self.db_path}; recovery mode is on "
+            f"(recovery {recovery_id}).",
+            file=self.out,
+        )
+        if pre_restore is not None:
+            print(f"The database from before the restore is at {pre_restore}.", file=self.out)
+        print(
+            "Start the engine: sending stays held until every recovery step is done.",
+            file=self.out,
+        )
+        log.info(
+            "database_restored",
+            extra={
+                "file": self.file.name,
+                "from_revision": found.revision,
+                "to_revision": revision,
+                "recovery_id": recovery_id,
+                "pre_restore": None if pre_restore is None else pre_restore.name,
+            },
+        )
+        return EXIT_OK
+
+    def _verify(self, revision: str, recovery_id: str) -> str | None:
+        """Step 14: what is wrong with the live database after the swap, or ``None``."""
+        try:
+            check = restored_check(self.db_path)
+        except Exception as exc:  # noqa: BLE001 - reported, with the safety copy's path
+            return error_code(exc)
+        if check.integrity != INTEGRITY_PASSED:
+            return "integrity_failed"
+        if check.revision != revision:
+            return "revision_mismatch"
+        if check.active_ids != (recovery_id,):
+            return "recovery_row_mismatch"
+        return None
+
+
+def restore(
+    file: Path | str,
+    *,
+    yes: bool = False,
+    secrets: SecretsPort | None = None,
+    targets: BackupTargets | None = None,
+    clock: Clock | None = None,
+    probes: Probes | None = None,
+    ask: Callable[[str], str] = input,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+) -> int:
+    """Restore the backup copy ``file`` into this environment's database with the engine
+    stopped, and turn recovery mode on; return 0 when restored, 1 when refused, cancelled or
+    failed, 2 for an invalid bootstrap config or a failed environment check. An encrypted copy
+    is decrypted through ``targets`` (``FolderBackupTarget`` with ``secrets``, keyring unless
+    injected); the clock is the system clock unless injected. Without ``yes`` it asks
+    ``ask("Type yes to restore: ")`` first."""
+    out = out if out is not None else sys.stdout
+    err = err if err is not None else sys.stderr
+    try:
+        config = load_bootstrap()
+    except BootstrapError as exc:
+        print(exc, file=err)
+        return EXIT_STARTUP_FAILED
+    probes = probes if probes is not None else Probes.system()
+    if _report_failures(environment_checks(config.data_dir, probes), err):
+        return EXIT_STARTUP_FAILED
+    lock = InstanceLock(config.data_dir / LOCK_FILE_NAME)
+    try:
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        (config.data_dir / LOGS_DIR_NAME).mkdir(exist_ok=True)
+        lock.acquire()
+    except LockHeldError:
+        print(STOP_THE_ENGINE, file=err)
+        return EXIT_RESTORE_FAILED
+    except OSError as exc:
+        print(
+            f"cannot prepare {exc.filename or config.data_dir}: {exc.strerror or exc}; "
+            f"{NOTHING_CHANGED}",
+            file=err,
+        )
+        return EXIT_RESTORE_FAILED
+    try:
+        configure_logging(config.data_dir / LOGS_DIR_NAME)
+
+        def backup_targets() -> BackupTargets:  # built only for an encrypted copy
+            if targets is not None:
+                return targets
+            return functools.partial(
+                FolderBackupTarget,
+                secrets=secrets if secrets is not None else KeyringSecrets(config.env),
+            )
+
+        return _Restore(
+            config,
+            Path(file),
+            yes,
+            backup_targets,
+            clock if clock is not None else SystemClock(),
+            ask,
+            out,
+            err,
+        ).run()
+    finally:
+        lock.release()

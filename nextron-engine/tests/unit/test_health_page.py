@@ -6,7 +6,9 @@ their exact ``hx-*`` attributes, each section's text in order, the Dismiss form 
 refusals, the Backups section (each last-backup line, each off-PC label and the failed
 class, the "Back up now" form and its POST: created, absorbed, an extra field, no CSRF token),
 the Restore test section (each last-test line, the failed class, the "Run restore test now" form
-and its POST, with its notice),
+and its POST, with its notice), the Recovery section (Story 1.19: none before a restore; on, with
+its steps table and the on class; ended, with "Last restore: ..."; after the Restore test
+section and before the errors),
 the notification area's error count
 (singular, plural and absent at 0), ``no-store``, the navigation link, the guard's
 ``HX-Refresh`` on an HTMX GET only, and a hostile ``last_error`` rendered as escaped text."""
@@ -21,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from nextron.app.ops.api import DeadJobAlerts, Heartbeat, OffpcOutcome, TakenBackup
+from nextron.app.ops.api import DeadJobAlerts, Heartbeat, OffpcOutcome, Recovery, TakenBackup
 from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
@@ -29,6 +31,7 @@ from nextron.domain.backup import BackupKind, LedgerStatus, OffpcStatus, copy_na
 from nextron.domain.budget import AiCall
 from nextron.domain.job import Lane
 from nextron.domain.readiness import CheckResult, Status
+from nextron.domain.recovery import RecoveryStep
 from nextron.domain.restore_test import RestoreTestKind
 from nextron.web.guard import LOCKED_TEXT
 from tests.asgi import DEFAULT_HOST, Reply, request
@@ -275,7 +278,8 @@ RESTORE_FORM = {
 }
 RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
-    [["Job type", "Last success"], ["backup_db", "never"], ["restore_test", "never"]],
+    [["Job type", "Last success"], ["backup_db", "never"],
+        ["restore_test", "never"], ["check_recovery", "never"]],
     [["Job type", "Last success"], ["send_alert", "never"]],
 ]
 
@@ -381,7 +385,8 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "12 ok, 0 warn, 0 fail",
     ]
     assert panel.tables[:2] == [
-        [["Job type", "Last success"], ["backup_db", "never"], ["restore_test", "never"]],
+        [["Job type", "Last success"], ["backup_db", "never"],
+        ["restore_test", "never"], ["check_recovery", "never"]],
         [["Job type", "Last success"], ["send_alert", "2026-11-17 09:05:00 UTC"]],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms
@@ -1233,3 +1238,105 @@ def test_run_restore_test_now_needs_a_session(
 
     assert reply.status == 401
     assert restore_jobs(units) == []
+
+
+# The Recovery section (Story 1.19) ---------------------------------------------------------------
+
+RESTORED_NAME = "nextron-test-20261116T080000.000Z.db.enc"
+
+
+def turn_recovery_on(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
+    with units.open():
+        row = Recovery(clock).begin(
+            backup_at=T - timedelta(days=1, hours=1),
+            source_name=RESTORED_NAME,
+            pre_restore_name="nextron-test-20261117T090000.000Z.db",
+        )
+    return row.id
+
+
+def recovery_line(reply: Reply) -> tuple[str, list[str]]:
+    """The Recovery line's text and its classes."""
+    found = re.search(r'<p class="(health-recovery(?: [^"]*)?)">([^<]*)</p>', reply.text)
+    assert found is not None
+    return found.group(2), found.group(1).split()
+
+
+def test_no_recovery_section_before_a_restore(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = get(dashboard, LIVE, session[0])
+
+    assert "health-recovery" not in reply.text
+    assert "Recovery" not in Panel(reply.text).texts
+
+
+def test_while_recovery_mode_is_on_the_section_lists_the_steps(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    turn_recovery_on(units, FrozenClock(T))
+    with units.open():  # repoll registered, the other three not applicable
+        Recovery(FrozenClock(T)).pending(frozenset({RecoveryStep.REPOLL_UNSUBSCRIBES}))
+
+    reply = get(dashboard, LIVE, session[0])
+
+    assert recovery_line(reply) == (
+        "Recovery mode is on since 2026-11-17 09:00:00 UTC: sending is held. Restored from "
+        f"{RESTORED_NAME}, backed up at 2026-11-16 08:00:00 UTC.",
+        ["health-recovery", "health-recovery-on"],
+    )
+    panel = Panel(reply.text)
+    assert panel.tables[0] == [
+        ["Step", "Status"],
+        ["Reapply the erasure ledger", "not applicable"],
+        ["Mark unfinished sends unknown", "not applicable"],
+        ["Re-ingest the mailboxes", "not applicable"],
+        ["Re-poll the unsubscribe Worker", "pending"],
+    ]
+    texts = panel.texts
+    assert texts.index("Run restore test now") < texts.index("Recovery")
+    assert texts.index("Recovery") < texts.index("Errors needing attention (0)")
+    assert panel.heading_ids == [
+        "health-worker-heading",
+        "health-backup-heading",
+        "health-restore-heading",
+        "health-recovery-heading",
+        "health-errors-heading",
+        "health-runs-heading",
+        "health-readiness-heading",
+    ]
+
+
+def test_after_recovery_mode_ends_the_section_shows_the_last_restore(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    turn_recovery_on(units, FrozenClock(T))
+    later = Recovery(FrozenClock(T + timedelta(minutes=3)))
+    with units.open():
+        later.pending(frozenset())
+    with units.open():
+        assert later.finish() is False
+
+    reply = get(dashboard, PAGE, session[0])
+
+    assert recovery_line(reply) == (
+        f"Last restore: 2026-11-17 09:00:00 UTC, from {RESTORED_NAME}; recovery mode ended at "
+        "2026-11-17 09:03:00 UTC.",
+        ["health-recovery"],
+    )
+    cells = [cell for table in Panel(reply.text).tables for row in table for cell in row]
+    assert "Step" not in cells
+
+
+def test_a_hostile_source_name_renders_as_escaped_text(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    with units.open():
+        Recovery(FrozenClock(T)).begin(
+            backup_at=T, source_name="<img src=x onerror=alert(1)>.db", pre_restore_name=None
+        )
+
+    reply = get(dashboard, LIVE, session[0])
+
+    assert "<img src=x" not in reply.text
+    assert "&lt;img src=x onerror=alert(1)&gt;.db" in reply.text

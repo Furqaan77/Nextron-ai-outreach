@@ -167,6 +167,24 @@ def test_every_takes_at_startup_only_by_keyword_and_is_frozen() -> None:
         schedule.period = timedelta(minutes=5)  # type: ignore[misc]
 
 
+def test_every_has_no_active_by_default_and_takes_a_callable_by_keyword() -> None:
+    def recovery_on() -> bool:
+        return True
+
+    assert Every(MINUTE).active is None
+    schedule = Every(MINUTE, at_startup=True, active=recovery_on)
+    assert (schedule.period, schedule.at_startup, schedule.active) == (MINUTE, True, recovery_on)
+    assert schedule.grace == MINUTE
+    with pytest.raises(TypeError):
+        Every(MINUTE, False, recovery_on)  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("active", [True, "recovery_mode", 1])
+def test_every_refuses_an_active_that_is_not_none_or_callable(active: object) -> None:
+    with pytest.raises(TypeError, match="active"):
+        Every(MINUTE, active=active)  # type: ignore[arg-type]
+
+
 # TriggerSpec ------------------------------------------------------------------------------------
 
 

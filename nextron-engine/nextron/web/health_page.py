@@ -47,12 +47,19 @@ In order, the panel shows:
    ``health-restore-failed`` class. Then the notice of a "Run restore test now" click
    (``<p class="health-restore-notice" role="status">``) when there is one, then the "Run
    restore test now" form (``id="restore-test-now"``);
-5. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
+5. **Recovery** (Story 1.19), only when a restore has a ``recovery_state`` row
+   (``queries.ops.recovery_state()``: the ``on`` row, else the newest). While recovery mode is
+   on: "Recovery mode is on since <restored_at>: sending is held. Restored from
+   <source_name>, backed up at <backup_at>." (the ``health-recovery-on`` class), then a table
+   (Step, Status) with each step's label and status label, in step order. Otherwise: "Last
+   restore: <restored_at>, from <source_name>; recovery mode ended at <ended_at>.". Times are
+   ``YYYY-MM-DD HH:MM:SS UTC``;
+6. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
    ``|plain``); a ``job_dead`` issue has a Dismiss form. With none: "No errors need
    attention.";
-6. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
+7. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
    type that has not succeeded;
-7. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
+8. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
    fail".
 """
 
@@ -61,11 +68,12 @@ from datetime import UTC, datetime
 from typing import Final
 
 from nextron.app.ops.api import HealthReport, Worker
-from nextron.app.queries.ops import BackupRow, RestoreTestRow
+from nextron.app.queries.ops import BackupRow, RecoveryRow, RestoreTestRow
 from nextron.domain.alert import JOB_DEAD
 from nextron.domain.backup import BackupKind, BackupStatus, OffpcStatus
 from nextron.domain.ids import is_ulid
 from nextron.domain.readiness import tally
+from nextron.domain.recovery import RecoveryMode
 from nextron.domain.restore_test import CheckOutcome, RestoreCheck, RestoreResult, RestoreTestKind
 from nextron.web.csrf import CSRF_FIELD
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
@@ -109,6 +117,14 @@ class GroupTable:
 
     label: str
     rows: tuple[RunRow, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StepRow:
+    """One recovery step's row: its label and its status label."""
+
+    step: str
+    status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +191,35 @@ def restore_test_failed(test: RestoreTestRow | None) -> bool:
     return test is not None and test.result == RestoreResult.FAIL
 
 
+def recovery_on(recovery: RecoveryRow | None) -> bool:
+    """Whether the Recovery section shows recovery mode on."""
+    return recovery is not None and recovery.mode == RecoveryMode.ON
+
+
+def recovery_text(recovery: RecoveryRow | None) -> str | None:
+    """The Recovery line, or ``None`` before the first restore (no section)."""
+    if recovery is None:
+        return None
+    restored = shown_time(recovery.restored_at)
+    if recovery_on(recovery):
+        return (
+            f"Recovery mode is on since {restored}: sending is held. Restored from "
+            f"{recovery.source_name}, backed up at {shown_time(recovery.backup_at)}."
+        )
+    ended = NEVER if recovery.ended_at is None else shown_time(recovery.ended_at)
+    return (
+        f"Last restore: {restored}, from {recovery.source_name}; recovery mode ended at "
+        f"{ended}."
+    )
+
+
+def recovery_steps(recovery: RecoveryRow | None) -> list[StepRow]:
+    """The Recovery table's rows while recovery mode is on, in step order; else none."""
+    if recovery is None or not recovery_on(recovery):
+        return []
+    return [StepRow(step.label, status.label) for step, status in recovery.steps]
+
+
 def panel_context(
     report: HealthReport, *, notice: str | None = None, restore_notice: str | None = None
 ) -> dict[str, object]:
@@ -212,6 +257,9 @@ def panel_context(
         "restore_test": restore_test_text(report.restore_test),
         "restore_test_failed": restore_test_failed(report.restore_test),
         "restore_notice": restore_notice,
+        "recovery": recovery_text(report.recovery),
+        "recovery_on": recovery_on(report.recovery),
+        "recovery_steps": recovery_steps(report.recovery),
         "issues": issues,
         "no_errors": NO_ERRORS,
         "groups": groups,

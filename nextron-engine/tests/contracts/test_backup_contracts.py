@@ -63,7 +63,10 @@ def _daily(at: time) -> Any:
 
 def _triggers(job_types: JobTypes) -> Any:
     return main.build_triggers(
-        job_types, backup_schedule=_daily(time(10)), restore_test_schedule=_daily(time(11))
+        job_types,
+        backup_schedule=_daily(time(10)),
+        restore_test_schedule=_daily(time(11)),
+        recovery_active=lambda: False,
     )
 
 
@@ -157,7 +160,7 @@ def backup_job_problems(job_types: JobTypes, name: str = "backup_db") -> list[st
 
 def _registry() -> JobTypes:
     return main.build_job_types(
-        alerts=_no_backups, backups=_no_backups, restore_tests=_no_backups
+        alerts=_no_backups, backups=_no_backups, restore_tests=_no_backups, recovery=_no_backups
     )
 
 
