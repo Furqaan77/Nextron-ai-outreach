@@ -26,6 +26,11 @@ The off-PC outcome (Story 1.17):
   after ``since`` (every one when ``since`` is ``None``), oldest first;
 - ``mark_offpc_deleted(names, at)``: sets ``offpc_deleted_at`` on the rows whose
   ``offpc_name`` is one of ``names``, while it is ``NULL``; returns the row count.
+
+The copy under test (Story 1.18):
+
+- ``newest_offpc_copy()``: the newest row (``started_at``, then id, descending) whose off-PC
+  copy is ``copied`` and not yet rotated out (``offpc_deleted_at IS NULL``), or ``None``.
 """
 
 from collections.abc import Iterable
@@ -42,6 +47,7 @@ from nextron.db.uow import current
 FAILED = "failed"  # nextron.domain.backup.BackupStatus.FAILED
 VERIFIED = "verified"  # nextron.domain.backup.BackupStatus.VERIFIED
 OFFPC_FAILED = "failed"  # nextron.domain.backup.OffpcStatus.FAILED
+OFFPC_COPIED = "copied"  # nextron.domain.backup.OffpcStatus.COPIED
 _NO_SYNC = {"synchronize_session": False}
 
 
@@ -226,3 +232,20 @@ def mark_offpc_deleted(names: Iterable[str], at: datetime) -> int:
         .execution_options(**_NO_SYNC)
     )
     return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+# The copy under test (Story 1.18) ---------------------------------------------------------------
+
+
+def newest_offpc_copy() -> BackupRow | None:
+    """The newest row whose off-PC copy is ``copied`` and not rotated out, or ``None``."""
+    rows = _rows(
+        select(*_COLUMNS)
+        .where(
+            BackupRecord.offpc_status == OFFPC_COPIED,
+            BackupRecord.offpc_deleted_at.is_(None),
+        )
+        .order_by(BackupRecord.started_at.desc(), BackupRecord.id.desc())
+        .limit(1)
+    )
+    return rows[0] if rows else None

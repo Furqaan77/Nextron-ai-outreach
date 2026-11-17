@@ -74,7 +74,8 @@ transaction, for a dashboard GET's read-only unit of work:
   read (<ExceptionType>)")`` and logs ``health_check_failed`` (ERROR, ``source``, ``code`` and
   the traceback); the other sources still run.
 - ``issue_count() -> int`` is ``len(issues())``: the notification area's error count.
-- ``report() -> HealthReport(checked_at, worker, groups, issues, readiness, backup)`` reads
+- ``report() -> HealthReport(checked_at, worker, groups, issues, readiness, backup,
+  restore_test)`` reads
   the clock once, then runs ``readiness()`` before its own database reads. Readiness ends with the
   checks that read the database (``offpc_backup``'s setting, ``required_settings``,
   ``database_revision``), which begin the read transaction; the checks that reach Credential
@@ -86,7 +87,9 @@ transaction, for a dashboard GET's read-only unit of work:
   ``None`` before the first beat); ``groups`` is ``job_group_runs`` of the registered job types
   (by ``JobType.group``) and ``queries.jobqueue.last_successes()``; ``backup`` is
   ``queries.ops.last_backup()``, the newest backup of any kind and status, read after
-  readiness (``None`` before the first one).
+  readiness (``None`` before the first one); ``restore_test`` is
+  ``queries.ops.last_restore_test()``, the newest restore test of either kind and result
+  (``None`` before the first one).
 
 **Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5, OP-6, NFR-16).** Every copy is made with
 SQLite's backup API (``nextron.db.repos.ops.snapshot``), verified and recorded in ``backups``,
@@ -153,6 +156,9 @@ env, data_dir, backup_dir, targets)`` sends a verified daily or manual copy off 
   skipped. In one transaction it then marks the deleted copies' rows (``offpc_deleted_at``),
   logs ``offpc_backups_rotated`` (INFO, ``backup_id``, ``count``) when it deleted any, and
   raises the first failed delete's error, if any. It returns the count.
+- ``fetch(folder, name, target) -> FetchedCopy`` (Story 1.18) decrypts the off-PC copy ``name``
+  from ``folder`` into the new local file ``target``: ``targets(folder).get(name, target)``. Its
+  errors propagate; it makes no database access.
 
 ``Backups(clock, local, *, notify, queue, offpc)`` is the ``backup_db`` job's service and the
 health panel's "Back up now":
@@ -199,6 +205,71 @@ health panel's "Back up now":
   ``missed`` is ``missed_daily`` of the newest ``daily`` row's ``started_at``. ``nextron.main``
   reads it once, when the scheduler starts.
 
+**Restore tests (Story 1.18; AD-20, FR-58, OP-7, NFR-16).** ``RestoreTests(clock, *, env,
+backup_dir, offpc, inspect, notify, queue)`` proves that the newest off-PC copy restores: it
+fetches and decrypts it into a work folder under the backup dir, reads it with ``inspect``
+(``nextron.main`` passes ``snapshot.inspect_copy``: read-only and ``immutable``) and records what
+``nextron.domain.restore_test.judge`` decides. The live database is never opened, copied,
+replaced or migrated, and nothing is started against the copy: no engine, unit of work, Alembic
+command, adapter, runner or scheduler. The row is written once, with no state machine and no
+``events`` row.
+
+- ``@use_case run(kind) -> str | None`` is the ``restore_test`` job's service (``ValueError``
+  for a kind that isn't a ``RestoreTestKind``). Under one ``threading.Lock``, so two tests never
+  run at once:
+
+  1. In one transaction: for ``monthly``, it reads ``sender_timezone`` (``UTC`` while it is
+     unset) and the newest monthly test; when ``restore_test_due`` is false, it logs
+     ``restore_test_not_due`` (INFO, ``kind``) and returns ``None`` with no row (the daily
+     trigger's check). Then it reads ``queries.ops.newest_offpc_copy()`` and
+     ``offpc.destination()``; an ``InvalidSettingValue`` there is ``offpc_not_configured`` with
+     the detail ``invalid_setting_value``.
+  2. Outside any transaction, ``_check`` decides the outcome and never raises an
+     ``Exception``: no copy is ``no_offpc_copy``; a destination problem is
+     ``offpc_not_configured`` (detail: the problem); otherwise it prepares the work folder and
+     calls ``offpc.fetch(folder, row.offpc_name, <work>\\copy.db)``. An ``AdapterError`` maps its
+     code to a reason (``FETCH_REASONS``: ``backup_copy_missing`` is ``copy_missing``,
+     ``backup_target_unavailable`` ``target_unavailable``, ``credential_not_set``
+     ``passphrase_not_set``, ``backup_wrong_passphrase`` ``wrong_passphrase``,
+     ``backup_tampered`` ``tampered``, ``backup_truncated`` ``truncated`` and
+     ``backup_bad_format`` ``bad_format``; any other code is ``fetch_failed`` with the code as
+     detail), and any other ``Exception`` (scrypt's ``MemoryError`` or ``ValueError`` included)
+     is ``fetch_failed`` with ``error_code`` as detail. A plaintext SHA-256 that differs from the
+     row's is ``checksum_mismatch``. Otherwise ``judge`` runs on ``inspect(copy)`` against the
+     row's recorded counts; an ``inspect`` that raises is an integrity failure
+     (``error: <code>``).
+  3. **The work folder** is ``<backup dir>\\restore_test\\`` (``mkdir(parents=True,
+     exist_ok=True)``). First every leftover ``nextron-<env>-*`` folder there (a crash's, or one
+     whose delete failed) is deleted: the files directly inside, then the folder (never through
+     a link or a junction). The same sweep also runs at the start of every ``run``, under the
+     lock and before the due check, when that folder exists, so a daily check that isn't due, or
+     a test that fails before fetching, clears them too. Then
+     ``tempfile.mkdtemp(prefix="nextron-<env>-", dir=...)`` makes this test's folder, and in a
+     ``finally`` it is deleted the same way. A failed delete logs
+     ``restore_test_cleanup_failed`` (WARNING, ``code``) and leaves the result as it is. The
+     plaintext copy is written nowhere else (not ``%TEMP%``, the data dir or the off-PC
+     folder), and no ``shutil``.
+  4. In one transaction it ``insert``s the row; for a ``fail`` it also raises the
+     ``restore_test_failed`` ops alert ``restore_test_failed_text(kind, id, reason)``
+     ("Restore test failed: <kind> <ULID>, <reason>", Telegram and the dashboard). If that
+     transaction raises, it logs ``restore_test_record_failed`` (ERROR: ``kind``, ``code``, the
+     traceback) and raises ``AdapterError(retryable=True, code="restore_test_not_recorded")``
+     from the error, so jobqueue retries the job (retry limit 2), which runs the test again.
+  5. After the commit it logs ``restore_test_passed`` (INFO: ``test_id``, ``kind``,
+     ``backup_id``) or ``restore_test_failed`` (ERROR: ``test_id``, ``kind``, ``reason``) and
+     returns the row's ULID. A failed test never raises, so the job never retries it.
+
+- ``@use_case request_restore_test() -> Enqueued`` enqueues the ``restore_test`` job (scope
+  ``global``, discriminator the UTC date, payload ``{"v": 1, "kind": "manual"}``) in one
+  transaction, so a click while a manual test is queued or running is absorbed
+  (``created=False``). After the commit it logs ``restore_test_requested`` (INFO, ``job_id``,
+  ``job_created``).
+- ``schedule() -> RestoreTestSchedule`` is a plain read for a read-only unit of work: ``at`` is
+  ``restore_test_time(backup_time)`` (an hour after the daily backup), ``timezone`` is
+  ``sender_timezone`` (``"UTC"`` while it is unset) and ``missed`` is ``missed_restore_test`` of
+  the newest ``monthly`` test's ``started_at``. ``nextron.main`` reads it once, when the
+  scheduler starts.
+
 Logs carry IDs, kinds, codes, counts and file names only, never a full path (the off-PC
 folder included) or an error's text.
 """
@@ -207,11 +278,13 @@ import contextlib
 import logging
 import os
 import secrets
+import tempfile
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from nextron.app.jobqueue.api import Enqueued, JobQueue, error_code, error_text
@@ -222,8 +295,10 @@ from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
+from nextron.db.repos.ops import restore_tests as restore_tests_repo
 from nextron.db.repos.ops.backups import BackupRow
-from nextron.db.repos.ops.snapshot import Snapshot, discard
+from nextron.db.repos.ops.restore_tests import RestoreTestRow
+from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, discard
 from nextron.db.uow import command, current, use_case
 from nextron.domain.alert import JOB_DEAD, SEND_ALERT_JOB, Channel, job_dead_text
 from nextron.domain.backup import (
@@ -262,8 +337,33 @@ from nextron.domain.health import (
 from nextron.domain.job import GLOBAL_SCOPE, JobTypes
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.domain.readiness import CheckResult
+from nextron.domain.restore_test import (
+    RESTORE_DIR_NAME,
+    RESTORE_TEST_FAILED,
+    RESTORE_TEST_JOB,
+    RestoreFailure,
+    RestoreOutcome,
+    RestoreResult,
+    RestoreTestKind,
+    RestoreTestSchedule,
+    fetch_failure,
+    judge,
+    missed_restore_test,
+    restore_test_due,
+    restore_test_failed_text,
+    restore_test_time,
+)
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
-from nextron.ports.backup_target import BackupTargets
+from nextron.ports.backup_target import (
+    BACKUP_BAD_FORMAT,
+    BACKUP_COPY_MISSING,
+    BACKUP_TAMPERED,
+    BACKUP_TARGET_UNAVAILABLE,
+    BACKUP_TRUNCATED,
+    BACKUP_WRONG_PASSPHRASE,
+    BackupTargets,
+    FetchedCopy,
+)
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import CREDENTIAL_NOT_SET, SecretsPort
@@ -288,6 +388,26 @@ OFFPC_ROTATION_FAILED: Final = "offpc_rotation_failed"
 OFFPC_BACKUPS_ROTATED: Final = "offpc_backups_rotated"
 PASSPHRASE_NOT_SET: Final = "passphrase_not_set"  # a not_configured reason
 OFFPC_DB_SUFFIX: Final = ".db" + OFFPC_SUFFIX  # an encrypted copy's name ends so
+RESTORE_TEST_NOT_DUE: Final = "restore_test_not_due"
+RESTORE_TEST_PASSED: Final = "restore_test_passed"
+RESTORE_TEST_CLEANUP_FAILED: Final = "restore_test_cleanup_failed"
+RESTORE_TEST_RECORD_FAILED: Final = "restore_test_record_failed"
+RESTORE_TEST_NOT_RECORDED: Final = "restore_test_not_recorded"  # the retryable error's code
+RESTORE_TEST_REQUESTED: Final = "restore_test_requested"
+INVALID_SETTING_VALUE: Final = "invalid_setting_value"  # offpc_not_configured's detail
+RESTORED_COPY_NAME: Final = "copy.db"  # the decrypted copy, inside the work folder
+# The fetch's AdapterError codes and the reason each one is; any other is fetch_failed.
+FETCH_REASONS: Final = MappingProxyType(
+    {
+        BACKUP_COPY_MISSING: RestoreFailure.COPY_MISSING,
+        BACKUP_TARGET_UNAVAILABLE: RestoreFailure.TARGET_UNAVAILABLE,
+        CREDENTIAL_NOT_SET: RestoreFailure.PASSPHRASE_NOT_SET,
+        BACKUP_WRONG_PASSPHRASE: RestoreFailure.WRONG_PASSPHRASE,
+        BACKUP_TAMPERED: RestoreFailure.TAMPERED,
+        BACKUP_TRUNCATED: RestoreFailure.TRUNCATED,
+        BACKUP_BAD_FORMAT: RestoreFailure.BAD_FORMAT,
+    }
+)
 
 log = logging.getLogger(__name__)
 
@@ -443,6 +563,7 @@ class HealthReport:
     issues: tuple[HealthIssue, ...]
     readiness: tuple[CheckResult, ...]
     backup: BackupRow | None
+    restore_test: RestoreTestRow | None
 
 
 def _source_failed(source: IssueSource, error: Exception) -> HealthIssue:
@@ -510,6 +631,7 @@ class EngineHealth:
         now = self._clock.now()
         readiness = tuple(self._readiness())  # its last checks begin the read transaction
         backup = ops_queries.last_backup()
+        restore_test = ops_queries.last_restore_test()
         beat = ops_queries.heartbeat()
         worker = Worker(
             beat is not None and worker_running(beat.beat_at, now),
@@ -517,7 +639,9 @@ class EngineHealth:
         )
         pairs = [(name, self._job_types.get(name).group) for name in self._job_types.names()]
         groups = job_group_runs(pairs, jobqueue_queries.last_successes())
-        return HealthReport(now, worker, groups, self.issues(), readiness, backup)
+        return HealthReport(
+            now, worker, groups, self.issues(), readiness, backup, restore_test
+        )
 
 
 # Backups ------------------------------------------------------------------------------------
@@ -806,6 +930,11 @@ class OffpcBackups:
             raise failure
         return len(deleted)
 
+    def fetch(self, folder: Path, name: str, target: Path) -> FetchedCopy:
+        """Decrypt the off-PC copy ``name`` in ``folder`` into the new local file ``target``;
+        no database access, and the target's errors propagate."""
+        return self._targets(folder).get(name, target)
+
 
 def _offpc_logged(backup_id: str, outcome: OffpcOutcome) -> None:
     if outcome.status is OffpcStatus.COPIED:
@@ -961,3 +1090,277 @@ class Backups:
         newest = ops_queries.newest_backup(BackupKind.DAILY)
         started = None if newest is None else newest.started_at
         return BackupSchedule(at, timezone, missed_daily(started, now, at, timezone))
+
+
+# Restore tests (Story 1.18) -------------------------------------------------------------------
+
+
+def _integrity_unreadable(error: Exception) -> CopyInspection:
+    """What an ``inspect`` that raised says: the copy's integrity could not be read."""
+    return CopyInspection(f"error: {error_code(error)}", None, "", False, None, None)
+
+
+def _not_followed(entry: Path) -> bool:
+    """Whether ``entry`` is a link or a junction, which cleanup never follows."""
+    return entry.is_symlink() or entry.is_junction()
+
+
+class RestoreTests:
+    """The monthly and on-demand restore test of the newest off-PC copy; see the module
+    docstring."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        env: str,
+        backup_dir: Path,
+        offpc: OffpcBackups,
+        inspect: Callable[[Path], CopyInspection],
+        notify: Notify,
+        queue: JobQueue,
+    ) -> None:
+        if not is_env_name(env):
+            raise ValueError("env must be an environment name such as dev, test or prod")
+        if not isinstance(backup_dir, Path):
+            raise TypeError("backup_dir must be a pathlib.Path")
+        if not isinstance(offpc, OffpcBackups):
+            raise TypeError("offpc must be an OffpcBackups")
+        if not callable(inspect):
+            raise TypeError("inspect must be callable")
+        self._clock = clock
+        self._env = env
+        self._backup_dir = backup_dir
+        self._offpc = offpc
+        self._inspect = inspect
+        self._notify = notify
+        self._queue = queue
+        self._lock = threading.Lock()  # one restore test at a time
+
+    @property
+    def restore_dir(self) -> Path:
+        """``<backup dir>\\restore_test``, where each test's work folder is made."""
+        return self._backup_dir / RESTORE_DIR_NAME
+
+    @use_case
+    def run(self, kind: RestoreTestKind) -> str | None:
+        """Run a monthly (when due) or manual restore test; return its row's ULID, or ``None``
+        when a monthly test isn't due."""
+        kind = RestoreTestKind(kind)
+        uow = current()
+        with self._lock:
+            self._sweep()  # every run, the daily check included: no plaintext outlives a crash
+            started_at = self._clock.now()
+            row: BackupRow | None = None
+            destination: Path | str = INVALID_SETTING_VALUE
+            with uow.transaction():  # step 1
+                due = kind is not RestoreTestKind.MONTHLY or self._due(started_at)
+                if due:
+                    row = ops_queries.newest_offpc_copy()
+                    destination = self._destination()
+            if not due:
+                log.info(RESTORE_TEST_NOT_DUE, extra={"kind": kind})
+                return None
+            outcome = self._check(row, destination)  # step 2, in a work folder (step 3)
+            finished_at = self._clock.now()
+            backup_id = None if row is None else row.id
+            try:
+                with uow.transaction():  # step 4
+                    test_id = self._insert(kind, outcome, started_at, finished_at, backup_id)
+                    if outcome.result is RestoreResult.FAIL:
+                        self._notify.alert(
+                            RESTORE_TEST_FAILED,
+                            test_id,
+                            restore_test_failed_text(kind, test_id, str(outcome.reason)),
+                            ALL_CHANNELS,
+                        )
+            except Exception as exc:
+                log.exception(
+                    RESTORE_TEST_RECORD_FAILED, extra={"kind": kind, "code": error_code(exc)}
+                )
+                raise AdapterError(  # retryable, so jobqueue retries the job
+                    True,
+                    RESTORE_TEST_NOT_RECORDED,
+                    f"the restore test's row could not be recorded ({error_code(exc)})",
+                ) from exc
+            if outcome.result is RestoreResult.PASS:  # step 5
+                log.info(
+                    RESTORE_TEST_PASSED,
+                    extra={"test_id": test_id, "kind": kind, "backup_id": backup_id},
+                )
+            else:
+                log.error(
+                    RESTORE_TEST_FAILED,
+                    extra={"test_id": test_id, "kind": kind, "reason": outcome.reason},
+                )
+            return test_id
+
+    def _timezone(self) -> str:
+        try:
+            return str(setup_queries.get(Key.SENDER_TIMEZONE))
+        except SettingNotSet:
+            return UTC_TIMEZONE
+
+    def _due(self, now: datetime) -> bool:
+        """Whether a monthly test is due, read in the caller's transaction."""
+        newest = ops_queries.newest_restore_test(RestoreTestKind.MONTHLY)
+        started = None if newest is None else newest.started_at
+        return restore_test_due(started, now, self._timezone())
+
+    def _destination(self) -> Path | str:
+        """The off-PC folder, or why there is none, read in the caller's transaction."""
+        try:
+            return self._offpc.destination()
+        except InvalidSettingValue:
+            return INVALID_SETTING_VALUE
+
+    @command
+    def _insert(
+        self,
+        kind: RestoreTestKind,
+        outcome: RestoreOutcome,
+        started_at: datetime,
+        finished_at: datetime,
+        backup_id: str | None,
+    ) -> str:
+        """Record ``outcome`` in the caller's transaction; return the new row's ULID."""
+        fetch, integrity, revision, suppression, provenance = (
+            str(check) for check in outcome.checks
+        )
+        return restore_tests_repo.insert(
+            kind=str(kind),
+            result=str(outcome.result),
+            started_at=started_at,
+            finished_at=finished_at,
+            backup_id=backup_id,
+            check_fetch=fetch,
+            check_integrity=integrity,
+            check_revision=revision,
+            check_suppression=suppression,
+            check_provenance=provenance,
+            reason=None if outcome.reason is None else str(outcome.reason),
+            copy_revision=outcome.copy_revision,
+            suppression_count=outcome.suppression_count,
+            provenance_count=outcome.provenance_count,
+            detail=outcome.detail,
+        )
+
+    def _check(self, row: BackupRow | None, destination: Path | str) -> RestoreOutcome:
+        """Step 2: fetch, decrypt and judge the copy in a fresh work folder, deleted after;
+        outside any transaction, and never raises an ``Exception``."""
+        if row is None or row.offpc_name is None:
+            return fetch_failure(RestoreFailure.NO_OFFPC_COPY)
+        if not isinstance(destination, Path):
+            return fetch_failure(RestoreFailure.OFFPC_NOT_CONFIGURED, destination)
+        try:
+            work = self._work_folder()
+        except Exception as exc:  # noqa: BLE001 - the backup dir can't hold the copy
+            return fetch_failure(RestoreFailure.FETCH_FAILED, error_code(exc))
+        try:
+            return self._fetch_and_judge(row, destination, work)
+        except Exception as exc:  # noqa: BLE001 - never raises: whatever broke is fetch_failed
+            return fetch_failure(RestoreFailure.FETCH_FAILED, error_code(exc))
+        finally:
+            self._remove(work)
+
+    def _fetch_and_judge(self, row: BackupRow, folder: Path, work: Path) -> RestoreOutcome:
+        copy = work / RESTORED_COPY_NAME
+        try:
+            fetched = self._offpc.fetch(folder, str(row.offpc_name), copy)
+        except AdapterError as exc:
+            reason = FETCH_REASONS.get(exc.code)
+            if reason is None:
+                return fetch_failure(RestoreFailure.FETCH_FAILED, exc.code)
+            return fetch_failure(reason)
+        except Exception as exc:  # noqa: BLE001 - scrypt's MemoryError or ValueError, say
+            return fetch_failure(RestoreFailure.FETCH_FAILED, error_code(exc))
+        if fetched.plain_sha256 != row.sha256:
+            return fetch_failure(RestoreFailure.CHECKSUM_MISMATCH)
+        try:
+            found = self._inspect(copy)
+        except Exception as exc:  # noqa: BLE001 - an unreadable copy fails its integrity
+            found = _integrity_unreadable(exc)
+        return judge(
+            integrity=found.integrity,
+            revision=found.revision,
+            head=found.head,
+            revision_known=found.revision_known,
+            counts=(found.suppression_count, found.provenance_count),
+            recorded=(row.suppression_count, row.provenance_count),
+        )
+
+    def _work_folder(self) -> Path:
+        """Step 3: ``<backup dir>\\restore_test``, cleared of this environment's leftover work
+        folders, and a new work folder in it."""
+        parent = self.restore_dir
+        parent.mkdir(parents=True, exist_ok=True)
+        self._sweep()
+        return Path(tempfile.mkdtemp(prefix=f"nextron-{self._env}-", dir=parent))
+
+    def _sweep(self) -> None:
+        """Delete this environment's leftover work folders (``nextron-<env>-*``) in
+        ``<backup dir>\\restore_test`` when that folder exists, never through a link or a
+        junction; a failure is logged (``restore_test_cleanup_failed``), never raised."""
+        parent = self.restore_dir
+        prefix = f"nextron-{self._env}-"
+        try:
+            if not parent.is_dir():
+                return
+            leftovers = sorted(parent.iterdir())
+        except OSError as exc:
+            log.warning(RESTORE_TEST_CLEANUP_FAILED, extra={"code": error_code(exc)})
+            return
+        for leftover in leftovers:
+            if (
+                leftover.name.startswith(prefix)
+                and not _not_followed(leftover)
+                and leftover.is_dir()
+            ):
+                self._remove(leftover)
+
+    def _remove(self, folder: Path) -> None:
+        """Delete the files directly in ``folder``, then ``folder``; a failure is logged
+        (``restore_test_cleanup_failed``), never raised, and the other files still go."""
+        failure: OSError | None = None
+        try:
+            entries = list(folder.iterdir())
+        except OSError as exc:
+            entries, failure = [], exc
+        for entry in entries:
+            try:
+                entry.unlink()
+            except OSError as exc:  # a subfolder, or a file still open
+                failure = failure if failure is not None else exc
+        try:
+            folder.rmdir()
+        except OSError as exc:
+            failure = failure if failure is not None else exc
+        if failure is not None:
+            log.warning(RESTORE_TEST_CLEANUP_FAILED, extra={"code": error_code(failure)})
+
+    @use_case
+    def request_restore_test(self) -> Enqueued:
+        """Queue a manual restore test, or find the one already queued or running today."""
+        now = self._clock.now()
+        with current().transaction():
+            enqueued = self._queue.enqueue(
+                RESTORE_TEST_JOB,
+                scope=GLOBAL_SCOPE,
+                discriminator=now.astimezone(UTC).date().isoformat(),
+                payload={"v": PAYLOAD_VERSION, KIND_FIELD: str(RestoreTestKind.MANUAL)},
+            )
+        log.info(
+            RESTORE_TEST_REQUESTED,
+            extra={"job_id": enqueued.job_id, "job_created": enqueued.created},
+        )
+        return enqueued
+
+    def schedule(self) -> RestoreTestSchedule:
+        """When the daily restore-test check runs and whether this month's slot was missed,
+        read in the current unit of work (a read-only one included)."""
+        now = self._clock.now()
+        at = restore_test_time(setup_queries.get(Key.BACKUP_TIME))
+        timezone = self._timezone()
+        newest = ops_queries.newest_restore_test(RestoreTestKind.MONTHLY)
+        started = None if newest is None else newest.started_at
+        return RestoreTestSchedule(at, timezone, missed_restore_test(started, now, at, timezone))

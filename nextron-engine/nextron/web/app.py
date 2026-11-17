@@ -64,6 +64,14 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   panel again in a read-only one, with "Backup queued; its result shows here when it
   finishes." when the job was created, else "A backup is already queued or running.". The copy
   is taken by the job runner's bulk lane, never in the request.
+- ``POST /health/restore-test`` (``health_restore_test_now``, ``@personal_data(True)``): the
+  health panel's "Run restore test now" (Story 1.18). Its only field is ``csrf_token``
+  (anything else is ``MalformedForm``, 400). It queues a manual restore test through
+  ``restore_tests`` (``RestoreTests.request_restore_test``, the ``restore_test`` job) in its own
+  unit of work, then renders the panel again in a read-only one, with "Restore test queued; its
+  result shows here when it finishes." when the job was created, else "A restore test is
+  already queued or running.". The test runs on the job runner's bulk lane, never in the
+  request.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -110,7 +118,7 @@ from starlette.routing import BaseRoute
 
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth
+from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
@@ -280,6 +288,7 @@ def create_app(
     health: EngineHealth,
     queue: JobQueue,
     backups: Backups,
+    restore_tests: RestoreTests,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -290,7 +299,8 @@ def create_app(
     and ``google`` the Google client and grants (both in Credential Manager, not the database);
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
     ``health`` gives the health panel its report and the notification area its error count;
-    ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now".
+    ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
+    ``restore_tests`` its "Run restore test now".
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -549,9 +559,15 @@ def create_app(
         return page(request, quota_rows.PAGE_TEMPLATE, **context)
 
     def health_answer(
-        request: Request, template: str, *, notice: str | None = None
+        request: Request,
+        template: str,
+        *,
+        notice: str | None = None,
+        restore_notice: str | None = None,
     ) -> HTMLResponse:
-        context = health_rows.panel_context(engine_health.report(), notice=notice)
+        context = health_rows.panel_context(
+            engine_health.report(), notice=notice, restore_notice=restore_notice
+        )
         return page(request, template, **context)
 
     @app.get("/health/panel", name="health_page")
@@ -588,6 +604,22 @@ def create_app(
         )
         with units.open(read_only=True):
             return health_answer(request, health_rows.PANEL_TEMPLATE, notice=notice)
+
+    @app.post("/health/restore-test", name="health_restore_test_now")
+    @personal_data(True)
+    def health_restore_test_now(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        health_rows.submitted_restore_test(fields)
+        with units.open():
+            enqueued = restore_tests.request_restore_test()
+        notice = (
+            health_rows.RESTORE_TEST_QUEUED
+            if enqueued.created
+            else health_rows.RESTORE_TEST_ALREADY_QUEUED
+        )
+        with units.open(read_only=True):
+            return health_answer(request, health_rows.PANEL_TEMPLATE, restore_notice=notice)
 
     require_declared(app)
     require_route_rules(app)

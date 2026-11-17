@@ -5,11 +5,13 @@
   (``hardlink_to``, ``symlink_to``, ``os.link``, ``os.symlink``) or names ``VACUUM INTO``, and
   ``.backup(`` (SQLite's backup API) appears only in ``nextron/db/engine.py``: nothing copies,
   links or reads the live database file's bytes.
-- **``backup_db`` is bulk-only with group Backup.** The registered job type runs only on the
-  ``bulk`` lane, so a copy never delays a send, and shows under Backup on the health panel.
-- **The trigger is registered after its job type.** ``build_triggers`` registers
-  ``Trigger.BACKUP_DB`` with a ``DailyAt``, and only on a registry where ``backup_db`` is
-  registered (the registry refuses otherwise).
+- **``backup_db`` and ``restore_test`` are bulk-only with group Backup.** Each registered job
+  type runs only on the ``bulk`` lane, so a copy or a restore test never delays a send, and
+  shows under Backup on the health panel (Stories 1.16 and 1.18).
+- **The triggers are registered after their job types.** ``build_triggers`` registers
+  ``Trigger.BACKUP_DB`` and ``Trigger.RESTORE_TEST`` with a ``DailyAt`` each, and only on a
+  registry where ``backup_db`` and ``restore_test`` are registered (the registry refuses
+  otherwise).
 - **Rotation never keeps erased data longer than 35 days.** ``MAX_ROTATION_DAYS`` is 35 (AD-17)
   and the ``backup_rotation_days`` setting refuses anything above it.
 
@@ -52,7 +54,17 @@ NEVER: Final = (
 
 
 def _no_backups() -> Any:
-    raise AssertionError("no backup_db job runs here")
+    raise AssertionError("no backup_db or restore_test job runs here")
+
+
+def _daily(at: time) -> Any:
+    return lambda: DailyRun(at, "UTC")
+
+
+def _triggers(job_types: JobTypes) -> Any:
+    return main.build_triggers(
+        job_types, backup_schedule=_daily(time(10)), restore_test_schedule=_daily(time(11))
+    )
 
 
 # No copy except through the backup API -----------------------------------------------------------
@@ -126,30 +138,39 @@ def test_the_copy_check_allows_a_copy_without_arguments(tmp_path: Path) -> None:
     assert copy_problems(root) == []
 
 
-# backup_db is bulk-only with group Backup --------------------------------------------------------
+# backup_db and restore_test are bulk-only with group Backup --------------------------------------
+
+BACKUP_JOB_TYPES: Final = ("backup_db", "restore_test")
 
 
-def backup_job_problems(job_types: JobTypes) -> list[str]:
-    """What is wrong with the registered ``backup_db`` job type."""
-    found = job_types.get("backup_db")
+def backup_job_problems(job_types: JobTypes, name: str = "backup_db") -> list[str]:
+    """What is wrong with the registered job type ``name`` (``backup_db`` or
+    ``restore_test``)."""
+    found = job_types.get(name)
     problems = []
     if found.lanes != frozenset({Lane.BULK}) or found.default_lane is not Lane.BULK:
-        problems.append("backup_db must run on the bulk lane only")
+        problems.append(f"{name} must run on the bulk lane only")
     if found.group is not JobGroup.BACKUP:
-        problems.append("backup_db must show under Backup")
+        problems.append(f"{name} must show under Backup")
     return problems
 
 
-def test_backup_db_is_bulk_only_with_group_backup() -> None:
-    job_types = main.build_job_types(alerts=_no_backups, backups=_no_backups)
+def _registry() -> JobTypes:
+    return main.build_job_types(
+        alerts=_no_backups, backups=_no_backups, restore_tests=_no_backups
+    )
 
-    assert backup_job_problems(job_types) == []
+
+@pytest.mark.parametrize("name", BACKUP_JOB_TYPES)
+def test_backup_db_and_restore_test_are_bulk_only_with_group_backup(name: str) -> None:
+    assert backup_job_problems(_registry(), name) == []
 
 
 def _noop(job: Job) -> None:
     del job
 
 
+@pytest.mark.parametrize("name", BACKUP_JOB_TYPES)
 @pytest.mark.parametrize(
     ("lanes", "group", "problem"),
     [
@@ -158,40 +179,51 @@ def _noop(job: Job) -> None:
     ],
 )
 def test_the_backup_job_check_catches_another_lane_or_group(
-    lanes: frozenset[Lane], group: JobGroup, problem: str
+    name: str, lanes: frozenset[Lane], group: JobGroup, problem: str
 ) -> None:
     job_types = JobTypes()
     job_types.register_job_type(
-        JobType("backup_db", Lane.BULK, lanes, 80, timedelta(minutes=30), 2, _noop, group=group)
+        JobType(name, Lane.BULK, lanes, 80, timedelta(minutes=30), 2, _noop, group=group)
     )
     job_types.freeze()
 
-    assert any(problem in found for found in backup_job_problems(job_types))
+    assert any(
+        found.startswith(name) and problem in found
+        for found in backup_job_problems(job_types, name)
+    )
 
 
-# The trigger is registered after its job type ---------------------------------------------------
+# The triggers are registered after their job types ----------------------------------------------
 
 
-def test_the_backup_trigger_is_a_daily_schedule_on_its_registered_job_type() -> None:
-    job_types = main.build_job_types(alerts=_no_backups, backups=_no_backups)
+@pytest.mark.parametrize(
+    ("trigger", "fallback"),
+    [(Trigger.BACKUP_DB, time(10, 0)), (Trigger.RESTORE_TEST, time(11, 0))],
+)
+def test_each_backup_trigger_is_a_daily_schedule_on_its_registered_job_type(
+    trigger: Trigger, fallback: time
+) -> None:
+    job_types = _registry()
 
-    triggers = main.build_triggers(job_types, backup_schedule=lambda: DailyRun(time(10), "UTC"))
+    triggers = _triggers(job_types)
 
-    [spec] = [spec for spec in triggers.specs() if spec.trigger is Trigger.BACKUP_DB]
+    [spec] = [spec for spec in triggers.specs() if spec.trigger is trigger]
     assert isinstance(spec.schedule, DailyAt)
     assert spec.job_type in job_types.names()
-    assert spec.schedule.fallback == DailyRun(time(10, 0), "UTC")
+    assert spec.schedule.fallback == DailyRun(fallback, "UTC")
 
 
-def test_the_registry_refuses_the_backup_trigger_before_its_job_type() -> None:
-    without_backup = JobTypes()
-    without_backup.register_job_type(
-        main.build_job_types(alerts=_no_backups, backups=_no_backups).get("send_alert")
-    )
-    without_backup.freeze()
+@pytest.mark.parametrize("missing", BACKUP_JOB_TYPES)
+def test_the_registry_refuses_a_backup_trigger_before_its_job_type(missing: str) -> None:
+    built = _registry()
+    without = JobTypes()
+    for name in built.names():
+        if name != missing:
+            without.register_job_type(built.get(name))
+    without.freeze()
 
-    with pytest.raises(UnknownJobType):
-        main.build_triggers(without_backup, backup_schedule=lambda: DailyRun(time(10), "UTC"))
+    with pytest.raises(UnknownJobType, match=missing):
+        _triggers(without)
 
 
 # Rotation never keeps erased data longer than 35 days -------------------------------------------

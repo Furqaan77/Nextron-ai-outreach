@@ -58,14 +58,17 @@ adds a subscriber registers its owner command there, in the order AD-3 lists. So
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
 the more advanced Pipeline Stage), with ``SystemClock()`` when no clock is given.
 
-**Jobs (AD-10).** ``build_job_types(*, alerts, backups)`` is the job type registry: the only
+**Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests)`` is the job type
+registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
 So far: ``send_alert`` (Story 1.12: the realtime lane only, priority 90, ``max_runtime`` 3
 minutes, retry limit 5, ``handlers.send_alert(alerts)``, group ``other``: the panel's groups
-have none for alerts) and ``backup_db`` (Story 1.16: the bulk lane only, priority 80,
-``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``).
+have none for alerts), ``backup_db`` (Story 1.16: the bulk lane only, priority 80,
+``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``) and
+``restore_test`` (Story 1.18: the bulk lane only, priority 70, ``max_runtime`` 30 minutes, retry
+limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -94,11 +97,13 @@ dashboard notice once a month. The meter needs the hook, the hook needs ``budget
 ``budget`` needs the meter: the lambda breaks the cycle, with ``budget`` bound just below it.
 Building the app builds no adapter or HTTP client and records nothing.
 
-**Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule)`` is the trigger
-registry: the only code that constructs ``Triggers`` or calls ``register_trigger``. Register
-each AD-10 ``Trigger`` there, after its job type (a firing enqueues the job type with the
-trigger's own name), then it is frozen. So far: ``backup_db`` (Story 1.16), a
-``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``. ``build_app``
+**Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule, restore_test_schedule)``
+is the trigger registry: the only code that constructs ``Triggers`` or calls
+``register_trigger``. Register each AD-10 ``Trigger`` there, after its job type (a firing
+enqueues the job type with the trigger's own name), then it is frozen. So far: ``backup_db``
+(Story 1.16), a ``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``, then
+``restore_test`` (Story 1.18), a ``DailyAt(restore_test_schedule,
+fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``. ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
 
@@ -106,9 +111,10 @@ builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), a
 ``LocalBackups(clock, env=config.env, local_dir=<backup dir>\\local,
 snapshot=functools.partial(snapshot, <data dir>\\nextron.db))``: ``serve`` uses it for the
 ``pre_migrate`` copy and ``build_app`` for the daily and manual ones. ``build_app`` builds one
-``Backups(clock, local, notify=notify, queue=queue, offpc=build_offpc_backups(config, clock,
-targets))`` (``nextron.app.ops.api``). ``build_offpc_backups`` is ``OffpcBackups(clock,
-env=config.env, data_dir=..., backup_dir=..., targets=targets)`` (Story 1.17), and ``targets``
+``offpc = build_offpc_backups(config, clock, targets)`` and one ``Backups(clock, local,
+notify=notify, queue=queue, offpc=offpc)`` (``nextron.app.ops.api``). ``build_offpc_backups``
+is ``OffpcBackups(clock, env=config.env, data_dir=..., backup_dir=..., targets=targets)``
+(Story 1.17), and ``targets``
 is ``build_app``'s ``backup_targets``, by default ``functools.partial(FolderBackupTarget,
 secrets=secrets)`` (``nextron.adapters.backup_target``): after each verified daily or manual
 backup, the copy is encrypted with the Backup passphrase and written to the
@@ -123,6 +129,21 @@ units, backups)``: when the scheduler starts, ``read_backup_schedule`` runs
 returns ``DailyRun(at, timezone, catch_up=missed)``. So ``backup_time`` and
 ``sender_timezone`` are read once per engine start, and a daily time missed while the engine
 was off is made up once at start; a new database (no daily backup yet) never catches up.
+
+**Restore tests (Story 1.18; AD-20, FR-58, OP-7, NFR-16).** ``build_restore_tests(config, clock,
+offpc, notify, queue)`` is ``RestoreTests(clock, env=config.env, backup_dir=config.backup_dir,
+offpc=offpc, inspect=snapshot.inspect_copy, notify=notify, queue=queue)``
+(``nextron.app.ops.api``), on the same ``offpc`` as ``Backups``: the ``restore_test`` job
+fetches and decrypts the newest off-PC copy into ``<backup dir>\\restore_test\\`` and checks it
+read-only. Building it reaches no folder and reads no secret. ``build_job_types(...,
+restore_tests=lambda: restore_tests)`` breaks the registry cycle as for ``backups``, and the
+dashboard gets it (``create_app(..., restore_tests=restore_tests)``) for the health panel's
+"Run restore test now". The trigger's ``restore_test_schedule`` is
+``functools.partial(read_restore_test_schedule, units, restore_tests)``, which works like
+``read_backup_schedule``: ``restore_tests.schedule()`` in a read-only unit of work inside a fresh
+``contextvars.Context()``, returning ``DailyRun(at, timezone, catch_up=missed)``. The check runs
+daily an hour after ``backup_time``; the job tests only when no monthly test has started this
+calendar month, and a month's slot missed while the engine was off is made up once at start.
 
 **The heartbeat (AD-20, NFR-14).** ``build_app`` builds one ``Heartbeat(clock, heartbeat
 file)`` (``nextron.app.ops.api``), whose file is ``<data dir>\\heartbeat``
@@ -317,6 +338,7 @@ from nextron.app.ops.api import (
     Heartbeat,
     LocalBackups,
     OffpcBackups,
+    RestoreTests,
     TakenBackup,
 )
 from nextron.app.pipeline.api import Pipeline
@@ -342,7 +364,7 @@ from nextron.db.migrations import (
     head_revision,
     known_revisions,
 )
-from nextron.db.repos.ops.snapshot import snapshot
+from nextron.db.repos.ops.snapshot import inspect_copy, snapshot
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain import seed_yaml, settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
@@ -357,6 +379,7 @@ from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import LeadsMerged
+from nextron.domain.restore_test import DEFAULT_RESTORE_TEST_TIME, RESTORE_TEST_JOB
 from nextron.domain.seed_yaml import SeedSyntaxError
 from nextron.domain.segments import InvalidSegments, validate_segments
 from nextron.domain.settings_schema import Key
@@ -502,7 +525,9 @@ def build_app(
     when the panel is read, never when the app is built. ``Backups`` takes the daily and
     manual backups (the ``backup_db`` job) into ``<backup dir>\\local`` and sends each off the
     PC through ``backup_targets`` (``FolderBackupTarget`` with these secrets unless injected);
-    the scheduler reads the daily time when it starts, never when the app is built."""
+    ``RestoreTests`` fetches the newest off-PC copy back through the same targets and checks
+    it (the ``restore_test`` job); the scheduler reads the daily times when it starts, never
+    when the app is built."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -516,8 +541,12 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
-    # notify and backups are bound just below
-    job_types = build_job_types(alerts=lambda: notify, backups=lambda: backups)
+    # notify, backups and restore_tests are bound just below
+    job_types = build_job_types(
+        alerts=lambda: notify,
+        backups=lambda: backups,
+        restore_tests=lambda: restore_tests,
+    )
     queue = JobQueue(clock, job_types)
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
@@ -528,17 +557,17 @@ def build_app(
         if backup_targets is not None
         else functools.partial(FolderBackupTarget, secrets=secrets)
     )
+    offpc = build_offpc_backups(config, clock, targets)
     backups = Backups(
-        clock,
-        build_local_backups(config, clock),
-        notify=notify,
-        queue=queue,
-        offpc=build_offpc_backups(config, clock, targets),
+        clock, build_local_backups(config, clock), notify=notify, queue=queue, offpc=offpc
     )
+    restore_tests = build_restore_tests(config, clock, offpc, notify, queue)
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
     triggers = build_triggers(
-        job_types, backup_schedule=functools.partial(read_backup_schedule, units, backups)
+        job_types,
+        backup_schedule=functools.partial(read_backup_schedule, units, backups),
+        restore_test_schedule=functools.partial(read_restore_test_schedule, units, restore_tests),
     )
     scheduler = Scheduler(units, queue, triggers)
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
@@ -571,6 +600,7 @@ def build_app(
         health=health,
         queue=queue,
         backups=backups,
+        restore_tests=restore_tests,
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )
@@ -592,11 +622,13 @@ def build_job_types(
     *,
     alerts: Callable[[], handlers.AlertSending],
     backups: Callable[[], handlers.BackingUp],
+    restore_tests: Callable[[], handlers.RestoreTesting],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
-    returns the ``notify`` service that ``send_alert`` jobs call, and ``backups`` the ``ops``
-    service's ``Backups`` that ``backup_db`` jobs call."""
+    returns the ``notify`` service that ``send_alert`` jobs call, ``backups`` the ``ops``
+    service's ``Backups`` that ``backup_db`` jobs call, and ``restore_tests`` its
+    ``RestoreTests`` that ``restore_test`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -623,6 +655,19 @@ def build_job_types(
             group=JobGroup.BACKUP,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=RESTORE_TEST_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=70,
+            # fetch and decrypt the newest off-PC copy, then its checks
+            max_runtime=timedelta(minutes=30),
+            retry_limit=2,  # a failed test never raises: only recording its row is retried
+            handler=handlers.restore_test(restore_tests),
+            group=JobGroup.BACKUP,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -639,15 +684,28 @@ def build_health_issues(*, budget: Budget) -> HealthIssues:
     return issues
 
 
-def build_triggers(job_types: JobTypes, *, backup_schedule: Callable[[], DailyRun]) -> Triggers:
+def build_triggers(
+    job_types: JobTypes,
+    *,
+    backup_schedule: Callable[[], DailyRun],
+    restore_test_schedule: Callable[[], DailyRun],
+) -> Triggers:
     """The trigger registry (AD-10), frozen: register each trigger with
     ``register_trigger(Trigger.X, Every(...))`` or ``DailyAt(...)``, after its job type, before
-    ``freeze()``. ``backup_schedule`` returns the daily backup's ``DailyRun``; the scheduler
-    calls it when it starts."""
+    ``freeze()``. ``backup_schedule`` returns the daily backup's ``DailyRun`` and
+    ``restore_test_schedule`` the daily restore-test check's; the scheduler calls them when it
+    starts."""
     triggers = Triggers(job_types)
     triggers.register_trigger(
         Trigger.BACKUP_DB,
         DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, FALLBACK_TIMEZONE)),
+    )
+    triggers.register_trigger(
+        Trigger.RESTORE_TEST,
+        DailyAt(
+            restore_test_schedule,
+            fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, FALLBACK_TIMEZONE),
+        ),
     )
     triggers.freeze()
     return triggers
@@ -677,6 +735,36 @@ def build_offpc_backups(
         backup_dir=config.backup_dir,
         targets=targets,
     )
+
+
+def build_restore_tests(
+    config: BootstrapConfig, clock: Clock, offpc: OffpcBackups, notify: Notify, queue: JobQueue
+) -> RestoreTests:
+    """The restore test: this environment's work folders under ``<backup dir>\\restore_test``,
+    the off-PC copies of ``offpc`` and ``inspect_copy``, which reads a restored copy read-only.
+    Building it reaches no folder and reads no secret."""
+    return RestoreTests(
+        clock,
+        env=config.env,
+        backup_dir=config.backup_dir,
+        offpc=offpc,
+        inspect=inspect_copy,
+        notify=notify,
+        queue=queue,
+    )
+
+
+def read_restore_test_schedule(units: Units, tests: RestoreTests) -> DailyRun:
+    """The daily restore-test check's ``DailyRun``: ``tests.schedule()`` read in its own
+    read-only unit of work inside a fresh ``contextvars.Context()``, so it works whatever the
+    caller has open; ``catch_up`` is whether this month's slot was missed."""
+
+    def read() -> DailyRun:
+        with units.open(read_only=True):
+            found = tests.schedule()
+        return DailyRun(found.at, found.timezone, catch_up=found.missed)
+
+    return contextvars.Context().run(read)
 
 
 def read_backup_schedule(units: Units, backups: Backups) -> DailyRun:

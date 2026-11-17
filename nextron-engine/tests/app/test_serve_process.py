@@ -233,21 +233,23 @@ def test_guarded_health_page_and_second_instance(
     [runner_started] = [line for line in lines if line["event"] == "job_runner_started"]
     assert (runner_started["logger"], runner_started["bulk_threads"]) == ("nextron.jobs.runner", 1)
     assert lines.index(started) < lines.index(runner_started)
-    # then the scheduler, with backup_db's daily time (no catch-up on a new database), and the
-    # heartbeat writer's first beat
-    [daily] = [line for line in lines if line["event"] == "daily_trigger_scheduled"]
-    assert (daily["trigger"], daily["at"], daily["timezone"], daily["catch_up"]) == (
-        "backup_db",
-        "10:00",
-        "UTC",
-        False,
-    )
+    # then the scheduler, with backup_db's and restore_test's daily times (no catch-up on a new
+    # database), and the heartbeat writer's first beat
+    dailies = {
+        line["trigger"]: line for line in lines if line["event"] == "daily_trigger_scheduled"
+    }
+    assert sorted(dailies) == ["backup_db", "restore_test"]
+    daily = dailies["backup_db"]
+    assert (daily["at"], daily["timezone"], daily["catch_up"]) == ("10:00", "UTC", False)
+    restore = dailies["restore_test"]
+    assert (restore["at"], restore["timezone"], restore["catch_up"]) == ("11:00", "UTC", False)
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        1,
+        2,
     )
     assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
+    assert lines.index(daily) < lines.index(restore) < lines.index(scheduler_started)
     # a new database takes no pre_migrate copy and no catch-up backup: the backup dir is empty
     assert not (tmp_path / "backups").exists()
     assert not [line for line in lines if str(line["event"]).startswith("backup")]
@@ -260,7 +262,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0011_2_2_leads"
+    assert HEAD == "0012_1_18_restore_tests"
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # no alert was raised or sent: nothing built the Telegram adapter or reached the sink

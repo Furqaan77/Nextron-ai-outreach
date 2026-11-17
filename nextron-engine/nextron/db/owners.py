@@ -142,6 +142,26 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "offpc_error",
         ),
     },
+    "restore_tests": {
+        "ops": (
+            "id",
+            "kind",
+            "result",
+            "started_at",
+            "finished_at",
+            "backup_id",
+            "check_fetch",
+            "check_integrity",
+            "check_revision",
+            "check_suppression",
+            "check_provenance",
+            "reason",
+            "copy_revision",
+            "suppression_count",
+            "provenance_count",
+            "detail",
+        ),
+    },
     "alerts": {
         "notify": (
             "id",

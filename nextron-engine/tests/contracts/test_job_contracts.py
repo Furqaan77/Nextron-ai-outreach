@@ -283,9 +283,21 @@ class RecordingBackups:
         return "01JD0000000000000000000002"
 
 
-def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> None:
+class RecordingRestoreTests:
+    """Stands in for the ``ops`` service's ``RestoreTests``."""
+
+    def __init__(self) -> None:
+        self.kinds: list[str] = []
+
+    def run(self, kind: str) -> str | None:
+        self.kinds.append(kind)
+        return None
+
+
+def test_build_job_types_is_frozen_and_registers_send_alert_backup_db_and_restore_test() -> None:
     alerts = RecordingAlerts()
     backups = RecordingBackups()
+    restore_tests = RecordingRestoreTests()
     calls: list[str] = []
 
     def lookup() -> RecordingAlerts:
@@ -296,11 +308,17 @@ def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> N
         calls.append("backups looked up")
         return backups
 
-    job_types = main.build_job_types(alerts=lookup, backups=backups_lookup)
+    def restore_tests_lookup() -> RecordingRestoreTests:
+        calls.append("restore tests looked up")
+        return restore_tests
+
+    job_types = main.build_job_types(
+        alerts=lookup, backups=backups_lookup, restore_tests=restore_tests_lookup
+    )
 
     assert isinstance(job_types, JobTypes)
     assert job_types.frozen
-    assert job_types.names() == ("send_alert", "backup_db")
+    assert job_types.names() == ("send_alert", "backup_db", "restore_test")
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,
@@ -327,23 +345,46 @@ def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> N
     tick = Job("01JD0000000000000000000003", "backup_db", Lane.BULK, {"v": 1}, 1)
     assert backup_db.handler(tick) is None  # type: ignore[func-returns-value]
     assert (calls[-1], backups.kinds) == ("backups looked up", ["daily"])
-    main_registry = main.build_job_types(alerts=lookup, backups=backups_lookup)
+    restore_test = job_types.get("restore_test")
+    assert (
+        restore_test.default_lane,
+        restore_test.lanes,
+        restore_test.priority,
+        restore_test.max_runtime,
+        restore_test.retry_limit,
+        restore_test.group,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 70, timedelta(minutes=30), 2, JobGroup.BACKUP)
+    restore_tick = Job("01JD0000000000000000000004", "restore_test", Lane.BULK, {"v": 1}, 1)
+    assert restore_test.handler(restore_tick) is None  # type: ignore[func-returns-value]
+    assert (calls[-1], restore_tests.kinds) == ("restore tests looked up", ["monthly"])
+    main_registry = main.build_job_types(
+        alerts=lookup, backups=backups_lookup, restore_tests=restore_tests_lookup
+    )
     assert main_registry is not job_types  # a new registry each time
 
 
-def test_build_triggers_registers_the_daily_backup() -> None:
-    job_types = main.build_job_types(alerts=RecordingAlerts, backups=RecordingBackups)
+def test_build_triggers_registers_the_daily_backup_then_the_restore_test() -> None:
+    job_types = main.build_job_types(
+        alerts=RecordingAlerts, backups=RecordingBackups, restore_tests=RecordingRestoreTests
+    )
     schedule = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
+    restore_schedule = lambda: DailyRun(time(4, 15), "UTC")  # noqa: E731
 
-    triggers = main.build_triggers(job_types, backup_schedule=schedule)
+    triggers = main.build_triggers(
+        job_types, backup_schedule=schedule, restore_test_schedule=restore_schedule
+    )
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec] = triggers.specs()
+    [spec, restore] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
-    built_again = main.build_triggers(job_types, backup_schedule=schedule)
+    assert (restore.trigger, restore.job_type) == (Trigger.RESTORE_TEST, "restore_test")
+    assert restore.schedule == DailyAt(restore_schedule, fallback=DailyRun(time(11, 0), "UTC"))
+    built_again = main.build_triggers(
+        job_types, backup_schedule=schedule, restore_test_schedule=restore_schedule
+    )
     assert built_again is not triggers  # a new registry each time
 
 

@@ -76,6 +76,11 @@ READINESS = (CheckResult("python_version", Status.OK, "fine"),)
 LOW_SCRYPT = ScryptParams(10, 8, 1)
 
 
+def no_restore_tests() -> Any:
+    """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
+    raise AssertionError("no restore_test job runs in these tests")
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -98,7 +103,9 @@ class World:
     backups: Backups = field(init=False)
 
     def __post_init__(self) -> None:
-        job_types = main.build_job_types(alerts=lambda: self.notify, backups=lambda: self.backups)
+        job_types = main.build_job_types(
+            alerts=lambda: self.notify, backups=lambda: self.backups, restore_tests=no_restore_tests
+        )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(
             self.clock, self.queue, alert_ports={Channel.TELEGRAM: lambda: InMemoryAlert()}
@@ -1145,7 +1152,11 @@ def _no_budget() -> Any:
 
 
 def test_the_backup_job_type_is_registered_as_specified() -> None:
-    job_types = main.build_job_types(alerts=lambda: None, backups=lambda: None)  # type: ignore[arg-type,return-value]
+    job_types = main.build_job_types(
+        alerts=lambda: None,  # type: ignore[arg-type,return-value]
+        backups=lambda: None,  # type: ignore[arg-type,return-value]
+        restore_tests=no_restore_tests,
+    )
 
     found = job_types.get("backup_db")
 

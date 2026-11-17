@@ -61,6 +61,11 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_restore_tests() -> Any:
+    """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
+    raise AssertionError("no restore_test job runs in these tests")
+
+
 @dataclass
 class World:
     """The ``notify`` service on real units of work, its queue and its job types."""
@@ -156,7 +161,9 @@ def world_on(
     port: AlertPort | Callable[[], AlertPort],
 ) -> World:
     built: dict[str, Notify] = {}
-    job_types = main.build_job_types(alerts=lambda: built["notify"], backups=no_backups)
+    job_types = main.build_job_types(
+        alerts=lambda: built["notify"], backups=no_backups, restore_tests=no_restore_tests
+    )
     queue = JobQueue(clock, job_types)
     factory: Any = port if callable(port) and not isinstance(port, AlertPort) else lambda: port
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: factory})

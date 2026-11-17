@@ -137,6 +137,27 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "offpc_deleted_at": PiiClass.NONE,
         "offpc_error": PiiClass.REDACT,
     },
+    # Story 1.18. The restore test's kind, result, times, the tested backup's id, each check's
+    # outcome, the reason code, the copy's revision and counts. detail is built from codes,
+    # revisions and counts, but it is free text, so redact like the backups' errors.
+    "restore_tests": {
+        "id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "result": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "finished_at": PiiClass.NONE,
+        "backup_id": PiiClass.NONE,
+        "check_fetch": PiiClass.NONE,
+        "check_integrity": PiiClass.NONE,
+        "check_revision": PiiClass.NONE,
+        "check_suppression": PiiClass.NONE,
+        "check_provenance": PiiClass.NONE,
+        "reason": PiiClass.NONE,
+        "copy_revision": PiiClass.NONE,
+        "suppression_count": PiiClass.NONE,
+        "provenance_count": PiiClass.NONE,
+        "detail": PiiClass.REDACT,
+    },
     # Story 1.12. Ops alert text carries IDs and counts only, but later kinds (Hot Lead,
     # LinkedIn) are free text that may name a person; every other column is an ID, a code or a
     # time.

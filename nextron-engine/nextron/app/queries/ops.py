@@ -19,7 +19,20 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.ops`` only.
   ``copied`` or ``not_configured`` one (every such row when there is none), oldest first, as
   ``HealthIssue("backup_failed", <backup id>, offpc_failed_text(kind, id), detail="Error: " +
   redact(offpc_error))``. That list clears when a later backup is copied off the PC or the
-  off-PC copy is no longer configured.
+  off-PC copy is no longer configured. Last come the failed restore tests (Story 1.18): each
+  ``fail`` test newer than the newest ``pass`` one (every failed one when none passed), oldest
+  first, as ``HealthIssue("restore_test_failed", <test id>, restore_test_failed_text(kind, id,
+  reason), detail="Error: " + redact(detail or reason))``. That list clears when a later test
+  passes; there is no Dismiss.
+
+The restore test (Story 1.18):
+
+- ``last_restore_test()``: the newest ``RestoreTestRow`` of either kind and result (by
+  ``started_at``, then id), or ``None`` before the first test. The health panel shows it.
+- ``newest_restore_test(kind)``: the newest ``RestoreTestRow`` of ``kind``, of either result, or
+  ``None``. The monthly schedule reads the newest ``monthly`` one.
+- ``newest_offpc_copy()``: the ``BackupRow`` whose off-PC copy a restore test fetches: the newest
+  one ``copied`` off the PC and not yet rotated out, or ``None``.
 
 It reads through the current unit of work, read-only ones included.
 """
@@ -28,8 +41,10 @@ from typing import Final
 
 from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
+from nextron.db.repos.ops import restore_tests as restore_tests_repo
 from nextron.db.repos.ops.backups import BackupRow
 from nextron.db.repos.ops.heartbeat import HeartbeatRow
+from nextron.db.repos.ops.restore_tests import RestoreTestRow
 from nextron.domain.backup import (
     BACKUP_FAILED,
     BackupKind,
@@ -40,6 +55,12 @@ from nextron.domain.backup import (
 )
 from nextron.domain.health import HealthIssue
 from nextron.domain.redaction import redact
+from nextron.domain.restore_test import (
+    RESTORE_TEST_FAILED,
+    RestoreResult,
+    RestoreTestKind,
+    restore_test_failed_text,
+)
 
 ERROR_LEAD: Final = "Error: "
 
@@ -59,10 +80,40 @@ def newest_backup(kind: BackupKind) -> BackupRow | None:
     return backups_repo.newest(kind=str(BackupKind(kind)))
 
 
+def last_restore_test() -> RestoreTestRow | None:
+    """The newest restore test of either kind and result, or ``None``."""
+    return restore_tests_repo.newest()
+
+
+def newest_restore_test(kind: RestoreTestKind) -> RestoreTestRow | None:
+    """The newest restore test of ``kind``, of either result, or ``None``."""
+    return restore_tests_repo.newest(kind=str(RestoreTestKind(kind)))
+
+
+def newest_offpc_copy() -> BackupRow | None:
+    """The newest backup copied off the PC whose copy is not rotated out, or ``None``."""
+    return backups_repo.newest_offpc_copy()
+
+
+def _restore_issues() -> tuple[HealthIssue, ...]:
+    passed = restore_tests_repo.newest(result=str(RestoreResult.PASS))
+    since = None if passed is None else passed.started_at
+    return tuple(
+        HealthIssue(
+            RESTORE_TEST_FAILED,
+            row.id,
+            restore_test_failed_text(row.kind, row.id, row.reason or ""),
+            detail=ERROR_LEAD + redact(row.detail or row.reason or ""),
+        )
+        for row in restore_tests_repo.failed_after(since)
+    )
+
+
 def health_issues() -> tuple[HealthIssue, ...]:
     """One ``backup_failed`` issue per failed backup newer than the newest verified one, then
-    one per failed off-PC copy newer than the newest copied or not configured one, each
-    oldest first."""
+    one per failed off-PC copy newer than the newest copied or not configured one, then one
+    ``restore_test_failed`` issue per failed restore test newer than the newest passed one,
+    each oldest first."""
     verified = backups_repo.newest(status=str(BackupStatus.VERIFIED))
     since = None if verified is None else verified.started_at
     local = tuple(
@@ -87,4 +138,4 @@ def health_issues() -> tuple[HealthIssue, ...]:
         )
         for row in backups_repo.offpc_failed_after(offpc_since)
     )
-    return local + offpc
+    return local + offpc + _restore_issues()

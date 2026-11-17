@@ -886,6 +886,7 @@ the log line carries the copy's `file` name.
 | `0009_1_17_offpc` | six nullable off-PC columns on `backups` (`offpc_status`, `offpc_name`, `offpc_ledger`, `offpc_at`, `offpc_deleted_at`, `offpc_error`), added with `ALTER TABLE ... ADD COLUMN`, and their three checks (`ck_backups_offpc_status`, `ck_backups_offpc_ledger`, `ck_backups_offpc`) | `ops` |
 | `0010_3_1_markets` | `markets` (unique `code` and `country_code`, `ck_markets_version`) (see [Markets](#markets)) | `setup` |
 | `0011_2_2_leads` | `leads` (unique `web_domain`, `ch_number` and `place_id`, four checks, two foreign keys) (see [Leads and identity](#leads-and-identity)) | `discovery` (identity group), `pipeline` (`pipeline_stage`) |
+| `0012_1_18_restore_tests` | `restore_tests`: one row per restore test, each check's outcome, its nine checks (`kind`, `result`, one per check, `ck_restore_tests_outcome`, `ck_restore_tests_counts`) and `ix_restore_tests_started_at` (see [The restore test](#the-restore-test)) | `ops` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -963,9 +964,9 @@ Background work (crawls, mailbox syncs, sends, AI calls) runs as durable jobs in
 table (owner `jobqueue`, AD-10), so it survives a crash or a restart, never runs twice at once,
 and retries only what may succeed later. The rules live in `nextron/domain/job.py`, the service
 in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. The
-job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)) and
-`backup_db` (see [Backups](#backups)); the stories that add work add theirs, with a thin handler
-in `nextron/jobs/handlers.py`.
+job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)),
+`backup_db` (see [Backups](#backups)) and `restore_test` (see [The restore test](#the-restore-test));
+the stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -1278,9 +1279,84 @@ included), a passphrase or an error's text: `backup_requested` (`job_id`, `job_c
 `offpc_rotation_failed` (ERROR: `backup_id`, `code`) and `offpc_record_failed` (ERROR:
 `backup_id`, `code`).
 
-**Not done yet.** The monthly restore test arrives with Story 1.18, and `nextron restore` with
-recovery mode with Story 1.19; Story 4.x writes the erasure ledger. There is no passphrase-strength
-rule. A failed off-PC copy is never retried before the next backup.
+**Not done yet.** `nextron restore` and recovery mode arrive with Story 1.19; Story 4.x writes
+the erasure ledger. There is no passphrase-strength rule. A failed off-PC copy is never retried
+before the next backup.
+
+### The restore test
+
+A backup nobody has restored is only a hope (AD-20, FR-58, OP-7, NFR-16). Once a month, and
+whenever you click **Run restore test now** on the health panel, `ops` (`RestoreTests` in
+`nextron/app/ops/api.py`; the rules in `nextron/domain/restore_test.py`) proves that the newest
+off-PC copy really restores:
+
+1. It takes the newest `backups` row whose off-PC copy is `copied` and not yet rotated out, and
+   fetches that file from the "Off-PC backup folder" set now, decrypting it with the Backup
+   passphrase into a fresh work folder, `<backup dir>\restore_test\nextron-<env>-<random>\copy.db`.
+2. It opens the copy read-only and `immutable` (`nextron.db.repos.ops.snapshot.inspect_copy`), so
+   SQLite writes nothing beside it, and checks, in order:
+   - **fetch and decrypt**: the file is there, the folder is reachable, the passphrase is set
+     and right, the file is whole and untampered, and the decrypted bytes have the SHA-256 the
+     backup recorded;
+   - **integrity check**: `PRAGMA integrity_check` answers exactly `ok`;
+   - **Alembic revision**: the copy's revision is the code's head;
+   - **Suppression List count** and **Provenance Records count**: the copy has at least as many
+     `suppression_entries` and `provenance_records` rows as the backup recorded (a table that
+     didn't exist at backup time is skipped).
+3. It records each check's `pass`, `fail` or `skipped` and the overall `pass` or `fail` in one
+   `restore_tests` row (owner `ops`, migration `0012_1_18_restore_tests`), written once, with no
+   state machine and no `events` row. Then it deletes the work folder.
+
+The live database is never opened, copied, replaced or migrated, and nothing is started against
+the copy: no engine, unit of work, Alembic command, adapter, runner or scheduler. The plaintext
+copy exists only inside the work folder (never in `%TEMP%`, the data dir or the off-PC folder):
+it holds personal data, and the backup dir already holds the local plaintext copies. A crash,
+or a delete that failed, can leave a work folder behind; every run clears this environment's
+leftovers first (`nextron-<env>-*`, the files directly inside, then the folder, never through
+a link or a junction), the daily check that finds no test due included, so a leftover never
+waits for the next real test. A delete that fails is logged (`restore_test_cleanup_failed`,
+WARNING) and the result stands.
+
+**When.** The `restore_test` trigger fires every day an hour after "Daily backup time"
+(`backup_time` + 1 hour, 11:00 by default) in the sender's timezone (UTC until it is set), so it
+usually tests that morning's copy. The job tests only when no monthly test has started this
+calendar month (in that timezone); otherwise it logs `restore_test_not_due` and records nothing.
+If the engine was off when this month's time passed, the test runs once at the next start; a new
+database waits for its first time. A manual test (`{"v": 1, "kind": "manual"}`, key
+`restore_test:global:<UTC date>`, absorbed while one is queued or running) always runs and
+doesn't count as the month's test. The job runs on the bulk lane only (priority 70,
+`max_runtime` 30 minutes, retry limit 2, group Backup). "Last successful runs" shows each daily
+check; the Restore test section shows the last real test.
+
+**When it fails**, the row is `fail` with the first failing check's reason, the
+`restore_test_failed` ops alert goes to Telegram and the dashboard ("Restore test failed: <kind>
+<ULID>, <reason>"), and the health panel lists it until a later test passes. A failed test isn't
+retried: the next month, or Run restore test now, tests again. Only a failure to record the row
+(`restore_test_record_failed`) makes the job retry, which runs the test again.
+
+| Reason | Check | What it means |
+|---|---|---|
+| `no_offpc_copy` | fetch | no backup has a `copied` off-PC copy that is still there |
+| `offpc_not_configured` | fetch | the off-PC folder is blank, the data or backup dir (or inside either), or its stored value no longer parses; the detail says which |
+| `copy_missing` | fetch | the file isn't in the folder set now (the folder changed since: wait for the next daily copy) |
+| `target_unavailable` | fetch | the folder can't be reached (an unplugged drive, an offline share) |
+| `passphrase_not_set` | fetch | the Backup passphrase isn't on the Credentials page |
+| `wrong_passphrase` | fetch | the passphrase isn't the one the copy was made with (a changed passphrase: see above) |
+| `tampered`, `truncated`, `bad_format` | fetch | the file was changed, cut short, or isn't a Nextron backup |
+| `fetch_failed` | fetch | anything else (out of memory, say); the detail has the code |
+| `checksum_mismatch` | fetch | the decrypted copy's SHA-256 differs from the backup's |
+| `integrity_failed` | integrity | the copy isn't a database or fails `integrity_check`; the detail has its first line |
+| `revision_behind` | revision | the copy is at an older revision: after an upgrade, a test before the next daily copy fails so |
+| `revision_unknown` | revision | the copy's revision is unknown to this code, or can't be read |
+| `suppression_fewer`, `provenance_fewer` | counts | the copy has fewer rows than the backup recorded, or lacks the table |
+
+**Logs**: `restore_test_requested` (`job_id`, `job_created`), `restore_test_not_due` (`kind`),
+`restore_test_passed` (`test_id`, `kind`, `backup_id`), `restore_test_failed` (ERROR: `test_id`,
+`kind`, `reason`), `restore_test_cleanup_failed` (WARNING: `code`) and
+`restore_test_record_failed` (ERROR: `kind`, `code`). Never a path, a passphrase or an error's
+text.
+
+**Not checked:** the erasure ledger's off-PC copy, and copies in a folder that is no longer set.
 
 ## Triggers and the heartbeat
 
@@ -1290,7 +1366,9 @@ table (`tests/unit/test_triggers.py` checks it against the spine). A trigger onl
 firing enqueues one job of the job type with the trigger's own name, with the key
 `<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
 still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
-job. So far one trigger is registered: `backup_db`, daily (see [Backups](#backups)).
+job. So far two triggers are registered: `backup_db`, daily (see [Backups](#backups)), and
+`restore_test`, daily an hour later, whose job tests once per calendar month (see [The restore
+test](#the-restore-test)).
 
 **Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
@@ -1312,8 +1390,9 @@ triggers.register_trigger(
   the engine missed while it was off. If `when()` fails or returns anything else, the
   scheduler logs `trigger_schedule_failed` (WARNING, `trigger`, `code`) and uses `fallback`.
   It logs `daily_trigger_scheduled` (INFO: `trigger`, `at`, `timezone`, `catch_up`). A change
-  to the time takes effect when the engine restarts. Monthly and Operator-time schedules arrive
-  with their first trigger.
+  to the time takes effect when the engine restarts. The monthly restore test is a daily
+  `DailyAt` whose job skips a month already tested; Operator-time schedules arrive with their
+  first trigger.
 - A trigger that isn't a `Trigger` member (a plain string included), whose job type isn't
   registered, or that is already registered is refused (`TypeError`, `UnknownJobType`,
   `ValueError`).
@@ -1696,7 +1775,11 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    ", copied off the PC", ", off-PC copy failed" or ", off-PC not configured" once its off-PC
    outcome is recorded (marked when the backup or its off-PC copy failed), and the **Back up
    now** button (see [Backups](#backups)).
-4. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
+4. **Restore test**: "No restore test yet." or "Last restore test: <YYYY-MM-DD HH:MM:SS> UTC,
+   <pass or fail> (<monthly or manual>)", from the newest test's start; a failed test adds ":
+   <reason>; failing checks: <the checks' names>" and is marked. Then the **Run restore test
+   now** button (see [The restore test](#the-restore-test)).
+5. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
    attention." The errors are:
    - each `dead` job, oldest first: "Job dead: <type> <ULID>, attempts: <n>", with "Last error:
      <redacted last_error>" and a **Dismiss** button;
@@ -1710,13 +1793,16 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    - then each failed off-PC copy newer than the newest one copied or not configured, oldest
      first: "Off-PC backup copy failed: <kind> <ULID>", with "Error: <redacted error>". It clears
      when a later backup is copied off the PC, or off-PC is no longer configured;
+   - then each failed restore test newer than the newest passed one, oldest first: "Restore
+     test failed: <kind> <ULID>, <reason>", with "Error: <redacted detail, or the reason>". It
+     clears when a later test passes; there is no Dismiss;
    - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
      fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
      traceback); the other sources still show.
-5. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
+6. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
-6. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
+7. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
    the same twelve ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
@@ -1729,6 +1815,12 @@ else is 400 `Request refused: malformed form`). It queues a manual backup and sh
 again with "Backup queued; its result shows here when it finishes.", or "A backup is already
 queued or running." when one is. The copy is taken by the job runner's bulk lane, never in the
 request; the panel's next refresh shows the result.
+
+**Run restore test now.** The button posts `POST /health/restore-test` (CSRF-checked, no other
+field; anything else is 400). It queues a manual restore test and shows the panel again with
+"Restore test queued; its result shows here when it finishes.", or "A restore test is already
+queued or running." when one is. The test runs on the job runner's bulk lane, never in the
+request.
 
 **Dismiss.** Dismissing a dead job deletes its `jobs` row (AD-10: `dead` rows stay until the
 Operator dismisses them), logs `job_dismissed`, and shows the panel again. Its history stays in
@@ -1761,7 +1853,8 @@ view; the area isn't polled.
 `HealthIssue(kind, subject, text, detail=None)` values (`nextron/domain/health.py`), and
 registers it in `nextron.main.build_health_issues`, the only code that builds the registry
 (`tests/contracts/test_health_contracts.py`). The sources so far, in order: `jobqueue` (dead
-jobs), `budget` (AI spend and quotas) and `backups` (failed backups, then failed off-PC copies).
+jobs), `budget` (AI spend and quotas) and `backups` (failed backups, then failed off-PC copies,
+then failed restore tests).
 
 ## Logs
 

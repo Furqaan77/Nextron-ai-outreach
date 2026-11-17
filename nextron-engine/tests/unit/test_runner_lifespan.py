@@ -26,6 +26,7 @@ file, a row, the log or the panel.
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import logging
 import os
@@ -46,6 +47,7 @@ from fastapi import FastAPI
 
 import nextron.adapters.telegram as telegram_adapter
 from nextron.adapters.backup_target import FolderBackupTarget
+from nextron.adapters.crypto import ScryptParams
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -95,6 +97,11 @@ LIFESPAN_LOGGERS = ("nextron.jobs.runner", "nextron.jobs.scheduler", "nextron.jo
 def no_backups() -> Any:
     """``build_job_types``'s ``backups`` where no ``backup_db`` job runs."""
     raise AssertionError("no backup_db job runs in these tests")
+
+
+def no_restore_tests() -> Any:
+    """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
+    raise AssertionError("no restore_test job runs in these tests")
 
 
 def job_threads() -> list[str]:
@@ -165,7 +172,11 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
 
     assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
     [job_types] = registries
-    assert job_types.names() == ("send_alert", "backup_db")  # type: ignore[attr-defined]
+    assert job_types.names() == (  # type: ignore[attr-defined]
+        "send_alert",
+        "backup_db",
+        "restore_test",
+    )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
         assert notify_queries.open_notifications(5).count == 0
@@ -459,7 +470,9 @@ def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> N
 
 def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
     """A ``send_alert`` job that died on its first run; its id."""
-    job_types = main.build_job_types(alerts=InMemoryAlert, backups=no_backups)  # never called
+    job_types = main.build_job_types(  # never called
+        alerts=InMemoryAlert, backups=no_backups, restore_tests=no_restore_tests
+    )
     queue = JobQueue(clock, job_types)
 
     @use_case
@@ -651,7 +664,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     events = [r.getMessage() for r in caplog.records if r.name in LIFESPAN_LOGGERS]
     assert events == [
         "job_runner_started",
-        "daily_trigger_scheduled",
+        "daily_trigger_scheduled",  # backup_db
+        "daily_trigger_scheduled",  # restore_test
         "scheduler_started",
         "scheduler_stopped",
         "job_runner_stopped",
@@ -659,7 +673,7 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    assert scheduled.triggers == 1  # type: ignore[attr-defined]  # backup_db's daily time
+    assert scheduled.triggers == 2  # type: ignore[attr-defined]  # backup_db, restore_test
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -883,9 +897,12 @@ class RealEngine:
         return reply
 
     def back_up_now(self) -> Any:
+        return self.post("/health/backup")
+
+    def post(self, path: str) -> Any:
         return request(
             self.app,
-            "/health/backup",
+            path,
             method="POST",
             headers=[
                 (b"host", self.host),
@@ -901,7 +918,9 @@ class RealEngine:
 
 
 def real_engine(
-    monkeypatch: pytest.MonkeyPatch, secrets: InMemorySecrets | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    secrets: InMemorySecrets | None = None,
+    backup_targets: Any = None,
 ) -> RealEngine:
     monkeypatch.setattr(main, "build_role_adapter", lambda *args, **kwargs: InMemoryAlert())
     config = load_bootstrap()
@@ -916,6 +935,7 @@ def real_engine(
         clock=clock,
         google_oauth=FakeGoogleOAuth(),
         probes=fake_probes(),
+        backup_targets=backup_targets,
     )
     engine = RealEngine(config, units, app, f"127.0.0.1:{config.port}".encode())
     engine.enter(secrets, clock)
@@ -947,15 +967,17 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     finally:
         engine.units.engine.dispose()
 
-    [job] = jobs
-    assert job.id == "backup_db"
-    assert isinstance(job.trigger, CronTrigger)
-    fields = {field.name: str(field) for field in job.trigger.fields}
-    assert (fields["hour"], fields["minute"]) == ("10", "0")
-    assert str(job.trigger.timezone) == "UTC"
-    assert (job.misfire_grace_time, job.coalesce, job.max_instances) == (86400, True, 1)
-    [scheduled] = [r for r in caplog.records if r.getMessage() == "daily_trigger_scheduled"]
-    assert getattr(scheduled, "catch_up") is False  # a new database never catches up
+    assert sorted(job.id for job in jobs) == ["backup_db", "restore_test"]
+    for job, hour in zip(sorted(jobs, key=lambda job: job.id), ("10", "11"), strict=True):
+        assert isinstance(job.trigger, CronTrigger)
+        fields = {field.name: str(field) for field in job.trigger.fields}
+        assert (fields["hour"], fields["minute"]) == (hour, "0")
+        assert str(job.trigger.timezone) == "UTC"
+        assert (job.misfire_grace_time, job.coalesce, job.max_instances) == (86400, True, 1)
+    scheduled = [r for r in caplog.records if r.getMessage() == "daily_trigger_scheduled"]
+    assert [getattr(record, "trigger") for record in scheduled] == ["backup_db", "restore_test"]
+    # a new database never catches up: no daily backup and no monthly restore test yet
+    assert [getattr(record, "catch_up") for record in scheduled] == [False, False]
     assert engine.backups() == []
     assert not (engine.config.backup_dir).exists()
 
@@ -995,14 +1017,27 @@ def test_the_scheduler_reads_the_stored_time_zone_and_a_missed_daily_backup(
     finally:
         engine.units.engine.dispose()
 
-    [scheduled] = [r for r in caplog.records if r.getMessage() == "daily_trigger_scheduled"]
+    [scheduled] = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "daily_trigger_scheduled" and getattr(r, "trigger") == "backup_db"
+    ]
     assert (
         getattr(scheduled, "at"),
         getattr(scheduled, "timezone"),
         getattr(scheduled, "catch_up"),
     ) == ("07:30", "America/New_York", True)
-    [job] = added
-    assert job["id"] == "backup_db"
+    [restore] = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "daily_trigger_scheduled" and getattr(r, "trigger") == "restore_test"
+    ]
+    assert (
+        getattr(restore, "at"),
+        getattr(restore, "timezone"),
+        getattr(restore, "catch_up"),
+    ) == ("08:30", "America/New_York", False)  # an hour after the backup; no monthly test yet
+    [job] = [job for job in added if job["id"] == "backup_db"]
     trigger = job["trigger"]
     assert isinstance(trigger, CronTrigger)
     fields = {field.name: str(field) for field in trigger.fields}
@@ -1144,3 +1179,55 @@ def test_back_up_now_copies_the_backup_off_the_pc_encrypted_with_the_real_adapte
         assert all(planted not in line for line in dump)
         assert planted not in logged
         assert planted not in panel
+
+
+# The restore test through the real app (Story 1.18) -------------------------------------------
+
+
+def wait_for_restore_test(engine: RealEngine) -> tuple[str, str, str | None, str | None]:
+    """The restore test's kind, result, reason and backup id, once the ``restore_test`` job
+    recorded it and finished."""
+    for _ in range(POLL_ATTEMPTS):
+        rows = raw_query(engine.units, "SELECT kind, result, reason, backup_id FROM restore_tests")
+        done = raw_query(engine.units, "SELECT status FROM jobs WHERE type = 'restore_test'")
+        if rows and done == [("done",)]:
+            return rows[0]
+        time.sleep(POLL_SLICE)
+    pytest.fail("the restore_test job did not record a restore test")
+
+
+def test_run_restore_test_now_restores_the_off_pc_copy_with_the_real_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    folder = tmp_path / "offpc"
+    secrets = InMemorySecrets("test")
+    secrets.write("backup/passphrase", PLANTED_PASSPHRASE)
+    targets = functools.partial(FolderBackupTarget, secrets=secrets, params=ScryptParams(10, 8, 1))
+    engine = real_engine(monkeypatch, secrets, targets)
+    try:
+        with engine.units.open():
+            Setup(FrozenClock(T)).set(Key.BACKUP_OFFPC_DIR, str(folder))
+        with serving(engine.app):
+            assert engine.back_up_now().status == 200
+            status, name, _ = wait_for_offpc(engine)
+            assert (status, name) == ("copied", "nextron-test-20261117T090000.000Z.db.enc")
+            reply = engine.post("/health/restore-test")
+            assert reply.status == 200
+            assert "Restore test queued; its result shows here when it finishes." in reply.text
+            kind, result, reason, backup_id = wait_for_restore_test(engine)
+            panel = engine.get("/health/panel/live").text
+    finally:
+        engine.units.engine.dispose()
+
+    [(copied_id,)] = raw_query(engine.units, "SELECT id FROM backups")
+    assert (kind, result, reason, backup_id) == ("manual", "pass", None, copied_id)
+    assert "Last restore test: 2026-11-17 09:00:00 UTC, pass (manual)" in panel
+    assert 'class="health-restore"' in panel
+    restore_dir = engine.config.backup_dir / "restore_test"
+    assert restore_dir.is_dir() and list(restore_dir.iterdir()) == []  # no work folder left
+    assert [found.name for found in folder.iterdir()] == [name]  # the copy itself stays
+    assert raw_query(engine.units, "SELECT count(*) FROM alerts") == [(0,)]
+    logged = caplog.text + "".join(str(vars(record)) for record in caplog.records)
+    assert PLANTED_PASSPHRASE not in logged and "QZXPLANTED" not in panel
+    assert [r.getMessage() for r in caplog.records].count("restore_test_passed") == 1
