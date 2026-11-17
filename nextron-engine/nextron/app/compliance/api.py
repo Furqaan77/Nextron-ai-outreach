@@ -36,6 +36,28 @@ permanent: nothing here, or anywhere, removes one or ages one out.
 
   Nothing is logged: the ``events`` rows are the audit, and neither they nor the notification
   hold an address, a name or a URL.
+
+**The contactability gate (AD-16, FR-50, FR-15, FR-63, Story 3.4).** The module-level function
+``assert_contactable(subject, channel, purpose) -> Allowed | Blocked`` is the only check of
+whether a Lead or a Contact may be reached. It is not a ``@command``: it only reads, so it runs
+inside a caller's transaction and in a read-only unit of work alike. Callers reach it as
+``compliance_api.assert_contactable`` (a module attribute), so the AD-16 contract test
+(``tests/contracts/test_ad16_callers.py``) can replace it with a recording fake.
+
+1. **Arguments, before any read.** ``channel`` and ``purpose`` go through ``channel_of`` and
+   ``purpose_of`` (a non-``str`` raises ``TypeError``, an unknown text ``ValueError``); a
+   ``subject`` that isn't a ``ContactSubject``, ``NewContactSubject`` or ``NewLeadSubject``
+   raises ``TypeError``.
+2. **Facts.** A ``ContactSubject``: the Contact (``queries.research.contact``) and its Lead. A
+   ``NewContactSubject``: its own values with its Lead. For a Contact, the Lead
+   (``queries.discovery.lead``) gives the web domain, and ``queries.pipeline.stage`` the stage.
+   A ``NewLeadSubject``: ``LeadFacts(web_domain, mail_domains)`` with no stage. An unknown
+   Contact or Lead raises ``LookupError``, and a merged Lead ``ValueError``; no message holds an
+   id or a value.
+3. **The answer** is ``nextron.domain.contactability.check(facts, channel, purpose,
+   queries.compliance.active_keys(lookup_keys(facts)))``: ``Blocked(reasons)`` or
+   ``Allowed()``. Nothing is written, cached or logged, and a ``Blocked`` answer is returned,
+   never raised, so a caller's transaction stays usable.
 """
 
 from collections.abc import Mapping
@@ -43,17 +65,31 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
 
+from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
 from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
 from nextron.db.uow import command, current
 from nextron.domain.contactability import (
+    Allowed,
+    Blocked,
+    Channel,
+    ContactFacts,
     ContactSubject,
+    LeadFacts,
+    NewContactSubject,
+    NewLeadSubject,
+    Purpose,
     SuppressionKey,
     SuppressionScope,
+    channel_of,
+    check,
     firm_domain_keys,
+    lookup_keys,
     person_keys,
+    purpose_of,
 )
 from nextron.domain.ids import is_ulid
 from nextron.domain.notifications import SubjectSuppressed
@@ -174,3 +210,60 @@ class Compliance:
             )
         )
         return result
+
+
+# The contactability gate ------------------------------------------------------------------------
+
+type Subject = ContactSubject | NewContactSubject | NewLeadSubject
+
+
+def _lead_facts(lead_id: str) -> LeadFacts:
+    """The stored Lead's web domain and stage; ``LookupError`` when it is unknown and
+    ``ValueError`` when it was merged."""
+    lead = discovery_queries.lead(lead_id)
+    if lead is None:
+        raise LookupError("assert_contactable: the Lead is unknown")
+    if lead.merged_into is not None:
+        raise ValueError("assert_contactable: the Lead was merged into another Lead")
+    stage = pipeline_queries.stage(lead.id)
+    if stage is None:  # the Lead was just read, so its stage is there
+        raise LookupError("assert_contactable: the Lead is unknown")
+    return LeadFacts(lead.web_domain, (), stage)
+
+
+def _facts(subject: Subject) -> LeadFacts | ContactFacts:
+    if isinstance(subject, NewLeadSubject):
+        return LeadFacts(subject.web_domain, subject.mail_domains)
+    if isinstance(subject, NewContactSubject):
+        return ContactFacts(
+            _lead_facts(subject.lead_id),
+            email=subject.email,
+            name=subject.name,
+            linkedin_url=subject.linkedin_url,
+        )
+    contact = research_queries.contact(subject.contact_id)
+    if contact is None:
+        raise LookupError("assert_contactable: the Contact is unknown")
+    return ContactFacts(
+        _lead_facts(contact.lead_id),
+        email=contact.email,
+        name=contact.name,
+        linkedin_url=contact.linkedin_url,
+    )
+
+
+def assert_contactable(
+    subject: Subject, channel: Channel | str, purpose: Purpose | str
+) -> Allowed | Blocked:
+    """Whether ``subject`` may be reached on ``channel`` for ``purpose``; see the module
+    docstring."""
+    found_channel = channel_of(channel)
+    found_purpose = purpose_of(purpose)
+    if not isinstance(subject, ContactSubject | NewContactSubject | NewLeadSubject):
+        raise TypeError(
+            "assert_contactable takes a ContactSubject, NewContactSubject or NewLeadSubject, "
+            f"not {type(subject).__name__}"
+        )
+    facts = _facts(subject)
+    active = compliance_queries.active_keys(lookup_keys(facts))
+    return check(facts, found_channel, found_purpose, active)

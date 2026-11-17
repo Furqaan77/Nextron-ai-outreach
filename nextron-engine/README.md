@@ -1062,9 +1062,21 @@ a LinkedIn URL that isn't a `linkedin.com/in/` profile, a name or role over 200 
 holding control characters, or a name with no letters or digits. A row with Contact cells but neither a name nor a valid email
 gets no Contact and a note.
 
-**The summary** shows the imported, merged, rejected and blocked-by-Market counts, each rejected
-row (number, organization, reason), each row blocked by Market (number, organization, reason)
-and each imported row with notes. Every CSV text shows escaped, inside an
+**Blocked by the Suppression List (Story 3.4).** A row whose new Lead's domain is on the
+Suppression List is **blocked: suppressed domain**: no Lead, no Contact, no crawl job, and it is
+counted neither imported nor merged ("Organization is on the Suppression List"). A row whose
+domain matches a stored Lead is merged as before, even when that domain is suppressed, but its
+Contact then isn't stored. A Contact the contactability gate refuses gets the note "Contact is
+on the Suppression List; not imported" (its address, its address's domain, the Lead's domain,
+its name at the Lead's domain or its LinkedIn profile is suppressed), or "the Lead is Lost or
+Disqualified, so the Contact was not imported". See [The contactability
+gate](#the-contactability-gate).
+
+**The summary** shows the imported, merged, rejected, blocked-by-Market and "Blocked:
+suppressed domain" counts, each rejected row (number, organization, reason), each row blocked
+by Market (number, organization, reason), each row blocked by a suppressed domain ("Rows
+blocked: suppressed domain": number, organization, reason) and each imported row with notes.
+Every CSV text shows escaped, inside an
 `untrusted` block. A refused import (a bad origin, an empty, non-UTF-8 or invalid file, a
 missing required column, too many rows, an unknown default Segment) writes nothing and shows the
 reason by its field, keeping what was typed. A file over 5 MB is discarded unread, so the form
@@ -1114,7 +1126,7 @@ email and a record's address are `keep_hash`, so suppression and dedupe still ma
 erasure; the LinkedIn URL and the office location (`office_country`, `office_region`) are
 `null`; the Market and timezone bases are `none`. No log line or `events` row holds a CSV cell,
 the origin, an email address, a note, a location or the file name: the import logs
-`lead_import_finished` (the imported, merged, rejected, noted and blocked counts),
+`lead_import_finished` (the imported, merged, rejected, noted, blocked and suppressed counts),
 `lead_import_refused` (`field`) and `lead_import_stopped` (`at_row`, the error's type).
 
 ### Contact Markets and timezones
@@ -1283,6 +1295,88 @@ migrations, `db/repos/compliance`, `app/compliance`, `app/queries/compliance.py`
 Entries can't age out.
 
 Read one Contact with `queries.research.contact(contact_id)` (a `StoredContact`, or `None`).
+
+### The contactability gate
+
+`compliance.assert_contactable(subject, channel, purpose)` (Story 3.4, AD-16, FR-50, FR-15,
+FR-63; `nextron/app/compliance/api.py`) is the **one** check of whether a Lead or a Contact may
+be reached. Exactly where it runs today: a new Lead is gated before its insert (a Lead matched
+by any key is returned without the gate), and `add_contact` is gated before any write, on both
+the candidate's values and a match's own stored values. Later outreach paths (Enrollments,
+Drafts, Tasks, sending) are forced to call it by the contract below. Merges, key attachment,
+`reparent_lead` and `resolve_market` aren't gated. It answers `Allowed()` or
+`Blocked(reasons)` and never raises for a block, so the caller's transaction stays usable. It
+only reads, so it works inside a transaction and in a read-only unit of work (Story 3.6's live
+Eligibility); it writes, caches and logs nothing.
+
+```python
+from nextron.app.compliance import api as compliance_api
+
+answer = compliance_api.assert_contactable(NewContactSubject(lead_id, email=..., name=...),
+                                           "email", "discovery")
+if isinstance(answer, Blocked):
+    ...  # write nothing; answer.reasons says why
+```
+
+- **Subjects** (`nextron/domain/contactability.py`): `ContactSubject(contact_id)` (a stored
+  Contact, with its Lead), `NewContactSubject(lead_id, email, name, linkedin_url)` (a Contact
+  about to be stored on a stored Lead) and `NewLeadSubject(web_domain, mail_domains=())` (a
+  Lead about to be created). Anything else raises `TypeError`. An unknown Contact or Lead
+  raises `LookupError` and a merged Lead `ValueError`; no message holds an id or a value.
+- **Channel** (`email`, `linkedin`, `whatsapp`, `instagram`, `phone`) and **purpose** (`cold`,
+  `follow_up`, `reply`, `referral`, `rebook`, `recontact`, `task`, `call`, `discovery`) are
+  checked before anything is read (an unknown text raises `ValueError`, a non-text
+  `TypeError`), but they don't change the answer: an opt-out blocks every channel.
+- **Reasons**, a closed set, in this order: `address_suppressed` (the address),
+  `address_domain_suppressed` (the address's registrable domain), `lead_domain_suppressed`
+  (the Lead's web domain, or any of its mail domains), `person_suppressed` (the name at the
+  Lead's web domain), `profile_suppressed` (the LinkedIn profile), `lead_lost` and
+  `lead_disqualified` (the Lead's Pipeline Stage). Only `active` entries count: a voided
+  `reply_rule` entry no longer blocks. A free-webmail domain is never looked up, and a value
+  that can't be normalised gives no key.
+- **The pure core** is `domain.contactability.check(facts, channel, purpose, active)`, with
+  `lookup_keys(facts)` naming the keys to read; `queries.compliance.active_keys(keys)` reads
+  which of them are `active` (and `active_entry(kind, value_hash)` one entry).
+
+**Where it is called (Story 3.4).**
+
+- `Discovery.upsert_lead`: before inserting a new Lead, with `NewLeadSubject(web_domain)`,
+  `email`, `discovery`. A block returns `UpsertedLead(lead_id=None, created=False, merged=(),
+  blocked=...)` with nothing written and no crawl job. A Lead matched by any key is returned as
+  before, without the gate: it is never re-created.
+- `Research.add_contact`, every source: after the reads, before any write, with
+  `NewContactSubject` (each value the candidate's, or its match's when the candidate lacks
+  it), `email`, `discovery`; then, when the candidate matches a stored Contact, with
+  `ContactSubject(match)`, so the match's own stored email, name and LinkedIn URL are checked
+  too. Either block blocks, with both answers' reasons combined in order. A block stores
+  nothing (no Contact, fill, Provenance Record or address) but one `events` row: entity
+  `leads`, the Lead's id, `None` to `contact_blocked`, cause the first reason, actor
+  `system:research`. It returns `AddedContact(contact_id=None, created=False,
+  email_dropped=False, blocked=...)`. A Lost or Disqualified Lead blocks its new Contacts too.
+- Both callers proceed only on `Allowed()`: any other answer raises `TypeError`.
+- The CSV import counts the rows and notes the Contacts it blocks (see [CSV import, Contacts
+  and Provenance](#csv-import-contacts-and-provenance)).
+
+**The contract** (`tests/contracts/test_ad16_callers.py`) keeps every path gated:
+
+- a **manifest** of every AD-16 caller: `upsert_lead`, the CSV import, `add_contact` for each
+  source, then (not built yet, skipped by name) `find_contact_email`, `verify_contact_email`,
+  the Signal Inbox chain, replies, `sequencing.enroll`, `drafting.request_*` and Call Prep,
+  `approval.approve`, the pipeline Tasks and call sheets, and `compliance.assert_sendable`. A
+  caller that exists without a scenario fails;
+- **scenarios** with a recording fake of the gate and a log of every write statement (a new
+  Contact and a matched one for `add_contact`): with `Allowed`, the gate is called with the
+  expected subjects (compared by value), channel and purpose before the first write and before
+  each insert into `leads`, `contacts`, `enrollments`, `drafts`, `linkedin_tasks`,
+  `call_preps` or `outbound_messages`; with `Blocked`, no table gains a row, no job is queued
+  and no `INSERT`, `UPDATE`, `DELETE` or `REPLACE` runs (except `add_contact`'s
+  `contact_blocked` event);
+- every use of `upsert_lead` or `add_contact` must sit inside a manifest caller;
+- a repository function that inserts into one of those tables (`insert(Model)` or
+  `insert(Model.__table__)`, `Model(...)`, `Model.__table__.insert()`,
+  `insert(table("leads"))`, or `bulk_insert_mappings`/`bulk_save_objects` of a model) may be
+  used only by its own module or a manifest caller that lists the table, and no string outside
+  the migrations may hold `INSERT INTO` one of them (a quoted or bracketed schema included).
 
 ## Sending Inboxes
 

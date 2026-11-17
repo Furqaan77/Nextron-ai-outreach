@@ -9,7 +9,7 @@ Companies House number or place ID), at any Pipeline Stage, merged Leads include
 already normalised: ``LeadIdentity`` refuses any other (``nextron.domain.identity`` is the only
 normaliser).
 
-- ``@command upsert_lead(identity, source) -> UpsertedLead(lead_id, created, merged)``:
+- ``@command upsert_lead(identity, source) -> UpsertedLead(lead_id, created, merged, blocked)``:
 
   1. A wrong type (``identity`` not a ``LeadIdentity``, ``source`` not a ``LeadSource``) raises
      ``TypeError``; a ``segment_id`` not among ``queries.setup.segment_ids()`` raises
@@ -17,12 +17,19 @@ normaliser).
      Segment's definition).
   2. Each key that is set is looked up, and ``merged_into`` is followed to the survivor; a
      chain longer than ``MAX_MERGE_CHAIN`` (64) links raises ``RuntimeError``.
-  3. No match: a new Lead is inserted (``created_at`` = now, stage ``new``), and
+  3. No match: first the contactability gate (AD-16, Story 3.4):
+     ``compliance_api.assert_contactable(NewLeadSubject(identity.web_domain), email,
+     discovery)``. A ``Blocked`` answer returns ``UpsertedLead(lead_id=None, created=False,
+     merged=(), blocked=<the answer>)`` with nothing written and nothing enqueued; an answer
+     that is neither ``Allowed`` nor ``Blocked`` raises ``TypeError``. On ``Allowed`` a new
+     Lead is inserted (``created_at`` = now, stage ``new``), and
      ``pipeline.record_created`` appends its creation ``events`` row (cause
      ``created_from_<source>``); ``created=True``. A Lead created from a ``csv`` source with a
      ``web_domain`` also gets its ``enrich_lead`` job (Story 2.5), enqueued in the same
      transaction: key ``enrich_lead:<lead ULID>:<UTC date>``, payload ``{v: 1, lead_id}``,
-     concurrency key ``domain:<web_domain>``, on its default lane.
+     concurrency key ``domain:<web_domain>``, on its default lane. A matched Lead (steps 4 and
+     5) is returned as before, at any stage and whatever its domain, without the gate: it is
+     never re-created (FR-9).
   4. Two or more distinct survivors: the oldest (by ``created_at``, then ``id``) survives, and
      each of the others is ``merge``d into it in that order; ``merged`` lists them.
   5. Then each candidate key that no Lead holds and the survivor lacks is attached to the
@@ -79,20 +86,25 @@ rows are ``nextron.domain.lead_import``'s.
   2. **Rows.** ``imported_at`` is the clock's now. The plan's rows run in batches of
      ``BATCH_ROWS`` (200), each in its own ``uow.transaction()``, so no write lock lasts long.
      Each row runs ``discovery.upsert_lead(identity, LeadSource.CSV)``: ``created`` counts as
-     imported, otherwise merged (a domain met earlier in the file or already stored). With a
-     Contact, it then runs ``research.add_contact(lead_id, contact, source=csv, detail=origin,
-     retrieved_at=imported_at)``; ``email_dropped`` adds ``NOTE_EMAIL_DROPPED`` to the row.
+     imported, a matched Lead as merged (a domain met earlier in the file or already stored),
+     and a ``blocked`` answer (Story 3.4) adds a ``SuppressedRow(number, label)``: the row is
+     neither imported nor merged, and its Contact isn't tried. With a Contact, an imported or
+     merged row then runs ``research.add_contact(lead_id, contact, source=csv, detail=origin,
+     retrieved_at=imported_at)``: a ``blocked`` answer adds ``NOTE_CONTACT_SUPPRESSED`` to the
+     row when any reason is in ``SUPPRESSION_REASONS``, else ``NOTE_CONTACT_LEAD_CLOSED`` (the
+     Lead is Lost or Disqualified); otherwise ``email_dropped`` adds ``NOTE_EMAIL_DROPPED``.
   3. **A failing batch** rolls back, and ``ImportStopped(summary, at_row)`` (a
      ``RuntimeError``) is raised from the error, logged as ``lead_import_stopped`` with
      ``at_row`` and the error's type. ``summary`` counts only the committed batches and
      ``at_row`` is the failed batch's first row number. Importing the same file again is safe:
      its committed rows are merged and their Contacts match.
 
-  ``ImportSummary(imported, merged, rejected, noted, blocked)`` holds the two counts, every
-  ``RejectedRow`` of the plan (all of them, even after a stop: they import nothing either way),
-  a ``NotedRow(number, label, notes)`` for each committed row with notes, and every
-  ``BlockedRow`` of the plan (Story 3.2, like the rejected rows), each in row order. A finished
-  import logs ``lead_import_finished`` with the five counts. No log line holds a CSV cell, the
+  ``ImportSummary(imported, merged, rejected, noted, blocked, suppressed)`` holds the two
+  counts, every ``RejectedRow`` of the plan (all of them, even after a stop: they import nothing
+  either way), a ``NotedRow(number, label, notes)`` for each committed row with notes, every
+  ``BlockedRow`` of the plan (Story 3.2, like the rejected rows) and a ``SuppressedRow`` for
+  each committed row whose Lead the gate blocked (Story 3.4), each in row order. A finished
+  import logs ``lead_import_finished`` with the six counts. No log line holds a CSV cell, the
   origin or the file name.
 """
 
@@ -101,6 +113,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import research as research_queries
@@ -109,6 +122,14 @@ from nextron.app.research.api import Research
 from nextron.db.repos.discovery import leads as leads_repo
 from nextron.db.repos.discovery.leads import StoredLead
 from nextron.db.uow import command, current, use_case
+from nextron.domain.contactability import (
+    SUPPRESSION_REASONS,
+    Allowed,
+    Blocked,
+    Channel,
+    NewLeadSubject,
+    Purpose,
+)
 from nextron.domain.contacts import ProvenanceSource
 from nextron.domain.crawl import ENRICH_LEAD_JOB, LEAD_ID_FIELD, PAYLOAD_VERSION, lead_job_keys
 from nextron.domain.ids import is_ulid
@@ -116,10 +137,13 @@ from nextron.domain.job import VERSION_FIELD
 from nextron.domain.lead_import import (
     DEFAULT_SEGMENT_UNKNOWN,
     FIELD_DEFAULT_SEGMENT,
+    NOTE_CONTACT_LEAD_CLOSED,
+    NOTE_CONTACT_SUPPRESSED,
     NOTE_EMAIL_DROPPED,
     BlockedRow,
     ImportRefused,
     RejectedRow,
+    SuppressedRow,
     check_file_size,
     check_origin,
     plan_import,
@@ -157,11 +181,13 @@ _LOOKUPS: Final = {
 @dataclass(frozen=True, slots=True)
 class UpsertedLead:
     """The Lead a candidate became: its id, whether it was created, and the Leads merged into it
-    on the way, in merge order."""
+    on the way, in merge order. When the contactability gate blocked a new Lead, ``lead_id`` is
+    ``None`` and ``blocked`` holds the gate's answer."""
 
-    lead_id: str
+    lead_id: str | None
     created: bool
     merged: tuple[str, ...]
+    blocked: Blocked | None = None
 
 
 def _survivor(lead: StoredLead) -> StoredLead:
@@ -212,6 +238,13 @@ class Discovery:
                 found = _survivor(holder)
                 survivors[found.id] = found
         if not survivors:
+            answer = compliance_api.assert_contactable(
+                NewLeadSubject(identity.web_domain), Channel.EMAIL, Purpose.DISCOVERY
+            )
+            if isinstance(answer, Blocked):
+                return UpsertedLead(None, False, (), blocked=answer)
+            if not isinstance(answer, Allowed):  # never proceed on anything else
+                raise TypeError(f"assert_contactable answered a {type(answer).__name__}")
             lead_id = leads_repo.insert(
                 name=identity.name,
                 segment_id=identity.segment_id,
@@ -345,14 +378,15 @@ class NotedRow:
 @dataclass(frozen=True, slots=True)
 class ImportSummary:
     """What an import did: how many rows created a Lead (``imported``) and how many matched one
-    (``merged``), the rejected rows, the imported rows with notes and the rows blocked by
-    Market, in row order."""
+    (``merged``), the rejected rows, the imported rows with notes, the rows blocked by Market
+    and the rows whose Lead the contactability gate blocked (``suppressed``), in row order."""
 
     imported: int
     merged: int
     rejected: tuple[RejectedRow, ...]
     noted: tuple[NotedRow, ...]
     blocked: tuple[BlockedRow, ...]
+    suppressed: tuple[SuppressedRow, ...] = ()
 
 
 class ImportStopped(RuntimeError):
@@ -430,15 +464,21 @@ class LeadImports:
         imported_at = self._clock.now()
         imported = merged = 0
         noted: list[NotedRow] = []
+        suppressed: list[SuppressedRow] = []
         for start in range(0, len(plan.rows), BATCH_ROWS):
             batch = plan.rows[start : start + BATCH_ROWS]
-            created = 0
+            created = matched = 0
             batch_noted: list[NotedRow] = []
+            batch_suppressed: list[SuppressedRow] = []
             try:
                 with uow.transaction():
                     for row in batch:
                         upserted = self._discovery.upsert_lead(row.identity, LeadSource.CSV)
+                        if upserted.lead_id is None:  # the gate blocked a new Lead
+                            batch_suppressed.append(SuppressedRow(row.number, row.label))
+                            continue
                         created += upserted.created
+                        matched += not upserted.created
                         notes = list(row.notes)
                         if row.contact is not None:
                             added = self._research.add_contact(
@@ -448,7 +488,9 @@ class LeadImports:
                                 detail=origin,
                                 retrieved_at=imported_at,
                             )
-                            if added.email_dropped:
+                            if added.blocked is not None:
+                                notes.append(_contact_note(added.blocked))
+                            elif added.email_dropped:
                                 notes.append(NOTE_EMAIL_DROPPED)
                         if notes:
                             batch_noted.append(NotedRow(row.number, row.label, tuple(notes)))
@@ -459,13 +501,21 @@ class LeadImports:
                     extra={"at_row": at_row, "error": type(error).__name__},
                 )
                 summary = ImportSummary(
-                    imported, merged, plan.rejected, tuple(noted), plan.blocked
+                    imported,
+                    merged,
+                    plan.rejected,
+                    tuple(noted),
+                    plan.blocked,
+                    tuple(suppressed),
                 )
                 raise ImportStopped(summary, at_row) from error
             imported += created
-            merged += len(batch) - created
+            merged += matched
             noted.extend(batch_noted)
-        summary = ImportSummary(imported, merged, plan.rejected, tuple(noted), plan.blocked)
+            suppressed.extend(batch_suppressed)
+        summary = ImportSummary(
+            imported, merged, plan.rejected, tuple(noted), plan.blocked, tuple(suppressed)
+        )
         log.info(
             "lead_import_finished",
             extra={
@@ -474,6 +524,14 @@ class LeadImports:
                 "rejected": len(plan.rejected),
                 "noted": len(noted),
                 "blocked": len(plan.blocked),
+                "suppressed": len(suppressed),
             },
         )
         return summary
+
+
+def _contact_note(blocked: Blocked) -> str:
+    """The note of a row whose Contact the gate blocked: suppressed, else the Lead is closed."""
+    if any(reason in SUPPRESSION_REASONS for reason in blocked.reasons):
+        return NOTE_CONTACT_SUPPRESSED
+    return NOTE_CONTACT_LEAD_CLOSED
