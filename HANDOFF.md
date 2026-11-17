@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`) and **Story 2.1** (merge `cb63e02`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`) and **Story 2.2** (merge `8b32024`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -102,9 +102,26 @@ The notification area shows "Engine health: N errors need attention". New error 
 
 Main after both merges: 5017 tests, 29 contracts.
 
+**Story 2.7 result:** every Claude call goes through `LlmPort` / `ClaudeGateway` (`nextron/adapters/ai/`). It returns a typed result: `ok`, `refused`, `truncated`, `invalid` or `failed`.
+- Untrusted text goes into `<untrusted>` blocks.
+- A truncated reply gets one retry with double `max_tokens`, up to the cap.
+- Every HTTP request records an `ai_usage` row priced from `adapters/ai/pricing.py`.
+- No prompt or response text is stored or logged, and only `nextron.adapters.ai` imports `anthropic`.
+- It isn't wired into `main` yet; Story 2.9 does that.
+
+**Story 3.1 result:** `seed/markets.yaml` (US and UK Market rules) syncs with the Segments in one `nextron seed sync` transaction, into a new `markets` table (migration `0010_3_1_markets`).
+- A compliance floor in code allows cold email only in US and GB Markets. A GB Market must block free webmail, require the privacy line and check legal forms (8 Companies House types).
+- New setting: `us_solicitation_label`.
+
+**Story 2.2 result:** exactly one Lead per organization. A new `leads` table (migration `0011_2_2_leads`) and `nextron/domain/identity.py` key Leads by registrable domain (from a vendored Public Suffix List), company number, place id and LinkedIn slug.
+- Duplicates merge into the oldest Lead, with the stage rules in the spec.
+- A Lead's Market is never stored; it is derived.
+
+Main after these merges: **6789 tests, 29 contracts.**
+
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 18 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 21 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -140,6 +157,17 @@ Main after both merges: 5017 tests, 29 contracts.
   - no YAML library was added (a strict stdlib subset reader instead); PyYAML would need your OK;
   - a Segment removed from the seed file is kept and can't be retired;
   - the ABA/SRA check misses forms like `aba512` and `S.R.A.`.
+- **Check the Claude prices (Story 2.7)** in `nextron-engine/nextron/adapters/ai/pricing.py` against Anthropic's pricing page. They came from a cached reference, not the live page. The AI budget relies on them.
+- **Story 2.7, recommended spec change:** widen the `<untrusted>` escaping to catch fullwidth or look-alike slashes and zero-width characters. The approved spec allows only an ASCII `/`, so this needs your OK.
+- **Story 3.1 decisions:**
+  - UK legal forms allowed: `ltd`, `plc`, the guarantee and section-30 variants, `private-unlimited`, `private-unlimited-nsc` and `llp`;
+  - US legal form isn't checked;
+  - any two-letter TLD counts as a country, so `.io` and `.eu` addresses are treated as non-US/UK.
+- **Story 2.2 items rejected only because they'd change the approved spec:**
+  - merges leave no audit record and can't be undone;
+  - a conflicting key on a candidate is dropped;
+  - a closed duplicate turns a `won` Lead `lost`;
+  - a sole trader's firm name in `leads.name` isn't erased with their Contact.
 - **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
