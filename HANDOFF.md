@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.14 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`; sprint status `review`). **Next: Story 1.15.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`; sprint status `review`). **Next: Story 1.16.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -70,7 +70,15 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 **Story 1.14 result:** `nextron doctor` runs 11 readiness checks (`ok`/`warn`/`fail`, table or `--json`, `--env`), reading the database read-only and never taking the lock. With a stored Google grant it makes one real token refresh, metered in memory only. 3815 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 14 are done.
+**Story 1.15 result:** an engine health panel at `/health/panel` (the nav's Health link), refreshed every 30 s:
+- worker state from the heartbeat;
+- each job type's last success, by a new `JobGroup`;
+- an error list (dead jobs with Dismiss, AI spend at 80% or more, quotas reached);
+- the `nextron doctor` readiness list, run in-process with no network call and no Google refresh.
+
+The notification area shows "Engine health: N errors need attention". New error sources register in `main.build_health_issues`. 3968 tests, 29 contracts.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 15 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -85,9 +93,14 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
   - every Telegram refusal is one code, so a bad token looks the same as a bad chat id;
   - each dead job gives two dashboard notices until `alert_chat_id` is set, and there is no "send a test alert";
   - an error notice stays until the page reloads.
+- **Story 1.15 items rejected only because they'd change the approved spec:**
+  - all eleven readiness checks run on every 30-second poll of the health panel;
+  - after a Dismiss, the notification area's error count lags until the next page view;
+  - dead jobs show no time of death;
+  - AI spend at 80% counts as an error for the rest of the month, with no acknowledge.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
-- **Never exercised against the real service:** nothing has talked to real Google, Telegram, Hunter or Claude yet. Every adapter is proven against fakes. Release 2 (Epics 8–9) is 20. Release 3 (Epics 10–11) is 17.
+- **Never exercised against the real service:** nothing has talked to real Google, Telegram, Hunter or Claude yet. Every adapter is proven against fakes.
 
 ## 4. How to continue building (exact procedure)
 
