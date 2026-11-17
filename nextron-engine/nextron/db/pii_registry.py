@@ -73,6 +73,34 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 4.1. A Sequence and its Step briefs hold rules, limits and angle texts, never a
+    # person.
+    "sequences": {
+        "id": PiiClass.NONE,
+        "key": PiiClass.NONE,
+        "name": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
+    "step_briefs": {
+        "id": PiiClass.NONE,
+        "sequence_id": PiiClass.NONE,
+        "step": PiiClass.NONE,
+        "delay_days": PiiClass.NONE,
+        "purpose": PiiClass.NONE,
+        "word_limit": PiiClass.NONE,
+        "word_comparison": PiiClass.NONE,
+        "allowed_content": PiiClass.NONE,
+        "ask": PiiClass.NONE,
+        "link_rule": PiiClass.NONE,
+        "no_price": PiiClass.NONE,
+        "no_audit": PiiClass.NONE,
+        "subject_rule": PiiClass.NONE,
+        "segment_angles": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Story 2.2. A Lead is an organization: its name, keys and country are firm data, so erasing a
     # Contact never tombstones the firm's Lead.
     "leads": {

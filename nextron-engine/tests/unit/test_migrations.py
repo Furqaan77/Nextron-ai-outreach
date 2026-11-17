@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0012_1_18_restore_tests"
+HEAD = "0013_4_1_sequences"
 
 
 @pytest.fixture

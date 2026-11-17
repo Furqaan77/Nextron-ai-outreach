@@ -13,7 +13,13 @@ from nextron.db.models.leads import LeadRecord
 from nextron.db.models.metering import AiUsageRecord, ApiUsageRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import BackupRecord, HeartbeatRecord, RestoreTestRecord
-from nextron.db.models.setup import MarketRecord, SegmentRecord, SettingRecord
+from nextron.db.models.setup import (
+    MarketRecord,
+    SegmentRecord,
+    SequenceRecord,
+    SettingRecord,
+    StepBriefRecord,
+)
 
 __all__ = [
     "AiUsageRecord",
@@ -29,7 +35,9 @@ __all__ = [
     "NotificationRecord",
     "RestoreTestRecord",
     "SegmentRecord",
+    "SequenceRecord",
     "SettingRecord",
+    "StepBriefRecord",
     "Ulid",
     "UtcDateTime",
     "events",

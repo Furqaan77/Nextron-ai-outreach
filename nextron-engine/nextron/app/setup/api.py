@@ -74,11 +74,33 @@ never changed or deleted. Decoding a stored row that no longer validates raises
 not_in_file)``, shaped like ``SegmentSync`` with codes, and after the commit logs
 ``markets_synced`` (INFO) with the same four ``*_count`` fields.
 
-``Setup.sync_seed(segments, markets)`` is what ``nextron seed sync`` calls (a unit of work runs
-one use case): every pre-transaction check of both syncs (Segments first), the clock read once,
-then both syncs in **one** transaction, Segments first, so a failure anywhere changes nothing.
-After the commit it logs ``segments_synced``, then ``markets_synced``, and returns
-``SeedSync(segments, markets)``.
+The Sequences of ``seed/sequences.yaml`` (FR-4, AD-12, Story 4.1), as
+``nextron.domain.sequences.SequenceDef`` values, are synced only through ``sync_seed``, keyed by
+``key`` into the ``sequences`` table with one ``step_briefs`` row per Step; there is no
+standalone ``sync_sequences``. Before any transaction ``_sequence_inputs`` refuses an item that
+isn't a ``SequenceDef`` (``TypeError``) or a repeated key (``ValueError``) and, when there is at
+least one, validates the definitions again as the file form (``validate_sequences`` on each
+``sequence_form``), then checks every angle against the Segments and Markets of the same call
+(``check_sequence_references``: a Segment key, a Market code, and ABA Formal Opinion 512 only on
+a US Market's angle and the SRA notice only on a GB Market's), raising ``InvalidSequences``; the
+Sequences it stores and compares are the ones validation returns. Then, inside the transaction,
+in input order: a key with no row is inserted at version 1 with its brief rows and one
+``events`` row (entity ``sequences``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``);
+a Sequence whose decoded ``SequenceDef`` differs is updated to version n+1 (only the brief rows
+that differ are written, new Steps are added and Steps no longer in it deleted) with one
+``events`` row ``v<n>`` to ``v<n+1>``; anything else writes nothing. A Sequence's version and
+event cover its briefs: there is no event per brief row. A stored Sequence missing from the
+input is never changed or deleted. Decoding a stored Sequence that no longer validates raises
+``InvalidSequences`` (nothing is written). The result is ``SequenceSync(created, changed,
+unchanged, not_in_file)``, shaped like ``MarketSync`` with keys.
+
+``Setup.sync_seed(segments, markets, sequences)`` is what ``nextron seed sync`` calls (a unit of
+work runs one use case): every pre-transaction check of the three syncs (Segments, Markets, then
+Sequences, whose angles are checked against this call's Segments and Markets), the clock read
+once, then the three syncs in **one** transaction, Segments first and Sequences last, so a
+failure anywhere changes nothing. After the commit it logs ``segments_synced``, then
+``markets_synced``, then ``sequences_synced`` (each with the four ``*_count`` fields), and
+returns ``SeedSync(segments, markets, sequences)``.
 
 ``Credentials`` (AD-12, FR-56, NFR-18) stores the external credentials declared in
 ``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. It touches
@@ -192,7 +214,7 @@ import json
 import logging
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -202,6 +224,7 @@ from typing import Final, NoReturn
 from nextron.db import eventlog
 from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import segments as segments_repo
+from nextron.db.repos.setup import sequences as sequences_repo
 from nextron.db.repos.setup import settings as settings_repo
 from nextron.db.uow import current, use_case
 from nextron.domain import credentials as credential_registry
@@ -256,6 +279,12 @@ from nextron.domain.segments import (
     segment_from_text,
     validate_segments,
 )
+from nextron.domain.sequences import (
+    SequenceDef,
+    check_sequence_references,
+    sequence_form,
+    validate_sequences,
+)
 from nextron.domain.settings_schema import (
     REQUIRED,
     REQUIRED_RULE,
@@ -297,6 +326,8 @@ SEGMENTS_SYNCED: Final = "segments_synced"
 SEGMENTS_ENTITY: Final = "segments"
 MARKETS_SYNCED: Final = "markets_synced"
 MARKETS_ENTITY: Final = "markets"
+SEQUENCES_SYNCED: Final = "sequences_synced"
+SEQUENCES_ENTITY: Final = "sequences"
 SEED_SYNC_CAUSE: Final = "seed_sync"
 SEED_ACTOR: Final = "seed"
 SAVE: Final = "save"
@@ -332,11 +363,24 @@ class MarketSync:
 
 
 @dataclass(frozen=True, slots=True)
+class SequenceSync:
+    """What ``sync_seed`` did to the Sequences: ``created`` as ``(key, version)``, ``changed``
+    as ``(key, from_version, to_version)`` and ``unchanged`` keys, each in input order, and
+    ``not_in_file`` as ``(key, version)`` of each stored Sequence the input left out, by key."""
+
+    created: tuple[tuple[str, int], ...]
+    changed: tuple[tuple[str, int, int], ...]
+    unchanged: tuple[str, ...]
+    not_in_file: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SeedSync:
-    """What ``sync_seed`` did: the Segments' sync, then the Markets'."""
+    """What ``sync_seed`` did: the Segments' sync, then the Markets', then the Sequences'."""
 
     segments: SegmentSync
     markets: MarketSync
+    sequences: SequenceSync
 
 
 def _log_changed(keys: list[str]) -> None:
@@ -346,7 +390,7 @@ def _log_changed(keys: list[str]) -> None:
 
 class Setup:
     """Operator settings, one typed value at a time or a whole Settings page at once, and the
-    Segments and Markets a seed sync loads."""
+    Segments, Markets and Sequences a seed sync loads."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
@@ -432,21 +476,32 @@ class Setup:
 
     @use_case
     def sync_seed(
-        self, segments: Sequence[SegmentDef], markets: Sequence[MarketDef]
+        self,
+        segments: Sequence[SegmentDef],
+        markets: Sequence[MarketDef],
+        sequences: Sequence[SequenceDef],
     ) -> SeedSync:
-        """Upsert ``segments`` and ``markets`` in one transaction; see the module docstring."""
+        """Upsert ``segments``, ``markets`` and ``sequences`` in one transaction; see the
+        module docstring."""
         chosen_segments, texts = _segment_inputs(segments)
         chosen_markets = _market_inputs(markets)
+        chosen_sequences = _sequence_inputs(
+            sequences,
+            frozenset(segment.key for segment in chosen_segments),
+            {market.code: market.country_code for market in chosen_markets},
+        )
         now = self._clock.now()
         with current().transaction():
             segment_result = _sync_segments(chosen_segments, texts, now)
             market_result = _sync_markets(chosen_markets, now)
+            sequence_result = _sync_sequences(chosen_sequences, now)
         _log_sync(SEGMENTS_SYNCED, segment_result)
         _log_sync(MARKETS_SYNCED, market_result)
-        return SeedSync(segment_result, market_result)
+        _log_sync(SEQUENCES_SYNCED, sequence_result)
+        return SeedSync(segment_result, market_result, sequence_result)
 
 
-def _log_sync(event: str, result: SegmentSync | MarketSync) -> None:
+def _log_sync(event: str, result: SegmentSync | MarketSync | SequenceSync) -> None:
     log.info(  # "created" itself is a LogRecord attribute, so each count is suffixed
         event,
         extra={
@@ -633,6 +688,73 @@ def _record_market(
     eventlog.append(
         entity=MARKETS_ENTITY,
         entity_id=market_id,
+        from_status=None if from_version is None else _version_status(from_version),
+        to_status=_version_status(to_version),
+        cause=SEED_SYNC_CAUSE,
+        cause_ref=None,
+        actor=SEED_ACTOR,
+        at=at,
+    )
+
+
+# Sequences ----------------------------------------------------------------------------------------
+
+
+def _sequence_inputs(
+    sequences: Sequence[SequenceDef],
+    segment_keys: Collection[str],
+    market_countries: Mapping[str, str],
+) -> tuple[SequenceDef, ...]:
+    """``sync_seed``'s Sequence checks before any transaction: the Sequences as validation
+    returns them from their file form, their angles checked against ``segment_keys`` and
+    ``market_countries`` (a Market code to its country code), or ``TypeError``, ``ValueError``
+    or ``InvalidSequences``."""
+    chosen = tuple(sequences)
+    for sequence in chosen:
+        if not isinstance(sequence, SequenceDef):
+            raise TypeError(f"sync_seed takes SequenceDefs, not {type(sequence).__name__}")
+    counts = Counter(sequence.key for sequence in chosen)
+    repeated = sorted(key for key, count in counts.items() if count > 1)
+    if repeated:
+        raise ValueError(f"sync_seed got a Sequence key more than once: {', '.join(repeated)}")
+    if not chosen:
+        return ()
+    validated = validate_sequences({"sequences": [sequence_form(s) for s in chosen]})
+    check_sequence_references(validated, segment_keys, market_countries)
+    return validated
+
+
+def _sync_sequences(chosen: tuple[SequenceDef, ...], now: datetime) -> SequenceSync:
+    """The Sequences' upsert, inside the running use case's transaction."""
+    created: list[tuple[str, int]] = []
+    changed: list[tuple[str, int, int]] = []
+    unchanged: list[str] = []
+    stored_sequences = {row.key: row for row in sequences_repo.all_sequences()}
+    keys = {sequence.key for sequence in chosen}
+    left_out = [row for key, row in stored_sequences.items() if key not in keys]
+    for sequence in chosen:
+        stored = stored_sequences.get(sequence.key)
+        if stored is None:
+            sequence_id = sequences_repo.insert(sequence, now)
+            _record_sequence(sequence_id, None, sequences_repo.FIRST_VERSION, now)
+            created.append((sequence.key, sequences_repo.FIRST_VERSION))
+        elif stored.sequence != sequence:
+            version = stored.version + 1
+            sequences_repo.update(stored.id, sequence, version, now)
+            _record_sequence(stored.id, stored.version, version, now)
+            changed.append((sequence.key, stored.version, version))
+        else:
+            unchanged.append(sequence.key)
+    not_in_file = tuple((row.key, row.version) for row in left_out)
+    return SequenceSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+
+
+def _record_sequence(
+    sequence_id: str, from_version: int | None, to_version: int, at: datetime
+) -> None:
+    eventlog.append(
+        entity=SEQUENCES_ENTITY,
+        entity_id=sequence_id,
         from_status=None if from_version is None else _version_status(from_version),
         to_status=_version_status(to_version),
         cause=SEED_SYNC_CAUSE,

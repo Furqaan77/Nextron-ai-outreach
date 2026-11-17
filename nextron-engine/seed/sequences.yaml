@@ -1,0 +1,98 @@
+# The Sequences (FR-4): the Steps a Campaign sends, in order, with each Step's brief. The
+# default Sequence is the PRD's four Steps on days 0, 3, 7 and 14, its briefs from the PRD's
+# FR-4 table (the PRD governs where it and the Sales Playbook differ, FR-71): each ask is the
+# table's Ask cell word for word; each purpose is the label of its Content cell (Step 1's cell
+# has none, so its purpose comes from Playbook §3); the allowed content is the rest of the
+# Content cell, split into items; and the Words cell gives the word limit. A Step has no
+# number: its number is its position in the list.
+#
+# Each Step's brief holds its delay in days after the Sequence starts, its purpose, its word
+# limit (under: fewer words than the limit; at_most: no more than the limit), the content it may
+# use, its ask, its link rule (footer_only: no link in the body; the signature and footer hold
+# the only links) and the no_price and no_audit flags. Step 1 alone has a subject rule: the
+# follow-ups reply in Step 1's thread. A segment_angles entry gives one Segment's angle in one
+# Market, such as Law-PrivateAI's regulatory fact for the US and for the UK.
+#
+# The engine refuses a Sequence that loosens the compliance floor: every Step has no_price and
+# no_audit true; Step 1 is on day 0, keeps links to the footer and has a subject of fewer than 7
+# words; only Step 1 has a subject rule; ABA Formal Opinion 512 is named only in a US Market's
+# angle and the SRA notice only in a GB Market's angle, never in a shared brief text; and each
+# angle names a Segment of segments.yaml and a Market of markets.yaml.
+#
+# `nextron seed sync` loads this file into the database together with segments.yaml and
+# markets.yaml (AD-12): it creates each Sequence that is new, gives each changed one a new
+# version, and leaves alone a Sequence that is stored but no longer listed here. The engine
+# must have been started once (nextron serve), so the database exists and is migrated.
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py): mappings and
+# lists indented with spaces, one-line [a, b] lists, 'single' or "double" quoted text, plain
+# text, whole numbers and true/false. Anything else (tabs, anchors, {...}, multi-line text, or
+# a plain value such as yes, no, null, 1.5, a date or a time) is refused with its line number,
+# so the file is never misread. Write a value in quotes when it must stay text.
+
+sequences:
+  - key: default
+    name: Default four-Step Sequence
+    steps:
+      # Step 1, day 0
+      - delay_days: 0
+        purpose: Event-led cold email
+        word_limit: 80
+        word_comparison: under
+        allowed_content:
+          - One observed Signal
+          - One sentence on the likely problem
+          - One credibility line from Approved Company Facts
+        ask: 'Relevance only, such as "Worth a look?" No meeting request or price'
+        link_rule: footer_only
+        no_price: true
+        no_audit: true
+        subject_rule:
+          word_limit: 7
+          word_comparison: under
+          guidance:
+            - About the prospect's world
+            - Never misleading
+      # Step 2, day 3
+      - delay_days: 3
+        purpose: New angle
+        word_limit: 70
+        word_comparison: at_most
+        allowed_content:
+          - One short Segment insight from Approved Company Facts
+        ask: The relevance question, reworded
+        link_rule: footer_only
+        no_price: true
+        no_audit: true
+        segment_angles:
+          - segment: law_private_ai
+            market: us
+            angle: What ABA Formal Opinion 512 means for their intake or document work
+          - segment: law_private_ai
+            market: uk
+            angle: What the SRA notice means for their intake or document work
+      # Step 3, day 7
+      - delay_days: 7
+        purpose: Proof
+        word_limit: 70
+        word_comparison: at_most
+        allowed_content:
+          - One relevant case study or regulatory note from Approved Company Facts
+          - Never "just following up"
+        ask: Offer to send more detail by reply (no link or attachment)
+        link_rule: footer_only
+        no_price: true
+        no_audit: true
+      # Step 4, day 14
+      - delay_days: 14
+        purpose: Respectful close
+        word_limit: 50
+        word_comparison: at_most
+        allowed_content:
+          - The timing may be wrong
+          - The door stays open
+          - No guilt or urgency
+        ask: '"Should I close the loop?" or a check-back date of their choosing'
+        link_rule: footer_only
+        no_price: true
+        no_audit: true

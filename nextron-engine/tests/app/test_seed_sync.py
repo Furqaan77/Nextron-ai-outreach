@@ -36,6 +36,7 @@ from tests.migration_chains import run_sql, sha256, stored_revisions
 SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
 SHIPPED_TEXT = SHIPPED.read_text(encoding="utf-8")
 SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME  # Story 3.1: the second seed file
+SHIPPED_SEQUENCES = main.SEED_DIR / main.SEQUENCES_FILE_NAME  # Story 4.1: the third seed file
 LATER = DEFAULT_NOW + timedelta(days=3)
 KEYS = ("law_private_ai", "ops_automation")
 
@@ -73,6 +74,7 @@ def seed_dir(tmp_path: Path, text: str | bytes, name: str = "seed") -> Path:
     folder = tmp_path / name
     folder.mkdir()
     (folder / main.MARKETS_FILE_NAME).write_bytes(SHIPPED_MARKETS.read_bytes())
+    (folder / main.SEQUENCES_FILE_NAME).write_bytes(SHIPPED_SEQUENCES.read_bytes())
     path = folder / main.SEGMENTS_FILE_NAME
     if isinstance(text, bytes):
         path.write_bytes(text)
@@ -145,7 +147,10 @@ MARKETS_FIRST = (
     "  uk: created (version 1)\n"
 )
 MARKETS_UNCHANGED = "markets: 0 changed, 2 unchanged\n"
-SUMMARY_FIRST = SEGMENTS_FIRST + MARKETS_FIRST
+# Story 4.1: the sequences block follows the markets block
+SEQUENCES_FIRST = "sequences: 1 changed, 0 unchanged\n  default: created (version 1)\n"
+SEQUENCES_UNCHANGED = "sequences: 0 changed, 1 unchanged\n"
+SUMMARY_FIRST = SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST
 
 
 # The I/O matrix -----------------------------------------------------------------------------------
@@ -181,7 +186,7 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 
     assert (run.code, run.out, run.err) == (
         0,
-        "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED,
+        "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED,
         "",
     )
     assert table_dump(database) == before
@@ -204,6 +209,7 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
     assert run.out == (
         "segments: 1 changed, 1 unchanged\n  ops_automation: changed (version 1 -> 2)\n"
         + MARKETS_UNCHANGED
+        + SEQUENCES_UNCHANGED
     )
     law_after, ops_after = segment_rows(database)
     assert law_after == law_before
@@ -218,7 +224,7 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
     # and the next sync of the same file changes nothing
     assert (
         sync(seed_dir(tmp_path, changed, "again")).out
-        == "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED
+        == "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
     )
 
 
@@ -273,9 +279,11 @@ def test_a_stored_segment_not_in_the_file_is_left_as_it_is(
         SEGMENTS_FIRST
         + "  old_segment: not in seed/segments.yaml, left as it is (version 1)\n"
         + MARKETS_FIRST
+        + SEQUENCES_FIRST
     )
     assert segment_rows(database)[1] == old_row  # law, old, ops by key
-    assert len(event_rows(database)) == len(events_before) + 4  # 2 Segments, 2 Markets
+    # 2 Segments, 2 Markets, 1 Sequence
+    assert len(event_rows(database)) == len(events_before) + 5
 
 
 @pytest.mark.parametrize(
@@ -604,7 +612,9 @@ def test_a_seed_file_with_a_bom_and_crlf_line_ends_is_read(database: Path, tmp_p
     run = sync(seed_dir(tmp_path, text))
 
     assert (run.code, run.out) == (0, SUMMARY_FIRST)
-    assert sync().out == "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED  # the same
+    assert sync().out == (  # the same
+        "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+    )
 
 
 def test_an_unset_environment_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,6 +26,13 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   Lead's Market is derived from these with ``nextron.domain.markets.market_for_country``, never
   stored on the Lead; Market resolution (3.2), Eligibility (3.6), the footer (4.11), drafting
   (4.15) and the send gate (6.9) read the Markets only through these two.
+- ``sequences()``: every stored Sequence as a ``SeededSequence(id, key, version, definition)``,
+  by key; ``sequence(key)``: one, or ``None``. ``definition`` is the
+  ``nextron.domain.sequences.SequenceDef`` (with its Step briefs, in Step order) the
+  ``sequences`` repository decodes through ``sequence_from_form``, which raises
+  ``InvalidSequences`` for a stored Sequence that no longer validates. Campaigns (4.2), Draft
+  slots and due times (4.9), the grounding rules (4.13) and drafting (4.15, 4.18) read the
+  Sequences only through these two.
 
 All read through the current unit of work, read-only ones included.
 """
@@ -35,12 +42,15 @@ from typing import Any
 
 from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import segments as segments_repo
+from nextron.db.repos.setup import sequences as sequences_repo
 from nextron.db.repos.setup import settings as settings_repo
 from nextron.db.repos.setup.markets import StoredMarket
 from nextron.db.repos.setup.segments import StoredSegment
+from nextron.db.repos.setup.sequences import StoredSequence
 from nextron.domain.budget import QUOTAS, Limits
 from nextron.domain.markets import MarketDef
 from nextron.domain.segments import SegmentDef, segment_from_text
+from nextron.domain.sequences import SequenceDef
 from nextron.domain.settings_schema import (
     REQUIRED,
     InvalidSettingValue,
@@ -152,3 +162,30 @@ def market(code: str) -> SeededMarket | None:
     """The stored Market ``code``, or ``None``."""
     stored = markets_repo.by_code(code)
     return None if stored is None else _seeded_market(stored)
+
+
+@dataclass(frozen=True, slots=True)
+class SeededSequence:
+    """A stored Sequence: its row id, key and version, and its decoded definition."""
+
+    id: str
+    key: str
+    version: int
+    definition: SequenceDef
+
+
+def _seeded_sequence(stored: StoredSequence) -> SeededSequence:
+    return SeededSequence(
+        id=stored.id, key=stored.key, version=stored.version, definition=stored.sequence
+    )
+
+
+def sequences() -> tuple[SeededSequence, ...]:
+    """Every stored Sequence, by key."""
+    return tuple(_seeded_sequence(stored) for stored in sequences_repo.all_sequences())
+
+
+def sequence(key: str) -> SeededSequence | None:
+    """The stored Sequence ``key``, or ``None``."""
+    stored = sequences_repo.by_key(key)
+    return None if stored is None else _seeded_sequence(stored)
