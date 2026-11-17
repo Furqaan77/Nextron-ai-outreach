@@ -1274,9 +1274,10 @@ Get-Content "$env:LOCALAPPDATA\Nextron\dev\logs\nextron.log" -Tail 20 -Wait
 ## Test
 
 ```powershell
-uv run pytest               # the unit, app and contracts suites; ai_eval is skipped
-uv run pytest -m ai_eval    # the opt-in AI evaluation suite
-uv run lint-imports         # the import contracts on their own
+uv run pytest                            # the unit, app and contracts suites; ai_eval is skipped
+uv run pytest -q -n 6 --dist loadgroup   # the same suite on 6 worker processes, about 3x faster
+uv run pytest -m ai_eval                 # the opt-in AI evaluation suite
+uv run lint-imports                      # the import contracts on their own
 ```
 
 - `tests/unit`: pure functions, the persistence layer and the composition root, with fakes,
@@ -1335,6 +1336,27 @@ uv run lint-imports         # the import contracts on their own
   alerts), or not yet built (it holds only its `__init__.py` and defines nothing). A new live
   adapter adds its constructors there; the isolation contract fails until every package is
   classified.
+
+**Running in parallel.** The dev dependency `pytest-xdist` spreads the suite over worker
+processes. `-n` is deliberately not in `addopts`: a plain `uv run pytest`, or a run of one file
+or one test, stays serial and works exactly as before. For the full suite use
+`uv run pytest -q -n 6 --dist loadgroup`. On the 16-thread build PC it takes about 75 to 90 s
+instead of about 250 s, with the same result. `-n 8` saves only a few more seconds, and the PC
+is shared, so 6 is the default. Each worker is its own process with its own `tmp_path`, so the
+temporary `%LOCALAPPDATA%`, data dirs and databases the fixtures make are never shared. Tests
+that start the engine as a process ask the OS for a free port (`free_port()`), never the fixed
+one.
+
+**The fixed-port rule.** A test must not bind a fixed port: not the `test` default 8767 (a
+`serve` with no `NEXTRON_PORT`), and no other hard-coded port. On two workers at once it would
+collide with itself. Take a free port instead (bind port 0, as `free_port()` does). If a test
+really must use the fixed port, mark it `@pytest.mark.xdist_group("fixed_port")`, or put
+`pytestmark = pytest.mark.xdist_group("fixed_port")` at the top of the module. With
+`--dist loadgroup`, every test in one group runs on the same worker, one after another. Always
+pass `--dist loadgroup` with `-n`, or the groups are ignored. The marker is registered in
+`pyproject.toml`, so `--strict-markers` accepts it. The same goes for anything else a test
+could share across processes: use `tmp_path`, never a fixed file under the source tree or the
+real `%LOCALAPPDATA%`.
 
 ## Layers and import contracts
 
