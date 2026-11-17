@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.9 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`; sprint status `review`). **Next: Story 1.10.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.10 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`; sprint status `review`). **Next: Story 1.11.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -60,7 +60,9 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 **Story 1.9 result:** Google Desktop client import, and a loopback OAuth consent flow for the `internal_notify` and Postmaster grants, using `httpx2` and no new dependencies. Grants are stored per account in Credential Manager. Each secret now has its own Credential Manager target, `nextron-engine/<env>/<name>`, which closes the cross-process race; old entries move over on first read, as verified live on 2026-11-17. 2595 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 9 are done.
+**Story 1.10 result:** durable jobs (`jobs` table, migration `0003_1_10_jobs`), a Job state machine, the `JobQueue` service, and `nextron/jobs/runner.py`. The runner has three lanes (realtime, standard, bulk), leases renewed while a handler runs, retries, a keeper thread that reaps expired leases and purges old jobs, and a 15-second graceful shutdown. Handlers must be idempotent. 2985 tests, 29 contracts.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 10 are done.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
