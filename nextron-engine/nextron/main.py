@@ -45,10 +45,11 @@ migrates: the reloader brought it to head before starting Uvicorn.
 any fails, and 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid. It takes no lock,
 creates nothing and starts no server.
 
-``build_app`` wires the dashboard (AD-13): its ``DashboardEntry`` reads the one-time code
-through ``KeyringSecrets(<env>)`` (Windows Credential Manager, service ``nextron-engine/<env>``),
-its ``Setup`` stores the settings, both on one ``SystemClock``, and its handlers open their
-units of work through ``units``; tests inject fakes.
+``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
+Manager, service ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
+one-time code, and its ``Credentials``, which store the external credentials; its ``Setup``
+stores the settings; all three share one ``SystemClock``; and its handlers open their units of
+work through ``units``. Tests inject the secrets and the clock.
 
 ``open_dashboard`` (``nextron open``) runs these steps and stops at the first failure:
 
@@ -78,7 +79,7 @@ from nextron import __version__
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.app.ops.api import DashboardEntry
-from nextron.app.setup.api import Setup
+from nextron.app.setup.api import Credentials, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
@@ -144,15 +145,18 @@ def build_app(
     secrets: SecretsPort | None = None,
     clock: Clock | None = None,
 ) -> FastAPI:
-    """The dashboard app; its handlers open their units of work through ``units``. One clock,
-    the system clock unless injected, serves the entry code and the settings."""
+    """The dashboard app; its handlers open their units of work through ``units``. One secrets
+    object, keyring unless injected, serves the entry code and the credentials; one clock, the
+    system clock unless injected, serves them and the settings."""
     clock = clock if clock is not None else SystemClock()
+    secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     return create_app(
         env=config.env,
         version=__version__,
         port=config.port,
         entry=build_entry(config, secrets=secrets, clock=clock),
         setup=Setup(clock),
+        credentials=Credentials(secrets, clock),
         units=units,
     )
 

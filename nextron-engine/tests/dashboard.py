@@ -1,7 +1,8 @@
 """Build the dashboard with fakes and open a session on it, as ``nextron open`` would.
 
 ``Dashboard`` reads through ``FakeUnits`` unless a test passes real units of work (the
-``units`` fixture); its ``Setup`` uses the dashboard's frozen clock. ``post`` sends a POST from
+``units`` fixture); its ``Setup`` uses the dashboard's frozen clock, and its ``Credentials`` the
+dashboard's in-memory secrets and that clock. ``post`` sends a POST from
 the dashboard's own origin by default; ``csrf_token(cookie)`` reads the session's CSRF token
 from ``GET /``'s ``<body hx-headers>``, as HTMX would; ``form(**fields)`` builds an urlencoded
 body.
@@ -16,7 +17,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron.app.ops.api import DashboardEntry
-from nextron.app.setup.api import Setup
+from nextron.app.setup.api import Credentials, Setup
 from nextron.web.app import create_app
 from nextron.web.routing import Units
 from tests.asgi import DEFAULT_HOST, Headers, Reply, request
@@ -71,10 +72,12 @@ class Dashboard:
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
+    credentials: Credentials = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
         self.setup = Setup(self.clock)
+        self.credentials = Credentials(self.secrets, self.clock)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -82,6 +85,7 @@ class Dashboard:
             port=PORT,
             entry=self.entry,
             setup=self.setup,
+            credentials=self.credentials,
             units=self.units,
             **extra,
         )

@@ -4,6 +4,7 @@
 real Windows Credential Manager. The default backend is only constructed, never called.
 """
 
+import threading
 from collections.abc import Callable
 
 import keyring
@@ -281,6 +282,56 @@ def test_the_default_backend_is_win_vault_constructed_only(
     assert secrets.backend.persist == 2  # CRED_PERSIST_LOCAL_MACHINE, not ENTERPRISE (3)
     assert secrets.service == "nextron-engine/prod"
     assert KeyringSecrets("dev").service == "nextron-engine/dev"
+
+
+class CountingKeyring(DictKeyring):
+    """A dict backend whose calls wait for ``release`` and count how many run at once, as two
+    ``WinVaultKeyring`` calls racing on the shared target would."""
+
+    def __init__(self, store: dict[tuple[str, str], str]) -> None:
+        super().__init__(store)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.started = 0
+        self.active = 0
+        self.most = 0
+        self._count = threading.Lock()
+
+    def _called(self, operation: str) -> None:
+        with self._count:
+            self.started += 1
+            self.active += 1
+            self.most = max(self.most, self.active)
+        self.entered.set()
+        self.release.wait(timeout=5)
+        with self._count:
+            self.active -= 1
+        super()._called(operation)
+
+
+@pytest.mark.parametrize("second", ["read", "write", "delete"])
+def test_two_instances_never_call_the_backend_at_once(second: str) -> None:
+    store: dict[tuple[str, str], str] = {}
+    backend = CountingKeyring(store)
+    entry, credentials = (KeyringSecrets("dev", backend=backend) for _ in range(2))
+    args = ("hunter/api_key", "value") if second == "write" else ("hunter/api_key",)
+    first = threading.Thread(target=entry.write, args=("session/open_code", "code"))
+    other = threading.Thread(target=getattr(credentials, second), args=args)
+
+    first.start()
+    assert backend.entered.wait(timeout=5)
+    other.start()
+    other.join(timeout=0.3)
+    blocked = other.is_alive()  # waiting for the module lock while the first call runs
+    started_before_release = backend.started
+    backend.release.set()
+    first.join(timeout=5)
+    other.join(timeout=5)
+
+    assert blocked and started_before_release == 1
+    assert backend.most == 1
+    assert backend.started == 2
+    assert store[("nextron-engine/dev", "session/open_code")] == "code"
 
 
 def test_an_injected_backend_keeps_its_own_persistence() -> None:

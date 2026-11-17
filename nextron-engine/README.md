@@ -315,8 +315,94 @@ whatever `PYTHON_KEYRING_BACKEND` or a keyringrc file says, and keeps entries on
 (they don't roam with a roaming profile). To inspect or remove an entry by hand, open
 Credential Manager > Windows Credentials: keyring keeps one secret at the target
 `nextron-engine/<env>` and every other one at `<name>@nextron-engine/<env>` (for example
-`session/open_code@nextron-engine/dev`). Tests use the in-memory fake `tests/fakes/secrets.py`
-and never touch Credential Manager.
+`session/open_code@nextron-engine/dev`). Because keyring moves entries between that shared
+target and the `<name>@...` targets on every write and delete, two calls at once could lose or
+delete each other's entry; the adapter therefore makes every Credential Manager call, from every
+part of the engine, one at a time under one lock. That lock covers one process only: `nextron
+open` writes its one-time code from its own process. Tests use the in-memory fake
+`tests/fakes/secrets.py` and never touch Credential Manager.
+
+### Credentials
+
+Every external API key, token and passphrase is declared once, in
+`nextron/domain/credentials.py` (AD-12), with the keyring name that holds it:
+
+| Key | Label | Keyring name | |
+|---|---|---|---|
+| `claude` | Claude API key | `anthropic/api_key` | required |
+| `google_places` | Google Places API key | `google_places/api_key` | optional |
+| `hunter` | Hunter API key | `hunter/api_key` | required |
+| `prospeo` | Prospeo API key | `prospeo/api_key` | optional |
+| `companies_house` | Companies House API key | `companies_house/api_key` | required |
+| `telegram_bot` | Telegram bot token | `telegram/bot_token` | required |
+| `unsubscribe_bearer` | Unsubscribe Endpoint bearer secret | `unsub/bearer` | required |
+| `backup_passphrase` | Backup passphrase | `backup/passphrase` | optional |
+| `job_aggregator` | Job aggregator API key | `job_aggregator/api_key` | optional |
+
+Each credential has a companion entry, `meta/<keyring name>` (for example
+`meta/hunter/api_key`), that holds only the value's last-updated time
+(`YYYY-MM-DDTHH:MM:SS.ffffffZ`), never the value. `tests/contracts/test_credential_contracts.py`
+checks that every name is a valid secret name, that no two collide, and that none starts with
+`meta/` or `session/`.
+
+**Enter them on the Credentials page** (`/credentials`, linked from the Settings page). Each
+credential has its own row: its label, "required" or "optional", and its state: `Set, last
+updated YYYY-MM-DD HH:MM UTC`, `Set, last update time unknown`, `Not set`, or `Unknown: Windows
+Credential Manager could not be read`. The page names the environment whose Credential Manager
+entries it writes (`dev`, `test` or `prod`). Type or paste a value into the row's password field
+and press Save; the field clears and the row says "Saved." with the new time. The field is
+marked `autocomplete="new-password"` so the browser doesn't fill in a saved password; if the
+browser offers to save or fill a password on this page anyway, decline: credentials belong only
+in Windows Credential Manager. A stored value is
+never shown, and no response, log record, error message, database row, file or job payload ever
+holds one. Each row saves or removes only its own credential, through a CSRF-checked POST
+(`POST /credentials/save`, `POST /credentials/remove`); a malformed form, such as an undeclared
+credential or a repeated field, gets 400 `Request refused: malformed form` and changes nothing.
+Every save, removal and failure is logged by key (`credential_saved`, `credential_removed`,
+`credential_store_failed` with the `operation` and the error `code`, and
+`credential_read_failed` with the `entry`, `value` or `meta`, and the `code`), never with the
+value.
+
+**How the page behaves:**
+
+1. **The panel is its own page,** `/credentials`, linked from the Settings page. The top
+   navigation keeps its six sections.
+2. **The keyring names are the ones in the table above.** `backup/passphrase` is the name the
+   encrypted off-PC backup (Story 1.17) reads. The backup passphrase is optional here; the
+   doctor check that Story 1.17 adds covers it.
+3. **"Set" is read from the credential's own entry; only the time comes from `meta/<name>`.** A
+   row can never say "set" for a credential that is gone. A missing, garbled or unreadable meta
+   entry shows "last update time unknown". If Credential Manager can't be read at all, the row
+   says "Unknown".
+4. **Removing asks first.** The first Remove click only asks "Remove the <label> from Windows
+   Credential Manager?"; nothing is deleted until you press "Yes, remove it" (a second POST with
+   `confirm=yes`). "Cancel" reloads the page. Removing deletes the entry and its `meta/` entry.
+5. **Spaces at either end of a value are dropped before it is stored.** A blank value is refused
+   with "enter a value" and never deletes anything; removing is a separate action. A value over
+   1,280 characters (UTF-16 units: a character outside the Basic Multilingual Plane, such as an
+   emoji, counts 2) is refused with "secret exceeds 1,280 characters". Either way nothing is
+   written. The field has no `maxlength`, so a pasted value is never cut short without a word.
+6. **Times are shown in UTC,** because the page can't assume the sender's timezone is set.
+
+If Credential Manager fails while saving or removing, the row says "Windows Credential Manager
+failed. The row shows what is stored now." and shows what it can read. The value is written
+before its time, so a failed time write can only understate when it was saved.
+
+**Read a credential in an adapter** with `read_credential` (`nextron/ports/secrets.py`), at call
+time, and never keep it:
+
+```python
+from nextron.domain.credentials import CredentialKey
+from nextron.ports.secrets import read_credential
+
+api_key = read_credential(self._secrets, CredentialKey.HUNTER)   # in the call, not __init__
+```
+
+It returns the value, or raises `AdapterError(False, "credential_not_set", "credential hunter is
+not set")` when there is none. `tests/app/test_credential_secrecy.py` saves a planted value on
+the page, has a fake adapter send it as a bearer header to a failing transport, sends refused
+requests that carry it, removes it, and then finds it in no HTTP response, log record (checked
+before redaction), database column or file.
 
 ## Database
 

@@ -17,11 +17,18 @@ Rules every implementation follows, checked before any backend call; each failur
   backend's text. Deleting a missing entry does nothing.
 
 Secrets never go into files, the database, logs, job payloads, backups or responses.
+
+**External credentials** (the API keys and tokens declared in ``nextron.domain.credentials``)
+are read with ``read_credential(secrets, key)``: it reads the credential's keyring entry and
+returns the value, and raises ``AdapterError(False, "credential_not_set", "credential <key> is
+not set")`` when there is none (``UnknownCredential`` for an undeclared key; a failed read
+propagates). Every adapter reads its credential this way, at call time, and never keeps it.
 """
 
 import re
 from typing import Final, Protocol, TypeGuard, runtime_checkable
 
+from nextron.domain.credentials import credential
 from nextron.ports.errors import AdapterError
 
 MAX_SECRET_LENGTH: Final = 1280
@@ -33,6 +40,7 @@ SECRET_NAME_INVALID: Final = "secret_name_invalid"
 SECRET_INVALID: Final = "secret_invalid"
 SECRET_TOO_LONG_CODE: Final = "secret_too_long"
 KEYRING_FAILED: Final = "keyring_failed"
+CREDENTIAL_NOT_SET: Final = "credential_not_set"
 
 
 def secret_length(value: str) -> int:
@@ -86,3 +94,14 @@ class SecretsPort(Protocol):
     def delete(self, name: str) -> None:
         """Remove the secret called ``name``; do nothing when there is none."""
         ...
+
+
+def read_credential(secrets: SecretsPort, key: str) -> str:
+    """The value of the declared credential ``key``, read from its keyring entry now. Raises
+    ``UnknownCredential`` for an undeclared key, ``AdapterError`` ``credential_not_set`` when the
+    entry is missing, and whatever ``secrets.read`` raises. Don't keep the value."""
+    found = credential(key)
+    value = secrets.read(found.secret_name)
+    if value is None:
+        raise AdapterError(False, CREDENTIAL_NOT_SET, f"credential {found.key} is not set")
+    return value

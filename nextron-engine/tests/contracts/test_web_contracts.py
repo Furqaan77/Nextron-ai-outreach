@@ -147,6 +147,9 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/static/{name}",
         "/settings",
         "/settings",
+        "/credentials",
+        "/credentials/save",
+        "/credentials/remove",
     ]
     assert async_route_handlers(app) == []
 
@@ -251,9 +254,17 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(RuntimeError) as caught:
         Dashboard()
 
-    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}", "GET /settings"):
+    for route in (
+        "GET /enter",
+        "GET /",
+        "GET /health",
+        "GET /static/{name}",
+        "GET /settings",
+        "GET /credentials",
+    ):
         assert route in str(caught.value)
-    assert "POST /settings" in str(caught.value)
+    for route in ("POST /settings", "POST /credentials/save", "POST /credentials/remove"):
+        assert route in str(caught.value)
 
 
 @pytest.mark.parametrize("value", [None, 0, 1, "False"])
@@ -411,9 +422,17 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
     with pytest.raises(RuntimeError) as caught:
         Dashboard()
 
-    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}", "GET /settings"):
+    for route in (
+        "GET /enter",
+        "GET /",
+        "GET /health",
+        "GET /static/{name}",
+        "GET /settings",
+        "GET /credentials",
+    ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
-    assert "POST /settings: a POST whose first dependency isn't require_csrf" in str(caught.value)
+    for route in ("POST /settings", "POST /credentials/save", "POST /credentials/remove"):
+        assert f"{route}: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
 
 # No inline script or style -------------------------------------------------------------------
@@ -502,6 +521,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
 
     assert templates == [
         "base.html",
+        "credential_row.html",
+        "credentials.html",
         "home.html",
         "locked.html",
         "macros.html",

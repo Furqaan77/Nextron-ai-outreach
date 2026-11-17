@@ -13,12 +13,20 @@ don't roam with a roaming profile; an injected backend is left as it is.
 ``WinVaultKeyring`` keeps one secret at the target ``nextron-engine/<env>`` and every other one
 at ``<name>@nextron-engine/<env>`` (Credential Manager > Windows Credentials).
 
+**One backend call at a time.** ``WinVaultKeyring.set_password`` reads the shared target, copies
+whatever is there to ``<name>@<service>``, then overwrites the target, and ``delete_password``
+deletes whatever sits at the target after its own read. Two calls at once on different names
+could lose or delete each other's entry, so every backend call of every ``KeyringSecrets`` runs
+under one module-level ``threading.Lock``. The lock covers this process only: ``nextron open``
+writes its one-time code from its own process.
+
 Names and values are checked before any backend call (``nextron.ports.secrets``). Any backend
 exception becomes ``AdapterError(False, "keyring_failed", "<operation> of secret <name>
 failed")``, without the exception's text; ``PasswordDeleteError`` on delete means the entry is
 missing, so deleting it does nothing.
 """
 
+import threading
 from typing import Final
 
 from keyring.backend import KeyringBackend
@@ -30,6 +38,9 @@ from nextron.ports.secrets import KEYRING_FAILED, check_secret_name, check_secre
 
 SERVICE_PREFIX: Final = "nextron-engine"
 PERSIST: Final = "local machine"  # CRED_PERSIST_LOCAL_MACHINE: never roams
+
+# Serialises every backend call of every instance in this process (see the module docstring).
+_BACKEND_LOCK: Final = threading.Lock()
 
 
 def service_name(env: str) -> str:
@@ -58,7 +69,8 @@ class KeyringSecrets:
     def read(self, name: str) -> str | None:
         check_secret_name(name)
         try:
-            return self._backend.get_password(self.service, name)
+            with _BACKEND_LOCK:
+                return self._backend.get_password(self.service, name)
         except Exception as exc:
             raise AdapterError(False, KEYRING_FAILED, f"read of secret {name} failed") from exc
 
@@ -66,14 +78,16 @@ class KeyringSecrets:
         check_secret_name(name)
         check_secret_value(value)
         try:
-            self._backend.set_password(self.service, name, value)
+            with _BACKEND_LOCK:
+                self._backend.set_password(self.service, name, value)
         except Exception as exc:
             raise AdapterError(False, KEYRING_FAILED, f"write of secret {name} failed") from exc
 
     def delete(self, name: str) -> None:
         check_secret_name(name)
         try:
-            self._backend.delete_password(self.service, name)
+            with _BACKEND_LOCK:
+                self._backend.delete_password(self.service, name)
         except PasswordDeleteError:
             return  # the entry is missing
         except Exception as exc:

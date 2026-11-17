@@ -158,3 +158,66 @@ button {
   border-radius: 4px;
   cursor: pointer;
 }
+
+/* A secondary action (Remove): outlined, so it doesn't compete with the row's Save. */
+button.secondary {
+  color: var(--accent);
+  background: var(--paper);
+}
+
+/* The Credentials page: one bordered row per credential, each with its own small forms. */
+.credential {
+  max-width: 48rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.credential h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.credential-need {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.credential-state {
+  margin: 0.25rem 0 0;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.credential form {
+  margin-top: 0.75rem;
+}
+
+.credential label {
+  display: block;
+  font-weight: 600;
+}
+
+.credential input[type="password"] {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0.25rem 0;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.credential .hint {
+  margin-bottom: 0.5rem;
+}
+
+.credential-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}

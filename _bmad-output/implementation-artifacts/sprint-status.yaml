@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 05:37
+last_updated: 11-17-2026 06:30
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -42,7 +42,7 @@ development_status:
   1-4-enter-the-dashboard-through-a-one-time-code-with-a-hardened: review
   1-5-require-csrf-checked-posts-and-render-untrusted-text-safely: review
   1-6-declare-typed-settings-once-and-edit-them-on-a-settings-page: review
-  1-7-store-external-credentials-in-windows-credential-manager-fro: backlog
+  1-7-store-external-credentials-in-windows-credential-manager-fro: review
   1-8-keep-dev-and-test-away-from-real-people-with-environment-iso: backlog
   1-9-grant-google-oauth-access-through-a-loopback-flow: backlog
   1-10-run-durable-jobs-on-three-lanes-with-leases-and-retries: backlog

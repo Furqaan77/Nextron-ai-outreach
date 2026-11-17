@@ -20,6 +20,11 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
 - ``GET /settings`` (``settings_page``) and ``POST /settings`` (``settings_save``): the Settings
   page and its save, both ``@personal_data(True)``; see ``nextron.web.settings_page``. The POST
   saves through ``setup`` (``Setup.save``) in its own unit of work.
+- ``GET /credentials`` (``credentials_page``), ``POST /credentials/save`` (``credential_save``)
+  and ``POST /credentials/remove`` (``credential_remove``): the write-only Credentials page and
+  its per-row save and two-step remove, all ``@personal_data(False)``; see
+  ``nextron.web.credentials_page``. They go through ``credentials`` (``Credentials``), which
+  touches no database, so the POSTs open no unit of work.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -53,9 +58,11 @@ from starlette.routing import BaseRoute
 
 from nextron.app.ops.api import DashboardEntry
 from nextron.app.queries import setup as setup_queries
-from nextron.app.setup.api import Setup
+from nextron.app.setup.api import Credentials, CredentialStoreFailed, Setup
+from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
+from nextron.web import credentials_page as credential_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
 from nextron.web.forms import FormFields, MalformedForm, form_fields, malformed_form
@@ -138,12 +145,15 @@ def create_app(
     port: int,
     entry: DashboardEntry,
     setup: Setup,
+    credentials: Credentials,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
-    ``units.open(read_only=True)`` and its POST handlers open ``units.open()``. ``setup`` stores
-    the settings. ``monotonic`` is injectable so tests control the uptime.
+    ``units.open(read_only=True)`` and its POST handlers that write the database open
+    ``units.open()``. ``setup`` stores the settings, and ``credentials`` the external
+    credentials (in Credential Manager, not the database). ``monotonic`` is injectable so tests
+    control the uptime.
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()
@@ -233,6 +243,59 @@ def create_app(
             context = form_context(texts, problems=refused.problems, refused=True)
             return page(request, FORM_TEMPLATE, **context)
         return page(request, FORM_TEMPLATE, **form_context(shown_values(stored), saved=True))
+
+    def row_answer(request: Request, row: credential_rows.CredentialRow) -> HTMLResponse:
+        return page(request, credential_rows.ROW_TEMPLATE, row=row)
+
+    def store_failed_row(request: Request, key: str) -> HTMLResponse:
+        # 200, so HTMX swaps the row in, showing what Credential Manager holds now
+        notice = credential_rows.store_failed()
+        return row_answer(
+            request, credential_rows.credential_row(credentials.status(key), notice=notice)
+        )
+
+    @app.get("/credentials", name="credentials_page")
+    @personal_data(False)
+    def credentials_page(request: Request) -> HTMLResponse:
+        rows = credential_rows.page_rows(credentials.statuses())
+        return page(request, credential_rows.PAGE_TEMPLATE, rows=rows, env=env)
+
+    @app.post("/credentials/save", name="credential_save")
+    @personal_data(False)
+    def credential_save(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        key, text = credential_rows.submitted_save(fields)
+        try:
+            status = credentials.save(key, text)
+        except InvalidCredentialValue as refused:
+            # 200, so HTMX swaps the row in; nothing was written, and the field is empty again
+            notice = credential_rows.refused(refused.reason)
+            return row_answer(
+                request, credential_rows.credential_row(credentials.status(key), notice=notice)
+            )
+        except CredentialStoreFailed:
+            return store_failed_row(request, key)
+        return row_answer(
+            request, credential_rows.credential_row(status, notice=credential_rows.saved())
+        )
+
+    @app.post("/credentials/remove", name="credential_remove")
+    @personal_data(False)
+    def credential_remove(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        key, confirmed = credential_rows.submitted_remove(fields)
+        if not confirmed:  # the first click only asks; nothing is deleted
+            row = credential_rows.credential_row(credentials.status(key), confirming=True)
+            return row_answer(request, row)
+        try:
+            status = credentials.remove(key)
+        except CredentialStoreFailed:
+            return store_failed_row(request, key)
+        return row_answer(
+            request, credential_rows.credential_row(status, notice=credential_rows.removed())
+        )
 
     require_declared(app)
     require_route_rules(app)
