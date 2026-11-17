@@ -1,7 +1,7 @@
 """``GoogleOAuthClient`` on ``httpx2.MockTransport`` and ``LocalClientFiles`` on ``tmp_path``
 (``nextron.adapters.google_oauth``): the exact form fields, every status mapping, no response
-text in any error, the lazy default client (refused in tests) and the file rules. Nothing here
-reaches Google."""
+text in any error, one usage record per request, the lazy default client (refused in tests)
+and the file rules. Nothing here reaches Google."""
 
 import logging
 import os
@@ -14,6 +14,7 @@ import pytest
 
 import nextron.adapters.google_oauth as adapter
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles
+from nextron.domain.budget import ApiCall
 from nextron.domain.google_oauth import REVOKE_URI, TOKEN_URI, ClientConfig
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import (
@@ -26,6 +27,7 @@ from nextron.ports.google_oauth import (
     TokenSet,
 )
 from tests.fakes.google_oauth import CLIENT_ID
+from tests.fakes.usage_meter import InMemoryUsageMeter
 from tests.live_guard import LiveAdapterInTests, allow_live_constructor
 
 SECRET = "Cs4Vq8Lp2Xz6Nw1Rt5Hy"
@@ -57,8 +59,11 @@ class Recorder:
         return parse_qsl(request.content.decode("ascii"), keep_blank_values=True)
 
 
-def client_on(recorder: Recorder) -> GoogleOAuthClient:
-    return GoogleOAuthClient(httpx2.Client(transport=httpx2.MockTransport(recorder)))
+def client_on(recorder: Recorder, meter: InMemoryUsageMeter | None = None) -> GoogleOAuthClient:
+    return GoogleOAuthClient(
+        meter=meter if meter is not None else InMemoryUsageMeter(),
+        http=httpx2.Client(transport=httpx2.MockTransport(recorder)),
+    )
 
 
 def tokens_body(**overrides: object) -> dict[str, object]:
@@ -91,17 +96,19 @@ def assert_no_leak(error: AdapterError) -> None:
 
 
 def test_the_adapters_implement_their_ports() -> None:
-    assert isinstance(GoogleOAuthClient(), GoogleOAuthPort)
+    assert isinstance(GoogleOAuthClient(meter=InMemoryUsageMeter()), GoogleOAuthPort)
     assert isinstance(LocalClientFiles(), ClientFilePort)
 
 
 def test_the_default_http_client_is_built_on_the_first_call_and_refused_in_tests() -> None:
-    client = GoogleOAuthClient()  # builds nothing yet
+    meter = InMemoryUsageMeter()
+    client = GoogleOAuthClient(meter=meter)  # builds nothing yet
 
     with pytest.raises(LiveAdapterInTests):
         client.revoke(REFRESH)
     with pytest.raises(LiveAdapterInTests):
         client.refresh(CLIENT, REFRESH)
+    assert meter.records == []  # no request was attempted
 
 
 def test_the_default_http_client_has_a_15_second_timeout_and_follows_no_redirects(
@@ -305,6 +312,55 @@ def test_any_other_revoke_answer_fails(
 
     assert (caught.value.code, caught.value.retryable) == (code, retryable)
     assert_no_leak(caught.value)
+
+
+# Metering ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("operation", "response", "ok", "code"),
+    [
+        ("token_refresh", ok(tokens_body()), True, None),
+        (
+            "token_refresh",
+            httpx2.Response(400, json={"error": "invalid_grant"}),
+            False,
+            "google_invalid_grant",
+        ),
+        ("token_refresh", httpx2.Response(503), False, "google_unavailable"),
+        ("token_refresh", httpx2.ConnectError("refused"), False, "google_unavailable"),
+        ("token_refresh", ok({"expires_in": 3599}), False, "google_bad_response"),
+        ("code_exchange", ok(tokens_body()), True, None),
+        ("code_exchange", httpx2.Response(400, json={}), False, "google_rejected"),
+        ("token_revocation", httpx2.Response(200), True, None),
+        (
+            "token_revocation",
+            httpx2.Response(400, json={"error": "invalid_token"}),
+            True,
+            None,
+        ),
+        ("token_revocation", httpx2.Response(500), False, "google_unavailable"),
+    ],
+)
+def test_each_request_records_exactly_one_google_oauth_call(
+    operation: str, response: httpx2.Response | Exception, ok: bool, code: str | None
+) -> None:
+    meter = InMemoryUsageMeter()
+    recorder = Recorder(response)
+    client = client_on(recorder, meter)
+    calls = {
+        "code_exchange": lambda: client.exchange(CLIENT, CODE, VERIFIER, REDIRECT),
+        "token_refresh": lambda: client.refresh(CLIENT, REFRESH),
+        "token_revocation": lambda: client.revoke(REFRESH),
+    }
+
+    try:
+        calls[operation]()
+    except AdapterError as error:
+        assert error.code == code
+
+    assert len(recorder.requests) == 1
+    assert meter.calls == [ApiCall("google_oauth", operation, ok=ok, error_code=code)]
 
 
 def test_the_adapter_logs_nothing_that_holds_a_token_or_a_code(

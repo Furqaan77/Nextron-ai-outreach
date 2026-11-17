@@ -26,7 +26,15 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Setup
 from nextron.db.repos.jobqueue.jobs import JobRow
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
-from nextron.domain.job import RENEW_INTERVAL, Job, JobType, JobTypes, Lane
+from nextron.domain.job import (
+    DEFERRED,
+    RENEW_INTERVAL,
+    HandlerResult,
+    Job,
+    JobType,
+    JobTypes,
+    Lane,
+)
 from nextron.domain.settings_schema import Key
 from nextron.jobs.runner import Runner
 from nextron.ports.errors import AdapterError
@@ -352,6 +360,73 @@ def test_a_handler_that_returns_a_value_fails_its_job(
         "dead",
         "invalid_job: the handler returned a value",
     )
+
+
+@pytest.mark.parametrize("retry_limit", [0, 3])
+def test_a_job_deferred_30_times_is_queued_an_hour_later_each_time_and_never_dies(
+    retry_limit: int,
+    units: UnitOfWorkFactory,
+    db_engine: Engine,
+    clock: FrozenClock,
+    runners: list[Runner],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    seen: list[int] = []
+
+    def handler(job: Job) -> HandlerResult:
+        seen.append(job.attempts)
+        return DEFERRED
+
+    runner, queue = build(runners, units, clock, job_type(handler, retry_limit=retry_limit))
+    created = enqueue(units, queue)
+
+    for _ in range(30):
+        assert runner.run_one(Lane.BULK) is True
+        deferred = row(units, created.job_id)
+        assert (deferred.status, deferred.attempts, deferred.lease_until) == ("queued", 0, None)
+        assert deferred.run_after == clock.now() + timedelta(hours=1)
+        assert deferred.last_error is None
+        assert runner.run_one(Lane.BULK) is False  # not before the hour is up
+        clock.advance(timedelta(hours=1))
+
+    assert seen == [1] * 30  # every run is the first attempt: no retry was used
+    assert query_events(db_engine, created.job_id) == [
+        "enqueued",
+        *["claimed", "deferred"] * 30,
+    ]
+    assert len(records(caplog, "job_deferred")) == 30
+    assert records(caplog, "job_dead") == []
+
+
+def test_a_plain_deferred_string_is_still_a_returned_value_and_fails_the_job(
+    units: UnitOfWorkFactory, clock: FrozenClock, runners: list[Runner]
+) -> None:
+    runner, queue = build(runners, units, clock, job_type(lambda job: "deferred"))
+    created = enqueue(units, queue)
+
+    assert runner.run_one(Lane.BULK) is True
+
+    failed = row(units, created.job_id)
+    assert (failed.status, failed.last_error) == (
+        "dead",
+        "invalid_job: the handler returned a value",
+    )
+    assert "deferred" == DEFERRED  # equal as a string, but not the domain's member
+
+
+def query_events(engine: Engine, job_id: str) -> list[str]:
+    assert engine.url.database
+    reader = sqlite3.connect(engine.url.database, isolation_level=None)
+    try:
+        return [
+            cause
+            for (cause,) in reader.execute(
+                "SELECT cause FROM events WHERE entity_id = ? ORDER BY rowid", (job_id,)
+            )
+        ]
+    finally:
+        reader.close()
 
 
 class Halt(BaseException):

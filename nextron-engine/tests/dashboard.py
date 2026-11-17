@@ -20,6 +20,10 @@ Its ``Notify`` (``notify``) uses the same clock, a ``JobQueue`` (``queue``) on t
 (``job_types``, from ``nextron.main.build_job_types``) and, for Telegram, the ``alert`` port
 (``InMemoryAlert`` unless a test passes another ``AlertPort``); the notification area and its
 Dismiss go through it, on the dashboard's units of work.
+
+Its ``Budget`` (``budget``) reads ``meter``, an ``InMemoryUsageMeter`` on the dashboard's clock,
+and raises its notices through that ``Notify``; the Quotas and cost page reads it. The page
+reads the settings, so it needs real units of work (``Dashboard(units=units)``).
 """
 
 import json
@@ -33,7 +37,7 @@ from fastapi import FastAPI
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import DashboardEntry
+from nextron.app.ops.api import Budget, DashboardEntry
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.domain.alert import Channel
 from nextron.domain.job import JobTypes
@@ -47,6 +51,7 @@ from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
+from tests.fakes.usage_meter import InMemoryUsageMeter
 
 PORT = 8766  # matches tests.asgi.DEFAULT_HOST
 ORIGIN = b"http://" + DEFAULT_HOST
@@ -118,6 +123,7 @@ class Dashboard:
     listeners: list[FakeConsentListener] = field(default_factory=list)
     jobs: list[Callable[[], None]] = field(default_factory=list)
     alert: AlertPort = field(default_factory=InMemoryAlert)
+    meter: InMemoryUsageMeter | None = None  # on the dashboard's clock unless a test passes one
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -126,6 +132,7 @@ class Dashboard:
     job_types: JobTypes = field(init=False)
     queue: JobQueue = field(init=False)
     notify: Notify = field(init=False)
+    budget: Budget = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -147,6 +154,9 @@ class Dashboard:
         self.notify = Notify(
             self.clock, self.queue, alert_ports={Channel.TELEGRAM: lambda: self.alert}
         )
+        meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
+        self.meter = meter
+        self.budget = Budget(self.clock, meter, self.notify)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -157,6 +167,7 @@ class Dashboard:
             credentials=self.credentials,
             google=self.google,
             notify=self.notify,
+            budget=self.budget,
             units=self.units,
             **extra,
         )

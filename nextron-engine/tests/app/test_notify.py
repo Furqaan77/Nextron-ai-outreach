@@ -40,6 +40,7 @@ from nextron.ports.errors import AdapterError
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.usage_meter import InMemoryUsageMeter
 from tests.live_guard import allow_live_constructor
 
 T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -509,9 +510,8 @@ def sink_world(
     assert config.env == "test"
     secrets = InMemorySecrets("test")
     secrets.write("telegram/bot_token", TOKEN)
-    port = functools.partial(
-        build_role_adapter, "telegram", AdapterContext(config, secrets, clock), units=units
-    )
+    context = AdapterContext(config, secrets, clock, InMemoryUsageMeter(clock))
+    port = functools.partial(build_role_adapter, "telegram", context, units=units)
     return world_on(units, db_engine, clock, port), requests, config.data_dir / "sink"
 
 
@@ -889,7 +889,8 @@ def test_a_missing_or_malformed_token_fails_the_alert_without_any_request(
     if token is not None:
         secrets.write("telegram/bot_token", token)
     client, requests = recording_client()
-    world = world_on(units, db_engine, clock, TelegramAlert(secrets, http=client))
+    adapter = TelegramAlert(secrets, meter=InMemoryUsageMeter(clock), http=client)
+    world = world_on(units, db_engine, clock, adapter)
     world.set_chat()
     world.alert()
     alert_id = world.only_alert()

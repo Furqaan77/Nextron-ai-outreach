@@ -1,8 +1,10 @@
 """``TelegramAlert`` on ``httpx2.MockTransport`` (``nextron.adapters.telegram``): the exact URL
 path and JSON body, every outcome row, the token read on each send, no secret or response text
-in any error, and the lazy default client (refused in tests). Nothing here reaches Telegram."""
+in any error, one usage record per attempted request (none for a send refused before it), and
+the lazy default client (refused in tests). Nothing here reaches Telegram."""
 
 import json
+import sys
 import traceback
 
 import httpx2
@@ -16,10 +18,12 @@ from nextron.adapters.telegram import (
     TELEGRAM_UNAVAILABLE,
     TelegramAlert,
 )
+from nextron.domain.budget import AiCall, ApiCall
 from nextron.ports.alert import DELIVERY_UNKNOWN, AlertDelivery, AlertMessage, AlertPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import CREDENTIAL_NOT_SET, KEYRING_FAILED
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.usage_meter import InMemoryUsageMeter
 from tests.live_guard import LiveAdapterInTests, allow_live_constructor
 
 TOKEN = "123456789:AAHk3Wq9Zr5Lp2Xc8Vn4Bm7Ty1Ju6Gd0Fs"
@@ -51,9 +55,14 @@ def secrets_with(token: str | None = TOKEN) -> InMemorySecrets:
     return secrets
 
 
-def alert_on(recorder: Recorder, secrets: InMemorySecrets | None = None) -> TelegramAlert:
+def alert_on(
+    recorder: Recorder,
+    secrets: InMemorySecrets | None = None,
+    meter: InMemoryUsageMeter | None = None,
+) -> TelegramAlert:
     return TelegramAlert(
         secrets if secrets is not None else secrets_with(),
+        meter=meter if meter is not None else InMemoryUsageMeter(),
         http=httpx2.Client(transport=httpx2.MockTransport(recorder)),
     )
 
@@ -75,7 +84,7 @@ def assert_clean(error: BaseException) -> None:
 
 
 def test_it_implements_the_alert_port() -> None:
-    assert isinstance(TelegramAlert(InMemorySecrets()), AlertPort)
+    assert isinstance(TelegramAlert(InMemorySecrets(), meter=InMemoryUsageMeter()), AlertPort)
 
 
 def test_a_send_posts_exactly_the_chat_id_and_the_text_to_send_message() -> None:
@@ -281,18 +290,96 @@ def test_a_chat_that_is_not_a_numeric_id_is_refused_before_any_request(chat: str
         assert chat not in str(error)
 
 
+# Metering ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("response", "ok", "code"),
+    [
+        (sent(42), True, None),
+        (httpx2.Response(429, json={"ok": False}), False, TELEGRAM_UNAVAILABLE),
+        (httpx2.ConnectError("refused"), False, TELEGRAM_UNAVAILABLE),
+        (httpx2.ReadTimeout("read timed out"), False, DELIVERY_UNKNOWN),
+        (httpx2.Response(403, json={"ok": False}), False, TELEGRAM_REFUSED),
+        (httpx2.Response(200, json={"ok": True}), False, DELIVERY_UNKNOWN),
+    ],
+    ids=["200", "429", "connect_error", "read_timeout", "403", "200_without_id"],
+)
+def test_each_attempted_request_records_exactly_one_send_message_call(
+    response: httpx2.Response | BaseException, ok: bool, code: str | None
+) -> None:
+    meter = InMemoryUsageMeter()
+    recorder = Recorder(response)
+    telegram = alert_on(recorder, meter=meter)
+
+    try:
+        telegram.send(AlertMessage(CHAT, TEXT))
+    except AdapterError as error:
+        assert error.code == code
+
+    assert len(recorder.requests) == 1
+    assert meter.calls == [ApiCall("telegram", "send_message", ok=ok, error_code=code)]
+    assert meter.calls[0].units == 1
+
+
+class RecordingFirst(InMemoryUsageMeter):
+    """A meter that notes whether the error had already been raised when it recorded."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.during: list[BaseException | None] = []
+
+    def record(self, call: ApiCall | AiCall) -> None:
+        self.during.append(sys.exc_info()[1])
+        super().record(call)
+
+
+def test_a_failed_request_is_recorded_before_its_error_is_raised() -> None:
+    meter = RecordingFirst()
+
+    with pytest.raises(AdapterError) as raised:
+        alert_on(Recorder(httpx2.Response(500)), meter=meter).send(AlertMessage(CHAT, TEXT))
+
+    assert meter.during == [raised.value]  # recorded while the error was being handled
+    assert_clean(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("secrets", "chat"),
+    [
+        (None, CHAT),  # no token: credential_not_set
+        (TOKEN, "@ops_channel"),  # a bad chat id
+        ("abc", CHAT),  # a malformed token
+    ],
+    ids=["missing_token", "bad_chat_id", "bad_token"],
+)
+def test_a_send_refused_before_any_request_records_nothing(
+    secrets: str | None, chat: str
+) -> None:
+    meter = InMemoryUsageMeter()
+    recorder = Recorder(sent())
+
+    with pytest.raises(AdapterError):
+        alert_on(recorder, secrets_with(secrets), meter).send(AlertMessage(chat, TEXT))
+
+    assert recorder.requests == []
+    assert meter.records == []
+
+
 # The live client --------------------------------------------------------------------------------
 
 
 def test_the_live_client_is_built_on_the_first_send_and_refused_in_tests() -> None:
-    telegram = TelegramAlert(secrets_with())  # builds no client
+    meter = InMemoryUsageMeter()
+    telegram = TelegramAlert(secrets_with(), meter=meter)  # builds no client
 
     with pytest.raises(LiveAdapterInTests):
         telegram.send(AlertMessage(CHAT, TEXT))
+    assert meter.records == []  # no request was attempted
 
 
 def test_no_client_is_built_when_the_send_is_refused_first() -> None:
-    telegram = TelegramAlert(secrets_with(None))
+    telegram = TelegramAlert(secrets_with(None), meter=InMemoryUsageMeter())
 
     with pytest.raises(AdapterError) as raised:
         telegram.send(AlertMessage(CHAT, TEXT))
@@ -328,7 +415,7 @@ def test_the_client_is_built_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> N
         return built[-1]
 
     monkeypatch.setattr(adapter, "default_http_client", build)
-    telegram = TelegramAlert(secrets_with())
+    telegram = TelegramAlert(secrets_with(), meter=InMemoryUsageMeter())
 
     telegram.send(AlertMessage(CHAT, TEXT))
     telegram.send(AlertMessage(CHAT, TEXT))

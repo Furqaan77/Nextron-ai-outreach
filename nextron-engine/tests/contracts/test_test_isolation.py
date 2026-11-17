@@ -37,6 +37,7 @@ from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
+from tests.fakes.usage_meter import InMemoryUsageMeter
 from tests.live_guard import (
     ADAPTER_PACKAGES,
     BROWSER_CALLS,
@@ -138,6 +139,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "GoogleOAuthPort",
         "MailPort",
         "SecretsPort",
+        "UsageMeterPort",
     }
     assert fake_problems(protocols, PORT_FAKES) == []
 
@@ -226,7 +228,10 @@ def test_a_registered_role_adapter_cant_be_built_until_allowed(
     probe = RoleAdapter("probe_telegram", SinkRole.ALERT, InMemoryAlert, build)
     monkeypatch.setattr(main, "ROLE_ADAPTERS", (probe,))
     guard_live_constructors(monkeypatch)  # as the autouse fixture does for real registrations
-    context = AdapterContext(load_bootstrap(), InMemorySecrets("test"), FrozenClock())
+    clock = FrozenClock()
+    context = AdapterContext(
+        load_bootstrap(), InMemorySecrets("test"), clock, InMemoryUsageMeter(clock)
+    )
 
     with pytest.raises(LiveAdapterInTests, match="role adapter probe_telegram"):
         build_role_adapter("probe_telegram", context, units=FakeUnits())
@@ -281,9 +286,11 @@ def test_the_google_http_client_cant_be_built() -> None:
     assert ("nextron.adapters.google_oauth", "default_http_client") in LIVE_CONSTRUCTORS
     with pytest.raises(LiveAdapterInTests):
         google_oauth_adapter.default_http_client()
-    client = google_oauth_adapter.GoogleOAuthClient()  # lazy: building it reaches nothing
+    meter = InMemoryUsageMeter()
+    client = google_oauth_adapter.GoogleOAuthClient(meter=meter)  # lazy: building reaches nothing
     with pytest.raises(LiveAdapterInTests):
         client.revoke("token")
+    assert meter.records == []  # no request was attempted, so none was recorded
 
 
 @pytest.mark.parametrize("name", BROWSER_CALLS)

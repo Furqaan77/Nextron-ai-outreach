@@ -10,7 +10,7 @@ a real external system to raise ``LiveAdapterInTests``:
   ``nextron.adapters.secrets.default_backend`` (Windows Credential Manager), so
   ``KeyringSecrets("test")`` and ``main.build_app`` without injected secrets raise, and
   ``nextron.adapters.google_oauth.default_http_client`` (Google's OAuth endpoints), so a
-  ``GoogleOAuthClient()`` raises on its first call, and
+  ``GoogleOAuthClient(meter=...)`` raises on its first call, and
   ``nextron.adapters.telegram.default_http_client`` (the Telegram Bot API), so a
   ``TelegramAlert`` raises on its first send;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``

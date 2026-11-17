@@ -507,12 +507,26 @@ def test_the_declared_keys_in_order() -> None:
         "sink_allowlist",
         "bulk_threads",
         "alert_chat_id",
+        "quota_hunter_credits",
+        "quota_prospeo_credits",
+        "quota_places_enterprise",
+        "quota_places_pro",
+        "quota_job_aggregator",
+        "ai_budget_monthly",
+        "ai_budget_alert_pct",
     ]
     assert declared() == (
         setting(Key.SENDER_TIMEZONE),
         setting(Key.SINK_ALLOWLIST),
         setting(Key.BULK_THREADS),
         setting(Key.ALERT_CHAT_ID),
+        setting(Key.QUOTA_HUNTER_CREDITS),
+        setting(Key.QUOTA_PROSPEO_CREDITS),
+        setting(Key.QUOTA_PLACES_ENTERPRISE),
+        setting(Key.QUOTA_PLACES_PRO),
+        setting(Key.QUOTA_JOB_AGGREGATOR),
+        setting(Key.AI_BUDGET_MONTHLY),
+        setting(Key.AI_BUDGET_ALERT_PCT),
     )
 
 
@@ -645,6 +659,90 @@ def test_bulk_threads_is_an_integer_from_1_to_2_in_the_engine_section() -> None:
 def test_bulk_threads_refuses_anything_but_1_or_2(text: str, rule: str) -> None:
     with pytest.raises(InvalidSettingValue) as raised:
         parse(setting(Key.BULK_THREADS), text)
+
+    assert raised.value.rule == rule
+
+
+# Budget and limits (Story 1.13) ----------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("key", "default", "maximum_message"),
+    [
+        (Key.QUOTA_HUNTER_CREDITS, 50, "must be at most 100,000"),
+        (Key.QUOTA_PROSPEO_CREDITS, 100, "must be at most 100,000"),
+        (Key.QUOTA_PLACES_ENTERPRISE, 1_000, "must be at most 1,000"),
+        (Key.QUOTA_PLACES_PRO, 0, "must be at most 5,000"),
+        (Key.QUOTA_JOB_AGGREGATOR, 0, "must be at most 100,000"),
+    ],
+)
+def test_each_quota_is_an_integer_from_0_in_the_budget_section(
+    key: Key, default: int, maximum_message: str
+) -> None:
+    found = setting(key)
+
+    assert (found.type, found.section, found.default) == (
+        SettingType.INTEGER,
+        Section.BUDGET_AND_LIMITS,
+        default,
+    )
+    assert not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 0"),
+        ("maximum", maximum_message),
+    ]
+    assert "UTC calendar month" in found.unit
+    assert parse(found, "0") == 0
+
+
+def test_the_ai_budget_is_money_from_0_to_100_dollars_in_the_budget_section() -> None:
+    found = setting(Key.AI_BUDGET_MONTHLY)
+
+    assert (found.type, found.section, found.default) == (
+        SettingType.MONEY,
+        Section.BUDGET_AND_LIMITS,
+        20_000_000,
+    )
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least $0"),
+        ("maximum", "must be at most $100"),
+    ]
+    assert default_text(found) == "20.00"
+    assert parse(found, "100") == 100_000_000 and parse(found, "0") == 0
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(found, "100.000001")
+    assert raised.value.rule == "maximum"
+
+
+def test_the_ai_alert_percentage_is_an_integer_from_1_to_100_in_the_budget_section() -> None:
+    found = setting(Key.AI_BUDGET_ALERT_PCT)
+
+    assert (found.type, found.section, found.default) == (
+        SettingType.INTEGER,
+        Section.BUDGET_AND_LIMITS,
+        80,
+    )
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 1"),
+        ("maximum", "must be at most 100"),
+    ]
+    assert parse(found, "1") == 1 and parse(found, "100") == 100
+
+
+@pytest.mark.parametrize(
+    ("key", "text", "rule"),
+    [
+        (Key.QUOTA_HUNTER_CREDITS, "-1", "minimum"),
+        (Key.QUOTA_PROSPEO_CREDITS, "-1", "minimum"),
+        (Key.QUOTA_PLACES_ENTERPRISE, "-1", "minimum"),
+        (Key.QUOTA_PLACES_PRO, "-1", "minimum"),
+        (Key.QUOTA_JOB_AGGREGATOR, "-1", "minimum"),
+        (Key.AI_BUDGET_ALERT_PCT, "101", "maximum"),
+        (Key.AI_BUDGET_ALERT_PCT, "0", "minimum"),
+    ],
+)
+def test_a_budget_setting_out_of_range_is_refused(key: Key, text: str, rule: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(key), text)
 
     assert raised.value.rule == rule
 
@@ -807,7 +905,12 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     schema = declare(named("extra_one", T.STRING))
 
     assert schema_problems(schema) == [
-        "Key members not declared: alert_chat_id, bulk_threads, sender_timezone, sink_allowlist",
+        (
+            "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
+            "bulk_threads, quota_hunter_credits, quota_job_aggregator, "
+            "quota_places_enterprise, quota_places_pro, quota_prospeo_credits, "
+            "sender_timezone, sink_allowlist"
+        ),
         "declared but not in Key: extra_one",
     ]
     assert schema_problems(schema, keys=["extra_one"]) == []

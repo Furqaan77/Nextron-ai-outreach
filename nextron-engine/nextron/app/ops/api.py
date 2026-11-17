@@ -42,6 +42,21 @@ whose job died and on every keeper tick.
   Telegram can't feed itself. Each job is alerted once, a crash between a job's death and the
   sweep included. It returns how many it alerted and logs ``dead_jobs_alerted`` (``count``)
   when that is above 0.
+
+``Budget(clock, meter, notify)`` (AD-8, FR-57, NFR-11, NFR-12, UX-DR28) reads the month's usage
+against the quotas and the AI budget (``nextron.domain.budget``) and raises the threshold
+notices. ``nextron.main`` builds it and runs ``check`` right after each usage row is recorded
+(the meter's ``after_record``); the Quotas and cost page reads ``status``.
+
+- ``status() -> Assessment`` is a plain read, with no use case or transaction, so a dashboard
+  GET can call it in its read-only unit of work: it reads the clock once, then returns
+  ``assess(meter.snapshot(now), queries.setup.budget_limits())``.
+- ``@use_case check() -> tuple[Threshold, ...]``: in one transaction, ``notify.alert(kind,
+  subject, text, {dashboard})`` for each of ``thresholds(status())``. Each notice is unique per
+  kind and subject, and its subject names the month, so it comes once a month (the AI warning,
+  the AI budget reached, and each quota reached); raising a limit mid-month doesn't repeat it.
+  It returns the thresholds that added a notification and, after the commit, logs
+  ``usage_alert_raised`` (INFO, ``kind`` and ``subject``) for each. Dashboard only: no Telegram.
 """
 
 import contextlib
@@ -57,13 +72,16 @@ from typing import Final
 from nextron.app.notify.api import Notify
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import notify as notify_queries
+from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
 from nextron.db.uow import current, use_case
 from nextron.domain.alert import JOB_DEAD, SEND_ALERT_JOB, Channel, job_dead_text
+from nextron.domain.budget import Assessment, Threshold, assess, thresholds
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import SecretsPort
+from nextron.ports.usage_meter import UsageMeterPort
 
 OPEN_CODE_SECRET: Final = "session/open_code"
 ALL_CHANNELS: Final = (Channel.TELEGRAM, Channel.DASHBOARD)
@@ -164,3 +182,36 @@ class DeadJobAlerts:
         if count > 0:
             log.info("dead_jobs_alerted", extra={"count": count})
         return count
+
+
+class Budget:
+    """The month's usage against the quotas and the AI budget, and its threshold notices; see
+    the module docstring."""
+
+    def __init__(self, clock: Clock, meter: UsageMeterPort, notify: Notify) -> None:
+        self._clock = clock
+        self._meter = meter
+        self._notify = notify
+
+    def status(self) -> Assessment:
+        """This month's assessment, read in the current unit of work (a read-only one
+        included)."""
+        now = self._clock.now()
+        return assess(self._meter.snapshot(now), setup_queries.budget_limits())
+
+    @use_case
+    def check(self) -> tuple[Threshold, ...]:
+        """Raise each threshold notice not yet raised this month; the ones it raised."""
+        raised: list[Threshold] = []
+        with current().transaction():
+            for threshold in thresholds(self.status()):
+                alerted = self._notify.alert(
+                    threshold.kind, threshold.subject, threshold.text, DASHBOARD_ONLY
+                )
+                if alerted.created:
+                    raised.append(threshold)
+        for threshold in raised:
+            log.info(
+                "usage_alert_raised", extra={"kind": threshold.kind, "subject": threshold.subject}
+            )
+        return tuple(raised)

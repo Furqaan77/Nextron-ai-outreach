@@ -17,10 +17,11 @@ running    expire               queued     lease_expired
 running    expire_exhausted     dead       lease_expired
 running    release              queued     released
 running    release_exhausted    dead       released
+running    defer                queued     deferred
 =========  ===================  =========  ===================
 
-**Leases and retries.** ``attempts`` counts claims, so a run cut off by an expired lease or a
-shutdown counts too.
+**Leases and retries.** ``attempts`` counts claims, except deferred ones (a deferral gives its
+attempt back), so a run cut off by an expired lease or a shutdown counts too.
 
 - ``lease_until(now, max_runtime)`` is ``now + max_runtime + LEASE_MARGIN`` (60 s); the keeper
   renews held leases every ``RENEW_INTERVAL`` (30 s).
@@ -29,7 +30,14 @@ shutdown counts too.
   limit (``attempts > retry_limit``) is ``exhaust``; otherwise ``retry``.
 - ``after_interruption(attempts, retry_limit, *, released)``: past the limit is
   ``release_exhausted`` (``released``) or ``expire_exhausted``; otherwise ``release`` or
-  ``expire``. A type with retry limit 0 therefore never runs twice.
+  ``expire``. A type with retry limit 0 therefore never runs twice, except that it runs again
+  after each ``DEFERRED``.
+
+**Deferral.** A handler whose work the budget refuses returns ``DEFERRED``
+(``HandlerResult.DEFERRED``). The runner then finishes the job with ``defer``: back to
+``queued``, ``DEFER_DELAY`` (1 h) later, with its attempt given back, so a deferral never uses a
+retry and never makes a job ``dead``. A deferred job runs again from the start, so a handler
+returns ``DEFERRED`` only before its use case has done any work: the budget check comes first.
 
 **Keys.** ``idempotency_key(job_type, scope, discriminator)`` is
 ``<type>:<scope>:<discriminator>``. The type is a ``verb_noun`` job-type name; the scope is a
@@ -58,7 +66,7 @@ is the registry: ``register_job_type`` until ``freeze()``, then ``get(name)`` (r
 ``UnknownJobType``) and ``names()``. Only ``nextron.main.build_job_types`` builds one.
 
 A handler receives a ``Job(id, type, lane, payload, attempts)``, calls one use case and returns
-``None``.
+``None``, or ``DEFERRED`` when the use case was refused by the budget (``Handler``).
 """
 
 import json
@@ -81,6 +89,7 @@ RENEW_INTERVAL: Final = timedelta(seconds=30)
 FIRST_RETRY_DELAY: Final = timedelta(seconds=30)
 MAX_RETRY_DELAY: Final = timedelta(minutes=30)
 DONE_RETENTION: Final = timedelta(days=30)
+DEFER_DELAY: Final = timedelta(hours=1)  # a job deferred by the budget runs again this much later
 MAX_BULK_THREADS: Final = 2
 MAX_ERROR_LENGTH: Final = 500
 
@@ -149,6 +158,7 @@ class JobEvent(StrEnum):
     EXPIRE_EXHAUSTED = "expire_exhausted"
     RELEASE = "release"
     RELEASE_EXHAUSTED = "release_exhausted"
+    DEFER = "defer"
 
 
 class JobCause(StrEnum):
@@ -160,6 +170,7 @@ class JobCause(StrEnum):
     RETRIES_EXHAUSTED = "retries_exhausted"
     LEASE_EXPIRED = "lease_expired"
     RELEASED = "released"
+    DEFERRED = "deferred"
 
 
 CREATION: Final[Transition[JobStatus, JobCause]] = Transition(JobStatus.QUEUED, JobCause.ENQUEUED)
@@ -188,6 +199,7 @@ TRANSITIONS: Final[Mapping[tuple[JobStatus, JobEvent], Transition[JobStatus, Job
             (JobStatus.RUNNING, JobEvent.RELEASE_EXHAUSTED): Transition(
                 JobStatus.DEAD, JobCause.RELEASED
             ),
+            (JobStatus.RUNNING, JobEvent.DEFER): Transition(JobStatus.QUEUED, JobCause.DEFERRED),
         }
     )
 )
@@ -451,7 +463,15 @@ class Job:
     attempts: int
 
 
-type Handler = Callable[[Job], None]
+class HandlerResult(StrEnum):
+    """What a handler may return besides ``None`` (done)."""
+
+    DEFERRED = "deferred"  # the budget refused the work: run it again DEFER_DELAY later
+
+
+DEFERRED: Final = HandlerResult.DEFERRED
+
+type Handler = Callable[[Job], HandlerResult | None]
 
 
 def _check_int(name: str, value: object, low: int, high: int) -> None:

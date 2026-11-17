@@ -33,6 +33,8 @@ from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.mail import InMemoryMail
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.usage_meter import InMemoryUsageMeter
+from tests.live_guard import allow_live_constructor
 
 T = datetime(2026, 11, 17, 23, 59, 59, tzinfo=UTC)
 
@@ -139,7 +141,10 @@ def context_for(
 ) -> AdapterContext:
     monkeypatch.setenv("NEXTRON_ENV", env)
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / "data" / env))
-    return AdapterContext(load_bootstrap(), InMemorySecrets(env), clock or FrozenClock(T))
+    clock = clock or FrozenClock(T)
+    return AdapterContext(
+        load_bootstrap(), InMemorySecrets(env), clock, InMemoryUsageMeter(clock)
+    )
 
 
 @pytest.mark.usefixtures("probes")
@@ -318,3 +323,18 @@ def test_the_registry_holds_telegram_and_the_roles_are_mail_and_alert() -> None:
     )
     assert [role.value for role in SinkRole] == ["mail", "alert"]
     assert main.SINK_DIR_NAME == "sink"
+
+
+def test_the_telegram_registration_builds_its_adapter_on_the_contexts_secrets_and_meter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allow_live_constructor(monkeypatch, "nextron.main", "telegram")
+    context = context_for("prod", tmp_path, monkeypatch)
+    [telegram] = main.ROLE_ADAPTERS
+
+    adapter = telegram.build(context)
+
+    assert type(adapter) is TelegramAlert
+    assert adapter._secrets is context.secrets  # type: ignore[attr-defined]
+    assert adapter._meter is context.meter  # type: ignore[attr-defined]
+    assert adapter._http is None  # type: ignore[attr-defined]  # no client until its first send

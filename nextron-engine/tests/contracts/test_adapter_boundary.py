@@ -14,8 +14,12 @@ secret is in the error.
 - **No secret in the error.** No planted secret appears in the error's ``str``, its ``repr``
   or its formatted traceback (its ``__cause__`` and ``__context__`` chain included, as logging
   would print it).
+- **Every request is metered (FR-57).** Each such class takes a required keyword-only
+  ``meter`` (the coverage check), and each attempted request records exactly one ``ApiCall``
+  on the driver's ``InMemoryUsageMeter``, whatever the probe did: ``ok`` when the call returned,
+  else ``ok=False`` with the ``AdapterError``'s code, recorded before it was raised.
 
-The proofs run the same check on probe adapters that break each rule.
+The proofs run the same checks on probe adapters that break each rule.
 """
 
 import inspect
@@ -33,10 +37,12 @@ import pytest
 import nextron.adapters
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.adapters.telegram import TelegramAlert
+from nextron.domain.budget import ApiCall
 from nextron.domain.google_oauth import ClientConfig
 from nextron.ports.alert import AlertMessage
 from nextron.ports.errors import AdapterError
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.usage_meter import InMemoryUsageMeter
 
 # Planted secrets: 20 letters and digits each, which no redaction rule masks, so only their
 # absence passes. The bot token has the shape Telegram's has.
@@ -59,6 +65,7 @@ LEAK: Final = " ".join(PLANTED)  # what every transport error and response body 
 
 type Transport = Callable[[httpx2.Request], httpx2.Response]
 type Call = Callable[[], object]
+type Driver = Callable[[httpx2.Client, InMemoryUsageMeter], Iterable[tuple[str, Call]]]
 
 
 # The transports ---------------------------------------------------------------------------------
@@ -143,15 +150,15 @@ def client_on(transport: Transport) -> httpx2.Client:
 # The drivers ------------------------------------------------------------------------------------
 
 
-def telegram_calls(http: httpx2.Client) -> Iterator[tuple[str, Call]]:
+def telegram_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
     secrets = InMemorySecrets()
     secrets.write("telegram/bot_token", BOT_TOKEN)
-    adapter = TelegramAlert(secrets, http=http)
+    adapter = TelegramAlert(secrets, meter=meter, http=http)
     yield "send", lambda: adapter.send(AlertMessage(CHAT, ALERT_TEXT))
 
 
-def google_calls(http: httpx2.Client) -> Iterator[tuple[str, Call]]:
-    adapter = GoogleOAuthClient(http=http)
+def google_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    adapter = GoogleOAuthClient(meter=meter, http=http)
     client = ClientConfig("1234-abc.apps.googleusercontent.com", CLIENT_SECRET)
     verifier = "Vf2Bn6Qr9Lk3Hs7Wd1Zm" * 3
     redirect = "http://127.0.0.1:53682/"
@@ -161,7 +168,7 @@ def google_calls(http: httpx2.Client) -> Iterator[tuple[str, Call]]:
 
 
 # Every adapter class whose __init__ takes an http client, with its driver.
-DRIVERS: Final[dict[type, Callable[[httpx2.Client], Iterable[tuple[str, Call]]]]] = {
+DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
     GoogleOAuthClient: google_calls,
 }
@@ -197,21 +204,32 @@ def http_adapter_classes(modules: Iterable[types.ModuleType]) -> set[type]:
     return found
 
 
+def unmetered_classes(classes: Iterable[type]) -> set[str]:
+    """Each class whose ``__init__`` doesn't take a required keyword-only ``meter``."""
+    found = set()
+    for cls in classes:
+        meter = inspect.signature(cls.__init__).parameters.get("meter")
+        if (
+            meter is None
+            or meter.kind is not inspect.Parameter.KEYWORD_ONLY
+            or meter.default is not inspect.Parameter.empty
+        ):
+            found.add(cls.__name__)
+    return found
+
+
 def shown(error: BaseException) -> str:
     """Everything a log record or a stored error could show of ``error``."""
     return "\n".join([str(error), repr(error), *traceback.format_exception(error)])
 
 
-def boundary_problems(
-    driver: Callable[[httpx2.Client], Iterable[tuple[str, Call]]],
-    planted: Iterable[str] = PLANTED,
-) -> list[str]:
+def boundary_problems(driver: Driver, planted: Iterable[str] = PLANTED) -> list[str]:
     """Each probe and call that lets anything but ``AdapterError`` out, or a planted secret
     into the error."""
     problems = []
     secrets = tuple(planted)
     for probe in probes():
-        for name, call in driver(client_on(probe.transport)):
+        for name, call in driver(client_on(probe.transport), InMemoryUsageMeter()):
             try:
                 call()
             except AdapterError as error:
@@ -223,13 +241,53 @@ def boundary_problems(
     return problems
 
 
-def test_every_http_adapter_has_a_driver() -> None:
-    assert http_adapter_classes(adapter_modules()) == set(DRIVERS)
+def metering_problems(driver: Driver) -> list[str]:
+    """Each probe and call that didn't record exactly one ``ApiCall`` for its one request, or
+    recorded the wrong outcome: ``ok`` when it returned, else the raised error's code."""
+    problems = []
+    for probe in probes():
+        requests: list[httpx2.Request] = []
+
+        def transport(request: httpx2.Request, probe: Probe = probe) -> httpx2.Response:
+            requests.append(request)
+            return probe.transport(request)
+
+        meter = InMemoryUsageMeter()
+        for name, call in driver(client_on(transport), meter):
+            before, sent = len(meter.records), len(requests)
+            try:
+                call()
+                expected: tuple[bool, str | None] = (True, None)
+            except AdapterError as error:
+                expected = (False, error.code)
+            except BaseException:  # noqa: BLE001 - boundary_problems reports these
+                continue
+            recorded = meter.calls[before:]
+            label = f"{name}, {probe.label}"
+            if len(requests) - sent != 1:
+                problems.append(f"{label}: {len(requests) - sent} requests were made")
+            if len(recorded) != 1 or not isinstance(recorded[0], ApiCall):
+                problems.append(f"{label}: {len(recorded)} calls were recorded")
+            elif (recorded[0].ok, recorded[0].error_code) != expected:
+                problems.append(f"{label}: the recorded outcome is not the call's")
+    return problems
+
+
+def test_every_http_adapter_has_a_driver_and_takes_a_meter() -> None:
+    classes = http_adapter_classes(adapter_modules())
+
+    assert classes == set(DRIVERS)
+    assert unmetered_classes(classes) == set()
 
 
 @pytest.mark.parametrize("adapter", list(DRIVERS), ids=lambda cls: cls.__name__)
 def test_only_adapter_errors_without_a_secret_come_out(adapter: type) -> None:
     assert boundary_problems(DRIVERS[adapter]) == []
+
+
+@pytest.mark.parametrize("adapter", list(DRIVERS), ids=lambda cls: cls.__name__)
+def test_every_attempted_request_records_exactly_one_api_call(adapter: type) -> None:
+    assert metering_problems(DRIVERS[adapter]) == []
 
 
 def test_the_probes_cover_the_specified_failures_and_answers() -> None:
@@ -269,6 +327,7 @@ def test_every_raised_exception_carries_the_planted_secrets_unless_it_takes_no_a
 LEAKY_ADAPTERS: Final = '''
 import httpx2
 
+from nextron.domain.budget import ApiCall
 from nextron.ports.errors import AdapterError
 
 
@@ -313,7 +372,26 @@ class Chained:
 class Clean:
     """What the real adapters do."""
 
-    def __init__(self, *, http=None):
+    def __init__(self, *, meter, http=None):
+        self._meter = meter
+        self._http = http
+
+    def call(self):
+        try:
+            try:
+                self._http.post("https://api.example.com/x")
+            except Exception:
+                raise AdapterError(True, "probe_failed", "the call failed") from None
+        except AdapterError as failed:
+            self._meter.record(ApiCall("probe", "call", ok=False, error_code=failed.code))
+            raise
+        self._meter.record(ApiCall("probe", "call", ok=True))
+
+
+class Unmetered:
+    """Records nothing."""
+
+    def __init__(self, *, meter=None, http=None):
         self._http = http
 
     def call(self):
@@ -321,6 +399,52 @@ class Clean:
             self._http.post("https://api.example.com/x")
         except Exception:
             raise AdapterError(True, "probe_failed", "the call failed") from None
+
+
+class OnlySuccesses:
+    """Records only the calls that return."""
+
+    def __init__(self, meter, *, http=None):
+        self._meter = meter
+        self._http = http
+
+    def call(self):
+        try:
+            self._http.post("https://api.example.com/x")
+        except Exception:
+            raise AdapterError(True, "probe_failed", "the call failed") from None
+        self._meter.record(ApiCall("probe", "call", ok=True))
+
+
+class AlwaysOk:
+    """Records every request as a success, failures included."""
+
+    def __init__(self, *, meter, http=None):
+        self._meter = meter
+        self._http = http
+
+    def call(self):
+        self._meter.record(ApiCall("probe", "call", ok=True))
+        try:
+            self._http.post("https://api.example.com/x")
+        except Exception:
+            raise AdapterError(True, "probe_failed", "the call failed") from None
+
+
+class Twice:
+    """Records each request twice, the second time as a success."""
+
+    def __init__(self, *, meter, http=None):
+        self._meter = meter
+        self._http = http
+
+    def call(self):
+        self._meter.record(ApiCall("probe", "call", ok=True))
+        try:
+            self._http.post("https://api.example.com/x")
+        except Exception:
+            raise AdapterError(True, "probe_failed", "the call failed") from None
+        self._meter.record(ApiCall("probe", "call", ok=True))
 
 
 class NoClient:
@@ -340,13 +464,30 @@ def test_the_coverage_check_finds_every_class_that_takes_http() -> None:
 
     found = {cls.__name__ for cls in http_adapter_classes([module])}
 
-    assert found == {"Unwrapped", "Chatty", "Chained", "Clean"}
+    assert found == {
+        "Unwrapped",
+        "Chatty",
+        "Chained",
+        "Clean",
+        "Unmetered",
+        "OnlySuccesses",
+        "AlwaysOk",
+        "Twice",
+    }
+
+
+def test_the_meter_coverage_check_finds_every_class_without_a_required_keyword_meter() -> None:
+    module = probe_module()
+
+    found = unmetered_classes(http_adapter_classes([module]))
+
+    assert found == {"Unwrapped", "Chatty", "Chained", "Unmetered", "OnlySuccesses"}
 
 
 def test_the_boundary_check_catches_an_exception_let_out() -> None:
     module = probe_module()
 
-    def driver(http: httpx2.Client) -> Iterator[tuple[str, Call]]:
+    def driver(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
         yield "call", module.Unwrapped(http=http).call
 
     problems = boundary_problems(driver)
@@ -360,7 +501,7 @@ def test_the_boundary_check_catches_an_exception_let_out() -> None:
 def test_the_boundary_check_catches_a_secret_in_the_error(name: str) -> None:
     module = probe_module()
 
-    def driver(http: httpx2.Client) -> Iterator[tuple[str, Call]]:
+    def driver(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
         if name == "Chatty":
             yield "call", module.Chatty(BOT_TOKEN, http=http).call
         else:
@@ -375,7 +516,53 @@ def test_the_boundary_check_catches_a_secret_in_the_error(name: str) -> None:
 def test_the_boundary_check_passes_a_clean_adapter() -> None:
     module = probe_module()
 
-    def driver(http: httpx2.Client) -> Iterator[tuple[str, Call]]:
-        yield "call", module.Clean(http=http).call
+    def driver(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+        yield "call", module.Clean(meter=meter, http=http).call
 
     assert boundary_problems(driver) == []
+    assert metering_problems(driver) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "problem"),
+    [
+        ("Unmetered", "call, raises ConnectError: 0 calls were recorded"),
+        ("OnlySuccesses", "call, raises ConnectError: 0 calls were recorded"),
+        ("Twice", "call, answers 200 garbage: 2 calls were recorded"),
+        ("Twice", "call, raises ConnectError: the recorded outcome is not the call's"),
+    ],
+)
+def test_the_metering_check_catches_a_request_recorded_wrongly(name: str, problem: str) -> None:
+    module = probe_module()
+
+    def driver(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+        cls = getattr(module, name)
+        if name == "OnlySuccesses":  # its meter is positional
+            yield "call", cls(meter, http=http).call
+        else:
+            yield "call", cls(meter=meter, http=http).call
+
+    problems = metering_problems(driver)
+
+    assert problem in problems
+
+
+def test_the_metering_check_catches_a_wrong_outcome() -> None:
+    module = probe_module()
+
+    def driver(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+        yield "call", module.AlwaysOk(meter=meter, http=http).call
+
+    problems = metering_problems(driver)
+
+    assert "call, raises ConnectError: the recorded outcome is not the call's" in problems
+    assert not [problem for problem in problems if "answers" in problem]  # it returns
+
+
+def test_the_metering_check_catches_a_request_never_made() -> None:
+    def driver(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+        yield "call", lambda: meter.record(ApiCall("probe", "call", ok=True))
+
+    problems = metering_problems(driver)
+
+    assert "call, answers 400: 0 requests were made" in problems

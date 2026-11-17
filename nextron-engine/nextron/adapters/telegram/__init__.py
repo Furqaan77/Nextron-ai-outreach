@@ -4,11 +4,18 @@
 Import rule: ``nextron.ports``, ``nextron.domain``, ``httpx2`` and the standard library. Nothing
 here logs.
 
-**``TelegramAlert(secrets, *, http=None)``** implements ``AlertPort``. Without ``http`` it builds
-``default_http_client()`` (the live constructor: an ``httpx2.Client`` with a 10 s connect
+**``TelegramAlert(secrets, *, meter, http=None)``** implements ``AlertPort``. Without ``http`` it
+builds ``default_http_client()`` (the live constructor: an ``httpx2.Client`` with a 10 s connect
 timeout and 15 s for each other phase, that never follows redirects) on its first send, looked
 up when it is called (so a test can refuse it) and under a lock. ``nextron.main`` registers it
-in ``ROLE_ADAPTERS`` for the ``alert`` role, so outside ``prod`` it is wrapped in the sink.
+in ``ROLE_ADAPTERS`` for the ``alert`` role, so outside ``prod`` it is wrapped in the sink (a
+message the sink records instead of sending never reaches this adapter).
+
+**Metering (FR-57).** Every request it attempts is recorded through ``meter``
+(``UsageMeterPort``, through ``Metered``) as exactly one ``ApiCall("telegram",
+"send_message")``, whatever the outcome: ``ok=True`` when ``send`` returns, else ``ok=False``
+with the ``AdapterError``'s code, recorded before the error propagates. A send refused before
+any request (step 1 or 2 below) records nothing.
 
 ``send(message)``:
 
@@ -55,6 +62,7 @@ from nextron.domain.credentials import CredentialKey
 from nextron.ports.alert import DELIVERY_UNKNOWN, AlertDelivery, AlertMessage
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import SecretsPort, read_credential
+from nextron.ports.usage_meter import Metered, UsageMeterPort
 
 API_BASE: Final = "https://api.telegram.org"
 TIMEOUT_S: Final = 15.0
@@ -65,6 +73,8 @@ TELEGRAM_BAD_TOKEN: Final = "telegram_bad_token"
 TELEGRAM_BAD_CHAT_ID: Final = "telegram_bad_chat_id"
 TELEGRAM_UNAVAILABLE: Final = "telegram_unavailable"
 TELEGRAM_REFUSED: Final = "telegram_refused"
+PROVIDER: Final = "telegram"  # the usage meter's provider and operation
+SEND_MESSAGE: Final = "send_message"
 
 # The failures that mean nothing reached Telegram, so a retry can't send the alert twice.
 NOT_SENT: Final = (
@@ -107,8 +117,15 @@ def _message_id(response: httpx2.Response) -> int | None:
 class TelegramAlert:
     """``AlertPort`` over the Telegram Bot API; see the module docstring."""
 
-    def __init__(self, secrets: SecretsPort, *, http: httpx2.Client | None = None) -> None:
+    def __init__(
+        self,
+        secrets: SecretsPort,
+        *,
+        meter: UsageMeterPort,
+        http: httpx2.Client | None = None,
+    ) -> None:
         self._secrets = secrets
+        self._meter = meter
         self._http = http
         self._lock = threading.Lock()
 
@@ -130,10 +147,14 @@ class TelegramAlert:
                 False, TELEGRAM_BAD_CHAT_ID, "the alert's chat id is not a numeric Telegram id"
             ) from None
         http = self._client()
+        with Metered(self._meter, PROVIDER, SEND_MESSAGE):  # one ApiCall, whatever the outcome
+            return self._post(http, token, int(recipient), message.text)
+
+    def _post(self, http: httpx2.Client, token: str, chat_id: int, text: str) -> AlertDelivery:
+        """The one ``sendMessage`` request and its outcome; only ``AdapterError`` gets out."""
         try:
             response = http.post(
-                f"{API_BASE}/bot{token}/sendMessage",
-                json={"chat_id": int(recipient), "text": message.text},
+                f"{API_BASE}/bot{token}/sendMessage", json={"chat_id": chat_id, "text": text}
             )
         except NOT_SENT:
             raise AdapterError(

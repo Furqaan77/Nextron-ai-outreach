@@ -1,4 +1,6 @@
-"""Thin job handlers (AD-10): each calls one use case and returns ``None``.
+"""Thin job handlers (AD-10): each calls one use case and returns ``None``, or the domain's
+``DEFERRED`` when the budget refused the use case's work (the runner re-queues the job an hour
+later without using a retry).
 
 Import rule: the domain and the standard library only. A handler gets what it calls from
 ``nextron.main``, which builds the job type registry (``build_job_types``), so this module

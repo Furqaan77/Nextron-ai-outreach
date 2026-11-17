@@ -21,9 +21,12 @@ thread goes on.
 
 **run_one(lane)** (also the test hook) returns whether a job ran. It claims in its own unit of
 work (``JobQueue.claim``), holds the claim with its monotonic start time, calls the handler in a
-second unit of work (the handler calls one use case and returns ``None``; any other value counts
-as ``InvalidJob("the handler returned a value")``), and finishes in a third: ``complete``, or
-``fail`` with any ``Exception`` the handler raised. The claim is held only while the handler
+second unit of work (the handler calls one use case and returns ``None``, or the domain's
+``DEFERRED`` when the budget refused its work; any other value, the plain string ``"deferred"``
+included, counts as ``InvalidJob("the handler returned a value")``), and finishes in a third:
+``complete`` for ``None``, ``defer`` for ``DEFERRED`` (back to ``queued`` an hour later with its
+attempt given back, so a deferral never makes a job ``dead``), or ``fail`` with any
+``Exception`` the handler raised. The claim is held only while the handler
 runs: a ``finally`` drops it as soon as the handler returns, before finishing, so a keeper tick
 after the finish commits never takes it for a lost claim (the lease, renewed every 30 s, still
 has at least ``max_runtime`` + 30 s left). A failure to finish logs ``job_finish_failed`` and
@@ -78,8 +81,10 @@ from nextron.app.jobqueue.api import Claim, JobQueue
 from nextron.app.queries import setup as setup_queries
 from nextron.domain.errors import DomainError
 from nextron.domain.job import (
+    DEFERRED,
     MAX_BULK_THREADS,
     RENEW_INTERVAL,
+    HandlerResult,
     InvalidJob,
     JobStatus,
     JobTypes,
@@ -294,34 +299,39 @@ class Runner:
             return False
         self._hold(claim)
         try:
-            error = self._run_handler(claim)
+            outcome = self._run_handler(claim)
         finally:
             # Dropped before finishing, so a keeper tick after the finish commits can't take
             # the claim for a lost one. The lease still has at least max_runtime + 30 s left.
             self._drop(claim)
-        self._finish(claim, error)
+        self._finish(claim, outcome)
         return True
 
-    def _run_handler(self, claim: Claim) -> Exception | None:
-        """Run the job's handler in its own unit of work; the exception it raised, if any."""
+    def _run_handler(self, claim: Claim) -> Exception | HandlerResult | None:
+        """Run the job's handler in its own unit of work; its outcome: ``None`` (done),
+        ``DEFERRED``, or the exception it raised (a value it returned is ``InvalidJob``)."""
         try:
             handler = self._job_types.get(claim.job.type).handler
             with self._units.open():
                 result: object = handler(claim.job)
         except Exception as exc:  # noqa: BLE001 - JobQueue.fail decides what to retry
             return exc
-        if result is not None:
-            return InvalidJob(HANDLER_RETURNED_A_VALUE)
-        return None
+        if result is None:
+            return None
+        if result is DEFERRED:  # the domain's member itself, never an equal string
+            return DEFERRED
+        return InvalidJob(HANDLER_RETURNED_A_VALUE)
 
-    def _finish(self, claim: Claim, error: Exception | None) -> None:
+    def _finish(self, claim: Claim, outcome: Exception | HandlerResult | None) -> None:
         status: JobStatus | None = None
         try:
             with self._units.open():
-                if error is None:
+                if outcome is None:
                     self._queue.complete(claim)
-                else:
-                    status = self._queue.fail(claim, error)
+                elif isinstance(outcome, Exception):
+                    status = self._queue.fail(claim, outcome)
+                else:  # DEFERRED: back to queued, the attempt given back; never dead
+                    self._queue.defer(claim)
         except Exception:
             log.exception("job_finish_failed", extra=_fields(claim))
             return

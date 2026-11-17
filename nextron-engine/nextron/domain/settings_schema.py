@@ -79,6 +79,7 @@ from types import MappingProxyType
 from typing import Any, Final, NamedTuple
 
 from nextron.domain.alert import is_telegram_chat_id
+from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.errors import DomainError
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.sink import is_sink_recipient
@@ -131,6 +132,13 @@ class Key(StrEnum):
     SINK_ALLOWLIST = "sink_allowlist"
     BULK_THREADS = "bulk_threads"
     ALERT_CHAT_ID = "alert_chat_id"
+    QUOTA_HUNTER_CREDITS = "quota_hunter_credits"
+    QUOTA_PROSPEO_CREDITS = "quota_prospeo_credits"
+    QUOTA_PLACES_ENTERPRISE = "quota_places_enterprise"
+    QUOTA_PLACES_PRO = "quota_places_pro"
+    QUOTA_JOB_AGGREGATOR = "quota_job_aggregator"
+    AI_BUDGET_MONTHLY = "ai_budget_monthly"
+    AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
 
 
 class _Required(Enum):
@@ -801,6 +809,15 @@ TELEGRAM_CHAT_ID_RULE: Final = Rule(
     is_telegram_chat_id,
 )
 
+# Budget and limits (Story 1.13, FR-57, NFR-12). Each quota counts the UTC calendar month; at
+# the quota, only the work it names stops, never sending, replies or unsubscribe polling. The
+# Places maximums are Google's free monthly allowance (March 2025 Maps pricing), so no value
+# can start paid Places use.
+MAX_QUOTA: Final = 100_000
+PLACES_ENTERPRISE_FREE_MONTHLY: Final = 1_000
+PLACES_PRO_FREE_MONTHLY: Final = 5_000
+MAX_AI_BUDGET: Final = 100 * MICROS_PER_DOLLAR  # the whole engine's monthly ceiling (SM-9)
+
 SCHEMA: Mapping[str, Setting] = _declare(
     Setting(
         key=Key.SENDER_TIMEZONE,
@@ -850,6 +867,94 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=REQUIRED,
         rules=(TELEGRAM_CHAT_ID_RULE,),
+    ),
+    Setting(
+        key=Key.QUOTA_HUNTER_CREDITS,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Hunter credits a month",
+        unit=(
+            "0 to 100,000 Hunter credits each UTC calendar month (a find or a Domain Search "
+            "uses 1, a verification half of one). At the quota, enrichment stops until the "
+            f"next month; 0 stops it altogether. {NEVER_BLOCKED}"
+        ),
+        default=50,
+        rules=(minimum(0, "0"), maximum(MAX_QUOTA, "100,000")),
+    ),
+    Setting(
+        key=Key.QUOTA_PROSPEO_CREDITS,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Prospeo credits a month",
+        unit=(
+            "0 to 100,000 Prospeo credits each UTC calendar month. At the quota, enrichment "
+            f"stops until the next month; 0 stops it altogether. {NEVER_BLOCKED}"
+        ),
+        default=100,
+        rules=(minimum(0, "0"), maximum(MAX_QUOTA, "100,000")),
+    ),
+    Setting(
+        key=Key.QUOTA_PLACES_ENTERPRISE,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Places Enterprise requests a month",
+        unit=(
+            "0 to 1,000 Google Places Enterprise requests each UTC calendar month. The maximum "
+            "is Google's free monthly allowance, so paid use never starts. At the quota, "
+            f"discovery stops until the next month; 0 stops it altogether. {NEVER_BLOCKED}"
+        ),
+        default=1_000,
+        rules=(minimum(0, "0"), maximum(PLACES_ENTERPRISE_FREE_MONTHLY, "1,000")),
+    ),
+    Setting(
+        key=Key.QUOTA_PLACES_PRO,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Places Pro requests a month",
+        unit=(
+            "0 to 5,000 Google Places Pro requests each UTC calendar month. The maximum is "
+            "Google's free monthly allowance, so paid use never starts. At the quota, "
+            f"discovery stops until the next month; 0 (the default) stops it. {NEVER_BLOCKED}"
+        ),
+        default=0,
+        rules=(minimum(0, "0"), maximum(PLACES_PRO_FREE_MONTHLY, "5,000")),
+    ),
+    Setting(
+        key=Key.QUOTA_JOB_AGGREGATOR,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Job-aggregator requests a month",
+        unit=(
+            "0 to 100,000 job-aggregator requests each UTC calendar month. At the quota, "
+            f"discovery stops until the next month; 0 (the default) stops it. {NEVER_BLOCKED}"
+        ),
+        default=0,
+        rules=(minimum(0, "0"), maximum(MAX_QUOTA, "100,000")),
+    ),
+    Setting(
+        key=Key.AI_BUDGET_MONTHLY,
+        type=SettingType.MONEY,
+        section=Section.BUDGET_AND_LIMITS,
+        label="AI budget a month",
+        unit=(
+            "US dollars, $0 to $100, of AI spend each UTC calendar month. At the budget, "
+            "discovery, enrichment and re-checks stop until the next month; $0 stops them "
+            f"altogether. {NEVER_BLOCKED}"
+        ),
+        default=20 * MICROS_PER_DOLLAR,
+        rules=(minimum(0, "$0"), maximum(MAX_AI_BUDGET, "$100")),
+    ),
+    Setting(
+        key=Key.AI_BUDGET_ALERT_PCT,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="AI spend alert at (%)",
+        unit=(
+            "1 to 100: the percentage of the monthly AI budget at which the dashboard warns, "
+            "once each UTC calendar month. Nothing stops at the warning."
+        ),
+        default=80,
+        rules=(minimum(1, "1"), maximum(MAX_PERCENT, "100")),
     ),
 )
 

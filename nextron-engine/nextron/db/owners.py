@@ -9,7 +9,9 @@ owner's commands and queries may import only its own repositories. After changin
 run ``uv run python scripts/gen_owner_contracts.py``; a contract test fails until you do.
 
 ``TABLES`` maps each table to its writers, column by column: ``table -> {writer: (columns...)}``.
-A writer is an owner in ``OWNERS`` or a shared database module in ``SHARED_WRITERS``. Every
+A writer is an owner in ``OWNERS`` or a shared database module in ``SHARED_WRITERS``, which
+writes on behalf of every owner: ``db.eventlog`` (the ``events`` log) and ``db.metering`` (the
+usage tables, through ``UsageMeterPort``). Every
 column of ``nextron.db.models.Base.metadata`` belongs to exactly one writer, and nothing else is
 listed; ``tests/contracts/test_persistence_contracts.py`` fails on any unmapped, doubly mapped or
 stale column. A story that adds a table or column adds it here (and to ``pii_registry.py``) in
@@ -38,7 +40,7 @@ OWNERS: Final[tuple[str, ...]] = (
 )
 
 # Database modules that write a table on behalf of every owner.
-SHARED_WRITERS: Final[tuple[str, ...]] = ("db.eventlog",)
+SHARED_WRITERS: Final[tuple[str, ...]] = ("db.eventlog", "db.metering")
 
 TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "events": {
@@ -95,5 +97,26 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     },
     "notifications": {
         "notify": ("id", "kind", "subject", "text", "created_at", "dismissed_at"),
+    },
+    "api_usage": {
+        "db.metering": ("id", "provider", "operation", "sku", "units", "ok", "error_code", "at"),
+    },
+    "ai_usage": {
+        "db.metering": (
+            "id",
+            "route",
+            "route_tuple",
+            "served_model",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "iterations",
+            "batch",
+            "cost_micros",
+            "refused",
+            "error_code",
+            "at",
+        ),
     },
 }

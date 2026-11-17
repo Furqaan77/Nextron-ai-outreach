@@ -812,7 +812,7 @@ def test_renewal_and_reaping_happen_in_one_keep(
 # Row: Lost claim --------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("finish", ["complete", "fail"])
+@pytest.mark.parametrize("finish", ["complete", "fail", "defer"])
 def test_a_run_whose_claim_was_lost_changes_nothing(
     finish: str,
     units: UnitOfWorkFactory,
@@ -831,6 +831,8 @@ def test_a_run_whose_claim_was_lost_changes_nothing(
 
     if finish == "complete":
         assert call(units, queue.complete, stale) is False
+    elif finish == "defer":
+        assert call(units, queue.defer, stale) is False
     else:
         assert call(units, queue.fail, stale, ValueError("late")) is None
 
@@ -843,6 +845,69 @@ def test_a_run_whose_claim_was_lost_changes_nothing(
         1,
     )
     assert call(units, queue.complete, fresh) is True
+
+
+# Row: Defer -------------------------------------------------------------------------------------
+
+
+def test_a_deferred_job_is_queued_an_hour_later_with_its_attempt_given_back(
+    units: UnitOfWorkFactory,
+    queue: JobQueue,
+    db_engine: Engine,
+    clock: FrozenClock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    created = enqueue(units, queue)
+    held = claimed(units, queue)
+    clock.advance(timedelta(seconds=10))
+
+    assert call(units, queue.defer, held) is True
+
+    job = row(units, created.job_id)
+    assert (job.status, job.attempts, job.lease_until, job.last_error) == (
+        "queued",
+        0,
+        None,
+        None,
+    )
+    assert (job.run_after, job.updated_at) == (clock.now() + timedelta(hours=1), clock.now())
+    assert events(db_engine, created.job_id) == [
+        (None, "queued", "enqueued"),
+        ("queued", "running", "claimed"),
+        ("running", "queued", "deferred"),
+    ]
+    [record] = records(caplog, "job_deferred")
+    assert record.levelno == logging.INFO
+    assert extras(record, "job_id", "job_type", "lane", "attempts") == (
+        created.job_id,
+        "enrich_lead",
+        Lane.BULK,
+        1,
+    )
+    clock.advance(timedelta(hours=1) - MICRO)
+    assert claim(units, queue) is None  # not before the hour is up
+    clock.advance(MICRO)
+    assert claimed(units, queue).job.attempts == 1  # the first attempt again
+
+
+def test_a_retry_limit_0_job_deferred_30_times_never_uses_a_retry_or_dies(
+    units: UnitOfWorkFactory, queue: JobQueue, db_engine: Engine, clock: FrozenClock
+) -> None:
+    created = enqueue(units, queue, "score_lead")  # retry limit 0
+
+    for _ in range(30):
+        held = claimed(units, queue)
+        assert held.job.attempts == 1
+        assert call(units, queue.defer, held) is True
+        job = row(units, created.job_id)
+        assert (job.status, job.attempts) == ("queued", 0)
+        assert job.run_after == clock.now() + timedelta(hours=1)
+        clock.advance(timedelta(hours=1))
+
+    assert causes(db_engine, created.job_id) == ["enqueued", *["claimed", "deferred"] * 30]
+    held = claimed(units, queue)
+    assert call(units, queue.complete, held) is True  # it still runs once the budget allows
 
 
 # Row: Shutdown ----------------------------------------------------------------------------------
@@ -1169,12 +1234,15 @@ def test_each_call_reads_the_clock_once(units: UnitOfWorkFactory, counting: Coun
     measure(lambda: call(units, queue.keep, tuple(held)))
     measure(lambda: call(units, queue.fail, held[0], ValueError("x")))
     second = claimed(units, queue)
+    measure(lambda: call(units, queue.defer, second))
+    counting.advance(timedelta(hours=1))
+    second = claimed(units, queue)
     measure(lambda: call(units, queue.complete, second))
     measure(lambda: call(units, queue.release, ()))
     measure(lambda: call(units, queue.purge_done))
     measure(lambda: call(units, queue.enqueue_tick, "sync_mailbox"))
 
-    assert reads == [1] * 9
+    assert reads == [1] * 10
 
 
 def test_the_query_returns_none_for_an_unknown_job(units: UnitOfWorkFactory) -> None:

@@ -52,6 +52,7 @@ from tests.fakes.clock import FrozenClock
 from tests.fakes.mail import InMemoryMail
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
+from tests.fakes.usage_meter import InMemoryUsageMeter
 
 SINKS: Final[dict[SinkRole, type]] = {SinkRole.MAIL: MailSink, SinkRole.ALERT: AlertSink}
 MESSAGE_ROLES: Final[dict[type, SinkRole]] = {
@@ -87,7 +88,10 @@ def unsunk(
     for env in ENVIRONMENTS:
         monkeypatch.setenv("NEXTRON_ENV", env)
         monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / env))
-        context = AdapterContext(load_bootstrap(), InMemorySecrets(env), FrozenClock())
+        clock = FrozenClock()
+        context = AdapterContext(
+            load_bootstrap(), InMemorySecrets(env), clock, InMemoryUsageMeter(clock)
+        )
         for entry in stubs:
             adapter = build_role_adapter(entry.name, context, units=FakeUnits())
             if env == "prod":

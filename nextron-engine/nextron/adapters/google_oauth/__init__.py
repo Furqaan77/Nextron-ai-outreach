@@ -6,9 +6,9 @@ Import rule: ``nextron.ports``, ``nextron.domain``, ``httpx2`` and the standard 
 Every error is an ``AdapterError`` whose message is this module's own text: never a response
 body, an exception's text, a token, a code, a URL with a query or a path. Nothing here logs.
 
-**``GoogleOAuthClient(http=None)``** implements ``GoogleOAuthPort``. Without ``http`` it builds
-``default_http_client()`` (the live constructor: an ``httpx2.Client`` with a 15 s timeout that
-never follows redirects) on its first call, not when it is constructed, so building the
+**``GoogleOAuthClient(*, meter, http=None)``** implements ``GoogleOAuthPort``. Without ``http`` it
+builds ``default_http_client()`` (the live constructor: an ``httpx2.Client`` with a 15 s timeout
+that never follows redirects) on its first call, not when it is constructed, so building the
 dashboard builds no HTTP client. Each call is one form-encoded POST:
 
 - ``exchange``: ``code``, ``client_id``, ``client_secret``, ``redirect_uri``,
@@ -25,6 +25,12 @@ whose JSON ``error`` is ``invalid_grant`` is ``google_invalid_grant``; another 4
 ``google_rejected``; a failed request (network, timeout), a 429 or a 5xx is
 ``google_unavailable`` (retryable); anything else is ``google_bad_response``. ``revoke`` takes
 200 and a 400 whose ``error`` is ``invalid_token`` as done.
+
+**Metering (FR-57).** Every request is recorded through ``meter`` (``UsageMeterPort``, through
+``Metered``) as exactly one ``ApiCall("google_oauth", <operation>)``, whatever the outcome:
+``code_exchange``, ``token_refresh`` or ``token_revocation``. It is ``ok=True`` when the call
+returns (a revoke answered ``invalid_token`` included), else ``ok=False`` with the
+``AdapterError``'s code, recorded before the error propagates.
 
 **``LoopbackListener()``** implements ``ConsentListener``. It binds ``127.0.0.1:0`` (Windows
 ``SO_EXCLUSIVEADDRUSE``, so no other process can bind the same port; an ``OSError`` is
@@ -70,6 +76,7 @@ from nextron.ports.google_oauth import (
     Query,
     TokenSet,
 )
+from nextron.ports.usage_meter import Metered, UsageMeterPort
 
 HTTP_TIMEOUT_S: Final = 15.0
 MAX_EXPIRES_IN: Final = 86_400  # seconds: a longer lifetime is not an answer Google gives
@@ -79,6 +86,10 @@ REQUEST_TIMEOUT_S: Final = 10.0  # a connection that sends nothing is dropped af
 POLL_INTERVAL_S: Final = 0.1
 INVALID_GRANT: Final = "invalid_grant"
 INVALID_TOKEN: Final = "invalid_token"
+PROVIDER: Final = "google_oauth"  # the usage meter's provider and operations
+CODE_EXCHANGE: Final = "code_exchange"
+TOKEN_REFRESH: Final = "token_refresh"
+TOKEN_REVOCATION: Final = "token_revocation"
 
 RECEIVED_PAGE: Final = (
     b'<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
@@ -126,7 +137,8 @@ def _non_empty(value: object) -> str | None:
 class GoogleOAuthClient:
     """``GoogleOAuthPort`` over ``httpx2``; see the module docstring."""
 
-    def __init__(self, http: httpx2.Client | None = None) -> None:
+    def __init__(self, *, meter: UsageMeterPort, http: httpx2.Client | None = None) -> None:
+        self._meter = meter
         self._http = http
         self._lock = threading.Lock()
 
@@ -136,8 +148,10 @@ class GoogleOAuthClient:
                 self._http = default_http_client()  # looked up now, so tests can refuse it
             return self._http
 
-    def _post(self, url: str, form: dict[str, str], operation: str) -> httpx2.Response:
-        http = self._client()
+    @staticmethod
+    def _post(
+        http: httpx2.Client, url: str, form: dict[str, str], operation: str
+    ) -> httpx2.Response:
         try:
             return http.post(url, data=form)
         except Exception:  # noqa: BLE001 - a network failure or a timeout, by any name
@@ -202,42 +216,42 @@ class GoogleOAuthClient:
         self, client: ClientConfig, code: str, verifier: str, redirect_uri: str
     ) -> TokenSet:
         operation = "code exchange"
-        response = self._post(
-            TOKEN_URI,
-            {
-                "code": code,
-                "client_id": client.client_id,
-                "client_secret": client.client_secret,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-                "code_verifier": verifier,
-            },
-            operation,
-        )
-        self._check(response, operation)
-        return self._tokens(response, operation)
+        form = {
+            "code": code,
+            "client_id": client.client_id,
+            "client_secret": client.client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+            "code_verifier": verifier,
+        }
+        http = self._client()
+        with Metered(self._meter, PROVIDER, CODE_EXCHANGE):  # one ApiCall, whatever the outcome
+            response = self._post(http, TOKEN_URI, form, operation)
+            self._check(response, operation)
+            return self._tokens(response, operation)
 
     def refresh(self, client: ClientConfig, refresh_token: str) -> TokenSet:
         operation = "token refresh"
-        response = self._post(
-            TOKEN_URI,
-            {
-                "refresh_token": refresh_token,
-                "client_id": client.client_id,
-                "client_secret": client.client_secret,
-                "grant_type": "refresh_token",
-            },
-            operation,
-        )
-        self._check(response, operation)
-        return self._tokens(response, operation)
+        form = {
+            "refresh_token": refresh_token,
+            "client_id": client.client_id,
+            "client_secret": client.client_secret,
+            "grant_type": "refresh_token",
+        }
+        http = self._client()
+        with Metered(self._meter, PROVIDER, TOKEN_REFRESH):  # one ApiCall, whatever the outcome
+            response = self._post(http, TOKEN_URI, form, operation)
+            self._check(response, operation)
+            return self._tokens(response, operation)
 
     def revoke(self, token: str) -> None:
         operation = "token revocation"
-        response = self._post(REVOKE_URI, {"token": token}, operation)
-        if response.status_code == 400 and _error_field(response) == INVALID_TOKEN:
-            return  # already revoked or expired: done
-        self._check(response, operation)
+        http = self._client()
+        with Metered(self._meter, PROVIDER, TOKEN_REVOCATION):  # one ApiCall, whatever the outcome
+            response = self._post(http, REVOKE_URI, {"token": token}, operation)
+            if response.status_code == 400 and _error_field(response) == INVALID_TOKEN:
+                return  # already revoked or expired: done, and recorded ok
+            self._check(response, operation)
 
 
 # The consent listener -------------------------------------------------------------------------

@@ -516,7 +516,7 @@ def test_the_sender_section_shows_the_sender_timezone_as_required(
 ) -> None:
     _, page = settings_page(dashboard, session[0])
 
-    assert page.legends == ["Sender", "Alerts and recipients", "Engine"]
+    assert page.legends == ["Sender", "Alerts and recipients", "Budget and limits", "Engine"]
     shown = page.fields["sender_timezone"]
     assert (shown.key, shown.label, shown.value) == ("sender_timezone", "Sender's timezone", "")
     assert shown.hint == "IANA timezone name, such as America/Los_Angeles; required"
@@ -530,6 +530,13 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
     assert list(page.fields) == [
         "sender_timezone",
         "alert_chat_id",
+        "quota_hunter_credits",
+        "quota_prospeo_credits",
+        "quota_places_enterprise",
+        "quota_places_pro",
+        "quota_job_aggregator",
+        "ai_budget_monthly",
+        "ai_budget_alert_pct",
         "sink_allowlist",
         "bulk_threads",
     ]
@@ -639,6 +646,65 @@ def test_bulk_threads_saves_2_and_refuses_0_and_3(
         field = SettingsHtml(refused.text).fields["bulk_threads"]
         assert (field.error, field.value) == (reason, refused_text)
         assert stored(units) == {"bulk_threads": "2"}
+
+
+def test_the_budget_section_shows_each_limit_with_its_default(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply, page = settings_page(dashboard, session[0])
+
+    shown = {
+        key: (page.fields[key].label, page.fields[key].value)
+        for key in (
+            "quota_hunter_credits",
+            "quota_prospeo_credits",
+            "quota_places_enterprise",
+            "quota_places_pro",
+            "quota_job_aggregator",
+            "ai_budget_monthly",
+            "ai_budget_alert_pct",
+        )
+    }
+    assert shown == {
+        "quota_hunter_credits": ("Hunter credits a month", "50"),
+        "quota_prospeo_credits": ("Prospeo credits a month", "100"),
+        "quota_places_enterprise": ("Places Enterprise requests a month", "1000"),
+        "quota_places_pro": ("Places Pro requests a month", "0"),
+        "quota_job_aggregator": ("Job-aggregator requests a month", "0"),
+        "ai_budget_monthly": ("AI budget a month", "20.00"),
+        "ai_budget_alert_pct": ("AI spend alert at (%)", "80"),
+    }
+    for key in shown:
+        assert "UTC calendar month" in page.fields[key].hint
+    assert "Google's free monthly allowance" in page.fields["quota_places_pro"].hint
+    assert 'href="/quotas"' in reply.text and "Quotas and cost page" in reply.text
+
+
+def test_a_places_quota_above_googles_free_allowance_is_refused(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    token = session[1]
+
+    for key, refused_text, reason in (
+        ("quota_places_enterprise", "1001", "must be at most 1,000"),
+        ("quota_places_pro", "5001", "must be at most 5,000"),
+        ("ai_budget_monthly", "100.01", "must be at most $100"),
+        ("ai_budget_alert_pct", "0", "must be at least 1"),
+    ):
+        refused = save(dashboard, session, real_body(token, **{key: refused_text}))
+        field = SettingsHtml(refused.text).fields[key]
+        assert (field.error, field.value) == (reason, refused_text)
+        assert stored(units) == {}
+
+    saved = save(
+        dashboard,
+        session,
+        real_body(token, quota_places_pro="5000", ai_budget_monthly="35.5"),
+    )
+
+    assert SettingsHtml(saved.text).notices == [("status", "Settings saved.")]
+    assert stored(units) == {"quota_places_pro": "5000", "ai_budget_monthly": "35.50"}
+    assert get_value(units, Key.AI_BUDGET_MONTHLY) == 35_500_000
 
 
 # Row: Page POST ok ------------------------------------------------------------------------------

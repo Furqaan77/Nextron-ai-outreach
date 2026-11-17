@@ -91,4 +91,32 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "dismissed_at": PiiClass.NONE,
     },
+    # Story 1.13. Codes, counts, flags and times only: nextron.domain.budget refuses any value
+    # that could hold free text or an address.
+    "api_usage": {
+        "id": PiiClass.NONE,
+        "provider": PiiClass.NONE,
+        "operation": PiiClass.NONE,
+        "sku": PiiClass.NONE,
+        "units": PiiClass.NONE,
+        "ok": PiiClass.NONE,
+        "error_code": PiiClass.NONE,
+        "at": PiiClass.NONE,
+    },
+    "ai_usage": {
+        "id": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "route_tuple": PiiClass.NONE,
+        "served_model": PiiClass.NONE,
+        "input_tokens": PiiClass.NONE,
+        "output_tokens": PiiClass.NONE,
+        "cache_read_tokens": PiiClass.NONE,
+        "cache_write_tokens": PiiClass.NONE,
+        "iterations": PiiClass.NONE,
+        "batch": PiiClass.NONE,
+        "cost_micros": PiiClass.NONE,
+        "refused": PiiClass.NONE,
+        "error_code": PiiClass.NONE,
+        "at": PiiClass.NONE,
+    },
 }

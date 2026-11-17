@@ -291,3 +291,34 @@ button.secondary {
 .google-waiting {
   font-weight: 600;
 }
+
+/* The Quotas and cost page: the never-blocked note, the stopped state and two plain tables. */
+.quota-note,
+.quota-status,
+.quota-warning {
+  max-width: 48rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}
+
+.quota-status-stopped,
+.quota-warning {
+  border-left-color: var(--refused);
+}
+
+.quota-table {
+  margin: 0 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.quota-table th,
+.quota-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+.quota-table td.number {
+  text-align: right;
+}

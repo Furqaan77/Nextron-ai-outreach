@@ -11,6 +11,8 @@ import pytest
 from nextron.domain.errors import DomainError
 from nextron.domain.job import (
     CREATION,
+    DEFER_DELAY,
+    DEFERRED,
     DONE_RETENTION,
     FIRST_RETRY_DELAY,
     LEASE_MARGIN,
@@ -20,6 +22,7 @@ from nextron.domain.job import (
     MAX_RETRY_DELAY,
     RENEW_INTERVAL,
     TRANSITIONS,
+    HandlerResult,
     InvalidJob,
     Job,
     JobCause,
@@ -75,6 +78,7 @@ EXPECTED_TABLE = {
     ("running", "expire_exhausted"): ("dead", "lease_expired"),
     ("running", "release"): ("queued", "released"),
     ("running", "release_exhausted"): ("dead", "released"),
+    ("running", "defer"): ("queued", "deferred"),
 }
 
 
@@ -92,6 +96,7 @@ def test_the_enums_are_exactly_the_specified_values() -> None:
         "retries_exhausted",
         "lease_expired",
         "released",
+        "deferred",
     ]
 
 
@@ -168,7 +173,19 @@ def test_the_constants() -> None:
     assert FIRST_RETRY_DELAY == timedelta(seconds=30)
     assert MAX_RETRY_DELAY == timedelta(minutes=30)
     assert DONE_RETENTION == timedelta(days=30)
+    assert DEFER_DELAY == timedelta(hours=1)
     assert (MAX_BULK_THREADS, MAX_ERROR_LENGTH) == (2, 500)
+
+
+def test_a_handler_may_return_deferred_and_nothing_else() -> None:
+    assert [result.value for result in HandlerResult] == ["deferred"]
+    assert DEFERRED is HandlerResult.DEFERRED
+    assert transition(JobStatus.RUNNING, JobEvent.DEFER) == Transition(
+        JobStatus.QUEUED, JobCause.DEFERRED
+    )
+    for status in (JobStatus.QUEUED, JobStatus.DONE, JobStatus.DEAD):
+        with pytest.raises(IllegalTransition):
+            transition(status, JobEvent.DEFER)
 
 
 def test_a_lease_lasts_the_runtime_plus_60_seconds() -> None:

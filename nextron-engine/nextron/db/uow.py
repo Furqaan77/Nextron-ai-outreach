@@ -42,6 +42,9 @@ The rules, each enforced here (a broken rule raises ``UnitOfWorkError``):
 - ``uow.publish(notification)`` needs an open transaction and a type exactly in
   ``NOTIFICATIONS`` (not a subclass). It runs that type's subscribers synchronously, in
   registration order, in the same transaction.
+- ``in_transaction()`` says whether a unit of work open in this context, on this thread, holds a
+  transaction (a use case's, or a read-only unit's read). A port call must never run inside
+  one; ``nextron.db.metering`` checks it before writing in a unit of work of its own.
 - ``Subscribers.register_subscriber(type, command)`` accepts only listed types and ``@command``
   callables, until ``freeze()``. ``UnitOfWorkFactory`` takes only a frozen registry. Only
   ``nextron.main.build_subscribers()`` constructs ``Subscribers`` or registers subscribers
@@ -466,6 +469,18 @@ def current() -> UnitOfWork:
         raise UnitOfWorkError("no unit of work is open; an entry point opens one")
     uow._check_open()
     return uow
+
+
+def in_transaction() -> bool:
+    """Whether a unit of work open in this context, on this thread, holds a transaction: a use
+    case's ``uow.transaction()`` block, or a read-only unit's read. Never raises."""
+    uow = _CURRENT.get()
+    return (
+        uow is not None
+        and uow._open
+        and uow._thread == threading.get_ident()
+        and uow._tx is not None
+    )
 
 
 def _refuse_coroutine(fn: Callable[..., object], marker: str) -> None:

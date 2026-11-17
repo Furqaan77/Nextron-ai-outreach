@@ -519,7 +519,8 @@ everywhere except `prod`. It holds one entry so far: `telegram` (`TelegramAlert`
 role; see [Alerts and notifications](#alerts-and-notifications)).
 
 ```python
-alert = build_role_adapter("telegram", AdapterContext(config, secrets, clock), units=units)
+context = AdapterContext(config, secrets, clock, meter)   # meter: the UsageMeterPort
+alert = build_role_adapter("telegram", context, units=units)
 delivery = alert.send(AlertMessage(chat_id, text))   # dev/test: delivered or recorded
 ```
 
@@ -563,6 +564,7 @@ traceback in `nextron.log`.
 | `0003_1_10_jobs` | `jobs` (see [Jobs](#jobs)), its checks and its indexes, two of them partial | `jobqueue` |
 | `0004_1_11_heartbeat` | `runner_heartbeat`, one row and its two checks (see [Triggers and the heartbeat](#triggers-and-the-heartbeat)) | `ops` |
 | `0005_1_12_notify` | `alerts` (unique on kind, subject and channel, a status check) and `notifications` (unique on kind and subject, `ix_notifications_open`) (see [Alerts and notifications](#alerts-and-notifications)) | `notify` |
+| `0006_1_13_metering` | `api_usage` (three checks, `ix_api_usage_at`) and `ai_usage` (two checks, `ix_ai_usage_at`) (see [Metering, quotas and the AI budget](#metering-quotas-and-the-ai-budget)) | `db.metering` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -654,7 +656,7 @@ job_types.register_job_type(
         priority=50,                            # 0 to 100; higher runs first
         max_runtime=timedelta(minutes=5),       # whole seconds, 1 s to 24 h
         retry_limit=3,                          # 0 to 20 retries after the first run
-        handler=enrich_lead,                    # thin: calls one use case, returns None
+        handler=enrich_lead,                    # thin: one use case; None or DEFERRED
     )
 )
 ```
@@ -700,13 +702,15 @@ crawls and batches on `bulk`, so a slow crawl never delays a send. An idle lane 
 every second; enqueueing doesn't wake it sooner. A claim takes the lane's due job (`run_after`
 now or earlier) with the highest priority, then the oldest `run_after`, then the lowest id. It
 runs the handler in its own unit of work, then marks the job `done`, or hands the error to
-`JobQueue.fail`. A handler returns `None`; any other value fails the job.
+`JobQueue.fail`. A handler returns `None`, or `DEFERRED` (see [Deferring a
+job](#deferring-a-job)); any other value, the plain string `"deferred"` included, fails the job.
 
-**Retries and backoff.** `attempts` counts claims. Only an `AdapterError` with
-`retryable=True` is retried: the job goes back to `queued` after 30 s, then 60 s, 120 s and so
-on, doubling up to 30 minutes, until it has run `retry_limit + 1` times; then it is `dead`
-(`retries_exhausted`). Any other exception makes it `dead` at once (`failed`), so a type with
-retry limit 0 never runs twice. `last_error` holds `"<code>: <message>"` (or
+**Retries and backoff.** `attempts` counts claims, except deferred ones (see [Deferring a
+job](#deferring-a-job)). Only an `AdapterError` with `retryable=True` is retried: the job goes
+back to `queued` after 30 s, then 60 s, 120 s and so on, doubling up to 30 minutes, until it
+has run `retry_limit + 1` times; then it is `dead` (`retries_exhausted`). Any other exception
+makes it `dead` at once (`failed`), so a type with retry limit 0 never runs twice, except that
+it runs again after each `DEFERRED`. `last_error` holds `"<code>: <message>"` (or
 `"<exception type>: <text>"`), redacted and cut to 500 characters. `dead` jobs stay until the
 Operator dismisses them (Story 1.15).
 
@@ -740,7 +744,34 @@ actor `system:jobqueue`). Read a job with `nextron.app.queries.jobqueue.job(job_
 only `job_id`, `job_type`, `lane`, `attempts` and an error `code`: `job_runner_started` (with
 `bulk_threads`), `job_runner_stopped` (with `released`), `job_retry_scheduled`, `job_dead`,
 `job_claim_lost`, `job_lease_expired`, `job_lease_lost`, `job_released`, `job_overran`,
-`job_claim_failed`, `job_finish_failed`, `job_keeper_failed` and `jobs_purged` (with `count`).
+`job_claim_failed`, `job_finish_failed`, `job_keeper_failed`, `job_deferred` and `jobs_purged`
+(with `count`).
+
+### Deferring a job
+
+A handler whose use case the budget refused (see [Metering, quotas and the AI
+budget](#metering-quotas-and-the-ai-budget)) returns `DEFERRED` from `nextron.domain.job`:
+
+```python
+from nextron.domain.job import DEFERRED
+
+def enrich_lead(job: Job) -> HandlerResult | None:
+    if not enrichment.enrich(job.payload["lead_id"]):   # False: refused by domain.budget.allow
+        return DEFERRED
+    return None
+```
+
+The runner then finishes the job with `JobQueue.defer`: back to `queued` with `run_after` one
+hour later (`DEFER_DELAY`), the lease cleared and the attempt given back (`attempts - 1`), with
+a `deferred` event and a `job_deferred` log record (INFO). So `attempts` doesn't count a
+deferred claim, and a deferral never uses a retry: a job deferred every hour for a month, even
+one with retry limit 0, runs again after each `DEFERRED` and never becomes `dead` for it; it
+does its work once the month's usage or a raised limit allows.
+
+**Return `DEFERRED` only before the use case has done any work.** A deferred job runs again
+from the start, so the budget check (`domain.budget.allow`) comes first, and a use case that has
+already written or called a provider must finish, not defer. Like every finish, the deferral is
+fenced on the claim's `attempts`: a lost claim changes nothing and logs `job_claim_lost`.
 
 ## Triggers and the heartbeat
 
@@ -918,6 +949,82 @@ page reloads. A request after the engine restarted (no session) shows "The dashb
 run nextron open in a terminal to open it again." A request that gets no answer at all (the
 engine is down) shows nothing.
 
+## Metering, quotas and the AI budget
+
+Every external call is counted, and discovery, enrichment and re-checks stop at the month's
+quotas and AI budget (FR-57, AD-8, NFR-10 to NFR-12). **Sending, reply handling and unsubscribe
+polling are never blocked.**
+
+**What is recorded.** `UsageMeterPort` (`nextron/ports/usage_meter.py`) is implemented by
+`nextron/db/metering.py` (`UsageMeter`), the only writer of the two usage tables (migration
+`0006_1_13_metering`):
+
+- `api_usage`: one row per HTTP request an adapter attempted, whatever its outcome: `provider`,
+  `operation`, `sku` (Places Pro and Enterprise are separate SKUs), integer `units`, `ok`,
+  `error_code` and `at`.
+- `ai_usage`: one row per AI call (Story 2.7 starts writing them): `route`, `route_tuple`,
+  `served_model`, the input, output, cache-read and cache-write tokens, `iterations`, `batch`,
+  `cost_micros` (micro-dollars), `refused`, `error_code` and `at`.
+
+Neither table holds personal data: `nextron/domain/budget.py` refuses any field value with `@`
+or a space (`ApiCall` and `AiCall` are checked when they are built), and the meter writes no
+`events` row. **Units:** Hunter's credits are stored doubled, so a find or a Domain Search is 2
+units and a verification 1; every other call is 1 per `count` (an adapter passes `count=0` for
+a call the provider doesn't bill). Each record commits in its own unit of work, so the usage is
+kept even when the caller's work rolls back. A record that can't be written logs
+`usage_record_failed` (with the provider and operation, or the route, and a `code`) and never
+fails the call: the provider has already done, and billed, the work. A record made inside the
+caller's open transaction writes nothing and logs the code `inside_transaction` (a port call
+never runs inside a transaction).
+
+**Adapters.** Every adapter whose `__init__` takes an `http` client takes a required keyword
+`meter` and wraps its one request in `Metered(meter, provider, operation)`, which records
+exactly one `ApiCall`: `ok`, or the `AdapterError`'s code. A call refused before any request (no
+token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_message`) and Google
+OAuth (`google_oauth`/`code_exchange`, `token_refresh` and `token_revocation`; a revoke answered
+`invalid_token` is `ok`). `tests/contracts/test_adapter_boundary.py` checks every such adapter.
+
+**Quotas and the budget** are settings (Settings, Budget and limits), each counted over the UTC
+calendar month:
+
+| Setting | Default | Range | At the limit, stops |
+|---|---|---|---|
+| `quota_hunter_credits` | 50 | 0 to 100,000 | enrichment |
+| `quota_prospeo_credits` | 100 | 0 to 100,000 | enrichment |
+| `quota_places_enterprise` | 1,000 | 0 to 1,000 | discovery |
+| `quota_places_pro` | 0 | 0 to 5,000 | discovery |
+| `quota_job_aggregator` | 0 | 0 to 100,000 | discovery |
+| `ai_budget_monthly` | $20 | $0 to $100 | discovery, enrichment and re-checks |
+| `ai_budget_alert_pct` | 80 | 1 to 100 | nothing: it only warns |
+
+The Places maximums are Google's free monthly allowances (March 2025 Maps pricing; check them
+against your billing account), so no setting can start paid Places use. **A limit of 0 means
+off:** work on it is always refused, quietly (no notice, not listed as stopped).
+
+**Asking the budget.** Work belongs to a `BudgetClass`: `blockable` (discovery, enrichment,
+re-checks and their AI routes) or `essential` (everything else). A use case reads the month's
+usage with `meter.snapshot(now)` and the limits with `queries.setup.budget_limits()`, then asks
+`domain.budget.allow(budget_class, usage, limits, quota="hunter")`: `essential` is always
+allowed; `blockable` is refused when the AI spend is at least the budget, or the named quota's
+usage at least its limit. A refused use case does nothing, and its handler returns `DEFERRED`
+(see [Deferring a job](#deferring-a-job)).
+
+**Notices.** Right after each record, the `ops` service's `Budget.check()` adds one dashboard
+notification per threshold and UTC month (no Telegram message): "AI spend at 80% of $20: $16
+spent in 2026-11" when the spend reaches the alert percentage, "AI budget reached: discovery,
+enrichment and re-checks stopped ($20.05 of $20 spent in 2026-11)" at the budget, and "Hunter
+quota reached: enrichment stopped (50 of 50 credits used in 2026-11)" for each quota reached.
+A jump past both 80% and 100% gives both; raising a limit mid-month doesn't repeat a notice;
+the next month starts afresh. Each new notice logs `usage_alert_raised` (with `kind` and
+`subject`); a failed check logs `usage_alerts_failed` and the usage row stays.
+
+**The Quotas and cost page** (`/quotas`, linked from the Settings page) shows, for the current
+UTC month: the note that sending, reply handling and unsubscribe polling are never blocked;
+"Non-essential work stopped: ..." with the reasons, or "Non-essential work is running."; the AI
+spend against the budget, with the warning, reached or off line; each quota's use against its
+limit (Hunter in credits, with halves) and its state (`OK`, `Reached: <work> stopped` or
+`Off (quota 0)`); and every provider, operation and SKU's calls, failed calls and units.
+
 ## Logs
 
 `serve` writes `<data dir>\logs\nextron.log`, for example
@@ -973,6 +1080,7 @@ uv run lint-imports         # the import contracts on their own
 - `tests/contracts`: import contracts, the source tree, pins, the lock file and vendored assets.
 - `tests/fakes`: one in-memory fake per port, listed in `tests.fakes.PORT_FAKES` (`FrozenClock`
   for `Clock`, `InMemorySecrets` for `SecretsPort`, `InMemoryAlert` for `AlertPort`,
+  `InMemoryUsageMeter` for `UsageMeterPort` (every HTTP adapter takes a `meter`),
   `InMemoryMail` for `MailPort`, and in `tests/fakes/google_oauth.py` `FakeGoogleOAuth` for
   `GoogleOAuthPort`, `FakeConsentListener` for `ConsentListener` and `FakeClientFiles` for
   `ClientFilePort`, with `id_token(...)`, an unsigned ID token builder), plus `FakeUnits`, which
@@ -1037,5 +1145,7 @@ uv run python scripts/gen_owner_contracts.py --check  # what the tests run
 
 When you add an adapter under `nextron/adapters/`, add it to contract 5, give its port a fake
 in `tests/fakes` (listed in `PORT_FAKES`), and classify the package in `tests/live_guard.py`; the
-contract tests fail until you do. A `mail` or `alert` adapter is also registered in
+contract tests fail until you do. An HTTP adapter also takes a required keyword `meter` and
+records each request it attempts (see [Metering, quotas and the AI
+budget](#metering-quotas-and-the-ai-budget)). A `mail` or `alert` adapter is also registered in
 `nextron.main.ROLE_ADAPTERS` (see [Dev and test sink](#dev-and-test-sink)).

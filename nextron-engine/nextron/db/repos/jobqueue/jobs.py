@@ -14,6 +14,9 @@ applies the Job machine. Rows come back as ``JobRow``, a frozen copy of every co
 - ``claim(job_id, ...)``: ``queued`` to ``running``, ``attempts + 1``; ``update_running(job_id,
   attempts, ...)``: changes a job only while it is ``running`` with exactly those attempts (the
   fence). Both return their row count;
+- ``defer_running(job_id, attempts, *, run_after, at)``: behind the same fence, back to
+  ``queued`` with the attempt given back (``attempts - 1``), no lease and ``run_after``; returns
+  its row count;
 - ``expired(now, exclude)``: the ``running`` jobs whose lease ended by ``now``;
 - ``dead()``: every ``dead`` job, oldest change first;
 - ``purge_done(cutoff)``: deletes ``done`` rows last changed before ``cutoff``, except each
@@ -170,6 +173,28 @@ def update_running(job_id: str, attempts: int, *, at: datetime, **changes: objec
             JobRecord.attempts == attempts,
         )
         .values(**changes, updated_at=at)
+        .execution_options(**_NO_SYNC)
+    )
+    return _count(statement)
+
+
+def defer_running(job_id: str, attempts: int, *, run_after: datetime, at: datetime) -> int:
+    """Put ``job_id`` back in the queue with its attempt given back, only while it is
+    ``running`` with exactly ``attempts``; the row count (0 when the claim was lost)."""
+    statement = (
+        update(JobRecord)
+        .where(
+            JobRecord.id == job_id,
+            JobRecord.status == str(JobStatus.RUNNING),
+            JobRecord.attempts == attempts,
+        )
+        .values(
+            status=str(JobStatus.QUEUED),
+            attempts=JobRecord.attempts - 1,
+            lease_until=None,
+            run_after=run_after,
+            updated_at=at,
+        )
         .execution_options(**_NO_SYNC)
     )
     return _count(statement)

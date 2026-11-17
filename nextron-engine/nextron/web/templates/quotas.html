@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Quotas and cost{% endblock %}
+{% block content %}
+<h1>Quotas and cost</h1>
+<p class="quota-note">{{ never_blocked }}</p>
+<p class="quota-status{% if any_stopped %} quota-status-stopped{% endif %}" role="status">{{ stopped }}</p>
+<p>Month (UTC): {{ month }}</p>
+<section aria-labelledby="ai-heading">
+<h2 id="ai-heading">AI spend</h2>
+<p class="ai-spend">{{ ai.spend }}</p>
+<p>AI calls this month: {{ ai.calls }}</p>
+{%- if ai.line %}
+<p class="quota-warning">{{ ai.line }}</p>
+{%- endif %}
+</section>
+<section aria-labelledby="quotas-heading">
+<h2 id="quotas-heading">Quotas</h2>
+<table class="quota-table">
+<thead>
+<tr><th scope="col">Quota</th><th scope="col">Used</th><th scope="col">Monthly quota</th><th scope="col">State</th></tr>
+</thead>
+<tbody>
+{%- for row in quotas %}
+<tr><td>{{ row.label }}</td><td class="number">{{ row.used }}</td><td class="number">{{ row.limit }}</td><td>{{ row.state }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+</section>
+<section aria-labelledby="usage-heading">
+<h2 id="usage-heading">Usage this month</h2>
+{%- if usage %}
+<table class="quota-table">
+<thead>
+<tr><th scope="col">Provider</th><th scope="col">Operation</th><th scope="col">SKU</th><th scope="col">Calls</th><th scope="col">Failed</th><th scope="col">Units</th></tr>
+</thead>
+<tbody>
+{%- for row in usage %}
+<tr><td>{{ row.provider }}</td><td>{{ row.operation }}</td><td>{{ row.sku }}</td><td class="number">{{ row.calls }}</td><td class="number">{{ row.failed }}</td><td class="number">{{ row.units }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p>{{ no_usage }}</p>
+{%- endif %}
+</section>
+<p>Quotas and the AI budget are set on the <a href="/settings">Settings page</a> (Budget and limits).</p>
+{% endblock %}

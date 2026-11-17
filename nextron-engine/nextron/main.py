@@ -48,12 +48,26 @@ lane only, priority 90, ``max_runtime`` 3 minutes, retry limit 5,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
 ``notifications`` tables and sends each Telegram alert as a ``send_alert`` job. Its Telegram
 port is ``functools.partial(build_role_adapter, "telegram", AdapterContext(config, secrets,
-clock), units=units)``, built on the first send, never when the app is built. The registry
+clock, meter), units=units)``, built on the first send, never when the app is built. The registry
 needs the handler, the handler needs ``Notify``, ``Notify`` needs the queue and the queue needs
 the registry: ``build_job_types(alerts=lambda: notify)`` breaks the cycle, with ``notify`` bound
 just below it. The runner's dead-job sweep (``DeadJobAlerts(notify)``, ``nextron.app.ops.api``)
 raises the ``job_dead`` alert for every dead job, and the dashboard (``create_app(...,
 notify=notify)``) shows the notifications and dismisses them.
+
+**Metering and the budget (AD-8, AD-9, FR-57).** ``build_app`` builds one ``UsageMeter(units,
+clock, after_record=lambda: check_usage(units, budget))`` (``nextron.db.metering``, the
+``UsageMeterPort``), the only writer of ``api_usage`` and ``ai_usage``, and hands it to every
+HTTP adapter: ``GoogleOAuthClient(meter=meter)`` and, through ``AdapterContext.meter``,
+``TelegramAlert(c.secrets, meter=c.meter)``. Each adapter records every request it attempts;
+each record commits in its own unit of work. One ``Budget(clock, meter, notify)``
+(``nextron.app.ops.api``) reads the month's usage against the quotas and the AI budget: the
+Quotas and cost page shows ``budget.status()`` (``create_app(..., budget=budget)``), and after
+each record the meter calls ``check_usage(units, budget)``, which runs ``budget.check()`` in a
+unit of work of its own inside a fresh ``contextvars.Context()`` and raises each threshold's
+dashboard notice once a month. The meter needs the hook, the hook needs ``budget`` and
+``budget`` needs the meter: the lambda breaks the cycle, with ``budget`` bound just below it.
+Building the app builds no adapter or HTTP client and records nothing.
 
 **Triggers (AD-10).** ``build_triggers(job_types)`` is the trigger registry: the only code that
 constructs ``Triggers`` or calls ``register_trigger``. It ships empty and frozen, so the
@@ -97,10 +111,10 @@ one-time code, its ``Credentials``, which store the external credentials, and it
 all of them share one ``SystemClock``; and its handlers open their units of work through
 ``units``. Tests inject the secrets and the clock.
 
-**Google OAuth (AD-12, AD-14).** ``GoogleAccess`` gets ``GoogleOAuthClient()``, which builds its
-HTTP client only on its first call to Google; ``LoopbackListener``, the class, which builds one
-listener per consent flow; ``LocalClientFiles()``; the environment; ``browser``, which defaults
-to ``open_in_browser`` (``webbrowser.open``, looked up when it is called); and
+**Google OAuth (AD-12, AD-14).** ``GoogleAccess`` gets ``GoogleOAuthClient(meter=meter)``, which
+builds its HTTP client only on its first call to Google; ``LoopbackListener``, the class, which
+builds one listener per consent flow; ``LocalClientFiles()``; the environment; ``browser``,
+which defaults to ``open_in_browser`` (``webbrowser.open``, looked up when it is called); and
 ``functools.partial(read_sink_allowlist, units)``, read only outside ``prod``. Building the app
 therefore constructs no HTTP client, no listener and no browser. Tests inject ``google_oauth``
 and ``browser`` (or build ``GoogleAccess`` themselves with fakes).
@@ -109,9 +123,9 @@ and ``browser`` (or build ``GoogleAccess`` themselves with fakes).
 (``SinkRole``) is registered once in ``ROLE_ADAPTERS`` as a ``RoleAdapter(name, role,
 adapter_type, build)``, and built only by ``build_role_adapter(name, context, units=units)``,
 the one function that reads ``ROLE_ADAPTERS``. It looks the name up (``LookupError`` unless it
-is registered exactly once), calls ``build(AdapterContext(config, secrets, clock))``, and checks
-that the result is an ``adapter_type`` that implements its role's port (``TypeError``
-otherwise). In ``prod`` it returns that adapter. Anywhere else
+is registered exactly once), calls ``build(AdapterContext(config, secrets, clock, meter))``,
+and checks that the result is an ``adapter_type`` that implements its role's port
+(``TypeError`` otherwise). In ``prod`` it returns that adapter. Anywhere else
 (``nextron.domain.sink.sink_applies``) it returns the adapter wrapped in its role's sink
 (``nextron.adapters.sink``: ``MailSink`` or ``AlertSink``), which records to
 ``<data dir>\\sink`` and reads the allowlist through ``read_sink_allowlist`` on every send. A
@@ -165,11 +179,12 @@ from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import DashboardEntry, DeadJobAlerts, Heartbeat
+from nextron.app.ops.api import Budget, DashboardEntry, DeadJobAlerts, Heartbeat
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
+from nextron.db.metering import UsageMeter
 from nextron.db.migrations import DatabaseStateError, ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
@@ -189,6 +204,7 @@ from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.mail import MailPort
 from nextron.ports.secrets import SecretsPort
+from nextron.ports.usage_meter import UsageMeterPort
 from nextron.startup_checks import (
     CheckResult,
     Probes,
@@ -258,17 +274,19 @@ def build_app(
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
     grants; one clock, the system clock unless injected, serves them and the settings. Google
-    is reached through ``google_oauth`` (``GoogleOAuthClient()`` unless injected) and the
-    consent page opens with ``browser`` (``open_in_browser`` unless injected). The job runner,
-    the scheduler and the heartbeat writer are built here and started by the app's lifespan
-    (``engine_lifespan``), never by building; ``Notify`` builds its Telegram adapter on the
-    first send."""
+    is reached through ``google_oauth`` (``GoogleOAuthClient(meter=meter)`` unless injected)
+    and the consent page opens with ``browser`` (``open_in_browser`` unless injected). The job
+    runner, the scheduler and the heartbeat writer are built here and started by the app's
+    lifespan (``engine_lifespan``), never by building; ``Notify`` builds its Telegram adapter
+    on the first send. The usage meter records each adapter's requests and, after each record,
+    runs the budget's threshold check (``check_usage``)."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
+    meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
     google = GoogleAccess(
         secrets,
         clock,
-        oauth=google_oauth if google_oauth is not None else GoogleOAuthClient(),
+        oauth=google_oauth if google_oauth is not None else GoogleOAuthClient(meter=meter),
         listen=LoopbackListener,
         files=LocalClientFiles(),
         browser=browser if browser is not None else open_in_browser,
@@ -278,9 +296,10 @@ def build_app(
     job_types = build_job_types(alerts=lambda: notify)  # notify is bound just below
     queue = JobQueue(clock, job_types)
     telegram = functools.partial(
-        build_role_adapter, "telegram", AdapterContext(config, secrets, clock), units=units
+        build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
+    budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
     scheduler = Scheduler(units, queue, build_triggers(job_types))
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
@@ -294,9 +313,22 @@ def build_app(
         credentials=Credentials(secrets, clock),
         google=google,
         notify=notify,
+        budget=budget,
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )
+
+
+def check_usage(units: Units, budget: Budget) -> None:
+    """The usage meter's ``after_record`` hook: ``budget.check()`` in a unit of work of its own,
+    inside a fresh ``contextvars.Context()``, so it works whatever unit of work the recording
+    adapter's caller has open."""
+
+    def run() -> None:
+        with units.open():
+            budget.check()
+
+    contextvars.Context().run(run)
 
 
 def build_job_types(*, alerts: Callable[[], handlers.AlertSending]) -> JobTypes:
@@ -358,12 +390,13 @@ class SinkRole(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AdapterContext:
-    """What a role adapter's ``build`` may use: the bootstrap config, the environment's secrets
-    and the clock."""
+    """What a role adapter's ``build`` may use: the bootstrap config, the environment's secrets,
+    the clock and the usage meter."""
 
     config: BootstrapConfig
     secrets: SecretsPort
     clock: Clock
+    meter: UsageMeterPort
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,7 +424,9 @@ class RoleAdapter:
 # Story 1.12 added Telegram; Stories 6.x and 7.9 add the others. Only build_role_adapter reads
 # it.
 ROLE_ADAPTERS: tuple[RoleAdapter, ...] = (
-    RoleAdapter("telegram", SinkRole.ALERT, TelegramAlert, lambda c: TelegramAlert(c.secrets)),
+    RoleAdapter(
+        "telegram", SinkRole.ALERT, TelegramAlert, lambda c: TelegramAlert(c.secrets, meter=c.meter)
+    ),
 )
 
 ROLE_PORTS: Final[Mapping[SinkRole, type]] = MappingProxyType(

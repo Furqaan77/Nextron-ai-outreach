@@ -17,17 +17,21 @@ import threading
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 
+import nextron.adapters.telegram as telegram_adapter
 from nextron import main
 from nextron.app.notify.api import Notify
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
+from nextron.db.metering import UsageMeter
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
+from nextron.domain.budget import ApiCall
 from nextron.domain.job import Lane
 from nextron.domain.settings_schema import Key
 from nextron.jobs.runner import Runner
@@ -36,8 +40,10 @@ from nextron.ports.alert import AlertMessage
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
+from tests.live_guard import allow_live_constructor
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+JOB = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
 EXPECTED_THREADS = [
     "nextron-job-bulk-1",
     "nextron-job-heartbeat",
@@ -206,12 +212,113 @@ def test_the_built_notify_sends_telegram_alerts_through_the_role_adapter(
 
     assert runner.run_one(Lane.REALTIME) is True
 
-    assert calls == [(("telegram", AdapterContext(config, secrets, clock)), {"units": units})]
-    [(args, _)] = calls
+    [(args, kwargs)] = calls
+    assert (args[0], kwargs) == ("telegram", {"units": units})
     context = args[1]
+    assert isinstance(context, AdapterContext)
     assert context.secrets is secrets and context.clock is clock and context.config is config
+    assert isinstance(context.meter, UsageMeter)
     assert port.sent == [AlertMessage("-1001234567890", "Job dead: x, attempts: 1")]
     assert raw_query(units, "SELECT status FROM alerts") == [("sent",)]
+
+
+# Metering wiring ----------------------------------------------------------------------------------
+
+TELEGRAM_TOKEN = "123456789:AAHk3Wq9Zr5Lp2Xc8Vn4Bm7Ty1Ju6Gd0Fs"
+CHAT = "-1001234567890"
+
+
+class NullMeter:
+    """A broken wiring's meter: it takes every record and keeps none."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+    def record(self, call: object) -> None:
+        del call
+
+    def snapshot(self, now: datetime) -> Any:
+        raise AssertionError("not read here")
+
+
+@pytest.mark.parametrize("wiring", ["real", "broken"])
+def test_a_telegram_send_through_the_built_notify_writes_one_api_usage_row(
+    wiring: str, units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json={"ok": True, "result": {"message_id": 7}})
+
+    allow_live_constructor(monkeypatch, "nextron.main", "telegram")  # the real registration
+    monkeypatch.setattr(
+        telegram_adapter,
+        "default_http_client",
+        lambda: httpx2.Client(transport=httpx2.MockTransport(answer)),
+    )
+    if wiring == "broken":
+        monkeypatch.setattr(main, "UsageMeter", NullMeter)
+    runners = spy(monkeypatch, "Runner")
+    notifies = spy(monkeypatch, "Notify")
+    clock, secrets = FrozenClock(T), InMemorySecrets("test")
+    secrets.write("telegram/bot_token", TELEGRAM_TOKEN)
+    main.build_app(load_bootstrap(), units=units, secrets=secrets, clock=clock)
+    [runner], [notify] = runners, notifies
+    with units.open():
+        Setup(clock).save({"alert_chat_id": CHAT, "sink_allowlist": CHAT})  # sink passes it
+
+    @use_case
+    def raise_alert() -> None:
+        with current().transaction():
+            notify.alert("job_dead", JOB, "Job dead: x, attempts: 1", [Channel.TELEGRAM])
+
+    with units.open():
+        raise_alert()
+    assert runner.run_one(Lane.REALTIME) is True
+
+    assert len(requests) == 1  # the real adapter sent it, through the sink
+    assert raw_query(units, "SELECT status FROM alerts") == [("sent",)]
+    rows = raw_query(units, "SELECT provider, operation, sku, units, ok, error_code FROM api_usage")
+    if wiring == "real":
+        assert rows == [("telegram", "send_message", None, 1, 1, None)]
+    else:
+        assert rows == []  # the check fails when the meter isn't the built one
+
+
+@pytest.mark.parametrize("wiring", ["real", "broken"])
+def test_a_record_over_a_quota_adds_its_notification_through_the_built_meter(
+    wiring: str, units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if wiring == "broken":
+        monkeypatch.setattr(main, "check_usage", lambda units, budget: None)
+    meters = spy(monkeypatch, "UsageMeter")
+    clients = spy(monkeypatch, "GoogleOAuthClient")
+    build(units)
+    [meter], [client] = meters, clients
+    assert client._meter is meter  # the Google client records through the same meter
+
+    meter.record(ApiCall("hunter", "find", ok=True, count=50))  # 100 units: 50 credits
+
+    assert raw_query(units, "SELECT provider, units FROM api_usage") == [("hunter", 100)]
+    notices = raw_query(units, "SELECT kind, subject, text FROM notifications")
+    if wiring == "real":
+        assert notices == [
+            (
+                "quota_reached",
+                "hunter:2026-11",
+                "Hunter quota reached: enrichment stopped (50 of 50 credits used in 2026-11)",
+            )
+        ]
+    else:
+        assert notices == []  # the check fails when the hook isn't wired
+
+
+def test_building_the_app_records_nothing(units: UnitOfWorkFactory) -> None:
+    build(units)
+
+    assert raw_query(units, "SELECT COUNT(*) FROM api_usage") == [(0,)]
+    assert raw_query(units, "SELECT COUNT(*) FROM ai_usage") == [(0,)]
 
 
 def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_stops_them(

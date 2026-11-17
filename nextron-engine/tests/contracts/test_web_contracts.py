@@ -156,6 +156,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/credentials/google/remove",
         "/notifications",
         "/notifications/dismiss",
+        "/quotas",
     ]
     assert async_route_handlers(app) == []
 
@@ -268,6 +269,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /settings",
         "GET /credentials",
         "GET /credentials/google/grant/{grant}",
+        "GET /quotas",
     ):
         assert route in str(caught.value)
     for route in (
@@ -444,6 +446,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /settings",
         "GET /credentials",
         "GET /credentials/google/grant/{grant}",
+        "GET /quotas",
     ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
     for route in (
@@ -551,6 +554,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "locked.html",
         "macros.html",
         "notifications.html",
+        "quotas.html",
         "settings.html",
         "settings_form.html",
     ]

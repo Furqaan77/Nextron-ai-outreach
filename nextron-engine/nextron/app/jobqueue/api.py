@@ -30,6 +30,11 @@ status change follows the Job machine (``nextron.domain.job.transition``) and ap
   tried, up to ``MAX_CLAIM_CANDIDATES`` (10) per call. ``Claim(job, max_runtime)`` is what the
   runner holds.
 - ``@use_case complete(claim) -> bool``: ``running`` to ``done``, lease cleared.
+- ``@use_case defer(claim) -> bool``: the handler returned ``DEFERRED`` (the budget refused its
+  work). ``running`` back to ``queued`` with ``run_after = now + DEFER_DELAY`` (1 h), the lease
+  cleared and the attempt given back (``attempts - 1``), so a deferral never uses a retry and
+  never makes a job ``dead``; the ``deferred`` event is appended. It logs ``job_deferred``
+  (INFO).
 - ``@use_case fail(claim, error) -> JobStatus | None``: the error is retryable when it is an
   ``AdapterError`` with ``retryable``; ``after_failure`` picks ``retry`` (``queued``, with
   ``run_after = now + retry_delay(attempts)``), ``fail`` or ``exhaust`` (``dead``). Either way
@@ -45,10 +50,10 @@ status change follows the Job machine (``nextron.domain.job.transition``) and ap
 - ``@use_case purge_done() -> int``: deletes ``done`` rows last changed more than 30 days ago,
   except each type's newest ``done`` row; never a ``dead`` one. It returns the count.
 
-**The fence.** ``complete``, ``fail``, ``keep``'s renewal and ``release`` change a job only
-while it is ``running`` with the claim's ``attempts``. A run whose claim was lost (reaped or
-released meanwhile) changes nothing: ``complete`` returns ``False``, ``fail`` ``None``, and
-both log ``job_claim_lost``.
+**The fence.** ``complete``, ``defer``, ``fail``, ``keep``'s renewal and ``release`` change a
+job only while it is ``running`` with the claim's ``attempts``. A run whose claim was lost
+(reaped or released meanwhile) changes nothing: ``complete`` and ``defer`` return ``False``,
+``fail`` ``None``, and all three log ``job_claim_lost``.
 
 **error_text(error)** is ``"<code>: <message>"`` for an ``AdapterError`` or ``DomainError`` and
 ``"<type qualname>: <str(error)>"`` for anything else, then ``redact``-ed and cut to 500
@@ -57,8 +62,8 @@ characters.
 **Logs** carry ``job_id``, ``job_type``, ``lane``, ``attempts`` and ``code`` (the error's code,
 or else its class name), never a payload value or ``last_error`` text, and are written after
 the transaction commits: ``job_retry_scheduled`` (WARNING), ``job_dead`` (ERROR, every move to
-``dead``), ``job_claim_lost``, ``job_lease_expired`` and ``job_released`` (WARNING), and
-``jobs_purged`` (INFO, with ``count``, only when it is above 0).
+``dead``), ``job_claim_lost``, ``job_lease_expired`` and ``job_released`` (WARNING),
+``job_deferred`` (INFO) and ``jobs_purged`` (INFO, with ``count``, only when it is above 0).
 """
 
 import logging
@@ -74,6 +79,7 @@ from nextron.db.uow import command, current, use_case
 from nextron.domain.errors import DomainError
 from nextron.domain.job import (
     CREATION,
+    DEFER_DELAY,
     DONE_RETENTION,
     GLOBAL_SCOPE,
     MAX_ERROR_LENGTH,
@@ -116,6 +122,7 @@ JOB_DEAD: Final = "job_dead"
 JOB_CLAIM_LOST: Final = "job_claim_lost"
 JOB_LEASE_EXPIRED: Final = "job_lease_expired"
 JOB_RELEASED: Final = "job_released"
+JOB_DEFERRED: Final = "job_deferred"
 JOBS_PURGED: Final = "jobs_purged"
 
 log = logging.getLogger(__name__)
@@ -358,6 +365,25 @@ class JobQueue:
         if change is None:
             log.warning(JOB_CLAIM_LOST, extra=_job_fields(job))
             return False
+        return True
+
+    @use_case
+    def defer(self, claim: Claim) -> bool:
+        """Put the claimed job back in the queue ``DEFER_DELAY`` from now, with its attempt
+        given back; ``False`` when the claim was lost."""
+        now = self._clock.now()
+        job = claim.job
+        change = transition(JobStatus.RUNNING, JobEvent.DEFER)
+        with current().transaction():
+            count = jobs_repo.defer_running(
+                job.id, job.attempts, run_after=now + DEFER_DELAY, at=now
+            )
+            if count == 1:
+                _record(job.id, JobStatus.RUNNING, change, now)
+        if count != 1:
+            log.warning(JOB_CLAIM_LOST, extra=_job_fields(job))
+            return False
+        log.info(JOB_DEFERRED, extra=_job_fields(job))
         return True
 
     @use_case

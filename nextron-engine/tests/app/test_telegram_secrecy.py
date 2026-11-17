@@ -29,6 +29,7 @@ from sqlalchemy import Engine
 
 from nextron.adapters.telegram import TelegramAlert
 from nextron.app.ops.api import DeadJobAlerts
+from nextron.db.metering import UsageMeter
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
 from nextron.domain.job import Lane
@@ -44,6 +45,7 @@ from tests.app.test_credential_secrecy import (
 )
 from tests.asgi import Reply
 from tests.dashboard import FORM, Dashboard, form
+from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
 
 TOKEN = "1234567890:Qm7Zr2Vx9Lk4Tw8Np3Hs"
@@ -152,10 +154,11 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
         logging.getLogger(name).setLevel(SDK_LEVEL)
     secrets = InMemorySecrets()
     transport = Transport()
-    port = RecordingPort(
-        TelegramAlert(secrets, http=httpx2.Client(transport=httpx2.MockTransport(transport)))
-    )
-    dashboard = Dashboard(units=units, secrets=secrets, alert=port)
+    clock = FrozenClock()
+    meter = UsageMeter(units, clock)  # the real meter: the token reaches no api_usage row either
+    client = httpx2.Client(transport=httpx2.MockTransport(transport))
+    port = RecordingPort(TelegramAlert(secrets, meter=meter, http=client))
+    dashboard = Dashboard(units=units, secrets=secrets, clock=clock, alert=port)
     cookie = dashboard.open_session()
     token = dashboard.csrf_token(cookie)
     replies: list[Reply] = []
@@ -184,6 +187,13 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             sink_allowlist="",
             bulk_threads="",
             alert_chat_id=CHAT,
+            quota_hunter_credits="",
+            quota_prospeo_credits="",
+            quota_places_enterprise="",
+            quota_places_pro="",
+            quota_job_aggregator="",
+            ai_budget_monthly="",
+            ai_budget_alert_pct="",
         ),
     )
     assert saved.status == 200 and "Saved." in saved.text
@@ -228,6 +238,8 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
         "unknown",
     ]
     assert len(transport.requests) > len(BEHAVIOURS)  # the resends and retries really ran
+    # the real meter recorded every attempted request, one api_usage row each
+    assert query(db_engine, "SELECT COUNT(*) FROM api_usage") == [(len(transport.requests),)]
     assert all(TOKEN in str(request.url) for request in transport.requests)  # it was used
     assert port.errors  # and failed on every failure path
     last_errors = [
@@ -253,7 +265,7 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
         assert error_leaks(port.errors, value) == []
         assert not [text for text in last_errors if value in text]
         tables, column_leaks = database_leaks(db_engine, value)
-        assert {"alerts", "notifications", "jobs", "events"} <= set(tables)
+        assert {"alerts", "notifications", "jobs", "events", "api_usage"} <= set(tables)
         assert column_leaks == []
         assert file_leaks(tmp_path, value) == []
 

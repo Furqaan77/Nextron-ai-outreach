@@ -43,6 +43,9 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it dismisses
   through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the area again
   in a read-only one.
+- ``GET /quotas`` (``quotas_page``, ``@personal_data(False)``): the Quotas and cost page
+  (UX-DR28), rendered from ``budget.status()`` (the ``ops`` service's ``Budget``) through
+  ``nextron.web.quotas_page``, and linked from the Settings page; see that module.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -88,7 +91,7 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import DashboardEntry
+from nextron.app.ops.api import Budget, DashboardEntry
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
@@ -105,6 +108,7 @@ from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
 from nextron.web import google_page as google_rows
+from nextron.web import quotas_page as quota_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
 from nextron.web.forms import (
@@ -235,6 +239,7 @@ def create_app(
     credentials: Credentials,
     google: GoogleAccess,
     notify: Notify,
+    budget: Budget,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -243,7 +248,7 @@ def create_app(
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``credentials`` the external credentials
     and ``google`` the Google client and grants (both in Credential Manager, not the database);
-    ``notify`` dismisses notifications.
+    ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -492,6 +497,12 @@ def create_app(
             notify.dismiss(notification_id)
         with units.open(read_only=True):
             return notification_list(request)
+
+    @app.get("/quotas", name="quotas_page")
+    @personal_data(False)  # usage rows hold codes and counts, never personal data
+    def quotas_page(request: Request) -> HTMLResponse:
+        context = quota_rows.page_context(budget.status())
+        return page(request, quota_rows.PAGE_TEMPLATE, **context)
 
     require_declared(app)
     require_route_rules(app)

@@ -21,6 +21,9 @@ through the Telegram Bot API's ``sendMessage`` over ``httpx2``, the ``alert`` ro
 adapter; live constructor ``default_http_client``). ``ai`` is reserved.
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
-port calls, whatever the transport raises or answers, and never carries a secret into an error:
-``tests/contracts/test_adapter_boundary.py`` proves it for each one.
+port calls, whatever the transport raises or answers, and never carries a secret into an error.
+It also takes a required keyword-only ``meter`` (``UsageMeterPort``, FR-57) and records exactly
+one ``ApiCall`` for every HTTP request it attempts, whatever the outcome (``ok``, or the
+``AdapterError``'s code, recorded before the error is re-raised); a call refused before any
+request records nothing. ``tests/contracts/test_adapter_boundary.py`` proves both for each one.
 """

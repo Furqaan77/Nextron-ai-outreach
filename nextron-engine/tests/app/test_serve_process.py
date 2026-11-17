@@ -114,6 +114,17 @@ def heartbeat_rows(path: Path) -> list[tuple[str, int, str, str]]:
         reader.close()
 
 
+def usage_counts(path: Path) -> tuple[int, int]:
+    """How many ``api_usage`` and ``ai_usage`` rows the running engine's database holds."""
+    reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        [(api,)] = reader.execute("SELECT COUNT(*) FROM api_usage").fetchall()
+        [(ai,)] = reader.execute("SELECT COUNT(*) FROM ai_usage").fetchall()
+        return int(api), int(ai)
+    finally:
+        reader.close()
+
+
 def _read(tmp_path: Path) -> str:
     return (tmp_path / "serve.log").read_text(encoding="utf-8", errors="replace")
 
@@ -238,7 +249,9 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0005_1_12_notify"
+    assert HEAD == "0006_1_13_metering"
+    # no adapter or HTTP client was built, so no external call was made or recorded
+    assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # no alert was raised or sent: nothing built the Telegram adapter or reached the sink
     assert not [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]
     assert not (data_dir / "sink").exists()
