@@ -76,14 +76,22 @@ adds a subscriber registers its owner command there, in the order AD-3 lists. So
 the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
 Lead's Contacts move to the survivor), with ``SystemClock()`` when no clock is given.
 
-**The CSV import (Story 2.3).** ``build_app`` builds one ``LeadImports(clock,
-Discovery(clock, Pipeline(clock)), Research(clock), EmailValidatorSyntax())``
+**The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
+``LeadImports(clock, Discovery(clock, Pipeline(clock)), research, EmailValidatorSyntax())``
 (``nextron.app.discovery.api``; the syntax adapter is ``nextron.adapters.email_syntax``,
 offline) and hands it to the dashboard (``create_app(..., lead_imports=...)``) for the
 ``/leads/import`` page.
 
-**Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery)`` is the job
-type registry: the only
+**Contact Markets (Story 3.2).** ``build_app`` builds one ``ContactMarkets(clock, research,
+queue)`` (``nextron.app.research.api``): the ``resolve_contact_markets`` job calls its
+``backfill``, and the lifespan's startup step, ``queue_contact_markets(units,
+contact_markets)``, runs its ``queue_backfill`` in a unit of work of its own (inside a fresh
+``contextvars.Context()``) at each engine start, so the one-off job is queued while any Contact
+is unresolved. ``build_job_types(..., contact_markets=lambda: contact_markets)`` breaks the
+registry cycle as for ``backups``.
+
+**Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
+contact_markets)`` is the job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -92,9 +100,12 @@ minutes, retry limit 5, ``handlers.send_alert(alerts)``, group ``other``: the pa
 have none for alerts), ``backup_db`` (Story 1.16: the bulk lane only, priority 80,
 ``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``) and
 ``restore_test`` (Story 1.18: the bulk lane only, priority 70, ``max_runtime`` 30 minutes, retry
-limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``) and ``check_recovery``
+limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``), ``check_recovery``
 (Story 1.19: the realtime lane only, priority 85, ``max_runtime`` 10 minutes, retry limit 2,
-``handlers.check_recovery(recovery)``, group ``backup``).
+``handlers.check_recovery(recovery)``, group ``backup``) and ``resolve_contact_markets`` (Story
+3.2: the bulk lane only, priority 40, ``max_runtime`` 30 minutes, retry limit 3,
+``handlers.resolve_contact_markets(contact_markets)``, group ``other``; a one-off with no
+trigger).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -255,12 +266,17 @@ Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. 
 external service.
 
 **The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer,
-recovery_runner.startup)`` to ``create_app``, so all three start when the server starts and stop
-when it stops, in whichever process serves the app (the reload worker included). Building the
-app starts nothing. Startup first runs the recovery steps' startup pass (``recovery_startup``)
-through ``asyncio.to_thread``; if it raises (``recovery_state`` can't be read or written), the
-server doesn't start: Uvicorn exits 3, and ``serve`` reports ``server_start_failed`` and exits 2,
-which fails closed. Then it runs ``runner.start`` through ``asyncio.to_thread``, then ``scheduler.start()`` on the event
+recovery_runner.startup, startup=...)`` to ``create_app``, so all three start when the server
+starts and stop when it stops, in whichever process serves the app (the reload worker
+included). Building the app starts nothing. Startup first runs the recovery steps' startup pass
+(``recovery_startup``) through ``asyncio.to_thread``; if it raises (``recovery_state`` can't be
+read or written), the server doesn't start: Uvicorn exits 3, and ``serve`` reports
+``server_start_failed`` and exits 2, which fails closed. Next it runs the ``startup`` step
+(``queue_contact_markets``) through ``asyncio.to_thread``; an exception there is logged as
+``startup_step_failed`` (ERROR, with the exception's type only) and never stops the engine. The
+recovery pass goes first so that a start it refuses writes nothing else, and so the backfill
+is queued against the state recovery left. Then it runs ``runner.start`` through
+``asyncio.to_thread``, then ``scheduler.start()`` on the event
 loop (APScheduler needs the running loop), then ``writer.start`` through ``asyncio.to_thread``.
 Shutdown runs in reverse: ``writer.stop`` (to a thread), ``await scheduler.stop()``, then
 ``runner.stop`` (to a thread), which waits up to 15 s for running handlers and then releases
@@ -478,7 +494,7 @@ from nextron.app.playbook.api import CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
-from nextron.app.research.api import Research
+from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Credentials,
@@ -520,6 +536,7 @@ from nextron.domain.backup import (
 from nextron.domain.ai import RouteSpec
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
+from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
@@ -717,7 +734,10 @@ def build_app(
     offline ``EmailValidatorSyntax``. The ``RecoveryRunner`` runs the recovery steps of
     ``recovery_steps`` (``build_recovery_steps()`` unless injected) at startup, before the
     runner, and from the ``check_recovery`` job while recovery mode is on. ``Sending``
-    registers the Sending Inboxes panel's inboxes, for ``config.env``."""
+    registers the Sending Inboxes panel's inboxes, for ``config.env``. ``ContactMarkets``
+    resolves the Contacts stored before Story 3.2 (the ``resolve_contact_markets`` job), which
+    the lifespan's startup step (``queue_contact_markets``, after the recovery startup pass)
+    queues while any Contact is unresolved."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -736,12 +756,13 @@ def build_app(
         Recovery(clock),
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
-    # notify, backups and restore_tests are bound just below
+    # notify, backups, restore_tests and contact_markets are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
         restore_tests=lambda: restore_tests,
         recovery=lambda: recovery_runner,
+        contact_markets=lambda: contact_markets,
     )
     queue = JobQueue(clock, job_types)
     telegram = functools.partial(
@@ -758,6 +779,8 @@ def build_app(
         clock, build_local_backups(config, clock), notify=notify, queue=queue, offpc=offpc
     )
     restore_tests = build_restore_tests(config, clock, offpc, notify, queue)
+    research = Research(clock)
+    contact_markets = ContactMarkets(clock, research, queue)
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
     triggers = build_triggers(
@@ -800,12 +823,30 @@ def build_app(
         backups=backups,
         restore_tests=restore_tests,
         lead_imports=LeadImports(
-            clock, Discovery(clock, Pipeline(clock)), Research(clock), EmailValidatorSyntax()
+            clock, Discovery(clock, Pipeline(clock)), research, EmailValidatorSyntax()
         ),
         sending=Sending(clock, env=config.env),
         units=units,
-        lifespan=engine_lifespan(runner, scheduler, writer, recovery_runner.startup),
+        lifespan=engine_lifespan(
+            runner,
+            scheduler,
+            writer,
+            recovery_runner.startup,
+            startup=functools.partial(queue_contact_markets, units, contact_markets),
+        ),
     )
+
+
+def queue_contact_markets(units: Units, contact_markets: ContactMarkets) -> None:
+    """The engine's startup step (Story 3.2): ``contact_markets.queue_backfill()`` in a unit of
+    work of its own, inside a fresh ``contextvars.Context()``, so the one-off
+    ``resolve_contact_markets`` job is queued while any Contact is unresolved."""
+
+    def run() -> None:
+        with units.open():
+            contact_markets.queue_backfill()
+
+    contextvars.Context().run(run)
 
 
 def check_usage(units: Units, budget: Budget) -> None:
@@ -826,13 +867,15 @@ def build_job_types(
     backups: Callable[[], handlers.BackingUp],
     restore_tests: Callable[[], handlers.RestoreTesting],
     recovery: Callable[[], handlers.RecoveryChecking],
+    contact_markets: Callable[[], handlers.MarketBackfilling],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
     returns the ``notify`` service that ``send_alert`` jobs call, ``backups`` the ``ops``
     service's ``Backups`` that ``backup_db`` jobs call, ``restore_tests`` its
-    ``RestoreTests`` that ``restore_test`` jobs call, and ``recovery`` the
-    ``RecoveryRunner`` that ``check_recovery`` jobs call."""
+    ``RestoreTests`` that ``restore_test`` jobs call, ``recovery`` the ``RecoveryRunner`` that
+    ``check_recovery`` jobs call, and ``contact_markets`` the ``research`` service's
+    ``ContactMarkets`` that ``resolve_contact_markets`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -883,6 +926,19 @@ def build_job_types(
             retry_limit=2,  # the trigger fires every minute while recovery mode is on
             handler=handlers.check_recovery(recovery),
             group=JobGroup.BACKUP,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RESOLVE_CONTACT_MARKETS_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=40,
+            # a one-off: every Contact stored before Story 3.2, 200 per transaction
+            max_runtime=timedelta(minutes=30),
+            retry_limit=3,
+            handler=handlers.resolve_contact_markets(contact_markets),
+            group=JobGroup.OTHER,
         )
     )
     job_types.freeze()
@@ -1052,16 +1108,26 @@ def engine_lifespan(
     scheduler: Scheduler,
     writer: HeartbeatWriter,
     recovery_startup: Callable[[], None],
+    *,
+    startup: Callable[[], None] | None = None,
 ) -> Lifespan:
     """The app's lifespan: run the recovery steps' startup pass (``recovery_startup``, on a
-    worker thread; if it raises, the server doesn't start), then start the runner (on a worker
+    worker thread; if it raises, the server doesn't start), then ``startup`` (on a worker
+    thread; an exception is logged as ``startup_step_failed`` and never stops the engine), then
+    start the runner (on a worker
     thread), the scheduler (on the event loop) and the heartbeat writer (on a worker thread)
     when the server starts, and stop them in reverse when it stops. Each part that started is
-    stopped even when a later start, or the server, failed."""
+    stopped even when a later start, or the server, failed. The recovery pass goes first: a
+    start it refuses writes nothing else, and ``startup`` sees the state recovery left."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(recovery_startup)  # before the runner: a failure stops the start
+        if startup is not None:
+            try:
+                await asyncio.to_thread(startup)
+            except Exception as error:  # noqa: BLE001 - a startup step never stops the engine
+                log.error("startup_step_failed", extra={"error": type(error).__name__})
         async with contextlib.AsyncExitStack() as started:
             await asyncio.to_thread(runner.start)
             started.push_async_callback(asyncio.to_thread, runner.stop)

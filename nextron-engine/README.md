@@ -848,6 +848,13 @@ Society, the SRA, Chambers, Legal 500, Trustpilot, Checkatrade, BBB), a company 
 country; a Segment that doesn't exist (even when a default is chosen: a
 typo shouldn't land a firm in the wrong playbook); or no Segment and no default.
 
+**Blocked by Market (Story 3.2).** Right after the country check, a row whose country is valid
+but has no enabled Market (see [Markets](#markets); today `CA`, `DE` and every country other
+than `US` and `GB`) is **blocked**: it creates no Lead and no Contact, and it is counted apart
+from the rejected rows with the reason "Country CA isn't an enabled Market". "Enabled" is the
+Market's `enabled` flag. With no Market stored, every row is blocked, so run `nextron seed sync`
+before the first import.
+
 An accepted row with a Contact name or email adds a Contact to the Lead through
 `Research.add_contact(source=csv)`. A Contact cell that fails its check is dropped and the row
 is noted, while the rest imports: an email that `normalize_email` or the syntax check refuses,
@@ -855,8 +862,9 @@ a LinkedIn URL that isn't a `linkedin.com/in/` profile, a name or role over 200 
 holding control characters, or a name with no letters or digits. A row with Contact cells but neither a name nor a valid email
 gets no Contact and a note.
 
-**The summary** shows the imported, merged and rejected counts, each rejected row (number,
-organization, reason) and each imported row with notes. Every CSV text shows escaped, inside an
+**The summary** shows the imported, merged, rejected and blocked-by-Market counts, each rejected
+row (number, organization, reason), each row blocked by Market (number, organization, reason)
+and each imported row with notes. Every CSV text shows escaped, inside an
 `untrusted` block. A refused import (a bad origin, an empty, non-UTF-8 or invalid file, a
 missing required column, too many rows, an unknown default Segment) writes nothing and shows the
 reason by its field, keeping what was typed. A file over 5 MB is discarded unread, so the form
@@ -870,7 +878,9 @@ is safe: rows already imported are merged and their Contacts match, so nothing i
 **Contacts (`contacts`, owner `research`, migration `0015_2_3_contacts_provenance`).** A
 Contact belongs to one Lead and has a name or an email (or both), an optional role and
 LinkedIn URL (normalised, stored as a source and never fetched), a Primary flag (false until
-Story 2.10 picks one), and `tz` and Market, NULL until Epic 3 sets them. Contacts are
+Story 2.10 picks one), its office location (`office_country` and `office_region`, when a source
+gives one), and its Market and `tz` with the basis of each (see [Contact Markets and
+timezones](#contact-markets-and-timezones)). Contacts are
 deduplicated within their Lead: a candidate matches the first Contact with the same normalised
 email, else the first with the same normalised name (`normalize_name`). A match only fills what
 the Contact lacks and never overwrites; a different email on the match is kept, and the new one
@@ -891,17 +901,84 @@ assignment appends an `events` row (entity `contacts`, actor `system:research`, 
 every address an `address` record: the source kind (`csv`, `website`, `signal_inbox`,
 `referral`, `replier`, `operator`, `pattern`, `finder` or `eligibility_basis`), the detail (for
 a CSV, the list's origin), the retrieval time and, on an `address` record, the address and its
-class at the time. A later source that fills a name, role or LinkedIn URL adds one more
-`contact` record. The eligibility-basis fields (`basis_rule`, `basis_campaign_id`, `lia_ref`,
-`lia_date`, `basis_recorded_at`) stay NULL until Epic 3. Read them with
+class at the time. A later source that fills a name, role, LinkedIn URL or office location adds
+one more `contact` record. The Contact's first `contact` record holds the notes of its Market
+and timezone (Story 3.2; see below). The eligibility-basis fields (`basis_rule`,
+`basis_campaign_id`, `lia_ref`, `lia_date`, `basis_recorded_at`) stay NULL until Epic 3. Read
+them with
 `queries.research.provenance(contact_id)`. A row without a Contact records its origin only
 through the Lead's creation event (`created_from_csv`).
 
 **Personal data.** A Contact's name and role and a record's detail and notes are `redact`; the
 email and a record's address are `keep_hash`, so suppression and dedupe still match after an
-erasure; the LinkedIn URL is `null`. No log line or `events` row holds a CSV cell, the origin,
-an email address or the file name: the import logs `lead_import_finished` (counts),
+erasure; the LinkedIn URL and the office location (`office_country`, `office_region`) are
+`null`; the Market and timezone bases are `none`. No log line or `events` row holds a CSV cell,
+the origin, an email address, a note, a location or the file name: the import logs
+`lead_import_finished` (the imported, merged, rejected, noted and blocked counts),
 `lead_import_refused` (`field`) and `lead_import_stopped` (`at_row`, the error's type).
+
+### Contact Markets and timezones
+
+Each Contact has its own Market and IANA timezone (FR-2, AD-11, Story 3.2), so the UK and
+blocked-country rules apply to the person, not only to the firm. `research` resolves a Contact
+in the same transaction as every write that can change it: `Research.add_contact` (a new
+Contact, or a match it fills anything on) and `reparent_lead` (a merge moves
+Contacts to a Lead whose country may differ). Later paths that change an address, an office
+location or a Lead outside `add_contact` (Stories 2.10, 2.13, 2.14 and 2.16) call
+`Research.resolve_market(contact_id)` in their transaction.
+
+**The rules** (`nextron/domain/contact_market.py`, pure). The *place* is the office location
+when the Contact has one, otherwise the Lead's country. "Enabled" means a stored Market with
+`enabled: true` (`market_for_country`).
+
+| Step | When | Market | `market_basis` |
+|---|---|---|---|
+| 1 | the address is on a country-code domain (`cctld_country`) outside the enabled Markets (`.de`, `.ca`, `.io`), whatever the place | none | `cctld_outside_markets` |
+| 2 | no place: no office location and no Lead country | none | `location_unknown` |
+| 3 | the place isn't in an enabled Market (an office in Toronto, a Lead in `CA`) | none | `location_outside_markets` |
+| 4 | the address's country-code domain points to another enabled Market than the place (a US office with a `.co.uk` address) | the stricter one: more of no cold email, free webmail blocked, a privacy line, legal forms checked (so the UK); a tie gives none | `conflict_stricter` |
+| 5 | otherwise | the place's Market | `office_location` or `lead_country` |
+
+A Contact with a Market gets a timezone from the **place's** Market (in a conflict, the place's
+own Market, not the stricter one), in this order, recorded in `tz_basis`:
+
+1. `office_location`: the office's zone, `Europe/London` for `GB` or the state's zone from the
+   vendored US state table (`nextron/domain/geodata/us_state_timezones.csv`: the 50 states and
+   DC, each with its most populous zone; read by `nextron/domain/geo.py`, SHA-256 pinned);
+2. `lead_hq`: the Lead's headquarters zone when it is in the place's country (Story 2.9 supplies
+   it; until then this step never applies);
+3. `us_unknown_fallback`: for a Market with an `unknown_send_window` (the US), its
+   `unknown_timezone`, `America/New_York`, so sending can narrow the Send Window to 11:00-17:00
+   Eastern;
+4. `market_default`: the Market's `default_timezone`.
+
+A Contact without a Market has `tz` NULL and `tz_basis` `no_market`. Every resolved Contact has
+both bases, and the checks keep `market_id` and `tz` set together.
+
+**Notes.** The Contact's first `contact` Provenance Record holds the Market note, then the
+timezone note, where there is one, joined by a newline: "Market taken from the Lead's country;
+office location unknown", the conflict ("The office location and the email's country-code
+domain point to different Markets (United States and United Kingdom); the stricter United
+Kingdom Market applies"), each blocking basis ("No Market: the email address is on the
+country-code domain .de, outside the enabled Markets"), and each timezone fallback ("Timezone
+falls back to America/New_York: the US state is unknown, so the Send Window narrows to
+11:00-17:00"). They hold codes, zones, Market names and windows only. A resolution writes the
+Contact only when its Market, timezone or a basis changed, and the notes only when they changed;
+then it also clears the notes of the Contact's other `contact` records, so only the first (by
+retrieval time, then id) holds them, even when a later source gives an earlier retrieval time.
+It appends no `events` row.
+
+**Contacts stored before Story 3.2.** At each engine start, after the recovery steps' startup
+pass (see [Restore and recovery mode](#restore-and-recovery-mode)) and before the job runner
+starts, the lifespan's startup step queues the one-off `resolve_contact_markets` job (bulk lane, payload
+`{"v": 1}`, key `resolve_contact_markets:global:1`, so a repeat is absorbed) while any Contact
+has no `market_basis`. The job resolves them 200 per transaction. With no Market stored it does
+nothing, and the next start queues it again. A failed startup step is logged as
+`startup_step_failed` (ERROR, the error's type only) and never stops the engine.
+
+**Not yet.** Editing a Market (`seed sync`) doesn't re-resolve stored Contacts; Story 3.6 checks
+live that a Contact's Market is still enabled. The CSV has no office-location columns, so CSV
+Contacts resolve from the Lead's country; Story 2.10 passes office locations from team pages.
 
 **Email syntax.** The syntax check is `EmailSyntaxPort` (`nextron/ports/email_syntax.py`),
 implemented by `nextron.adapters.email_syntax.EmailValidatorSyntax` over email-validator with
@@ -1319,6 +1396,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0016_1_19_recovery` | `recovery_state`: one row per restore (`mode`, the times, the restored file's name, the safety copy's name, one status per recovery step), its six checks (`mode`, one per step, `ck_recovery_state_outcome`), the partial unique index `uq_recovery_state_on` (at most one `on` row) and `ix_recovery_state_restored_at` (see [Restore and recovery mode](#restore-and-recovery-mode)) | `ops` |
 | `0017_4_3_company_facts` | `company_facts`: append-only fact versions (unique on `fact_id` and `version`; three checks; three triggers refusing a delete, a reused id or version, and any change but one retraction) (see [Approved Company Facts](#approved-company-facts)) | `playbook` |
 | `0018_4_7_sending_inboxes` | `sending_domains` (unique `domain`, `ck_sending_domains_not_brand`) and `sending_inboxes` (unique `address`, a foreign key to `sending_domains.id` with no cascade, `status` default `connecting`, `ck_sending_inboxes_status` and `ck_sending_inboxes_not_brand`) (see [Sending Inboxes](#sending-inboxes)) | `sending` |
+| `0019_3_2_contact_markets` | rebuilds `contacts` (from 0015's exact table, which 0016 to 0018 leave unchanged, every row, check, foreign key and index kept) with four nullable columns after `market_id`: `market_basis`, `tz_basis`, `office_country` and `office_region`, and six checks (`ck_contacts_market_basis`, `ck_contacts_tz_basis`, `ck_contacts_resolved`, `ck_contacts_market_tz`, `ck_contacts_office_country`, `ck_contacts_office_region`) (see [Contact Markets and timezones](#contact-markets-and-timezones)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -1397,8 +1475,10 @@ table (owner `jobqueue`, AD-10), so it survives a crash or a restart, never runs
 and retries only what may succeed later. The rules live in `nextron/domain/job.py`, the service
 in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. The
 job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)),
-`backup_db` (see [Backups](#backups)), `restore_test` (see [The restore test](#the-restore-test))
-and `check_recovery` (see [Restore and recovery mode](#restore-and-recovery-mode));
+`backup_db` (see [Backups](#backups)), `restore_test` (see [The restore test](#the-restore-test)),
+`check_recovery` (see [Restore and recovery mode](#restore-and-recovery-mode)) and the one-off
+`resolve_contact_markets` (bulk lane, priority 40, 30 minutes, retry limit 3,
+group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones));
 the stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry

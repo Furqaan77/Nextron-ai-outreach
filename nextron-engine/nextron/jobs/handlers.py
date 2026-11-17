@@ -29,6 +29,11 @@ handler runs in.
   passes ``lambda: recovery_runner``). It calls ``checker().check()`` once, which runs the
   pending recovery steps and ends recovery mode when they are all settled, and returns
   ``None``. The payload is a trigger's tick, ``{"v": 1}``.
+- ``resolve_contact_markets(markets)`` (Story 3.2): the one-off ``resolve_contact_markets``
+  job's handler. ``markets`` returns the ``research`` service's ``ContactMarkets``
+  (``nextron.main`` passes ``lambda: contact_markets``, which breaks the cycle registry,
+  handler, ``ContactMarkets``, queue, registry); the handler calls ``markets().backfill()``
+  once and returns ``None``. The payload (``{"v": 1}``) holds nothing else.
 """
 
 from collections.abc import Callable
@@ -110,3 +115,20 @@ def check_recovery(checker: Callable[[], RecoveryChecking]) -> Handler:
         checker().check()
 
     return handle_check_recovery
+
+
+class MarketBackfilling(Protocol):
+    """What ``resolve_contact_markets`` needs of the ``research`` service's ``ContactMarkets``."""
+
+    def backfill(self) -> int: ...
+
+
+def resolve_contact_markets(markets: Callable[[], MarketBackfilling]) -> Handler:
+    """The ``resolve_contact_markets`` job's handler: resolve the Contacts stored before Story
+    3.2 through ``markets()``."""
+
+    def handle_resolve_contact_markets(job: Job) -> None:
+        del job  # the payload holds only its version
+        markets().backfill()
+
+    return handle_resolve_contact_markets

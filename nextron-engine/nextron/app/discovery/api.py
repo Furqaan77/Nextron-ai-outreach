@@ -45,11 +45,13 @@ rows are ``nextron.domain.lead_import``'s.
 
   1. **Checks before any write.** ``check_origin`` cleans the origin, then ``check_file_size``
      refuses an empty file or one over 5 MiB. One transaction reads
-     ``queries.setup.segments()``; a ``default_segment`` key (``None`` for no default) that
-     isn't stored raises ``ImportRefused("default_segment", ...)``. Then ``plan_import`` runs,
-     outside any transaction, with each Segment's casefolded key and name and
-     ``email_syntax.is_valid`` (the ``EmailSyntaxPort``, offline). An ``ImportRefused`` means
-     nothing was written; it is logged as ``lead_import_refused`` with its ``field``.
+     ``queries.setup.segments()`` and ``queries.setup.markets()``; a ``default_segment`` key
+     (``None`` for no default) that isn't stored raises ``ImportRefused("default_segment",
+     ...)``. Then ``plan_import`` runs, outside any transaction, with each Segment's casefolded
+     key and name, ``email_syntax.is_valid`` (the ``EmailSyntaxPort``, offline) and the country
+     codes of the ``enabled`` Markets (Story 3.2: a row of any other country is blocked). An
+     ``ImportRefused`` means nothing was written; it is logged as ``lead_import_refused`` with
+     its ``field``.
   2. **Rows.** ``imported_at`` is the clock's now. The plan's rows run in batches of
      ``BATCH_ROWS`` (200), each in its own ``uow.transaction()``, so no write lock lasts long.
      Each row runs ``discovery.upsert_lead(identity, LeadSource.CSV)``: ``created`` counts as
@@ -62,11 +64,12 @@ rows are ``nextron.domain.lead_import``'s.
      ``at_row`` is the failed batch's first row number. Importing the same file again is safe:
      its committed rows are merged and their Contacts match.
 
-  ``ImportSummary(imported, merged, rejected, noted)`` holds the two counts, every
+  ``ImportSummary(imported, merged, rejected, noted, blocked)`` holds the two counts, every
   ``RejectedRow`` of the plan (all of them, even after a stop: they import nothing either way),
-  and a ``NotedRow(number, label, notes)`` for each committed row with notes, both in row
-  order. A finished import logs ``lead_import_finished`` with the four counts. No log line holds
-  a CSV cell, the origin or the file name.
+  a ``NotedRow(number, label, notes)`` for each committed row with notes, and every
+  ``BlockedRow`` of the plan (Story 3.2, like the rejected rows), each in row order. A finished
+  import logs ``lead_import_finished`` with the five counts. No log line holds a CSV cell, the
+  origin or the file name.
 """
 
 import logging
@@ -86,6 +89,7 @@ from nextron.domain.lead_import import (
     DEFAULT_SEGMENT_UNKNOWN,
     FIELD_DEFAULT_SEGMENT,
     NOTE_EMAIL_DROPPED,
+    BlockedRow,
     ImportRefused,
     RejectedRow,
     check_file_size,
@@ -252,12 +256,14 @@ class NotedRow:
 @dataclass(frozen=True, slots=True)
 class ImportSummary:
     """What an import did: how many rows created a Lead (``imported``) and how many matched one
-    (``merged``), the rejected rows and the imported rows with notes, in row order."""
+    (``merged``), the rejected rows, the imported rows with notes and the rows blocked by
+    Market, in row order."""
 
     imported: int
     merged: int
     rejected: tuple[RejectedRow, ...]
     noted: tuple[NotedRow, ...]
+    blocked: tuple[BlockedRow, ...]
 
 
 class ImportStopped(RuntimeError):
@@ -311,6 +317,7 @@ class LeadImports:
             check_file_size(request.data)
             with uow.transaction():
                 stored = setup_queries.segments()
+                markets = setup_queries.markets()
             default_id: str | None = None
             if request.default_segment is not None:
                 chosen = [found.id for found in stored if found.key == request.default_segment]
@@ -322,6 +329,11 @@ class LeadImports:
                 segments=_segment_lookup(stored),
                 default_segment_id=default_id,
                 email_ok=self._email_syntax.is_valid,
+                enabled_countries=frozenset(
+                    market.definition.country_code
+                    for market in markets
+                    if market.definition.enabled
+                ),
             )
         except ImportRefused as refused:
             log.info("lead_import_refused", extra={"field": refused.field})
@@ -357,12 +369,14 @@ class LeadImports:
                     "lead_import_stopped",
                     extra={"at_row": at_row, "error": type(error).__name__},
                 )
-                summary = ImportSummary(imported, merged, plan.rejected, tuple(noted))
+                summary = ImportSummary(
+                    imported, merged, plan.rejected, tuple(noted), plan.blocked
+                )
                 raise ImportStopped(summary, at_row) from error
             imported += created
             merged += len(batch) - created
             noted.extend(batch_noted)
-        summary = ImportSummary(imported, merged, plan.rejected, tuple(noted))
+        summary = ImportSummary(imported, merged, plan.rejected, tuple(noted), plan.blocked)
         log.info(
             "lead_import_finished",
             extra={
@@ -370,6 +384,7 @@ class LeadImports:
                 "merged": merged,
                 "rejected": len(plan.rejected),
                 "noted": len(noted),
+                "blocked": len(plan.blocked),
             },
         )
         return summary

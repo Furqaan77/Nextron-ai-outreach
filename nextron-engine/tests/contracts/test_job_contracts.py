@@ -4,9 +4,11 @@
   ``JobTypes`` or calls ``register_job_type``, and only ``build_triggers()`` there constructs
   ``Triggers`` or calls ``register_trigger``, under any alias.
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
-  (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18, and
-  ``check_recovery``, Story 1.19, with their settings); the triggers are exactly ``backup_db``'s
-  and ``restore_test``'s daily schedules and ``check_recovery``'s ``Every`` with ``active``.
+  (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
+  ``check_recovery``, Story 1.19, and ``resolve_contact_markets``, Story 3.2, with their
+  settings); the triggers are exactly ``backup_db``'s and ``restore_test``'s daily schedules
+  and ``check_recovery``'s ``Every`` with ``active``: the one-off ``resolve_contact_markets``
+  has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -308,11 +310,23 @@ class RecordingRestoreTests:
         return None
 
 
+class RecordingContactMarkets:
+    """Stands in for the ``research`` service's ``ContactMarkets``."""
+
+    def __init__(self) -> None:
+        self.backfills = 0
+
+    def backfill(self) -> int:
+        self.backfills += 1
+        return 0
+
+
 def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> None:
     alerts = RecordingAlerts()
     backups = RecordingBackups()
     restore_tests = RecordingRestoreTests()
     recovery = RecordingRecovery()
+    contact_markets = RecordingContactMarkets()
     calls: list[str] = []
 
     def lookup() -> RecordingAlerts:
@@ -331,16 +345,27 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         calls.append("recovery looked up")
         return recovery
 
+    def contact_markets_lookup() -> RecordingContactMarkets:
+        calls.append("contact markets looked up")
+        return contact_markets
+
     job_types = main.build_job_types(
         alerts=lookup,
         backups=backups_lookup,
         restore_tests=restore_tests_lookup,
         recovery=recovery_lookup,
+        contact_markets=contact_markets_lookup,
     )
 
     assert isinstance(job_types, JobTypes)
     assert job_types.frozen
-    assert job_types.names() == ("send_alert", "backup_db", "restore_test", "check_recovery")
+    assert job_types.names() == (
+        "send_alert",
+        "backup_db",
+        "restore_test",
+        "check_recovery",
+        "resolve_contact_markets",
+    )
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,
@@ -398,11 +423,26 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
     recovery_tick = Job("01JD0000000000000000000005", "check_recovery", Lane.REALTIME, {"v": 1}, 1)
     assert check_recovery.handler(recovery_tick) is None  # type: ignore[func-returns-value]
     assert (calls[-1], recovery.checks) == ("recovery looked up", 1)
+    resolve = job_types.get("resolve_contact_markets")
+    assert (
+        resolve.default_lane,
+        resolve.lanes,
+        resolve.priority,
+        resolve.max_runtime,
+        resolve.retry_limit,
+        resolve.group,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 40, timedelta(minutes=30), 3, JobGroup.OTHER)
+    resolve_job = Job(
+        "01JD0000000000000000000006", "resolve_contact_markets", Lane.BULK, {"v": 1}, 1
+    )
+    assert resolve.handler(resolve_job) is None  # type: ignore[func-returns-value]
+    assert (calls[-1], contact_markets.backfills) == ("contact markets looked up", 1)
     main_registry = main.build_job_types(
         alerts=lookup,
         backups=backups_lookup,
         restore_tests=restore_tests_lookup,
         recovery=recovery_lookup,
+        contact_markets=contact_markets_lookup,
     )
     assert main_registry is not job_types  # a new registry each time
 
@@ -413,6 +453,7 @@ def test_build_triggers_registers_the_backup_the_restore_test_then_the_recovery_
         backups=RecordingBackups,
         restore_tests=RecordingRestoreTests,
         recovery=RecordingRecovery,
+        contact_markets=RecordingContactMarkets,
     )
     schedule = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
     restore_schedule = lambda: DailyRun(time(4, 15), "UTC")  # noqa: E731

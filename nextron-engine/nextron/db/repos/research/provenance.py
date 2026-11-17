@@ -9,7 +9,12 @@ the running use case's transaction. It checks nothing; ``nextron.app.research`` 
 - ``insert(...) -> id``: a new record; ``notes`` and the eligibility-basis fields are NULL;
 - ``for_contact(contact_id)``: the Contact's records, by ``retrieved_at``, then ``id``;
 - ``for_lead(lead_id)`` (Story 2.4): the records of every Contact of the Lead, by
-  ``retrieved_at``, then ``id``, in one statement joining ``contacts``.
+  ``retrieved_at``, then ``id``, in one statement joining ``contacts``;
+- ``first_contact_record(contact_id)``: the Contact's first ``contact``-subject record (by
+  ``retrieved_at``, then ``id``), or ``None``;
+- ``set_notes(record_id, notes)``: sets the record's ``notes`` (``None`` clears them);
+- ``clear_other_contact_notes(contact_id, keep_id)``: clears the ``notes`` of every other
+  ``contact``-subject record of the Contact that holds some, in one statement.
 """
 
 from dataclasses import dataclass
@@ -17,10 +22,12 @@ from datetime import date, datetime
 
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import select
+from sqlalchemy import update as update_rows
 
 from nextron.db.models.base import new_id
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.uow import current
+from nextron.domain.contacts import ProvenanceSubject
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,3 +115,41 @@ def for_lead(lead_id: str) -> tuple[StoredProvenance, ...]:
         .order_by(ProvenanceRecord.retrieved_at, ProvenanceRecord.id)
     )
     return tuple(StoredProvenance(*row) for row in current().session.execute(statement))
+
+
+def first_contact_record(contact_id: str) -> StoredProvenance | None:
+    """The first ``contact``-subject record of the Contact ``contact_id`` (by ``retrieved_at``,
+    then ``id``), or ``None``."""
+    statement = (
+        select(*_COLUMNS)
+        .where(
+            ProvenanceRecord.contact_id == contact_id,
+            ProvenanceRecord.subject == str(ProvenanceSubject.CONTACT),
+        )
+        .order_by(ProvenanceRecord.retrieved_at, ProvenanceRecord.id)
+        .limit(1)
+    )
+    row = current().session.execute(statement).one_or_none()
+    return None if row is None else StoredProvenance(*row)
+
+
+def set_notes(record_id: str, notes: str | None) -> None:
+    """Set the ``notes`` of the record ``record_id``."""
+    current().session.execute(
+        update_rows(ProvenanceRecord).where(ProvenanceRecord.id == record_id).values(notes=notes)
+    )
+
+
+def clear_other_contact_notes(contact_id: str, keep_id: str) -> None:
+    """Clear the ``notes`` of every ``contact``-subject record of the Contact ``contact_id``
+    other than ``keep_id`` that holds some."""
+    current().session.execute(
+        update_rows(ProvenanceRecord)
+        .where(
+            ProvenanceRecord.contact_id == contact_id,
+            ProvenanceRecord.subject == str(ProvenanceSubject.CONTACT),
+            ProvenanceRecord.id != keep_id,
+            ProvenanceRecord.notes.is_not(None),
+        )
+        .values(notes=None)
+    )

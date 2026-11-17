@@ -70,6 +70,11 @@ def no_recovery() -> Any:
     raise AssertionError("no check_recovery job runs in these tests")
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 def enrich(job: Job) -> None:
     return None
 
@@ -193,6 +198,7 @@ def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
         backups=no_backups,
         restore_tests=no_restore_tests,
         recovery=no_recovery,
+        contact_markets=no_contact_markets,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
@@ -292,6 +298,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
             backups=no_backups,
             restore_tests=no_restore_tests,
             recovery=no_recovery,
+            contact_markets=no_contact_markets,
         ),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
@@ -308,7 +315,10 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("check_recovery", None),
             ),
         ),
-        GroupRuns(JobGroup.OTHER, (LastRun("send_alert", None),)),
+        GroupRuns(
+            JobGroup.OTHER,
+            (LastRun("send_alert", None), LastRun("resolve_contact_markets", None)),
+        ),
     )
     assert report.readiness == READINESS
     assert report.issues == ()

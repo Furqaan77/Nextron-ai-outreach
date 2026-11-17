@@ -2,7 +2,8 @@
 through ``Dashboard(units=...)`` on a temporary database at head with the real subscriber
 registry, the HTML parsed: the form, a successful import's summary, refusals by field (the
 origin and default kept, or reset after a body over the limit), a stopped import, escaping of
-every CSV text, the field rules, ``no-store``, CSRF and the home page's link."""
+every CSV text, the field rules, ``no-store``, CSRF and the home page's link. With the shipped
+Markets seeded: the "Blocked by Market" count and table (Story 3.2), labels escaped."""
 
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -21,8 +22,10 @@ from nextron.domain.lead_import import (
     NOTE_BAD_EMAIL,
     ORIGIN_LENGTH,
     REASON_DENIED,
+    BlockedRow,
     RejectedRow,
 )
+from nextron.domain.markets import validate_markets
 from nextron.domain.segments import validate_segments
 from nextron.web.csrf import SECURITY_CHECK_FAILED
 from nextron.web.forms import MALFORMED_FORM, MAX_UPLOAD_BODY
@@ -32,6 +35,7 @@ from tests.fakes.clock import FrozenClock
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
+SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME
 ORIGIN = "Law Society directory, Manchester"
 HEADER = "Organization name,Website,Country"
 HOSTILE = '<script>alert(1)</script><b hx-post="/x">'
@@ -118,8 +122,11 @@ def real_units(db_engine: Engine) -> UnitOfWorkFactory:
     clock = FrozenClock(T)
     found = UnitOfWorkFactory(db_engine, main.build_subscribers(clock=clock))
     segments = validate_segments(seed_yaml.parse(SHIPPED.read_text(encoding="utf-8")))
+    markets = validate_markets(seed_yaml.parse(SHIPPED_MARKETS.read_text(encoding="utf-8")))
     with found.open():
         Setup(clock).sync_segments(segments)
+    with found.open():
+        Setup(clock).sync_markets(markets)
     return found
 
 
@@ -224,6 +231,56 @@ def test_a_successful_import_shows_the_summary_above_a_fresh_form(
     assert count(db_engine, "contacts") == 2
 
 
+def test_rows_blocked_by_market_show_their_count_and_table(
+    dashboard: Dashboard, cookie: bytes, db_engine: Engine
+) -> None:
+    data = csv_bytes(
+        HEADER + ",Contact name",
+        "Maple Law,maple.ca,CA,Ann",
+        "LinkedIn,https://www.linkedin.com/company/x,GB,",
+        "Berg Recht,berg.de,de,",
+        "Smith Law,smith.co.uk,GB,Jo",
+    )
+
+    page = Parsed(post(dashboard, cookie, data).text)
+
+    assert "Imported: 1. Merged: 0. Rejected: 1. Blocked by Market: 2." in page.text
+    rejected, blocked = page.tables
+    assert rejected == [["Row", "Organization", "Reason"], ["3", "LinkedIn", REASON_DENIED]]
+    assert blocked == [
+        ["Row", "Organization", "Reason"],
+        ["2", "Maple Law", "Country CA isn't an enabled Market"],
+        ["4", "Berg Recht", "Country DE isn't an enabled Market"],
+    ]
+    assert "Rows blocked by Market" in page.text
+    assert count(db_engine, "leads") == 1
+    assert count(db_engine, "contacts") == 1
+
+
+def test_no_blocked_row_shows_a_zero_count_and_no_table(
+    dashboard: Dashboard, cookie: bytes
+) -> None:
+    page = Parsed(post(dashboard, cookie, csv_bytes(HEADER, "A,a.com,GB")).text)
+
+    assert "Rejected: 0. Blocked by Market: 0." in page.text
+    assert "Rows blocked by Market" not in page.text
+    assert page.tables == []
+
+
+def test_a_blocked_rows_label_renders_escaped(dashboard: Dashboard, cookie: bytes) -> None:
+    data = csv_bytes(HEADER, f'"{HOSTILE.replace(chr(34), chr(34) * 2)}",maple.ca,CA')
+
+    reply = post(dashboard, cookie, data)
+
+    assert "<script>" not in reply.text
+    assert '<b hx-post="/x">' not in reply.text
+    page = Parsed(reply.text)
+    assert [text for _, text in page.untrusted] == [HOSTILE]
+    assert all("hx-disable" in attrs for attrs, _ in page.untrusted)
+    [blocked] = page.tables
+    assert blocked[1][2] == "Country CA isn't an enabled Market"
+
+
 def test_every_csv_text_renders_escaped(
     dashboard: Dashboard, cookie: bytes, db_engine: Engine
 ) -> None:
@@ -303,7 +360,11 @@ def test_a_stopped_import_shows_its_summary_and_the_stop_notice(
     dashboard: Dashboard, cookie: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     summary = ImportSummary(
-        200, 0, (RejectedRow(9, "Bad", REASON_DENIED),), (NotedRow(3, "N", (NOTE_BAD_EMAIL,)),)
+        200,
+        0,
+        (RejectedRow(9, "Bad", REASON_DENIED),),
+        (NotedRow(3, "N", (NOTE_BAD_EMAIL,)),),
+        (BlockedRow(4, "Maple", "CA"),),
     )
 
     def stop(request: object) -> ImportSummary:
@@ -317,8 +378,9 @@ def test_a_stopped_import_shows_its_summary_and_the_stop_notice(
 
     assert "Import stopped" in page.text
     assert "The import stopped at row 202" in page.text
-    assert "Imported: 200. Merged: 0. Rejected: 1." in page.text
+    assert "Imported: 200. Merged: 0. Rejected: 1. Blocked by Market: 1." in page.text
     assert page.tables[0][1] == ["9", "Bad", REASON_DENIED]
+    assert page.tables[1][1] == ["4", "Maple", "Country CA isn't an enabled Market"]
     # what was typed is kept, so the same file can be imported again
     assert page.inputs["origin"]["value"] == ORIGIN
     assert ("ops_automation", "Ops-Automation", True) in page.options

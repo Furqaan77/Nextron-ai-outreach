@@ -212,7 +212,11 @@ def trigger_problems(triggers: Triggers, job_types: JobTypes) -> list[str]:
 
 def _main_registries() -> tuple[Triggers, JobTypes]:
     job_types = main.build_job_types(
-        alerts=_never, backups=_never, restore_tests=_never, recovery=_never
+        alerts=_never,
+        backups=_never,
+        restore_tests=_never,
+        recovery=_never,
+        contact_markets=_never,
     )
     triggers = main.build_triggers(
         job_types,

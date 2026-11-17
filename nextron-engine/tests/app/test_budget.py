@@ -54,6 +54,11 @@ def no_recovery() -> Any:
     raise AssertionError("no check_recovery job runs in these tests")
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 class World:
     """A meter, a budget and notify on one database, wired as ``nextron.main`` does."""
 
@@ -67,6 +72,7 @@ class World:
             backups=no_backups,
             restore_tests=no_restore_tests,
             recovery=no_recovery,
+            contact_markets=no_contact_markets,
         )
         self.notify = Notify(
             self.clock,

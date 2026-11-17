@@ -71,6 +71,11 @@ def no_recovery() -> Any:
     raise AssertionError("no check_recovery job runs in these tests")
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 @dataclass
 class World:
     """The ``notify`` service on real units of work, its queue and its job types."""
@@ -171,6 +176,7 @@ def world_on(
         backups=no_backups,
         restore_tests=no_restore_tests,
         recovery=no_recovery,
+        contact_markets=no_contact_markets,
     )
     queue = JobQueue(clock, job_types)
     factory: Any = port if callable(port) and not isinstance(port, AlertPort) else lambda: port

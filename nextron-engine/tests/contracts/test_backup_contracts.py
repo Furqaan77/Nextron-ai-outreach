@@ -160,7 +160,11 @@ def backup_job_problems(job_types: JobTypes, name: str = "backup_db") -> list[st
 
 def _registry() -> JobTypes:
     return main.build_job_types(
-        alerts=_no_backups, backups=_no_backups, restore_tests=_no_backups, recovery=_no_backups
+        alerts=_no_backups,
+        backups=_no_backups,
+        restore_tests=_no_backups,
+        recovery=_no_backups,
+        contact_markets=_no_backups,
     )
 
 

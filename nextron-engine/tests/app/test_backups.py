@@ -86,6 +86,11 @@ def no_recovery() -> Any:
     raise AssertionError("no check_recovery job runs in these tests")
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -113,6 +118,7 @@ class World:
             backups=lambda: self.backups,
             restore_tests=no_restore_tests,
             recovery=no_recovery,
+            contact_markets=no_contact_markets,
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(
@@ -1166,6 +1172,7 @@ def test_the_backup_job_type_is_registered_as_specified() -> None:
         backups=lambda: None,  # type: ignore[arg-type,return-value]
         restore_tests=no_restore_tests,
         recovery=no_recovery,
+        contact_markets=no_contact_markets,
     )
 
     found = job_types.get("backup_db")

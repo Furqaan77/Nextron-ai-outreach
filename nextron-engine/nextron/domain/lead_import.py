@@ -14,11 +14,12 @@ that field. No reason holds a cell, the origin or the file name.
   ``Cc``, ``Cf``, ``Zl`` or ``Zp`` character. It returns the cleaned origin.
 - ``check_file_size(data)``: the file must not be empty or over ``MAX_FILE_BYTES`` (5 MiB).
 
-**``plan_import(data, *, segments, default_segment_id, email_ok) -> ImportPlan(rows,
-rejected)``.** ``segments`` maps each Segment's key and name, each whitespace-collapsed and
-casefolded, to its id;
+**``plan_import(data, *, segments, default_segment_id, email_ok, enabled_countries) ->
+ImportPlan(rows, rejected, blocked)``.** ``segments`` maps each Segment's key and name, each
+whitespace-collapsed and casefolded, to its id;
 ``default_segment_id`` is the form's default Segment's id, or ``None``; ``email_ok(address)`` is
-the syntax check (``EmailSyntaxPort.is_valid``). The file as a whole is refused
+the syntax check (``EmailSyntaxPort.is_valid``); ``enabled_countries`` holds the country codes
+of the enabled Markets (Story 3.2). The file as a whole is refused
 (``ImportRefused("file", ...)``) when:
 
 - ``check_file_size`` refuses it;
@@ -48,6 +49,12 @@ a website on a shared platform (``leads.is_shared_platform``); a country
 name (ignoring case); a blank Segment cell with no default. A blank Segment cell takes the
 default.
 
+**Blocked rows (Story 3.2, FR-2, NFR-5).** Right after the country check, a valid country that
+isn't in ``enabled_countries`` makes the row a ``BlockedRow(number, label, country)``, whose
+``reason`` is ``"Country <code> isn't an enabled Market"``. A blocked row isn't rejected, and
+it imports nothing: no Lead and no Contact. With no Market stored, every valid row is
+blocked.
+
 **Contact cells** of an accepted row: an email is ``normalize_email``'d and must pass
 ``email_ok``; a LinkedIn URL is ``normalize_linkedin_url``'d; a name and a role follow
 ``ContactCandidate``'s text rules (a name also needs a letter or digit). A cell that fails is
@@ -57,9 +64,10 @@ no Contact.
 
 **The plan.** ``ImportRow(number, label, identity, contact, notes)`` holds a ``LeadIdentity``
 built from normaliser output (the cleaned name, the Segment's id, the registrable domain and the
-country code) and ``RejectedRow(number, label, reason)`` its reason. A ``label`` is the cleaned
-name cell without its ``Cc``, ``Cf``, ``Zl`` and ``Zp`` characters, cut to ``LABEL_LENGTH``
-(100) characters; it is CSV text, so the page renders it escaped.
+country code), ``RejectedRow(number, label, reason)`` its reason and ``BlockedRow(number,
+label, country)`` its country. A ``label`` is the cleaned name cell without its ``Cc``,
+``Cf``, ``Zl`` and ``Zp`` characters, cut to ``LABEL_LENGTH`` (100) characters; it is CSV text,
+so the page renders it escaped.
 """
 
 import csv
@@ -176,6 +184,8 @@ REASON_SHARED_PLATFORM: Final = (
 REASON_BAD_COUNTRY: Final = "unknown country: use a two-letter code such as US or GB"
 REASON_UNKNOWN_SEGMENT: Final = "unknown Segment"
 REASON_NO_SEGMENT: Final = "no Segment, and no default Segment was chosen"
+# A valid country with no enabled Market (Story 3.2): the row is blocked, not rejected.
+REASON_BLOCKED: Final = "Country {country} isn't an enabled Market"
 
 # The notes on accepted rows.
 NOTE_BAD_EMAIL: Final = "the email fails the syntax check, so it was not imported"
@@ -229,11 +239,28 @@ class RejectedRow:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockedRow:
+    """A row whose valid country has no enabled Market (Story 3.2): it imports nothing. Its
+    number, its label and the country code."""
+
+    number: int
+    label: str
+    country: str
+
+    @property
+    def reason(self) -> str:
+        """``"Country <code> isn't an enabled Market"``."""
+        return REASON_BLOCKED.format(country=self.country)
+
+
+@dataclass(frozen=True, slots=True)
 class ImportPlan:
-    """The accepted rows and the rejected rows, each in row order."""
+    """The accepted rows, the rejected rows and the rows blocked by Market, each in row
+    order."""
 
     rows: tuple[ImportRow, ...]
     rejected: tuple[RejectedRow, ...]
+    blocked: tuple[BlockedRow, ...]
 
 
 def _has_refused_character(text: str) -> bool:
@@ -326,6 +353,7 @@ class _Planner:
     segments: Mapping[str, str]
     default_segment_id: str | None
     email_ok: Callable[[str], bool]
+    enabled_countries: frozenset[str]
     columns: Mapping[ImportField, int]
     width: int
 
@@ -335,7 +363,7 @@ class _Planner:
             return ""
         return _collapse(record[index])
 
-    def row(self, number: int, record: list[str]) -> ImportRow | RejectedRow:
+    def row(self, number: int, record: list[str]) -> ImportRow | RejectedRow | BlockedRow:
         name = self.cell(record, ImportField.ORGANIZATION)
         label = _label(name)
 
@@ -364,6 +392,8 @@ class _Planner:
             country_code = normalize_country_code(self.cell(record, ImportField.COUNTRY))
         except IdentityError:
             return rejected(REASON_BAD_COUNTRY)
+        if country_code not in self.enabled_countries:
+            return BlockedRow(number, label, country_code)
         segment = self.cell(record, ImportField.SEGMENT)
         if segment:
             segment_id = self.segments.get(segment.casefold())
@@ -436,6 +466,7 @@ def plan_import(
     segments: Mapping[str, str],
     default_segment_id: str | None,
     email_ok: Callable[[str], bool],
+    enabled_countries: frozenset[str],
 ) -> ImportPlan:
     """The rows of the CSV ``data``, accepted or rejected; raises ``ImportRefused("file", ...)``
     for a file that can't be imported at all. See the module docstring."""
@@ -445,15 +476,25 @@ def plan_import(
     if first is None:
         raise ImportRefused(FIELD_FILE, FILE_NO_HEADER)
     _, header = first
-    planner = _Planner(segments, default_segment_id, email_ok, _columns(header), len(header))
+    planner = _Planner(
+        segments,
+        default_segment_id,
+        email_ok,
+        frozenset(enabled_countries),
+        _columns(header),
+        len(header),
+    )
     rows: list[ImportRow] = []
     rejected: list[RejectedRow] = []
+    blocked: list[BlockedRow] = []
     for counted, (number, record) in enumerate(records, start=1):
         if counted > MAX_ROWS:
             raise ImportRefused(FIELD_FILE, FILE_TOO_MANY_ROWS)
         planned = planner.row(number, record)
         if isinstance(planned, ImportRow):
             rows.append(planned)
+        elif isinstance(planned, BlockedRow):
+            blocked.append(planned)
         else:
             rejected.append(planned)
-    return ImportPlan(tuple(rows), tuple(rejected))
+    return ImportPlan(tuple(rows), tuple(rejected), tuple(blocked))

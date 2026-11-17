@@ -3,7 +3,8 @@ FR-15, FR-51; AD-3, AD-4, AD-7) on a temporary database at head, with ``FrozenCl
 subscriber registry and ``FakeEmailSyntax``: Story 2.3's app rows of the I/O matrix (happy
 path, refused imports, rejected rows, a failing email, Contact dedup, merge, batch stop), the
 queries, and the ``contacts`` and ``provenance_records`` checks, foreign keys and indexes on raw
-writes."""
+writes. With the shipped Markets seeded: Story 3.2's rows blocked by Market (a valid country
+with no enabled Market imports nothing), and each imported Contact resolved in its batch."""
 
 import logging
 from collections.abc import Callable
@@ -51,11 +52,13 @@ from nextron.domain.lead_import import (
     REASON_NO_SEGMENT,
     REASON_SHARED_PLATFORM,
     REASON_UNKNOWN_SEGMENT,
+    BlockedRow,
     ImportRefused,
     RejectedRow,
 )
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.machines import IllegalTransition
+from nextron.domain.markets import validate_markets
 from nextron.domain.segments import validate_segments
 from tests.fakes.clock import FrozenClock
 from tests.fakes.email_syntax import FakeEmailSyntax
@@ -63,6 +66,7 @@ from tests.fakes.email_syntax import FakeEmailSyntax
 T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 STAMP = "2026-11-17T09:00:00.000000Z"
 SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
+SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME
 ORIGIN = "Law Society directory, Manchester, 2026"
 HEADER = "Organization name,Website,Country"
 TABLES = ("leads", "contacts", "provenance_records", "events")
@@ -137,7 +141,10 @@ class World:
         return {table: self.count(table) for table in TABLES}
 
     def contacts(self) -> list[dict[str, Any]]:
-        keys = "id lead_id name role email address_class linkedin_url is_primary tz market_id"
+        keys = (
+            "id lead_id name role email address_class linkedin_url is_primary tz market_id "
+            "market_basis tz_basis office_country office_region"
+        )
         rows = self.sql(f"SELECT {keys.replace(' ', ', ')} FROM contacts ORDER BY rowid")
         return [dict(zip(keys.split(), row, strict=True)) for row in rows]
 
@@ -159,6 +166,10 @@ class World:
             "FROM events WHERE entity = 'contacts' ORDER BY rowid"
         )
 
+    def market_id(self, code: str) -> str:
+        [(market_id,)] = self.sql("SELECT id FROM markets WHERE code = ?", (code,))
+        return str(market_id)
+
     def leads(self) -> list[tuple[Any, ...]]:
         return self.sql(
             "SELECT name, web_domain, country_code, segment_id, merged_into FROM leads "
@@ -174,8 +185,11 @@ def world(db_engine: Engine) -> World:
     clock = FrozenClock(T0)
     units = UnitOfWorkFactory(db_engine, main.build_subscribers(clock=clock))
     segments = validate_segments(seed_yaml.parse(SHIPPED.read_text(encoding="utf-8")))
+    markets = validate_markets(seed_yaml.parse(SHIPPED_MARKETS.read_text(encoding="utf-8")))
     with units.open():
         Setup(clock).sync_segments(segments)
+    with units.open():
+        Setup(clock).sync_markets(markets)
     discovery = Discovery(clock, Pipeline(clock))
     research = Research(clock)
     imports = LeadImports(clock, discovery, research, FakeEmailSyntax())
@@ -198,7 +212,7 @@ def test_the_happy_path(world: World) -> None:
 
     summary = world.run(data)
 
-    assert summary == ImportSummary(imported=1, merged=1, rejected=(), noted=())
+    assert summary == ImportSummary(imported=1, merged=1, rejected=(), noted=(), blocked=())
     assert world.leads() == [("Smith Law", "smith-law.co.uk", "GB", world.law, None)]
     [contact] = world.contacts()
     [lead_id] = [row[0] for row in world.sql("SELECT id FROM leads")]
@@ -211,8 +225,12 @@ def test_the_happy_path(world: World) -> None:
         "address_class": "guessed",
         "linkedin_url": None,
         "is_primary": 0,
-        "tz": None,
-        "market_id": None,
+        "tz": "Europe/London",  # Story 3.2: resolved in the batch's transaction
+        "market_id": world.market_id("uk"),
+        "market_basis": "lead_country",
+        "tz_basis": "market_default",
+        "office_country": None,
+        "office_region": None,
     }
     blank = dict.fromkeys(
         ("notes", "basis_rule", "basis_campaign_id", "lia_ref", "lia_date", "basis_recorded_at")
@@ -227,6 +245,11 @@ def test_the_happy_path(world: World) -> None:
             "retrieved_at": STAMP,
             "address_class": None,
             **blank,
+            "notes": (
+                "Market taken from the Lead's country; office location unknown\n"
+                "Timezone is the United Kingdom Market's default (Europe/London); neither the "
+                "office location nor the Lead's headquarters gave one"
+            ),
         },
         {
             "contact_id": contact["id"],
@@ -259,7 +282,7 @@ def test_reimporting_the_same_file_writes_nothing_new(world: World) -> None:
 
     summary = world.run(data)
 
-    assert summary == ImportSummary(imported=0, merged=2, rejected=(), noted=())
+    assert summary == ImportSummary(imported=0, merged=2, rejected=(), noted=(), blocked=())
     assert world.dump() == before
 
 
@@ -386,8 +409,62 @@ def test_rejected_rows_write_nothing(world: World) -> None:
             RejectedRow(10, "Extra", REASON_EXTRA_CELLS),
         ),
         noted=(),
+        blocked=(),
     )
     assert world.counts() == before
+
+
+# Row: CSV blocked (Story 3.2)
+def test_rows_blocked_by_market_write_nothing_and_the_rest_import_resolved(world: World) -> None:
+    data = csv_bytes(
+        HEADER + ",Contact name,Email",
+        "Maple Law,maple.ca,CA,Ann Lee,ann@maple.ca",
+        "Berg Recht,berg.de,de,Bo Berg,",
+        "Smith Law,smith.co.uk,GB,Jo Bell,jo@smith.co.uk",
+    )
+
+    summary = world.run(data)
+
+    assert summary == ImportSummary(
+        imported=1,
+        merged=0,
+        rejected=(),
+        noted=(),
+        blocked=(BlockedRow(2, "Maple Law", "CA"), BlockedRow(3, "Berg Recht", "DE")),
+    )
+    assert [row.reason for row in summary.blocked] == [
+        "Country CA isn't an enabled Market",
+        "Country DE isn't an enabled Market",
+    ]
+    assert world.leads() == [("Smith Law", "smith.co.uk", "GB", world.law, None)]
+    [contact] = world.contacts()
+    assert (contact["name"], contact["market_id"], contact["market_basis"]) == (
+        "Jo Bell",
+        world.market_id("uk"),
+        "lead_country",
+    )
+    assert (contact["tz"], contact["tz_basis"]) == ("Europe/London", "market_default")
+    assert world.count("provenance_records") == 2  # the GB row's contact and address records
+
+
+def test_with_no_market_stored_every_row_is_blocked(world: World) -> None:
+    world.sql("DELETE FROM markets")  # no Contact points to one yet
+    before = world.counts()
+
+    summary = world.run(csv_bytes(HEADER, "A,a.com,GB", "B,b.com,US"))
+
+    assert (summary.imported, summary.merged, summary.rejected) == (0, 0, ())
+    assert [(row.number, row.country) for row in summary.blocked] == [(2, "GB"), (3, "US")]
+    assert world.counts() == before
+
+
+def test_a_disabled_market_blocks_its_country(world: World) -> None:
+    world.sql("UPDATE markets SET enabled = 0 WHERE code = 'us'")
+
+    summary = world.run(csv_bytes(HEADER, "A,a.com,US", "B,b.co.uk,GB"))
+
+    assert summary.blocked == (BlockedRow(2, "A", "US"),)
+    assert (summary.imported, summary.rejected) == (1, ())
 
 
 def test_a_blank_segment_without_a_default_is_rejected(world: World) -> None:
@@ -402,7 +479,7 @@ def test_an_email_that_fails_the_syntax_check(world: World) -> None:
         csv_bytes(HEADER + ",Contact name,Email", 'Firm,firm.com,GB,Ann Lee,"a,b@firm.com"')
     )
 
-    assert summary == ImportSummary(1, 0, (), (NotedRow(2, "Firm", (NOTE_BAD_EMAIL,)),))
+    assert summary == ImportSummary(1, 0, (), (NotedRow(2, "Firm", (NOTE_BAD_EMAIL,)),), ())
     [contact] = world.contacts()
     assert (contact["name"], contact["email"], contact["address_class"]) == ("Ann Lee", None, None)
     assert [row["subject"] for row in world.records()] == ["contact"]
@@ -423,7 +500,7 @@ def test_contacts_are_deduplicated_within_their_lead(world: World) -> None:
 
     summary = world.run(data)
 
-    assert summary == ImportSummary(1, 3, (), (NotedRow(5, "Firm", (NOTE_EMAIL_DROPPED,)),))
+    assert summary == ImportSummary(1, 3, (), (NotedRow(5, "Firm", (NOTE_EMAIL_DROPPED,)),), ())
     [contact] = world.contacts()
     assert (contact["name"], contact["email"]) == ("Ann Lee", "ann@firm.com")
     assert len(world.contact_events()) == 1  # the email was assigned once
@@ -659,8 +736,10 @@ def test_a_failing_batch_stops_the_import_and_keeps_earlier_batches(
     monkeypatch.setattr(Research, "add_contact", command(failing))
     caplog.set_level(logging.INFO, logger="nextron.app.discovery.api")
 
+    blocked = "Maple Law,maple.ca,CA,Ann Lee,"  # row 302: blocked by Market, in no batch
+
     with pytest.raises(ImportStopped) as caught:
-        world.run(csv_bytes(HEADER + ",Contact,Email", *rows))
+        world.run(csv_bytes(HEADER + ",Contact,Email", *rows, blocked))
 
     stopped = caught.value
     assert isinstance(stopped, RuntimeError)
@@ -670,6 +749,7 @@ def test_a_failing_batch_stops_the_import_and_keeps_earlier_batches(
         merged=0,
         rejected=(),
         noted=(NotedRow(3, "Firm 3", (NOTE_BAD_EMAIL,)),),  # row 205's note was rolled back
+        blocked=(BlockedRow(302, "Maple Law", "CA"),),  # every blocked row, even after a stop
     )
     assert isinstance(stopped.__cause__, RuntimeError)
     names = [row[0] for row in world.leads()]
@@ -688,15 +768,26 @@ def test_the_finished_log_holds_counts_only(
         csv_bytes(
             HEADER + ",Contact,Email",
             "Secretfirm,secretfirm.com,GB,Plantedname,p@secretfirm.com",
+            "Plantedblocked,plantedblocked.ca,CA,Otherplanted,o@plantedblocked.ca",
         ),
         origin="Plantedorigin list",
     )
 
     [record] = [r for r in caplog.records if r.getMessage() == "lead_import_finished"]
-    counts = [getattr(record, key) for key in ("imported", "merged", "rejected", "noted")]
-    assert counts == [1, 0, 0, 0]
+    keys = ("imported", "merged", "rejected", "noted", "blocked")
+    counts = [getattr(record, key) for key in keys]
+    assert counts == [1, 0, 0, 0, 1]
     text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
-    for planted in ("Secretfirm", "secretfirm", "Plantedname", "Plantedorigin"):
+    planted_texts = (
+        "Secretfirm",
+        "secretfirm",
+        "Plantedname",
+        "Plantedorigin",
+        "Plantedblocked",
+        "plantedblocked",
+        "Otherplanted",
+    )
+    for planted in planted_texts:
         assert planted not in text
 
 

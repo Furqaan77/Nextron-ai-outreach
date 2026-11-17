@@ -50,6 +50,11 @@ def no_recovery() -> Any:
     raise AssertionError("no check_recovery job runs in these tests")
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 def fail_with_value_error(job: Job) -> None:
     raise ValueError(f"enrichment failed for job {job.id}")
 
@@ -136,6 +141,7 @@ def build_world(
         backups=no_backups,
         restore_tests=no_restore_tests,
         recovery=no_recovery,
+        contact_markets=no_contact_markets,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))  # the real, registered one

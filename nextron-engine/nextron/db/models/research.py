@@ -1,6 +1,6 @@
-"""The ``research`` service's tables (FR-14, FR-15, FR-51, AD-3, AD-7, AD-17; migration
-``0015_2_3_contacts_provenance``). Owner ``research`` writes every column
-(``nextron.db.repos.research``). No foreign key cascades.
+"""The ``research`` service's tables (FR-2, FR-14, FR-15, FR-51, AD-3, AD-7, AD-11, AD-17;
+migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). Owner
+``research`` writes every column (``nextron.db.repos.research``). No foreign key cascades.
 
 **``contacts``**: one person on a Lead.
 
@@ -11,7 +11,15 @@
   address has a class and a class has an address (``ck_contacts_email_class``);
 - ``linkedin_url`` (nullable, normalised, never fetched);
 - ``is_primary`` (server default false); ``tz`` and ``market_id``
-  (``fk_contacts_market_id_markets``), both nullable and NULL until Epic 3 sets them;
+  (``fk_contacts_market_id_markets``), both nullable: the Contact's IANA timezone and Market,
+  set together or not at all (``ck_contacts_market_tz``);
+- ``market_basis`` and ``tz_basis`` (Story 3.2, each nullable, one of
+  ``nextron.domain.contact_market.MarketBasis`` and ``TzBasis``: ``ck_contacts_market_basis``,
+  ``ck_contacts_tz_basis``), why the Market and timezone apply; both are set once the Contact is
+  resolved, or neither (``ck_contacts_resolved``);
+- ``office_country`` and ``office_region`` (Story 3.2, each nullable, two capitals): the place
+  the Contact's office is in; a region needs a country (``ck_contacts_office_country``,
+  ``ck_contacts_office_region``);
 - ``created_at`` and ``updated_at``.
 
 ``ck_contacts_identity``: a Contact has a name or an email.
@@ -35,7 +43,8 @@
 
 PII classes (``nextron.db.pii_registry``): a Contact's ``name`` and ``role`` and a record's
 ``source_detail`` and ``notes`` are ``redact``; ``email`` and a record's ``address`` are
-``keep_hash``, so suppression still matches after an erasure; ``linkedin_url`` is ``null``.
+``keep_hash``, so suppression still matches after an erasure; ``linkedin_url``,
+``office_country`` and ``office_region`` are ``null``; the bases are ``none``.
 """
 
 from datetime import date, datetime
@@ -55,6 +64,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.address_class import AddressClass
+from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
 
 TEXT_LENGTH: Final = 200  # nextron.domain.contacts.MAX_TEXT_LENGTH
@@ -67,15 +77,29 @@ SOURCE_KIND_LENGTH: Final = 32
 DETAIL_LENGTH: Final = 2048
 BASIS_RULE_LENGTH: Final = 64
 LIA_REF_LENGTH: Final = 200
+BASIS_LENGTH: Final = 32
+COUNTRY_LENGTH: Final = 2
+
+type _Values = type[AddressClass | ProvenanceSource | ProvenanceSubject | MarketBasis | TzBasis]
 
 
-def _one_of(column: str, values: type[AddressClass | ProvenanceSource | ProvenanceSubject]) -> str:
+def _one_of(column: str, values: _Values) -> str:
     return "{} IN ({})".format(column, ",".join(f"'{value}'" for value in values))
 
 
 CONTACT_CLASS_CHECK: Final = "address_class IS NULL OR " + _one_of("address_class", AddressClass)
 CONTACT_EMAIL_CLASS_CHECK: Final = "(email IS NULL) = (address_class IS NULL)"
 CONTACT_IDENTITY_CHECK: Final = "name IS NOT NULL OR email IS NOT NULL"
+CONTACT_MARKET_BASIS_CHECK: Final = "market_basis IS NULL OR " + _one_of(
+    "market_basis", MarketBasis
+)
+CONTACT_TZ_BASIS_CHECK: Final = "tz_basis IS NULL OR " + _one_of("tz_basis", TzBasis)
+CONTACT_RESOLVED_CHECK: Final = "(market_basis IS NULL) = (tz_basis IS NULL)"
+CONTACT_MARKET_TZ_CHECK: Final = "(market_id IS NULL) = (tz IS NULL)"
+CONTACT_OFFICE_COUNTRY_CHECK: Final = "office_country IS NULL OR office_country GLOB '[A-Z][A-Z]'"
+CONTACT_OFFICE_REGION_CHECK: Final = (
+    "office_region IS NULL OR (office_country IS NOT NULL AND office_region GLOB '[A-Z][A-Z]')"
+)
 SUBJECT_CHECK: Final = _one_of("subject", ProvenanceSubject)
 SOURCE_KIND_CHECK: Final = _one_of("source_kind", ProvenanceSource)
 RECORD_ADDRESS_CHECK: Final = (
@@ -93,6 +117,12 @@ class ContactRecord(Base):
         CheckConstraint(CONTACT_CLASS_CHECK, name="address_class"),
         CheckConstraint(CONTACT_EMAIL_CLASS_CHECK, name="email_class"),
         CheckConstraint(CONTACT_IDENTITY_CHECK, name="identity"),
+        CheckConstraint(CONTACT_MARKET_BASIS_CHECK, name="market_basis"),
+        CheckConstraint(CONTACT_TZ_BASIS_CHECK, name="tz_basis"),
+        CheckConstraint(CONTACT_RESOLVED_CHECK, name="resolved"),
+        CheckConstraint(CONTACT_MARKET_TZ_CHECK, name="market_tz"),
+        CheckConstraint(CONTACT_OFFICE_COUNTRY_CHECK, name="office_country"),
+        CheckConstraint(CONTACT_OFFICE_REGION_CHECK, name="office_region"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -105,6 +135,10 @@ class ContactRecord(Base):
     is_primary: Mapped[bool] = mapped_column(Boolean, server_default=text("0"))
     tz: Mapped[str | None] = mapped_column(String(TZ_LENGTH))
     market_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("markets.id"))
+    market_basis: Mapped[str | None] = mapped_column(String(BASIS_LENGTH))
+    tz_basis: Mapped[str | None] = mapped_column(String(BASIS_LENGTH))
+    office_country: Mapped[str | None] = mapped_column(String(COUNTRY_LENGTH))
+    office_region: Mapped[str | None] = mapped_column(String(COUNTRY_LENGTH))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
 
