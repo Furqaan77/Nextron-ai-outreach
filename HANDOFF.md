@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.7 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`; sprint status `review`). **Next: Story 1.8.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.8 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`; sprint status `review`). **Next: Story 1.9.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -56,7 +56,9 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 **Story 1.7 result:** a credential registry (`nextron/domain/credentials.py`, 9 credentials with keyring names such as `anthropic/api_key`), a `Credentials` service, `read_credential()` for adapters (read at call time, never cached), and a write-only `/credentials` page linked from Settings, where removing takes two steps. A planted-secret test proves values reach no response, log, DB column or file. 1960 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 7 are done. Release 2 (Epics 8–9) is 20. Release 3 (Epics 10–11) is 17.
+**Story 1.8 result:** `AlertPort` and `MailPort`, and sink adapters (`nextron/adapters/sink`) that wrap every mail and alert adapter outside `prod`. Only `sink_allowlist` recipients are delivered; everyone else goes to `<data dir>\sink\<date>.jsonl`. The allowlist is empty by default. Tests run as `NEXTRON_ENV=test`, and live adapters, the real keyring and non-loopback network all raise there. `doctor` warns if `prod` is set persistently. 2190 tests, 29 contracts.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 8 are done. Release 2 (Epics 8–9) is 20. Release 3 (Epics 10–11) is 17.
 
 ## 4. How to continue building (exact procedure)
 
