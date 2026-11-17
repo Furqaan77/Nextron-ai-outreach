@@ -25,12 +25,33 @@ first use.
 - ``zone_country(zone)``: ``GB`` for ``Europe/London``, ``US`` for any zone in the US table,
   otherwise ``None``.
 
+- ``us_state_names()`` (Story 2.9): the table's names, code to name, read-only.
+
 **``Location(country_code, region=None)``** is a place a Contact's office is in. It is frozen
 and slotted and checks itself when built: ``country_code`` is a ``str`` equal to
 ``normalize_country_code(country_code)`` (so ``gb`` and ``UK`` are refused: pass ``GB``), and
 ``region`` is ``None``, or, only when the country is ``US``, a code of the US table. A problem
 raises ``InvalidLocation(field, reason)`` (code ``invalid_location``, message
 ``"<field>: <reason>"``), never showing the value.
+
+**``place_in(text) -> Location | None``** (Story 2.9) reads the place a text (a quote from a
+Lead's website) names, for the Lead's headquarters zone. The text is normalised first
+(``nextron.domain.quotes.normalise``). It finds:
+
+- **US states.** A state code after a comma (``, XX`` with ``XX`` a code of the table, in
+  capitals, optionally followed by a ZIP: ``Chicago, IL 60601``), and ``Washington, D.C.``
+  (``Washington D.C.``, ``Washington, DC``; the comma and the dots are optional) as ``DC``. These
+  are preferred: only when the text holds none are the table's full state names looked for
+  (whole words, any case, the longest first, so ``West Virginia`` is not ``Virginia``).
+- **Great Britain.** ``United Kingdom``, ``Great Britain``, ``England``, ``Scotland``,
+  ``Wales`` and ``Northern Ireland`` (whole words, any case; ``New England`` and
+  ``New South Wales`` don't count), ``UK`` and ``U.K.`` (in capitals), or a full UK postcode in
+  capitals (``EC1A 1BB``, ``M1 1AE``; the space is optional).
+
+It gives ``Location("US", <state>)`` when it finds exactly one state and nothing British,
+``Location("GB")`` when it finds something British and no state, and ``None`` otherwise: both
+countries, two different states, or neither. It never raises on a ``str``; anything else is a
+``TypeError``.
 """
 
 import functools
@@ -43,6 +64,7 @@ from typing import Final
 
 from nextron.domain.errors import DomainError
 from nextron.domain.identity import IdentityError, normalize_country_code
+from nextron.domain.quotes import normalise
 from nextron.domain.settings_schema import timezone_names
 
 US_STATES_PATH: Final = ("geodata", "us_state_timezones.csv")
@@ -69,7 +91,13 @@ class InvalidLocation(DomainError):
 def parse_us_state_zones(text: str) -> Mapping[str, str]:
     """The US state table in ``text``, code to zone, read-only; a malformed table raises
     ``ValueError``. See the module docstring."""
+    return _parse_us_states(text)[0]
+
+
+def _parse_us_states(text: str) -> tuple[Mapping[str, str], Mapping[str, str]]:
+    """The US state table in ``text``: code to zone, and code to name."""
     zones: dict[str, str] = {}
+    names: dict[str, str] = {}
     header_seen = False
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip() or line.startswith("#"):
@@ -94,18 +122,29 @@ def parse_us_state_zones(text: str) -> Mapping[str, str]:
         if not name.strip():
             raise ValueError(f"the US state table's line {number} has a blank name")
         zones[code] = zone
+        names[code] = name
     if not header_seen:
         raise ValueError("the US state table has no header")
     if len(zones) != US_STATE_COUNT:
         raise ValueError(f"the US state table must have {US_STATE_COUNT} rows, not {len(zones)}")
-    return MappingProxyType(zones)
+    return MappingProxyType(zones), MappingProxyType(names)
+
+
+def _read_us_states() -> tuple[Mapping[str, str], Mapping[str, str]]:
+    text = resources.files(__package__).joinpath(*US_STATES_PATH).read_text(encoding="utf-8")
+    return _parse_us_states(text)
 
 
 @functools.cache
 def us_state_zones() -> Mapping[str, str]:
     """The vendored US state table, code to zone, read once; see the module docstring."""
-    text = resources.files(__package__).joinpath(*US_STATES_PATH).read_text(encoding="utf-8")
-    return parse_us_state_zones(text)
+    return _read_us_states()[0]
+
+
+@functools.cache
+def us_state_names() -> Mapping[str, str]:
+    """The vendored US state table, code to name, read once; see the module docstring."""
+    return _read_us_states()[1]
 
 
 @functools.cache
@@ -162,3 +201,74 @@ class Location:
             raise InvalidLocation("region", "is set only for a US location")
         if self.region not in us_state_zones():
             raise InvalidLocation("region", "must be a US state code (or DC)")
+
+
+# The place a text names (Story 2.9) --------------------------------------------------------------
+
+# ``Washington, D.C.`` (the comma and the dots optional) or a capital state code after a comma,
+# optionally followed by a ZIP; tried left to right, so ``Washington, DC`` is read once.
+_STATE_CODE: Final = re.compile(
+    r"(?P<dc>\bWashington,?\s*D\.?\s?C\.?(?![A-Za-z0-9]))"
+    r"|,\s*(?P<code>[A-Z]{2})(?:\s+[0-9]{5}(?:-[0-9]{4})?)?(?![A-Za-z0-9])"
+)
+_BRITISH_NAMES: Final = re.compile(
+    r"\b(?:United Kingdom|Great Britain|Northern Ireland|Scotland"
+    r"|(?<!new )England|(?<!new south )Wales)\b",
+    re.IGNORECASE,
+)
+_BRITISH_ABBREVIATIONS: Final = re.compile(r"(?<![A-Za-z0-9.])(?:UK|U\.K\.)(?![A-Za-z0-9])")
+_UK_POSTCODE: Final = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z]{1,2}[0-9][A-Z0-9]?|GIR) ?[0-9][A-Z]{2}(?![A-Za-z0-9])"
+)
+DC: Final = "DC"
+
+
+@functools.cache
+def _state_names() -> tuple[re.Pattern[str], Mapping[str, str]]:
+    """The full-name pattern (longest first, whole words, any case) and lowercased name to
+    code."""
+    codes = {name.casefold(): code for code, name in us_state_names().items()}
+    names = sorted(us_state_names().values(), key=lambda name: (-len(name), name))
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(name) for name in names) + r")\b", re.IGNORECASE
+    )
+    return pattern, MappingProxyType(codes)
+
+
+def _state_codes(text: str) -> set[str]:
+    found = set()
+    for match in _STATE_CODE.finditer(text):
+        if match.group("dc") is not None:
+            found.add(DC)
+        elif match.group("code") in us_state_zones():
+            found.add(match.group("code"))
+    return found
+
+
+def _named_states(text: str) -> set[str]:
+    pattern, codes = _state_names()
+    return {codes[match.group(0).casefold()] for match in pattern.finditer(text)}
+
+
+def _is_british(text: str) -> bool:
+    return any(
+        pattern.search(text) is not None
+        for pattern in (_BRITISH_NAMES, _BRITISH_ABBREVIATIONS, _UK_POSTCODE)
+    )
+
+
+def place_in(text: str) -> Location | None:
+    """The one place ``text`` names: a US state, Great Britain, or ``None``; see the module
+    docstring."""
+    if not isinstance(text, str):
+        raise TypeError("place_in takes a str")
+    normalised = normalise(text)
+    states = _state_codes(normalised) or _named_states(normalised)
+    british = _is_british(normalised)
+    if british and states:
+        return None  # both countries
+    if british:
+        return Location(GB)
+    if len(states) == 1:
+        return Location(US, states.pop())
+    return None  # two states, or nothing

@@ -1223,10 +1223,11 @@ it) and Primary (`Yes` or `No`), a blank showing "—"; or "No Contacts yet.". U
 Contact, its Provenance Records (FR-51): the record ("Contact", or "Address" and the address),
 the source (CSV import, Website, Signal Inbox (manual), Referral, Replier, Entered by Mac, Email
 pattern, Email finder or Eligibility basis), the detail (for a CSV, the list's origin), the
-retrieval date and the Address Class at the time; or "No Provenance Record.". Market, Tier,
-scores, Signals, Evidence, job postings, the timeline, stage actions, changing the Primary and
-the data-subject actions come with their stories (3.2 and 3.7, 2.9, 2.11, 2.15, Epics 5 and 9,
-2.10, 3.13 onwards).
+retrieval date and the Address Class at the time; or "No Provenance Record.". The header's
+**HQ timezone**, and the **Signals** and **Evidence** sections above Contacts, are Story 2.9's
+(see [Signals and Evidence](#signals-and-evidence)). Market, Tier, scores, job postings, the
+timeline, stage actions, changing the Primary and the data-subject actions come with their
+stories (3.2 and 3.7, 2.11, 2.15, Epics 5 and 9, 2.10, 3.13 onwards).
 
 A merged Lead's URL redirects (303) straight to the Lead at the end of its merge chain, following
 at most 32 merges; an id that isn't a ULID, an unknown id or a broken chain gets 404 "Lead not
@@ -1590,8 +1591,9 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 `check_recovery` (see [Restore and recovery mode](#restore-and-recovery-mode)), the one-off
 `resolve_contact_markets` (bulk lane, priority 40, 30 minutes, retry limit 3,
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
-and `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
-crawling](#website-crawling)); the stories that add work add theirs, with a thin handler in
+`enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
+crawling](#website-crawling)), and `extract_lead` (see [Signals and
+Evidence](#signals-and-evidence)); the stories that add work add theirs, with a thin handler in
 `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
@@ -2790,6 +2792,8 @@ failure, a refused connection or a 404 is final.
   domain stays findable through the merged Lead).
   Nothing changes when the Lead was merged meanwhile into a Lead with another website of its
   own.
+- A crawl that stored at least one page queues `extract_lead` (see [Signals and
+  Evidence](#signals-and-evidence)), one job per crawl run.
 - A Lead imported from CSV with a website gets its `enrich_lead` job when it is created, in the
   same transaction.
 - `purge_page_text` runs at every start and every 24 hours. It clears page text 30 days after
@@ -2800,6 +2804,95 @@ failure, a refused connection or a 404 is final.
 **Settings** (Engine section): **Pages crawled per Lead** (1 to 15, default 15) and **ATS board
 hosts** (one host per line: `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`
 and `jobs.ashbyhq.com` by default; a URL, an upper-case name or a never-fetch host is refused).
+
+## Signals and Evidence
+
+Each crawl's new or changed pages go to Claude once, and what Claude proposes becomes Evidence
+only when code has checked it against the stored pages (FR-10, FR-11, FR-57, AD-7, AD-8, AD-11,
+AD-18, NFR-24; Story 2.9). The rules are in `nextron/domain/extraction.py` and
+`nextron/domain/signals.py`; the service is `SignalExtractions` in
+`nextron/app/research/extraction.py`.
+
+**The `extract_lead` job** (bulk lane by default, or interactive; priority 45; 15 minutes;
+retry limit 3; group Enrichment on the health panel). A crawl that stored at least one page
+queues it in its own transaction, keyed `extract_lead:<lead>:<n>` where `<n>` is the Lead's
+number of crawl runs (one job per run), one site at a time (`domain:<site>`). It:
+
+1. waits an hour when the month's AI budget is spent (deferred, never failed);
+2. skips an unknown or merged Lead (`extraction_skipped` in the log);
+3. reads the active `extract_signals` tuple (see [Prompts and the active route
+   tuple](#prompts-and-the-active-route-tuple)); with none, it records a `no_activation` run;
+4. takes the Lead's pages whose text changed since its last successful extraction (all of them
+   the first time); with none, it records a `no_pages` run and makes no call;
+5. sends them in one call, after a `signal_types` block listing the Segment's quotable Signal
+   types: by page kind, then URL, sharing 180,000 characters (about 90,000 tokens at worst; a
+   long page is cut to its share, never dropped);
+6. validates every proposal and stores what passes (below), reconciles it with the Lead's
+   earlier Evidence, recomputes the headquarters zone and records an `ok` run.
+
+A refused, truncated or invalid answer, or a failed request, records that outcome and stores
+nothing; the job completes. A retryable failure (the API unavailable) records a `failed` run and
+retries; a non-retryable one (an unknown route tuple) records it and the job goes dead, which
+raises an alert. Every run is a row of `extraction_runs` (outcome, error code, pages sent and
+cut, rows stored, proposals discarded).
+
+**What is stored.** A proposal is kept only when its page was one of the pages sent, its quote
+(NFC- and whitespace-normalised) is 1 to 300 characters and appears exactly in that page's full
+stored text, a Signal's type is one of the Lead's Segment's quotable types, a size clue's number
+(1 to 1,000,000) is written in digits in its quote (`1,200` counts; "twelve" and the `5` of
+`1.5 million` don't), and a profile fact's value is 1 to 200 characters with no control
+character. Each refusal writes one `events` row on the Lead
+(`signal_discarded`, `profile_fact_discarded`, `size_clue_discarded` or `event_date_discarded`,
+with its cause, the cited page's id and the AI actor): IDs and codes only, never text. An
+Event's date is kept only when the quote writes it (an ISO date, `14 October 2026`,
+`October 14, 2026`, `14/10/2026` or `10/14/2026`, with a month's full name or its abbreviation
+such as `Oct.` or `Sept`; a month and year means the 1st, a year alone 1 January) and it isn't
+in the future; otherwise the Signal is kept undated.
+
+- **Evidence** (`evidence`): one immutable row per quote, with `source=website`, the page's URL
+  (`source_url`, `pages_checked`), its fetch time (`retrieved_at`) and
+  `extracted_by=ai:extract_signals@v1`. Profile facts (what the firm does, locations, technology)
+  and size clues (lawyers at the office or firm-wide, staff, group staff, locations) are
+  Evidence rows too, with their `fact` and `value` or `number`. Database triggers refuse a
+  delete and any change but `last_confirmed_at`, a merge's `lead_id`, and setting
+  `superseded_by` or `retracted_at` once.
+- **Signals** (`signals`, linked through `signal_evidence`): one per type for an Attribute, one
+  per type and stated date for an Event (undated Events share one). Class, Tier and score-only
+  come from the Segment; `first_seen_at` is the first Evidence's fetch time. A Signal is never
+  stored without Evidence.
+
+**Re-extraction.** Per page and claim: the same quote seen again only moves
+`last_confirmed_at`; a live quote still in the page is confirmed too, whether the model repeats
+it or not; a quote that is gone is superseded by a new quote for the same claim (oldest first),
+or retracted when there is none. A Signal left with no live Evidence is retracted, and every
+superseded or retracted row publishes `EvidenceChanged`, so Drafts built on it go stale. Pages
+not sent keep their Evidence.
+
+**Headquarters** (`leads.hq_tz`). The zone comes from the live location quotes, never from
+the model's wording: a US state (`, IL 60601`, `Washington, D.C.`, else a full state name) gives
+its zone, and the UK (`UK`, `England`, `Scotland`, a postcode, ...) `Europe/London`. When a quote
+names the headquarters (`headquarters`, `head office`, `HQ`, `main office`, `principal office`,
+`registered office`), only those quotes count. Exactly one zone sets `hq_tz` with its Evidence;
+none, both countries, or two zones leave it empty. A change re-resolves the Lead's Contacts, so
+a Contact with no office takes the headquarters zone (`tz_basis` `lead_hq`, Story 3.2).
+
+**Merges.** The merged Lead's Evidence and Signals move to the survivor; its extraction runs and
+headquarters zone stay.
+
+**The Lead page** shows the **HQ timezone** in its header, then **Signals** (every current
+Signal: its name from the Segment, Event or Attribute, Tier, its event date or "first seen
+<date>", its age in days, Live or Expired, and "Score only") and **Evidence** (every live row:
+Quote, Absence or Count; the quote, or what was sought or counted with the pages checked; the
+Signals it supports, or its fact; its source URL; its retrieval time; and "AI-extracted"). A Tier
+1 Event keeps its full weight for 30 days, then fades to nothing at 90; a Tier 2 or 3 Event
+counts for 90 days; Attributes don't age.
+
+**The Claude gateway** is built by `build_app` (`ClaudeGateway(secrets, meter=meter)`, imported
+inside the function, so `doctor`, `open` and `seed sync` still never load the SDK). It builds no
+HTTP client until the first call, and the Claude API key is read from Credential Manager then.
+
+**Not yet:** "contact form only" (an Absence Signal, `extracted_by=rule`) needs Story 2.6's
+widget detection; the job postings `extract_signals` returns are read by Story 2.11.
 
 ## Engine health
 

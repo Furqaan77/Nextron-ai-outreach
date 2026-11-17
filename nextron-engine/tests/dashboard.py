@@ -85,6 +85,7 @@ from nextron.app.ops.api import (
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import CompanyFacts
 from nextron.app.research.api import ContactMarkets, Research
+from nextron.app.research.extraction import LeadSignals
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
@@ -139,9 +140,11 @@ def no_recovery() -> Any:
 
 
 def no_crawl_jobs() -> Any:
-    """``build_job_types``'s ``crawls``, ``discovery`` and ``research``: the dashboard runs no
-    Story 2.5 job."""
-    raise AssertionError("the dashboard runs no enrich_lead, canonicalize_lead or purge_page_text")
+    """``build_job_types``'s ``crawls``, ``discovery``, ``research`` and ``extractions``: the
+    dashboard runs no Story 2.5 or 2.9 job."""
+    raise AssertionError(
+        "the dashboard runs no enrich_lead, canonicalize_lead, purge_page_text or extract_lead"
+    )
 
 
 def default_data_dir() -> Path:
@@ -305,6 +308,7 @@ class Dashboard:
             crawls=no_crawl_jobs,
             discovery=no_crawl_jobs,
             research=no_crawl_jobs,
+            extractions=no_crawl_jobs,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -369,6 +373,7 @@ class Dashboard:
             restore_tests=self.restore_tests,
             lead_imports=self.lead_imports,
             sending=self.sending,
+            lead_signals=LeadSignals(self.clock),
             units=self.units,
             **extra,
         )

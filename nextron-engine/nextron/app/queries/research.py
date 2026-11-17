@@ -18,30 +18,97 @@ current unit of work, read-only ones included.
 - ``crawled_pages(lead_id)``: the Lead's stored pages, by URL, each a ``StoredPage`` (whose
   ``text`` is ``None`` once purged).
 - ``ats_links(lead_id)``: the ATS board links found on the Lead's website, by URL.
+
+Story 2.9 adds the Signals and their Evidence (a text that isn't a ULID reads as an unknown
+Lead: empty, or ``None``):
+
+- ``signals(lead_id)``: the Lead's Signals that aren't retracted, as ``StoredSignal`` rows, by
+  ``first_seen_at``, then ``id``.
+- ``evidence(lead_id)``: the Lead's live Evidence (neither superseded nor retracted), as
+  ``StoredEvidence`` rows (``pages_checked`` a tuple of URLs), oldest first.
+- ``hq_tz(lead_id)``: the Lead's headquarters zone, or ``None``.
+- ``last_ok_extraction(lead_id)``: the Lead's ``ok`` extraction run started last, as a
+  ``StoredExtractionRun``, or ``None``; ``extraction_runs(lead_id)``: every run, oldest first.
+- ``lead_signals(lead_id, now, type_names) -> LeadSignalsView``: what the Lead page shows, read
+  at once: ``hq_tz``; each current Signal as a ``SignalStatus(signal, name, age, live)``, its
+  ``name`` from ``type_names`` (a Signal type key to its Segment's name) or else its key, its
+  ``age`` from ``nextron.domain.signals.age_days`` at ``now`` and ``live`` from ``is_live``
+  (a Signal whose stored class or Tier the domain refuses counts as expired); and each live
+  Evidence row as an ``EvidenceSupport(evidence, supports)``, ``supports`` being the names of
+  the current Signals it supports, in the Signals' order.
 """
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
+from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.contacts import StoredContact
 from nextron.db.repos.research.crawl import StoredAtsLink, StoredCrawlRun, StoredPage
 from nextron.db.repos.research.provenance import StoredProvenance
+from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.ids import is_ulid
+from nextron.domain.segments import SignalClass
+from nextron.domain.signals import age_days, is_live
 
 __all__ = [
+    "EvidenceSupport",
+    "LeadSignalsView",
+    "SignalStatus",
     "StoredAtsLink",
     "StoredContact",
     "StoredCrawlRun",
+    "StoredEvidence",
+    "StoredExtractionRun",
     "StoredPage",
     "StoredProvenance",
+    "StoredSignal",
     "ats_links",
     "contacts",
     "crawl_run",
     "crawled_pages",
+    "evidence",
+    "extraction_runs",
+    "hq_tz",
+    "last_ok_extraction",
     "latest_crawl_run",
     "lead_provenance",
+    "lead_signals",
     "provenance",
+    "signals",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class SignalStatus:
+    """A current Signal as the Lead page shows it: its type's name, its age in days and whether
+    it is still live."""
+
+    signal: StoredSignal
+    name: str
+    age: int
+    live: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceSupport:
+    """A live Evidence row and the names of the current Signals it supports."""
+
+    evidence: StoredEvidence
+    supports: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LeadSignalsView:
+    """The Lead page's Signals and Evidence, and the headquarters zone."""
+
+    hq_tz: str | None
+    signals: tuple[SignalStatus, ...]
+    evidence: tuple[EvidenceSupport, ...]
 
 
 def contacts(lead_id: str) -> tuple[StoredContact, ...]:
@@ -87,3 +154,66 @@ def crawled_pages(lead_id: str) -> tuple[StoredPage, ...]:
 def ats_links(lead_id: str) -> tuple[StoredAtsLink, ...]:
     """The Lead's ATS board links, by URL."""
     return crawl_repo.ats_links(lead_id) if is_ulid(lead_id) else ()
+
+
+def signals(lead_id: str) -> tuple[StoredSignal, ...]:
+    """The Lead's Signals that aren't retracted, first seen first."""
+    return signals_repo.signals(lead_id, current_only=True) if is_ulid(lead_id) else ()
+
+
+def evidence(lead_id: str) -> tuple[StoredEvidence, ...]:
+    """The Lead's live Evidence, oldest first."""
+    return signals_repo.evidence(lead_id, live_only=True) if is_ulid(lead_id) else ()
+
+
+def hq_tz(lead_id: str) -> str | None:
+    """The Lead's headquarters zone, or ``None``."""
+    found = profile_repo.headquarters(lead_id) if is_ulid(lead_id) else None
+    return None if found is None else found.hq_tz
+
+
+def last_ok_extraction(lead_id: str) -> StoredExtractionRun | None:
+    """The Lead's ``ok`` extraction run started last, or ``None``."""
+    return signals_repo.last_ok_run(lead_id) if is_ulid(lead_id) else None
+
+
+def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:
+    """Every extraction run of the Lead, oldest first."""
+    return signals_repo.runs(lead_id) if is_ulid(lead_id) else ()
+
+
+def _status(signal: StoredSignal, name: str, now: datetime) -> SignalStatus:
+    age = age_days(signal.event_date, signal.first_seen_at, now)
+    try:
+        live = is_live(SignalClass(signal.signal_class), signal.tier, age)
+    except (TypeError, ValueError):  # a stored class or Tier the domain no longer knows
+        live = False
+    return SignalStatus(signal, name, age, live)
+
+
+def lead_signals(lead_id: str, now: datetime, type_names: Mapping[str, str]) -> LeadSignalsView:
+    """The Lead page's Signals, Evidence and headquarters zone at ``now``; see the module
+    docstring."""
+    current = signals(lead_id)
+    named = {
+        signal.id: type_names.get(signal.signal_type, signal.signal_type) for signal in current
+    }
+    supports: dict[str, list[str]] = {}
+    for link in signals_repo.links(lead_id) if is_ulid(lead_id) else ():
+        if link.signal_id in named:
+            supports.setdefault(link.evidence_id, []).append(link.signal_id)
+    order = {signal.id: index for index, signal in enumerate(current)}
+    return LeadSignalsView(
+        hq_tz=hq_tz(lead_id),
+        signals=tuple(_status(signal, named[signal.id], now) for signal in current),
+        evidence=tuple(
+            EvidenceSupport(
+                row,
+                tuple(
+                    named[signal_id]
+                    for signal_id in sorted(supports.get(row.id, ()), key=order.__getitem__)
+                ),
+            )
+            for row in evidence(lead_id)
+        ),
+    )

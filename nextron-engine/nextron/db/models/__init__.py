@@ -17,6 +17,7 @@ from nextron.db.models import (
     research,
     sending,
     setup,
+    signals,
 )
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
 from nextron.db.models.crawl import AtsLinkRecord, CrawledPageRecord, CrawlRunRecord
@@ -48,6 +49,12 @@ from nextron.db.models.setup import (
     StepBriefRecord,
     VariantRecord,
 )
+from nextron.db.models.signals import (
+    EvidenceRecord,
+    ExtractionRunRecord,
+    SignalEvidenceRecord,
+    SignalRecord,
+)
 
 __all__ = [
     "AiRouteActivationRecord",
@@ -63,6 +70,8 @@ __all__ = [
     "CrawlRunRecord",
     "CrawledPageRecord",
     "EventRecord",
+    "EvidenceRecord",
+    "ExtractionRunRecord",
     "HeartbeatRecord",
     "JobRecord",
     "LeadRecord",
@@ -78,6 +87,8 @@ __all__ = [
     "SendingInboxRecord",
     "SequenceRecord",
     "SettingRecord",
+    "SignalEvidenceRecord",
+    "SignalRecord",
     "StepBriefRecord",
     "Ulid",
     "UtcDateTime",
@@ -94,5 +105,6 @@ __all__ = [
     "research",
     "sending",
     "setup",
+    "signals",
     "ulid_pk",
 ]

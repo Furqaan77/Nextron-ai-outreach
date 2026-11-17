@@ -82,6 +82,7 @@ class World:
             crawls=no_crawls,
             discovery=no_crawls,
             research=no_crawls,
+            extractions=no_crawls,
         )
         self.notify = Notify(
             self.clock,

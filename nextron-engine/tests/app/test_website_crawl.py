@@ -166,6 +166,7 @@ def world(db_engine: Engine) -> World:
         crawls=no_jobs,
         discovery=no_jobs,
         research=no_jobs,
+        extractions=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     found = World(
@@ -256,7 +257,16 @@ def test_a_happy_crawl_stores_the_home_and_keyword_pages_and_the_ats_link(world:
         run.id,
     )
     assert (link.first_seen_at, link.last_seen_at) == (T0, T0)
-    assert world.jobs() == []  # no other domain, so nothing to canonicalize
+    # no other domain, so nothing to canonicalize; the stored pages go to extraction (Story 2.9)
+    assert world.jobs() == [
+        (
+            "extract_lead",
+            f"extract_lead:{lead}:1",
+            f"domain:{SITE}",
+            json.dumps({"lead_id": lead, "run_id": run.id, "v": 1}, separators=(",", ":")),
+            "bulk",
+        )
+    ]
 
 
 def test_iframe_and_script_ats_embeds_are_recorded_and_other_hosts_are_not(
@@ -510,6 +520,7 @@ def test_the_enrich_lead_handler_defers_a_refused_crawl(world: World) -> None:
         crawls=lambda: world.crawls,
         discovery=no_jobs,
         research=no_jobs,
+        extractions=no_jobs,
     ).get("enrich_lead").handler
     job = Job("01JD0000000000000000000099", "enrich_lead", Lane.BULK, {"v": 1, "lead_id": lead}, 1)
 
@@ -566,7 +577,7 @@ def test_a_home_on_another_domain_sets_final_domain_and_enqueues_canonicalize(
     assert world.crawler.urls() == [HOME, "https://www.new-firm.co.uk/team"]
     assert world.crawler.calls[-1].site == "new-firm.co.uk"
     assert world.pages(lead)[HOME].final_url == landed
-    [job] = world.jobs()
+    job, extraction = world.jobs()
     assert job == (
         "canonicalize_lead",
         f"canonicalize_lead:{lead}:2026-11-17",
@@ -574,6 +585,7 @@ def test_a_home_on_another_domain_sets_final_domain_and_enqueues_canonicalize(
         json.dumps({"lead_id": lead, "run_id": run.id, "v": 1}, separators=(",", ":")),
         "bulk",
     )
+    assert extraction[:3] == ("extract_lead", f"extract_lead:{lead}:1", f"domain:{SITE}")
 
 
 NEW_ROBOTS = "https://www.new-firm.co.uk/robots.txt"
@@ -685,7 +697,7 @@ def test_a_home_that_lands_on_a_shared_platform_stores_and_enqueues_nothing(
         assert world.crawler.urls() == [HOME]
     else:
         assert (run.outcome, run.final_domain) == ("ok", "smith-law.wixsite.com")
-        assert [row[0] for row in world.jobs()] == ["canonicalize_lead"]
+        assert [row[0] for row in world.jobs()] == ["canonicalize_lead", "extract_lead"]
 
 
 # Row: Unreachable -------------------------------------------------------------------------------
@@ -894,6 +906,7 @@ def test_a_lead_merged_during_the_crawl_gets_only_a_lead_merged_run(world: World
     assert run == (lead, "lead_merged")
     assert world.sql("SELECT COUNT(*) FROM crawled_pages") == [(0,)]
     assert world.sql("SELECT COUNT(*) FROM ats_links") == [(0,)]
+    assert world.jobs() == []  # nothing to extract (Story 2.9)
 
 
 # Row: Purge -------------------------------------------------------------------------------------

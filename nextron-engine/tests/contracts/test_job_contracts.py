@@ -5,8 +5,9 @@
   ``Triggers`` or calls ``register_trigger``, under any alias.
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
-  ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, and ``enrich_lead``,
-  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, with their settings); the triggers
+  ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
+  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, and ``extract_lead``, Story 2.9,
+  with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
   ``resolve_contact_markets`` has no trigger.
@@ -357,6 +358,19 @@ class RecordingResearch:
         return 0
 
 
+class RecordingExtractions:
+    """Stands in for the ``research`` service's ``SignalExtractions``; ``allowed`` is what
+    ``extract_lead`` returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[tuple[str, str]] = []
+
+    def extract_lead(self, lead_id: str, run_id: str) -> bool:
+        self.calls.append((lead_id, run_id))
+        return self.allowed
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -368,6 +382,7 @@ def registry(**overrides: object) -> JobTypes:
         "crawls": RecordingCrawls,
         "discovery": RecordingDiscovery,
         "research": RecordingResearch,
+        "extractions": RecordingExtractions,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -420,6 +435,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "enrich_lead",
         "canonicalize_lead",
         "purge_page_text",
+        "extract_lead",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -518,7 +534,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             found.retry_limit,
             found.group,
         )
-        for name in ("enrich_lead", "canonicalize_lead", "purge_page_text")
+        for name in ("enrich_lead", "canonicalize_lead", "purge_page_text", "extract_lead")
         for found in [job_types.get(name)]
     }
 
@@ -526,6 +542,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
     assert shapes == {
         "enrich_lead": (Lane.BULK, both, 40, timedelta(minutes=20), 3, JobGroup.ENRICHMENT),
         "canonicalize_lead": (Lane.BULK, both, 45, timedelta(minutes=2), 2, JobGroup.ENRICHMENT),
+        "extract_lead": (Lane.BULK, both, 45, timedelta(minutes=15), 3, JobGroup.ENRICHMENT),
         "purge_page_text": (
             Lane.BULK,
             frozenset({Lane.BULK}),
@@ -569,6 +586,35 @@ def test_canonicalize_lead_and_purge_page_text_call_their_services_once() -> Non
     job_types.get("purge_page_text").handler(Job(RUN, "purge_page_text", Lane.BULK, {"v": 1}, 1))
 
     assert (discovery.calls, research.purges) == ([(LEAD, RUN)], 1)
+
+
+def test_extract_lead_calls_its_service_once_and_is_deferred_when_the_budget_refuses() -> None:
+    extractions = RecordingExtractions()
+    refused = RecordingExtractions(allowed=False)
+    payload = {"v": 1, "lead_id": LEAD, "run_id": RUN}
+    job = Job(RUN, "extract_lead", Lane.BULK, payload, 1)
+
+    assert registry(extractions=lambda: extractions).get("extract_lead").handler(job) is None
+    assert registry(extractions=lambda: refused).get("extract_lead").handler(job) is DEFERRED
+    assert (extractions.calls, refused.calls) == ([(LEAD, RUN)], [(LEAD, RUN)])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "lead_id": LEAD},
+        {"v": 1, "run_id": RUN},
+        {"v": 1, "lead_id": "not-a-ulid", "run_id": RUN},
+        {"v": 1, "lead_id": LEAD, "run_id": 7},
+    ],
+)
+def test_an_extract_lead_job_without_its_ids_is_invalid(payload: dict[str, object]) -> None:
+    extractions = RecordingExtractions()
+    handler = registry(extractions=lambda: extractions).get("extract_lead").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "extract_lead", Lane.BULK, payload, 1))
+    assert extractions.calls == []
 
 
 @pytest.mark.parametrize(

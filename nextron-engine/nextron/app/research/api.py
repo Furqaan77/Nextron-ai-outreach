@@ -50,7 +50,9 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
   them). Each moved Contact is then resolved, since the survivor's country may differ. Every
   ``crawl_runs`` row of the merged Lead moves to the survivor too (Story 2.5), and so does each
   ``crawled_pages`` and ``ats_links`` row whose ``url`` the survivor doesn't already hold (the
-  rest stay on the merged Lead).
+  rest stay on the merged Lead). Every ``evidence`` and ``signals`` row of the merged Lead
+  moves to the survivor (Story 2.9); its ``extraction_runs`` and its ``hq_tz`` and
+  ``hq_evidence_id`` stay.
 
 - ``@command resolve_market(contact_id)`` resolves one Contact, for the later paths that change
   its email, office location or Lead outside ``add_contact`` (Stories 2.10, 2.13, 2.14, 2.16);
@@ -65,7 +67,7 @@ serves ``add_contact``, ``reparent_lead`` and ``resolve_market``. It reads the C
 (``queries.discovery.lead``) and the stored Markets (``queries.setup.markets()``), and calls
 ``nextron.domain.contact_market.resolve_contact_market`` with the stored email, the stored
 office (a ``Location``, or ``None`` without an ``office_country``), the Lead's ``country_code``
-and ``lead_hq_tz=None`` (Story 2.9 passes the Lead's headquarters zone). It writes
+and ``lead_hq_tz``, the Lead's stored headquarters zone (``hq_tz``, Story 2.9). It writes
 ``market_id`` (the chosen Market's row id, or NULL), ``market_basis``, ``tz`` and ``tz_basis``
 through ``contacts.fill`` (``updated_at`` now) only when one of them differs, and sets the notes
 (joined with a newline, or NULL when there are none) on the Contact's first ``contact``
@@ -133,15 +135,19 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    ``pages_fetched`` counts the 2xx answers, the homepage included; ``renders`` is 0 (Story 2.6
    renders).
 5. **Apply transaction.** When the Lead was merged meanwhile, the run is inserted as
-   ``lead_merged`` and nothing else is written. Otherwise the run is inserted (outcome ``ok``
-   unless step 2 or 3 ended it); each stored page is upserted on ``(lead_id, url)`` with its
+   ``lead_merged`` and nothing else is written or enqueued. Otherwise the run is inserted
+   (outcome ``ok`` unless step 2 or 3 ended it); each stored page is upserted on
+   ``(lead_id, url)`` with its
    ``content_hash`` (``text_hash`` of its text), ``fetched_at``, ``text_purge_after``
    (``fetched_at`` + 30 days) and ``changed_at`` (``fetched_at`` for a new page or a changed
    hash, else kept); and every ``a``, ``iframe`` and ``script`` link of a stored page that
    ``check_url`` accepts and whose host is in ``ats_hosts`` is upserted on ``(lead_id, url)``
    (``first_seen_at`` kept, ``last_seen_at``, ``run_id`` and ``page_id`` updated; the first page
    that holds it in the run). With a ``final_domain``, ``canonicalize_lead`` is enqueued
-   (payload ``{v, lead_id, run_id}``).
+   (payload ``{v, lead_id, run_id}``). When the run stored at least one page, ``extract_lead``
+   (Story 2.9) is enqueued too: scope the Lead, discriminator the Lead's number of crawl runs
+   (a revision, so each run gets its own job: a job key's discriminator can't be the run's
+   id), the same payload and the concurrency key ``domain:<site>``.
 6. **Afterwards** it logs ``crawl_finished`` (``lead_id``, ``run_id``, ``outcome``,
    ``error_code``, ``pages_fetched``, ``pages_stored``, ``pages_skipped_robots``, ``errors``).
    Then, when ``may_retry`` holds, the run isn't ``lead_merged`` and its ``error_code``
@@ -150,6 +156,12 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    job's last attempt) the job completes and no dead-job alert follows. It returns ``True``.
 
 No page text, HTML or URL is logged; the run's row holds codes and counts only.
+
+**Signals and Evidence (Story 2.9)** live in ``nextron.app.research.extraction``:
+``SignalExtractions`` runs the ``extract_lead`` jobs (the Lead's changed pages through Claude's
+``extract_signals`` route, validated and reconciled into ``evidence``, ``signals`` and
+``signal_evidence``, and the Lead's ``hq_tz``), and ``LeadSignals`` serves the Lead page's
+Signals and Evidence sections.
 """
 
 import logging
@@ -165,7 +177,9 @@ from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
+from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.contacts import StoredContact
 from nextron.db.uow import command, current, use_case
 from nextron.domain.address_class import AddressCause, AddressClass, assign
@@ -191,6 +205,7 @@ from nextron.domain.crawl import (
     lead_job_keys,
     text_hash,
 )
+from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
 from nextron.domain.geo import Location
 from nextron.domain.identity import IdentityError, normalize_name, registrable_domain
@@ -392,11 +407,12 @@ class Research:
             if contact.office_country is None
             else Location(contact.office_country, contact.office_region)
         )
+        held = None if lead is None else profile_repo.headquarters(lead.id)
         resolved = resolve_contact_market(
             email=contact.email,
             office=office,
             lead_country=None if lead is None else lead.country_code,
-            lead_hq_tz=None,  # Story 2.9 passes the Lead's headquarters zone
+            lead_hq_tz=None if held is None else held.hq_tz,
             markets=[market.definition for market in stored],
         )
         chosen = resolved.market
@@ -462,8 +478,8 @@ class Research:
 
     @command
     def reparent_lead(self, n: LeadsMerged) -> None:
-        """Move the merged Lead's Contacts and crawl rows to the survivor; see the module
-        docstring."""
+        """Move the merged Lead's Contacts, crawl rows, Evidence and Signals to the survivor;
+        see the module docstring."""
         survivor_has_primary = contacts_repo.has_primary(n.survivor_lead_id)
         moved = contacts_repo.for_lead(n.merged_lead_id)
         contacts_repo.move_to_lead(
@@ -475,6 +491,7 @@ class Research:
         for contact in moved:
             self._resolve(contact.id)
         crawl_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
+        signals_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
 
     @use_case
     def purge_page_text(self) -> int:
@@ -863,17 +880,22 @@ class WebsiteCrawls:
                     continue
                 seen.add(target.url)
                 self._upsert_ats_link(run.lead_id, run_id, page_id, target, link.tag, now)
+        discriminator, concurrency_key = lead_job_keys(run.site, now)
+        payload = {VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: run.lead_id, RUN_ID_FIELD: run_id}
         if run.final_domain is not None:
-            discriminator, concurrency_key = lead_job_keys(run.site, now)
             self._queue.enqueue(
                 CANONICALIZE_LEAD_JOB,
                 scope=run.lead_id,
                 discriminator=discriminator,
-                payload={
-                    VERSION_FIELD: PAYLOAD_VERSION,
-                    LEAD_ID_FIELD: run.lead_id,
-                    RUN_ID_FIELD: run_id,
-                },
+                payload=payload,
+                concurrency_key=concurrency_key,
+            )
+        if run.pages:  # Story 2.9: extract Signals from what this run stored
+            self._queue.enqueue(
+                EXTRACT_LEAD_JOB,
+                scope=run.lead_id,
+                discriminator=str(crawl_repo.run_count(run.lead_id)),
+                payload=payload,
                 concurrency_key=concurrency_key,
             )
         return run_id

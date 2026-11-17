@@ -4,7 +4,8 @@ database at head with the real subscriber registry and the shipped Segments, the
 into a tree: every page row of the I/O matrix (the list, the filters, paging, bad parameters, a
 CSV-imported Lead's page, merged and missing Leads, hostile text, the empty cases),
 ``no-store``, the lock without a session, the route order, the nav link, the label tables and
-the queries-only import rule."""
+the queries-only import rule. Story 2.9 adds the headquarters zone and the Signals and Evidence
+sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped)."""
 
 import ast
 from collections.abc import Callable, Iterator
@@ -25,6 +26,8 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries.setup import SeededSegment
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
+from nextron.db.repos.research import profile as profile_repo
+from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource
@@ -34,7 +37,15 @@ from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import validate_segments
 from nextron.web import leads_page
 from nextron.web.forms import MALFORMED_FORM
-from nextron.web.leads_page import SOURCE_LABELS, STAGE_LABELS
+from nextron.domain.extraction import FactKind
+from nextron.domain.segments import EvidenceType, SignalClass
+from nextron.web.leads_page import (
+    CLASS_LABELS,
+    EVIDENCE_TYPE_LABELS,
+    FACT_LABELS,
+    SOURCE_LABELS,
+    STAGE_LABELS,
+)
 from tests.asgi import Reply
 from tests.contracts.support import PACKAGE
 from tests.dashboard import Dashboard, upload
@@ -49,6 +60,8 @@ VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "l
 LIST_HEADER = ["Name", "Website", "Segment", "Country", "Stage", "Created"]
 CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary"]
 RECORD_HEADER = ["Record", "Source", "Detail", "Retrieved", "Address Class"]
+SIGNAL_HEADER = ["Signal", "Class", "Tier", "Date", "Age", "Status", "Score only"]
+EVIDENCE_HEADER = ["Type", "Evidence", "Supports", "Source", "Retrieved", "Extraction"]
 
 
 # The parsed page --------------------------------------------------------------------------------
@@ -286,6 +299,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         crawls=no_jobs,
         discovery=no_jobs,
         research=no_jobs,
+        extractions=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -598,6 +612,8 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "Law-PrivateAI",
         "Country",
         "GB",
+        "HQ timezone",
+        "—",
         "Pipeline Stage",
         "New",
         "Created",
@@ -606,7 +622,7 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     website = header.find("a")
     assert website.attrs == {"href": "https://smith-law.co.uk/", "rel": "noopener noreferrer"}
     assert page.find("main").find("a", href="/leads").text == "All Leads"
-    assert page.find("h2").text == "Contacts"
+    assert [h2.text for h2 in page.find_all("h2")] == ["Signals", "Evidence", "Contacts"]
     table = page.find("table", class_="contact-table")
     assert "hx-disable" in table.attrs
     assert table_rows(table)[0] == CONTACT_HEADER
@@ -651,6 +667,8 @@ def test_the_empty_cases(world: World) -> None:
     page = world.page(f"/leads/{lead}")
 
     assert nothing.find("section", class_="lead-contacts").text == "Contacts No Contacts yet."
+    assert nothing.find("section", class_="lead-signals").text == "Signals No Signals yet."
+    assert nothing.find("section", class_="lead-evidence").text == "Evidence No Evidence yet."
     assert not nothing.find_all("table")
     first, second = page.find_all("tr", class_="contact-row")
     assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No"]
@@ -759,6 +777,262 @@ def test_hostile_text_is_escaped_inside_hx_disable(world: World) -> None:
             "/static/htmx-2.0.11.min.js"
         ]
         assert not tree.find_all("img") and not tree.find_all("b") and not tree.find_all("i")
+
+
+# Signals and Evidence (Story 2.9) --------------------------------------------------------------
+
+HOSTILE_QUOTE = '<script>alert(1)</script> We are hiring <b hx-get="/x">now</b>'
+
+
+def evidence_row(world: World, lead: str, created: int, **values: Any) -> str:
+    """An Evidence row of ``lead`` created ``created`` minutes after ``T``."""
+    row: dict[str, Any] = {
+        "lead_id": lead,
+        "evidence_type": "quote",
+        "quote": None,
+        "sought": None,
+        "number": None,
+        "fact": None,
+        "value": None,
+        "pages_checked": ("https://smith-law.co.uk/team",),
+        "source": "website",
+        "source_url": "https://smith-law.co.uk/team",
+        "retrieved_at": T,
+        "extracted_by": "ai:extract_signals@v1",
+        "person_contact_id": None,
+        "at": T + timedelta(minutes=created),
+    }
+    row.update(values)
+    return world.transact(lambda: signals_repo.insert_evidence(**row))
+
+
+def stored_signal(world: World, lead: str, evidence_id: str, **values: Any) -> str:
+    row: dict[str, Any] = {
+        "lead_id": lead,
+        "signal_class": "event",
+        "score_only": False,
+        "event_date": None,
+        "evidence_ids": [evidence_id],
+    }
+    row.update(values)
+    return world.transact(lambda: signals_repo.insert_signal(**row))
+
+
+def signalled_lead(world: World) -> str:
+    """A Lead with a Tier 1 Event first seen 31 days ago, a Tier 2 Event dated 91 days ago, a
+    score-only Attribute with Absence Evidence, a location fact, a Signal type its Segment no
+    longer lists, and its headquarters zone."""
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    hiring = evidence_row(world, lead, 1, quote=HOSTILE_QUOTE, retrieved_at=T - timedelta(days=31))
+    opened = evidence_row(world, lead, 2, quote="We opened in Manchester on 18 August 2026.")
+    absent = evidence_row(
+        world,
+        lead,
+        3,
+        evidence_type="absence",
+        sought="chat widget, booking link or after-hours line",
+        pages_checked=("https://smith-law.co.uk/", "https://smith-law.co.uk/contact"),
+        source_url=None,
+        extracted_by="rule",
+    )
+    location = evidence_row(
+        world, lead, 4, quote="Our head office is in Chicago, IL.", fact="location", value="Chicago"
+    )
+    evidence_row(world, lead, 5, quote="We employ 1,200 staff.", fact="staff", number=1200)
+    stored_signal(
+        world,
+        lead,
+        opened,
+        signal_type="law_expansion",
+        tier=2,
+        event_date=(T - timedelta(days=91)).date(),
+        first_seen_at=T - timedelta(days=100),
+    )
+    stored_signal(
+        world,
+        lead,
+        hiring,
+        signal_type="law_hiring_legal_ops",
+        tier=1,
+        first_seen_at=T - timedelta(days=31),
+    )
+    stored_signal(
+        world,
+        lead,
+        absent,
+        signal_type="law_contact_form_only",
+        signal_class="attribute",
+        tier=3,
+        score_only=True,
+        first_seen_at=T - timedelta(days=5),
+    )
+    retired = evidence_row(world, lead, 6, quote="We are hiring.")
+    stored_signal(
+        world, lead, retired, signal_type="law_retired_type", tier=3, first_seen_at=T
+    )
+    evidence_row(
+        world,
+        lead,
+        7,
+        evidence_type="count",
+        sought="matters listed on the practice pages",
+        number=1250,
+        pages_checked=("https://smith-law.co.uk/practice", "https://smith-law.co.uk/news"),
+        source_url=None,
+        extracted_by="rule",
+    )
+    world.transact(lambda: profile_repo.set_headquarters(lead, "America/Chicago", location))
+    return lead
+
+
+def test_the_signals_section_shows_each_current_signal(world: World) -> None:
+    lead = signalled_lead(world)
+
+    page = world.page(f"/leads/{lead}")
+
+    header = page.find("header", class_="lead-header")
+    facts = [node.text for node in header.find("dl").walk() if node.tag in ("dt", "dd")]
+    assert facts[6:8] == ["HQ timezone", "America/Chicago"]
+    section = page.find("section", class_="lead-signals")
+    assert "hx-disable" in section.attrs
+    assert table_rows(section.find("table", class_="signal-table")) == [
+        SIGNAL_HEADER,
+        [
+            "New office, merger, or practice-area expansion",
+            "Event",
+            "Tier 2",
+            "2026-08-18",
+            "91 days",
+            "Expired",
+            "",
+        ],
+        [
+            "Hiring intake, legal-ops, knowledge-management, or innovation staff",
+            "Event",
+            "Tier 1",
+            "first seen 2026-10-17",
+            "31 days",
+            "Live",
+            "",
+        ],
+        [
+            "Contact form only (no chat, booking, or after-hours line)",
+            "Attribute",
+            "Tier 3",
+            "first seen 2026-11-12",
+            "5 days",
+            "Live",
+            "Score only",
+        ],
+        ["law_retired_type", "Event", "Tier 3", "first seen 2026-11-17", "0 days", "Live", ""],
+    ]
+
+
+def test_the_evidence_section_shows_each_live_row(world: World) -> None:
+    lead = signalled_lead(world)
+
+    page = world.page(f"/leads/{lead}")
+
+    section = page.find("section", class_="lead-evidence")
+    assert "hx-disable" in section.attrs
+    table = section.find("table", class_="evidence-table")
+    rows = table_rows(table)
+    hiring = "Hiring intake, legal-ops, knowledge-management, or innovation staff"
+    assert rows[0] == EVIDENCE_HEADER
+    assert rows[1] == [
+        "Quote",
+        HOSTILE_QUOTE,
+        hiring,
+        "https://smith-law.co.uk/team",
+        "2026-10-17 09:00 UTC",
+        "AI-extracted",
+    ]
+    assert rows[2][2:] == [
+        "New office, merger, or practice-area expansion",
+        "https://smith-law.co.uk/team",
+        "2026-11-17 09:00 UTC",
+        "AI-extracted",
+    ]
+    assert rows[3][0] == "Absence"
+    assert rows[3][2:] == [
+        "Contact form only (no chat, booking, or after-hours line)",
+        "—",
+        "2026-11-17 09:00 UTC",
+        "—",
+    ]
+    assert rows[4][1:3] == ["Our head office is in Chicago, IL.", "Location: Chicago"]
+    assert rows[5][1:3] == ["We employ 1,200 staff.", "Staff: 1,200"]
+    assert rows[6][2] == "law_retired_type"
+    count_row = table.find_all("tr", class_="evidence-row")[6]
+    assert cells(count_row)[0] == "Count"
+    counted = "Counted: matters listed on the practice pages: 1,250"
+    assert cells(count_row)[1].startswith(counted)  # then the pages checked, as a list
+    assert cells(count_row)[2:] == ["—", "—", "2026-11-17 09:00 UTC", "—"]
+    assert not count_row.find_all("q")
+    count_links = count_row.find("ul", class_="pages-checked").find_all("a")
+    assert [(a.attrs["href"], a.text) for a in count_links] == [
+        ("https://smith-law.co.uk/practice", "https://smith-law.co.uk/practice"),
+        ("https://smith-law.co.uk/news", "https://smith-law.co.uk/news"),
+    ]
+    absence = table.find_all("tr", class_="evidence-row")[2]
+    sought = "Sought: chat widget, booking link or after-hours line"
+    assert cells(absence)[1].startswith(sought)  # then the pages checked, as a list
+    links = absence.find("ul", class_="pages-checked").find_all("a")
+    assert [(a.attrs["href"], a.attrs["rel"]) for a in links] == [
+        ("https://smith-law.co.uk/", "noopener noreferrer"),
+        ("https://smith-law.co.uk/contact", "noopener noreferrer"),
+    ]
+    first = table.find_all("tr", class_="evidence-row")[0]
+    assert first.find("a").attrs["href"] == "https://smith-law.co.uk/team"
+
+
+def test_superseded_and_retracted_evidence_and_retracted_signals_are_not_shown(
+    world: World,
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    old = evidence_row(world, lead, 1, quote="Old quote.")
+    new = evidence_row(world, lead, 2, quote="New quote.")
+    gone = evidence_row(world, lead, 3, quote="Gone quote.")
+    world.transact(lambda: signals_repo.supersede_evidence(old, new))
+    world.transact(lambda: signals_repo.retract_evidence(gone, T))
+    stored_signal(world, lead, gone, signal_type="law_expansion", tier=2, first_seen_at=T)
+    world.transact(lambda: signals_repo.retract_unsupported(lead, T))
+
+    page = world.page(f"/leads/{lead}")
+
+    assert page.find("section", class_="lead-signals").text == "Signals No Signals yet."
+    rows = table_rows(page.find("table", class_="evidence-table"))
+    assert [row[1] for row in rows[1:]] == ["New quote."]
+
+
+def test_the_signal_and_evidence_text_is_escaped_inside_hx_disable(world: World) -> None:
+    lead = signalled_lead(world)
+
+    reply = world.get(f"/leads/{lead}")
+
+    assert reply.status == 200
+    for raw in ("<script>alert", '<b hx-get="/x">'):
+        assert raw not in reply.text
+    tree = Tree(reply.text)
+    assert tree.disabled(HOSTILE_QUOTE) == [True]
+    assert [node.attrs.get("src") for node in tree.find_all("script")] == [
+        "/static/htmx-2.0.11.min.js"
+    ]
+    assert not tree.find_all("b")
+    for name in ("lead-signals", "lead-evidence"):  # neither section holds an HTMX action
+        section = tree.find("section", class_=name)
+        for node in (section, *section.walk()):
+            assert not [key for key in node.attrs if key.startswith("hx-") and key != "hx-disable"]
+        assert not section.find_all("form") and not section.find_all("button")
+
+
+def test_every_signal_class_evidence_type_and_fact_kind_has_a_label() -> None:
+    assert list(CLASS_LABELS) == list(SignalClass)
+    assert list(EVIDENCE_TYPE_LABELS) == list(EvidenceType)
+    assert list(FACT_LABELS) == list(FactKind)
+    assert leads_page.age_text(1) == "1 day"
+    assert leads_page.age_text(0) == "0 days"
+    assert leads_page.age_text(1200) == "1,200 days"
 
 
 # Route rules, nav and labels --------------------------------------------------------------------

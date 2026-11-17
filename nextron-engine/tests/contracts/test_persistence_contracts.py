@@ -78,7 +78,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0021_4_2_campaigns"
+HEAD = "0022_2_9_signals_evidence"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -93,6 +93,9 @@ CAMPAIGNS_TRIGGERS = frozenset(  # Story 4.2: no UK Campaign runs without its LI
     {"trg_campaigns_lia_insert", "trg_campaigns_lia_update"}
 )
 VARIANTS_TRIGGERS = frozenset({"trg_variants_at_most_two"})  # Story 4.2: at most 2 Variants
+EVIDENCE_TRIGGERS = frozenset(  # Story 2.9: Evidence is immutable
+    {"trg_evidence_no_delete", "trg_evidence_immutable"}
+)
 
 
 def _parse(path: Path) -> ast.Module:
@@ -539,6 +542,9 @@ def test_every_owner_of_a_lead_scoped_row_reparents_it_on_a_merge() -> None:
         "crawled_pages.lead_id",
         "ats_links.lead_id",
         "contacts.lead_id",  # Story 2.3
+        "evidence.lead_id",  # Story 2.9
+        "signals.lead_id",
+        "extraction_runs.lead_id",
     ]
     assert reparenting_owners(subscribers) == {"pipeline", "research"}
     assert reparent_problems(Base.metadata, subscribers) == []
@@ -573,6 +579,9 @@ def test_the_reparent_check_names_a_missing_registration() -> None:
             "crawled_pages.lead_id",
             "ats_links.lead_id",
             "contacts.lead_id",  # Story 2.3
+            "evidence.lead_id",  # Story 2.9
+            "signals.lead_id",
+            "extraction_runs.lead_id",
         )
     ]
 
@@ -792,19 +801,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0022_next"}], None),
-        ([{"revision": "0022-next"}], "the chain does not load"),
-        ([{"revision": "0022_Next"}], "the id does not match"),
+        ([{"revision": "0023_next"}], None),
+        ([{"revision": "0023-next"}], "the chain does not load"),
+        ([{"revision": "0023_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0023_next"}], "the id starts 0023, but it is revision 22"),
-        ([{"revision": "0022_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0022_next", "file": "0022_other"}], "the id is not its file name"),
-        ([{"revision": "0022_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0022_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0022_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0022_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0024_next"}], "the id starts 0024, but it is revision 23"),
+        ([{"revision": "0023_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0023_next", "file": "0023_other"}], "the id is not its file name"),
+        ([{"revision": "0023_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0023_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0023_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0023_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0022_a"}, {"revision": "0023_b", "down": HEAD}],
+            [{"revision": "0023_a"}, {"revision": "0024_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],
@@ -926,6 +935,10 @@ def table_triggers(engine: Engine, table: str) -> set[str]:
 def test_the_campaigns_and_variants_triggers_exist_at_head(db_engine: Engine) -> None:
     assert table_triggers(db_engine, "campaigns") == CAMPAIGNS_TRIGGERS
     assert table_triggers(db_engine, "variants") == VARIANTS_TRIGGERS
+
+
+def test_the_evidence_triggers_exist_at_head(db_engine: Engine) -> None:
+    assert table_triggers(db_engine, "evidence") == EVIDENCE_TRIGGERS
 
 
 def test_the_trigger_check_catches_a_batch_rebuild_of_events(db_engine: Engine) -> None:
