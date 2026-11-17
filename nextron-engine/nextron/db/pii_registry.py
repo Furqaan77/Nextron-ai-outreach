@@ -132,12 +132,40 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "effort": PiiClass.NONE,
         "prompt_version": PiiClass.NONE,
         "prompt_sha256": PiiClass.NONE,
+        "playbook_sha256": PiiClass.NONE,
         "schema_version": PiiClass.NONE,
         "actor": PiiClass.NONE,
         "bootstrap": PiiClass.NONE,
         "test_run_id": PiiClass.NONE,
         "activated_at": PiiClass.NONE,
         "deactivated_at": PiiClass.NONE,
+    },
+    # Story 4.4. The Sales Playbook is Nextron's own text; a candidate tuple and a Playbook check
+    # hold codes, hashes and times.
+    "playbook_snapshots": {
+        "id": PiiClass.NONE,
+        "sha256": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "content": PiiClass.NONE,
+        "captured_at": PiiClass.NONE,
+    },
+    "ai_route_tuples": {
+        "id": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "model": PiiClass.NONE,
+        "effort": PiiClass.NONE,
+        "prompt_version": PiiClass.NONE,
+        "prompt_sha256": PiiClass.NONE,
+        "playbook_sha256": PiiClass.NONE,
+        "schema_version": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+    },
+    "playbook_checks": {
+        "id": PiiClass.NONE,
+        "checked_at": PiiClass.NONE,
+        "trigger": PiiClass.NONE,
+        "playbook_sha256": PiiClass.NONE,
+        "problem": PiiClass.NONE,
     },
     # Story 2.3. A Contact is a person: free text is redacted, the address is kept as a hash so
     # suppression and dedupe still match after an erasure, and the LinkedIn URL is nulled.

@@ -1,0 +1,73 @@
+{#- The AI content panel (nextron.web.ai_content_page): rendered inside ai_content.html, and
+    alone as the answer to POST /ai/check, swapped in for this whole panel. Stored values are
+    escaped with |plain; Playbook text is never shown. -#}
+{%- macro tuple_fields(found) -%}
+<dl class="ai-tuple">
+{%- if found.id %}
+<dt>Tuple id</dt><dd>{{ found.id|plain }}</dd>
+{%- endif %}
+<dt>Model</dt><dd>{{ found.model|plain }}</dd>
+<dt>Effort</dt><dd>{{ found.effort|plain }}</dd>
+<dt>Prompt version</dt><dd>{{ found.prompt_version|plain }}</dd>
+<dt>Schema version</dt><dd>{{ found.schema_version }}</dd>
+<dt>Sales Playbook</dt><dd>{{ found.playbook|plain }}</dd>
+{%- if found.note %}
+<dt>Activated</dt><dd>{{ found.time }} ({{ found.note|plain }})</dd>
+{%- else %}
+<dt>Created</dt><dd>{{ found.time }}</dd>
+{%- endif %}
+</dl>
+{%- endmacro -%}
+<div id="ai-content-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<section aria-labelledby="ai-playbook-heading">
+<h2 id="ai-playbook-heading">Sales Playbook</h2>
+<dl class="ai-playbook">
+<dt>Current version</dt>
+{%- if playbook.version %}
+<dd>{{ playbook.version|plain }} ({{ playbook.short_sha|plain }}), captured {{ playbook.captured_at }}</dd>
+{%- else %}
+<dd>No snapshot is stored yet.</dd>
+{%- endif %}
+<dt>Last check</dt>
+{%- if playbook.checked_at %}
+<dd>{{ playbook.checked_at }}, {{ playbook.trigger|plain }}: {% if playbook.problem %}{{ playbook.problem|plain }}{% else %}read without a problem.{% endif %}</dd>
+{%- else %}
+<dd>Not checked yet.</dd>
+{%- endif %}
+</dl>
+<form method="post" hx-post="/ai/check" hx-target="#ai-content-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<button type="submit" class="secondary" id="ai-check">Check for changes</button>
+</form>
+</section>
+<section aria-labelledby="ai-routes-heading">
+<h2 id="ai-routes-heading">Route tuples</h2>
+{%- if not routes %}
+<p>No route has a tuple yet. They are recorded when the engine starts.</p>
+{%- endif %}
+{%- for route in routes %}
+<section class="ai-route" aria-labelledby="ai-route-{{ route.route }}-heading">
+<h3 id="ai-route-{{ route.route }}-heading">{{ route.route|plain }}</h3>
+<h4>Active tuple</h4>
+{%- if route.active %}
+{{ tuple_fields(route.active) }}
+{%- else %}
+<p>No active tuple</p>
+{%- endif %}
+<h4>Candidates ({{ route.candidates|length }})</h4>
+{%- if not route.candidates %}
+<p>No candidates.</p>
+{%- endif %}
+{%- for candidate in route.candidates %}
+{{ tuple_fields(candidate) }}
+{%- endfor %}
+</section>
+{%- endfor %}
+</section>
+</div>

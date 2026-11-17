@@ -37,7 +37,7 @@ from tests.fakes.usage_meter import InMemoryUsageMeter
 HEALTH_ISSUES = Registry(
     "build_health_issues", "HealthIssues", "nextron.domain.health", "register_source"
 )
-SOURCES = ("jobqueue", "budget", "backups")
+SOURCES = ("jobqueue", "budget", "backups", "playbook")  # playbook: Story 4.4
 STARTUP_CHECKS = "nextron/startup_checks.py"
 UNUSED = '"""unused"""\n'
 
@@ -112,7 +112,7 @@ def test_the_registry_check_catches_another_function_in_main(tmp_path: Path) -> 
     assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
-def test_the_registry_ships_frozen_with_the_jobqueue_budget_and_backups_sources() -> None:
+def test_the_registry_ships_frozen_with_the_four_owner_sources() -> None:
     meter = InMemoryUsageMeter(FrozenClock())
     budget = main.Budget(FrozenClock(), meter, notify=None)  # type: ignore[arg-type]
 
@@ -121,10 +121,11 @@ def test_the_registry_ships_frozen_with_the_jobqueue_budget_and_backups_sources(
     assert isinstance(issues, HealthIssues)
     assert issues.frozen
     assert tuple(source.name for source in issues.sources) == SOURCES
-    jobqueue, budget_source, backups = issues.sources
+    jobqueue, budget_source, backups, playbook = issues.sources
     assert jobqueue.read is main.jobqueue_queries.health_issues
     assert budget_source.read == budget.health_issues
     assert backups.read is main.ops_queries.health_issues
+    assert playbook.read is main.playbook_queries.health_issues
     with pytest.raises(RuntimeError):
         issues.register_source(IssueSource("late", tuple))
     assert main.build_health_issues(budget=budget) is not issues  # a new registry each time

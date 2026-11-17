@@ -132,6 +132,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "effort",
             "prompt_version",
             "prompt_sha256",
+            "playbook_sha256",
             "schema_version",
             "actor",
             "bootstrap",
@@ -139,6 +140,25 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "activated_at",
             "deactivated_at",
         ),
+    },
+    "playbook_snapshots": {
+        "playbook": ("id", "sha256", "version", "content", "captured_at"),
+    },
+    "ai_route_tuples": {
+        "playbook": (
+            "id",
+            "route",
+            "model",
+            "effort",
+            "prompt_version",
+            "prompt_sha256",
+            "playbook_sha256",
+            "schema_version",
+            "created_at",
+        ),
+    },
+    "playbook_checks": {
+        "playbook": ("id", "checked_at", "trigger", "playbook_sha256", "problem"),
     },
     "contacts": {
         "research": (

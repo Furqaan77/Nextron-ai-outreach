@@ -33,7 +33,10 @@ from nextron.db.models.ops import (
 )
 from nextron.db.models.playbook import (
     AiRouteActivationRecord,
+    AiRouteTupleRecord,
     CompanyFactRecord,
+    PlaybookCheckRecord,
+    PlaybookSnapshotRecord,
     PromptSnapshotRecord,
 )
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
@@ -51,6 +54,7 @@ from nextron.db.models.setup import (
 
 __all__ = [
     "AiRouteActivationRecord",
+    "AiRouteTupleRecord",
     "AiUsageRecord",
     "AlertRecord",
     "ApiUsageRecord",
@@ -69,6 +73,8 @@ __all__ = [
     "MarketRecord",
     "NotificationRecord",
     "OfferRecord",
+    "PlaybookCheckRecord",
+    "PlaybookSnapshotRecord",
     "PromptSnapshotRecord",
     "ProvenanceRecord",
     "RecoveryStateRecord",

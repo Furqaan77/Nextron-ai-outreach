@@ -28,6 +28,12 @@ from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, is_comma
 from nextron.domain.backup import BackupKind, BackupNotVerified
 from nextron.domain.ai import RouteSpec
 from nextron.domain.notifications import NOTIFICATIONS, LeadsMerged
+from nextron.domain.playbook import (
+    MAX_PLAYBOOK_BYTES,
+    PlaybookProblem,
+    PlaybookSnapshot,
+    problem_text,
+)
 from nextron.domain.prompts import PromptFile
 from nextron.lock import InstanceLock, LockHeldError
 from nextron.startup_checks import Probes
@@ -92,6 +98,7 @@ def run_serve(
     probes: Probes | None = None,
     reload: bool = False,
     load_prompts: main.PromptLoader = main.load_prompts,
+    read_playbook: main.PlaybookReader = main.read_playbook_file,
 ) -> tuple[int, str, ServerSpy]:
     spy = ServerSpy()
     err = io.StringIO()
@@ -101,6 +108,7 @@ def run_serve(
         run_server=spy,
         err=err,
         load_prompts=load_prompts,
+        read_playbook=read_playbook,
     )
     return code, err.getvalue(), spy
 
@@ -113,10 +121,15 @@ def no_prompts() -> tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]:
 
 @pytest.fixture
 def dev(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """``NEXTRON_ENV=dev`` with a temporary data dir; returns the data dir."""
+    """``NEXTRON_ENV=dev`` with a temporary data dir and a copy of the Sales Playbook
+    (``NEXTRON_PLAYBOOK_PATH``, so no test touches the real one); returns the data dir."""
     data_dir = tmp_path / "data" / "dev"
+    playbook = tmp_path / "playbook" / "sales-playbook.md"
+    playbook.parent.mkdir()
+    shutil.copyfile(load_bootstrap("dev").playbook_path, playbook)
     monkeypatch.setenv("NEXTRON_ENV", "dev")
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("NEXTRON_PLAYBOOK_PATH", str(playbook))
     return data_dir
 
 
@@ -759,7 +772,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0022_more", create_table("more")))
+    extend(location, ("0023_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -773,7 +786,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0022_more"
+    assert spy.calls[0]["db_revision"] == "0023_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade
@@ -1153,3 +1166,146 @@ def test_the_database_engine_is_disposed_when_the_prompts_are_refused(
 
     [engine] = engines
     assert_disposed(engine, dev / "nextron.db")
+
+
+# Story 4.4: the Sales Playbook read at serve start
+
+
+def playbook_rows(
+    db_file: Path,
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    """The ``playbook_snapshots``, ``ai_route_tuples`` and ``playbook_checks`` rows."""
+    reader = sqlite3.connect(f"{db_file.as_uri()}?mode=ro", uri=True)
+    try:
+        snapshots = reader.execute("SELECT version, sha256 FROM playbook_snapshots").fetchall()
+        tuples = reader.execute(
+            "SELECT route, prompt_version, playbook_sha256 FROM ai_route_tuples ORDER BY route"
+        ).fetchall()
+        checks = reader.execute(
+            'SELECT "trigger", playbook_sha256, problem FROM playbook_checks ORDER BY checked_at'
+        ).fetchall()
+        return snapshots, tuples, checks
+    finally:
+        reader.close()
+
+
+def test_a_first_start_stores_the_playbook_and_records_the_tuples_and_the_check(
+    dev: Path,
+) -> None:
+    config = load_bootstrap()
+    read = main.read_playbook_file(config.playbook_path)
+    assert isinstance(read, PlaybookSnapshot)
+
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    snapshots, tuples, checks = playbook_rows(dev / "nextron.db")
+    assert snapshots == [(read.version, read.sha256)]
+    assert tuples == [
+        ("extract_people", "v1", None),
+        ("extract_signals", "v1", None),
+        ("signal_inbox_parse", "v1", None),
+    ]
+    assert checks == [("startup", read.sha256, None)]
+    [synced] = [line for line in log_lines(dev) if line["event"] == "prompts_synced"]
+    assert synced["candidate_count"] == 3
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        (b"# A Playbook without front matter\n", PlaybookProblem.NO_VERSION),
+        (b"---\nversion: 1\nversion: 2\n---\nText.\n", PlaybookProblem.BAD_VERSION),
+        (b"---\nversion: 1.0\n---\n\xff\n", PlaybookProblem.NOT_UTF8),
+        (None, PlaybookProblem.UNREADABLE),  # the file is missing
+    ],
+)
+def test_a_playbook_problem_never_stops_serve(
+    content: bytes | None, problem: PlaybookProblem, dev: Path
+) -> None:
+    path = load_bootstrap().playbook_path
+    if content is None:
+        path.unlink()
+    else:
+        path.write_bytes(content)
+
+    code, err, spy = run_serve()
+
+    assert code == 0
+    assert err == f"warning: playbook: {problem_text(problem)}\n"
+    assert len(spy.calls) == 1  # the server started
+    snapshots, tuples, checks = playbook_rows(dev / "nextron.db")
+    assert snapshots == []
+    assert len(tuples) == 3  # extraction is unaffected
+    assert checks == [("startup", None, problem.value)]
+    _, activations = prompt_rows(dev / "nextron.db")
+    assert len(activations) == 3
+    [warned] = [line for line in log_lines(dev) if line["event"] == "playbook_invalid"]
+    assert (warned["level"], warned["problem"]) == ("WARNING", problem.value)
+    assert "engine_started" in events(dev)
+
+
+def test_the_playbook_is_read_outside_any_unit_of_work(dev: Path) -> None:
+    seen: list[bool] = []
+
+    def reader(path: Path) -> PlaybookSnapshot | PlaybookProblem:
+        try:
+            current()
+        except UnitOfWorkError:
+            seen.append(True)
+        return main.read_playbook_file(path)
+
+    assert run_serve(read_playbook=reader)[0] == 0
+    assert seen == [True]
+
+
+def test_read_playbook_file_gives_the_snapshot_or_the_problem(tmp_path: Path) -> None:
+    path = tmp_path / "sales-playbook.md"
+    text = "---\nversion: 0.9.0\n---\n\nRules.\n"
+    path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+
+    assert main.read_playbook_file(path) == PlaybookSnapshot("0.9.0", text)
+    assert main.read_playbook_file(tmp_path / "missing.md") is PlaybookProblem.UNREADABLE
+    assert main.read_playbook_file(tmp_path) is PlaybookProblem.UNREADABLE  # a folder
+    path.write_bytes(b"---\nversion: 1\n---\n" + b"x" * MAX_PLAYBOOK_BYTES)
+    assert main.read_playbook_file(path) is PlaybookProblem.TOO_LARGE
+
+
+def test_load_ai_content_reads_the_prompts_and_the_playbook(tmp_path: Path) -> None:
+    path = tmp_path / "sales-playbook.md"
+    path.write_text("---\nversion: 4.4.0\n---\n\nRules.\n", encoding="utf-8")
+
+    loaded = main.load_ai_content(path)
+
+    assert loaded == (*main.load_prompts(), main.read_playbook_file(path))
+    assert isinstance(loaded[2], PlaybookSnapshot) and loaded[2].version == "4.4.0"
+    missing = main.load_ai_content(tmp_path / "missing.md")
+    assert missing[2] is PlaybookProblem.UNREADABLE
+
+
+def test_the_served_app_loads_the_ai_content_from_the_configured_playbook(
+    dev: Path,
+    opened: list[UnitOfWorkFactory],
+    fake_keyring: list[InMemorySecrets],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_bootstrap().playbook_path.write_text(
+        "---\nversion: 7.7.7-wiring\n---\n\nRules.\n", encoding="utf-8"
+    )
+    created: list[dict[str, Any]] = []
+    real_create_app = main.create_app
+
+    def spy(**kwargs: Any) -> object:
+        created.append(kwargs)
+        return real_create_app(**kwargs)
+
+    monkeypatch.setattr(main, "create_app", spy)
+    monkeypatch.setattr(main.uvicorn, "run", lambda app, **kwargs: None)
+
+    assert main.serve(probes=fake_probes(), err=io.StringIO()) == 0
+
+    [kwargs] = created
+    assert isinstance(kwargs["playbook"], main.Playbook)
+    files, defaults, read = kwargs["ai_content"]()  # the loader runs only when called
+    assert (files, defaults) == main.load_prompts()
+    assert isinstance(read, PlaybookSnapshot) and read.version == "7.7.7-wiring"

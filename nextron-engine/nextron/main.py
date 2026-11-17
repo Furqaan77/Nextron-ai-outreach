@@ -42,11 +42,19 @@ database, the notification subscriber registry and Uvicorn.
      copy's row and rotates (a failed rotation only logs ``backup_rotation_failed``). If
      recording fails, ``backup_record_failed`` (ERROR) is logged and
      startup continues: the copy stays on disk.
-7. The prompts (Story 2.8): ``sync_prompts(units, load_prompts, err, log_file)`` runs the
-   loader (``serve(load_prompts=...)``, ``load_prompts`` unless injected) outside any unit of
-   work, then ``Playbook(SystemClock()).sync_prompts(files, defaults)`` in one unit of work:
-   it stores each new prompt version and bootstrap-activates each route's default that has no
-   active tuple (``nextron.app.playbook.api``). ``load_prompts(folder=None)`` reads
+7. The prompts and the Sales Playbook (Stories 2.8 and 4.4): ``sync_prompts(units,
+   load_prompts, read, err, log_file)`` runs the loader (``serve(load_prompts=...)``,
+   ``load_prompts`` unless injected), then reads ``config.playbook_path`` with
+   ``serve(read_playbook=...)`` (``read_playbook_file`` unless injected), both outside any unit
+   of work, then ``Playbook(SystemClock()).sync_prompts(files, defaults, playbook)`` in one unit
+   of work: it stores each new prompt version and Playbook snapshot, records the candidate
+   tuples and the Playbook check, and bootstrap-activates each non-Playbook route's default that
+   has no active tuple (``nextron.app.playbook.api``). ``read_playbook_file(path)`` reads at
+   most ``MAX_PLAYBOOK_BYTES`` + 1 bytes and returns ``nextron.domain.playbook.read_playbook``'s
+   snapshot, or the ``PlaybookProblem``: any ``OSError`` (a missing file included) is
+   ``unreadable``, and an ``InvalidPlaybook`` gives its problem. A problem never stops ``serve``
+   (decision 8: extraction doesn't use the Playbook): it prints ``warning: playbook: <problem
+   text>`` and the sync records it. ``load_prompts(folder=None)`` reads
    ``manifest.lock`` and every ``*.md`` file at any depth of ``folder`` (the AI package's
    ``prompts`` folder unless given), named by its ``/``-separated path relative to ``folder``, so
    a stray or misnamed one is refused, as strict UTF-8 with universal newlines, checks them with
@@ -333,8 +341,9 @@ registry: the only code that constructs ``HealthIssues`` or calls ``register_sou
 ``IssueSource("jobqueue", queries.jobqueue.health_issues)`` (each dead job), then
 ``IssueSource("budget", budget.health_issues)`` (AI spend and quotas), then
 ``IssueSource("backups", queries.ops.health_issues)`` (each failed backup newer than the newest
-verified one), then freezes it; each later owner registers its ``queries.<owner>.health_issues``
-there. ``build_app`` builds one
+verified one), then ``IssueSource("playbook", queries.playbook.health_issues)`` (the newest
+Sales Playbook check's problem, Story 4.4), then freezes it; each later owner registers its
+``queries.<owner>.health_issues`` there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
 (``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
@@ -363,8 +372,12 @@ Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, whic
 one-time code, its ``Credentials``, which store the external credentials, and its
 ``GoogleAccess``, which holds the Google client and grants; its ``Setup`` stores the settings,
 its ``Campaigns`` (``nextron.app.setup.api``) runs the Settings page's Campaign controls
-(``create_app(..., campaigns=...)``), and its ``CompanyFacts`` (``nextron.app.playbook.api``)
-the Approved Company Facts the facts page edits (``create_app(..., facts=...)``); all of them
+(``create_app(..., campaigns=...)``), its ``CompanyFacts`` (``nextron.app.playbook.api``)
+the Approved Company Facts the facts page edits (``create_app(..., facts=...)``), and its
+``Playbook`` the AI content view's "Check for changes" (``create_app(..., playbook=...,
+ai_content=...)``, Story 4.4), whose loader (``load_ai_content``, bound to
+``config.playbook_path``) runs ``load_prompts()`` and ``read_playbook_file`` outside any unit
+of work when the button is pressed, never when the app is built; all of them
 share one ``SystemClock``; and its handlers open their units of work through ``units``. Tests
 inject the secrets and the clock.
 
@@ -526,6 +539,7 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
 from nextron.app.sending.api import Sending
@@ -580,6 +594,14 @@ from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import LeadsMerged
 from nextron.domain.offers import InvalidOffers, validate_offers
+from nextron.domain.playbook import (
+    MAX_PLAYBOOK_BYTES,
+    InvalidPlaybook,
+    PlaybookProblem,
+    PlaybookSnapshot,
+    problem_text,
+    read_playbook,
+)
 from nextron.domain.prompts import (
     MANIFEST_FILE_NAME,
     PROMPT_SUFFIX,
@@ -726,6 +748,7 @@ RESTORE_TIME_FORMAT: Final = "%Y-%m-%d %H:%M:%S UTC"
 
 ServerRunner = Callable[[BootstrapConfig, bool, UnitOfWorkFactory], None]
 PromptLoader = Callable[[], tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]]
+PlaybookReader = Callable[[Path], PlaybookSnapshot | PlaybookProblem]
 EngineProbe = Callable[[str, int], bool]
 Browser = Callable[[str], bool]
 
@@ -871,6 +894,8 @@ def build_app(
         setup=Setup(clock),
         campaigns=Campaigns(clock),
         facts=CompanyFacts(clock),
+        playbook=Playbook(clock),
+        ai_content=functools.partial(load_ai_content, config.playbook_path),
         credentials=Credentials(secrets, clock),
         google=google,
         notify=notify,
@@ -1045,12 +1070,13 @@ def build_job_types(
 
 def build_health_issues(*, budget: Budget) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
-    quotas, then the failed backups. Each later owner registers its
-    ``queries.<owner>.health_issues`` here, before ``freeze()``."""
+    quotas, then the failed backups, then the Sales Playbook's problem. Each later owner
+    registers its ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
     issues.register_source(IssueSource("budget", budget.health_issues))
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
+    issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
     issues.freeze()
     return issues
 
@@ -1439,15 +1465,48 @@ def load_prompts(
     return verify(entries, files), routes.default_specs()
 
 
+def read_playbook_file(path: Path) -> PlaybookSnapshot | PlaybookProblem:
+    """The Sales Playbook snapshot of the file at ``path``, or the problem that kept it from
+    one: ``unreadable`` for any ``OSError`` (a missing file included), else
+    ``read_playbook``'s. File I/O only: it opens no unit of work, and it reads at most
+    ``MAX_PLAYBOOK_BYTES`` + 1 bytes, so a huge file is ``too_large`` without being loaded."""
+    try:
+        with path.open("rb") as file:
+            data = file.read(MAX_PLAYBOOK_BYTES + 1)
+    except OSError:
+        return PlaybookProblem.UNREADABLE
+    try:
+        return read_playbook(data)
+    except InvalidPlaybook as exc:
+        return exc.problem
+
+
+def load_ai_content(
+    playbook_path: Path,
+) -> tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...], PlaybookSnapshot | PlaybookProblem]:
+    """The AI content view's loader: ``load_prompts()`` and ``read_playbook_file(playbook_path)``,
+    outside any unit of work. ``InvalidPrompts`` propagates."""
+    files, defaults = load_prompts()
+    return files, defaults, read_playbook_file(playbook_path)
+
+
 def sync_prompts(
-    units: UnitOfWorkFactory, load: PromptLoader, err: TextIO, log_file: Path
+    units: UnitOfWorkFactory,
+    load: PromptLoader,
+    read: Callable[[], PlaybookSnapshot | PlaybookProblem],
+    err: TextIO,
+    log_file: Path,
 ) -> bool:
-    """``serve``'s prompt step: ``load()`` outside any unit of work, then
-    ``Playbook.sync_prompts`` in one. False, after printing and logging why, when it failed."""
+    """``serve``'s prompt step: ``load()`` and ``read()`` outside any unit of work, then
+    ``Playbook.sync_prompts`` in one. A Playbook problem prints ``warning: playbook: <problem
+    text>`` and the step goes on. False, after printing and logging why, when it failed."""
     try:
         files, defaults = load()
+        playbook = read()
+        if isinstance(playbook, PlaybookProblem):
+            print(f"warning: playbook: {problem_text(playbook)}", file=err)
         with units.open():
-            Playbook(SystemClock()).sync_prompts(files, defaults)
+            Playbook(SystemClock()).sync_prompts(files, defaults, playbook)
     except InvalidPrompts as exc:
         print(f"startup check failed: {PROMPTS_CHECK}: {exc.message}", file=err)
         log.error("startup_check_failed", extra={"check": PROMPTS_CHECK})
@@ -1476,6 +1535,7 @@ def serve(
     run_server: ServerRunner = run_uvicorn,
     err: TextIO | None = None,
     load_prompts: PromptLoader = load_prompts,
+    read_playbook: PlaybookReader = read_playbook_file,
 ) -> int:
     """Start the engine for ``NEXTRON_ENV``; return the process exit code."""
     err = err if err is not None else sys.stderr
@@ -1547,7 +1607,8 @@ def serve(
             if pre_migrate.taken is not None:  # a verified copy, and the upgrade succeeded
                 record_pre_migrate(units, local, pre_migrate.taken)
             log_file = config.data_dir / LOGS_DIR_NAME / LOG_FILE_NAME
-            if not sync_prompts(units, load_prompts, err, log_file):
+            read = functools.partial(read_playbook, config.playbook_path)
+            if not sync_prompts(units, load_prompts, read, err, log_file):
                 return EXIT_STARTUP_FAILED
             identity = {"env": config.env, "version": __version__}
             log.info("engine_started", extra={**identity, "db_revision": db_revision})

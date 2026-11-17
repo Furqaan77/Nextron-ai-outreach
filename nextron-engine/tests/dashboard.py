@@ -52,6 +52,11 @@ the CSV import page runs it, so it needs real units of work too. Its ``ContactMa
 ``upload(**texts, file=...)`` builds a ``multipart/form-data`` body as a browser would, with its
 ``Content-Type``.
 
+Its ``Playbook`` (``playbook``, Story 4.4) uses the same clock; the AI content view's "Check
+for changes" runs it on what ``ai_content`` loads (``shipped_ai_content`` unless a test passes
+another loader: the shipped prompt files and defaults, and ``TEST_PLAYBOOK``, a synthetic
+Sales Playbook, so no test reads or edits the real one).
+
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
@@ -83,13 +88,16 @@ from nextron.app.ops.api import (
     RestoreTests,
 )
 from nextron.app.pipeline.api import Pipeline
-from nextron.app.playbook.api import CompanyFacts
+from nextron.app.playbook.api import CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
+from nextron.domain.ai import RouteSpec
 from nextron.domain.alert import Channel
 from nextron.domain.job import JobTypes
+from nextron.domain.playbook import PlaybookProblem, PlaybookSnapshot, read_playbook
+from nextron.domain.prompts import PromptFile
 from nextron.domain.readiness import CheckResult, Status
 from nextron.ports.alert import AlertPort
 from nextron.ports.email_syntax import EmailSyntaxPort
@@ -126,6 +134,17 @@ READINESS = tuple(
         "database_revision",
     )
 )
+
+
+TEST_PLAYBOOK = "---\ntitle: Test Sales Playbook\nversion: 9.9.9-test\n---\n\n# Test Playbook\n"
+
+
+def shipped_ai_content() -> tuple[
+    tuple[PromptFile, ...], tuple[RouteSpec, ...], PlaybookSnapshot | PlaybookProblem
+]:
+    """The shipped prompt files and defaults, and the synthetic ``TEST_PLAYBOOK``."""
+    files, defaults = main.load_prompts()
+    return files, defaults, read_playbook(TEST_PLAYBOOK.encode("utf-8"))
 
 
 def no_copies(target: Path) -> Snapshot:
@@ -258,11 +277,15 @@ class Dashboard:
     offpc_target: InMemoryBackupTarget = field(default_factory=InMemoryBackupTarget)
     inspect: Callable[[Path], CopyInspection] = inspect_copy
     email_syntax: EmailSyntaxPort = field(default_factory=FakeEmailSyntax)
+    ai_content: Callable[
+        [], tuple[Sequence[PromptFile], Sequence[RouteSpec], PlaybookSnapshot | PlaybookProblem]
+    ] = shipped_ai_content
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
     campaigns: Campaigns = field(init=False)
     facts: CompanyFacts = field(init=False)
+    playbook: Playbook = field(init=False)
     credentials: Credentials = field(init=False)
     google: GoogleAccess = field(init=False)
     job_types: JobTypes = field(init=False)
@@ -284,6 +307,7 @@ class Dashboard:
         self.setup = Setup(self.clock)
         self.campaigns = Campaigns(self.clock)
         self.facts = CompanyFacts(self.clock)
+        self.playbook = Playbook(self.clock)
         self.credentials = Credentials(self.secrets, self.clock)
         self.google = GoogleAccess(
             self.secrets,
@@ -359,6 +383,8 @@ class Dashboard:
             setup=self.setup,
             campaigns=self.campaigns,
             facts=self.facts,
+            playbook=self.playbook,
+            ai_content=self.ai_content,
             credentials=self.credentials,
             google=self.google,
             notify=self.notify,

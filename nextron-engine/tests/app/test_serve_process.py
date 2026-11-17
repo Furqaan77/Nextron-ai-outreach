@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from nextron import __version__
+from nextron.bootstrap import DEFAULT_PLAYBOOK_PATH, ENGINE_ROOT
 from nextron.db.migrations import head_revision
 from tests.migration_chains import stored_revisions
 
@@ -62,10 +63,14 @@ def nextron(*args: str, env: dict[str, str], **kwargs: object) -> subprocess.Com
 @pytest.fixture
 def engine_env(tmp_path: Path, local_app_data: Path) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("NEXTRON_")}
+    playbook = tmp_path / "playbook" / "sales-playbook.md"  # Story 4.4: a copy, never the real one
+    playbook.parent.mkdir()
+    shutil.copyfile(ENGINE_ROOT / DEFAULT_PLAYBOOK_PATH, playbook)
     env.update(
         NEXTRON_ENV="test",
         NEXTRON_DATA_DIR=str(tmp_path / "data"),
         NEXTRON_BACKUP_DIR=str(tmp_path / "backups"),
+        NEXTRON_PLAYBOOK_PATH=str(playbook),
         NEXTRON_PORT=str(free_port()),
         LOCALAPPDATA=str(local_app_data),
         PYTHONIOENCODING="utf-8",
@@ -133,6 +138,29 @@ def purge_jobs(path: Path) -> list[tuple[str]]:
         return reader.execute(
             "SELECT idempotency_key FROM jobs WHERE type = 'purge_page_text'"
         ).fetchall()
+    finally:
+        reader.close()
+
+
+def playbook_counts(path: Path) -> tuple[int, int, int, int, int]:
+    """How many Playbook snapshots, candidate tuples, tuples with a Playbook, startup checks
+    that read a snapshot, and activations that are not bootstrap or name a Playbook the running
+    engine's database holds."""
+    reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        counts = [
+            reader.execute(statement).fetchone()[0]
+            for statement in (
+                "SELECT COUNT(*) FROM playbook_snapshots",
+                "SELECT COUNT(*) FROM ai_route_tuples",
+                "SELECT COUNT(*) FROM ai_route_tuples WHERE playbook_sha256 IS NOT NULL",
+                "SELECT COUNT(*) FROM playbook_checks WHERE \"trigger\" = 'startup' "
+                "AND playbook_sha256 IS NOT NULL AND problem IS NULL",
+                "SELECT COUNT(*) FROM ai_route_activations "
+                "WHERE bootstrap = 0 OR playbook_sha256 IS NOT NULL",
+            )
+        ]
+        return tuple(int(count) for count in counts)  # type: ignore[return-value]
     finally:
         reader.close()
 
@@ -293,7 +321,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0021_4_2_campaigns"
+    assert HEAD == "0022_4_4_playbook_snapshots"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]
@@ -304,6 +332,10 @@ def test_guarded_health_page_and_second_instance(
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
     # bootstrap activation, by seed and with no test run, per route
     assert prompt_counts(data_dir / "nextron.db") == (3, 3, 3)
+    # Story 4.4: one Sales Playbook snapshot, one candidate tuple per route (none with a
+    # Playbook) and one startup check; no route is activated with a Playbook, and every
+    # activation is a bootstrap one
+    assert playbook_counts(data_dir / "nextron.db") == (1, 3, 0, 1, 0)
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
     assert (synced["stored_count"], synced["activated_count"]) == (3, 3)
     assert lines.index(synced) < lines.index(started)

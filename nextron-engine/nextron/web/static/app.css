@@ -692,3 +692,45 @@ button.secondary {
 .campaign form {
   margin: 0 0 0.75rem;
 }
+
+/* The AI content view: one bordered section per route, each tuple as a definition list with a
+   rule above it, so the candidates never run together. */
+.ai-route {
+  max-width: 48rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.ai-route h3 {
+  margin: 0 0 0.5rem;
+}
+
+.ai-route h4 {
+  margin: 0.75rem 0 0.25rem;
+}
+
+.ai-playbook,
+.ai-tuple {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.ai-tuple {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.ai-playbook dt,
+.ai-tuple dt {
+  font-weight: 600;
+}
+
+.ai-playbook dd,
+.ai-tuple dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

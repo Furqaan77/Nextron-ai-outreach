@@ -9,6 +9,7 @@ import pytest
 
 from nextron.domain.ai import (
     Effort,
+    RouteSpec,
     RouteTuple,
     UntrustedBlock,
     Urgency,
@@ -17,10 +18,13 @@ from nextron.domain.ai import (
     check_urgency,
 )
 from nextron.domain.budget import MODEL_PATTERN
+from nextron.domain.playbook import PlaybookSnapshot
 
 PROMPT: Final = "Extract the Signals. Quote the page exactly."
 LEAD: Final = "lead:01JD3QZ8X5V9K2M7N4P6R8T0WY"
 TEXT: Final = "Smith & Jones LLP is hiring a Head of Marketing."
+PLAYBOOK_TEXT: Final = "---\nversion: 0.2.0\n---\n\nPlaybookTextMarker.\n"
+PLAYBOOK: Final = PlaybookSnapshot("0.2.0", PLAYBOOK_TEXT)
 
 
 def route_tuple(**changes: Any) -> RouteTuple:
@@ -69,6 +73,53 @@ def test_the_longest_route_tuple_key_still_fits_the_usage_table() -> None:
 
     assert MODEL_PATTERN.fullmatch(value.key)
     assert value.key.startswith("m" * 64 + ":medium:v9999:s9999:")
+
+
+def test_a_route_tuple_without_a_playbook_keeps_its_story_2_7_key() -> None:
+    value = route_tuple()
+
+    assert value.playbook is None
+    assert value.playbook_sha256 is None
+    assert ":p" not in value.key.split(":s1:")[1]
+
+
+def test_a_playbook_tuple_names_its_snapshot_in_its_key() -> None:  # Story 4.4
+    value = route_tuple(playbook=PLAYBOOK)
+    digest = hashlib.sha256(PLAYBOOK_TEXT.encode("utf-8")).hexdigest()
+
+    assert value.playbook_sha256 == digest == PLAYBOOK.sha256
+    assert value.key == f"{route_tuple().key}:p{digest[:12]}"
+    assert MODEL_PATTERN.fullmatch(value.key)
+    assert value != route_tuple()  # the Playbook is part of the tuple
+    other = PlaybookSnapshot("0.2.0", PLAYBOOK_TEXT + "More.\n")
+    assert route_tuple(playbook=other).key != value.key  # same version, another text
+    assert "PlaybookTextMarker" not in repr(value)
+
+
+def test_the_longest_playbook_tuple_key_still_fits_the_usage_table() -> None:
+    value = route_tuple(
+        route="r" * 64, model="m" * 64, prompt_version="v9999", schema_version=9_999,
+        playbook=PLAYBOOK,
+    )
+
+    assert MODEL_PATTERN.fullmatch(value.key)
+    assert len(value.key) <= 128  # ai_usage.route_tuple
+
+
+@pytest.mark.parametrize("playbook", ["0.2.0", PLAYBOOK_TEXT, 1, object()])
+def test_a_route_tuple_refuses_a_playbook_that_isnt_a_snapshot(playbook: object) -> None:
+    with pytest.raises(TypeError, match="playbook must be a PlaybookSnapshot or None"):
+        route_tuple(playbook=playbook)
+
+
+def test_a_route_spec_carries_whether_it_uses_the_playbook() -> None:
+    spec = RouteSpec("draft_sequence", "claude-opus-5-5", Effort.HIGH, "v1", 1)
+
+    assert spec.uses_playbook is False
+    assert replace(spec, uses_playbook=True).uses_playbook is True
+    for bad in (1, 0, None, "true"):
+        with pytest.raises(TypeError, match="uses_playbook must be a bool"):
+            replace(spec, uses_playbook=bad)
 
 
 def test_a_non_ascii_prompt_is_hashed_as_utf8() -> None:

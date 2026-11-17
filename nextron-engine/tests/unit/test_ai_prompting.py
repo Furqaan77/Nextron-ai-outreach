@@ -11,6 +11,7 @@ from nextron.adapters.ai.prompting import build_request, escape, user_turn
 from nextron.adapters.ai.routes import CANDIDATES
 from nextron.adapters.ai.schemas import EXTRACT_SIGNALS_V1, wire_schema
 from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock
+from nextron.domain.playbook import AUTHORITY_ORDER, PlaybookSnapshot, playbook_section
 
 LEAD: Final = "lead:01JD3QZ8X5V9K2M7N4P6R8T0WY"
 PROMPT: Final = "You extract Signals from a law firm's pages. Quote each page exactly."
@@ -174,3 +175,43 @@ def test_the_request_carries_the_tuple_effort_and_model() -> None:
 
     assert request["output_config"]["effort"] == "low"
     assert request["model"] == "claude-haiku-5-5"
+
+
+# The pinned Sales Playbook (Story 4.4) -----------------------------------------------------------
+
+PLAYBOOK_TEXT: Final = "---\nversion: 0.2.0\n---\n\n# Sales Playbook\nCite one Signal.\n"
+
+
+def test_a_playbook_tuple_sends_the_prompt_then_the_framed_snapshot() -> None:
+    snapshot = PlaybookSnapshot("0.2.0", PLAYBOOK_TEXT)
+    route = RouteTuple(
+        "extract_signals", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1, PROMPT, snapshot
+    )
+    blocks = [block()]
+
+    request = build_request(route, CANDIDATES["extract_signals"][0], blocks, 8_000)
+
+    assert request["system"] == [
+        {"type": "text", "text": PROMPT},
+        {
+            "type": "text",
+            "text": playbook_section(snapshot),
+            "cache_control": {"type": "ephemeral"},  # the cached prefix holds both blocks
+        },
+    ]
+    framed = request["system"][1]["text"]
+    assert framed.index(AUTHORITY_ORDER) < framed.index("Sales Playbook, version 0.2.0:")
+    assert framed.endswith(PLAYBOOK_TEXT)
+    plain = build_request(signals_tuple(), CANDIDATES["extract_signals"][0], blocks, 8_000)
+    assert {key: value for key, value in request.items() if key != "system"} == {
+        key: value for key, value in plain.items() if key != "system"
+    }  # nothing else in the request changes
+
+
+def test_a_tuple_without_a_playbook_keeps_one_cached_system_block() -> None:
+    request = build_request(signals_tuple(), CANDIDATES["extract_signals"][0], [block()], 8_000)
+
+    assert request["system"] == [
+        {"type": "text", "text": PROMPT, "cache_control": {"type": "ephemeral"}}
+    ]
+    assert list(request["system"][0]) == ["type", "text", "cache_control"]
