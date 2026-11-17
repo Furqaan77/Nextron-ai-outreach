@@ -18,7 +18,36 @@ so Epic 4 can't activate an untested tuple without a schema change); ``activated
 ``deactivated_at``, NULL while the activation is active. ``(route, prompt_version,
 prompt_sha256)`` references the snapshot, so an activation always names stored text, and the
 partial unique index ``uq_ai_route_activations_active_route`` allows one active activation per
-route. ``test_run_id`` has no foreign key yet: Epic 4 adds ``ai_test_runs``.
+route. ``test_run_id`` has no foreign key yet: Epic 4 adds ``ai_test_runs``. Story 4.4
+(migration ``0026_4_4_playbook_snapshots``, which rebuilds the table) adds a nullable
+``playbook_sha256`` after ``prompt_sha256``: the Sales Playbook snapshot the tuple runs under
+(a foreign key to ``playbook_snapshots.sha256``; ``ck_ai_route_activations_playbook_sha256``:
+NULL or 64 lowercase hex digits). A bootstrap activation never has one.
+
+``playbook_snapshots`` (Story 4.4) holds every Sales Playbook text ever read, written only by
+``nextron.db.repos.playbook.playbook_snapshots``: ``sha256`` (unique,
+``uq_playbook_snapshots_sha256``; ``ck_playbook_snapshots_sha256``), the front matter's
+``version`` (``ck_playbook_snapshots_version``: 1 to 32 letters, digits, dots, plus and minus
+signs, starting with a letter or digit), the normalised ``content`` and ``captured_at``.
+
+``ai_route_tuples`` (Story 4.4) holds every candidate tuple the sync has seen, active ones
+included, written only by ``nextron.db.repos.playbook.route_tuples``: ``route``, ``model``,
+``effort`` (``ck_ai_route_tuples_effort``), ``prompt_version``, ``prompt_sha256`` (with the
+route and version, a foreign key to the prompt snapshot), a nullable ``playbook_sha256`` (a
+foreign key to ``playbook_snapshots.sha256``; ``ck_ai_route_tuples_playbook_sha256``),
+``schema_version`` (``ck_ai_route_tuples_schema_version``) and ``created_at``. Two partial
+unique indexes keep one row per tuple: ``uq_ai_route_tuples_no_playbook`` on (``route``,
+``model``, ``effort``, ``prompt_version``, ``schema_version``) where ``playbook_sha256`` is NULL,
+and ``uq_ai_route_tuples_playbook`` on those columns and ``playbook_sha256`` where it isn't. Its
+ULID is the tuple id Stories 4.5 and 4.12 name.
+
+``playbook_checks`` (Story 4.4) holds one row per read of the Playbook file, written only by
+``nextron.db.repos.playbook.playbook_checks``: ``checked_at``, ``trigger``
+(``ck_playbook_checks_trigger``: ``startup`` or ``operator_check``), and either the
+``playbook_sha256`` read (a foreign key to ``playbook_snapshots.sha256``) or the ``problem``
+(``ck_playbook_checks_problem``: one of the five ``PlaybookProblem`` codes);
+``ck_playbook_checks_outcome``: exactly one of the two is set. None of the three Story 4.4
+tables is ever updated or deleted.
 
 ``company_facts`` holds the Approved Company Facts (FR-72, Story 4.3) as append-only versions,
 written only by ``nextron.db.repos.playbook.company_facts`` (migration
@@ -40,7 +69,8 @@ REPLACE`` can't replace a version); and ``trg_company_facts_immutable`` aborts a
 that changes any column but ``retracted_at``, or changes ``retracted_at`` once it isn't NULL. A
 later migration that rebuilds the table in batch mode must create them again.
 
-Prompts are the engine's own text and an activation holds codes and times; facts are claims
+Prompts and the Playbook are the engine's own text, and activations, tuples and checks hold
+codes, hashes and times; facts are claims
 about Nextron, its work, its Offer and public regulation, never about a person. So no column
 is personal data (PII class ``none``).
 """
@@ -52,6 +82,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -64,6 +95,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.ai import Effort
+from nextron.domain.playbook import PlaybookProblem, SyncTrigger
 
 ROUTE_LENGTH: Final = 64  # nextron.domain.budget.CODE_PATTERN allows 64 characters
 MODEL_LENGTH: Final = 64  # nextron.domain.ai.MODEL_NAME_PATTERN
@@ -83,6 +115,26 @@ TESTED_CHECK: Final = (
     "(bootstrap = 1 AND test_run_id IS NULL) OR (bootstrap = 0 AND test_run_id IS NOT NULL)"
 )
 ACTIVE_WHERE: Final = "deactivated_at IS NULL"
+
+PLAYBOOK_VERSION_LENGTH: Final = 32  # nextron.domain.playbook.VERSION_PATTERN
+TRIGGER_LENGTH: Final = 16
+PROBLEM_LENGTH: Final = 16
+PLAYBOOK_SHA256_CHECK: Final = (
+    "playbook_sha256 IS NULL OR "
+    "(length(playbook_sha256) = 64 AND playbook_sha256 NOT GLOB '*[^0-9a-f]*')"
+)
+PLAYBOOK_VERSION_CHECK: Final = (
+    "length(version) BETWEEN 1 AND 32 AND version GLOB '[0-9A-Za-z]*' "
+    "AND version NOT GLOB '*[^0-9A-Za-z.+-]*'"
+)
+TRIGGER_CHECK: Final = "trigger IN ({})".format(",".join(f"'{t}'" for t in SyncTrigger))
+PROBLEM_CHECK: Final = "problem IS NULL OR problem IN ({})".format(
+    ",".join(f"'{problem}'" for problem in PlaybookProblem)
+)
+OUTCOME_CHECK: Final = "(playbook_sha256 IS NULL) <> (problem IS NULL)"
+NO_PLAYBOOK_WHERE: Final = "playbook_sha256 IS NULL"
+PLAYBOOK_WHERE: Final = "playbook_sha256 IS NOT NULL"
+TUPLE_COLUMNS: Final = ("route", "model", "effort", "prompt_version", "schema_version")
 
 FACT_ID_LENGTH: Final = 31  # nextron.domain.company_facts.FACT_ID_PATTERN
 FACT_TYPE_LENGTH: Final = 16  # company, case_study, offer, regulation, statistic
@@ -133,6 +185,7 @@ class AiRouteActivationRecord(Base):
         CheckConstraint(EFFORT_CHECK, name="effort"),
         CheckConstraint(SCHEMA_VERSION_CHECK, name="schema_version"),
         CheckConstraint(TESTED_CHECK, name="tested"),
+        CheckConstraint(PLAYBOOK_SHA256_CHECK, name="playbook_sha256"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -141,12 +194,95 @@ class AiRouteActivationRecord(Base):
     effort: Mapped[str] = mapped_column(String(EFFORT_LENGTH))
     prompt_version: Mapped[str] = mapped_column(String(PROMPT_VERSION_LENGTH))
     prompt_sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH))
+    playbook_sha256: Mapped[str | None] = mapped_column(
+        String(SHA256_LENGTH), ForeignKey("playbook_snapshots.sha256")
+    )
     schema_version: Mapped[int] = mapped_column(Integer)
     actor: Mapped[str] = mapped_column(String(ACTOR_LENGTH))
     bootstrap: Mapped[bool] = mapped_column(Boolean)
     test_run_id: Mapped[str | None] = mapped_column(Ulid)
     activated_at: Mapped[datetime] = mapped_column(UtcDateTime)
     deactivated_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+class PlaybookSnapshotRecord(Base):
+    """One stored Sales Playbook text, by its SHA-256."""
+
+    __tablename__ = "playbook_snapshots"
+    __table_args__ = (
+        UniqueConstraint("sha256"),
+        CheckConstraint(SHA256_CHECK, name="sha256"),
+        CheckConstraint(PLAYBOOK_VERSION_CHECK, name="version"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH))
+    version: Mapped[str] = mapped_column(String(PLAYBOOK_VERSION_LENGTH))
+    content: Mapped[str] = mapped_column(Text)
+    captured_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class AiRouteTupleRecord(Base):
+    """One candidate tuple of a route: what Story 4.5's test gate runs and activates."""
+
+    __tablename__ = "ai_route_tuples"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["route", "prompt_version", "prompt_sha256"],
+            [
+                "prompt_snapshots.route",
+                "prompt_snapshots.prompt_version",
+                "prompt_snapshots.sha256",
+            ],
+        ),
+        Index(
+            "uq_ai_route_tuples_no_playbook",
+            *TUPLE_COLUMNS,
+            unique=True,
+            sqlite_where=text(NO_PLAYBOOK_WHERE),
+        ),
+        Index(
+            "uq_ai_route_tuples_playbook",
+            *TUPLE_COLUMNS,
+            "playbook_sha256",
+            unique=True,
+            sqlite_where=text(PLAYBOOK_WHERE),
+        ),
+        CheckConstraint(EFFORT_CHECK, name="effort"),
+        CheckConstraint(SCHEMA_VERSION_CHECK, name="schema_version"),
+        CheckConstraint(PLAYBOOK_SHA256_CHECK, name="playbook_sha256"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    route: Mapped[str] = mapped_column(String(ROUTE_LENGTH))
+    model: Mapped[str] = mapped_column(String(MODEL_LENGTH))
+    effort: Mapped[str] = mapped_column(String(EFFORT_LENGTH))
+    prompt_version: Mapped[str] = mapped_column(String(PROMPT_VERSION_LENGTH))
+    prompt_sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH))
+    playbook_sha256: Mapped[str | None] = mapped_column(
+        String(SHA256_LENGTH), ForeignKey("playbook_snapshots.sha256")
+    )
+    schema_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class PlaybookCheckRecord(Base):
+    """One read of the Sales Playbook file: the snapshot it gave, or why it gave none."""
+
+    __tablename__ = "playbook_checks"
+    __table_args__ = (
+        CheckConstraint(TRIGGER_CHECK, name="trigger"),
+        CheckConstraint(PROBLEM_CHECK, name="problem"),
+        CheckConstraint(OUTCOME_CHECK, name="outcome"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    trigger: Mapped[str] = mapped_column(String(TRIGGER_LENGTH))
+    playbook_sha256: Mapped[str | None] = mapped_column(
+        String(SHA256_LENGTH), ForeignKey("playbook_snapshots.sha256")
+    )
+    problem: Mapped[str | None] = mapped_column(String(PROBLEM_LENGTH))
 
 
 class CompanyFactRecord(Base):

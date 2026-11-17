@@ -75,6 +75,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``facts`` (``CompanyFacts``, the ``playbook`` service) in its own unit of work, then renders
   the panel again in a read-only one; a refused one (``InvalidFact``) answers 200 with the
   refused form re-rendered.
+- ``GET /ai`` (``ai_content_page``) and ``POST /ai/check`` (``ai_content_check``), both
+  ``@personal_data(False)``: the AI content view (Story 4.4), linked from the Settings page; see
+  ``nextron.web.ai_content_page``. The GET reads ``queries.playbook.route_tuples()`` and
+  ``playbook_status()``. The POST's only field is ``csrf_token`` (anything else is
+  ``MalformedForm``, 400); it runs ``ai_content`` (the loader ``nextron.main`` binds: the
+  verified prompt files, each route's default and the Sales Playbook read) outside any unit of
+  work, then ``playbook.sync_prompts(..., trigger=SyncTrigger.OPERATOR_CHECK)`` (``Playbook``)
+  in its own unit of work, then renders the panel again in a read-only one, with the check's
+  notice and, when the Playbook read failed, its alert. ``InvalidPrompts`` answers 200 with the
+  alert "Nothing was stored: <message>".
 - ``GET /quotas`` (``quotas_page``, ``@personal_data(False)``): the Quotas and cost page
   (UX-DR28), rendered from ``budget.status()`` (the ``ops`` service's ``Budget``) through
   ``nextron.web.quotas_page``, and linked from the Settings page; see that module.
@@ -178,7 +188,7 @@ from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
-from nextron.app.playbook.api import CompanyFacts
+from nextron.app.playbook.api import CompanyFacts, Playbook
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
@@ -206,12 +216,15 @@ from nextron.domain.lead_import import ImportRefused
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.offers import InvalidOffers
 from nextron.domain.open_code import CodeCheck
+from nextron.domain.playbook import SyncTrigger
+from nextron.domain.prompts import InvalidPrompts
 from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.domain.unsub_token import UnsubKeyInUse
+from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import facts_page as fact_rows
@@ -379,6 +392,8 @@ def create_app(
     setup: Setup,
     campaigns: Campaigns,
     facts: CompanyFacts,
+    playbook: Playbook,
+    ai_content: ai_rows.ContentLoader,
     credentials: Credentials,
     google: GoogleAccess,
     notify: Notify,
@@ -398,6 +413,7 @@ def create_app(
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``campaigns`` runs the Settings page's
     Campaign controls (activate, pause, resume, save the LIA), ``facts`` the Approved Company Facts,
+    ``playbook`` the AI content view's "Check for changes" with the inputs ``ai_content`` loads,
     ``credentials`` the external credentials and ``google`` the Google client and grants (both
     in Credential Manager, not the database);
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
@@ -680,6 +696,47 @@ def create_app(
         notice = fact_rows.retracted_notice(retracted)
         with units.open(read_only=True):
             return facts_answer(request, fact_rows.PANEL_TEMPLATE, notice=notice)
+
+    def ai_content_answer(
+        request: Request, template: str, *, notice: str | None = None, alert: str | None = None
+    ) -> HTMLResponse:
+        context = ai_rows.panel_context(
+            playbook_queries.route_tuples(),
+            playbook_queries.playbook_status(),
+            notice=notice,
+            alert=alert,
+        )
+        return page(request, template, **context)
+
+    @app.get("/ai", name="ai_content_page")
+    @personal_data(False)  # route codes, models, versions, hashes and times
+    def ai_content_page(request: Request) -> HTMLResponse:
+        return ai_content_answer(request, ai_rows.PAGE_TEMPLATE)
+
+    @app.post("/ai/check", name="ai_content_check")
+    @personal_data(False)
+    def ai_content_check(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        ai_rows.submitted_check(fields)
+        try:
+            files, defaults, read = ai_content()  # file I/O, outside any unit of work
+            with units.open():
+                result = playbook.sync_prompts(
+                    files, defaults, read, trigger=SyncTrigger.OPERATOR_CHECK
+                )
+        except InvalidPrompts as refused:  # 200, so HTMX swaps the panel in; nothing stored
+            with units.open(read_only=True):
+                return ai_content_answer(
+                    request, ai_rows.PANEL_TEMPLATE, alert=ai_rows.prompts_refused(refused)
+                )
+        with units.open(read_only=True):
+            return ai_content_answer(
+                request,
+                ai_rows.PANEL_TEMPLATE,
+                notice=ai_rows.check_notice(result),
+                alert=ai_rows.check_alert(result),
+            )
 
     def row_answer(request: Request, row: credential_rows.CredentialRow) -> HTMLResponse:
         return page(request, credential_rows.ROW_TEMPLATE, row=row)

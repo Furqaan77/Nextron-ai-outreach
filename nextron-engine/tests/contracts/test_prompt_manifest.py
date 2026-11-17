@@ -12,14 +12,19 @@
   itself (no braces, no JSON schema keywords); never a Signal Tier; and, where a
   ``signal_types`` block is sent, never to quote or cite it.
 - ``.gitattributes`` keeps git from converting the prompt files' line endings.
+- **The Sales Playbook frame never changes** (Story 4.4). ``FRAME_SHA256`` pins
+  ``playbook_section`` (the order of authority, then the version, then the snapshot), and a built
+  Playbook request puts the order of authority before the Playbook text.
 - **Shipped candidates never change.** ``SHIPPED_CANDIDATES`` is add-only: each route candidate
   ever shipped must still be found by ``routes.find``, because a stored activation may name it
   and the gateway refuses a tuple no candidate matches (``llm_unknown_route``).
 """
 
+import hashlib
 import re
 import shutil
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -27,8 +32,10 @@ import pytest
 
 from nextron import main
 from nextron.adapters.ai import routes
+from nextron.adapters.ai.prompting import build_request
 from nextron.adapters.ai.schemas import json_schema
-from nextron.domain.ai import Effort, RouteTuple
+from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock
+from nextron.domain.playbook import AUTHORITY_ORDER, PlaybookSnapshot, playbook_section
 from nextron.domain.prompts import MANIFEST_FILE_NAME, InvalidPrompts, PromptFile, parse_manifest
 from tests.contracts.support import ENGINE_ROOT
 
@@ -270,3 +277,45 @@ def test_every_current_candidate_is_pinned_as_shipped() -> None:
     }
 
     assert current <= set(SHIPPED_CANDIDATES), "add each new candidate to SHIPPED_CANDIDATES"
+
+
+# The Sales Playbook frame (Story 4.4) ------------------------------------------------------------
+
+# The SHA-256 of playbook_section(PlaybookSnapshot("1.0.0", "CONTENT")): the frame (the order of
+# authority, the version line and the blank lines) around every pinned Playbook snapshot. A
+# change to the frame changes what every Playbook route's cached prefix says: it never changes.
+FRAME_SHA256: Final = "2196c8cb64b5607b8754b0b326517e4fbcb705a66814e16be85bf3120cdd34fa"
+
+
+def test_the_playbook_frame_never_changes() -> None:
+    section = playbook_section(PlaybookSnapshot("1.0.0", "CONTENT"))
+
+    assert hashlib.sha256(section.encode("utf-8")).hexdigest() == FRAME_SHA256, (
+        "the frame around a pinned Sales Playbook snapshot changed: it never changes"
+    )
+    assert section.startswith(AUTHORITY_ORDER + "\n\n")
+
+
+def test_the_order_of_authority_precedes_the_playbook_in_a_built_playbook_request() -> None:
+    content = "---\nversion: 0.2.0\n---\n\nPlaybook rules.\n"
+    pinned = PlaybookSnapshot("0.2.0", content)
+    shipped = routes.CANDIDATES["extract_signals"][0]
+    candidate = replace(shipped, uses_playbook=True)
+    route_tuple = RouteTuple(
+        shipped.name,
+        shipped.model,
+        shipped.effort,
+        shipped.prompt_version,
+        shipped.output_schema.version,
+        "The route's own prompt.",
+        pinned,
+    )
+    block = UntrustedBlock("lead:01JD3QZ8X5V9K2M7N4P6R8T0WY", "page", "p1", "Page text.")
+
+    request = build_request(route_tuple, candidate, [block], 1_000)
+
+    system = "\n".join(part["text"] for part in request["system"])
+    assert system.index("The route's own prompt.") < system.index(AUTHORITY_ORDER)
+    assert system.index(AUTHORITY_ORDER) < system.index("Playbook rules.")
+    assert [("cache_control" in part) for part in request["system"]] == [False, True]
+    assert "Playbook rules." not in request["messages"][0]["content"]

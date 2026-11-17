@@ -40,6 +40,7 @@ from nextron.domain.job import DEFERRED, Job, Lane
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import validate_markets
 from nextron.domain.notifications import EvidenceChanged, LeadsMerged
+from nextron.domain.playbook import PlaybookSnapshot
 from nextron.domain.segments import signal_catalogue, validate_segments
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import (
@@ -68,6 +69,9 @@ HAIKU = "claude-haiku-5-5"
 ACTOR = "ai:extract_signals@v1"
 SEGMENTS = main.SEED_DIR / main.SEGMENTS_FILE_NAME
 MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME
+# Story 4.4: every prompt sync also takes a Sales Playbook read; extraction doesn't use the
+# Playbook, so these tests use a synthetic one.
+PLAYBOOK = PlaybookSnapshot("1.0.0", "---\nversion: 1.0.0\n---\n\nA test Sales Playbook.\n")
 
 HOME_HTML = """<html><body><h1>Smith Law LLP</h1>
 <a href="/team">Our team</a> <a href="/about">About us</a> <a href="/news">News</a>
@@ -280,7 +284,7 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
     if prompts:
         files, defaults = main.load_prompts()
         with units.open():
-            Playbook(clock).sync_prompts(files, defaults)
+            Playbook(clock).sync_prompts(files, defaults, PLAYBOOK)
     meter = InMemoryUsageMeter(clock)
     crawler = ScriptedCrawler()
     job_types = main.build_job_types(

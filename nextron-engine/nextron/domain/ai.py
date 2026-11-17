@@ -8,27 +8,36 @@ answer (in Epic 2 every call is one direct Messages request, whatever the urgenc
 ``Effort`` is ``low``, ``medium``, ``high``, ``xhigh`` or ``max``, the API's
 ``output_config.effort``.
 
-**``RouteTuple(route, model, effort, prompt_version, schema_version, system_prompt)``** names
-exactly what one call runs. It is frozen, and ``system_prompt`` never shows in its ``repr``.
+**``RouteTuple(route, model, effort, prompt_version, schema_version, system_prompt,
+playbook=None)``** names exactly what one call runs. It is frozen, and ``system_prompt`` never
+shows in its ``repr``.
 
 - ``route`` fullmatches ``nextron.domain.budget.CODE_PATTERN``;
 - ``model`` fullmatches ``[a-z0-9][a-z0-9.-]{0,63}``;
 - ``effort`` is an ``Effort``;
 - ``prompt_version`` fullmatches ``v[1-9][0-9]{0,3}``;
 - ``schema_version`` is an ``int`` (not a ``bool``) from 1 to 9,999;
-- ``system_prompt`` is a non-blank ``str`` (not only whitespace) that encodes as UTF-8.
+- ``system_prompt`` is a non-blank ``str`` (not only whitespace) that encodes as UTF-8;
+- ``playbook`` (Story 4.4) is the pinned ``nextron.domain.playbook.PlaybookSnapshot`` a Playbook
+  route runs under, or ``None`` (any other type is a ``TypeError``). The gateway frames its text
+  after the system prompt (``playbook_section``); the tuple never holds the live file.
 
 ``prompt_sha256`` is the hex SHA-256 of the system prompt's UTF-8 (``text_sha256``), so the
-text and its hash can never disagree. ``key`` is
-``<model>:<effort>:<prompt_version>:s<schema_version>:<the first 12 hex of prompt_sha256>``: it
-fits ``budget.MODEL_PATTERN`` and is what ``ai_usage.route_tuple`` stores. ``actor`` is
+text and its hash can never disagree; ``playbook_sha256`` is the Playbook snapshot's, or
+``None`` without one. ``key`` is
+``<model>:<effort>:<prompt_version>:s<schema_version>:<the first 12 hex of prompt_sha256>``,
+followed by ``:p<the first 12 hex of playbook_sha256>`` only when there is a Playbook (so
+``ai_usage`` tells Playbook versions apart, and extraction keys are unchanged): it fits
+``budget.MODEL_PATTERN`` and is what ``ai_usage.route_tuple`` stores. ``actor`` is
 ``ai:<route>@<prompt_version>``: it
 fullmatches ``nextron.db.eventlog.ACTOR_PATTERN``, and it is what every stored result of the
 call records as its ``extracted_by`` or actor (Stories 2.9 onwards).
 
-**``RouteSpec(route, model, effort, prompt_version, schema_version)``** (Story 2.8) is a route
-candidate as data, without the prompt's text: what ``Playbook.sync_prompts`` activates. It is
-frozen and checked by ``check_route_fields``.
+**``RouteSpec(route, model, effort, prompt_version, schema_version, uses_playbook=False)``**
+(Story 2.8) is a route candidate as data, without the prompt's text: what
+``Playbook.sync_prompts`` activates or records as a candidate tuple. It is frozen and checked by
+``check_route_fields``; ``uses_playbook`` (Story 4.4) must be a ``bool``, and a route that uses
+the Playbook runs under a pinned snapshot and is never bootstrap-activated.
 
 **``UntrustedBlock(subject, source, block_id, text)``** is one piece of untrusted text (a
 crawled page, a pasted Signal Inbox item) for the user turn. It is frozen, and ``text`` never
@@ -49,7 +58,8 @@ raised here):
 - ``check_urgency(urgency)`` returns ``urgency``, or raises ``TypeError`` unless it is an
   ``Urgency``.
 - ``check_route_fields(route, model, effort, prompt_version, schema_version)`` checks the
-  fields a ``RouteTuple`` and a route candidate share.
+  fields a ``RouteTuple`` and a route candidate share, and ``check_uses_playbook(value)`` that a
+  candidate's ``uses_playbook`` is a ``bool`` (Story 4.4).
 - ``check_token_limits(max_tokens, max_tokens_cap, ceiling)`` raises unless both are ints (not
   bools) and ``0 < max_tokens <= max_tokens_cap <= ceiling``.
 """
@@ -62,6 +72,7 @@ from enum import StrEnum
 from typing import Final
 
 from nextron.domain.budget import CODE_PATTERN
+from nextron.domain.playbook import SHORT_SHA_LENGTH, PlaybookSnapshot
 
 MODEL_NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 PROMPT_VERSION_PATTERN: Final = re.compile(r"v[1-9][0-9]{0,3}")
@@ -70,6 +81,7 @@ SUBJECT_PATTERN: Final = re.compile(r"[a-z][a-z_]{0,31}:[A-Za-z0-9]{1,64}")
 SOURCE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")
 BLOCK_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 PROMPT_HASH_PREFIX: Final = 12  # hex digits of prompt_sha256 in a RouteTuple's key
+PLAYBOOK_HASH_PREFIX: Final = SHORT_SHA_LENGTH  # hex digits of playbook_sha256 in the key
 
 
 class Urgency(StrEnum):
@@ -128,6 +140,12 @@ def check_route_fields(
         raise ValueError(f"schema_version must be from 1 to {MAX_SCHEMA_VERSION:,}")
 
 
+def check_uses_playbook(uses_playbook: object) -> None:
+    """Raise ``TypeError`` unless a route candidate's ``uses_playbook`` is a ``bool``."""
+    if not isinstance(uses_playbook, bool):
+        raise TypeError("uses_playbook must be a bool")
+
+
 def check_token_limits(max_tokens: object, max_tokens_cap: object, ceiling: int) -> None:
     """Raise unless ``0 < max_tokens <= max_tokens_cap <= ceiling``."""
     tokens = _int("max_tokens", max_tokens)
@@ -166,6 +184,7 @@ class RouteTuple:
     prompt_version: str
     schema_version: int
     system_prompt: str = field(repr=False)
+    playbook: PlaybookSnapshot | None = None
 
     def __post_init__(self) -> None:
         check_route_fields(
@@ -174,6 +193,8 @@ class RouteTuple:
         _utf8("system_prompt", self.system_prompt)
         if not self.system_prompt.strip():
             raise ValueError("system_prompt must not be blank")
+        if self.playbook is not None and not isinstance(self.playbook, PlaybookSnapshot):
+            raise TypeError("playbook must be a PlaybookSnapshot or None")
 
     @property
     def prompt_sha256(self) -> str:
@@ -181,12 +202,20 @@ class RouteTuple:
         return text_sha256(self.system_prompt)
 
     @property
+    def playbook_sha256(self) -> str | None:
+        """The pinned Playbook snapshot's SHA-256, or ``None`` without one."""
+        return None if self.playbook is None else self.playbook.sha256
+
+    @property
     def key(self) -> str:
         """What ``ai_usage.route_tuple`` stores; see the module docstring."""
-        return (
+        key = (
             f"{self.model}:{self.effort.value}:{self.prompt_version}:s{self.schema_version}:"
             f"{self.prompt_sha256[:PROMPT_HASH_PREFIX]}"
         )
+        if self.playbook is not None:
+            key += f":p{self.playbook.sha256[:PLAYBOOK_HASH_PREFIX]}"
+        return key
 
     @property
     def actor(self) -> str:
@@ -203,11 +232,13 @@ class RouteSpec:
     effort: Effort
     prompt_version: str
     schema_version: int
+    uses_playbook: bool = False
 
     def __post_init__(self) -> None:
         check_route_fields(
             self.route, self.model, self.effort, self.prompt_version, self.schema_version
         )
+        check_uses_playbook(self.uses_playbook)
 
 
 @dataclass(frozen=True, slots=True)

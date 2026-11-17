@@ -1836,6 +1836,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0023_4_11_footer_snapshots` | `footer_snapshots`: each distinct footer text of a Market (a foreign key to `markets` with no cascade; unique on `market_id` and `sha256`; checks that `sha256` is 64 lowercase hex characters and `text` isn't empty) (see [The footer](#the-footer)) | `drafting` |
 | `0024_3_8_unsub_tokens` | `unsub_tokens`: one row per issued unsubscribe token, holding only its hash (three checks, the unique indexes `uq_unsub_tokens_token_hash` and `uq_unsub_tokens_om_id`, `ix_unsub_tokens_kid_issued_at`, and three triggers refusing a delete, any update and a reused id, hash or message) (see [Unsubscribe tokens](#unsubscribe-tokens)) | `compliance` |
 | `0025_2_9_signals_evidence` | `evidence` (shape checks and two triggers, `trg_evidence_no_delete` and `trg_evidence_immutable`), `signals`, `signal_evidence` (unique on `signal_id` and `evidence_id`) and `extraction_runs`, each with foreign keys and no cascade; adds `leads.hq_tz` and `leads.hq_evidence_id` in place (`add_column`) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
+| `0026_4_4_playbook_snapshots` | `playbook_snapshots` (unique `sha256`, version and hash checks), `ai_route_tuples` (foreign keys to `prompt_snapshots` and `playbook_snapshots`, two partial unique indexes, one row per tuple) and `playbook_checks` (trigger, problem and outcome checks); rebuilds `ai_route_activations` from 0014's exact table with a nullable `playbook_sha256` (a foreign key to `playbook_snapshots`, no cascade, and a check) (see [The Sales Playbook snapshot and the candidate tuples (Story 4.4)](#the-sales-playbook-snapshot-and-the-candidate-tuples-story-44)) | `playbook` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -3154,8 +3155,9 @@ schema version), every start logs one WARNING `active_tuple_not_default` with `r
 `active_version` and `default_version`, so the drift is never silent.
 
 **At every start**, after the database is at head and before `engine_started`, `serve` runs
-`load_prompts()` outside any unit of work, then `Playbook.sync_prompts(files, defaults)` in one
-unit of work:
+`load_prompts()` (and, since Story 4.4, reads the Sales Playbook) outside any unit of work, then
+`Playbook.sync_prompts(files, defaults, playbook)` in one unit of work. The prompt work is below;
+the Playbook work is in "The Sales Playbook snapshot and the candidate tuples":
 
 - `load_prompts()` reads `manifest.lock` and every `*.md` file at any depth of the prompts
   folder, and checks them against each other (`nextron.domain.prompts.verify`), so a stray or
@@ -3206,6 +3208,81 @@ live file. It raises `ValueError` when the stored text no longer matches its has
 `None` when the route has no active tuple. `RouteTuple.actor` is `ai:<route>@<prompt_version>`:
 what every stored result of the call records as its `extracted_by` or actor. Stories 2.9, 2.10
 and 2.16 are its first callers.
+
+### The Sales Playbook snapshot and the candidate tuples (Story 4.4)
+
+A route that drafts under the Sales Playbook (`docs/playbook/sales-playbook.md`) runs a pinned
+**snapshot** of it, never the live file, so a change in reply rates can be traced to the exact
+Playbook, prompt and model (FR-71, AD-8, AD-12, NFR-9, NFR-25).
+
+**Reading the file.** `nextron.main.read_playbook_file(path)` reads `NEXTRON_PLAYBOOK_PATH` (the
+repo's `docs/playbook/sales-playbook.md` by default) outside any unit of work and returns a
+`PlaybookSnapshot(version, content)` or the problem (`nextron.domain.playbook.read_playbook`):
+
+- the bytes are strict UTF-8 (else `not_utf8`) with one leading byte-order mark dropped and
+  universal newlines, so a CRLF checkout hashes the same as the LF text;
+- more than 100,000 characters (or 400,000 bytes) is `too_large`;
+- the front matter (between the first two `---` lines) needs exactly one top-level
+  `version:` line: none is `no_version`, a repeat or a value other than 1 to 32 letters,
+  digits, dots, plus and minus signs (a `#` comment after a space or tab, and one pair of
+  quotes, are removed first) is `bad_version`;
+- a missing or unreadable file is `unreadable`.
+
+The snapshot is the whole normalised text, front matter included, and its SHA-256 names it.
+
+**At every start** `serve` reads it beside `load_prompts()` and passes it to
+`Playbook.sync_prompts(files, defaults, playbook)`. **A problem never stops `serve`**
+(extraction doesn't use the Playbook): it prints `warning: playbook: <problem>` and the sync
+records it. In the same transaction, after the prompt work, the sync:
+
+1. stores a snapshot whose SHA-256 isn't stored yet in `playbook_snapshots` (a new text is
+   stored even when its front-matter version is already used);
+2. records each route's default candidate as a **candidate tuple** in `ai_route_tuples`: the
+   route, model, effort, prompt version and SHA-256, schema version and, for a route that uses
+   the Playbook, the snapshot's SHA-256. A tuple with no row is inserted with one `events` row
+   (`None` to `candidate`). The active tuple of each route gets a row too. A tuple row's id is
+   the "tuple id" the AI test gate (Story 4.5) runs and activates;
+3. bootstrap-activates only routes that don't use the Playbook: **a Playbook route is activated
+   only through the test gate**. No shipped route uses the Playbook yet (`Candidate.uses_playbook`
+   is false for all three);
+4. records one `playbook_checks` row: the trigger (`startup`, or `operator_check` for the AI
+   content view's button) and the snapshot's SHA-256 or the problem.
+
+It logs `prompts_synced` with a `candidate_count` and the `trigger`, and `playbook_invalid`
+(WARNING, the problem code and the trigger only) when the read failed. No Playbook text reaches
+a log record, an event or an error.
+
+**The pinned snapshot.** An activation may name a snapshot (`ai_route_activations.playbook_sha256`,
+added by migration `0026_4_4_playbook_snapshots`). `queries.playbook.active_tuple` then builds
+`RouteTuple.playbook` from the **stored** snapshot, and raises `ValueError` when it is missing
+or its text no longer matches its hash. The gateway sends such a tuple's system prompt as two
+cached blocks: the route's prompt, then the frame (`playbook_section`): "Order of authority: law
+and platform rules come first, then the Step brief, then the Sales Playbook. Where they
+disagree, follow the earlier one.", the line `Sales Playbook, version <v>:` and the snapshot's
+text. A contract test pins the frame's SHA-256. The tuple's `key` (what `ai_usage` stores) gains
+`:p<the first 12 hex of the snapshot's SHA-256>`, and the gateway refuses a Playbook tuple on a
+candidate that doesn't use the Playbook, or the other way round (`llm_unknown_route`). Editing
+the live file never changes what a pinned tuple sends.
+
+**The AI content view** (`/ai`, linked from the Settings page) shows the current Playbook
+version with its short SHA-256 and capture time, the last check (time, trigger and any problem),
+and, per route, the active tuple (model, effort, prompt and schema versions, Playbook version or
+"No Playbook") or "No active tuple", and every candidate with its tuple id and created time.
+**Check for changes** re-reads the prompt files and the Playbook and runs the same sync: it says
+how many candidate tuples were created and which Playbook version it stored, shows a read
+problem as an alert, and stores nothing when a prompt file and the lock disagree. The routes
+table (`routes.py`) is code the engine loaded at start, so a change to it takes effect, and gets
+its candidate tuple, at the next start.
+
+**The health panel** shows `playbook_invalid` ("Sales Playbook: <problem>", with "Fix the file,
+then use Check for changes on the AI content page (/ai) or restart the engine.") while the newest
+check recorded a problem; the next good read clears it.
+
+**The tables** (owner `playbook`, every column PII class `none`, never updated or deleted):
+`playbook_snapshots` (`sha256` unique, `version`, `content`, `captured_at`), `ai_route_tuples`
+(the tuple's fields, a nullable `playbook_sha256`, `created_at`; one row per tuple through two
+partial unique indexes) and `playbook_checks` (`checked_at`, `trigger`, and exactly one of
+`playbook_sha256` and `problem`).
 
 **Checking a quote.** `nextron.domain.quotes.quote_in(quote, text)` is the substring check
 every proposed quote must pass. Both are normalised (NFC, each run of Unicode whitespace as one

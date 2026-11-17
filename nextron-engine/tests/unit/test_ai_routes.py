@@ -19,12 +19,15 @@ from nextron.adapters.ai.schemas import (
     OutputSchema,
     SignalInboxParseV1,
 )
-from nextron.domain.ai import Effort, RouteTuple
+from nextron.domain.ai import Effort, RouteSpec, RouteTuple
 from nextron.domain.budget import BudgetClass
+from nextron.domain.playbook import PlaybookSnapshot
 
 PROMPT: Final = "Extract."
+PLAYBOOK: Final = PlaybookSnapshot("0.2.0", "---\nversion: 0.2.0\n---\nRules.\n")
 
-# name, model, effort, prompt, schema model, schema version, batchable, max_tokens, cap, class
+# name, model, effort, prompt, schema model, schema version, batchable, max_tokens, cap, class,
+# uses_playbook (Story 4.4: no shipped route uses the Playbook)
 TABLE: Final = [
     (
         "extract_signals",
@@ -37,6 +40,7 @@ TABLE: Final = [
         8_000,
         16_000,
         BudgetClass.BLOCKABLE,
+        False,
     ),
     (
         "extract_people",
@@ -49,6 +53,7 @@ TABLE: Final = [
         4_000,
         16_000,
         BudgetClass.BLOCKABLE,
+        False,
     ),
     (
         "signal_inbox_parse",
@@ -61,6 +66,7 @@ TABLE: Final = [
         2_000,
         8_000,
         BudgetClass.BLOCKABLE,
+        False,
     ),
 ]
 
@@ -77,6 +83,7 @@ def _row(candidate: Candidate) -> tuple[Any, ...]:
         candidate.max_tokens,
         candidate.max_tokens_cap,
         candidate.budget_class,
+        candidate.uses_playbook,
     )
 
 
@@ -137,6 +144,31 @@ def test_find_needs_every_field_of_the_tuple_to_match(changes: dict[str, Any]) -
     assert find(tuple_of(candidate, **changes)) is None
 
 
+def test_find_needs_the_playbook_to_match_the_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # Row: Mismatch
+    candidate = CANDIDATES["extract_signals"][0]
+    playbook_candidate = replace(candidate, uses_playbook=True)
+
+    assert find(tuple_of(candidate, playbook=PLAYBOOK)) is None  # a Playbook tuple
+    assert find(tuple_of(candidate)) is candidate
+    monkeypatch.setattr(
+        routes, "CANDIDATES", {**CANDIDATES, "extract_signals": (playbook_candidate,)}
+    )
+    assert find(tuple_of(playbook_candidate, playbook=PLAYBOOK)) is playbook_candidate
+    assert find(tuple_of(playbook_candidate)) is None  # a tuple without its Playbook
+
+
+def test_the_default_specs_carry_uses_playbook() -> None:
+    specs = routes.default_specs()
+
+    assert [spec.route for spec in specs] == list(CANDIDATES)
+    assert [spec.uses_playbook for spec in specs] == [False, False, False]
+    assert specs[0] == RouteSpec(
+        "extract_signals", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1, uses_playbook=False
+    )
+
+
 def test_find_returns_none_for_anything_but_a_route_tuple() -> None:
     assert find("extract_signals") is None  # type: ignore[arg-type]
     assert find(None) is None  # type: ignore[arg-type]
@@ -176,6 +208,8 @@ def test_a_candidate_outside_the_token_limits_is_refused_at_construction(
         ({"prompt_version": "1"}, ValueError),
         ({"output_schema": OutputSchema(0, ExtractPeopleV1)}, ValueError),
         ({"output_schema": ExtractPeopleV1}, TypeError),
+        ({"uses_playbook": 1}, TypeError),
+        ({"uses_playbook": None}, TypeError),
     ],
 )
 def test_a_candidate_with_a_bad_route_field_is_refused(
@@ -211,4 +245,5 @@ def test_no_candidate_field_is_named_like_fallbacks() -> None:
         "max_tokens",
         "max_tokens_cap",
         "budget_class",
+        "uses_playbook",
     ]

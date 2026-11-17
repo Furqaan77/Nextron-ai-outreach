@@ -3,16 +3,24 @@
 Other services and the delivery layers change ``playbook`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-**``Playbook(clock).sync_prompts(files, defaults) -> PromptSync``** (FR-71, AD-8, AD-12, AD-18,
-Story 2.8) is a ``@use_case``. ``serve`` runs it at every start, after the database is at head,
-with the prompt files ``nextron.main.load_prompts`` read and verified against
-``manifest.lock`` (``nextron.domain.prompts.PromptFile``) and each route's default candidate
-(``nextron.domain.ai.RouteSpec``, from ``nextron.adapters.ai.routes.default_specs``).
+**``Playbook(clock).sync_prompts(files, defaults, playbook, *, trigger=SyncTrigger.STARTUP)
+-> PromptSync``** (FR-71, AD-8, AD-12, AD-18, Stories 2.8 and 4.4) is a ``@use_case``. ``serve``
+runs it at every start, after the database is at head, and the AI content view's "Check for
+changes" runs it with ``trigger=SyncTrigger.OPERATOR_CHECK``. It takes the prompt files
+``nextron.main.load_prompts`` read and verified against ``manifest.lock``
+(``nextron.domain.prompts.PromptFile``), each route's default candidate
+(``nextron.domain.ai.RouteSpec``, from ``nextron.adapters.ai.routes.default_specs``) and the
+Sales Playbook read (``nextron.main.read_playbook_file``): a
+``nextron.domain.playbook.PlaybookSnapshot``, or the ``PlaybookProblem`` that kept it from one.
+``SyncTrigger`` names the actor and cause of what the Playbook work records: ``startup`` is
+``system:playbook`` with ``startup_sync``, ``operator_check`` is ``operator`` with
+``operator_check``.
 
 Before any write it raises:
 
-- ``TypeError`` unless every item of ``files`` is a ``PromptFile`` and every item of
-  ``defaults`` a ``RouteSpec``;
+- ``TypeError`` unless every item of ``files`` is a ``PromptFile``, every item of ``defaults`` a
+  ``RouteSpec``, ``playbook`` a ``PlaybookSnapshot`` or a ``PlaybookProblem`` and ``trigger`` a
+  ``SyncTrigger``;
 - ``ValueError`` for a ``(route, version)`` that repeats in ``files``, or a route that repeats in
   ``defaults``;
 - ``InvalidPrompts`` when a default names a prompt version that has no file (before any
@@ -20,25 +28,46 @@ Before any write it raises:
   version)`` has another SHA-256: a used prompt never changes, so the change must be a new
   version. Nothing is written.
 
-It reads the clock once, then works in one transaction:
+With no files and no defaults it touches no table, records no check, and returns an empty
+``PromptSync`` whose ``playbook`` is ``None``. Otherwise it reads the clock once, then works in
+one transaction, in this order:
 
-- each file whose ``(route, version)`` has no snapshot is stored (``prompt_snapshots``, with its
-  SHA-256 and text, created now); a file already stored with the same hash writes nothing;
-- each default route with no active activation gets one: the default's model, effort, prompt
-  version and schema version, the stored prompt's SHA-256, ``actor='seed'``,
-  ``bootstrap=True``, no test run and ``activated_at`` = now, plus one ``events`` row (entity
-  ``ai_route_activations``, ``None`` to ``active``, cause ``bootstrap``, actor ``seed``);
-- an existing active activation is never replaced or changed, even when it differs from the
-  default (Epic 4 activates a tested tuple). When a kept activation's model, effort, prompt
-  version or schema version differs from the route's default, it logs one WARNING
-  ``active_tuple_not_default`` with ``route``, ``active_version`` and ``default_version`` (the
-  prompt versions) and nothing else, so drift from the default is never silent.
+1. each file whose ``(route, version)`` has no snapshot is stored (``prompt_snapshots``, with
+   its SHA-256 and text, created now); a file already stored with the same hash writes nothing;
+2. a Playbook snapshot whose SHA-256 has no row is stored (``playbook_snapshots``, captured
+   now); a stored one writes nothing (decision 7: a new hash is stored even when its version
+   is already used);
+3. the candidate tuples (``ai_route_tuples``, decision 3): per default, in order, its tuple is
+   the default's route, model, effort, prompt version and schema version, the stored prompt's
+   SHA-256 and, when the default ``uses_playbook``, the read snapshot's SHA-256 (a Playbook
+   default gets no tuple when the read was a problem). A tuple with no row is inserted, created
+   now, with one ``events`` row (entity ``ai_route_tuples``, ``None`` to ``candidate``, the
+   trigger's cause and actor). Then each active activation of a default's route whose tuple has
+   no row gets one the same way (the activations stored before Story 4.4);
+4. each default route with no active activation that doesn't use the Playbook gets one
+   (decision 4: a Playbook route is activated only through Story 4.5's gate): the default's
+   model, effort, prompt version and schema version, the stored prompt's SHA-256, no Playbook,
+   ``actor='seed'``, ``bootstrap=True``, no test run and ``activated_at`` = now, plus one
+   ``events`` row (entity ``ai_route_activations``, ``None`` to ``active``, cause
+   ``bootstrap``, actor ``seed``). An existing active activation is never replaced or changed,
+   even when it differs from the default (Epic 4 activates a tested tuple). When a kept
+   activation's model, effort, prompt version, schema version or use of the Playbook differs
+   from the route's default, it logs one WARNING ``active_tuple_not_default`` with ``route``,
+   ``active_version`` and ``default_version`` (the prompt versions) and nothing else, so drift
+   from the default is never silent;
+5. one ``playbook_checks`` row records the trigger and the read snapshot's SHA-256 or the
+   problem, checked now.
 
 After the commit it logs ``prompts_synced`` (INFO) with ``stored_count``, ``unchanged_count``,
-``activated_count`` and ``kept_count``, and returns ``PromptSync(stored, unchanged, activated,
-kept)``: the ``(route, version)`` of each file stored and each file already stored, in input
-order, then of each default activated and each active activation kept, in ``defaults`` order.
-No prompt text reaches a log record, an event or an error.
+``activated_count``, ``kept_count``, ``candidate_count`` and ``trigger`` (the trigger's value),
+and, when the read was a problem, ``playbook_invalid`` (WARNING) with the ``problem`` code and
+the ``trigger`` only. It returns ``PromptSync(stored,
+unchanged, activated, kept, candidates, playbook)``: the ``(route, version)`` of each file
+stored and each file already stored, in input order, then of each default activated and each
+active activation kept, in ``defaults`` order; ``candidates``, the ``(route, tuple id)`` of each
+tuple created, in creation order; and ``playbook``, a ``PlaybookRead(version, sha256, stored)``
+or the ``PlaybookProblem``. No prompt or Playbook text reaches a log record, an event or an
+error.
 
 **Approved Company Facts** (FR-72, AD-7, AD-12, NFR-24, Story 4.3). ``CompanyFacts(clock)``
 keeps the facts a Draft may claim as append-only versions in the ``company_facts`` table
@@ -108,6 +137,9 @@ from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.playbook import activations as activations_repo
 from nextron.db.repos.playbook import company_facts as company_facts_repo
+from nextron.db.repos.playbook import playbook_checks as checks_repo
+from nextron.db.repos.playbook import playbook_snapshots as playbook_snapshots_repo
+from nextron.db.repos.playbook import route_tuples as tuples_repo
 from nextron.db.repos.playbook import snapshots as snapshots_repo
 from nextron.db.repos.playbook.company_facts import StoredFact
 from nextron.db.uow import command, current, use_case
@@ -127,12 +159,16 @@ from nextron.domain.company_facts import (
     fact_from_fields,
     validate_company_facts,
 )
+from nextron.domain.playbook import PlaybookProblem, PlaybookSnapshot, SyncTrigger
 from nextron.domain.prompts import USED_PROMPT_NEVER_CHANGES, InvalidPrompts, PromptFile
 from nextron.ports.clock import Clock
 
 PROMPTS_SYNCED: Final = "prompts_synced"
 NOT_DEFAULT: Final = "active_tuple_not_default"
+PLAYBOOK_INVALID: Final = "playbook_invalid"
 ACTIVATIONS_ENTITY: Final = "ai_route_activations"
+TUPLES_ENTITY: Final = "ai_route_tuples"
+CANDIDATE_STATUS: Final = "candidate"
 ACTIVE_STATUS: Final = "active"
 BOOTSTRAP_CAUSE: Final = "bootstrap"
 SEED_ACTOR: Final = "seed"
@@ -159,33 +195,63 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class PlaybookRead:
+    """The Sales Playbook a sync read: its version and SHA-256, and whether this sync stored
+    it (``False`` when it was already stored)."""
+
+    version: str
+    sha256: str
+    stored: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PromptSync:
-    """What ``sync_prompts`` did, each as ``(route, version)``: the files ``stored`` and the
-    files already stored (``unchanged``), in input order; the defaults ``activated`` and the
-    active activations ``kept``, in ``defaults`` order."""
+    """What ``sync_prompts`` did. Each of the first four is ``(route, version)``: the files
+    ``stored`` and the files already stored (``unchanged``), in input order; the defaults
+    ``activated`` and the active activations ``kept``, in ``defaults`` order. ``candidates`` is
+    the ``(route, tuple id)`` of each candidate tuple created, and ``playbook`` the Playbook
+    read (``None`` when the sync had no input)."""
 
     stored: tuple[tuple[str, str], ...]
     unchanged: tuple[tuple[str, str], ...]
     activated: tuple[tuple[str, str], ...]
     kept: tuple[tuple[str, str], ...]
+    candidates: tuple[tuple[str, str], ...]
+    playbook: PlaybookRead | PlaybookProblem | None
 
 
 class Playbook:
-    """The versioned AI prompts and which tuple each AI route runs."""
+    """The versioned AI prompts, the Sales Playbook snapshots, and which tuple each AI route
+    runs."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
 
     @use_case
     def sync_prompts(
-        self, files: Sequence[PromptFile], defaults: Sequence[RouteSpec]
+        self,
+        files: Sequence[PromptFile],
+        defaults: Sequence[RouteSpec],
+        playbook: PlaybookSnapshot | PlaybookProblem,
+        *,
+        trigger: SyncTrigger = SyncTrigger.STARTUP,
     ) -> PromptSync:
-        """Store the prompt files and bootstrap-activate each route's default; see the module
-        docstring."""
+        """Store the prompt files and the Playbook, record the candidate tuples and the check,
+        and bootstrap-activate each non-Playbook route's default; see the module docstring."""
         chosen_files, chosen_defaults = _prompt_inputs(files, defaults)
+        if not isinstance(playbook, PlaybookSnapshot | PlaybookProblem):
+            raise TypeError(
+                "sync_prompts takes a PlaybookSnapshot or a PlaybookProblem, not "
+                f"{type(playbook).__name__}"
+            )
+        if not isinstance(trigger, SyncTrigger):
+            raise TypeError(f"sync_prompts takes a SyncTrigger, not {type(trigger).__name__}")
         now = self._clock.now()
         with current().transaction():
-            result = _sync(chosen_files, chosen_defaults, now)
+            if chosen_files or chosen_defaults:
+                result = _sync(chosen_files, chosen_defaults, playbook, trigger, now)
+            else:  # nothing to sync: no table is touched and no check is recorded
+                result = PromptSync((), (), (), (), (), None)
         log.info(
             PROMPTS_SYNCED,
             extra={
@@ -193,8 +259,15 @@ class Playbook:
                 "unchanged_count": len(result.unchanged),
                 "activated_count": len(result.activated),
                 "kept_count": len(result.kept),
+                "candidate_count": len(result.candidates),
+                "trigger": trigger.value,
             },
         )
+        if isinstance(result.playbook, PlaybookProblem):
+            log.warning(
+                PLAYBOOK_INVALID,
+                extra={"problem": result.playbook.value, "trigger": trigger.value},
+            )
         return result
 
 
@@ -228,7 +301,11 @@ def _prompt_inputs(
 
 
 def _sync(
-    files: tuple[PromptFile, ...], defaults: tuple[RouteSpec, ...], now: datetime
+    files: tuple[PromptFile, ...],
+    defaults: tuple[RouteSpec, ...],
+    playbook: PlaybookSnapshot | PlaybookProblem,
+    trigger: SyncTrigger,
+    now: datetime,
 ) -> PromptSync:
     """The sync, inside the running use case's transaction."""
     hashes = {(prompt.route, prompt.version): prompt.sha256 for prompt in files}
@@ -247,6 +324,8 @@ def _sync(
             unchanged.append((prompt.route, prompt.version))
     for prompt in new:
         snapshots_repo.insert(prompt.route, prompt.version, prompt.sha256, prompt.text, now)
+    read = _store_playbook(playbook, now)
+    candidates = _record_candidates(defaults, hashes, playbook, trigger, now)
     activated: list[tuple[str, str]] = []
     kept: list[tuple[str, str]] = []
     for spec in defaults:
@@ -255,12 +334,15 @@ def _sync(
             kept.append((current_activation.route, current_activation.prompt_version))
             _warn_if_not_default(current_activation, spec)
             continue
+        if spec.uses_playbook:  # decision 4: only Story 4.5's gate activates a Playbook route
+            continue
         activation_id = activations_repo.insert(
             route=spec.route,
             model=spec.model,
             effort=spec.effort.value,
             prompt_version=spec.prompt_version,
             prompt_sha256=hashes[(spec.route, spec.prompt_version)],
+            playbook_sha256=None,
             schema_version=spec.schema_version,
             actor=SEED_ACTOR,
             bootstrap=True,
@@ -278,17 +360,132 @@ def _sync(
             at=now,
         )
         activated.append((spec.route, spec.prompt_version))
+    if isinstance(playbook, PlaybookSnapshot):
+        checks_repo.insert(now, trigger.value, playbook.sha256, None)
+    else:
+        checks_repo.insert(now, trigger.value, None, playbook.value)
     stored = tuple((prompt.route, prompt.version) for prompt in new)
-    return PromptSync(stored, tuple(unchanged), tuple(activated), tuple(kept))
+    return PromptSync(
+        stored, tuple(unchanged), tuple(activated), tuple(kept), candidates, read
+    )
+
+
+def _store_playbook(
+    playbook: PlaybookSnapshot | PlaybookProblem, now: datetime
+) -> PlaybookRead | PlaybookProblem:
+    """Store a Playbook snapshot whose SHA-256 has no row; what the read was."""
+    if isinstance(playbook, PlaybookProblem):
+        return playbook
+    sha256 = playbook.sha256
+    if playbook_snapshots_repo.get(sha256) is not None:
+        return PlaybookRead(playbook.version, sha256, stored=False)
+    playbook_snapshots_repo.insert(sha256, playbook.version, playbook.content, now)
+    return PlaybookRead(playbook.version, sha256, stored=True)
+
+
+def _record_candidates(
+    defaults: tuple[RouteSpec, ...],
+    hashes: Mapping[tuple[str, str], str],
+    playbook: PlaybookSnapshot | PlaybookProblem,
+    trigger: SyncTrigger,
+    now: datetime,
+) -> tuple[tuple[str, str], ...]:
+    """Each default's tuple, then each active activation's of a default's route, inserted when
+    it has no row; the ``(route, tuple id)`` of each inserted."""
+    created: list[tuple[str, str]] = []
+    read_sha256 = playbook.sha256 if isinstance(playbook, PlaybookSnapshot) else None
+    for spec in defaults:
+        if spec.uses_playbook and read_sha256 is None:
+            continue  # a Playbook default gets no tuple from a problem read
+        tuple_id = _record_tuple(
+            route=spec.route,
+            model=spec.model,
+            effort=spec.effort.value,
+            prompt_version=spec.prompt_version,
+            prompt_sha256=hashes[(spec.route, spec.prompt_version)],
+            playbook_sha256=read_sha256 if spec.uses_playbook else None,
+            schema_version=spec.schema_version,
+            trigger=trigger,
+            now=now,
+        )
+        if tuple_id is not None:
+            created.append((spec.route, tuple_id))
+    for spec in defaults:
+        found = activations_repo.active(spec.route)
+        if found is None:
+            continue
+        tuple_id = _record_tuple(
+            route=found.route,
+            model=found.model,
+            effort=found.effort,
+            prompt_version=found.prompt_version,
+            prompt_sha256=found.prompt_sha256,
+            playbook_sha256=found.playbook_sha256,
+            schema_version=found.schema_version,
+            trigger=trigger,
+            now=now,
+        )
+        if tuple_id is not None:
+            created.append((found.route, tuple_id))
+    return tuple(created)
+
+
+def _record_tuple(
+    *,
+    route: str,
+    model: str,
+    effort: str,
+    prompt_version: str,
+    prompt_sha256: str,
+    playbook_sha256: str | None,
+    schema_version: int,
+    trigger: SyncTrigger,
+    now: datetime,
+) -> str | None:
+    """Insert the tuple with its ``candidate`` event when it has no row; its new id, or
+    ``None``."""
+    if (
+        tuples_repo.find(route, model, effort, prompt_version, schema_version, playbook_sha256)
+        is not None
+    ):
+        return None
+    tuple_id = tuples_repo.insert(
+        route=route,
+        model=model,
+        effort=effort,
+        prompt_version=prompt_version,
+        prompt_sha256=prompt_sha256,
+        playbook_sha256=playbook_sha256,
+        schema_version=schema_version,
+        at=now,
+    )
+    eventlog.append(
+        entity=TUPLES_ENTITY,
+        entity_id=tuple_id,
+        from_status=None,
+        to_status=CANDIDATE_STATUS,
+        cause=trigger.cause,
+        cause_ref=None,
+        actor=trigger.actor,
+        at=now,
+    )
+    return tuple_id
 
 
 def _warn_if_not_default(active: activations_repo.StoredActivation, default: RouteSpec) -> None:
     """Log ``active_tuple_not_default`` when the kept activation isn't the route's default."""
-    if (active.model, active.effort, active.prompt_version, active.schema_version) != (
+    if (
+        active.model,
+        active.effort,
+        active.prompt_version,
+        active.schema_version,
+        active.playbook_sha256 is not None,
+    ) != (
         default.model,
         default.effort.value,
         default.prompt_version,
         default.schema_version,
+        default.uses_playbook,
     ):
         log.warning(
             NOT_DEFAULT,

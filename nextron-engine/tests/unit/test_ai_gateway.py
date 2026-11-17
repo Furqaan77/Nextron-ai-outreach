@@ -31,6 +31,7 @@ from nextron.adapters.ai.prompting import user_turn
 from nextron.adapters.ai.routes import CANDIDATES
 from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import AiCall, Usage
+from nextron.domain.playbook import PlaybookSnapshot
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import (
     LlmFailed,
@@ -637,6 +638,8 @@ def test_an_unreadable_credential_manager_propagates_and_nothing_is_sent() -> No
         {"prompt_version": "v2"},
         {"schema_version": 2},
         {"route": "draft_email"},
+        # Row: Mismatch (Story 4.4): a Playbook tuple on a candidate that doesn't use it
+        {"playbook": PlaybookSnapshot("0.2.0", "---\nversion: 0.2.0\n---\nRules.\n")},
     ],
 )
 def test_an_unknown_tuple_is_refused_before_any_request(changes: dict[str, Any]) -> None:

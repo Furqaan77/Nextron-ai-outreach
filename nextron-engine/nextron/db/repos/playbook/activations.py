@@ -8,7 +8,9 @@ foreign key and partial unique index refuse a bad row (``IntegrityError``).
 
 - ``active(route)``: the route's active activation (``deactivated_at`` is NULL) as a
   ``StoredActivation``, or ``None``;
-- ``insert(...) -> id``: a new active activation, activated at ``at``.
+- ``all_active()``: every active activation, by route (Story 4.4's AI content view);
+- ``insert(...) -> id``: a new active activation, activated at ``at``, with the Playbook
+  snapshot's ``playbook_sha256`` it runs under, or ``None`` (Story 4.4).
 """
 
 from dataclasses import dataclass
@@ -32,6 +34,7 @@ class StoredActivation:
     effort: str
     prompt_version: str
     prompt_sha256: str
+    playbook_sha256: str | None
     schema_version: int
     actor: str
     bootstrap: bool
@@ -47,6 +50,7 @@ _COLUMNS = (
     AiRouteActivationRecord.effort,
     AiRouteActivationRecord.prompt_version,
     AiRouteActivationRecord.prompt_sha256,
+    AiRouteActivationRecord.playbook_sha256,
     AiRouteActivationRecord.schema_version,
     AiRouteActivationRecord.actor,
     AiRouteActivationRecord.bootstrap,
@@ -66,6 +70,16 @@ def active(route: str) -> StoredActivation | None:
     return None if row is None else StoredActivation(*row)
 
 
+def all_active() -> tuple[StoredActivation, ...]:
+    """Every active activation, by route."""
+    statement = (
+        select(*_COLUMNS)
+        .where(AiRouteActivationRecord.deactivated_at.is_(None))
+        .order_by(AiRouteActivationRecord.route)
+    )
+    return tuple(StoredActivation(*row) for row in current().session.execute(statement))
+
+
 def insert(
     *,
     route: str,
@@ -73,6 +87,7 @@ def insert(
     effort: str,
     prompt_version: str,
     prompt_sha256: str,
+    playbook_sha256: str | None,
     schema_version: int,
     actor: str,
     bootstrap: bool,
@@ -89,6 +104,7 @@ def insert(
             effort=effort,
             prompt_version=prompt_version,
             prompt_sha256=prompt_sha256,
+            playbook_sha256=playbook_sha256,
             schema_version=schema_version,
             actor=actor,
             bootstrap=bootstrap,

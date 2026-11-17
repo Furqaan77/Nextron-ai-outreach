@@ -23,12 +23,15 @@ from nextron.db.eventlog import ACTOR_PATTERN
 from nextron.db.models.base import new_id
 from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain.ai import Effort, RouteSpec, RouteTuple
+from nextron.domain.playbook import PlaybookSnapshot
 from nextron.domain.prompts import InvalidPrompts, PromptFile
 from tests.fakes.clock import DEFAULT_NOW, FrozenClock
 
 ROUTES = ("extract_signals", "extract_people", "signal_inbox_parse")
 STAMP = "2026-11-16T09:00:00.000000Z"
 MARKER = "Pr0mptTextMarker"  # appears in a test prompt's text, never in a log or an error
+# Story 4.4: every sync also takes a Playbook read; these tests use a synthetic one.
+PLAYBOOK = PlaybookSnapshot("1.0.0", "---\nversion: 1.0.0\n---\n\nA test Sales Playbook.\n")
 
 
 def query(engine: Engine, statement: str, params: tuple[object, ...] = ()) -> list[Any]:
@@ -75,7 +78,12 @@ def sync(
     clock: FrozenClock | None = None,
 ) -> PromptSync:
     with units.open():
-        return Playbook(clock or FrozenClock()).sync_prompts(files, defaults)
+        return Playbook(clock or FrozenClock()).sync_prompts(files, defaults, PLAYBOOK)
+
+
+def prompt_work(result: PromptSync) -> tuple[object, ...]:
+    """Story 2.8's four fields of ``result``."""
+    return (result.stored, result.unchanged, result.activated, result.kept)
 
 
 def active(units: UnitOfWorkFactory, route: str) -> RouteTuple | None:
@@ -101,7 +109,7 @@ def test_a_first_start_stores_each_prompt_and_bootstrap_activates_each_default(
     result = sync(units, files, defaults)
 
     pairs = tuple((route, "v1") for route in ROUTES)
-    assert result == PromptSync(stored=pairs, unchanged=(), activated=pairs, kept=())
+    assert prompt_work(result) == (pairs, (), pairs, ())
     assert snapshots(db_engine) == sorted(
         (f.route, f.version, f.sha256, f.text, STAMP) for f in files
     )
@@ -128,9 +136,10 @@ def not_default(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 
 
 # Row: Restart
-def test_a_restart_with_the_same_files_writes_nothing(
+def test_a_restart_with_the_same_files_changes_no_prompt_or_activation(
     units: UnitOfWorkFactory, db_engine: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """The prompt work writes nothing; since Story 4.4 the only new row is the Playbook check."""
     files, defaults = shipped()
     sync(units, files, defaults)
     before = (snapshots(db_engine), activations(db_engine), events(db_engine))
@@ -139,8 +148,10 @@ def test_a_restart_with_the_same_files_writes_nothing(
     result = sync(units, files, defaults, FrozenClock(DEFAULT_NOW + timedelta(days=1)))
 
     pairs = tuple((route, "v1") for route in ROUTES)
-    assert result == PromptSync(stored=(), unchanged=pairs, activated=(), kept=pairs)
+    assert prompt_work(result) == ((), pairs, (), pairs)
     assert (snapshots(db_engine), activations(db_engine), events(db_engine)) == before
+    checks = query(db_engine, "SELECT checked_at FROM playbook_checks ORDER BY checked_at")
+    assert checks == [(STAMP,), ("2026-11-17T09:00:00.000000Z",)]  # one new check row
     assert not_default(caplog) == []  # every kept activation is its route's default
 
 

@@ -159,6 +159,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/facts/add",
         "/facts/edit",
         "/facts/retract",
+        "/ai",
+        "/ai/check",
         "/credentials",
         "/credentials/save",
         "/credentials/remove",
@@ -295,6 +297,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /credentials",
         "GET /credentials/google/grant/{grant}",
         "GET /facts",
+        "GET /ai",
         "GET /quotas",
         "GET /health/panel",
         "GET /health/panel/live",
@@ -315,6 +318,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /facts/add",
         "POST /facts/edit",
         "POST /facts/retract",
+        "POST /ai/check",
         "POST /health/jobs/dismiss",
         "POST /health/backup",
         "POST /inboxes",
@@ -486,6 +490,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /credentials",
         "GET /credentials/google/grant/{grant}",
         "GET /facts",
+        "GET /ai",
         "GET /quotas",
         "GET /health/panel",
         "GET /health/panel/live",
@@ -506,6 +511,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "POST /facts/add",
         "POST /facts/edit",
         "POST /facts/retract",
+        "POST /ai/check",
         "POST /health/jobs/dismiss",
         "POST /inboxes",
     ):
@@ -597,6 +603,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
     templates = sorted(p.name for p in (PACKAGE / "web" / "templates").glob("*.html"))
 
     assert templates == [
+        "ai_content.html",
+        "ai_content_panel.html",
         "base.html",
         "campaigns_panel.html",
         "credential_row.html",

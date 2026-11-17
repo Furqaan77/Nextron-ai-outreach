@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0025_2_9_signals_evidence"
+HEAD = "0026_4_4_playbook_snapshots"
 
 
 @pytest.fixture
@@ -430,3 +430,85 @@ def test_the_hook_never_runs_for_a_refused_database(db_file: Path) -> None:
             ensure_current(engine, before_upgrade=calls.append)
 
     assert calls == []
+
+
+# Story 4.4: 0026 rebuilds ai_route_activations on a 0025 database that already holds rows
+ACTIVATION_COLUMNS = (
+    "id, route, model, effort, prompt_version, prompt_sha256, schema_version, actor, bootstrap, "
+    "test_run_id, activated_at, deactivated_at"
+)
+ACTIVE_ROW = "01JD3QZ8X5V9K2M7N4P6R8T0B1"
+OLD_ROW = "01JD3QZ8X5V9K2M7N4P6R8T0B2"
+
+
+def activation_rows(path: Path, columns: str) -> list[tuple[object, ...]]:
+    reader = sqlite3.connect(path)
+    try:
+        return reader.execute(f"SELECT {columns} FROM ai_route_activations ORDER BY id").fetchall()
+    finally:
+        reader.close()
+
+
+def test_0026_keeps_every_activation_and_its_partial_index(tmp_path: Path) -> None:
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0025_2_9_signals_evidence":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0025_2_9_signals_evidence",
+        )
+    digest, at = "a" * 64, "2026-11-17T09:00:00.000000Z"
+    run_sql(
+        path,
+        "INSERT INTO prompt_snapshots (id, route, prompt_version, sha256, text, created_at) "
+        f"VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0B0', 'extract_signals', 'v1', '{digest}', 'Text.', "
+        f"'{at}')",
+        f"INSERT INTO ai_route_activations ({ACTIVATION_COLUMNS}) VALUES ('{ACTIVE_ROW}', "
+        f"'extract_signals', 'claude-haiku-5-5', 'medium', 'v1', '{digest}', 1, 'seed', 1, NULL, "
+        f"'{at}', NULL)",
+        f"INSERT INTO ai_route_activations ({ACTIVATION_COLUMNS}) VALUES ('{OLD_ROW}', "
+        f"'extract_signals', 'claude-haiku-5-5', 'low', 'v1', '{digest}', 1, 'operator', 0, "
+        f"'01JD3QZ8X5V9K2M7N4P6R8T0B3', '{at}', '{at}')",
+    )
+    before = activation_rows(path, ACTIVATION_COLUMNS)
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0025_2_9_signals_evidence", HEAD)
+
+    assert activation_rows(path, ACTIVATION_COLUMNS) == before  # every row unchanged
+    assert activation_rows(path, "playbook_sha256") == [(None,), (None,)]
+    reader = sqlite3.connect(path)
+    try:
+        [(index_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_ai_route_activations_active_route'"
+        ).fetchall()
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(ai_route_activations)")]
+        keys = reader.execute("PRAGMA foreign_key_list(ai_route_activations)").fetchall()
+    finally:
+        reader.close()
+    assert "WHERE deactivated_at IS NULL" in index_sql
+    assert columns.index("playbook_sha256") == columns.index("prompt_sha256") + 1
+    assert {row[2] for row in keys} == {"prompt_snapshots", "playbook_snapshots"}
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):  # still one active per route
+        run_sql(
+            path,
+            f"INSERT INTO ai_route_activations ({ACTIVATION_COLUMNS}) VALUES "
+            f"('01JD3QZ8X5V9K2M7N4P6R8T0B4', 'extract_signals', 'claude-haiku-5-5', 'high', 'v1', "
+            f"'{digest}', 1, 'seed', 1, NULL, '{at}', NULL)",
+        )
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_ai_route_activations_tested$"):
+        run_sql(path, f"UPDATE ai_route_activations SET bootstrap = 0 WHERE id = '{ACTIVE_ROW}'")
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_ai_route_activations_effort$"):
+        run_sql(path, f"UPDATE ai_route_activations SET effort = 'huge' WHERE id = '{ACTIVE_ROW}'")
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_ai_route_activations_schema_version$"):
+        run_sql(
+            path, f"UPDATE ai_route_activations SET schema_version = 0 WHERE id = '{ACTIVE_ROW}'"
+        )
+    bad_playbook = (
+        f"UPDATE ai_route_activations SET playbook_sha256 = 'X' WHERE id = '{ACTIVE_ROW}'"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_ai_route_activations_playbook_sha256$"):
+        run_sql(path, bad_playbook)
