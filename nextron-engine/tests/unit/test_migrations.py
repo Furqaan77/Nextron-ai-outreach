@@ -33,7 +33,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0002_1_6_settings"
+HEAD = "0003_1_10_jobs"
 
 
 @pytest.fixture
@@ -152,11 +152,11 @@ def test_a_rollback_journal_database_is_refused_untouched(
 
 
 def test_a_database_with_several_revisions_is_refused_untouched(db_file: Path) -> None:
-    run_sql(db_file, "INSERT INTO alembic_version (version_num) VALUES ('0002_fork')")
+    run_sql(db_file, "INSERT INTO alembic_version (version_num) VALUES ('0099_fork')")
     before = sha256(db_file)
 
     with engine_on(db_file) as engine:
-        with pytest.raises(DatabaseStateError, match=rf"2 Alembic revisions \({HEAD}, 0002_fork\)"):
+        with pytest.raises(DatabaseStateError, match=rf"2 Alembic revisions \({HEAD}, 0099_fork\)"):
             ensure_current(engine)
         with pytest.raises(DatabaseStateError):
             current_revision(engine)

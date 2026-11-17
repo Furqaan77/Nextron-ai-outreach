@@ -42,4 +42,22 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "value": PiiClass.REDACT,
         "updated_at": PiiClass.NONE,
     },
+    # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
+    # exception's message is redacted and cut to 500 characters, but could still name a person.
+    "jobs": {
+        "id": PiiClass.NONE,
+        "type": PiiClass.NONE,
+        "lane": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "priority": PiiClass.NONE,
+        "payload": PiiClass.NONE,
+        "idempotency_key": PiiClass.NONE,
+        "concurrency_key": PiiClass.NONE,
+        "run_after": PiiClass.NONE,
+        "attempts": PiiClass.NONE,
+        "lease_until": PiiClass.NONE,
+        "last_error": PiiClass.REDACT,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
 }

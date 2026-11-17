@@ -552,6 +552,14 @@ A file that can't be opened (not SQLite, locked too long), or a migration that f
 foreign-key violations (rolled back), ends with exit 2 and `database_migration_failed` with the
 traceback in `nextron.log`.
 
+**The migrations so far**, in order (`nextron/db/alembic/versions/`):
+
+| Revision | Creates | Owner |
+|---|---|---|
+| `0001_1_3_persistence_foundation` | `events`, the append-only audit log, and its triggers | `db.eventlog` |
+| `0002_1_6_settings` | `settings` (see [Settings](#settings)) | `setup` |
+| `0003_1_10_jobs` | `jobs` (see [Jobs](#jobs)), its checks and its indexes, two of them partial | `jobqueue` |
+
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
 `pre_migrate` backup (a later story).
@@ -569,10 +577,16 @@ could drop the append-only `events` audit trail. Recover from a bad upgrade by r
    rejects `-`), the id is at most 31 characters and equals the file name, `down_revision` is
    the previous head, and `downgrade()` raises `NotImplementedError`. `env.py` runs it in batch mode, so `op.alter_column` and friends
    rebuild SQLite tables; a rebuild of `events` must create its triggers again.
+4. Repeats every index and check exactly. A partial index needs the same `sqlite_where` in the
+   model and the migration, and a check's full name in a migration goes through `op.f(...)`
+   (`name=op.f("ck_jobs_status")`): the naming convention would otherwise prefix it a second
+   time (`ck_jobs_ck_jobs_status`).
 
 `tests/contracts/test_persistence_contracts.py` checks all of it: one linear chain, the id rules,
 forward-only downgrades, owner and PII coverage, the key and datetime rules, the `events`
-triggers, and that the models match a database at head (the drift test).
+triggers, and that the models match a database at head (the drift test). The drift test sees
+neither a partial index's `WHERE` nor a check, so `tests/contracts/test_job_contracts.py` also
+compares the SQL of every table's indexes and checks with the model.
 
 **Units of work.** Each entry point (a web handler, a job handler or a CLI command) opens one
 unit of work and calls one use case. Only the use case opens transactions; owner commands join
@@ -614,6 +628,114 @@ or `WITH` raises `ReadOnlySqlError` (`PRAGMA query_only=OFF` included); and a ha
 leaves changed ORM objects behind raises when it returns. Only `nextron/db/engine.py`
 (`read_only_connection`) sets `query_only`, and it turns it off again before the connection
 goes back to the pool.
+
+## Jobs
+
+Background work (crawls, mailbox syncs, sends, AI calls) runs as durable jobs in the `jobs`
+table (owner `jobqueue`, AD-10), so it survives a crash or a restart, never runs twice at once,
+and retries only what may succeed later. The rules live in `nextron/domain/job.py`, the service
+in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. No job
+type is registered yet; the stories that add work add them.
+
+**Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
+(`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
+
+```python
+job_types.register_job_type(
+    JobType(
+        name="enrich_lead",                    # verb_noun, at most 48 characters
+        default_lane=Lane.BULK,
+        lanes=frozenset({Lane.BULK}),           # the lanes it may run on
+        priority=50,                            # 0 to 100; higher runs first
+        max_runtime=timedelta(minutes=5),       # whole seconds, 1 s to 24 h
+        retry_limit=3,                          # 0 to 20 retries after the first run
+        handler=enrich_lead,                    # thin: calls one use case, returns None
+    )
+)
+```
+
+**Handlers must be idempotent.** A run cut off by a crash or a shutdown is run again from the
+start unless it was the job's last attempt, and the cut-off run may already have committed its
+work. Work that must never happen twice (sending an email, say) uses retry limit 0 plus its own
+state guard, checked and set by the use case itself (AD-5).
+
+**Enqueue** with `JobQueue.enqueue`, an `@command`, inside the transaction whose change makes the
+work necessary, so the job exists exactly when that change commits:
+
+```python
+jobqueue.enqueue("enrich_lead", scope=lead_id, discriminator=str(rev),
+                 payload={"v": 1, "lead_id": lead_id}, concurrency_key="domain:example.com")
+```
+
+It raises `UnknownJobType` for an unregistered type and `InvalidJob` for a lane the type doesn't
+allow, a bad key, payload or concurrency key, or a naive `run_after`; either dooms the caller's
+transaction. `run_after` defaults to now and `lane` to the type's default lane.
+
+- **Keys.** The idempotency key is `<type>:<scope>:<discriminator>`. The scope is a ULID,
+  `inbox:<ULID>` or `global`; the discriminator is `tick`, a `YYYY-MM-DD` date or a revision
+  from `0` to `999999999` (text, no leading zeros). While a job with the key is `queued` or
+  `running`, enqueueing it again returns that job (`Enqueued(job_id, created=False)`) and writes
+  nothing; once it is `done` or `dead`, the key makes a new job.
+- **Payloads** hold IDs and scalars only, never personal data, secrets or free text: a flat JSON
+  object with a version field `v` (1 to 999), at most 32 fields with `[a-z][a-z0-9_]{0,31}`
+  names and at most 4,096 bytes, each value a ULID, an integer (signed 64 bits), a boolean, a
+  `YYYY-MM-DD` date, a UTC time (`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`) or a token of
+  `[a-z0-9_:.-]{1,64}`. No `null`, float, list or object; a string with `@` or a space is
+  refused. A refusal names the field, never its value. A handler gets the payload back as a
+  read-only mapping in `Job.payload`.
+- **Concurrency keys** (`inbox:<ULID>` or `domain:<name>`): a job is not claimed while a
+  `running` job holds the same key, on any lane.
+
+**Lanes and threads.** The FastAPI lifespan starts the runner when the server starts and stops
+it when the server stops, so handlers never run on the event loop. Each lane has its own
+threads: `nextron-job-realtime-1`, `nextron-job-interactive-1`, and `nextron-job-bulk-1` (plus
+`nextron-job-bulk-2` when `bulk_threads` is 2), and one `nextron-job-keeper`. Time-critical work
+(mail, replies, alerts) goes on `realtime`, the Operator's own requests on `interactive`, and
+crawls and batches on `bulk`, so a slow crawl never delays a send. An idle lane looks for work
+every second; enqueueing doesn't wake it sooner. A claim takes the lane's due job (`run_after`
+now or earlier) with the highest priority, then the oldest `run_after`, then the lowest id. It
+runs the handler in its own unit of work, then marks the job `done`, or hands the error to
+`JobQueue.fail`. A handler returns `None`; any other value fails the job.
+
+**Retries and backoff.** `attempts` counts claims. Only an `AdapterError` with
+`retryable=True` is retried: the job goes back to `queued` after 30 s, then 60 s, 120 s and so
+on, doubling up to 30 minutes, until it has run `retry_limit + 1` times; then it is `dead`
+(`retries_exhausted`). Any other exception makes it `dead` at once (`failed`), so a type with
+retry limit 0 never runs twice. `last_error` holds `"<code>: <message>"` (or
+`"<exception type>: <text>"`), redacted and cut to 500 characters. `dead` jobs stay until the
+Operator dismisses them (Story 1.15).
+
+**Leases.** A claim sets `lease_until` to now + `max_runtime` + 60 s. Every 30 s the keeper
+renews the lease of every job this process is still running, then reaps the other `running`
+jobs whose lease has ended: back to `queued` with the attempt counted, or `dead` at the last
+attempt (`lease_expired`). The reaping happens only on the keeper's 30 s ticks, so a job
+orphaned by a crash is claimable again at most `max_runtime` + 90 s after the crash, once the
+engine is running again; a job still running here (after the PC slept, say) is never claimed
+twice. Python can't stop a thread, so a handler past its `max_runtime` keeps its
+lease and is only logged (`job_overran`); a hung handler is left to the heartbeat and the
+supervisor. Every finish is fenced by `(id, attempts)`: a run whose claim was lost (reaped or
+released meanwhile) changes nothing and logs `job_claim_lost`.
+
+**Shutdown.** Stopping the server stops claiming at once and waits up to 15 s for running
+handlers. Jobs still running then are released: back to `queued` with the attempt counted, or
+`dead` at the last attempt (`released`). A killed process releases nothing; its leases expire.
+
+**Maintenance.** The keeper purges `done` jobs last changed more than 30 days ago when the
+runner starts and then 24 hours after each purge that succeeded (a failed purge is tried again
+on the next tick), keeping the newest `done` row of each type (so
+the health panel can show each type's last success). It never deletes a `dead` job.
+
+**`bulk_threads`** ("Bulk worker threads", Settings, Engine section) is 1 or 2, default 1. It
+is read once when the runner starts, so a change takes effect when the engine restarts; if it
+can't be read, the runner uses 1 and logs `bulk_threads_unreadable`.
+
+**Every status change** follows the Job machine (`queued`, `running`, `done`, `dead`; the table is
+in `nextron/domain/job.py`) and appends an `events` row in the same transaction (entity `jobs`,
+actor `system:jobqueue`). Read a job with `nextron.app.queries.jobqueue.job(job_id)`. Logs carry
+only `job_id`, `job_type`, `lane`, `attempts` and an error `code`: `job_runner_started` (with
+`bulk_threads`), `job_runner_stopped` (with `released`), `job_retry_scheduled`, `job_dead`,
+`job_claim_lost`, `job_lease_expired`, `job_lease_lost`, `job_released`, `job_overran`,
+`job_claim_failed`, `job_finish_failed`, `job_keeper_failed` and `jobs_purged` (with `count`).
 
 ## Logs
 

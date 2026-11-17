@@ -36,6 +36,17 @@ Any other error is logged as ``engine_crashed`` and ends with exit 1.
 constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists.
 
+**Jobs (AD-10).** ``build_job_types`` is the job type registry: the only code that constructs
+``JobTypes`` or calls ``register_job_type``. It ships empty and frozen; each story that adds a
+job type registers its ``JobType`` (lanes, priority, ``max_runtime``, retry limit and a thin
+handler) there. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one
+``Runner(units, queue, job_types)`` (``nextron.jobs.runner``) and hands
+``runner_lifespan(runner)`` to ``create_app``, so the runner's lane threads and keeper start
+when the server starts and stop when it stops, in whichever process serves the app (the reload
+worker included). Building the app starts nothing. ``runner_lifespan`` runs ``runner.start``
+and ``runner.stop`` through ``asyncio.to_thread``, off the event loop: stopping waits up to 15 s
+for running handlers, then releases their jobs back to the queue.
+
 With ``--reload`` (``dev`` only), Uvicorn serves from a worker process that does not write
 ``nextron.log``: only the reloader's own records reach the file. The worker's WARNING and above
 go to stderr, redacted. The worker opens the database with ``connect_database``, which never
@@ -94,13 +105,14 @@ so it must never run while the caller holds a transaction open.
 5. Exit 0. The code is never printed or logged; the link works once, within 5 minutes.
 """
 
+import asyncio
 import contextlib
 import contextvars
 import functools
 import logging
 import sys
 import webbrowser
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -115,6 +127,7 @@ from nextron.adapters.clock import SystemClock
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.ops.api import DashboardEntry
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
@@ -122,8 +135,10 @@ from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
+from nextron.domain.job import JobTypes
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
+from nextron.jobs.runner import Runner
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.ports.alert import AlertPort
@@ -140,7 +155,7 @@ from nextron.startup_checks import (
     engine_is_running,
     environment_checks,
 )
-from nextron.web.app import create_app
+from nextron.web.app import Lifespan, create_app
 from nextron.web.routing import Units
 
 HOST: Final = "127.0.0.1"
@@ -201,7 +216,8 @@ def build_app(
     object, keyring unless injected, serves the entry code, the credentials and the Google
     grants; one clock, the system clock unless injected, serves them and the settings. Google
     is reached through ``google_oauth`` (``GoogleOAuthClient()`` unless injected) and the
-    consent page opens with ``browser`` (``open_in_browser`` unless injected)."""
+    consent page opens with ``browser`` (``open_in_browser`` unless injected). The job runner
+    is built here and started by the app's lifespan (``runner_lifespan``), never by building."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     google = GoogleAccess(
@@ -214,6 +230,8 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
+    job_types = build_job_types()
+    runner = Runner(units, JobQueue(clock, job_types), job_types)
     return create_app(
         env=config.env,
         version=__version__,
@@ -223,7 +241,31 @@ def build_app(
         credentials=Credentials(secrets, clock),
         google=google,
         units=units,
+        lifespan=runner_lifespan(runner),
     )
+
+
+def build_job_types() -> JobTypes:
+    """The job type registry (AD-10), frozen. Empty until a story adds a job type: register each
+    with ``register_job_type(JobType(...))`` before ``freeze()``."""
+    job_types = JobTypes()
+    job_types.freeze()
+    return job_types
+
+
+def runner_lifespan(runner: Runner) -> Lifespan:
+    """The app's lifespan: start ``runner`` when the server starts and stop it when the server
+    stops, both on a worker thread, never on the event loop."""
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        await asyncio.to_thread(runner.start)
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(runner.stop)
+
+    return lifespan
 
 
 class SinkRole(StrEnum):

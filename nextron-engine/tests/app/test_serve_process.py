@@ -204,6 +204,11 @@ def test_guarded_health_page_and_second_instance(
         HEAD,
     )
     assert any(line["logger"] == "uvicorn.error" for line in lines)
+    # the lifespan started the job runner before the server took requests
+    [runner_started] = [line for line in lines if line["event"] == "job_runner_started"]
+    assert (runner_started["logger"], runner_started["bulk_threads"]) == ("nextron.jobs.runner", 1)
+    assert lines.index(started) < lines.index(runner_started)
+    assert HEAD == "0003_1_10_jobs"
     for line in lines:
         assert {"ts", "level", "logger", "event"} <= set(line)
     assert PLANTED_CODE not in log_text(data_dir)

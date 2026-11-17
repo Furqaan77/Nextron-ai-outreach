@@ -501,9 +501,13 @@ def test_sender_timezone_is_declared_required_in_the_sender_section() -> None:
     assert setting("sender_timezone") is found
 
 
-def test_the_declared_keys_are_the_sender_timezone_and_the_sink_allowlist() -> None:
-    assert [key.value for key in Key] == ["sender_timezone", "sink_allowlist"]
-    assert declared() == (setting(Key.SENDER_TIMEZONE), setting(Key.SINK_ALLOWLIST))
+def test_the_declared_keys_are_the_sender_timezone_the_sink_allowlist_and_bulk_threads() -> None:
+    assert [key.value for key in Key] == ["sender_timezone", "sink_allowlist", "bulk_threads"]
+    assert declared() == (
+        setting(Key.SENDER_TIMEZONE),
+        setting(Key.SINK_ALLOWLIST),
+        setting(Key.BULK_THREADS),
+    )
 
 
 # Row: Setting (sink_allowlist) ------------------------------------------------------------------
@@ -569,6 +573,40 @@ def test_sink_allowlist_encode_refuses_an_invalid_entry() -> None:
         encode(setting(Key.SINK_ALLOWLIST), ("a@b.co", "@chan"))
 
     assert raised.value.rule == "sink_recipient"
+
+
+# Row: Setting (bulk_threads) --------------------------------------------------------------------
+
+BULK_UNIT = (
+    "1 or 2. Threads for crawls, enrichment and other bulk work; a change takes effect when the "
+    "engine restarts."
+)
+
+
+def test_bulk_threads_is_an_integer_from_1_to_2_in_the_engine_section() -> None:
+    found = setting(Key.BULK_THREADS)
+
+    assert (found.key, found.type, found.section) == (
+        "bulk_threads",
+        SettingType.INTEGER,
+        Section.ENGINE,
+    )
+    assert (found.label, found.unit) == ("Bulk worker threads", BULK_UNIT)
+    assert found.default == 1 and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 1"),
+        ("maximum", "must be at most 2"),
+    ]
+    assert default_text(found) == "1"
+    assert parse(found, "2") == 2 and encode(found, 1) == "1"
+
+
+@pytest.mark.parametrize(("text", "rule"), [("0", "minimum"), ("3", "maximum"), ("x", "integer")])
+def test_bulk_threads_refuses_anything_but_1_or_2(text: str, rule: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.BULK_THREADS), text)
+
+    assert raised.value.rule == rule
 
 
 def test_the_schema_is_read_only_and_in_declaration_order() -> None:
@@ -729,7 +767,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     schema = declare(named("extra_one", T.STRING))
 
     assert schema_problems(schema) == [
-        "Key members not declared: sender_timezone, sink_allowlist",
+        "Key members not declared: bulk_threads, sender_timezone, sink_allowlist",
         "declared but not in Key: extra_one",
     ]
     assert schema_problems(schema, keys=["extra_one"]) == []

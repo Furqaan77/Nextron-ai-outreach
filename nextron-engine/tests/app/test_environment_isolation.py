@@ -17,6 +17,7 @@ Nothing here touches Windows Credential Manager or the network beyond 127.0.0.1.
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -162,6 +163,20 @@ REQUIRED_FILES = {"nextron.db", "nextron.lock", "logs", "logs/nextron.log"}
 SQLITE_SIDE_FILES = {"nextron.db-wal", "nextron.db-shm"}  # WAL mode keeps these while open
 
 
+def revisions_after_exit(path: Path) -> list[str]:
+    """``stored_revisions`` of a database a terminated engine had open. The job runner's
+    threads hold pooled connections, and Windows releases a killed process's file locks a
+    moment after it exits, so a read straight away can fail with "disk I/O error"."""
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            return stored_revisions(path)
+        except sqlite3.OperationalError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
+
+
 def test_dev_and_test_run_side_by_side_without_touching_each_other(
     engines: dict[str, Engine], local_app_data: Path
 ) -> None:
@@ -185,7 +200,7 @@ def test_dev_and_test_run_side_by_side_without_touching_each_other(
         other_dir = nextron_dir / ("test" if env == "dev" else "dev")
         files = {path.relative_to(data_dir).as_posix() for path in data_dir.rglob("*")}
         assert REQUIRED_FILES <= files <= REQUIRED_FILES | SQLITE_SIDE_FILES, (env, files)
-        assert stored_revisions(data_dir / "nextron.db") == [head_revision()]
+        assert revisions_after_exit(data_dir / "nextron.db") == [head_revision()]
         [started] = [record for record in records[env] if record["event"] == "engine_started"]
         assert started["env"] == env
         for record in log_records(data_dir):

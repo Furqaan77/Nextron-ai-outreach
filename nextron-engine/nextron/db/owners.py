@@ -57,4 +57,22 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "settings": {
         "setup": ("id", "key", "value", "updated_at"),
     },
+    "jobs": {
+        "jobqueue": (
+            "id",
+            "type",
+            "lane",
+            "status",
+            "priority",
+            "payload",
+            "idempotency_key",
+            "concurrency_key",
+            "run_after",
+            "attempts",
+            "lease_until",
+            "last_error",
+            "created_at",
+            "updated_at",
+        ),
+    },
 }

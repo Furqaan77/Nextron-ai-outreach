@@ -271,6 +271,12 @@ def fields_body(token: str, **fields: str) -> bytes:
     return form(csrf_token=token, **fields)
 
 
+def real_body(token: str, **fields: str) -> bytes:
+    """A save of the real schema: every declared field blank unless given."""
+    texts = {str(found.key): "" for found in settings_schema.declared()}
+    return fields_body(token, **{**texts, **fields})
+
+
 def stored(units: UnitOfWorkFactory) -> dict[str, str]:
     with units.open(read_only=True):
         return setup_queries.stored_texts()
@@ -520,7 +526,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
 ) -> None:
     _, page = settings_page(dashboard, session[0])
 
-    assert list(page.fields) == ["sender_timezone", "sink_allowlist"]
+    assert list(page.fields) == ["sender_timezone", "sink_allowlist", "bulk_threads"]
     shown = page.fields["sink_allowlist"]
     assert (shown.tag, shown.label, shown.value) == ("textarea", "Dev and test allowlist", "")
     assert shown.hint == (
@@ -535,17 +541,13 @@ def test_the_sink_allowlist_saves_addresses_and_chat_ids_and_refuses_anything_el
 ) -> None:
     token = session[1]
 
-    saved = save(
-        dashboard, session, fields_body(token, sender_timezone="", sink_allowlist="a@b.co\r\n123")
-    )
+    saved = save(dashboard, session, real_body(token, sink_allowlist="a@b.co\r\n123"))
 
     assert SettingsHtml(saved.text).notices == [("status", "Settings saved.")]
     assert stored(units) == {"sink_allowlist": "a@b.co\n123"}
     assert get_value(units, Key.SINK_ALLOWLIST) == ("a@b.co", "123")
     for refused_text in ("@chan", "a@b", "12a"):
-        refused = save(
-            dashboard, session, fields_body(token, sender_timezone="", sink_allowlist=refused_text)
-        )
+        refused = save(dashboard, session, real_body(token, sink_allowlist=refused_text))
         field = SettingsHtml(refused.text).fields["sink_allowlist"]
         assert field.error == "each line must be an email address or a numeric Telegram chat id"
         assert field.value == refused_text
@@ -557,26 +559,50 @@ def test_saving_mars_base_stores_nothing_and_america_los_angeles_is_saved(
 ) -> None:
     token = session[1]
 
-    refused = save(
-        dashboard, session, fields_body(token, sender_timezone="Mars/Base", sink_allowlist="")
-    )
+    refused = save(dashboard, session, real_body(token, sender_timezone="Mars/Base"))
     refused_page = SettingsHtml(refused.text)
 
     assert refused.status == 200
     assert refused_page.fields["sender_timezone"].error == TIMEZONE_REASON
     assert stored(units) == {}
 
-    saved = save(
-        dashboard,
-        session,
-        fields_body(token, sender_timezone="America/Los_Angeles", sink_allowlist=""),
-    )
+    saved = save(dashboard, session, real_body(token, sender_timezone="America/Los_Angeles"))
     saved_page = SettingsHtml(saved.text)
 
     assert saved.status == 200
     assert saved_page.notices == [("status", "Settings saved.")]
     assert saved_page.fields["sender_timezone"].value == "America/Los_Angeles"
     assert get_value(units, Key.SENDER_TIMEZONE) == "America/Los_Angeles"
+
+
+def test_the_engine_section_shows_bulk_threads_with_its_default(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    _, page = settings_page(dashboard, session[0])
+
+    shown = page.fields["bulk_threads"]
+    assert (shown.label, shown.value) == ("Bulk worker threads", "1")
+    assert shown.hint == (
+        "1 or 2. Threads for crawls, enrichment and other bulk work; a change takes effect when "
+        "the engine restarts.; default: 1; leave blank to use it"
+    )
+
+
+def test_bulk_threads_saves_2_and_refuses_0_and_3(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    token = session[1]
+
+    saved = save(dashboard, session, real_body(token, bulk_threads="2"))
+
+    assert SettingsHtml(saved.text).notices == [("status", "Settings saved.")]
+    assert stored(units) == {"bulk_threads": "2"}
+    assert get_value(units, Key.BULK_THREADS) == 2
+    for refused_text, reason in (("0", "must be at least 1"), ("3", "must be at most 2")):
+        refused = save(dashboard, session, real_body(token, bulk_threads=refused_text))
+        field = SettingsHtml(refused.text).fields["bulk_threads"]
+        assert (field.error, field.value) == (reason, refused_text)
+        assert stored(units) == {"bulk_threads": "2"}
 
 
 # Row: Page POST ok ------------------------------------------------------------------------------

@@ -486,8 +486,8 @@ def test_a_database_behind_is_upgraded_before_the_server_starts(
             "database revision 0099_future is newer than this code",
         ),
         (
-            ["INSERT INTO alembic_version (version_num) VALUES ('0002_fork')"],
-            f"the database has 2 Alembic revisions ({HEAD}, 0002_fork); expected one",
+            ["INSERT INTO alembic_version (version_num) VALUES ('0099_fork')"],
+            f"the database has 2 Alembic revisions ({HEAD}, 0099_fork); expected one",
         ),
         (
             ["DROP TABLE alembic_version"],

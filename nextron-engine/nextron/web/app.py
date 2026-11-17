@@ -50,11 +50,16 @@ the route declared, because the page carries that token.
 
 The base layout's navigation lists, in ``NAV_SECTIONS`` order, each section whose page route
 (a GET route with that name) exists; a later story adds the route and its link appears.
+
+``create_app(..., lifespan=None)`` hands ``lifespan`` to ``FastAPI``; ``Guard`` passes lifespan
+scopes through untouched, so the job runner that ``nextron.main`` wires there starts and stops
+with the server.
 """
 
 import logging
 import time
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final
@@ -120,6 +125,9 @@ NO_STORE: Final = {"Cache-Control": "no-store"}
 BROWSER_STARTED: Final = "none"  # Sec-Fetch-Site of a navigation the user started
 CROSS_SITE: Final = "cross_site"
 
+# An async context manager factory taking the app: what FastAPI(lifespan=...) accepts.
+type Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
+
 log = logging.getLogger(__name__)
 
 
@@ -165,12 +173,15 @@ def create_app(
     google: GoogleAccess,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
+    lifespan: Lifespan | None = None,
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``credentials`` the external credentials
     and ``google`` the Google client and grants (both in Credential Manager, not the database).
-    ``monotonic`` is injectable so tests control the uptime.
+    ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
+    ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
+    runner (``runner_lifespan``).
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()
@@ -184,6 +195,7 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.router.route_class = dashboard_route_class(units)
     app.add_exception_handler(SecurityCheckFailed, security_check_failed)

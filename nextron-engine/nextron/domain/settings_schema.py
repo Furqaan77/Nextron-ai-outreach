@@ -79,6 +79,7 @@ from types import MappingProxyType
 from typing import Any, Final, NamedTuple
 
 from nextron.domain.errors import DomainError
+from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.sink import is_sink_recipient
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
@@ -127,6 +128,7 @@ class Key(StrEnum):
 
     SENDER_TIMEZONE = "sender_timezone"
     SINK_ALLOWLIST = "sink_allowlist"
+    BULK_THREADS = "bulk_threads"
 
 
 class _Required(Enum):
@@ -813,6 +815,19 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=(),
         rules=(SINK_RECIPIENT_RULE,),
+    ),
+    # The job runner's bulk lane threads (AD-10), read once when the runner starts.
+    Setting(
+        key=Key.BULK_THREADS,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Bulk worker threads",
+        unit=(
+            "1 or 2. Threads for crawls, enrichment and other bulk work; a change takes effect "
+            "when the engine restarts."
+        ),
+        default=1,
+        rules=(minimum(1, "1"), maximum(MAX_BULK_THREADS, str(MAX_BULK_THREADS))),
     ),
 )
 
