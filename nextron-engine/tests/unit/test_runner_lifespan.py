@@ -136,6 +136,12 @@ def no_contact_markets() -> Any:
     raise AssertionError("no resolve_contact_markets job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 def job_threads() -> list[str]:
     return sorted(t.name for t in threading.enumerate() if t.name.startswith("nextron-job-"))
 
@@ -210,6 +216,9 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "restore_test",
         "check_recovery",
         "resolve_contact_markets",
+        "enrich_lead",
+        "canonicalize_lead",
+        "purge_page_text",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -510,6 +519,9 @@ def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
         restore_tests=no_restore_tests,
         recovery=no_recovery,
         contact_markets=no_contact_markets,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -693,6 +705,17 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
     segments = validate_segments(seed_yaml.parse(segments_file.read_text(encoding="utf-8")))
     with units.open():
         Setup(clock).sync_segments(segments)
+    job_types = main.build_job_types(  # none is called
+        alerts=InMemoryAlert,
+        backups=no_backups,
+        restore_tests=no_restore_tests,
+        recovery=no_recovery,
+        contact_markets=no_contact_markets,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
+    )
+    queue = JobQueue(clock, job_types)
 
     @use_case
     def store() -> None:
@@ -701,7 +724,7 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
             identity = LeadIdentity(
                 "Smith Law", segment.id, web_domain="smith.co.uk", country_code="GB"
             )
-            lead = Discovery(clock, Pipeline(clock)).upsert_lead(identity, LeadSource.CSV)
+            lead = Discovery(clock, Pipeline(clock), queue).upsert_lead(identity, LeadSource.CSV)
             Research(clock).add_contact(
                 lead.lead_id,
                 ContactCandidate(name="Jane Doe"),
@@ -713,6 +736,8 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
     with units.open():
         store()
     raw_query(units, "UPDATE contacts SET market_basis = NULL, tz_basis = NULL")
+    # the CSV Lead's crawl (Story 2.5) isn't under test: the runner must not fetch its website
+    raw_query(units, "DELETE FROM jobs WHERE type = 'enrich_lead'")
 
 
 def test_the_built_lifespan_queues_resolve_contact_markets_once_for_an_unresolved_contact(
@@ -740,7 +765,9 @@ def test_the_built_lifespan_queues_nothing_when_every_contact_is_resolved(
     sent, _ = drive_lifespan(build(units))
 
     assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
-    assert raw_query(units, "SELECT COUNT(*) FROM jobs") == [(0,)]
+    # purge_page_text's startup tick (Story 2.5) may be queued; resolve_contact_markets isn't
+    jobs = "SELECT COUNT(*) FROM jobs WHERE type = 'resolve_contact_markets'"
+    assert raw_query(units, jobs) == [(0,)]
 
 
 def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_stops_them(
@@ -768,8 +795,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    # backup_db, restore_test, check_recovery
-    assert scheduled.triggers == 3  # type: ignore[attr-defined]
+    # backup_db, restore_test, check_recovery and purge_page_text
+    assert scheduled.triggers == 4  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1129,12 +1156,20 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     finally:
         engine.units.engine.dispose()
 
-    assert sorted(job.id for job in jobs) == ["backup_db", "check_recovery", "restore_test"]
+    assert sorted(job.id for job in jobs) == [
+        "backup_db",
+        "check_recovery",
+        "purge_page_text",
+        "restore_test",
+    ]
     [check] = [job for job in jobs if job.id == "check_recovery"]
     assert isinstance(check.trigger, IntervalTrigger)
     assert check.trigger.interval == timedelta(minutes=1)
     assert (check.misfire_grace_time, check.coalesce, check.max_instances) == (60, True, 1)
-    dailies = sorted((job for job in jobs if job.id != "check_recovery"), key=lambda job: job.id)
+    dailies = sorted(
+        (job for job in jobs if job.id not in {"check_recovery", "purge_page_text"}),
+        key=lambda job: job.id,
+    )
     for job, hour in zip(dailies, ("10", "11"), strict=True):
         assert isinstance(job.trigger, CronTrigger)
         fields = {field.name: str(field) for field in job.trigger.fields}

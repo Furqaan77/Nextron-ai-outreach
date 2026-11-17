@@ -1,7 +1,7 @@
 """``python -m nextron`` as a real process: env refusal, the guarded health page, the database
 at head, the log file, the prompts pinned at start (Story 2.8), the runner, scheduler and
-heartbeat started by the lifespan, the second instance, and ``nextron open`` with no engine
-running.
+heartbeat started by the lifespan, the page-text purge enqueued at scheduler start (Story 2.5),
+the second instance, and ``nextron open`` with no engine running.
 
 Nothing here runs ``nextron open`` against a live engine or touches Credential Manager: entering
 the dashboard is covered in-process with fakes (``tests/unit/test_dashboard.py``)."""
@@ -122,6 +122,17 @@ def usage_counts(path: Path) -> tuple[int, int]:
         [(api,)] = reader.execute("SELECT COUNT(*) FROM api_usage").fetchall()
         [(ai,)] = reader.execute("SELECT COUNT(*) FROM ai_usage").fetchall()
         return int(api), int(ai)
+    finally:
+        reader.close()
+
+
+def purge_jobs(path: Path) -> list[tuple[str]]:
+    """The idempotency keys of the running engine's ``purge_page_text`` jobs."""
+    reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        return reader.execute(
+            "SELECT idempotency_key FROM jobs WHERE type = 'purge_page_text'"
+        ).fetchall()
     finally:
         reader.close()
 
@@ -266,7 +277,7 @@ def test_guarded_health_page_and_second_instance(
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        3,  # backup_db, restore_test and check_recovery
+        4,  # backup_db, restore_test, check_recovery and purge_page_text (Story 2.5)
     )
     assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
     assert lines.index(daily) < lines.index(restore) < lines.index(scheduler_started)
@@ -282,7 +293,12 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0019_3_2_contact_markets"
+    assert HEAD == "0020_2_5_crawl"
+    # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
+    purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
+    [purge] = [line for line in purged if line["event"] == "page_text_purged"]
+    assert purge["count"] == 0
+    assert purge_jobs(data_dir / "nextron.db") == [("purge_page_text:global:tick",)]
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one

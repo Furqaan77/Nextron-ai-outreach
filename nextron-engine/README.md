@@ -811,8 +811,9 @@ never removes the firm's Lead. No column records the source: the creation `event
 **Importing a list (FR-59).** Open the dashboard and follow **Import Leads from a CSV file** on
 the home page (`/leads/import`). Give the list's origin (3 to 200 characters, such as `Law
 Society directory, Manchester solicitors, exported 17 November 2026`), choose a default Segment
-or none, choose the file and press **Import**. Nothing is crawled and no email is sent: the
-import only stores Leads and Contacts.
+or none, choose the file and press **Import**. No email is sent: the import only stores Leads
+and Contacts, and queues each new Lead with a website for a crawl (see [Website
+crawling](#website-crawling)).
 
 The file is UTF-8 CSV (a BOM is fine; Excel's "CSV UTF-8" works), comma-separated, at most
 5 MB (5 MiB) and 5,000 rows, with a header row. Header names ignore case, and any run of
@@ -1397,6 +1398,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0017_4_3_company_facts` | `company_facts`: append-only fact versions (unique on `fact_id` and `version`; three checks; three triggers refusing a delete, a reused id or version, and any change but one retraction) (see [Approved Company Facts](#approved-company-facts)) | `playbook` |
 | `0018_4_7_sending_inboxes` | `sending_domains` (unique `domain`, `ck_sending_domains_not_brand`) and `sending_inboxes` (unique `address`, a foreign key to `sending_domains.id` with no cascade, `status` default `connecting`, `ck_sending_inboxes_status` and `ck_sending_inboxes_not_brand`) (see [Sending Inboxes](#sending-inboxes)) | `sending` |
 | `0019_3_2_contact_markets` | rebuilds `contacts` (from 0015's exact table, which 0016 to 0018 leave unchanged, every row, check, foreign key and index kept) with four nullable columns after `market_id`: `market_basis`, `tz_basis`, `office_country` and `office_region`, and six checks (`ck_contacts_market_basis`, `ck_contacts_tz_basis`, `ck_contacts_resolved`, `ck_contacts_market_tz`, `ck_contacts_office_country`, `ck_contacts_office_region`) (see [Contact Markets and timezones](#contact-markets-and-timezones)) | `research` |
+| `0020_2_5_crawl` | `crawl_runs` (`ix_crawl_runs_lead_id`, a foreign key to `leads`, `ck_crawl_runs_outcome` and `ck_crawl_runs_counts`), `crawled_pages` (unique on `lead_id` and `url`, foreign keys to `leads` and `crawl_runs`, `ck_crawled_pages_kind`) and `ats_links` (unique on `lead_id` and `url`, foreign keys to `leads`, `crawl_runs` and `crawled_pages`, `ck_ats_links_tag`); no foreign key cascades (see [Website crawling](#website-crawling)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -1476,10 +1478,12 @@ and retries only what may succeed later. The rules live in `nextron/domain/job.p
 in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. The
 job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)),
 `backup_db` (see [Backups](#backups)), `restore_test` (see [The restore test](#the-restore-test)),
-`check_recovery` (see [Restore and recovery mode](#restore-and-recovery-mode)) and the one-off
+`check_recovery` (see [Restore and recovery mode](#restore-and-recovery-mode)), the one-off
 `resolve_contact_markets` (bulk lane, priority 40, 30 minutes, retry limit 3,
-group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones));
-the stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
+group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
+and `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
+crawling](#website-crawling)); the stories that add work add theirs, with a thin handler in
+`nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -1985,10 +1989,11 @@ table (`tests/unit/test_triggers.py` checks it against the spine). A trigger onl
 firing enqueues one job of the job type with the trigger's own name, with the key
 `<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
 still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
-job. So far three triggers are registered: `backup_db`, daily (see [Backups](#backups)),
+job. So far four triggers are registered: `backup_db`, daily (see [Backups](#backups)),
 `restore_test`, daily an hour later, whose job tests once per calendar month (see [The restore
-test](#the-restore-test)), and `check_recovery`, every minute and at start, but only while
-recovery mode is on (see [Restore and recovery mode](#restore-and-recovery-mode)).
+test](#the-restore-test)), `check_recovery`, every minute and at start, but only while
+recovery mode is on (see [Restore and recovery mode](#restore-and-recovery-mode)), and
+`purge_page_text`, every 24 hours and at start (see [Website crawling](#website-crawling)).
 
 **Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
@@ -2528,6 +2533,89 @@ in a file.
 It prints the report and asserts the bars: every case was answered (no failed call), every
 proposed quote passes, at least 80% of the labelled Signals are found, and no injection
 succeeds. Without the key it skips.
+
+## Website crawling
+
+Each Lead's website is read politely and stored as visible text, with hidden content stripped,
+so the extraction (Story 2.9) and the job-board check (Story 2.11) work from what a visitor sees
+(FR-10, FR-49, FR-57, AD-7, AD-9, AD-18, NFR-6, NFR-34; Story 2.5).
+
+**What is never fetched** (`nextron/domain/fetch_policy.py`). The FR-49 denylist refuses
+LinkedIn, Instagram, Google Maps (a `maps` host under `google.*`, a `/maps` path, `goo.gl` maps
+links and `g.page`) and the job sites (Indeed, Glassdoor, ZipRecruiter, Reed, Totaljobs and
+CV-Library). The egress rules refuse a URL that isn't `http` or `https`, has credentials in it,
+uses a port other than 80 or 443, or names an IP address instead of a host; and an address that
+is private, loopback, link-local, multicast, CGNAT, unique-local, IPv4 hidden inside IPv6,
+otherwise not global, or this PC's own. No setting loosens any of this.
+
+**The crawler** (`nextron/adapters/crawler`, `HttpCrawler`) checks every hop itself:
+
+1. the URL against the egress rules and the denylist;
+2. the host name, resolved by the crawler (never by the HTTP client), and every address it
+   resolves to: the request then goes to that exact address, with the name in `Host` and in
+   TLS (so DNS can't be switched between the check and the request);
+3. pacing: at least 1 s between requests to one registrable domain (robots.txt's
+   `Crawl-delay`, up to 10 s, when it gives one);
+4. one GET, metered as `web` (`robots` or `page`) on the Quotas and cost page, within 30 s
+   for the whole fetch (every redirect included), with no cookies kept, no proxy taken from the environment and no keep-alive. It sends
+   `User-Agent: NextronBot/1.0 (+https://nextronai.com)`, and robots.txt rules are matched for
+   `NextronBot`;
+5. a redirect starts the next hop, so every redirect is checked again; a sixth redirect is
+   refused.
+
+A page must be HTML or XHTML (JSON is read but never stored) and at most 5 MiB; robots.txt at
+most 512 KiB. The text is what a visitor sees: `<head>`, scripts, styles, `<noscript>`,
+`<template>`, iframe content, `<noembed>`, `<noframes>`, datalists, SVG descriptions, closed
+dialogs, comments, elements marked `hidden` or `aria-hidden="true"`, and elements styled inline
+with `display: none` or `visibility: hidden` (CSS escapes read first) are removed first. Format characters
+(soft hyphens, zero-width spaces, bidi marks) are deleted, so a quote copied from a page matches
+the stored text exactly. Text is capped at 100,000 characters.
+
+**A crawl** is the `enrich_lead` job (bulk lane, key `enrich_lead:<lead>:<date>`, one site at a
+time):
+
+1. When the month's AI budget is spent, the job waits an hour (it is deferred, never failed).
+2. robots.txt from `https://<domain>`, or `https://www.<domain>` when the bare domain doesn't
+   answer. A 4xx (except 429) means everything is allowed; any other failure means nothing is
+   fetched this time.
+3. The homepage. When it can't be fetched the run is recorded as **website unreachable**
+   (`queries.research.latest_crawl_run` and `nextron.domain.crawl.OUTCOME_LABELS`, for the Lead
+   page of Story 2.4). When it lands on another domain, that domain is recorded, its own
+   robots.txt is read, and the rest of the crawl stays on it. When it lands on a shared
+   platform (a Facebook page, a site builder, a directory or a link shortener), nothing is
+   stored and the run is recorded as unreachable.
+4. Up to 15 pages in all (the **Pages crawled per Lead** setting), two links deep from the
+   homepage, chosen by keywords in the link or its text, in this order: team (people, staff,
+   attorneys, lawyers, solicitors), about, careers (jobs, vacancies, join us), contact (offices,
+   locations), services (practice areas, expertise, what we do) and news (press, blog,
+   insights). Files (PDFs, images, office files, archives, media) are never followed, and a
+   crawl stops after 10 minutes, or as soon as a page answers 429 or 503 (the site asked us to
+   slow down).
+5. The pages are stored in `crawled_pages` (one row per Lead and URL, updated in place), the run
+   in `crawl_runs`, and every link, embed or script pointing at a host in **ATS board hosts**
+   (Greenhouse, Lever and Ashby by default) in `ats_links`.
+
+A timeout or a 5xx from robots.txt or the homepage retries the job (up to 3 times); its last
+attempt completes instead of failing, so a flaky site never raises a dead-job alert. A DNS
+failure, a refused connection or a 404 is final.
+
+**Afterwards.**
+
+- A homepage found on another domain queues `canonicalize_lead`. The Lead moves to that domain
+  when no Lead holds it, or is merged with the Lead that does (the older one survives; the new
+  domain stays findable through the merged Lead).
+  Nothing changes when the Lead was merged meanwhile into a Lead with another website of its
+  own.
+- A Lead imported from CSV with a website gets its `enrich_lead` job when it is created, in the
+  same transaction.
+- `purge_page_text` runs at every start and every 24 hours. It clears page text 30 days after
+  it was fetched and keeps its SHA-256, so a change is still detectable.
+- When two Leads merge, the merged Lead's crawl runs move to the survivor, and so do the pages
+  and ATS links whose URL the survivor doesn't already have.
+
+**Settings** (Engine section): **Pages crawled per Lead** (1 to 15, default 15) and **ATS board
+hosts** (one host per line: `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`
+and `jobs.ashbyhq.com` by default; a URL, an upper-case name or a never-fetch host is refused).
 
 ## Engine health
 

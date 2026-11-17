@@ -89,6 +89,8 @@ from nextron.domain.backup import (
 )
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.errors import DomainError
+from nextron.domain.fetch_policy import is_denied
+from nextron.domain.identity import IdentityError, url_host
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.sink import is_sink_recipient
 
@@ -152,6 +154,8 @@ class Key(StrEnum):
     AI_BUDGET_MONTHLY = "ai_budget_monthly"
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
     US_SOLICITATION_LABEL = "us_solicitation_label"
+    CRAWL_MAX_PAGES = "crawl_max_pages"
+    ATS_HOSTS = "ats_hosts"
 
 
 class _Required(Enum):
@@ -857,6 +861,31 @@ OFFPC_FOLDER_RULE: Final = Rule(
     is_offpc_folder,
 )
 
+def is_ats_host(item: str) -> bool:
+    """Whether ``item`` is a host name as ``identity.url_host`` writes it (lowercase ASCII, no
+    scheme, path or port) that the FR-49 denylist doesn't deny."""
+    try:
+        return url_host(item) == item and not is_denied(item)
+    except IdentityError:
+        return False
+
+
+ATS_HOST_RULE: Final = Rule(
+    "ats_host",
+    "each line must be a host name in lowercase ASCII, such as boards.greenhouse.io, that is "
+    "not on the never-fetch list",
+    lambda value: all(is_ats_host(item) for item in value),
+)
+
+# The website crawl (Story 2.5, FR-10, NFR-6): at most 15 pages per Lead, homepage included.
+MAX_CRAWL_PAGES: Final = 15
+DEFAULT_ATS_HOSTS: Final = (
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+)
+
 # Budget and limits (Story 1.13, FR-57, NFR-12). Each quota counts the UTC calendar month; at
 # the quota, only the work it names stops, never sending, replies or unsubscribe polling. The
 # Places maximums are Google's free monthly allowance (March 2025 Maps pricing), so no value
@@ -1083,6 +1112,31 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(max_length(200),),
+    ),
+    # The website crawl (Story 2.5), read at the start of each crawl.
+    Setting(
+        key=Key.CRAWL_MAX_PAGES,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Pages crawled per Lead",
+        unit=(
+            f"1 to {MAX_CRAWL_PAGES}. The most pages one crawl of a Lead's website stores, its "
+            "homepage included."
+        ),
+        default=MAX_CRAWL_PAGES,
+        rules=(minimum(1, "1"), maximum(MAX_CRAWL_PAGES, str(MAX_CRAWL_PAGES))),
+    ),
+    Setting(
+        key=Key.ATS_HOSTS,
+        type=SettingType.LIST,
+        section=Section.ENGINE,
+        label="ATS board hosts",
+        unit=(
+            "One host name per line, such as boards.greenhouse.io. A link, embed or script on a "
+            "Lead's website whose host is listed here is recorded as the Lead's job board."
+        ),
+        default=DEFAULT_ATS_HOSTS,
+        rules=(ATS_HOST_RULE,),
     ),
 )
 

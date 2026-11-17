@@ -299,6 +299,9 @@ def test_the_health_report_carries_the_newest_recovery_row(
         restore_tests=lambda: None,  # type: ignore[arg-type,return-value]
         recovery=lambda: None,  # type: ignore[arg-type,return-value]
         contact_markets=lambda: None,  # type: ignore[arg-type,return-value]
+        crawls=lambda: None,  # type: ignore[arg-type,return-value]
+        discovery=lambda: None,  # type: ignore[arg-type,return-value]
+        research=lambda: None,  # type: ignore[arg-type,return-value]
     )
     issues = main.build_health_issues(budget=_NoBudget())  # type: ignore[arg-type]
     health = EngineHealth(

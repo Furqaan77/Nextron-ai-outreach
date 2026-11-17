@@ -14,7 +14,9 @@ a real external system to raise ``LiveAdapterInTests``:
   ``nextron.adapters.telegram.default_http_client`` (the Telegram Bot API), so a
   ``TelegramAlert`` raises on its first send, and ``nextron.adapters.ai.default_http_client``
   (the Claude API), so a ``ClaudeGateway`` without an injected ``http`` raises on its first
-  ``run``;
+  ``run``, and ``nextron.adapters.crawler``'s ``default_http_client``, ``default_resolver`` and
+  ``default_own_addresses`` (the web, DNS and this PC's addresses), so an ``HttpCrawler``
+  without an injected ``http``, ``resolve`` or ``own_addresses`` raises on its first fetch;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
 
@@ -87,6 +89,9 @@ LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.google_oauth", "default_http_client"),
     ("nextron.adapters.telegram", "default_http_client"),
     ("nextron.adapters.ai", "default_http_client"),
+    ("nextron.adapters.crawler", "default_http_client"),
+    ("nextron.adapters.crawler", "default_resolver"),
+    ("nextron.adapters.crawler", "default_own_addresses"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -145,6 +150,7 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "email_syntax": NoExternalSystem(
         "checks an address's syntax with email-validator, deliverability off; no DNS or network"
     ),
+    "crawler": Guarded(("default_http_client", "default_resolver", "default_own_addresses")),
 }
 
 

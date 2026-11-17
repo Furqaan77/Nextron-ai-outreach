@@ -217,6 +217,9 @@ def _main_registries() -> tuple[Triggers, JobTypes]:
         restore_tests=_never,
         recovery=_never,
         contact_markets=_never,
+        crawls=_never,
+        discovery=_never,
+        research=_never,
     )
     triggers = main.build_triggers(
         job_types,
@@ -231,7 +234,9 @@ def test_check_recovery_is_an_active_every_minute_at_startup_on_the_realtime_lan
     triggers, job_types = _main_registries()
 
     assert trigger_problems(triggers, job_types) == []
-    assert [spec.trigger for spec in triggers.specs()][-1] is Trigger.CHECK_RECOVERY
+    order = [spec.trigger for spec in triggers.specs()]
+    # registered right after restore_test (Story 2.5's purge_page_text comes after it)
+    assert order.index(Trigger.CHECK_RECOVERY) == order.index(Trigger.RESTORE_TEST) + 1
 
 
 def _noop(job: Job) -> None:

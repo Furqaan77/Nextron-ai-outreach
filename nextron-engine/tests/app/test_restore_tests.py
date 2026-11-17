@@ -98,6 +98,12 @@ def no_contact_markets() -> Any:
     raise AssertionError("no resolve_contact_markets job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -126,6 +132,9 @@ class World:
             restore_tests=lambda: self.tests,
             recovery=no_recovery,
             contact_markets=no_contact_markets,
+            crawls=no_crawls,
+            discovery=no_crawls,
+            research=no_crawls,
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(

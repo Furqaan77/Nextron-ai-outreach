@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0019_3_2_contact_markets"
+HEAD = "0020_2_5_crawl"
 
 
 @pytest.fixture

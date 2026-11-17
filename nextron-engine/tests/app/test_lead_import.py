@@ -26,6 +26,7 @@ from nextron.app.discovery.api import (
     LeadImports,
     NotedRow,
 )
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
@@ -180,6 +181,26 @@ class World:
         return [self.sql(f"SELECT * FROM {table} ORDER BY rowid") for table in TABLES]
 
 
+def no_jobs() -> Any:
+    """``build_job_types``'s services: no job runs in these tests."""
+    raise AssertionError("no job runs in these tests")
+
+
+def queue_on(clock: FrozenClock) -> JobQueue:
+    """A job queue on the real job types; ``upsert_lead`` enqueues a CSV Lead's crawl there."""
+    job_types = main.build_job_types(
+        alerts=no_jobs,
+        backups=no_jobs,
+        restore_tests=no_jobs,
+        recovery=no_jobs,
+        contact_markets=no_jobs,
+        crawls=no_jobs,
+        discovery=no_jobs,
+        research=no_jobs,
+    )
+    return JobQueue(clock, job_types)
+
+
 @pytest.fixture
 def world(db_engine: Engine) -> World:
     clock = FrozenClock(T0)
@@ -190,7 +211,7 @@ def world(db_engine: Engine) -> World:
         Setup(clock).sync_segments(segments)
     with units.open():
         Setup(clock).sync_markets(markets)
-    discovery = Discovery(clock, Pipeline(clock))
+    discovery = Discovery(clock, Pipeline(clock), queue_on(clock))
     research = Research(clock)
     imports = LeadImports(clock, discovery, research, FakeEmailSyntax())
     found = World(units, db_engine, clock, discovery, research, imports, "", "")

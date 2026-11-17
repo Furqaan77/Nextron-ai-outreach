@@ -137,6 +137,12 @@ def no_recovery() -> Any:
     raise RuntimeError("this dashboard runs no check_recovery job")
 
 
+def no_crawl_jobs() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research``: the dashboard runs no
+    Story 2.5 job."""
+    raise AssertionError("the dashboard runs no enrich_lead, canonicalize_lead or purge_page_text")
+
+
 def default_data_dir() -> Path:
     """``<%LOCALAPPDATA%>\\Nextron\\test``: under the test's temporary folder."""
     return Path(os.environ["LOCALAPPDATA"]) / "Nextron" / "test"
@@ -293,6 +299,9 @@ class Dashboard:
             restore_tests=lambda: self.restore_tests,
             recovery=no_recovery,
             contact_markets=lambda: self.contact_markets,
+            crawls=no_crawl_jobs,
+            discovery=no_crawl_jobs,
+            research=no_crawl_jobs,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -334,7 +343,7 @@ class Dashboard:
         self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
         self.lead_imports = LeadImports(
             self.clock,
-            Discovery(self.clock, Pipeline(self.clock)),
+            Discovery(self.clock, Pipeline(self.clock), self.queue),
             self.research,
             self.email_syntax,
         )

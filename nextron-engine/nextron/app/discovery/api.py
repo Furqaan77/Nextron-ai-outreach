@@ -3,8 +3,8 @@
 Other services and the delivery layers change ``discovery`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-``Discovery(clock, pipeline)`` owns the ``leads`` identity group and keeps exactly one Lead per
-organization: a candidate matches an existing Lead by any of its keys (registrable domain,
+``Discovery(clock, pipeline, queue)`` owns the ``leads`` identity group and keeps exactly one
+Lead per organization: a candidate matches an existing Lead by any of its keys (registrable domain,
 Companies House number or place ID), at any Pipeline Stage, merged Leads included. Keys arrive
 already normalised: ``LeadIdentity`` refuses any other (``nextron.domain.identity`` is the only
 normaliser).
@@ -19,7 +19,10 @@ normaliser).
      chain longer than ``MAX_MERGE_CHAIN`` (64) links raises ``RuntimeError``.
   3. No match: a new Lead is inserted (``created_at`` = now, stage ``new``), and
      ``pipeline.record_created`` appends its creation ``events`` row (cause
-     ``created_from_<source>``); ``created=True``.
+     ``created_from_<source>``); ``created=True``. A Lead created from a ``csv`` source with a
+     ``web_domain`` also gets its ``enrich_lead`` job (Story 2.5), enqueued in the same
+     transaction: key ``enrich_lead:<lead ULID>:<UTC date>``, payload ``{v: 1, lead_id}``,
+     concurrency key ``domain:<web_domain>``, on its default lane.
   4. Two or more distinct survivors: the oldest (by ``created_at``, then ``id``) survives, and
      each of the others is ``merge``d into it in that order; ``merged`` lists them.
   5. Then each candidate key that no Lead holds and the survivor lacks is attached to the
@@ -36,6 +39,27 @@ normaliser).
   ``research.reparent_lead``. A key the survivor holds with another value stays on the loser,
   where a lookup still finds it and follows ``merged_into``. The merge itself appends no
   ``events`` row: ``merged_into`` is the record. Non-``str`` ids raise ``TypeError``.
+
+- ``@use_case canonicalize_lead(lead_id, run_id) -> str`` (the ``canonicalize_lead`` job, Story
+  2.5): a crawl found the Lead's homepage on another registrable domain. In one transaction it
+  reads the run's ``final_domain`` through ``queries.research.crawl_run`` and works on the
+  Lead's survivor (``merged_into`` followed):
+
+  - an unknown Lead or run, a run without a ``final_domain``, or one whose final domain is a
+    shared platform (``nextron.domain.leads.is_shared_platform``): nothing (``nothing``);
+  - the survivor already holds the domain, itself or through a Lead merged into it: nothing
+    (``kept``);
+  - the survivor's ``web_domain`` isn't the run's ``site_domain`` (the crawled Lead was merged
+    into a Lead with another website meanwhile): nothing (``nothing``), so the survivor's own
+    domain is never replaced;
+  - no Lead holds it: the survivor's ``web_domain`` becomes it (``leads.set_web_domain``), so
+    the old domain is released (``moved``);
+  - another Lead holds it: the two survivors are ``merge``d, the older surviving (``merged``).
+    When the older one keeps its own ``web_domain``, the new domain stays on the merged Lead,
+    where a lookup still finds it and follows ``merged_into``.
+
+  It logs ``lead_canonicalized`` (``lead_id``, ``survivor_id``, ``run_id``, ``action``) and
+  returns the action.
 
 **The CSV import (FR-59, Story 2.3).** ``LeadImports(clock, discovery, research,
 email_syntax)`` turns an uploaded CSV into Leads and Contacts; the rules for the file and its
@@ -77,14 +101,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
 from nextron.db.repos.discovery import leads as leads_repo
 from nextron.db.repos.discovery.leads import StoredLead
 from nextron.db.uow import command, current, use_case
 from nextron.domain.contacts import ProvenanceSource
+from nextron.domain.crawl import ENRICH_LEAD_JOB, LEAD_ID_FIELD, PAYLOAD_VERSION, lead_job_keys
 from nextron.domain.ids import is_ulid
+from nextron.domain.job import VERSION_FIELD
 from nextron.domain.lead_import import (
     DEFAULT_SEGMENT_UNKNOWN,
     FIELD_DEFAULT_SEGMENT,
@@ -102,15 +130,22 @@ from nextron.domain.leads import (
     LeadIdentity,
     LeadSource,
     MergeRefused,
+    is_shared_platform,
 )
 from nextron.domain.notifications import LeadsMerged
 from nextron.ports.clock import Clock
 from nextron.ports.email_syntax import EmailSyntaxPort
 
+log = logging.getLogger(__name__)
+
 MAX_MERGE_CHAIN: Final = 64
 BATCH_ROWS: Final = 200
-
-log = logging.getLogger(__name__)
+LEAD_CANONICALIZED: Final = "lead_canonicalized"
+# What canonicalize_lead did
+NOTHING: Final = "nothing"
+KEPT: Final = "kept"
+MOVED: Final = "moved"
+MERGED: Final = "merged"
 
 _LOOKUPS: Final = {
     "web_domain": leads_repo.by_web_domain,
@@ -154,9 +189,10 @@ def _age(lead: StoredLead) -> tuple[datetime, str]:
 class Discovery:
     """One Lead per organization; see the module docstring."""
 
-    def __init__(self, clock: Clock, pipeline: Pipeline) -> None:
+    def __init__(self, clock: Clock, pipeline: Pipeline, queue: JobQueue) -> None:
         self._clock = clock
         self._pipeline = pipeline
+        self._queue = queue
 
     @command
     def upsert_lead(self, identity: LeadIdentity, source: LeadSource) -> UpsertedLead:
@@ -186,6 +222,8 @@ class Discovery:
                 created_at=self._clock.now(),
             )
             self._pipeline.record_created(lead_id, source)
+            if source is LeadSource.CSV and identity.web_domain is not None:
+                self._enqueue_crawl(lead_id, identity.web_domain)
             return UpsertedLead(lead_id, True, ())
         keep, *others = sorted(survivors.values(), key=_age)
         for other in others:
@@ -200,6 +238,57 @@ class Discovery:
         }
         leads_repo.set_keys(kept.id, **attach)
         return UpsertedLead(kept.id, False, tuple(other.id for other in others))
+
+    def _enqueue_crawl(self, lead_id: str, web_domain: str) -> None:
+        """Enqueue the new Lead's ``enrich_lead`` job in the caller's transaction."""
+        discriminator, concurrency_key = lead_job_keys(web_domain, self._clock.now())
+        self._queue.enqueue(
+            ENRICH_LEAD_JOB,
+            scope=lead_id,
+            discriminator=discriminator,
+            payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id},
+            concurrency_key=concurrency_key,
+        )
+
+    @use_case
+    def canonicalize_lead(self, lead_id: str, run_id: str) -> str:
+        """Move the Lead to the domain its website now lives on; see the module docstring."""
+        with current().transaction():
+            survivor_id, action = self._canonicalize(lead_id, run_id)
+        log.info(
+            LEAD_CANONICALIZED,
+            extra={
+                "lead_id": lead_id,
+                "survivor_id": survivor_id,
+                "run_id": run_id,
+                "action": action,
+            },
+        )
+        return action
+
+    def _canonicalize(self, lead_id: str, run_id: str) -> tuple[str | None, str]:
+        run = research_queries.crawl_run(run_id) if isinstance(run_id, str) else None
+        lead = leads_repo.get(lead_id) if isinstance(lead_id, str) and is_ulid(lead_id) else None
+        if run is None or lead is None or run.final_domain is None:
+            return None, NOTHING
+        domain = run.final_domain
+        if is_shared_platform(domain):  # never one organization's domain
+            return None, NOTHING
+        survivor = _survivor(lead)
+        if survivor.web_domain == domain:
+            return survivor.id, KEPT
+        if survivor.web_domain != run.site_domain:  # the survivor's site isn't the one crawled
+            return survivor.id, NOTHING
+        holder = leads_repo.by_web_domain(domain)
+        if holder is None:
+            leads_repo.set_web_domain(survivor.id, domain)
+            return survivor.id, MOVED
+        other = _survivor(holder)
+        if other.id == survivor.id:
+            return survivor.id, KEPT
+        older, newer = sorted((survivor, other), key=_age)
+        self.merge(older.id, newer.id)
+        return older.id, MERGED
 
     @command
     def merge(self, survivor_id: str, loser_id: str) -> None:

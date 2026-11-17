@@ -164,9 +164,11 @@ def test_the_group_check_catches_a_registration_without_a_group(tmp_path: Path) 
     _, root = copy_with_probe(tmp_path, "nextron.app.ops", UNUSED)
     main_py = root / MAIN
     text = main_py.read_text(encoding="utf-8")
-    grouped = "            group=JobGroup.OTHER,"
-    assert text.count(grouped) == 2  # send_alert, then resolve_contact_markets (Story 3.2)
-    main_py.write_text(text.replace(grouped, "", 1), encoding="utf-8")  # send_alert's only
+    grouped = (  # send_alert's; resolve_contact_markets and purge_page_text are in Other too
+        "            group=JobGroup.OTHER,  # the health panel's groups have none for alerts"
+    )
+    assert text.count(grouped) == 1
+    main_py.write_text(text.replace(grouped + "\n", "").replace(grouped, ""), encoding="utf-8")
 
     [problem] = ungrouped_job_types(root)
 

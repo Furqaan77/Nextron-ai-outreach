@@ -55,6 +55,12 @@ def no_contact_markets() -> Any:
     raise AssertionError("no resolve_contact_markets job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 def fail_with_value_error(job: Job) -> None:
     raise ValueError(f"enrichment failed for job {job.id}")
 
@@ -142,6 +148,9 @@ def build_world(
         restore_tests=no_restore_tests,
         recovery=no_recovery,
         contact_markets=no_contact_markets,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))  # the real, registered one

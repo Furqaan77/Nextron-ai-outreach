@@ -5,6 +5,8 @@
 it answers each ``run`` with the next scripted ``LlmResult`` or ``AdapterError`` and records
 every call. ``FakeEmailSyntax`` (``email_syntax``) fakes ``EmailSyntaxPort``: it refuses the
 addresses it is given and any address holding ``,;<>()[]\\"`` or a space.
+``ScriptedCrawler`` (``crawler``) fakes ``CrawlerPort``: it answers each fetch by its URL from
+a script, after the real adapter's checks on the first URL, and records every call.
 
 ``PORT_FAKES`` maps every port Protocol in ``nextron/ports`` to its fake; each fake can be
 built with no arguments. ``tests/contracts/test_test_isolation.py`` fails when a port has no
@@ -19,6 +21,7 @@ from typing import Final
 from nextron.ports.alert import AlertPort
 from nextron.ports.backup_target import BackupTargetPort
 from nextron.ports.clock import Clock
+from nextron.ports.crawler import CrawlerPort
 from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
 from nextron.ports.llm import LlmPort
@@ -28,6 +31,7 @@ from nextron.ports.usage_meter import UsageMeterPort
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
+from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
@@ -48,5 +52,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         BackupTargetPort: InMemoryBackupTarget,
         LlmPort: ScriptedLlm,
         EmailSyntaxPort: FakeEmailSyntax,
+        CrawlerPort: ScriptedCrawler,
     }
 )

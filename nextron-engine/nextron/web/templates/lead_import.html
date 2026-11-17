@@ -4,6 +4,6 @@
 <h1>Import Leads from a CSV file</h1>
 <p>Each row becomes one Lead, or updates the Lead the engine already has for that website. A
 row's Contact is added to its Lead, and every Contact and address records the list's origin.
-Nothing is crawled, and no email is sent.</p>
+No email is sent. Each new Lead with a website is queued for a polite crawl of its site.</p>
 {% include "lead_import_form.html" %}
 {% endblock %}

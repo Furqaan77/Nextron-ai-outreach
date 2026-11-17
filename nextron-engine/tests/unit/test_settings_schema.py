@@ -519,6 +519,8 @@ def test_the_declared_keys_in_order() -> None:
         "ai_budget_monthly",
         "ai_budget_alert_pct",
         "us_solicitation_label",
+        "crawl_max_pages",
+        "ats_hosts",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -537,6 +539,8 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.AI_BUDGET_MONTHLY),
         setting(Key.AI_BUDGET_ALERT_PCT),
         setting(Key.US_SOLICITATION_LABEL),
+        setting(Key.CRAWL_MAX_PAGES),
+        setting(Key.ATS_HOSTS),
     )
 
 
@@ -699,6 +703,74 @@ def test_bulk_threads_refuses_anything_but_1_or_2(text: str, rule: str) -> None:
         parse(setting(Key.BULK_THREADS), text)
 
     assert raised.value.rule == rule
+
+
+# Row: Settings (crawl_max_pages, ats_hosts; Story 2.5) ------------------------------------------
+
+ATS_DEFAULT = (
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+)
+
+
+def test_crawl_max_pages_is_an_integer_from_1_to_15_in_the_engine_section() -> None:
+    found = setting(Key.CRAWL_MAX_PAGES)
+
+    assert (found.key, found.type, found.section) == (
+        "crawl_max_pages",
+        SettingType.INTEGER,
+        Section.ENGINE,
+    )
+    assert found.label == "Pages crawled per Lead"
+    assert found.default == 15 and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 1"),
+        ("maximum", "must be at most 15"),
+    ]
+    assert default_text(found) == "15"
+    assert parse(found, "1") == 1 and encode(found, 15) == "15"
+
+
+@pytest.mark.parametrize(("text", "rule"), [("0", "minimum"), ("16", "maximum"), ("x", "integer")])
+def test_crawl_max_pages_refuses_anything_outside_1_to_15(text: str, rule: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.CRAWL_MAX_PAGES), text)
+
+    assert raised.value.rule == rule
+
+
+def test_ats_hosts_is_a_list_of_host_names_defaulting_to_the_four_boards() -> None:
+    found = setting(Key.ATS_HOSTS)
+
+    assert (found.key, found.type, found.section) == ("ats_hosts", SettingType.LIST, Section.ENGINE)
+    assert found.label == "ATS board hosts"
+    assert found.default == ATS_DEFAULT and not found.required
+    assert [rule.name for rule in found.rules] == ["ats_host"]
+    assert parse(found, "boards.greenhouse.io\ncareers.example.com") == (
+        "boards.greenhouse.io",
+        "careers.example.com",
+    )
+    assert default_text(found) == "\n".join(ATS_DEFAULT)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://boards.greenhouse.io",
+        "Boards.Greenhouse.io",
+        "boards.greenhouse.io/x",
+        "uk.indeed.com",
+        "jobs.lever.co\nwww.linkedin.com",
+        "boards.greenhouse.io:443",
+    ],
+)
+def test_ats_hosts_refuses_a_url_an_uppercase_name_or_a_never_fetch_host(text: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.ATS_HOSTS), text)
+
+    assert raised.value.rule == "ats_host"
 
 
 # Row: Settings (backup_time, backup_rotation_days; Story 1.16) ---------------------------------
@@ -1053,9 +1125,10 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     assert schema_problems(schema) == [
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
-            "backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
-            "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
-            "quota_places_pro, quota_prospeo_credits, sender_name, sender_timezone, "
+            "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
+            "crawl_max_pages, quota_hunter_credits, quota_job_aggregator, "
+            "quota_places_enterprise, quota_places_pro, quota_prospeo_credits, sender_name, "
+            "sender_timezone, "
             "sink_allowlist, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",

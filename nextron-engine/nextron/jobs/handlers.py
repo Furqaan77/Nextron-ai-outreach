@@ -34,16 +34,35 @@ handler runs in.
   (``nextron.main`` passes ``lambda: contact_markets``, which breaks the cycle registry,
   handler, ``ContactMarkets``, queue, registry); the handler calls ``markets().backfill()``
   once and returns ``None``. The payload (``{"v": 1}``) holds nothing else.
+- ``enrich_lead(crawls)`` (Story 2.5): calls ``crawls().enrich_lead(lead_id, may_retry=
+  job.attempts <= ENRICH_LEAD_RETRIES)`` once (the research service's ``WebsiteCrawls``), so the
+  job's last allowed attempt completes instead of failing on a flaky site, and returns
+  ``DEFERRED`` when it returns ``False`` (the budget refused the crawl).
+- ``canonicalize_lead(discovery)`` (Story 2.5): calls ``discovery().canonicalize_lead(lead_id,
+  run_id)`` once.
+- ``purge_page_text(research)`` (Story 2.5): calls ``research().purge_page_text()`` once.
+
+A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
 
 from collections.abc import Callable
 from typing import Final, Protocol
 
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
-from nextron.domain.job import Handler, InvalidJob, Job
+from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
+from nextron.domain.ids import is_ulid
+from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
 from nextron.domain.restore_test import RestoreTestKind
 
 ALERT_ID_FIELD: Final = "alert_id"
+ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
+
+
+def _ulid_field(job: Job, name: str) -> str:
+    value = job.payload.get(name)
+    if not isinstance(value, str) or not is_ulid(value):
+        raise InvalidJob(f"{job.type}: the {name} field must be a ULID")
+    return value
 
 
 class AlertSending(Protocol):
@@ -132,3 +151,54 @@ def resolve_contact_markets(markets: Callable[[], MarketBackfilling]) -> Handler
         markets().backfill()
 
     return handle_resolve_contact_markets
+
+
+class Crawling(Protocol):
+    """What ``enrich_lead`` needs of the ``research`` service's ``WebsiteCrawls``."""
+
+    def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool: ...
+
+
+def enrich_lead(crawls: Callable[[], Crawling]) -> Handler:
+    """The ``enrich_lead`` job's handler: crawl the payload's Lead through ``crawls()``."""
+
+    def handle_enrich_lead(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        if not crawls().enrich_lead(lead_id, may_retry=job.attempts <= ENRICH_LEAD_RETRIES):
+            return DEFERRED
+        return None
+
+    return handle_enrich_lead
+
+
+class Canonicalizing(Protocol):
+    """What ``canonicalize_lead`` needs of the ``discovery`` service."""
+
+    def canonicalize_lead(self, lead_id: str, run_id: str) -> str: ...
+
+
+def canonicalize_lead(discovery: Callable[[], Canonicalizing]) -> Handler:
+    """The ``canonicalize_lead`` job's handler: move the payload's Lead to its run's domain
+    through ``discovery()``."""
+
+    def handle_canonicalize_lead(job: Job) -> None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        run_id = _ulid_field(job, RUN_ID_FIELD)
+        discovery().canonicalize_lead(lead_id, run_id)
+
+    return handle_canonicalize_lead
+
+
+class PurgingPageText(Protocol):
+    """What ``purge_page_text`` needs of the ``research`` service."""
+
+    def purge_page_text(self) -> int: ...
+
+
+def purge_page_text(research: Callable[[], PurgingPageText]) -> Handler:
+    """The ``purge_page_text`` job's handler: null old page text through ``research()``."""
+
+    def handle_purge_page_text(job: Job) -> None:
+        research().purge_page_text()
+
+    return handle_purge_page_text

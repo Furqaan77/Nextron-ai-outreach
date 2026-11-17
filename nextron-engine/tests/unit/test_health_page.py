@@ -278,6 +278,7 @@ RESTORE_FORM = {
 }
 RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
+    [["Job type", "Last success"], ["enrich_lead", "never"], ["canonicalize_lead", "never"]],
     [
         ["Job type", "Last success"],
         ["backup_db", "never"],
@@ -288,6 +289,7 @@ NEVER_RUN = [
         ["Job type", "Last success"],
         ["send_alert", "never"],
         ["resolve_contact_markets", "never"],  # Story 3.2's one-off, group Other
+        ["purge_page_text", "never"],
     ],
 ]
 
@@ -335,6 +337,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Errors needing attention (0)",
         "No errors need attention.",
         "Last successful runs",
+        "Enrichment",
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
@@ -387,12 +390,14 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Last error: ValueError: broken",
         "Dismiss",
         "Last successful runs",
+        "Enrichment",
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
         "12 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables[:2] == [
+    assert panel.tables[:3] == [
+        NEVER_RUN[0],
         [
             ["Job type", "Last success"],
             ["backup_db", "never"],
@@ -403,6 +408,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
             ["Job type", "Last success"],
             ["send_alert", "2026-11-17 09:05:00 UTC"],
             ["resolve_contact_markets", "never"],
+            ["purge_page_text", "never"],
         ],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms

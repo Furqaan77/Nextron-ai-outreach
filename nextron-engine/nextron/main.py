@@ -74,13 +74,16 @@ that constructs ``Subscribers`` or registers a subscriber, frozen once filled. E
 adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
 the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
-Lead's Contacts move to the survivor), with ``SystemClock()`` when no clock is given.
+Lead's Contacts move to the survivor; Story 2.5: so do its crawl runs, and its pages and ATS
+links the survivor lacks), with ``SystemClock()`` when no clock is given.
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
-``LeadImports(clock, Discovery(clock, Pipeline(clock)), research, EmailValidatorSyntax())``
+``LeadImports(clock, discovery, research, EmailValidatorSyntax())``, on the same ``discovery =
+Discovery(clock, Pipeline(clock), queue)`` as the ``canonicalize_lead`` jobs
 (``nextron.app.discovery.api``; the syntax adapter is ``nextron.adapters.email_syntax``,
-offline) and hands it to the dashboard (``create_app(..., lead_imports=...)``) for the
-``/leads/import`` page.
+offline), and hands it to the dashboard (``create_app(..., lead_imports=...)``) for the
+``/leads/import`` page. A Lead the import creates with a website gets its ``enrich_lead`` job
+(Story 2.5) from ``Discovery.upsert_lead``.
 
 **Contact Markets (Story 3.2).** ``build_app`` builds one ``ContactMarkets(clock, research,
 queue)`` (``nextron.app.research.api``): the ``resolve_contact_markets`` job calls its
@@ -91,7 +94,7 @@ is unresolved. ``build_job_types(..., contact_markets=lambda: contact_markets)``
 registry cycle as for ``backups``.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
-contact_markets)`` is the job type registry: the only
+contact_markets, crawls, discovery, research)`` is the job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -102,12 +105,25 @@ have none for alerts), ``backup_db`` (Story 1.16: the bulk lane only, priority 8
 ``restore_test`` (Story 1.18: the bulk lane only, priority 70, ``max_runtime`` 30 minutes, retry
 limit 2, ``handlers.restore_test(restore_tests)``, group ``backup``), ``check_recovery``
 (Story 1.19: the realtime lane only, priority 85, ``max_runtime`` 10 minutes, retry limit 2,
-``handlers.check_recovery(recovery)``, group ``backup``) and ``resolve_contact_markets`` (Story
+``handlers.check_recovery(recovery)``, group ``backup``), ``resolve_contact_markets`` (Story
 3.2: the bulk lane only, priority 40, ``max_runtime`` 30 minutes, retry limit 3,
 ``handlers.resolve_contact_markets(contact_markets)``, group ``other``; a one-off with no
-trigger).
+trigger), and Story 2.5's ``enrich_lead`` (the bulk lane by default, or interactive, priority
+40, ``max_runtime`` 20 minutes, retry limit 3, ``handlers.enrich_lead(crawls)``, group
+``enrichment``), ``canonicalize_lead`` (bulk by default, or interactive, priority 45, 2 minutes,
+retry limit 2, ``handlers.canonicalize_lead(discovery)``, ``enrichment``) and
+``purge_page_text`` (bulk only, priority 20, 10 minutes, retry limit 2,
+``handlers.purge_page_text(research)``, ``other``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
+
+**The website crawl (Story 2.5, AD-9, AD-18).** ``build_app`` builds one
+``HttpCrawler(meter=meter)`` (``nextron.adapters.crawler``) unless a ``crawler=`` is injected;
+building it builds no HTTP client and resolves nothing. ``WebsiteCrawls(clock, meter, crawler,
+queue)`` runs the ``enrich_lead`` jobs, ``Discovery(clock, Pipeline(clock), queue)`` the
+``canonicalize_lead`` jobs and ``Research(clock)`` the ``purge_page_text`` jobs; the registry
+reaches them through ``crawls=lambda: crawls``, ``discovery=lambda: discovery`` and
+``research=lambda: research``, which break the same cycle as ``notify``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -143,7 +159,9 @@ enqueues the job type with the trigger's own name), then it is frozen. So far: `
 fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``, then ``check_recovery`` (Story 1.19), an
 ``Every(CHECK_PERIOD, at_startup=True, active=recovery_active)``: every minute, and at start,
 but the scheduler enqueues it only while ``recovery_active()`` returns ``True``, so no job row is
-made once recovery is over. ``build_app``
+made once recovery is over, then ``purge_page_text`` (Story 2.5), ``Every(1 day,
+at_startup=True)``: the PC is not on at fixed times, so it also runs at every start.
+``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
 
@@ -464,6 +482,7 @@ from fastapi import FastAPI
 from nextron import __version__
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
+from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
@@ -494,7 +513,7 @@ from nextron.app.playbook.api import CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
-from nextron.app.research.api import ContactMarkets, Research
+from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Credentials,
@@ -537,6 +556,7 @@ from nextron.domain.ai import RouteSpec
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB
+from nextron.domain.crawl import CANONICALIZE_LEAD_JOB, ENRICH_LEAD_JOB, PURGE_PAGE_TEXT_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
@@ -578,6 +598,7 @@ from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mar
 from nextron.ports.alert import AlertPort
 from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
+from nextron.ports.crawler import CrawlerPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.mail import MailPort
@@ -635,6 +656,7 @@ ENV_SOURCE_VARIABLE: Final = "NEXTRON_ENV"
 PRE_MIGRATE_BACKUP_CHECK: Final = "pre_migrate_backup"
 PROMPTS_CHECK: Final = "prompts"
 FALLBACK_TIMEZONE: Final = "UTC"
+PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -714,6 +736,7 @@ def build_app(
     probes: Probes | None = None,
     backup_targets: BackupTargets | None = None,
     recovery_steps: RecoverySteps | None = None,
+    crawler: CrawlerPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -737,7 +760,9 @@ def build_app(
     registers the Sending Inboxes panel's inboxes, for ``config.env``. ``ContactMarkets``
     resolves the Contacts stored before Story 3.2 (the ``resolve_contact_markets`` job), which
     the lifespan's startup step (``queue_contact_markets``, after the recovery startup pass)
-    queues while any Contact is unresolved."""
+    queues while any Contact is unresolved. The
+    website crawl fetches through ``crawler`` (``HttpCrawler(meter=meter)`` unless injected),
+    which builds its HTTP client on its first fetch."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -756,15 +781,24 @@ def build_app(
         Recovery(clock),
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
-    # notify, backups, restore_tests and contact_markets are bound just below
+    # notify, backups, restore_tests, contact_markets, crawls, discovery and research are
+    # bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
         restore_tests=lambda: restore_tests,
         recovery=lambda: recovery_runner,
         contact_markets=lambda: contact_markets,
+        crawls=lambda: crawls,
+        discovery=lambda: discovery,
+        research=lambda: research,
     )
     queue = JobQueue(clock, job_types)
+    crawls = WebsiteCrawls(
+        clock, meter, crawler if crawler is not None else HttpCrawler(meter=meter), queue
+    )
+    discovery = Discovery(clock, Pipeline(clock), queue)
+    research = Research(clock)
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -779,7 +813,6 @@ def build_app(
         clock, build_local_backups(config, clock), notify=notify, queue=queue, offpc=offpc
     )
     restore_tests = build_restore_tests(config, clock, offpc, notify, queue)
-    research = Research(clock)
     contact_markets = ContactMarkets(clock, research, queue)
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
@@ -822,9 +855,7 @@ def build_app(
         queue=queue,
         backups=backups,
         restore_tests=restore_tests,
-        lead_imports=LeadImports(
-            clock, Discovery(clock, Pipeline(clock)), research, EmailValidatorSyntax()
-        ),
+        lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=Sending(clock, env=config.env),
         units=units,
         lifespan=engine_lifespan(
@@ -868,14 +899,20 @@ def build_job_types(
     restore_tests: Callable[[], handlers.RestoreTesting],
     recovery: Callable[[], handlers.RecoveryChecking],
     contact_markets: Callable[[], handlers.MarketBackfilling],
+    crawls: Callable[[], handlers.Crawling],
+    discovery: Callable[[], handlers.Canonicalizing],
+    research: Callable[[], handlers.PurgingPageText],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
     returns the ``notify`` service that ``send_alert`` jobs call, ``backups`` the ``ops``
     service's ``Backups`` that ``backup_db`` jobs call, ``restore_tests`` its
     ``RestoreTests`` that ``restore_test`` jobs call, ``recovery`` the ``RecoveryRunner`` that
-    ``check_recovery`` jobs call, and ``contact_markets`` the ``research`` service's
-    ``ContactMarkets`` that ``resolve_contact_markets`` jobs call."""
+    ``check_recovery`` jobs call, ``contact_markets`` the ``research`` service's
+    ``ContactMarkets`` that ``resolve_contact_markets`` jobs call, ``crawls`` its
+    ``WebsiteCrawls`` that ``enrich_lead`` jobs call, ``discovery`` the ``discovery`` service
+    that ``canonicalize_lead`` jobs call, and ``research`` the ``research`` service that
+    ``purge_page_text`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -941,6 +978,43 @@ def build_job_types(
             group=JobGroup.OTHER,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=ENRICH_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=40,
+            # robots.txt, then up to 15 pages at 1 to 10 s apart within the 10-minute deadline
+            max_runtime=timedelta(minutes=20),
+            retry_limit=handlers.ENRICH_LEAD_RETRIES,  # the last attempt never fails a flaky site
+            handler=handlers.enrich_lead(crawls),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=CANONICALIZE_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            max_runtime=timedelta(minutes=2),
+            retry_limit=2,
+            handler=handlers.canonicalize_lead(discovery),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=PURGE_PAGE_TEXT_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=20,
+            max_runtime=timedelta(minutes=10),
+            retry_limit=2,
+            handler=handlers.purge_page_text(research),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -984,6 +1058,10 @@ def build_triggers(
     )
     triggers.register_trigger(
         Trigger.CHECK_RECOVERY, Every(CHECK_PERIOD, at_startup=True, active=recovery_active)
+    )
+    # the PC is not on at fixed times: purge at every start too
+    triggers.register_trigger(
+        Trigger.PURGE_PAGE_TEXT, Every(PURGE_PAGE_TEXT_PERIOD, at_startup=True)
     )
     triggers.freeze()
     return triggers

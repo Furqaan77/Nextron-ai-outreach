@@ -119,6 +119,9 @@ class World:
             restore_tests=no_restore_tests,
             recovery=no_recovery,
             contact_markets=no_contact_markets,
+            crawls=lambda: None,  # type: ignore[arg-type,return-value]
+            discovery=lambda: None,  # type: ignore[arg-type,return-value]
+            research=lambda: None,  # type: ignore[arg-type,return-value]
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(
@@ -1173,6 +1176,9 @@ def test_the_backup_job_type_is_registered_as_specified() -> None:
         restore_tests=no_restore_tests,
         recovery=no_recovery,
         contact_markets=no_contact_markets,
+        crawls=lambda: None,  # type: ignore[arg-type,return-value]
+        discovery=lambda: None,  # type: ignore[arg-type,return-value]
+        research=lambda: None,  # type: ignore[arg-type,return-value]
     )
 
     found = job_types.get("backup_db")

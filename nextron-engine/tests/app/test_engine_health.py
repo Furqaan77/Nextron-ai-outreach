@@ -75,6 +75,12 @@ def no_contact_markets() -> Any:
     raise AssertionError("no resolve_contact_markets job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 def enrich(job: Job) -> None:
     return None
 
@@ -199,6 +205,9 @@ def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
         restore_tests=no_restore_tests,
         recovery=no_recovery,
         contact_markets=no_contact_markets,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
@@ -299,6 +308,9 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
             restore_tests=no_restore_tests,
             recovery=no_recovery,
             contact_markets=no_contact_markets,
+            crawls=no_crawls,
+            discovery=no_crawls,
+            research=no_crawls,
         ),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
@@ -307,6 +319,10 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
     report = world.read(health.report)
 
     assert report.groups == (
+        GroupRuns(
+            JobGroup.ENRICHMENT,
+            (LastRun("enrich_lead", None), LastRun("canonicalize_lead", None)),
+        ),
         GroupRuns(
             JobGroup.BACKUP,
             (
@@ -317,7 +333,11 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
         ),
         GroupRuns(
             JobGroup.OTHER,
-            (LastRun("send_alert", None), LastRun("resolve_contact_markets", None)),
+            (
+                LastRun("send_alert", None),
+                LastRun("resolve_contact_markets", None),
+                LastRun("purge_page_text", None),
+            ),
         ),
     )
     assert report.readiness == READINESS

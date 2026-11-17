@@ -103,6 +103,7 @@ class World:
         self.clock.set(T0 + later)
         identity = LeadIdentity(name, self.law, web_domain=domain, country_code=country)
         upserted = self.transact(lambda: self.discovery.upsert_lead(identity, LeadSource.CSV))
+        self.sql("DELETE FROM jobs WHERE type = 'enrich_lead'")  # Story 2.5's crawl: not tested here
         self.clock.set(T0)
         return upserted.lead_id
 
@@ -192,6 +193,9 @@ def world(db_engine: Engine) -> World:
         restore_tests=no_service,
         recovery=no_service,
         contact_markets=lambda: built["markets"],
+        crawls=no_service,
+        discovery=no_service,
+        research=no_service,
     )
     queue = JobQueue(clock, job_types)
     built["markets"] = ContactMarkets(clock, research, queue)
@@ -199,7 +203,7 @@ def world(db_engine: Engine) -> World:
         units,
         db_engine,
         clock,
-        Discovery(clock, Pipeline(clock)),
+        Discovery(clock, Pipeline(clock), queue),
         research,
         job_types,
         queue,
@@ -753,8 +757,10 @@ def test_0019_keeps_every_0018_contact_and_record_with_clean_foreign_keys(tmp_pa
     contacts_before = rows(path, f"SELECT {OLD_COLUMNS} FROM contacts ORDER BY id")
     records_before = rows(path, "SELECT * FROM provenance_records ORDER BY id")
 
+    migration = SCRIPT_LOCATION / "versions" / "0019_3_2_contact_markets.py"
+    shutil.copy2(migration, location / "versions" / migration.name)  # 0019 alone, not later ones
     with engine_on(path) as engine:
-        assert ensure_current(engine) == (
+        assert ensure_current(engine, script_location=location) == (
             "0018_4_7_sending_inboxes",
             "0019_3_2_contact_markets",
         )

@@ -15,6 +15,7 @@ from sqlalchemy import Engine
 
 from nextron import main
 from nextron.app.discovery.api import Discovery
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import research as research_queries
@@ -124,6 +125,26 @@ class World:
         return [lead.name for lead in self.listed(**filters).leads]
 
 
+def no_jobs() -> Any:
+    """``build_job_types``'s services: no job runs in these tests."""
+    raise AssertionError("no job runs in these tests")
+
+
+def queue_on(clock: FrozenClock) -> JobQueue:
+    """A job queue on the real job types; ``upsert_lead`` enqueues a CSV Lead's crawl there."""
+    job_types = main.build_job_types(
+        alerts=no_jobs,
+        backups=no_jobs,
+        restore_tests=no_jobs,
+        recovery=no_jobs,
+        contact_markets=no_jobs,
+        crawls=no_jobs,
+        discovery=no_jobs,
+        research=no_jobs,
+    )
+    return JobQueue(clock, job_types)
+
+
 @pytest.fixture
 def world(db_engine: Engine) -> World:
     clock = FrozenClock(T0)
@@ -131,7 +152,7 @@ def world(db_engine: Engine) -> World:
     segments = validate_segments(seed_yaml.parse(SHIPPED.read_text(encoding="utf-8")))
     with units.open():
         Setup(clock).sync_segments(segments)
-    discovery, research = Discovery(clock, Pipeline(clock)), Research(clock)
+    discovery, research = Discovery(clock, Pipeline(clock), queue_on(clock)), Research(clock)
     found = World(units, db_engine, clock, discovery, research, "", "")
     [(law,), (ops,)] = found.sql("SELECT id FROM segments ORDER BY key")
     found.law, found.ops = law, ops
