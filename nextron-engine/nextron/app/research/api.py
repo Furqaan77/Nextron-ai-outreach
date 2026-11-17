@@ -9,8 +9,8 @@ Provenance. Every Address Class assignment appends one ``events`` row (entity ``
 actor ``system:research``, at the clock's now) with IDs and codes only.
 
 - ``@command add_contact(lead_id, candidate, *, source, detail, retrieved_at) ->
-  AddedContact(contact_id, created, email_dropped)`` stores a person on a Lead, deduplicated
-  within it:
+  AddedContact(contact_id, created, email_dropped, blocked)`` stores a person on a Lead,
+  deduplicated within it:
 
   1. **Checks, before any write.** ``candidate`` not a ``ContactCandidate``, ``source`` not a
      ``ProvenanceSource``, or ``retrieved_at`` not an aware ``datetime`` raises ``TypeError``;
@@ -22,22 +22,35 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
   2. **Matching.** Among the Lead's Contacts (oldest first), the match is the first with an
      equal ``email``, else, when the candidate has a name, the first whose name has an equal
      ``normalize_name`` key.
-  3. **No match.** A Contact is inserted (its Address Class ``assign(source).to`` when it has an
+  3. **The contactability gate (AD-16, Story 3.4)**, before any write, for every source:
+     ``compliance_api.assert_contactable(NewContactSubject(lead.id, email, name,
+     linkedin_url), email, discovery)``, each value the candidate's or, when the candidate
+     lacks it, its match's; then, with a match, ``assert_contactable(ContactSubject(match.id),
+     email, discovery)``, so the match's own stored values are checked too. Either ``Blocked``
+     answer blocks, with the reasons of both combined in ``BlockReason`` order; an answer that
+     is neither ``Allowed`` nor ``Blocked`` raises ``TypeError``. A block writes nothing (no
+     Contact, fill, Provenance Record or address) but one ``events`` row: entity ``leads``, the
+     Lead's id, ``None`` to ``contact_blocked``, cause the first reason, no ``cause_ref``,
+     actor ``system:research``, now. It returns ``AddedContact(contact_id=None, created=False,
+     email_dropped=False, blocked=<the combined answer>)``. A suppressed address, address
+     domain, Lead domain, person or profile blocks, and so does a Lead at ``lost`` or
+     ``disqualified``.
+  4. **No match.** A Contact is inserted (its Address Class ``assign(source).to`` when it has an
      email, its office's ``office_country`` and ``office_region`` when the candidate has an
      ``office``, ``is_primary`` false, created and updated now), then a ``contact`` Provenance
      Record. With an email, an ``address`` record (its ``address`` and ``address_class``) and
      one ``events`` row (``None`` to the class, cause ``assign(source).cause``, no
      ``cause_ref``) follow. ``created=True``.
-  4. **A match.** Each of ``name``, ``role``, ``linkedin_url``, the office and ``email`` the
+  5. **A match.** Each of ``name``, ``role``, ``linkedin_url``, the office and ``email`` the
      Contact lacks is filled; nothing is ever overwritten. A filled name, role, LinkedIn URL or
      office adds one ``contact`` record; a filled email sets its class and adds the ``address``
-     record and the ``events`` row as in step 3. A candidate email that differs from the
+     record and the ``events`` row as in step 4. A candidate email that differs from the
      Contact's own gives ``email_dropped=True`` and is not stored. When nothing is filled,
      nothing is written. ``created=False``.
-  5. **Provenance Records** carry ``source_kind`` = ``source``, ``source_detail`` = ``detail``
+  6. **Provenance Records** carry ``source_kind`` = ``source``, ``source_detail`` = ``detail``
      and ``retrieved_at``; ``address_class`` is set only on ``address`` records, ``notes`` hold
      the Market notes (below) and the eligibility-basis fields are NULL.
-  6. **The Market (Story 3.2).** After the writes, the Contact is resolved (below) whenever it
+  7. **The Market (Story 3.2).** After the writes, the Contact is resolved (below) whenever it
      was created or anything was filled, in the same transaction (a filled name, role or
      LinkedIn URL included: it resolves a Contact stored before Story 3.2 and keeps the notes on
      its first ``contact`` record).
@@ -214,6 +227,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 
+from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import setup as setup_queries
@@ -228,6 +242,15 @@ from nextron.db.uow import command, current, use_case
 from nextron.domain.address_class import AddressCause, AddressClass, assign
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB, resolve_contact_market
+from nextron.domain.contactability import (
+    Allowed,
+    Blocked,
+    BlockReason,
+    Channel,
+    ContactSubject,
+    NewContactSubject,
+    Purpose,
+)
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource, ProvenanceSubject
 from nextron.domain.crawl import (
     CANONICALIZE_LEAD_JOB,
@@ -281,6 +304,9 @@ log = logging.getLogger(__name__)
 
 ENTITY: Final = "contacts"
 ACTOR: Final = "system:research"
+# The events row of a Contact the contactability gate blocked (Story 3.4), on its Lead.
+BLOCKED_ENTITY: Final = "leads"
+CONTACT_BLOCKED: Final = "contact_blocked"
 MAX_DETAIL_LENGTH: Final = 2048
 # The Contact fields a later source fills when the Contact lacks them, besides the email and
 # the office.
@@ -315,11 +341,14 @@ type RobotsRule = Callable[[str], bool]
 @dataclass(frozen=True, slots=True)
 class AddedContact:
     """The Contact a candidate became: its id, whether it was created, and whether the
-    candidate's email was dropped because the Contact already has another."""
+    candidate's email was dropped because the Contact already has another. When the
+    contactability gate blocked it, ``contact_id`` is ``None`` and ``blocked`` holds the gate's
+    answer."""
 
-    contact_id: str
+    contact_id: str | None
     created: bool
     email_dropped: bool
+    blocked: Blocked | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +399,38 @@ def _match(
     return None
 
 
+def _new_contact(
+    lead_id: str, candidate: ContactCandidate, match: StoredContact | None
+) -> NewContactSubject:
+    """The gate's first subject: each value the candidate's or, when the candidate lacks it,
+    its match's. A match's own stored values are checked by a second call
+    (``ContactSubject(match.id)``)."""
+
+    def value(name: str) -> str | None:
+        found: str | None = getattr(candidate, name)
+        if found is None and match is not None:
+            found = getattr(match, name)
+        return found
+
+    return NewContactSubject(
+        lead_id, email=value("email"), name=value("name"), linkedin_url=value("linkedin_url")
+    )
+
+
+def _blocked(answers: Iterable[object]) -> Blocked | None:
+    """The gate's answers combined: ``None`` when every one is ``Allowed``, else one
+    ``Blocked`` with every reason in ``BlockReason`` order. Any other answer raises
+    ``TypeError`` (naming its type only), so nothing proceeds on it."""
+    reasons: set[BlockReason] = set()
+    for answer in answers:
+        if isinstance(answer, Blocked):
+            reasons.update(answer.reasons)
+        elif not isinstance(answer, Allowed):
+            raise TypeError(f"assert_contactable answered a {type(answer).__name__}")
+    ordered = tuple(reason for reason in BlockReason if reason in reasons)
+    return Blocked(ordered) if ordered else None
+
+
 class Research:
     """Contacts and their Provenance, and the Lead-scoped crawl rows; see the module
     docstring."""
@@ -400,6 +461,30 @@ class Research:
         provenance = _Provenance(source, detail, retrieved_at)
         now = self._clock.now()
         match = _match(contacts_repo.for_lead(lead.id), candidate)
+        answers = [
+            compliance_api.assert_contactable(
+                _new_contact(lead.id, candidate, match), Channel.EMAIL, Purpose.DISCOVERY
+            )
+        ]
+        if match is not None:  # the match's own stored values too (decision 13)
+            answers.append(
+                compliance_api.assert_contactable(
+                    ContactSubject(match.id), Channel.EMAIL, Purpose.DISCOVERY
+                )
+            )
+        blocked = _blocked(answers)
+        if blocked is not None:
+            eventlog.append(
+                entity=BLOCKED_ENTITY,
+                entity_id=lead.id,
+                from_status=None,
+                to_status=CONTACT_BLOCKED,
+                cause=str(blocked.reasons[0]),
+                cause_ref=None,
+                actor=ACTOR,
+                at=now,
+            )
+            return AddedContact(None, created=False, email_dropped=False, blocked=blocked)
         office = candidate.office
         if match is None:
             contact_id = contacts_repo.insert(

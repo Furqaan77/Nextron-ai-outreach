@@ -62,6 +62,13 @@ dropped with its ``NOTE_*`` text, and the rest of the row imports. The row gets 
 remains; when some Contact cell was filled but neither remains, it gets ``NOTE_NO_CONTACT`` and
 no Contact.
 
+**Rows the contactability gate blocks (Story 3.4).** These are found while the rows run, not
+by the plan: ``SuppressedRow(number, label)`` is a row whose new Lead
+``Discovery.upsert_lead`` blocked (its ``reason`` is ``REASON_SUPPRESSED``, "Organization is
+on the Suppression List"), and ``NOTE_CONTACT_SUPPRESSED`` ("Contact is on the Suppression
+List; not imported") and ``NOTE_CONTACT_LEAD_CLOSED`` are the notes of a row whose Contact
+``Research.add_contact`` blocked.
+
 **The plan.** ``ImportRow(number, label, identity, contact, notes)`` holds a ``LeadIdentity``
 built from normaliser output (the cleaned name, the Segment's id, the registrable domain and the
 country code), ``RejectedRow(number, label, reason)`` its reason and ``BlockedRow(number,
@@ -203,6 +210,13 @@ NOTE_NO_CONTACT: Final = "the Contact needs a name or a valid email, so no Conta
 NOTE_EMAIL_DROPPED: Final = (
     "the Contact already has a different email address, so this one was not stored"
 )
+# The contactability gate (Story 3.4): a row's Contact that Research.add_contact blocked.
+NOTE_CONTACT_SUPPRESSED: Final = "Contact is on the Suppression List; not imported"
+NOTE_CONTACT_LEAD_CLOSED: Final = (
+    "the Lead is Lost or Disqualified, so the Contact was not imported"
+)
+# A row whose new Lead Discovery.upsert_lead blocked (Story 3.4).
+REASON_SUPPRESSED: Final = "Organization is on the Suppression List"
 
 
 class ImportRefused(DomainError):
@@ -251,6 +265,20 @@ class BlockedRow:
     def reason(self) -> str:
         """``"Country <code> isn't an enabled Market"``."""
         return REASON_BLOCKED.format(country=self.country)
+
+
+@dataclass(frozen=True, slots=True)
+class SuppressedRow:
+    """A row whose new Lead the contactability gate blocked (Story 3.4): it imports nothing. Its
+    number and its label."""
+
+    number: int
+    label: str
+
+    @property
+    def reason(self) -> str:
+        """``"Organization is on the Suppression List"``."""
+        return REASON_SUPPRESSED
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,9 @@ through ``Dashboard(units=...)`` on a temporary database at head with the real s
 registry, the HTML parsed: the form, a successful import's summary, refusals by field (the
 origin and default kept, or reset after a body over the limit), a stopped import, escaping of
 every CSV text, the field rules, ``no-store``, CSRF and the home page's link. With the shipped
-Markets seeded: the "Blocked by Market" count and table (Story 3.2), labels escaped."""
+Markets seeded: the "Blocked by Market" count and table (Story 3.2), labels escaped. With a
+domain on the Suppression List (Story 3.4): the "Blocked: suppressed domain" count, its table
+after the Market table (labels escaped) and a blocked Contact's note."""
 
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -15,15 +17,20 @@ from sqlalchemy import Engine
 from nextron import main
 from nextron.app.discovery.api import ImportStopped, ImportSummary, NotedRow
 from nextron.app.setup.api import Setup
-from nextron.db.uow import UnitOfWorkFactory
+from nextron.db.repos.compliance import suppression_entries as entries_repo
+from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
+from nextron.domain.contactability import suppression_key
 from nextron.domain.lead_import import (
     FILE_TOO_LARGE,
     NOTE_BAD_EMAIL,
+    NOTE_CONTACT_SUPPRESSED,
     ORIGIN_LENGTH,
     REASON_DENIED,
+    REASON_SUPPRESSED,
     BlockedRow,
     RejectedRow,
+    SuppressedRow,
 )
 from nextron.domain.markets import validate_markets
 from nextron.domain.segments import validate_segments
@@ -262,8 +269,9 @@ def test_no_blocked_row_shows_a_zero_count_and_no_table(
 ) -> None:
     page = Parsed(post(dashboard, cookie, csv_bytes(HEADER, "A,a.com,GB")).text)
 
-    assert "Rejected: 0. Blocked by Market: 0." in page.text
+    assert "Rejected: 0. Blocked by Market: 0. Blocked: suppressed domain: 0." in page.text
     assert "Rows blocked by Market" not in page.text
+    assert "Rows blocked: suppressed domain" not in page.text
     assert page.tables == []
 
 
@@ -279,6 +287,75 @@ def test_a_blocked_rows_label_renders_escaped(dashboard: Dashboard, cookie: byte
     assert all("hx-disable" in attrs for attrs, _ in page.untrusted)
     [blocked] = page.tables
     assert blocked[1][2] == "Country CA isn't an enabled Market"
+
+
+def suppress_domain(units: UnitOfWorkFactory, domain: str) -> None:
+    """An ``active`` domain entry on the Suppression List (Story 3.4)."""
+    key = suppression_key("domain", domain)
+
+    @use_case
+    def store() -> None:
+        with current().transaction():
+            entries_repo.insert(
+                kind=str(key.kind),
+                value_hash=key.value_hash,
+                domain_plain=key.domain_plain,
+                source="operator",
+                cause_ref=None,
+                created_at=T,
+            )
+
+    with units.open():
+        store()
+
+
+def test_rows_on_a_suppressed_domain_show_their_count_and_table_after_the_markets(
+    dashboard: Dashboard, cookie: bytes, db_engine: Engine, real_units: UnitOfWorkFactory
+) -> None:
+    suppress_domain(real_units, "gone-firm.co.uk")
+    data = csv_bytes(
+        HEADER + ",Contact name",
+        "Maple Law,maple.ca,CA,Ann",
+        f'"{HOSTILE.replace(chr(34), chr(34) * 2)}",gone-firm.co.uk,GB,Jo',
+        "Smith Law,smith.co.uk,GB,Jo",
+        "Gone Again,www.gone-firm.co.uk,GB,",
+    )
+
+    reply = post(dashboard, cookie, data)
+
+    assert "<script>" not in reply.text
+    page = Parsed(reply.text)
+    assert (
+        "Imported: 1. Merged: 0. Rejected: 0. Blocked by Market: 1. "
+        "Blocked: suppressed domain: 2." in page.text
+    )
+    market, suppressed = page.tables
+    assert market[1] == ["2", "Maple Law", "Country CA isn't an enabled Market"]
+    assert suppressed == [
+        ["Row", "Organization", "Reason"],
+        ["3", HOSTILE, REASON_SUPPRESSED],
+        ["5", "Gone Again", REASON_SUPPRESSED],
+    ]
+    assert "Rows blocked: suppressed domain" in page.text
+    assert [text for _, text in page.untrusted] == ["Maple Law", HOSTILE, "Gone Again"]
+    assert all("hx-disable" in attrs for attrs, _ in page.untrusted)
+    assert count(db_engine, "leads") == 1
+    assert count(db_engine, "contacts") == 1
+
+
+def test_a_blocked_contact_shows_its_note(
+    dashboard: Dashboard, cookie: bytes, real_units: UnitOfWorkFactory
+) -> None:
+    post(dashboard, cookie, csv_bytes(HEADER, "Smith Law,smith.co.uk,GB"))
+    suppress_domain(real_units, "smith.co.uk")
+
+    page = Parsed(
+        post(dashboard, cookie, csv_bytes(HEADER + ",Contact name", "Smith,smith.co.uk,GB,Jo")).text
+    )
+
+    assert "Imported: 0. Merged: 1." in page.text
+    [noted] = page.tables
+    assert noted[1] == ["2", "Smith", NOTE_CONTACT_SUPPRESSED]
 
 
 def test_every_csv_text_renders_escaped(
@@ -365,6 +442,7 @@ def test_a_stopped_import_shows_its_summary_and_the_stop_notice(
         (RejectedRow(9, "Bad", REASON_DENIED),),
         (NotedRow(3, "N", (NOTE_BAD_EMAIL,)),),
         (BlockedRow(4, "Maple", "CA"),),
+        (SuppressedRow(6, "Gone"),),
     )
 
     def stop(request: object) -> ImportSummary:
@@ -378,9 +456,14 @@ def test_a_stopped_import_shows_its_summary_and_the_stop_notice(
 
     assert "Import stopped" in page.text
     assert "The import stopped at row 202" in page.text
-    assert "Imported: 200. Merged: 0. Rejected: 1. Blocked by Market: 1." in page.text
+    assert (
+        "Imported: 200. Merged: 0. Rejected: 1. Blocked by Market: 1. "
+        "Blocked: suppressed domain: 1." in page.text
+    )
     assert page.tables[0][1] == ["9", "Bad", REASON_DENIED]
     assert page.tables[1][1] == ["4", "Maple", "Country CA isn't an enabled Market"]
+    assert page.tables[2][1] == ["6", "Gone", REASON_SUPPRESSED]
+    assert page.tables[3][1] == ["3", "N", NOTE_BAD_EMAIL]
     # what was typed is kept, so the same file can be imported again
     assert page.inputs["origin"]["value"] == ORIGIN
     assert ("ops_automation", "Ops-Automation", True) in page.options

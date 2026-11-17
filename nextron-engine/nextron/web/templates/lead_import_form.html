@@ -21,7 +21,8 @@ aria-describedby="hint-{{ name }}{% if errors[name] %} error-{{ name }}{% endif 
 <p class="import-counts" role="status">Imported: {{ "{:,}".format(summary.imported) }}.
 Merged: {{ "{:,}".format(summary.merged) }}.
 Rejected: {{ "{:,}".format(summary.rejected|length) }}.
-Blocked by Market: {{ "{:,}".format(summary.blocked|length) }}.</p>
+Blocked by Market: {{ "{:,}".format(summary.blocked|length) }}.
+Blocked: suppressed domain: {{ "{:,}".format(summary.suppressed|length) }}.</p>
 {%- if summary.rejected %}
 <h3>Rejected rows</h3>
 <table class="import-table">
@@ -43,6 +44,19 @@ Blocked by Market: {{ "{:,}".format(summary.blocked|length) }}.</p>
 </thead>
 <tbody>
 {%- for row in summary.blocked %}
+<tr><td class="number">{{ row.number }}</td><td>{{ untrusted_block(row.label) }}</td><td>{{ row.reason }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if summary.suppressed %}
+<h3>Rows blocked: suppressed domain</h3>
+<table class="import-table">
+<thead>
+<tr><th scope="col">Row</th><th scope="col">Organization</th><th scope="col">Reason</th></tr>
+</thead>
+<tbody>
+{%- for row in summary.suppressed %}
 <tr><td class="number">{{ row.number }}</td><td>{{ untrusted_block(row.label) }}</td><td>{{ row.reason }}</td></tr>
 {%- endfor %}
 </tbody>
