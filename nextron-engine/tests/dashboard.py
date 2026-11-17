@@ -56,6 +56,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
@@ -120,6 +121,11 @@ READINESS = tuple(
 def no_copies(target: Path) -> Snapshot:
     """The dashboard's default snapshot: it takes no copies."""
     raise RuntimeError("this dashboard takes no copies")
+
+
+def no_recovery() -> Any:
+    """The dashboard's ``check_recovery`` runner: no job runs here."""
+    raise RuntimeError("this dashboard runs no check_recovery job")
 
 
 def default_data_dir() -> Path:
@@ -271,6 +277,7 @@ class Dashboard:
             alerts=lambda: self.notify,
             backups=lambda: self.backups,
             restore_tests=lambda: self.restore_tests,
+            recovery=no_recovery,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(

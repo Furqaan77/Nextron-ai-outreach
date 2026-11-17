@@ -266,7 +266,7 @@ def test_guarded_health_page_and_second_instance(
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        2,
+        3,  # backup_db, restore_test and check_recovery
     )
     assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
     assert lines.index(daily) < lines.index(restore) < lines.index(scheduler_started)
@@ -282,7 +282,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0015_2_3_contacts_provenance"
+    assert HEAD == "0016_1_19_recovery"
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one

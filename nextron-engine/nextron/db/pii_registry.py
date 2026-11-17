@@ -244,6 +244,20 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "provenance_count": PiiClass.NONE,
         "detail": PiiClass.REDACT,
     },
+    # recovery_state (Story 1.19): codes, times and file names (never a path); no personal data.
+    "recovery_state": {
+        "id": PiiClass.NONE,
+        "mode": PiiClass.NONE,
+        "restored_at": PiiClass.NONE,
+        "backup_at": PiiClass.NONE,
+        "source_name": PiiClass.NONE,
+        "pre_restore_name": PiiClass.NONE,
+        "ended_at": PiiClass.NONE,
+        "reapply_erasure_ledger": PiiClass.NONE,
+        "mark_oms_unknown": PiiClass.NONE,
+        "reingest_mailboxes": PiiClass.NONE,
+        "repoll_unsubscribes": PiiClass.NONE,
+    },
     # Story 1.12. Ops alert text carries IDs and counts only, but later kinds (Hot Lead,
     # LinkedIn) are free text that may name a person; every other column is an ID, a code or a
     # time.

@@ -238,6 +238,21 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "detail",
         ),
     },
+    "recovery_state": {
+        "ops": (
+            "id",
+            "mode",
+            "restored_at",
+            "backup_at",
+            "source_name",
+            "pre_restore_name",
+            "ended_at",
+            "reapply_erasure_ledger",
+            "mark_oms_unknown",
+            "reingest_mailboxes",
+            "repoll_unsubscribes",
+        ),
+    },
     "alerts": {
         "notify": (
             "id",

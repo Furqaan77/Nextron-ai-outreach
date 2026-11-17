@@ -42,11 +42,14 @@ not APScheduler's to see (its grace covers only sleep): the ``DailyAt``'s ``when
 as ``catch_up``, and the trigger fires once at start.
 
 **fire(trigger)** is the job APScheduler runs, as a sync job on the loop's default executor
-thread, never on the loop. It opens one unit of work and calls
-``queue.enqueue_tick(trigger.value)``, which a live job with the same key absorbs. It runs no
-handler: the runner's lanes do. Any exception logs ``trigger_failed`` (ERROR, with ``trigger``,
-the error's ``code`` and the traceback) and is not re-raised, so later firings still run. A
-firing that succeeds logs nothing: the job's creation event records it.
+thread, never on the loop. For an ``Every`` with ``active`` (a data-dependent trigger such as
+``check_recovery``), it first calls ``active()``, before opening any unit of work, and goes on
+only when that returns exactly ``True``; otherwise it does nothing and logs nothing. It then
+opens one unit of work and calls ``queue.enqueue_tick(trigger.value)``, which a live job with the
+same key absorbs. It runs no handler: the runner's lanes do. Any exception, from ``active()``
+included, logs ``trigger_failed`` (ERROR, with ``trigger``, the error's ``code`` and the
+traceback) and is not re-raised, so later firings still run. A firing that succeeds logs
+nothing: the job's creation event records it.
 
 **stop()** (async, on the loop) shuts APScheduler down without waiting, yields to the loop once
 so its deferred shutdown runs, and logs ``scheduler_stopped``. It does nothing before
@@ -105,6 +108,11 @@ class Scheduler:
         self._units = units
         self._queue = queue
         self._triggers = triggers
+        self._active = {  # each data-dependent trigger's check, read before every firing
+            spec.trigger: spec.schedule.active
+            for spec in triggers.specs()
+            if isinstance(spec.schedule, Every) and spec.schedule.active is not None
+        }
         self._probe_timeout = probe_timeout
         self._lock = threading.Lock()  # guards the started/stopped flags and the loop
         self._started = False
@@ -178,8 +186,12 @@ class Scheduler:
         return run
 
     def fire(self, trigger: Trigger) -> None:
-        """Enqueue ``trigger``'s tick job in its own unit of work; never raises."""
+        """Enqueue ``trigger``'s tick job in its own unit of work, when its ``active()`` (if it
+        has one) returns ``True``; never raises."""
         try:
+            active = self._active.get(trigger)
+            if active is not None and active() is not True:
+                return
             with self._units.open():
                 self._queue.enqueue_tick(trigger.value)
         except Exception as exc:  # noqa: BLE001 - a failed firing must not stop later ones

@@ -437,6 +437,111 @@ def test_fire_never_raises(caplog: pytest.LogCaptureFixture) -> None:
     assert len(records(caplog, "trigger_failed")) == 1
 
 
+# A data-dependent trigger (Every with active, Story 1.19) ------------------------------------------
+
+
+class Active:
+    """An ``Every``'s ``active``: records each call and the units of work open then, and
+    returns (or raises) its answers in turn."""
+
+    def __init__(self, units: FakeUnits, *answers: object) -> None:
+        self.units = units
+        self.answers = list(answers)
+        self.calls: list[int] = []  # how many units of work were open at each call
+
+    def __call__(self) -> bool:
+        self.calls.append(len(self.units.open_now))
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer  # type: ignore[return-value]
+
+
+@pytest.mark.parametrize("answer", [False, None, 1, "yes"])
+def test_a_firing_whose_active_is_not_exactly_true_does_nothing_and_logs_nothing(
+    caplog: pytest.LogCaptureFixture, answer: object
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    queue, units = RecordingQueue(), FakeUnits()
+    active = Active(units, answer)
+    scheduler = build(
+        queue, (Trigger.CHECK_RECOVERY, Every(MINUTE, active=active)), units=units
+    )
+
+    scheduler.fire(Trigger.CHECK_RECOVERY)
+
+    assert active.calls == [0]
+    assert queue.calls == []
+    assert units.opened == []  # no unit of work opened
+    assert [r for r in caplog.records if r.name == LOGGER] == []
+
+
+def test_a_firing_whose_active_is_true_enqueues_in_its_own_unit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    queue, units = RecordingQueue(), FakeUnits()
+    active = Active(units, True, False, True)
+    scheduler = build(
+        queue, (Trigger.CHECK_RECOVERY, Every(MINUTE, active=active)), SEND, units=units
+    )
+
+    for _ in range(3):
+        scheduler.fire(Trigger.CHECK_RECOVERY)
+    scheduler.fire(Trigger.SEND_DUE_MESSAGES)  # no active: always enqueues
+
+    assert active.calls == [0, 0, 0]  # read before the firing's unit opens
+    assert queue.names() == ["check_recovery", "check_recovery", "send_due_messages"]
+    assert len(units.opened) == 3
+    assert records(caplog, "trigger_failed") == []
+
+
+def test_an_active_that_raises_is_a_failed_firing(caplog: pytest.LogCaptureFixture) -> None:
+    queue, units = RecordingQueue(), FakeUnits()
+    active = Active(units, OSError("the database is locked"), True)
+    scheduler = build(
+        queue, (Trigger.CHECK_RECOVERY, Every(MINUTE, active=active)), units=units
+    )
+
+    scheduler.fire(Trigger.CHECK_RECOVERY)  # never raises
+    scheduler.fire(Trigger.CHECK_RECOVERY)  # later firings still run
+
+    [failed] = records(caplog, "trigger_failed")
+    assert failed.levelno == logging.ERROR
+    assert (getattr(failed, "trigger"), getattr(failed, "code")) == (
+        Trigger.CHECK_RECOVERY,
+        "OSError",
+    )
+    assert failed.exc_info is not None
+    assert queue.names() == ["check_recovery"]
+
+
+def test_an_at_startup_trigger_with_active_fires_only_while_active(
+    clock: FrozenClock, aps: Captured
+) -> None:
+    queue, units = RecordingQueue(), FakeUnits()
+    active = Active(units, True, False)
+    scheduler = build(
+        queue,
+        (Trigger.CHECK_RECOVERY, Every(MINUTE, at_startup=True, active=active)),
+        units=units,
+    )
+
+    async def scenario() -> None:
+        scheduler.start()
+        try:
+            assert await fired(aps, 1)  # at startup: active, so enqueued
+            clock.advance(MINUTE)
+            await scheduler.wakeup()
+            assert await fired(aps, 2)  # a minute later: not active, so nothing
+        finally:
+            await scheduler.stop()
+
+    run(scenario)
+
+    assert len(active.calls) == 2
+    assert queue.names() == ["check_recovery"]
+
+
 # Firing with the real queue ---------------------------------------------------------------------
 
 

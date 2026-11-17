@@ -22,7 +22,12 @@ from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.leads import LeadRecord
 from nextron.db.models.metering import AiUsageRecord, ApiUsageRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
-from nextron.db.models.ops import BackupRecord, HeartbeatRecord, RestoreTestRecord
+from nextron.db.models.ops import (
+    BackupRecord,
+    HeartbeatRecord,
+    RecoveryStateRecord,
+    RestoreTestRecord,
+)
 from nextron.db.models.playbook import AiRouteActivationRecord, PromptSnapshotRecord
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.models.setup import (
@@ -49,6 +54,7 @@ __all__ = [
     "NotificationRecord",
     "PromptSnapshotRecord",
     "ProvenanceRecord",
+    "RecoveryStateRecord",
     "RestoreTestRecord",
     "SegmentRecord",
     "SequenceRecord",

@@ -88,6 +88,11 @@ ROW_COLUMNS = (
 )
 
 
+def no_recovery() -> Any:
+    """``build_job_types``'s ``recovery`` where no ``check_recovery`` job runs."""
+    raise AssertionError("no check_recovery job runs in these tests")
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -114,6 +119,7 @@ class World:
             alerts=lambda: self.notify,
             backups=lambda: self.backups,
             restore_tests=lambda: self.tests,
+            recovery=no_recovery,
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(
@@ -1156,7 +1162,7 @@ PASS_ROW: dict[str, object] = {
     "check_suppression": "skipped",
     "check_provenance": "pass",
     "reason": None,
-    "copy_revision": "0009_1_18_restore_tests",
+    "copy_revision": HEAD,
     "suppression_count": None,
     "provenance_count": 4,
     "detail": None,
@@ -1199,7 +1205,7 @@ def test_valid_pass_and_fail_rows_are_accepted(world: World) -> None:
             "check_suppression": "fail",
             "check_provenance": "pass",
             "reason": "revision_behind",
-            "detail": "copy revision 0008_1_17_offpc; code head 0009_1_18_restore_tests",
+            "detail": f"copy revision {OLD_REVISION}; code head {HEAD}",
         },
     )
 

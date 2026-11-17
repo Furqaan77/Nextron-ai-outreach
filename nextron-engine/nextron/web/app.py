@@ -36,7 +36,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
 - ``GET /notifications`` (``notifications_area``) and ``POST /notifications/dismiss``
   (``notification_dismiss``), both ``@personal_data(True)``: the notification area (UX-DR5),
   which the base layout loads once per page view (``hx-trigger="load"``; it isn't polled), and
-  its Dismiss button. The area (``notifications.html``) starts with "Engine health: <n> error
+  its Dismiss button. While recovery mode is on (``queries.ops.recovery_mode()``, Story 1.19),
+  the area (``notifications.html``) starts with the banner ``<p class="recovery-banner"
+  role="alert">``, ``RECOVERY_BANNER`` linked to the health panel; every page shows it, because
+  every page loads the area. Then it shows "Engine health: <n> error
   needs attention" (or "<n> errors need attention"), linked to the health panel, when
   ``health.issue_count()`` is above 0. It is empty when nothing is undismissed and no error
   needs attention; otherwise it shows "Notifications (<count>)", the newest ``AREA_LIMIT`` (5),
@@ -129,6 +132,7 @@ from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
 from nextron.app.queries import notify as notify_queries
+from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
     Credentials,
@@ -142,6 +146,7 @@ from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
 from nextron.domain.open_code import CodeCheck
+from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
 from nextron.web import google_page as google_rows
@@ -234,15 +239,17 @@ def health_count_text(errors: int) -> str | None:
 
 
 def area_context(
-    found: notify_queries.OpenNotifications, *, errors: int = 0
+    found: notify_queries.OpenNotifications, *, errors: int = 0, recovery: bool = False
 ) -> dict[str, object]:
-    """What ``notifications.html`` renders: the engine health line, the count, the listed items
-    and how many more."""
+    """What ``notifications.html`` renders: the recovery banner while ``recovery`` mode is on,
+    the engine health line, the count, the listed items and how many more."""
     items = [
         NotificationItem(row.id, row.text, f"{row.created_at:{TIME_FORMAT}}")
         for row in found.newest
     ]
     return {
+        "recovery": recovery,
+        "RECOVERY_BANNER": RECOVERY_BANNER,
         "health_text": health_count_text(errors),
         "count": found.count,
         "items": items,
@@ -547,7 +554,9 @@ def create_app(
 
     def notification_list(request: Request) -> HTMLResponse:
         found = notify_queries.open_notifications(AREA_LIMIT)
-        context = area_context(found, errors=engine_health.issue_count())
+        context = area_context(
+            found, errors=engine_health.issue_count(), recovery=ops_queries.recovery_mode()
+        )
         return page(request, NOTIFICATIONS_TEMPLATE, **context)
 
     @app.get("/notifications", name="notifications_area")

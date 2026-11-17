@@ -12,12 +12,15 @@ retry backoff is still ``queued``, so the firings meanwhile are absorbed and it 
 backoff, not every period: the stories that add periodic job types choose their retry limits
 with that in mind.
 
-**Every(period, *, at_startup=False)** is an interval schedule. ``period`` is a ``timedelta``
-of whole seconds from 1 minute to 31 days (``TypeError`` or ``ValueError`` otherwise);
-``at_startup`` (a ``bool``) fires once right after the scheduler starts too. Its misfire
-``grace`` equals the period, so the one coalesced firing that catches up after the PC slept
-normally runs; when the wake lands just before a slot, that slot fires instead (see
-``nextron.jobs.scheduler``).
+**Every(period, *, at_startup=False, active=None)** is an interval schedule. ``period`` is a
+``timedelta`` of whole seconds from 1 minute to 31 days (``TypeError`` or ``ValueError``
+otherwise); ``at_startup`` (a ``bool``) fires once right after the scheduler starts too. Its
+misfire ``grace`` equals the period, so the one coalesced firing that catches up after the PC
+slept normally runs; when the wake lands just before a slot, that slot fires instead (see
+``nextron.jobs.scheduler``). ``active`` (``None`` or a callable returning ``bool``; anything
+else is a ``TypeError``) makes the trigger data-dependent: each firing calls ``active()`` first
+and enqueues only when it returns exactly ``True``, so no job row is made while there is
+nothing to do (``check_recovery`` fires only while recovery mode is on, Story 1.19).
 
 Schedules live in memory, so an ``Every`` restarts from zero at each engine start. A period
 longer than the engine usually runs between restarts (a day, say, on a PC that is shut down
@@ -89,10 +92,12 @@ class Trigger(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Every:
-    """Fire every ``period``; with ``at_startup``, also right after the scheduler starts."""
+    """Fire every ``period``; with ``at_startup``, also right after the scheduler starts; with
+    ``active``, only while ``active()`` returns ``True``."""
 
     period: timedelta
     at_startup: bool = field(default=False, kw_only=True)
+    active: Callable[[], bool] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.period, timedelta):
@@ -101,6 +106,8 @@ class Every:
             raise ValueError("a schedule's period must be whole seconds from 1 minute to 31 days")
         if not isinstance(self.at_startup, bool):
             raise TypeError("a schedule's at_startup must be a bool")
+        if self.active is not None and not callable(self.active):
+            raise TypeError("a schedule's active must be None or callable")
 
     @property
     def grace(self) -> timedelta:

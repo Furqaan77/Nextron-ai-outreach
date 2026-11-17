@@ -34,7 +34,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from html.parser import HTMLParser
 from pathlib import Path
@@ -43,6 +43,7 @@ from typing import Any
 import httpx2
 import pytest
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 
 import nextron.adapters.telegram as telegram_adapter
@@ -51,6 +52,7 @@ from nextron.adapters.crypto import ScryptParams
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
+from nextron.app.ops.api import Recovery
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.setup.api import Setup
@@ -68,6 +70,13 @@ from nextron.domain.google_oauth import (
     encode_grant_meta,
 )
 from nextron.domain.job import Lane
+from nextron.domain.recovery import (
+    RecoveryContext,
+    RecoveryHandler,
+    RecoveryStep,
+    RecoverySteps,
+    StepStatus,
+)
 from nextron.domain.settings_schema import Key
 from nextron.jobs import scheduler as scheduler_module
 from nextron.jobs.runner import Runner
@@ -102,6 +111,11 @@ def no_backups() -> Any:
 def no_restore_tests() -> Any:
     """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
     raise AssertionError("no restore_test job runs in these tests")
+
+
+def no_recovery() -> Any:
+    """``build_job_types``'s ``recovery`` where no ``check_recovery`` job runs."""
+    raise AssertionError("no check_recovery job runs in these tests")
 
 
 def job_threads() -> list[str]:
@@ -176,6 +190,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "send_alert",
         "backup_db",
         "restore_test",
+        "check_recovery",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -471,7 +486,10 @@ def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> N
 def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
     """A ``send_alert`` job that died on its first run; its id."""
     job_types = main.build_job_types(  # never called
-        alerts=InMemoryAlert, backups=no_backups, restore_tests=no_restore_tests
+        alerts=InMemoryAlert,
+        backups=no_backups,
+        restore_tests=no_restore_tests,
+        recovery=no_recovery,
     )
     queue = JobQueue(clock, job_types)
 
@@ -673,7 +691,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    assert scheduled.triggers == 2  # type: ignore[attr-defined]  # backup_db, restore_test
+    # backup_db, restore_test, check_recovery
+    assert scheduled.triggers == 3  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -690,8 +709,9 @@ class Failed(Exception):
 
 
 class Parts:
-    """A recording runner, scheduler and heartbeat writer sharing one call log of
-    ``(call, thread)``; any call named in ``failing`` raises ``Failed`` after recording."""
+    """A recording recovery startup pass, runner, scheduler and heartbeat writer sharing one
+    call log of ``(call, thread)``; any call named in ``failing`` raises ``Failed`` after
+    recording."""
 
     def __init__(self, *failing: str) -> None:
         self.failing = set(failing)
@@ -708,11 +728,15 @@ class Parts:
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
 
+    def recovery_startup(self) -> None:
+        self.record("recovery.startup")
+
     def lifespan(self) -> main.Lifespan:
         return main.engine_lifespan(
             self.runner,  # type: ignore[arg-type]
             self.scheduler,  # type: ignore[arg-type]
             self.writer,  # type: ignore[arg-type]
+            self.recovery_startup,
         )
 
 
@@ -753,12 +777,13 @@ def serve(parts: Parts, *, server_fails: bool = False) -> threading.Thread:
     return asyncio.run(run())
 
 
-def test_startup_runs_runner_scheduler_writer_and_shutdown_reverses_it() -> None:
+def test_startup_runs_recovery_runner_scheduler_writer_and_shutdown_reverses_it() -> None:
     parts = Parts()
 
     loop_thread = serve(parts)
 
     assert parts.names() == [
+        "recovery.startup",
         "runner.start",
         "scheduler.start",
         "writer.start",
@@ -783,11 +808,19 @@ def test_every_part_stops_when_serving_fails() -> None:
 @pytest.mark.parametrize(
     ("failing", "calls"),
     [
-        ("runner.start", ["runner.start"]),
-        ("scheduler.start", ["runner.start", "scheduler.start", "runner.stop"]),
+        ("recovery.startup", ["recovery.startup"]),
+        ("runner.start", ["recovery.startup", "runner.start"]),
+        ("scheduler.start", ["recovery.startup", "runner.start", "scheduler.start", "runner.stop"]),
         (
             "writer.start",
-            ["runner.start", "scheduler.start", "writer.start", "scheduler.stop", "runner.stop"],
+            [
+                "recovery.startup",
+                "runner.start",
+                "scheduler.start",
+                "writer.start",
+                "scheduler.stop",
+                "runner.stop",
+            ],
         ),
     ],
 )
@@ -921,6 +954,7 @@ def real_engine(
     monkeypatch: pytest.MonkeyPatch,
     secrets: InMemorySecrets | None = None,
     backup_targets: Any = None,
+    recovery_steps: Any = None,
 ) -> RealEngine:
     monkeypatch.setattr(main, "build_role_adapter", lambda *args, **kwargs: InMemoryAlert())
     config = load_bootstrap()
@@ -936,6 +970,7 @@ def real_engine(
         google_oauth=FakeGoogleOAuth(),
         probes=fake_probes(),
         backup_targets=backup_targets,
+        recovery_steps=recovery_steps,
     )
     engine = RealEngine(config, units, app, f"127.0.0.1:{config.port}".encode())
     engine.enter(secrets, clock)
@@ -967,8 +1002,13 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     finally:
         engine.units.engine.dispose()
 
-    assert sorted(job.id for job in jobs) == ["backup_db", "restore_test"]
-    for job, hour in zip(sorted(jobs, key=lambda job: job.id), ("10", "11"), strict=True):
+    assert sorted(job.id for job in jobs) == ["backup_db", "check_recovery", "restore_test"]
+    [check] = [job for job in jobs if job.id == "check_recovery"]
+    assert isinstance(check.trigger, IntervalTrigger)
+    assert check.trigger.interval == timedelta(minutes=1)
+    assert (check.misfire_grace_time, check.coalesce, check.max_instances) == (60, True, 1)
+    dailies = sorted((job for job in jobs if job.id != "check_recovery"), key=lambda job: job.id)
+    for job, hour in zip(dailies, ("10", "11"), strict=True):
         assert isinstance(job.trigger, CronTrigger)
         fields = {field.name: str(field) for field in job.trigger.fields}
         assert (fields["hour"], fields["minute"]) == (hour, "0")
@@ -1231,3 +1271,157 @@ def test_run_restore_test_now_restores_the_off_pc_copy_with_the_real_runner(
     logged = caplog.text + "".join(str(vars(record)) for record in caplog.records)
     assert PLANTED_PASSPHRASE not in logged and "QZXPLANTED" not in panel
     assert [r.getMessage() for r in caplog.records].count("restore_test_passed") == 1
+
+
+# Recovery mode through the real app (Story 1.19) -------------------------------------------------
+
+
+def turn_recovery_on(engine: RealEngine) -> str:
+    """An ``on`` recovery row, as ``nextron restore`` leaves one; its ULID."""
+    with engine.units.open():
+        row = Recovery(FrozenClock(T)).begin(
+            backup_at=T - timedelta(days=1),
+            source_name="nextron-test-20261116T090000.000Z.db",
+            pre_restore_name=None,
+        )
+    return row.id
+
+
+def recovery_row(engine: RealEngine) -> Any:
+    with engine.units.open(read_only=True):
+        return ops_queries.recovery_state()
+
+
+def wait_for_recovery_off(engine: RealEngine) -> Any:
+    for _ in range(POLL_ATTEMPTS):
+        row = recovery_row(engine)
+        if row is not None and row.mode == "off":
+            return row
+        time.sleep(POLL_SLICE)
+    pytest.fail("check_recovery did not end recovery mode")
+
+
+def test_an_on_row_with_no_handlers_ends_after_the_start(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    engine = real_engine(monkeypatch)
+    recovery_id = turn_recovery_on(engine)
+    try:
+        with serving(engine.app):
+            ended = wait_for_recovery_off(engine)
+            assert "recovery-banner" not in engine.get("/notifications").text
+            panel = engine.get("/health/panel/live").text
+    finally:
+        engine.units.engine.dispose()
+
+    assert (ended.id, ended.ended_at) == (recovery_id, T)
+    assert {status for _, status in ended.steps} == {StepStatus.NOT_APPLICABLE}
+    assert "Last restore: 2026-11-17 09:00:00 UTC, from nextron-test-" in panel
+    events = [r.getMessage() for r in caplog.records]
+    # every step was settled before the runner started; the at-startup check ended it
+    assert events.index("recovery_mode_on") < events.index("job_runner_started")
+    last_marked = max(
+        index
+        for index, event in enumerate(events)
+        if event == "recovery_step_not_applicable"
+    )
+    assert last_marked < events.index("job_runner_started")
+    assert events.count("recovery_step_not_applicable") == 4
+    assert events.index("job_runner_started") < events.index("recovery_mode_ended")
+    [jobs] = raw_query(engine.units, "SELECT count(*) FROM jobs WHERE type = 'check_recovery'")
+    assert jobs[0] >= 1
+
+
+def test_while_recovery_mode_is_off_no_check_recovery_job_is_made(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers: list[bool] = []
+    real_read = main.read_recovery_mode
+
+    def read_recovery_mode(units: Any) -> bool:
+        answers.append(real_read(units))
+        return answers[-1]
+
+    monkeypatch.setattr(main, "read_recovery_mode", read_recovery_mode)
+    engine = real_engine(monkeypatch)
+    try:
+        with serving(engine.app):
+            for _ in range(POLL_ATTEMPTS):  # until the at-startup firing has asked
+                if answers:
+                    break
+                time.sleep(POLL_SLICE)
+    finally:
+        engine.units.engine.dispose()
+
+    assert answers[:1] == [False]
+    assert raw_query(engine.units, "SELECT count(*) FROM jobs WHERE type = 'check_recovery'") == [
+        (0,)
+    ]
+
+
+def test_an_injected_startup_handler_runs_before_the_runner_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, list[str]]] = []
+
+    def at_start(context: RecoveryContext) -> bool:
+        seen.append(("startup", job_threads()))
+        return True
+
+    def later(context: RecoveryContext) -> bool:
+        seen.append(("check", job_threads()))
+        return True
+
+    steps = RecoverySteps()
+    steps.register_step(
+        RecoveryHandler(RecoveryStep.REAPPLY_ERASURE_LEDGER, "compliance", at_start, True)
+    )
+    steps.register_step(
+        RecoveryHandler(RecoveryStep.REPOLL_UNSUBSCRIBES, "compliance", later, False)
+    )
+    steps.freeze()
+    engine = real_engine(monkeypatch, recovery_steps=steps)
+    turn_recovery_on(engine)
+    try:
+        with serving(engine.app):
+            ended = wait_for_recovery_off(engine)
+    finally:
+        engine.units.engine.dispose()
+
+    assert seen[0] == ("startup", [])  # before runner.start: no job thread yet
+    assert [name for name, _ in seen] == ["startup", "check"]
+    assert "nextron-job-realtime-1" in seen[1][1]  # check_recovery runs on the realtime lane
+    assert dict(ended.steps) == {
+        RecoveryStep.REAPPLY_ERASURE_LEDGER: StepStatus.DONE,
+        RecoveryStep.MARK_OMS_UNKNOWN: StepStatus.NOT_APPLICABLE,
+        RecoveryStep.REINGEST_MAILBOXES: StepStatus.NOT_APPLICABLE,
+        RecoveryStep.REPOLL_UNSUBSCRIBES: StepStatus.DONE,
+    }
+
+
+def test_a_recovery_state_that_cannot_be_read_stops_the_start(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Unreadable(Recovery):
+        def pending(self, registered: frozenset[RecoveryStep]) -> Any:  # type: ignore[override]
+            raise OSError("the database is locked")
+
+    monkeypatch.setattr(main, "Recovery", Unreadable)
+    app = build(units)
+    sent: list[str] = []
+
+    async def run() -> None:
+        async def receive() -> dict[str, Any]:
+            return {"type": "lifespan.startup"}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message["type"])
+
+        await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+
+    with pytest.raises(OSError, match="locked"):  # Uvicorn exits 3, and serve reports exit 2
+        asyncio.run(run())
+
+    assert sent == ["lifespan.startup.failed"]
+    assert job_threads() == []  # the runner never started

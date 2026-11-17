@@ -32,6 +32,24 @@
 <button type="submit" class="secondary" id="restore-test-now">Run restore test now</button>
 </form>
 </section>
+{%- if recovery %}
+<section aria-labelledby="health-recovery-heading">
+<h2 id="health-recovery-heading">Recovery</h2>
+<p class="health-recovery{% if recovery_on %} health-recovery-on{% endif %}">{{ recovery }}</p>
+{%- if recovery_steps %}
+<table class="health-table">
+<thead>
+<tr><th scope="col">Step</th><th scope="col">Status</th></tr>
+</thead>
+<tbody>
+{%- for row in recovery_steps %}
+<tr><td>{{ row.step }}</td><td>{{ row.status }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>
+{%- endif %}
 <section aria-labelledby="health-errors-heading">
 <h2 id="health-errors-heading">Errors needing attention ({{ issues|length }})</h2>
 {%- if issues %}

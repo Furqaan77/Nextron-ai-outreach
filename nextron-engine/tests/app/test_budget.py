@@ -49,6 +49,11 @@ def no_restore_tests() -> Any:
     raise AssertionError("no restore_test job runs in these tests")
 
 
+def no_recovery() -> Any:
+    """``build_job_types``'s ``recovery`` where no ``check_recovery`` job runs."""
+    raise AssertionError("no check_recovery job runs in these tests")
+
+
 class World:
     """A meter, a budget and notify on one database, wired as ``nextron.main`` does."""
 
@@ -58,7 +63,10 @@ class World:
         self.clock = FrozenClock(T)
         self.alert = InMemoryAlert()
         job_types = main.build_job_types(
-            alerts=lambda: self.notify, backups=no_backups, restore_tests=no_restore_tests
+            alerts=lambda: self.notify,
+            backups=no_backups,
+            restore_tests=no_restore_tests,
+            recovery=no_recovery,
         )
         self.notify = Notify(
             self.clock,

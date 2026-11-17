@@ -75,7 +75,7 @@ transaction, for a dashboard GET's read-only unit of work:
   the traceback); the other sources still run.
 - ``issue_count() -> int`` is ``len(issues())``: the notification area's error count.
 - ``report() -> HealthReport(checked_at, worker, groups, issues, readiness, backup,
-  restore_test)`` reads
+  restore_test, recovery)`` reads
   the clock once, then runs ``readiness()`` before its own database reads. Readiness ends with the
   checks that read the database (``offpc_backup``'s setting, ``required_settings``,
   ``database_revision``), which begin the read transaction; the checks that reach Credential
@@ -89,7 +89,8 @@ transaction, for a dashboard GET's read-only unit of work:
   ``queries.ops.last_backup()``, the newest backup of any kind and status, read after
   readiness (``None`` before the first one); ``restore_test`` is
   ``queries.ops.last_restore_test()``, the newest restore test of either kind and result
-  (``None`` before the first one).
+  (``None`` before the first one); ``recovery`` is ``queries.ops.recovery_state()``: the ``on``
+  recovery row, else the newest of any mode (``None`` before the first restore).
 
 **Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5, OP-6, NFR-16).** Every copy is made with
 SQLite's backup API (``nextron.db.repos.ops.snapshot``), verified and recorded in ``backups``,
@@ -270,6 +271,51 @@ command, adapter, runner or scheduler. The row is written once, with no state ma
   the newest ``monthly`` test's ``started_at``. ``nextron.main`` reads it once, when the
   scheduler starts.
 
+**The work folders.** ``clear_work_folders(parent, prefix, event)`` deletes every leftover
+``<prefix>*`` folder directly in ``parent`` (when ``parent`` exists) with
+``remove_work_folder(folder, event)``, which deletes the files directly in ``folder``, then
+``folder``. Neither ever goes through a link or a junction or raises: a failure is logged as
+``event`` (WARNING, ``code``) and the other files still go. ``RestoreTests`` uses them with
+``restore_test_cleanup_failed``, and ``nextron restore`` (``nextron.main.restore``) with
+``restore_cleanup_failed`` for its own work folder under ``<data dir>\\restore``.
+
+**Restore and recovery mode (Story 1.19; AD-2, AD-5, AD-17, AD-20, OP-8).** ``nextron restore``
+(``nextron.main.restore``, with the engine stopped) puts a backup copy back. A restored database
+has forgotten every opt-out, erasure and send made after the copy was taken, so the restore
+turns recovery mode on, and ``queries.ops.recovery_mode()`` is the gate every send path checks
+in its own transaction: while it is true, sending is held. ``Recovery(clock)`` owns the
+``recovery_state`` rows and only them; the job layer's ``RecoveryRunner``
+(``nextron.jobs.recovery``) runs the steps' handlers, and a step is marked done only by the
+runner, from its handler's ``True`` (owners outside ``ops`` never call ``ops``).
+
+- ``@use_case begin(*, backup_at, source_name, pre_restore_name) -> RecoveryRow``:
+  ``nextron restore`` calls it on the restored copy before swapping it in. It reads the clock
+  once (``restored_at``). In one transaction it supersedes the ``on`` row there may be
+  (``superseded``, ``ended_at`` = now; a backup taken during recovery mode holds one), then
+  inserts the ``on`` row with all four steps ``pending`` and ``backup_at`` = the earliest of
+  the given time, ``restored_at`` and the superseded row's ``backup_at``, so mail the first
+  recovery hadn't re-ingested isn't lost. ``source_name`` and ``pre_restore_name`` are file
+  names, never paths (``ValueError``). After the commit it logs ``recovery_mode_started``
+  (INFO: ``recovery_id``, ``superseded``: the superseded row's ULID or ``None``) and returns the
+  new row.
+- ``@use_case pending(registered) -> RecoveryPass | None``: ``None`` when no row is ``on``.
+  Otherwise, in one transaction, each ``pending`` step not in ``registered`` (the steps with a
+  handler) becomes ``not_applicable``, logged after the commit as
+  ``recovery_step_not_applicable`` (INFO: ``recovery_id``, ``step``). It returns
+  ``RecoveryPass(context, pending)``: the row's ``RecoveryContext`` and the registered steps
+  still pending, in step order.
+- ``@use_case mark_done(recovery_id, step) -> bool``: in one transaction, the step of the ``on``
+  row becomes ``done`` while it is ``pending``; whether it changed, logged as
+  ``recovery_step_done`` (INFO: ``recovery_id``, ``step``).
+- ``@use_case finish() -> bool``: in one transaction, an ``on`` row whose steps are all
+  ``done`` or ``not_applicable`` becomes ``off`` with ``ended_at`` = now, logged after the
+  commit as ``recovery_mode_ended`` (INFO, ``recovery_id``). It returns whether recovery mode is
+  still on.
+
+There is no ``events`` row (recovery isn't one of AD-4's machines), no Telegram alert, no
+setting and no doctor check: the dashboard's banner and the health panel's Recovery section are
+the signals.
+
 Logs carry IDs, kinds, codes, counts and file names only, never a full path (the off-PC
 folder included) or an error's text.
 """
@@ -295,8 +341,10 @@ from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
+from nextron.db.repos.ops import recovery as recovery_repo
 from nextron.db.repos.ops import restore_tests as restore_tests_repo
 from nextron.db.repos.ops.backups import BackupRow
+from nextron.db.repos.ops.recovery import RecoveryRow
 from nextron.db.repos.ops.restore_tests import RestoreTestRow
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, discard
 from nextron.db.uow import command, current, use_case
@@ -337,6 +385,14 @@ from nextron.domain.health import (
 from nextron.domain.job import GLOBAL_SCOPE, JobTypes
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.domain.readiness import CheckResult
+from nextron.domain.recovery import (
+    RecoveryContext,
+    RecoveryMode,
+    RecoveryPass,
+    RecoveryStep,
+    StepStatus,
+    settled,
+)
 from nextron.domain.restore_test import (
     RESTORE_DIR_NAME,
     RESTORE_TEST_FAILED,
@@ -396,6 +452,10 @@ RESTORE_TEST_NOT_RECORDED: Final = "restore_test_not_recorded"  # the retryable 
 RESTORE_TEST_REQUESTED: Final = "restore_test_requested"
 INVALID_SETTING_VALUE: Final = "invalid_setting_value"  # offpc_not_configured's detail
 RESTORED_COPY_NAME: Final = "copy.db"  # the decrypted copy, inside the work folder
+RECOVERY_MODE_STARTED: Final = "recovery_mode_started"
+RECOVERY_STEP_NOT_APPLICABLE: Final = "recovery_step_not_applicable"
+RECOVERY_STEP_DONE: Final = "recovery_step_done"
+RECOVERY_MODE_ENDED: Final = "recovery_mode_ended"
 # The fetch's AdapterError codes and the reason each one is; any other is fetch_failed.
 FETCH_REASONS: Final = MappingProxyType(
     {
@@ -564,6 +624,7 @@ class HealthReport:
     readiness: tuple[CheckResult, ...]
     backup: BackupRow | None
     restore_test: RestoreTestRow | None
+    recovery: RecoveryRow | None
 
 
 def _source_failed(source: IssueSource, error: Exception) -> HealthIssue:
@@ -632,6 +693,7 @@ class EngineHealth:
         readiness = tuple(self._readiness())  # its last checks begin the read transaction
         backup = ops_queries.last_backup()
         restore_test = ops_queries.last_restore_test()
+        recovery = ops_queries.recovery_state()
         beat = ops_queries.heartbeat()
         worker = Worker(
             beat is not None and worker_running(beat.beat_at, now),
@@ -640,7 +702,7 @@ class EngineHealth:
         pairs = [(name, self._job_types.get(name).group) for name in self._job_types.names()]
         groups = job_group_runs(pairs, jobqueue_queries.last_successes())
         return HealthReport(
-            now, worker, groups, self.issues(), readiness, backup, restore_test
+            now, worker, groups, self.issues(), readiness, backup, restore_test, recovery
         )
 
 
@@ -1105,6 +1167,44 @@ def _not_followed(entry: Path) -> bool:
     return entry.is_symlink() or entry.is_junction()
 
 
+def clear_work_folders(parent: Path, prefix: str, event: str) -> None:
+    """Delete every leftover work folder named ``<prefix>*`` directly in ``parent`` when
+    ``parent`` exists (``remove_work_folder``), never through a link or a junction; a failure is
+    logged as ``event`` (WARNING, ``code``), never raised."""
+    try:
+        if not parent.is_dir():
+            return
+        leftovers = sorted(parent.iterdir())
+    except OSError as exc:
+        log.warning(event, extra={"code": error_code(exc)})
+        return
+    for leftover in leftovers:
+        if leftover.name.startswith(prefix) and not _not_followed(leftover) and leftover.is_dir():
+            remove_work_folder(leftover, event)
+
+
+def remove_work_folder(folder: Path, event: str) -> None:
+    """Delete the files directly in ``folder``, then ``folder``; a failure is logged as
+    ``event`` (WARNING, ``code``: the first failure's), never raised, and the other files still
+    go."""
+    failure: OSError | None = None
+    try:
+        entries = list(folder.iterdir())
+    except OSError as exc:
+        entries, failure = [], exc
+    for entry in entries:
+        try:
+            entry.unlink()
+        except OSError as exc:  # a subfolder, or a file still open
+            failure = failure if failure is not None else exc
+    try:
+        folder.rmdir()
+    except OSError as exc:
+        failure = failure if failure is not None else exc
+    if failure is not None:
+        log.warning(event, extra={"code": error_code(failure)})
+
+
 class RestoreTests:
     """The monthly and on-demand restore test of the newest off-PC copy; see the module
     docstring."""
@@ -1149,7 +1249,8 @@ class RestoreTests:
         kind = RestoreTestKind(kind)
         uow = current()
         with self._lock:
-            self._sweep()  # every run, the daily check included: no plaintext outlives a crash
+            # every run, the daily check included: no plaintext outlives a crash
+            clear_work_folders(self.restore_dir, self._prefix, RESTORE_TEST_CLEANUP_FAILED)
             started_at = self._clock.now()
             row: BackupRow | None = None
             destination: Path | str = INVALID_SETTING_VALUE
@@ -1261,7 +1362,7 @@ class RestoreTests:
         except Exception as exc:  # noqa: BLE001 - never raises: whatever broke is fetch_failed
             return fetch_failure(RestoreFailure.FETCH_FAILED, error_code(exc))
         finally:
-            self._remove(work)
+            remove_work_folder(work, RESTORE_TEST_CLEANUP_FAILED)
 
     def _fetch_and_judge(self, row: BackupRow, folder: Path, work: Path) -> RestoreOutcome:
         copy = work / RESTORED_COPY_NAME
@@ -1294,49 +1395,13 @@ class RestoreTests:
         folders, and a new work folder in it."""
         parent = self.restore_dir
         parent.mkdir(parents=True, exist_ok=True)
-        self._sweep()
-        return Path(tempfile.mkdtemp(prefix=f"nextron-{self._env}-", dir=parent))
+        clear_work_folders(parent, self._prefix, RESTORE_TEST_CLEANUP_FAILED)
+        return Path(tempfile.mkdtemp(prefix=self._prefix, dir=parent))
 
-    def _sweep(self) -> None:
-        """Delete this environment's leftover work folders (``nextron-<env>-*``) in
-        ``<backup dir>\\restore_test`` when that folder exists, never through a link or a
-        junction; a failure is logged (``restore_test_cleanup_failed``), never raised."""
-        parent = self.restore_dir
-        prefix = f"nextron-{self._env}-"
-        try:
-            if not parent.is_dir():
-                return
-            leftovers = sorted(parent.iterdir())
-        except OSError as exc:
-            log.warning(RESTORE_TEST_CLEANUP_FAILED, extra={"code": error_code(exc)})
-            return
-        for leftover in leftovers:
-            if (
-                leftover.name.startswith(prefix)
-                and not _not_followed(leftover)
-                and leftover.is_dir()
-            ):
-                self._remove(leftover)
-
-    def _remove(self, folder: Path) -> None:
-        """Delete the files directly in ``folder``, then ``folder``; a failure is logged
-        (``restore_test_cleanup_failed``), never raised, and the other files still go."""
-        failure: OSError | None = None
-        try:
-            entries = list(folder.iterdir())
-        except OSError as exc:
-            entries, failure = [], exc
-        for entry in entries:
-            try:
-                entry.unlink()
-            except OSError as exc:  # a subfolder, or a file still open
-                failure = failure if failure is not None else exc
-        try:
-            folder.rmdir()
-        except OSError as exc:
-            failure = failure if failure is not None else exc
-        if failure is not None:
-            log.warning(RESTORE_TEST_CLEANUP_FAILED, extra={"code": error_code(failure)})
+    @property
+    def _prefix(self) -> str:
+        """The name prefix of this environment's work folders, ``nextron-<env>-``."""
+        return f"nextron-{self._env}-"
 
     @use_case
     def request_restore_test(self) -> Enqueued:
@@ -1364,3 +1429,119 @@ class RestoreTests:
         newest = ops_queries.newest_restore_test(RestoreTestKind.MONTHLY)
         started = None if newest is None else newest.started_at
         return RestoreTestSchedule(at, timezone, missed_restore_test(started, now, at, timezone))
+
+
+# Restore and recovery mode (Story 1.19) ---------------------------------------------------------
+
+
+def _plain_name(field: str, value: object) -> str:
+    """``value`` when it is a file name, never a path; ``TypeError`` or ``ValueError``."""
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a str")
+    if not value.strip() or "/" in value or "\\" in value or ":" in value:
+        raise ValueError(f"{field} must be a file name, not a path")
+    return value
+
+
+class Recovery:
+    """Recovery mode's ``recovery_state`` rows; see the module docstring."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    @use_case
+    def begin(
+        self, *, backup_at: datetime, source_name: str, pre_restore_name: str | None
+    ) -> RecoveryRow:
+        """Turn recovery mode on for a restore of ``source_name`` taken at ``backup_at`` (at the
+        latest), superseding the ``on`` row there may be; return the new row."""
+        if not isinstance(backup_at, datetime):
+            raise TypeError("backup_at must be a datetime")
+        if backup_at.utcoffset() is None:
+            raise ValueError("backup_at must be an aware datetime")
+        _plain_name("source_name", source_name)
+        if pre_restore_name is not None:
+            _plain_name("pre_restore_name", pre_restore_name)
+        restored_at = self._clock.now()
+        with current().transaction():
+            superseded = recovery_repo.supersede_active(restored_at)
+            earliest = min(backup_at, restored_at)
+            if superseded is not None:
+                earliest = min(earliest, superseded.backup_at)
+            recovery_repo.insert(
+                mode=str(RecoveryMode.ON),
+                restored_at=restored_at,
+                backup_at=earliest,
+                source_name=source_name,
+                pre_restore_name=pre_restore_name,
+                ended_at=None,
+                steps={step: str(StepStatus.PENDING) for step in RecoveryStep},
+            )
+            row = recovery_repo.active()
+        assert row is not None  # inserted just above, in the same transaction
+        log.info(
+            RECOVERY_MODE_STARTED,
+            extra={
+                "recovery_id": row.id,
+                "superseded": None if superseded is None else superseded.id,
+            },
+        )
+        return row
+
+    @use_case
+    def pending(self, registered: frozenset[RecoveryStep]) -> RecoveryPass | None:
+        """``None`` when recovery mode is off; otherwise mark each pending step nobody
+        registered ``not_applicable`` and return the context and the registered steps still
+        pending, in step order."""
+        registered = frozenset(RecoveryStep(step) for step in registered)
+        with current().transaction():
+            row = recovery_repo.active()
+            if row is None:
+                return None
+            unregistered = [
+                step
+                for step, status in row.steps
+                if status is StepStatus.PENDING and step not in registered
+            ]
+            marked = [
+                step
+                for step in unregistered
+                if recovery_repo.set_step(row.id, step, str(StepStatus.NOT_APPLICABLE)) == 1
+            ]
+        for step in marked:
+            log.info(
+                RECOVERY_STEP_NOT_APPLICABLE, extra={"recovery_id": row.id, "step": str(step)}
+            )
+        context = RecoveryContext(row.id, row.backup_at, row.restored_at)
+        pending = tuple(
+            step
+            for step, status in row.steps
+            if status is StepStatus.PENDING and step in registered
+        )
+        return RecoveryPass(context, pending)
+
+    @use_case
+    def mark_done(self, recovery_id: str, step: RecoveryStep) -> bool:
+        """Mark ``step`` of the ``on`` row ``recovery_id`` ``done`` while it is pending; whether
+        it changed."""
+        step = RecoveryStep(step)
+        with current().transaction():
+            changed = recovery_repo.set_step(recovery_id, step, str(StepStatus.DONE)) == 1
+        if changed:
+            log.info(RECOVERY_STEP_DONE, extra={"recovery_id": recovery_id, "step": str(step)})
+        return changed
+
+    @use_case
+    def finish(self) -> bool:
+        """End recovery mode when every step of the ``on`` row is settled; whether recovery
+        mode is still on."""
+        now = self._clock.now()
+        with current().transaction():
+            row = recovery_repo.active()
+            if row is None:
+                return False
+            if not settled(status for _, status in row.steps):
+                return True
+            recovery_repo.end(row.id, now)
+        log.info(RECOVERY_MODE_ENDED, extra={"recovery_id": row.id})
+        return False

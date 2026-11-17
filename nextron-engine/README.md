@@ -1043,8 +1043,8 @@ already has data, it takes a `pre_migrate` backup inside that transaction (see
 A file that can't be opened (not SQLite, locked too long), or a migration that fails or leaves
 foreign-key violations (rolled back), ends with exit 2 and `database_migration_failed` with the
 traceback in `nextron.log`. When a `pre_migrate` copy was taken first, the message names the
-copy's full path and `nextron restore "<path>"` (quoted; Story 1.19 adds that command), and
-the log line carries the copy's `file` name.
+copy's full path and `nextron restore "<path>"` (quoted; see [Restore and recovery
+mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` name.
 
 **The migrations so far**, in order (`nextron/db/alembic/versions/`):
 
@@ -1065,11 +1065,12 @@ the log line carries the copy's `file` name.
 | `0013_4_1_sequences` | `sequences` (unique `key`, `ck_sequences_version`) and `step_briefs` (a foreign key to `sequences.id` with no cascade; unique on `sequence_id` and `step`; three checks) (see [Sequences](#sequences)) | `setup` |
 | `0014_2_8_ai_routes` | `prompt_snapshots` (unique `(route, prompt_version)` and `(route, prompt_version, sha256)`, two checks) and `ai_route_activations` (a composite foreign key to the snapshot, three checks, the partial unique index `uq_ai_route_activations_active_route`) (see [Prompts and the active route tuple](#prompts-and-the-active-route-tuple)) | `playbook` |
 | `0015_2_3_contacts_provenance` | `contacts` (`ix_contacts_lead_id`, foreign keys to `leads` and `markets` with no cascade, three checks) and `provenance_records` (`ix_provenance_records_contact_id`, a foreign key to `contacts` with no cascade, four checks, the nullable eligibility-basis fields) (see [CSV import, Contacts and Provenance](#csv-import-contacts-and-provenance)) | `research` |
+| `0016_1_19_recovery` | `recovery_state`: one row per restore (`mode`, the times, the restored file's name, the safety copy's name, one status per recovery step), its six checks (`mode`, one per step, `ck_recovery_state_outcome`), the partial unique index `uq_recovery_state_on` (at most one `on` row) and `ix_recovery_state_restored_at` (see [Restore and recovery mode](#restore-and-recovery-mode)) | `ops` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
-`pre_migrate` backup `serve` took before it (see [Backups](#backups); `nextron restore`
-arrives with Story 1.19).
+`pre_migrate` backup `serve` took before it with `nextron restore` (see [Restore and recovery
+mode](#restore-and-recovery-mode)).
 
 **Adding a migration.** Alembic is configured in code (`nextron/db/migrations.py`); there is no
 `alembic.ini` and no `alembic` command. A story that changes the schema:
@@ -1143,7 +1144,8 @@ table (owner `jobqueue`, AD-10), so it survives a crash or a restart, never runs
 and retries only what may succeed later. The rules live in `nextron/domain/job.py`, the service
 in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. The
 job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)),
-`backup_db` (see [Backups](#backups)) and `restore_test` (see [The restore test](#the-restore-test));
+`backup_db` (see [Backups](#backups)), `restore_test` (see [The restore test](#the-restore-test))
+and `check_recovery` (see [Restore and recovery mode](#restore-and-recovery-mode));
 the stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
@@ -1457,8 +1459,9 @@ included), a passphrase or an error's text: `backup_requested` (`job_id`, `job_c
 `offpc_rotation_failed` (ERROR: `backup_id`, `code`) and `offpc_record_failed` (ERROR:
 `backup_id`, `code`).
 
-**Not done yet.** `nextron restore` and recovery mode arrive with Story 1.19; Story 4.x writes
-the erasure ledger. There is no passphrase-strength rule. A failed off-PC copy is never retried
+**Not done yet.** Story 4.x writes the erasure ledger (`nextron restore` puts back a database
+copy only; see [Restore and recovery mode](#restore-and-recovery-mode)). There is no
+passphrase-strength rule. A failed off-PC copy is never retried
 before the next backup.
 
 ### The restore test
@@ -1536,6 +1539,111 @@ text.
 
 **Not checked:** the erasure ledger's off-PC copy, and copies in a folder that is no longer set.
 
+### Restore and recovery mode
+
+A lost or damaged database is put back from a backup copy with `nextron restore` (AD-2, AD-5,
+AD-17, AD-20, OP-8). A restored database has forgotten every opt-out, erasure and send made
+after the copy was taken, so a restore turns **recovery mode** on: sending is held until every
+recovery step has caught up. Nothing but `nextron restore` ever replaces the database.
+
+```powershell
+uv run nextron restore "E:\NextronBackups\nextron-prod-20261116T100000.000Z.db.enc"   # asks you to type yes
+uv run nextron restore "$env:LOCALAPPDATA\Nextron\backups\dev\local\nextron-dev-20261116T100000.000Z.db" --yes
+```
+
+**Before you restore**, stop the engine, and stop its supervisor first (`scripts/run.ps1`,
+Story 1.21) so it doesn't start the engine again in the middle: while the engine holds
+`<data dir>\nextron.lock`, `restore` prints `stop the engine before restoring` and exits 1
+without changing or logging anything. **On a new PC**, an encrypted `.db.enc` copy needs the
+Backup passphrase in Credential Manager first: start the engine once, enter it on the
+Credentials page, then stop the engine and restore.
+
+**What it does**, in order (`nextron.main.restore`; the file work in
+`nextron/db/repos/ops/restore.py`):
+
+1. It refuses anything but a backup copy: the file must exist and end `.db` (plain, Story
+   1.16) or `.db.enc` (encrypted, Story 1.17). A file that keeps a backup copy's name,
+   `nextron-<env>-<stamp>...`, must name this environment (any case), so such a `prod` copy
+   never lands in `dev` or the reverse. A renamed file isn't checked, so keep the backup names.
+   A plain `.db` with a non-empty `-wal` beside it is a live database, not a backup copy; the
+   live database itself and anything inside the work folder are refused too.
+2. In a private work folder, `<data dir>\restore\nextron-<env>-<random>\`, it decrypts the
+   copy (with the Backup passphrase) or copies it with SQLite's backup API (the file opened
+   read-only and `immutable`), so the file you named, and every file beside it, is never
+   changed. A crash's leftover work folders are cleared first, and the work folder is always
+   deleted at the end (`restore_cleanup_failed`, WARNING, when a delete fails).
+3. It checks the copy: `integrity_check` must answer `ok`, and its Alembic revision must be one
+   this code knows (a newer code's copy is refused; an older one is upgraded below).
+4. Without `--yes` it says what it will do and asks `Type yes to restore: `; anything but `yes`
+   (any case), or no input, prints `restore cancelled; nothing was changed`.
+5. It saves the current database, when there is one, to
+   `<backup dir>\pre_restore\nextron-<env>-<now>.db` with SQLite's backup API (not
+   integrity-checked, because it may be the damaged one; no `backups` row, and never rotated).
+   If that copy can't be made, the restore refuses: move a damaged `nextron.db` (with its `-wal`
+   and `-shm`) out of the data dir yourself, then restore again. If the next step (the upgrade,
+   or turning recovery mode on) fails, the safety copy is deleted again, so nothing was
+   changed.
+6. It upgrades the copy to head when it is behind, then writes the `recovery_state` row into it:
+   recovery mode `on`, its four steps `pending`, and `backup_at`, the time the copy was taken at
+   the latest: the earliest of the file name's stamp, the copy's newest `events` time and now,
+   so a renamed copy re-ingests more, never less. A copy taken during an earlier recovery
+   already holds an `on` row: it becomes `superseded`, and the new `backup_at` is the earlier
+   of the two.
+7. It swaps the copy in with SQLite's backup API, in one write transaction (a failure leaves
+   the database unchanged, keeps the safety copy and names its full path; on a new PC no empty
+   database is left; a `-wal` a crash left beside it is read and checkpointed away), then reads
+   the result back: `integrity_check` `ok`, the head revision and exactly the new `on` row. If
+   that check fails it says so, names the safety copy's full path and tells you not to start
+   the engine: run `nextron restore` again, or restore the safety copy.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | restored: start the engine |
+| 1 | refused, cancelled or failed (the message says which, and that nothing was changed), or the engine is running |
+| 2 | `NEXTRON_ENV` unset or invalid, another invalid setting, or a failed environment check |
+
+**Recovery mode.** While a `recovery_state` row is `on`, `queries.ops.recovery_mode()` is true:
+every send path (Epic 6) checks it in its own transaction and holds its sends. The notification
+area, on every page, starts with "Recovery mode is on: sending is held until every recovery step
+is done." (linked to the health panel), and the panel's **Recovery** section lists the steps. At
+each engine start, before the job runner starts, each step nobody registered becomes `not
+applicable`, then the registered `startup` steps run; the `check_recovery` job (the realtime
+lane only, priority 85, `max_runtime` 10 minutes, retry limit 2, group Backup) runs the other
+steps every minute and ends recovery mode once every step is `done` or `not applicable`. The
+`check_recovery` trigger fires only while recovery mode is on, so no job row is made once it is
+over. A failure to read or write `recovery_state` at start stops the start (exit 2): it fails
+closed.
+
+| Step | Owner |
+|---|---|
+| Reapply the erasure ledger | Story 3.16 |
+| Mark unfinished sends unknown | Story 6.12 |
+| Re-ingest the mailboxes | Story 6.12 |
+| Re-poll the unsubscribe Worker | Story 3.12 |
+
+None of them is registered yet, so in Epic 1 all four become `not applicable` at the first
+start and recovery mode ends within a minute. A story adds its step in
+`nextron.main.build_recovery_steps`, the only code that builds the registry
+(`tests/contracts/test_recovery_contracts.py`): `RecoveryHandler(step, owner, run, startup)`,
+where `run(context)` (the restore's `recovery_id`, `backup_at` and `restored_at`) returns `True`
+when the step is done. A `startup` step runs only at an engine start, before the runner; the
+others run at every `check_recovery` until done, so they must be idempotent and quick (enqueue
+work, don't do it). A handler that raises, or returns anything but a `bool`, logs
+`recovery_step_failed` (ERROR) and its step stays pending.
+
+**Logs**: `restore_refused` (WARNING, `reason`), `restore_failed` (ERROR: `stage`, `code`),
+`pre_restore_backup_taken` (`file`), `restore_candidate_migrated` (`from_revision`,
+`to_revision`), `database_restored` (INFO: `file`, `from_revision`, `to_revision`,
+`recovery_id`, `pre_restore`), `restore_cleanup_failed` (WARNING, `code`); then in the engine
+`recovery_mode_started` (`recovery_id`, `superseded`), `recovery_mode_on` (WARNING:
+`recovery_id`, `pending`), `recovery_step_not_applicable` and `recovery_step_done`
+(`recovery_id`, `step`), `recovery_step_failed` (ERROR: `recovery_id`, `step`, `code`) and
+`recovery_mode_ended` (`recovery_id`). File names only, never a path. There is no `events` row,
+no Telegram alert, no setting and no doctor check: the banner and the panel are the signals.
+
+**Not covered yet:** rotating the `pre_restore` copies, and restoring the erasure ledger's
+off-PC copy (Story 3.16).
+
 ## Triggers and the heartbeat
 
 **Periodic triggers** (AD-10) start periodic work: sends, mailbox syncs, unsubscribe polls,
@@ -1544,9 +1652,10 @@ table (`tests/unit/test_triggers.py` checks it against the spine). A trigger onl
 firing enqueues one job of the job type with the trigger's own name, with the key
 `<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
 still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
-job. So far two triggers are registered: `backup_db`, daily (see [Backups](#backups)), and
+job. So far three triggers are registered: `backup_db`, daily (see [Backups](#backups)),
 `restore_test`, daily an hour later, whose job tests once per calendar month (see [The restore
-test](#the-restore-test)).
+test](#the-restore-test)), and `check_recovery`, every minute and at start, but only while
+recovery mode is on (see [Restore and recovery mode](#restore-and-recovery-mode)).
 
 **Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
@@ -1560,8 +1669,11 @@ triggers.register_trigger(
 )
 ```
 
-- `Every(period, at_startup=False)`: `period` is whole seconds from 1 minute to 31 days;
-  `at_startup` also fires once right after the engine starts.
+- `Every(period, at_startup=False, active=None)`: `period` is whole seconds from 1 minute to 31
+  days; `at_startup` also fires once right after the engine starts. `active` (a callable
+  returning `bool`) makes the trigger data-dependent: each firing calls it first, before any
+  unit of work, and enqueues only when it returns exactly `True`, logging nothing otherwise; an
+  exception from it is a `trigger_failed`.
 - `DailyAt(when, *, fallback)`: every day at a time read once, when the scheduler starts.
   `when()` returns a `DailyRun(at, timezone, catch_up=False)`: `at` a time in whole minutes,
   `timezone` an IANA name, and `catch_up` fires once right after the start, to make up a run
@@ -1574,8 +1686,8 @@ triggers.register_trigger(
 - A trigger that isn't a `Trigger` member (a plain string included), whose job type isn't
   registered, or that is already registered is refused (`TypeError`, `UnknownJobType`,
   `ValueError`).
-- Per-inbox triggers (`sync_mailbox`) and data-dependent ones (`check_recovery`) add their own
-  enqueue use case in their stories.
+- Per-inbox triggers (`sync_mailbox`) add their own enqueue use case in their story;
+  `check_recovery` is an `Every` with `active` (`read_recovery_mode`).
 - **An `Every` restarts from zero at each engine start**, because schedules live in memory. A
   period longer than the engine usually runs between restarts (a day, say, on a PC shut down
   every night) never fires unless `at_startup=True`. Daily work wants `at_startup` with a
@@ -2106,7 +2218,12 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    <pass or fail> (<monthly or manual>)", from the newest test's start; a failed test adds ":
    <reason>; failing checks: <the checks' names>" and is marked. Then the **Run restore test
    now** button (see [The restore test](#the-restore-test)).
-5. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
+5. **Recovery**, only once a restore has happened (see [Restore and recovery
+   mode](#restore-and-recovery-mode)): while recovery mode is on, "Recovery mode is on since
+   <time> UTC: sending is held. Restored from <file name>, backed up at <time> UTC." (marked),
+   then a table of the four steps and their status (pending, done or not applicable);
+   afterwards "Last restore: <time> UTC, from <file name>; recovery mode ended at <time> UTC.".
+6. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
    attention." The errors are:
    - each `dead` job, oldest first: "Job dead: <type> <ULID>, attempts: <n>", with "Last error:
      <redacted last_error>" and a **Dismiss** button;
@@ -2126,10 +2243,10 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
      fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
      traceback); the other sources still show.
-6. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
+7. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
-7. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
+8. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
    the same twelve ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
@@ -2173,6 +2290,7 @@ Building the app runs no check.
 
 **The error count.** The notification area shows "Engine health: 1 error needs attention" (or
 "<n> errors need attention"), linked to the panel, whenever the panel's error list isn't empty.
+While recovery mode is on, the recovery banner comes first.
 The worker state isn't counted (it is at the top of the panel). The count is read on each page
 view; the area isn't polled.
 

@@ -72,12 +72,32 @@ after the test, only by ``nextron.db.repos.ops.restore_tests`` (migration
 ``ck_restore_tests_outcome`` keeps the outcome whole: a ``pass`` has no reason and no detail, a
 ``backup_id``, ``pass`` for fetch, integrity and revision, and ``pass`` or ``skipped`` for both
 counts; a ``fail`` has a reason and at least one check that is ``fail``.
+
+``recovery_state`` holds one row per restore of a backup (Story 1.19), written only by
+``nextron.db.repos.ops.recovery`` (migration ``0016_1_19_recovery``). ``nextron restore`` inserts
+it into the restored copy before swapping the copy in; the engine then works through its steps:
+
+- ``mode``: ``on`` (sending is held), ``off`` (every step settled) or ``superseded`` (a later
+  restore replaced it) (``ck_recovery_state_mode``); the partial unique index
+  ``uq_recovery_state_on`` allows at most one ``on`` row;
+- ``restored_at``: when the restore ran (``ix_recovery_state_restored_at`` serves the
+  newest-first read); ``backup_at``: when the restored copy was taken, at the latest (the steps
+  re-ingest and re-poll from there); ``ended_at``: when recovery mode ended or was superseded;
+- ``source_name``: the restored file's name, never a path; ``pre_restore_name``: the name of the
+  safety copy of the database the restore replaced, ``NULL`` when there was none;
+- one column per recovery step, named as the step (``reapply_erasure_ledger``,
+  ``mark_oms_unknown``, ``reingest_mailboxes`` and ``repoll_unsubscribes``): ``pending``,
+  ``done`` or ``not_applicable`` (``ck_recovery_state_<step>``).
+
+``ck_recovery_state_outcome`` keeps the outcome whole: ``on`` has no ``ended_at``,
+``superseded`` has one, and ``off`` has one and every step ``done`` or ``not_applicable``. It
+holds no personal data.
 """
 
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -118,6 +138,18 @@ RESTORE_OUTCOME_CHECK: Final = (
     "AND check_suppression IN ('pass','skipped') AND check_provenance IN ('pass','skipped')) "
     "OR (result = 'fail' AND reason IS NOT NULL AND 'fail' IN (check_fetch, check_integrity, "
     "check_revision, check_suppression, check_provenance))"
+)
+NAME_LENGTH: Final = 255  # a file name, never a path
+STEP_VALUES: Final = "IN ('pending','done','not_applicable')"
+RECOVERY_ON_WHERE: Final = "mode = 'on'"
+RECOVERY_OUTCOME_CHECK: Final = (
+    "(mode = 'on' AND ended_at IS NULL) "
+    "OR (mode = 'superseded' AND ended_at IS NOT NULL) "
+    "OR (mode = 'off' AND ended_at IS NOT NULL "
+    "AND reapply_erasure_ledger IN ('done','not_applicable') "
+    "AND mark_oms_unknown IN ('done','not_applicable') "
+    "AND reingest_mailboxes IN ('done','not_applicable') "
+    "AND repoll_unsubscribes IN ('done','not_applicable'))"
 )
 
 
@@ -209,3 +241,31 @@ class RestoreTestRecord(Base):
     suppression_count: Mapped[int | None] = mapped_column(Integer)
     provenance_count: Mapped[int | None] = mapped_column(Integer)
     detail: Mapped[str | None] = mapped_column(String(ERROR_LENGTH))
+
+
+class RecoveryStateRecord(Base):
+    """One restore of a backup and its recovery mode."""
+
+    __tablename__ = "recovery_state"
+    __table_args__ = (
+        CheckConstraint("mode IN ('on','off','superseded')", name="mode"),
+        CheckConstraint(f"reapply_erasure_ledger {STEP_VALUES}", name="reapply_erasure_ledger"),
+        CheckConstraint(f"mark_oms_unknown {STEP_VALUES}", name="mark_oms_unknown"),
+        CheckConstraint(f"reingest_mailboxes {STEP_VALUES}", name="reingest_mailboxes"),
+        CheckConstraint(f"repoll_unsubscribes {STEP_VALUES}", name="repoll_unsubscribes"),
+        CheckConstraint(RECOVERY_OUTCOME_CHECK, name="outcome"),
+        Index("uq_recovery_state_on", "mode", unique=True, sqlite_where=text(RECOVERY_ON_WHERE)),
+        Index("ix_recovery_state_restored_at", "restored_at"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    mode: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    restored_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    backup_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    source_name: Mapped[str] = mapped_column(String(NAME_LENGTH))
+    pre_restore_name: Mapped[str | None] = mapped_column(String(NAME_LENGTH))
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    reapply_erasure_ledger: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    mark_oms_unknown: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    reingest_mailboxes: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    repoll_unsubscribes: Mapped[str] = mapped_column(String(CODE_LENGTH))

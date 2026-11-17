@@ -28,8 +28,13 @@ Commands:
   the code ("newer than this code") or not this engine's, or the sync failed, and nothing was
   changed; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is invalid, or the arguments
   are).
-
-A later story adds ``restore``.
+- ``restore <file> [--yes]``: put the backup copy ``file`` (``nextron-<env>-<stamp>.db``, or
+  ``.db.enc`` encrypted with the Backup passphrase) back as this environment's database, with
+  the engine stopped, and turn recovery mode on, which holds sending until every recovery step
+  is done. The current database is saved to ``<backup dir>\\pre_restore\\`` first. Without
+  ``--yes`` it asks you to type ``yes`` (exit 0: restored; exit 1: refused, cancelled or failed,
+  the engine running included; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is invalid,
+  or an environment check failed).
 """
 
 import argparse
@@ -81,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=ENVIRONMENTS,
         help="the environment to sync, instead of NEXTRON_ENV (for this run only)",
     )
+    restore = commands.add_parser(
+        "restore",
+        help="restore a backup copy with the engine stopped, and hold sending in recovery mode",
+    )
+    restore.add_argument(
+        "file", help="the backup copy: nextron-<env>-<stamp>.db, or .db.enc (encrypted)"
+    )
+    restore.add_argument(
+        "--yes", action="store_true", help="restore without asking you to type yes"
+    )
     return parser
 
 
@@ -92,6 +107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return engine.open_dashboard()
     if args.command == "seed" and args.seed_command == "sync":
         return engine.seed_sync(env=args.env)
+    if args.command == "restore":
+        return engine.restore(args.file, yes=args.yes)
     if args.command == "doctor":
         return engine.doctor(env=args.env, as_json=args.as_json)
     raise AssertionError(f"the parser accepted a command main doesn't dispatch: {args}")

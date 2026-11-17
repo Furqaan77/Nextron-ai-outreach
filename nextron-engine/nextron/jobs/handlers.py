@@ -24,6 +24,11 @@ handler runs in.
   the monthly test); an unknown kind raises ``InvalidJob``. Otherwise it calls
   ``tests().run(kind)`` once and returns ``None`` (a monthly test that isn't due returns
   without a row).
+- ``check_recovery(checker)`` (Story 1.19): the ``check_recovery`` job's handler. ``checker``
+  returns the job layer's ``RecoveryRunner`` (``nextron.jobs.recovery``; ``nextron.main``
+  passes ``lambda: recovery_runner``). It calls ``checker().check()`` once, which runs the
+  pending recovery steps and ends recovery mode when they are all settled, and returns
+  ``None``. The payload is a trigger's tick, ``{"v": 1}``.
 """
 
 from collections.abc import Callable
@@ -89,3 +94,19 @@ def restore_test(tests: Callable[[], RestoreTesting]) -> Handler:
         tests().run(kind)
 
     return handle_restore_test
+
+
+class RecoveryChecking(Protocol):
+    """What ``check_recovery`` needs of the ``RecoveryRunner``."""
+
+    def check(self) -> bool: ...
+
+
+def check_recovery(checker: Callable[[], RecoveryChecking]) -> Handler:
+    """The ``check_recovery`` job's handler: run the pending recovery steps through
+    ``checker()``."""
+
+    def handle_check_recovery(job: Job) -> None:
+        checker().check()
+
+    return handle_check_recovery

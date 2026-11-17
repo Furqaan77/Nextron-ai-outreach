@@ -1,19 +1,24 @@
 """The notification area (UX-DR5, Story 1.12) through ``Dashboard(units=units)`` on a temporary
 database at head: ``GET /notifications``, ``POST /notifications/dismiss`` and its refusals, the
 base layout's notice elements, the exact ``htmx-config`` meta JSON, and the guard's plain-text
-401 for an HTMX request without a session."""
+401 for an HTMX request without a session. Since Story 1.19 also the recovery banner: first in
+the area while recovery mode is on (with the error count and the notifications after it), on
+every page that loads the area, and gone once recovery mode ends."""
 
 import json
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 
 import pytest
 from sqlalchemy import select
 
 from nextron.db.models.notify import NotificationRecord
+from nextron.app.ops.api import Recovery
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
+from nextron.domain.recovery import RECOVERY_BANNER
+from tests.fakes.clock import FrozenClock
 from nextron.web.app import STATIC_DIR
 from nextron.web.guard import LOCKED_TEXT
 from tests.asgi import DEFAULT_HOST, Reply, request
@@ -348,3 +353,101 @@ def test_any_other_request_without_a_session_gets_the_html_locked_page(
     assert reply.status == 401
     assert reply.header(b"content-type") == b"text/html; charset=utf-8"
     assert b"<h1>Dashboard locked</h1>" in reply.body
+
+
+# Row: Gate and UI (Story 1.19) -------------------------------------------------------------------
+
+T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+
+
+def turn_recovery_on(units: UnitOfWorkFactory) -> str:
+    with units.open():
+        row = Recovery(FrozenClock(T0)).begin(
+            backup_at=T0 - timedelta(days=1),
+            source_name="nextron-test-20261116T090000.000Z.db",
+            pre_restore_name=None,
+        )
+    return row.id
+
+
+def end_recovery(units: UnitOfWorkFactory) -> None:
+    recovery = Recovery(FrozenClock(T0 + timedelta(minutes=1)))
+    with units.open():
+        recovery.pending(frozenset())  # every step not applicable
+    with units.open():
+        assert recovery.finish() is False
+
+
+def banners(reply: Reply) -> list[dict[str, str | None]]:
+    return Tags(reply.text).find("p", **{"class": "recovery-banner"})
+
+
+def test_while_recovery_mode_is_on_the_area_starts_with_the_banner(
+    dashboard: Dashboard, units: UnitOfWorkFactory, session: tuple[bytes, str]
+) -> None:
+    turn_recovery_on(units)
+
+    reply = area(dashboard, session[0])
+
+    assert reply.status == 200
+    assert reply.text.startswith(
+        '<p class="recovery-banner" role="alert"><a href="/health/panel">'
+        f"{RECOVERY_BANNER}</a></p>"
+    )
+    assert banners(reply) == [{"class": "recovery-banner", "role": "alert"}]
+    assert Tags(reply.text).texts == [RECOVERY_BANNER]  # nothing else needs attention
+    assert shown_count(reply) is None
+
+
+def test_the_banner_comes_before_the_errors_and_the_notifications(
+    dashboard: Dashboard, units: UnitOfWorkFactory, session: tuple[bytes, str]
+) -> None:
+    seed(dashboard, units, ONE)
+    turn_recovery_on(units)
+
+    reply = area(dashboard, session[0])
+
+    texts = Tags(reply.text).texts
+    assert texts[0] == RECOVERY_BANNER
+    assert texts.index(RECOVERY_BANNER) < texts.index("Notifications (1)")
+
+
+def test_the_banner_shows_on_the_dismiss_answer_too(
+    dashboard: Dashboard, units: UnitOfWorkFactory, session: tuple[bytes, str]
+) -> None:
+    [notification_id] = seed(dashboard, units, ONE)
+    turn_recovery_on(units)
+
+    reply = dismiss(dashboard, session, form(notification=notification_id))
+
+    assert reply.status == 200
+    assert Tags(reply.text).texts == [RECOVERY_BANNER]
+
+
+def test_the_banner_is_gone_once_recovery_mode_ends(
+    dashboard: Dashboard, units: UnitOfWorkFactory, session: tuple[bytes, str]
+) -> None:
+    turn_recovery_on(units)
+    assert banners(area(dashboard, session[0]))
+
+    end_recovery(units)
+
+    reply = area(dashboard, session[0])
+    assert banners(reply) == []
+    assert reply.body == b""
+
+
+@pytest.mark.parametrize("path", ["/", "/settings", "/health/panel"])
+def test_every_page_loads_the_area_that_holds_the_banner(
+    dashboard: Dashboard, units: UnitOfWorkFactory, session: tuple[bytes, str], path: str
+) -> None:
+    turn_recovery_on(units)
+
+    reply = dashboard.get(path, cookie=session[0])
+
+    # the layout loads the area once per page view, and the area holds the banner
+    assert reply.status == 200
+    assert Tags(reply.text).find(
+        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load"}
+    )
+    assert banners(area(dashboard, session[0]))
