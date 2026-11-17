@@ -33,7 +33,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0001_1_3_persistence_foundation"
+HEAD = "0002_1_6_settings"
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def test_a_new_file_is_created_at_head(tmp_path: Path) -> None:
         assert ensure_current(engine) == (None, HEAD)
 
         assert current_revision(engine) == HEAD
-    assert {"alembic_version", "events"} <= tables(path)
+    assert {"alembic_version", "events", "settings"} <= tables(path)
 
 
 def test_a_database_at_head_is_left_alone(db_file: Path) -> None:

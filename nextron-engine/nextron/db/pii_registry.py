@@ -35,4 +35,11 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "actor": PiiClass.NONE,
         "at": PiiClass.NONE,
     },
+    # Later keys hold Nextron staff addresses and the postal address (Story 1.6).
+    "settings": {
+        "id": PiiClass.NONE,
+        "key": PiiClass.NONE,
+        "value": PiiClass.REDACT,
+        "updated_at": PiiClass.NONE,
+    },
 }

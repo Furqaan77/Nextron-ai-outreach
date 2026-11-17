@@ -1,19 +1,22 @@
 """Build the dashboard with fakes and open a session on it, as ``nextron open`` would.
 
 ``Dashboard`` reads through ``FakeUnits`` unless a test passes real units of work (the
-``units`` fixture). ``post`` sends a POST from the dashboard's own origin by default;
-``csrf_token(cookie)`` reads the session's CSRF token from ``GET /``'s ``<body hx-headers>``,
-as HTMX would.
+``units`` fixture); its ``Setup`` uses the dashboard's frozen clock. ``post`` sends a POST from
+the dashboard's own origin by default; ``csrf_token(cookie)`` reads the session's CSRF token
+from ``GET /``'s ``<body hx-headers>``, as HTMX would; ``form(**fields)`` builds an urlencoded
+body.
 """
 
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from urllib.parse import urlencode
 
 from fastapi import FastAPI
 
 from nextron.app.ops.api import DashboardEntry
+from nextron.app.setup.api import Setup
 from nextron.web.app import create_app
 from nextron.web.routing import Units
 from tests.asgi import DEFAULT_HOST, Headers, Reply, request
@@ -24,6 +27,12 @@ from tests.fakes.units import FakeUnits
 PORT = 8766  # matches tests.asgi.DEFAULT_HOST
 ORIGIN = b"http://" + DEFAULT_HOST
 FORM = b"application/x-www-form-urlencoded"
+
+
+def form(**fields: str) -> bytes:
+    """An ``application/x-www-form-urlencoded`` body of ``fields``, in order, as a browser
+    encodes it."""
+    return urlencode(fields).encode("ascii")
 
 
 class _BodyHeaders(HTMLParser):
@@ -61,15 +70,18 @@ class Dashboard:
     units: Units = field(default_factory=FakeUnits)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
+    setup: Setup = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
+        self.setup = Setup(self.clock)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
             version=self.version,
             port=PORT,
             entry=self.entry,
+            setup=self.setup,
             units=self.units,
             **extra,
         )

@@ -54,4 +54,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "at",
         ),
     },
+    "settings": {
+        "setup": ("id", "key", "value", "updated_at"),
+    },
 }

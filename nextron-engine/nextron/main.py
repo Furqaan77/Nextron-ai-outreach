@@ -46,8 +46,9 @@ any fails, and 2 when ``NEXTRON_ENV`` or another bootstrap setting is invalid. I
 creates nothing and starts no server.
 
 ``build_app`` wires the dashboard (AD-13): its ``DashboardEntry`` reads the one-time code
-through ``KeyringSecrets(<env>)`` (Windows Credential Manager, service ``nextron-engine/<env>``)
-and the ``SystemClock``, and its GET handlers read through ``units``; tests inject fakes.
+through ``KeyringSecrets(<env>)`` (Windows Credential Manager, service ``nextron-engine/<env>``),
+its ``Setup`` stores the settings, both on one ``SystemClock``, and its handlers open their
+units of work through ``units``; tests inject fakes.
 
 ``open_dashboard`` (``nextron open``) runs these steps and stops at the first failure:
 
@@ -77,6 +78,7 @@ from nextron import __version__
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.app.ops.api import DashboardEntry
+from nextron.app.setup.api import Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
@@ -142,12 +144,15 @@ def build_app(
     secrets: SecretsPort | None = None,
     clock: Clock | None = None,
 ) -> FastAPI:
-    """The dashboard app; its GET handlers read through ``units``."""
+    """The dashboard app; its handlers open their units of work through ``units``. One clock,
+    the system clock unless injected, serves the entry code and the settings."""
+    clock = clock if clock is not None else SystemClock()
     return create_app(
         env=config.env,
         version=__version__,
         port=config.port,
         entry=build_entry(config, secrets=secrets, clock=clock),
+        setup=Setup(clock),
         units=units,
     )
 

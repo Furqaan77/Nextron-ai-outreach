@@ -17,19 +17,23 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   whole seconds, and nothing else.
 - ``GET /static/{name}`` (``static``): the vendored HTMX build and ``app.css``, read once when
   the app is built; any other name is 404.
+- ``GET /settings`` (``settings_page``) and ``POST /settings`` (``settings_save``): the Settings
+  page and its save, both ``@personal_data(True)``; see ``nextron.web.settings_page``. The POST
+  saves through ``setup`` (``Setup.save``) in its own unit of work.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
 every response. Sessions live in a ``SessionStore`` made here, so a restart drops them all. A
 ``SecurityCheckFailed`` from ``require_csrf`` is answered with 403 by
-``nextron.web.csrf.security_check_failed``. The interactive API docs and the OpenAPI schema are
-off, because the dashboard serves no third-party scripts.
+``nextron.web.csrf.security_check_failed``, and a ``MalformedForm`` with 400 by
+``nextron.web.forms.malformed_form``. The interactive API docs and the OpenAPI schema are off,
+because the dashboard serves no third-party scripts.
 
 Pages render with ``app.state.templates`` (``template_environment()``: autoescaping on, plus the
-``nextron.web.templating`` helpers). ``page()`` passes ``nav`` and the session's ``csrf_token``,
-which ``base.html`` puts in ``<body hx-headers>`` for HTMX and ``csrf_field()`` puts in forms, and
-answers with ``Cache-Control: no-store``, whatever the route declared, because the page carries
-that token.
+``nextron.web.templating`` helpers). ``page(request, template, **context)`` passes ``context``,
+``nav`` and the session's ``csrf_token``, which ``base.html`` puts in ``<body hx-headers>`` for
+HTMX and ``csrf_field()`` puts in forms, and answers with ``Cache-Control: no-store``, whatever
+the route declared, because the page carries that token.
 
 The base layout's navigation lists, in ``NAV_SECTIONS`` order, each section whose page route
 (a GET route with that name) exists; a later story adds the route and its link appears.
@@ -40,17 +44,21 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
 from nextron.app.ops.api import DashboardEntry
+from nextron.app.queries import setup as setup_queries
+from nextron.app.setup.api import Setup
 from nextron.domain.open_code import CodeCheck
+from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
+from nextron.web.forms import FormFields, MalformedForm, form_fields, malformed_form
 from nextron.web.guard import Guard
 from nextron.web.routing import (
     Units,
@@ -60,6 +68,14 @@ from nextron.web.routing import (
     require_route_rules,
 )
 from nextron.web.sessions import SESSION_COOKIE, SessionStore
+from nextron.web.settings_page import (
+    FORM_TEMPLATE,
+    PAGE_TEMPLATE,
+    form_context,
+    shown_values,
+    stored_problems,
+    submitted_texts,
+)
 
 WEB_DIR: Final = Path(__file__).resolve().parent
 TEMPLATES_DIR: Final = WEB_DIR / "templates"
@@ -121,11 +137,13 @@ def create_app(
     version: str,
     port: int,
     entry: DashboardEntry,
+    setup: Setup,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
-    ``units.open(read_only=True)``. ``monotonic`` is injectable so tests control the uptime.
+    ``units.open(read_only=True)`` and its POST handlers open ``units.open()``. ``setup`` stores
+    the settings. ``monotonic`` is injectable so tests control the uptime.
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()
@@ -142,11 +160,12 @@ def create_app(
     )
     app.router.route_class = dashboard_route_class(units)
     app.add_exception_handler(SecurityCheckFailed, security_check_failed)
+    app.add_exception_handler(MalformedForm, malformed_form)
     app.state.templates = templates
 
-    def page(request: Request, template: str) -> HTMLResponse:
+    def page(request: Request, template: str, **context: object) -> HTMLResponse:
         body = templates.get_template(template).render(
-            nav=nav_links(request.app), csrf_token=request.scope.get(CSRF_SCOPE_KEY)
+            **context, nav=nav_links(request.app), csrf_token=request.scope.get(CSRF_SCOPE_KEY)
         )
         return HTMLResponse(body, headers=NO_STORE)  # it carries the session's CSRF token
 
@@ -192,6 +211,28 @@ def create_app(
         if content is None:
             return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
         return Response(content, media_type=STATIC_TYPES[name])
+
+    @app.get("/settings", name="settings_page")
+    @personal_data(True)
+    def settings_page(request: Request) -> HTMLResponse:
+        stored = setup_queries.stored_texts()
+        context = form_context(shown_values(stored), problems=stored_problems(stored))
+        return page(request, PAGE_TEMPLATE, **context)
+
+    @app.post("/settings", name="settings_save")
+    @personal_data(True)
+    def settings_save(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        texts = submitted_texts(fields)
+        try:
+            with units.open():
+                stored = setup.save(texts)
+        except InvalidSettings as refused:
+            # 200, so HTMX swaps the form in; nothing was saved
+            context = form_context(texts, problems=refused.problems, refused=True)
+            return page(request, FORM_TEMPLATE, **context)
+        return page(request, FORM_TEMPLATE, **form_context(shown_values(stored), saved=True))
 
     require_declared(app)
     require_route_rules(app)

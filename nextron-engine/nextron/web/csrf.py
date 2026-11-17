@@ -55,7 +55,8 @@ def _bytes(token: str) -> bytes:
     return token.encode("utf-8", errors="replace")
 
 
-def _media_type(content_type: str) -> str:
+def media_type(content_type: str) -> str:
+    """The lowercased media type of a ``Content-Type`` value, without its parameters."""
     return content_type.split(";", 1)[0].strip().lower()
 
 
@@ -65,7 +66,7 @@ async def _presented_tokens(request: Request) -> list[str]:
     content_types = request.headers.getlist("content-type")
     if len(content_types) > 1:
         raise SecurityCheckFailed()
-    if content_types and _media_type(content_types[0]) == FORM_MEDIA_TYPE:
+    if content_types and media_type(content_types[0]) == FORM_MEDIA_TYPE:
         body = await request.body()
         try:
             fields = parse_qs(

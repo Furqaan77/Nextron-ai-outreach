@@ -13,10 +13,12 @@ nothing from ``nextron.ports``.
 Modules: ``app`` (the factory and routes), ``guard`` (the ASGI middleware that checks ``Host``,
 the session, and ``Origin`` and ``Sec-Fetch-Site`` on unsafe methods, and stamps the security
 headers on every response), ``sessions`` (the in-memory session store, with each session's
-CSRF token), ``csrf`` (the ``require_csrf`` dependency every POST runs first), ``routing`` (the
-``@personal_data`` declaration every route makes, and the route class that runs each GET in a
-read-only unit of work and gives each POST the CSRF check), ``templating`` (the ``plain``,
-``safe_link`` and ``csrf_field`` helpers for untrusted text), ``templates/`` (Jinja2,
+CSRF token), ``csrf`` (the ``require_csrf`` dependency every POST runs first), ``forms`` (the
+``form_fields`` dependency that parses a POST's urlencoded form, and the 400 for a malformed
+one), ``routing`` (the ``@personal_data`` declaration every route makes, and the route class
+that runs each GET in a read-only unit of work and gives each POST the CSRF check),
+``settings_page`` (the Settings form, generated from the settings schema), ``templating`` (the
+``plain``, ``safe_link`` and ``csrf_field`` helpers for untrusted text), ``templates/`` (Jinja2,
 autoescaping on, no inline script or style; ``macros.html`` holds ``untrusted_block``) and
 ``static/`` (the vendored HTMX build and ``app.css``). ``tests/contracts/test_web_contracts.py``
 checks that no route handler is ``async def``, that every route declares ``personal_data`` and

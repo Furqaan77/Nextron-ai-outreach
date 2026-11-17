@@ -140,7 +140,14 @@ def async_handler_problems(root: Path) -> list[str]:
 def test_no_route_handler_is_async_at_run_time() -> None:
     app = Dashboard().app
 
-    assert [route.path for route in app.routes] == ["/enter", "/", "/health", "/static/{name}"]
+    assert [route.path for route in app.routes] == [
+        "/enter",
+        "/",
+        "/health",
+        "/static/{name}",
+        "/settings",
+        "/settings",
+    ]
     assert async_route_handlers(app) == []
 
 
@@ -244,8 +251,9 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(RuntimeError) as caught:
         Dashboard()
 
-    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}"):
+    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}", "GET /settings"):
         assert route in str(caught.value)
+    assert "POST /settings" in str(caught.value)
 
 
 @pytest.mark.parametrize("value", [None, 0, 1, "False"])
@@ -403,8 +411,9 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
     with pytest.raises(RuntimeError) as caught:
         Dashboard()
 
-    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}"):
+    for route in ("GET /enter", "GET /", "GET /health", "GET /static/{name}", "GET /settings"):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
+    assert "POST /settings: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
 
 # No inline script or style -------------------------------------------------------------------
@@ -491,7 +500,14 @@ def inline_code_problems(root: Path) -> list[str]:
 def test_templates_and_stylesheets_have_no_inline_code() -> None:
     templates = sorted(p.name for p in (PACKAGE / "web" / "templates").glob("*.html"))
 
-    assert templates == ["base.html", "home.html", "locked.html", "macros.html"]
+    assert templates == [
+        "base.html",
+        "home.html",
+        "locked.html",
+        "macros.html",
+        "settings.html",
+        "settings_form.html",
+    ]
     assert inline_code_problems(ENGINE_ROOT) == []
 
 

@@ -171,11 +171,21 @@ code.
 
   ```python
   @app.post("/settings", name="settings_save")     # gets Depends(require_csrf) from the route class
-  @personal_data(False)
-  def settings_save(request: Request) -> Response:
+  @personal_data(True)
+  def settings_save(
+      request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+  ) -> HTMLResponse:
+      texts = submitted_texts(fields)              # MalformedForm (400) for any other fields
       with units.open():                           # its own write unit of work (AD-3)
-          setup_api.save(...)
+          stored = setup.save(texts)
   ```
+
+  A handler reads its form through the `form_fields` dependency (`nextron/web/forms.py`), never
+  FastAPI's `Form()`, which needs `python-multipart`. It needs exactly one `Content-Type`
+  (`application/x-www-form-urlencoded`) and an ASCII body that `parse_qs` reads strictly
+  (percent-escapes as strict UTF-8, at most 1,000 fields). Anything else, or fields other than
+  the form's own, gets **400 `Request refused: malformed form`** as plain text, logged as
+  `request_refused` with `check=form`.
 
   A GET handler renders its page inside its body (`page(request, "x.html")`): the read-only
   unit of work closes before FastAPI serialises what the handler returns.
@@ -203,6 +213,97 @@ code.
 autoescaping, form and safe-allowlist rules. No form uses GET yet: every `<form>` must have
 `method="post"`, `hx-post` and `{{ csrf_field() }}`, and a future GET filter form must amend that
 contract.
+
+## Settings
+
+Every operator setting lives in the database and is declared once, in
+`nextron/domain/settings_schema.py` (AD-12); the bootstrap variables above are the only
+configuration outside it. Secrets never go there: they live in Credential Manager (see
+[Secrets](#secrets)).
+
+**Declare a key.** Add a member to `Key` and a `Setting` to `SCHEMA`, in the same change:
+
+```python
+class Key(StrEnum):
+    SENDER_TIMEZONE = "sender_timezone"
+    DAILY_CAP = "daily_cap"                     # new
+
+SCHEMA = _declare(
+    ...,
+    Setting(key=Key.DAILY_CAP, type=SettingType.INTEGER, section=Section.SENDING,
+            label="Daily send cap", unit="emails per inbox per day", default=30,
+            rules=(minimum(1, "1"), maximum(50, "50"))),
+)
+```
+
+- `type` is one of `string`, `integer`, `boolean`, `time` (`HH:MM`), `timezone` (an IANA name,
+  exactly as listed), `duration` (ISO 8601, such as `PT30M` or `P2W`), `money` (US dollars,
+  held as integer micro-dollars), `list` (one item per line) and `availability` (one
+  `Mon 09:00-17:00` slot per line). The module docstring gives each one's exact text form.
+- `section` is one of the six Settings page sections (UX-DR23): Footer and booking, Sender,
+  Alerts and recipients, Sending, Budget and limits, Engine. Pick one; don't add another.
+- `default` is a typed value (`30`, `time(7, 0)`, `timedelta(days=2)`, `20_000_000` for
+  $20.00, a tuple for a list) or `REQUIRED`.
+- A `time` or `availability` setting names, in `timezone_key`, the `timezone` setting its times
+  are in.
+- `rules` adds checks on the typed value: `minimum(bound, shown)`, `maximum(bound, shown)`,
+  `max_length(n)`, or any `Rule(name, message, check)`.
+- The key is lowercase snake_case of at most 31 characters.
+
+The module checks the whole schema when it is imported and raises `TypeError` on a bad
+declaration: a malformed key, a key missing from `Key` (or the other way round), an empty label
+or unit, a default that is invalid or not in canonical form, or a missing `timezone_key`. The
+contract tests (`tests/contracts/test_settings_contracts.py`) also refuse a key that could switch
+off Suppression, Eligibility, the footer, opt-out handling or Market rules (a boolean, or a key
+name or label such as `skip_eligibility` or "Disable footer"), and a key name or label that
+names a secret (`token`, `password`, `api_key`, `private`, or the word `key` or `pass`, and so
+on).
+
+**Read a value** through `queries.setup.get` inside the entry point's unit of work:
+
+```python
+from nextron.app.queries import setup as setup_queries
+
+zone = ZoneInfo(setup_queries.get(Key.SENDER_TIMEZONE))   # SettingNotSet until Mac sets it
+```
+
+`get` returns the typed value: the stored one, else the default. A required setting that nobody
+has set raises `SettingNotSet`, and a stored text that no longer parses (say, after a rule was
+tightened) raises `InvalidSettingValue`.
+
+**Write a value** with `Setup.set(key, value)` (`nextron/app/setup/api.py`), a use case, or on
+the Settings page. The `settings` table (owner `setup`) holds one row per stored key: the
+canonical text and `updated_at`. Each change logs `settings_changed` with the changed key names,
+never a value.
+
+**The Settings page** (`/settings`, in the navigation) is generated from the schema: one
+fieldset per section, each field with its unit and either "required" or its default as a hint,
+showing the stored value, else the default, else blank. Saving checks every field on the server
+and stores all or nothing: an invalid field shows its reason beside it, marked
+`aria-invalid="true"`, and the page says nothing was saved. A stored value that no longer passes
+its rules (one tightened since it was saved) is marked the same way when the page opens.
+
+**How blank fields, missing values and formats work:**
+
+1. **Blank fields.** A blank field with a default resets the setting to its default (its row is
+   deleted). A blank required field that was never set stays unset and isn't an error, so you
+   can save other settings before you have every value (the footer postal address is still
+   pending). A required value that has been set can't be cleared.
+2. **An unset required setting fails closed.** `get` raises `SettingNotSet` instead of
+   returning `None`, so nothing can run on a missing value by accident.
+3. **Durations have no years or months,** because those have no fixed length. A setting counted
+   in months (retention, say) is an `integer` with the unit "months".
+4. **Input formats.** Money is entered and shown in US dollars (up to 6 decimals) and held as
+   integer micro-dollars. Lists take one item per line. Weekly availability takes one
+   `Mon 09:00-17:00` slot per line, in the timezone its `timezone_key` names.
+5. **Unchanged defaults stay unset.** The page shows an unset setting's default as its value;
+   saving it back unchanged stores nothing, so a default changed in a later version still
+   applies.
+6. **A timezone is a region name,** such as `America/Los_Angeles` (or `UTC`). Fixed-offset and
+   legacy names such as `EST`, `EST5EDT`, `Zulu` or `Etc/GMT+5` are refused, because they don't
+   follow daylight saving. Region links such as `US/Pacific` work.
+7. **Setting names have at most 31 characters,** because log redaction masks any longer run as
+   `<key>`.
 
 ## Secrets
 

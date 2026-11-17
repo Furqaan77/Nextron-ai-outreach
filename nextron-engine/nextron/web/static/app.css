@@ -7,6 +7,7 @@
   --paper: #ffffff;
   --band: #f4f6f9;
   --accent: #2456c9;
+  --refused: #b3261e;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--ink);
   background: var(--paper);
@@ -78,4 +79,82 @@ p {
 .untrusted {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Forms (the Settings page): one fieldset per section, a hint under each field, and the
+   reason beside a refused field. */
+form {
+  max-width: 48rem;
+}
+
+fieldset {
+  margin: 0 0 1.5rem;
+  padding: 0.75rem 1rem 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+legend {
+  padding: 0 0.25rem;
+  font-weight: 600;
+}
+
+.field {
+  margin-bottom: 1rem;
+}
+
+.field label {
+  display: block;
+  font-weight: 600;
+}
+
+.field input,
+.field textarea,
+.field select {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.field [aria-invalid="true"] {
+  border-color: var(--refused);
+}
+
+.hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+}
+
+.field-error {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  color: var(--refused);
+}
+
+/* A form's outcome: saved, or refused with nothing saved. */
+.notice {
+  padding: 0.5rem 0.75rem;
+  color: var(--ink);
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}
+
+.notice-refused {
+  border-left-color: var(--refused);
+}
+
+button {
+  padding: 0.4rem 1rem;
+  font: inherit;
+  color: var(--paper);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
 }

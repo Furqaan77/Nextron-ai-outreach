@@ -1,0 +1,44 @@
+{#- The Settings form (nextron.web.settings_page): rendered inside settings.html, and alone as the
+    answer to POST /settings, which HTMX swaps in for this form. -#}
+{%- macro described(field) -%}
+id="setting-{{ field.key }}" name="{{ field.key }}" aria-describedby="hint-{{ field.key }}
+{%- if field.error %} error-{{ field.key }}{% endif %}"{% if field.error %} aria-invalid="true"{% endif %}
+{%- endmacro %}
+<form class="settings" method="post" hx-post="/settings" hx-target="this" hx-swap="outerHTML">
+{{ csrf_field() }}
+{%- if saved %}
+<p class="notice" role="status">Settings saved.</p>
+{%- endif %}
+{%- if refused %}
+<p class="notice notice-refused" role="alert">
+Nothing was saved. Correct the fields marked below, then save again.</p>
+{%- endif %}
+{%- for section in sections %}
+<fieldset>
+<legend>{{ section.legend }}</legend>
+{%- for field in section.fields %}
+<div class="field">
+<label for="setting-{{ field.key }}">{{ field.label }}</label>
+{%- if field.control == "textarea" %}
+<textarea {{ described(field) }} rows="5">
+{{ field.value }}</textarea>
+{%- elif field.control == "boolean" %}
+<select {{ described(field) }}>
+<option value=""{% if field.value not in ("true", "false") %} selected{% endif %}>
+{%- if field.required %}not set{% else %}use the default{% endif %}</option>
+<option value="true"{% if field.value == "true" %} selected{% endif %}>true</option>
+<option value="false"{% if field.value == "false" %} selected{% endif %}>false</option>
+</select>
+{%- else %}
+<input type="text" {{ described(field) }} value="{{ field.value }}">
+{%- endif %}
+<p class="hint" id="hint-{{ field.key }}">{{ field.hint }}</p>
+{%- if field.error %}
+<p class="field-error" id="error-{{ field.key }}">{{ field.error }}</p>
+{%- endif %}
+</div>
+{%- endfor %}
+</fieldset>
+{%- endfor %}
+<button type="submit">Save settings</button>
+</form>
