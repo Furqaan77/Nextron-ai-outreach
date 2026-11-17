@@ -1,12 +1,15 @@
 """The engine's lifespan (``nextron.main.build_app`` and ``engine_lifespan``, AD-2, AD-10,
 AD-20).
 
-With recording fakes: startup runs the runner (off the loop), the scheduler (on the loop's
-thread) and the heartbeat writer (off the loop) in that order, shutdown stops them in reverse,
-and each part that started is stopped after a later start, a stop or the server failed. On a
-real database at head, driven through the ASGI lifespan by hand: startup starts the named
-threads, beats once (the ``runner_heartbeat`` row and ``<data dir>\\heartbeat``), shutdown
-stops them, and building the app starts none.
+With recording fakes: startup runs the startup step (off the loop; Story 3.2), then the runner
+(off the loop), the scheduler (on the loop's thread) and the heartbeat writer (off the loop) in
+that order, shutdown stops them in reverse, and each part that started is stopped after a later
+start, a stop or the server failed; a failed startup step is logged (``startup_step_failed``,
+its type only) and the engine still starts. On the real ``build_app`` (Story 3.2), the startup
+step queues one ``resolve_contact_markets`` job when a Contact is unresolved, and none
+otherwise. On a real database at head, driven through the ASGI lifespan by hand: startup starts
+the named threads, beats once (the ``runner_heartbeat`` row and ``<data dir>\\heartbeat``),
+shutdown stops them, and building the app starts none.
 
 The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
 ``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the twelve
@@ -49,17 +52,23 @@ import nextron.adapters.telegram as telegram_adapter
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.crypto import ScryptParams
 from nextron import main
+from nextron.app.discovery.api import Discovery
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
+from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
+from nextron.app.queries import setup as setup_queries
+from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
 from nextron.db.metering import UsageMeter
 from nextron.db.migrations import head_revision
 from nextron.db.uow import UnitOfWorkFactory, current, in_transaction, use_case
+from nextron.domain import seed_yaml
 from nextron.domain.alert import Channel
 from nextron.domain.budget import ApiCall
+from nextron.domain.contacts import ContactCandidate, ProvenanceSource
 from nextron.domain.google_oauth import (
     CLIENT_SECRET_NAME,
     ClientConfig,
@@ -68,6 +77,8 @@ from nextron.domain.google_oauth import (
     encode_grant_meta,
 )
 from nextron.domain.job import Lane
+from nextron.domain.leads import LeadIdentity, LeadSource
+from nextron.domain.segments import validate_segments
 from nextron.domain.settings_schema import Key
 from nextron.jobs import scheduler as scheduler_module
 from nextron.jobs.runner import Runner
@@ -102,6 +113,11 @@ def no_backups() -> Any:
 def no_restore_tests() -> Any:
     """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
     raise AssertionError("no restore_test job runs in these tests")
+
+
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
 
 
 def job_threads() -> list[str]:
@@ -176,6 +192,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "send_alert",
         "backup_db",
         "restore_test",
+        "resolve_contact_markets",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -471,7 +488,10 @@ def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> N
 def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
     """A ``send_alert`` job that died on its first run; its id."""
     job_types = main.build_job_types(  # never called
-        alerts=InMemoryAlert, backups=no_backups, restore_tests=no_restore_tests
+        alerts=InMemoryAlert,
+        backups=no_backups,
+        restore_tests=no_restore_tests,
+        contact_markets=no_contact_markets,
     )
     queue = JobQueue(clock, job_types)
 
@@ -648,6 +668,63 @@ def test_the_built_panel_shows_a_grant_problem_and_a_crashed_check_without_calli
         units.engine.dispose()
 
 
+def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
+    """A Lead with one Contact whose Market was never resolved, as before Story 3.2."""
+    clock = FrozenClock(T)
+    segments_file = main.SEED_DIR / main.SEGMENTS_FILE_NAME
+    segments = validate_segments(seed_yaml.parse(segments_file.read_text(encoding="utf-8")))
+    with units.open():
+        Setup(clock).sync_segments(segments)
+
+    @use_case
+    def store() -> None:
+        with current().transaction():
+            [segment] = [s for s in setup_queries.segments() if s.key == "law_private_ai"]
+            identity = LeadIdentity(
+                "Smith Law", segment.id, web_domain="smith.co.uk", country_code="GB"
+            )
+            lead = Discovery(clock, Pipeline(clock)).upsert_lead(identity, LeadSource.CSV)
+            Research(clock).add_contact(
+                lead.lead_id,
+                ContactCandidate(name="Jane Doe"),
+                source=ProvenanceSource.CSV,
+                detail="a list",
+                retrieved_at=T,
+            )
+
+    with units.open():
+        store()
+    raw_query(units, "UPDATE contacts SET market_basis = NULL, tz_basis = NULL")
+
+
+def test_the_built_lifespan_queues_resolve_contact_markets_once_for_an_unresolved_contact(
+    units: UnitOfWorkFactory,
+) -> None:
+    load_bootstrap().data_dir.mkdir(parents=True)
+    store_unresolved_contact(units)
+
+    sent, _ = drive_lifespan(build(units))
+
+    assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+    jobs = raw_query(
+        units,
+        "SELECT lane, idempotency_key, payload FROM jobs WHERE type = ?",
+        ("resolve_contact_markets",),
+    )
+    assert jobs == [("bulk", "resolve_contact_markets:global:1", '{"v":1}')]
+
+
+def test_the_built_lifespan_queues_nothing_when_every_contact_is_resolved(
+    units: UnitOfWorkFactory,
+) -> None:
+    load_bootstrap().data_dir.mkdir(parents=True)
+
+    sent, _ = drive_lifespan(build(units))
+
+    assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+    assert raw_query(units, "SELECT COUNT(*) FROM jobs") == [(0,)]
+
+
 def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_stops_them(
     units: UnitOfWorkFactory, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -708,11 +785,12 @@ class Parts:
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
 
-    def lifespan(self) -> main.Lifespan:
+    def lifespan(self, *, startup: bool = False) -> main.Lifespan:
         return main.engine_lifespan(
             self.runner,  # type: ignore[arg-type]
             self.scheduler,  # type: ignore[arg-type]
             self.writer,  # type: ignore[arg-type]
+            startup=(lambda: self.record("startup")) if startup else None,
         )
 
 
@@ -739,12 +817,14 @@ class _SchedulerPart:
         self.parts.record("scheduler.stop")
 
 
-def serve(parts: Parts, *, server_fails: bool = False) -> threading.Thread:
+def serve(
+    parts: Parts, *, server_fails: bool = False, startup: bool = False
+) -> threading.Thread:
     """Run the lifespan around a server that returns (or raises ``Failed``); the loop's
     thread."""
 
     async def run() -> threading.Thread:
-        async with parts.lifespan()(FastAPI()):
+        async with parts.lifespan(startup=startup)(FastAPI()):
             parts.calls.append(("serving", threading.current_thread()))
             if server_fails:
                 raise Failed("the server failed")
@@ -769,6 +849,43 @@ def test_startup_runs_runner_scheduler_writer_and_shutdown_reverses_it() -> None
     ]
     on_loop = {name for name, thread in parts.calls if thread is loop_thread}
     assert on_loop == {"scheduler.start", "serving", "scheduler.stop"}
+
+
+STARTUP_THEN_PARTS = [
+    "startup",
+    "runner.start",
+    "scheduler.start",
+    "writer.start",
+    "serving",
+    "writer.stop",
+    "scheduler.stop",
+    "runner.stop",
+]
+
+
+def test_the_startup_step_runs_off_the_loop_before_the_runner_starts() -> None:
+    parts = Parts()
+
+    loop_thread = serve(parts, startup=True)
+
+    assert parts.names() == STARTUP_THEN_PARTS
+    [thread] = [thread for name, thread in parts.calls if name == "startup"]
+    assert thread is not loop_thread
+
+
+def test_a_failed_startup_step_is_logged_by_type_and_the_engine_still_starts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    parts = Parts("startup")
+
+    serve(parts, startup=True)
+
+    assert parts.names() == STARTUP_THEN_PARTS
+    [failed] = [r for r in caplog.records if r.getMessage() == "startup_step_failed"]
+    assert (failed.name, failed.levelno) == ("nextron.main", logging.ERROR)
+    assert failed.error == "Failed"  # type: ignore[attr-defined]
+    assert failed.exc_info is None  # the type only: no traceback and no message
 
 
 def test_every_part_stops_when_serving_fails() -> None:

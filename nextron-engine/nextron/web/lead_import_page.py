@@ -25,8 +25,9 @@ default is no default.
   ``file``, marked ``aria-invalid``), with the origin and default typed so far kept;
 - over the body limit (``UploadForm.too_large``): "The file is over 5 MB." by the file, with the
   origin and default reset, because the body was discarded unread;
-- imported: the summary above a fresh form: the imported, merged and rejected counts, each
-  rejected row (number, label, reason) and each imported row with notes (number, label, notes);
+- imported: the summary above a fresh form: the imported, merged, rejected and blocked-by-Market
+  counts, each rejected row (number, label, reason), each row blocked by Market (number, label,
+  reason; Story 3.2) and each imported row with notes (number, label, notes), in that order;
 - stopped (``ImportStopped``): the summary so far and ``stop_notice(at_row)``, with the origin
   and default kept, since the notice says to import the same file again.
 

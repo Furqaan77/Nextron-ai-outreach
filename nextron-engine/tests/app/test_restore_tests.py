@@ -88,6 +88,11 @@ ROW_COLUMNS = (
 )
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -114,6 +119,7 @@ class World:
             alerts=lambda: self.notify,
             backups=lambda: self.backups,
             restore_tests=lambda: self.tests,
+            contact_markets=no_contact_markets,
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(

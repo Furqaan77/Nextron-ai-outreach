@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 23:31
+last_updated: 11-18-2026 01:30
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -80,7 +80,7 @@ development_status:
 
   epic-3: in-progress
   3-1-seed-the-us-and-uk-market-rules: review
-  3-2-resolve-each-contact-s-market-and-timezone: backlog
+  3-2-resolve-each-contact-s-market-and-timezone: review
   3-3-record-suppression-entries-through-one-writer: backlog
   3-4-gate-every-outreach-path-with-assert_contactable: backlog
   3-5-manage-the-suppression-list-from-the-dashboard: backlog

@@ -46,8 +46,10 @@ unless a test passes another). The panel's "Run restore test now" queues its job
 
 Its ``LeadImports`` (``lead_imports``, Story 2.3) uses the same clock, a ``Discovery`` and a
 ``Research`` on it, and ``email_syntax`` (a ``FakeEmailSyntax`` unless a test passes another);
-the CSV import page runs it, so it needs real units of work too. ``upload(**texts, file=...)``
-builds a ``multipart/form-data`` body as a browser would, with its ``Content-Type``.
+the CSV import page runs it, so it needs real units of work too. Its ``ContactMarkets``
+(``contact_markets``, Story 3.2) uses the same clock, that ``Research`` and ``queue``.
+``upload(**texts, file=...)`` builds a ``multipart/form-data`` body as a browser would, with its
+``Content-Type``.
 """
 
 import json
@@ -74,7 +76,7 @@ from nextron.app.ops.api import (
     RestoreTests,
 )
 from nextron.app.pipeline.api import Pipeline
-from nextron.app.research.api import Research
+from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.alert import Channel
@@ -251,6 +253,8 @@ class Dashboard:
     backups: Backups = field(init=False)
     restore_tests: RestoreTests = field(init=False)
     lead_imports: LeadImports = field(init=False)
+    research: Research = field(init=False)
+    contact_markets: ContactMarkets = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -271,6 +275,7 @@ class Dashboard:
             alerts=lambda: self.notify,
             backups=lambda: self.backups,
             restore_tests=lambda: self.restore_tests,
+            contact_markets=lambda: self.contact_markets,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -307,10 +312,12 @@ class Dashboard:
             issues=main.build_health_issues(budget=self.budget),
             readiness=self.readiness,
         )
+        self.research = Research(self.clock)
+        self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
         self.lead_imports = LeadImports(
             self.clock,
             Discovery(self.clock, Pipeline(self.clock)),
-            Research(self.clock),
+            self.research,
             self.email_syntax,
         )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}

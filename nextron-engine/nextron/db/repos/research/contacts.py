@@ -8,9 +8,14 @@ nothing; ``nextron.app.research`` does.
 - ``StoredContact``: one row;
 - ``get(contact_id)``: the row, or ``None``;
 - ``for_lead(lead_id)``: the Lead's Contacts, by ``created_at``, then ``id``;
-- ``insert(...) -> id``: a new row, created and updated at ``at``; ``is_primary`` is left to
-  its server default (false) and ``tz`` and ``market_id`` are NULL;
+- ``insert(...) -> id``: a new row (with its office's ``office_country`` and
+  ``office_region``), created and updated at ``at``; ``is_primary`` is left to its server
+  default (false), and ``tz``, ``market_id`` and both bases are NULL until ``research``
+  resolves it;
 - ``fill(contact_id, updated_at, **fields)``: sets the named columns and ``updated_at``;
+- ``unresolved_ids(after, limit)``: up to ``limit`` ids of Contacts not yet resolved
+  (``market_basis`` NULL) with an id after ``after`` (``None``: from the first), by id;
+- ``has_unresolved()``: whether any Contact is not yet resolved;
 - ``has_primary(lead_id)``: whether one of the Lead's Contacts is its Primary;
 - ``move_to_lead(from_lead, to_lead, updated_at, clear_primary)``: gives every Contact of
   ``from_lead`` to ``to_lead`` (and clears their Primary flags when ``clear_primary``), in one
@@ -43,6 +48,10 @@ class StoredContact:
     is_primary: bool
     tz: str | None
     market_id: str | None
+    market_basis: str | None
+    tz_basis: str | None
+    office_country: str | None
+    office_region: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -58,6 +67,10 @@ _COLUMNS = (
     ContactRecord.is_primary,
     ContactRecord.tz,
     ContactRecord.market_id,
+    ContactRecord.market_basis,
+    ContactRecord.tz_basis,
+    ContactRecord.office_country,
+    ContactRecord.office_region,
     ContactRecord.created_at,
     ContactRecord.updated_at,
 )
@@ -88,6 +101,8 @@ def insert(
     email: str | None,
     address_class: str | None,
     linkedin_url: str | None,
+    office_country: str | None,
+    office_region: str | None,
     at: datetime,
 ) -> str:
     """Store a new Contact on the Lead ``lead_id``, created and updated at ``at``; return its
@@ -102,6 +117,8 @@ def insert(
             email=email,
             address_class=address_class,
             linkedin_url=linkedin_url,
+            office_country=office_country,
+            office_region=office_region,
             created_at=at,
             updated_at=at,
         )
@@ -119,6 +136,22 @@ def fill(contact_id: str, updated_at: datetime, **fields: str | None) -> None:
         .where(ContactRecord.id == contact_id)
         .values(updated_at=updated_at, **fields)
     )
+
+
+def unresolved_ids(after: str | None, limit: int) -> tuple[str, ...]:
+    """Up to ``limit`` ids of the Contacts with no ``market_basis`` whose id is after ``after``
+    (every one with ``None``), by id."""
+    statement = select(ContactRecord.id).where(ContactRecord.market_basis.is_(None))
+    if after is not None:
+        statement = statement.where(ContactRecord.id > after)
+    statement = statement.order_by(ContactRecord.id).limit(limit)
+    return tuple(current().session.execute(statement).scalars())
+
+
+def has_unresolved() -> bool:
+    """Whether any Contact has no ``market_basis`` yet."""
+    statement = select(exists().where(ContactRecord.market_basis.is_(None)))
+    return bool(current().session.execute(statement).scalar_one())
 
 
 def has_primary(lead_id: str) -> bool:

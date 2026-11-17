@@ -276,7 +276,11 @@ RESTORE_FORM = {
 RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
     [["Job type", "Last success"], ["backup_db", "never"], ["restore_test", "never"]],
-    [["Job type", "Last success"], ["send_alert", "never"]],
+    [
+        ["Job type", "Last success"],
+        ["send_alert", "never"],
+        ["resolve_contact_markets", "never"],  # Story 3.2's one-off, group Other
+    ],
 ]
 
 
@@ -382,7 +386,11 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
     ]
     assert panel.tables[:2] == [
         [["Job type", "Last success"], ["backup_db", "never"], ["restore_test", "never"]],
-        [["Job type", "Last success"], ["send_alert", "2026-11-17 09:05:00 UTC"]],
+        [
+            ["Job type", "Last success"],
+            ["send_alert", "2026-11-17 09:05:00 UTC"],
+            ["resolve_contact_markets", "never"],
+        ],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms
     assert backup_form == (BACKUP_FORM, [csrf_input(session[1])])

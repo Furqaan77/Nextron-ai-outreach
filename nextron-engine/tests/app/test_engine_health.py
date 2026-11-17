@@ -65,6 +65,11 @@ def no_restore_tests() -> Any:
     raise AssertionError("no restore_test job runs in these tests")
 
 
+def no_contact_markets() -> Any:
+    """``build_job_types``'s ``contact_markets`` where no ``resolve_contact_markets`` job runs."""
+    raise AssertionError("no resolve_contact_markets job runs in these tests")
+
+
 def enrich(job: Job) -> None:
     return None
 
@@ -184,7 +189,10 @@ def clock() -> FrozenClock:
 def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
     """The real registered ``send_alert``, plus ``enrich_lead`` (Enrichment)."""
     registered = main.build_job_types(
-        alerts=world_notify, backups=no_backups, restore_tests=no_restore_tests
+        alerts=world_notify,
+        backups=no_backups,
+        restore_tests=no_restore_tests,
+        contact_markets=no_contact_markets,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
@@ -280,7 +288,10 @@ def test_the_real_registry_groups_backup_db_and_restore_test_as_backup_and_send_
     health = EngineHealth(
         world.clock,
         main.build_job_types(
-            alerts=lambda: world.notify, backups=no_backups, restore_tests=no_restore_tests
+            alerts=lambda: world.notify,
+            backups=no_backups,
+            restore_tests=no_restore_tests,
+            contact_markets=no_contact_markets,
         ),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
@@ -292,7 +303,10 @@ def test_the_real_registry_groups_backup_db_and_restore_test_as_backup_and_send_
         GroupRuns(
             JobGroup.BACKUP, (LastRun("backup_db", None), LastRun("restore_test", None))
         ),
-        GroupRuns(JobGroup.OTHER, (LastRun("send_alert", None),)),
+        GroupRuns(
+            JobGroup.OTHER,
+            (LastRun("send_alert", None), LastRun("resolve_contact_markets", None)),
+        ),
     )
     assert report.readiness == READINESS
     assert report.issues == ()

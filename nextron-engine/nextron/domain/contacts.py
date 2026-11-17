@@ -5,9 +5,9 @@ Provenance Record: ``csv``, ``website``, ``signal_inbox``, ``referral``, ``repli
 ``operator``, ``pattern``, ``finder`` and ``eligibility_basis``. **``ProvenanceSubject``** is
 what a record is about: the ``contact`` (its name, role or LinkedIn URL) or its ``address``.
 
-**``ContactCandidate(name=None, role=None, email=None, linkedin_url=None)``** is a person that
-``Research.add_contact`` matches and stores on a Lead. It is frozen and checks itself when
-built:
+**``ContactCandidate(name=None, role=None, email=None, linkedin_url=None, office=None)``** is a
+person that ``Research.add_contact`` matches and stores on a Lead. It is frozen and checks itself
+when built:
 
 - ``name`` and ``role``: each ``None`` or a ``str`` of 1 to 200 characters, equal to its own
   strip, with no ``Cc``, ``Cf``, ``Zl`` or ``Zp`` character; ``name`` must also give a
@@ -15,6 +15,9 @@ built:
 - ``email``: ``None`` or already normalised (``normalize_email`` returns it unchanged);
 - ``linkedin_url``: ``None`` or already normalised (``normalize_linkedin_url`` returns it
   unchanged): a profile URL is stored as a source, never fetched (FR-49);
+- ``office`` (Story 3.2): ``None`` or a ``nextron.domain.geo.Location``, the place the person's
+  office is in (its country and, in the US, its state); a Contact's Market and timezone are
+  resolved from it (``nextron.domain.contact_market``);
 - at least one of ``name`` and ``email`` is set.
 
 A problem raises ``InvalidContact(field, reason)`` (code ``invalid_contact``, message
@@ -29,6 +32,7 @@ from enum import StrEnum
 from typing import Final
 
 from nextron.domain.errors import DomainError
+from nextron.domain.geo import Location
 from nextron.domain.identity import (
     IdentityError,
     normalize_email,
@@ -115,6 +119,7 @@ class ContactCandidate:
     role: str | None = None
     email: str | None = None
     linkedin_url: str | None = None
+    office: Location | None = None
 
     def __post_init__(self) -> None:
         if self.name is not None:
@@ -125,6 +130,8 @@ class ContactCandidate:
             _check_normalised("email", self.email, normalize_email)
         if self.linkedin_url is not None:
             _check_normalised("linkedin_url", self.linkedin_url, normalize_linkedin_url)
+        if self.office is not None and not isinstance(self.office, Location):
+            raise InvalidContact("office", "must be a Location or None")
         if self.name is None and self.email is None:
             raise InvalidContact("identity", "set at least one of name, email")
 

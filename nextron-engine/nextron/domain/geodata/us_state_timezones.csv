@@ -1,0 +1,77 @@
+# The US states and the District of Columbia, each with its IANA timezone (Story 3.2, AD-11).
+# Read by nextron/domain/geo.py; its SHA-256 is pinned in tests/contracts/test_vendored_assets.py.
+#
+# A state that spans more than one zone takes the zone where most of its people live:
+#   AK America/Anchorage (Adak and the western Aleutians keep Hawaii-Aleutian time)
+#   AZ America/Phoenix (the Navajo Nation keeps daylight saving time)
+#   FL America/New_York (the western Panhandle is Central)
+#   ID America/Boise (the northern panhandle is Pacific)
+#   IN America/Indiana/Indianapolis (the north-west and south-west corners are Central)
+#   KS America/Chicago (four western counties are Mountain)
+#   KY America/New_York (the west is Central)
+#   MI America/Detroit (four Upper Peninsula counties are Central)
+#   NE America/Chicago (the western panhandle is Mountain)
+#   ND America/Chicago (the south-west is Mountain)
+#   NV America/Los_Angeles (West Wendover is Mountain)
+#   OR America/Los_Angeles (most of Malheur County is Mountain)
+#   SD America/Chicago (the west is Mountain)
+#   TN America/Chicago (East Tennessee is Eastern)
+#   TX America/Chicago (El Paso and Hudspeth counties are Mountain)
+#
+# Territories (Puerto Rico, Guam, the US Virgin Islands, American Samoa, the Northern Mariana
+# Islands) have their own ISO 3166-1 codes, so they aren't US states here.
+#
+# Format: lines starting with # and blank lines are skipped; the first other line is the header
+# below; then exactly 51 rows of a two-capital code (unique), an IANA timezone and a name.
+code,timezone,name
+AK,America/Anchorage,Alaska
+AL,America/Chicago,Alabama
+AR,America/Chicago,Arkansas
+AZ,America/Phoenix,Arizona
+CA,America/Los_Angeles,California
+CO,America/Denver,Colorado
+CT,America/New_York,Connecticut
+DC,America/New_York,District of Columbia
+DE,America/New_York,Delaware
+FL,America/New_York,Florida
+GA,America/New_York,Georgia
+HI,Pacific/Honolulu,Hawaii
+IA,America/Chicago,Iowa
+ID,America/Boise,Idaho
+IL,America/Chicago,Illinois
+IN,America/Indiana/Indianapolis,Indiana
+KS,America/Chicago,Kansas
+KY,America/New_York,Kentucky
+LA,America/Chicago,Louisiana
+MA,America/New_York,Massachusetts
+MD,America/New_York,Maryland
+ME,America/New_York,Maine
+MI,America/Detroit,Michigan
+MN,America/Chicago,Minnesota
+MO,America/Chicago,Missouri
+MS,America/Chicago,Mississippi
+MT,America/Denver,Montana
+NC,America/New_York,North Carolina
+ND,America/Chicago,North Dakota
+NE,America/Chicago,Nebraska
+NH,America/New_York,New Hampshire
+NJ,America/New_York,New Jersey
+NM,America/Denver,New Mexico
+NV,America/Los_Angeles,Nevada
+NY,America/New_York,New York
+OH,America/New_York,Ohio
+OK,America/Chicago,Oklahoma
+OR,America/Los_Angeles,Oregon
+PA,America/New_York,Pennsylvania
+RI,America/New_York,Rhode Island
+SC,America/New_York,South Carolina
+SD,America/Chicago,South Dakota
+TN,America/Chicago,Tennessee
+TX,America/Chicago,Texas
+UT,America/Denver,Utah
+VA,America/New_York,Virginia
+VT,America/New_York,Vermont
+WA,America/Los_Angeles,Washington
+WI,America/Chicago,Wisconsin
+WV,America/New_York,West Virginia
+WY,America/Denver,Wyoming

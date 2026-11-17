@@ -1,7 +1,8 @@
 """``nextron.domain.lead_import`` (FR-59, FR-9, FR-15, FR-49): Story 2.3's planner rows of the
 I/O matrix (happy path, refused files, rejected rows, a failing email), the header aliases, the
-limits, the row numbering, the Contact cell notes and ``check_origin``; and the import's
-Segment lookup (``nextron.app.discovery.api._segment_lookup``)."""
+limits, the row numbering, the Contact cell notes and ``check_origin``; the import's Segment
+lookup (``nextron.app.discovery.api._segment_lookup``); and Story 3.2's rows blocked by Market
+(a valid country outside ``enabled_countries``, checked right after the country)."""
 
 import dataclasses
 import inspect
@@ -36,11 +37,13 @@ from nextron.domain.lead_import import (
     REASON_BAD_COUNTRY,
     REASON_BAD_NAME,
     REASON_BAD_WEBSITE,
+    REASON_BLOCKED,
     REASON_DENIED,
     REASON_EXTRA_CELLS,
     REASON_NO_SEGMENT,
     REASON_SHARED_PLATFORM,
     REASON_UNKNOWN_SEGMENT,
+    BlockedRow,
     ImportField,
     ImportPlan,
     ImportRefused,
@@ -64,6 +67,7 @@ SEGMENTS = {
 }
 HEADER = "Organization name,Website,Country"
 BOM = b"\xef\xbb\xbf"
+ENABLED = frozenset({"US", "GB"})  # the shipped Markets' countries (Story 3.2)
 
 
 def csv_bytes(*lines: str, bom: bool = False) -> bytes:
@@ -76,10 +80,15 @@ def plan(
     *,
     default: str | None = LAW,
     email_ok: FakeEmailSyntax | None = None,
+    enabled: frozenset[str] = ENABLED,
 ) -> ImportPlan:
     checker = email_ok if email_ok is not None else FakeEmailSyntax()
     return plan_import(
-        data, segments=SEGMENTS, default_segment_id=default, email_ok=checker.is_valid
+        data,
+        segments=SEGMENTS,
+        default_segment_id=default,
+        email_ok=checker.is_valid,
+        enabled_countries=enabled,
     )
 
 
@@ -127,6 +136,7 @@ def test_the_happy_path() -> None:
             ),
         ),
         rejected=(),
+        blocked=(),
     )
 
 
@@ -635,5 +645,73 @@ def test_the_segment_lookup_folds_keys_and_names_and_a_key_beats_a_name() -> Non
         segments=lookup,
         default_segment_id=None,
         email_ok=FakeEmailSyntax().is_valid,
+        enabled_countries=ENABLED,
     ).rows
     assert row.identity.segment_id == LAW
+
+
+# Blocked by Market (Story 3.2) ----------------------------------------------------------------
+
+
+def test_a_valid_country_outside_the_enabled_markets_blocks_the_row() -> None:
+    found = plan(
+        csv_bytes(
+            HEADER + ",Contact name,Email",
+            "Maple Law,maple.ca,CA,Ann Lee,ann@maple.ca",
+            "Berg Recht,berg.de,de,,",
+            "Smith Law,smith.co.uk,GB,Jo Bell,",
+        )
+    )
+
+    assert [row.number for row in found.rows] == [4]
+    assert found.rejected == ()
+    assert found.blocked == (BlockedRow(2, "Maple Law", "CA"), BlockedRow(3, "Berg Recht", "DE"))
+    assert [row.reason for row in found.blocked] == [
+        "Country CA isn't an enabled Market",
+        "Country DE isn't an enabled Market",
+    ]
+    assert REASON_BLOCKED.format(country="CA") == found.blocked[0].reason
+
+
+def test_the_market_check_comes_right_after_the_country_check() -> None:
+    found = plan(
+        csv_bytes(
+            HEADER + ",Segment",
+            "A,a.com,ZZ,",  # an unknown country is rejected, not blocked
+            "B,b.ca,CA,Nope",  # blocked before its unknown Segment is looked at
+            "C,linkedin.com/in/c,CA,",  # rejected before the country check
+            "D,d.com,US,Nope",
+        )
+    )
+
+    assert reasons(found) == [
+        (2, "A", REASON_BAD_COUNTRY),
+        (4, "C", REASON_DENIED),
+        (5, "D", REASON_UNKNOWN_SEGMENT),
+    ]
+    assert found.blocked == (BlockedRow(3, "B", "CA"),)
+    assert found.rows == ()
+
+
+def test_uk_is_gb_for_the_market_check() -> None:
+    [row] = plan(csv_bytes(HEADER, "Firm,firm.co.uk,uk")).rows
+
+    assert row.identity.country_code == "GB"
+
+
+def test_with_no_enabled_market_every_valid_row_is_blocked() -> None:
+    found = plan(csv_bytes(HEADER, "A,a.com,GB", "B,b.com,US", "C,c.com,ZZ"), enabled=frozenset())
+
+    assert found.rows == ()
+    assert reasons(found) == [(4, "C", REASON_BAD_COUNTRY)]
+    assert [(row.number, row.label, row.country) for row in found.blocked] == [
+        (2, "A", "GB"),
+        (3, "B", "US"),
+    ]
+
+
+def test_plan_import_requires_the_enabled_countries() -> None:
+    parameter = inspect.signature(plan_import).parameters["enabled_countries"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty

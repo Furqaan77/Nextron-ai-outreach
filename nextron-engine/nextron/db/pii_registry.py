@@ -152,6 +152,11 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "is_primary": PiiClass.NONE,
         "tz": PiiClass.NONE,
         "market_id": PiiClass.NONE,
+        # Story 3.2: why the Market and timezone apply (codes only), and the office's place
+        "market_basis": PiiClass.NONE,
+        "tz_basis": PiiClass.NONE,
+        "office_country": PiiClass.NULL,
+        "office_region": PiiClass.NULL,
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
