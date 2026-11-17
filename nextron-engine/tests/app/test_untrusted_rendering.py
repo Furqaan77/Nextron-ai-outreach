@@ -199,7 +199,11 @@ def test_hostile_markup_renders_as_escaped_text(rendered: dict[str, Any]) -> Non
     assert not page.find("img") and not page.find("b") and not page.find("i")
     assert not [attrs for _, attrs in page.tags if any(k.startswith("on") for k in attrs)]
     hx_tags = [tag for tag, attrs in page.tags if "hx-post" in attrs or "hx-trigger" in attrs]
-    assert hx_tags == ["form"]  # only the page's own form posts through HTMX
+    # only the page's own form posts through HTMX; the layout's notification list loads once
+    assert hx_tags == ["div", "form"]
+    assert [attrs for tag, attrs in page.tags if "hx-trigger" in attrs] == [
+        {"id": "notification-list", "hx-get": "/notifications", "hx-trigger": "load"}
+    ]
     assert [attrs for tag, attrs in page.tags if tag == "button"] == [{"type": "submit"}]
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert" not in html and "<b>" not in html

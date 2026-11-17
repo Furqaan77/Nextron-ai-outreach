@@ -28,9 +28,24 @@ the file goes stale.
   first, so a database that keeps failing leaves the file stale too, and a failed row write
   touches no file. Any failure raises to the caller. It writes no ``events`` row, and neither
   the row nor the file holds personal data.
+
+``DeadJobAlerts(notify)`` (AD-15, AD-20) raises the ``job_dead`` ops alert. jobqueue sits below
+notify in the app DAG, so it can't raise the alert itself, and a job dies in four places (a
+failed run, a reaped lease, an unrunnable claim and a release at shutdown); this sweep reads
+only committed ``dead`` rows instead. The runner (``nextron.jobs.runner``) calls it after a run
+whose job died and on every keeper tick.
+
+- ``@use_case alert_dead_jobs() -> int``: in one transaction, for every ``dead`` job
+  (``queries.jobqueue.dead_jobs()``) whose id isn't among ``queries.notify.subjects("job_dead")``,
+  it calls ``notify.alert("job_dead", <job id>, job_dead_text(type, id, attempts), channels)``
+  with ``{telegram, dashboard}``, or ``{dashboard}`` for a dead ``send_alert`` job, so a broken
+  Telegram can't feed itself. Each job is alerted once, a crash between a job's death and the
+  sweep included. It returns how many it alerted and logs ``dead_jobs_alerted`` (``count``)
+  when that is above 0.
 """
 
 import contextlib
+import logging
 import os
 import secrets
 import threading
@@ -39,14 +54,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final
 
+from nextron.app.notify.api import Notify
+from nextron.app.queries import jobqueue as jobqueue_queries
+from nextron.app.queries import notify as notify_queries
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
 from nextron.db.uow import current, use_case
+from nextron.domain.alert import JOB_DEAD, SEND_ALERT_JOB, Channel, job_dead_text
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import SecretsPort
 
 OPEN_CODE_SECRET: Final = "session/open_code"
+ALL_CHANNELS: Final = (Channel.TELEGRAM, Channel.DASHBOARD)
+DASHBOARD_ONLY: Final = (Channel.DASHBOARD,)  # a dead send_alert job: never Telegram again
+
+log = logging.getLogger(__name__)
 
 
 def new_open_code() -> str:
@@ -117,3 +140,27 @@ class Heartbeat:
         with current().transaction():
             heartbeat_repo.save(pid=os.getpid(), started_at=self._started_at, beat_at=now)
         self._file.touch()
+
+
+class DeadJobAlerts:
+    """The ``job_dead`` sweep: one ops alert per dead job; see the module docstring."""
+
+    def __init__(self, notify: Notify) -> None:
+        self._notify = notify
+
+    @use_case
+    def alert_dead_jobs(self) -> int:
+        """Alert every dead job not yet alerted; how many were alerted."""
+        count = 0
+        with current().transaction():
+            alerted = notify_queries.subjects(JOB_DEAD)
+            for job in jobqueue_queries.dead_jobs():
+                if job.id in alerted:
+                    continue
+                channels = DASHBOARD_ONLY if job.type == SEND_ALERT_JOB else ALL_CHANNELS
+                text = job_dead_text(job.type, job.id, job.attempts)
+                self._notify.alert(JOB_DEAD, job.id, text, channels)
+                count += 1
+        if count > 0:
+            log.info("dead_jobs_alerted", extra={"count": count})
+        return count

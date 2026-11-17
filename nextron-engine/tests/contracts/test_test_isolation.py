@@ -395,7 +395,7 @@ def classification_problems(
 def test_every_adapter_package_is_classified_once() -> None:
     packages = adapter_packages()
 
-    assert packages == {"ai", "clock", "google_oauth", "secrets", "sink"}
+    assert packages == {"ai", "clock", "google_oauth", "secrets", "sink", "telegram"}
     assert classification_problems(packages, ADAPTER_PACKAGES, LIVE_CONSTRUCTORS) == []
 
 
@@ -409,7 +409,7 @@ def test_the_ai_package_is_not_built_yet_and_defines_nothing() -> None:
 
 
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
-    for name in ("ai", "clock", "google_oauth", "secrets", "sink", "telegram"):
+    for name in ("ai", "clock", "google_oauth", "secrets", "sink", "telegram", "gmail"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "__init__.py").write_text("")
     (tmp_path / "ai" / "gateway.py").write_text("")
@@ -419,7 +419,8 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "nextron.adapters.google_oauth": package_modules("nextron.adapters.google_oauth"),
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),
-        "nextron.adapters.telegram": [probe_module("nextron.adapters.telegram", "x = 1")],
+        "nextron.adapters.telegram": package_modules("nextron.adapters.telegram"),
+        "nextron.adapters.gmail": [probe_module("nextron.adapters.gmail", "x = 1")],
     }
     classified = {
         **ADAPTER_PACKAGES,
@@ -430,20 +431,20 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
     problems = classification_problems(
         adapter_packages(tmp_path),
         classified,
-        [*LIVE_CONSTRUCTORS, ("nextron.adapters.gmail", "default_service")],
+        [*LIVE_CONSTRUCTORS, ("nextron.adapters.gmail_api", "default_service")],
         modules_of=modules.__getitem__,
         folder=tmp_path,
     )
 
     assert problems == [
-        "telegram is not classified",
+        "gmail is not classified",
         "ai is not built yet but defines ['nextron.adapters.ai.route']",
         "ai is not built yet but holds ['__init__.py', 'gateway.py']",
         "clock gives no reason it reaches no external system",
         "secrets has no missing_constructor",
         "nextron.adapters.secrets.missing_constructor is not in LIVE_CONSTRUCTORS",
-        "nextron.adapters.gmail.default_service is in LIVE_CONSTRUCTORS but no guarded package "
-        "lists it",
+        "nextron.adapters.gmail_api.default_service is in LIVE_CONSTRUCTORS but no guarded "
+        "package lists it",
     ]
 
 

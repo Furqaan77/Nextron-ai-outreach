@@ -334,7 +334,9 @@ def test_the_page_extends_the_layout_and_links_back_to_settings(
 
     assert page.texts("title") == ["Nextron: Credentials"]
     assert page.texts("h1") == ["Credentials"]
-    assert "Windows Credential Manager" in page.texts("p")[0]
+    # the first paragraph after the layout's empty error notice (#request-error)
+    assert page.texts("p")[0] == ""
+    assert "Windows Credential Manager" in page.texts("p")[1]
     # the brand, the navigation (its sections unchanged: no Credentials link) and the way back
     assert [(a.attrs.get("href"), a.text) for a in page.find("a") if a.row is None] == [
         ("/", "Nextron"),

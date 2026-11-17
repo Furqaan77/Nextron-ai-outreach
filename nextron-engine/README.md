@@ -133,7 +133,8 @@ browser's session with the other. Run `nextron open` again to switch back.
 
 After a second `nextron open`, a dashboard tab opened earlier still carries the old session's
 CSRF token while the browser now sends the new session's cookie, so the old tab's actions are
-refused (silently for now, until Story 1.12's notification). Reload the tab.
+refused, and the page's error notice says `Request refused: security check failed` (see
+[Alerts and notifications](#alerts-and-notifications)). Reload the tab.
 
 These protections keep out other websites and other Windows users' processes, not your own:
 any process running as your Windows user can read Credential Manager, and with it the pending
@@ -175,8 +176,8 @@ code.
     body, and every token it presents must match (compared in constant time). **A plain
     multipart form can't carry the token, so it is refused** until a story needs one.
   - A refused request gets **403 `Request refused: security check failed` as plain text**, and
-    the handler never runs. HTMX doesn't swap error responses, so an HTMX control shows nothing
-    for now; the error notification arrives in Story 1.12. It is logged as `request_refused`
+    the handler never runs. HTMX shows that text in the page's error notice (see
+    [Alerts and notifications](#alerts-and-notifications)). It is logged as `request_refused`
     with `check` = `origin`, `fetch_site` or `csrf_token`, the `method` and the `path`, never
     with the query string, a header value or a token.
 - **No GET writes to the database.** Every GET handler runs inside a read-only unit of work
@@ -514,7 +515,8 @@ In `dev` and `test`, email and alerts reach only the people on the `sink_allowli
 **How it is wired.** Every `mail` or `alert` adapter is registered once in
 `nextron.main.ROLE_ADAPTERS` as `RoleAdapter(name, role, adapter_type, build)` and built only by
 `build_role_adapter`, which wraps it in `MailSink` or `AlertSink` (`nextron/adapters/sink`)
-everywhere except `prod`. The registry is empty until the first adapter (Telegram, Story 1.12).
+everywhere except `prod`. It holds one entry so far: `telegram` (`TelegramAlert`, the `alert`
+role; see [Alerts and notifications](#alerts-and-notifications)).
 
 ```python
 alert = build_role_adapter("telegram", AdapterContext(config, secrets, clock), units=units)
@@ -560,6 +562,7 @@ traceback in `nextron.log`.
 | `0002_1_6_settings` | `settings` (see [Settings](#settings)) | `setup` |
 | `0003_1_10_jobs` | `jobs` (see [Jobs](#jobs)), its checks and its indexes, two of them partial | `jobqueue` |
 | `0004_1_11_heartbeat` | `runner_heartbeat`, one row and its two checks (see [Triggers and the heartbeat](#triggers-and-the-heartbeat)) | `ops` |
+| `0005_1_12_notify` | `alerts` (unique on kind, subject and channel, a status check) and `notifications` (unique on kind and subject, `ix_notifications_open`) (see [Alerts and notifications](#alerts-and-notifications)) | `notify` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -635,8 +638,9 @@ goes back to the pool.
 Background work (crawls, mailbox syncs, sends, AI calls) runs as durable jobs in the `jobs`
 table (owner `jobqueue`, AD-10), so it survives a crash or a restart, never runs twice at once,
 and retries only what may succeed later. The rules live in `nextron/domain/job.py`, the service
-in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. No job
-type is registered yet; the stories that add work add them.
+in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. The
+job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)); the
+stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -829,6 +833,91 @@ Story 1.15.
 (Get-Item "$env:LOCALAPPDATA\Nextron\dev\heartbeat").LastWriteTime
 ```
 
+## Alerts and notifications
+
+The engine tells you on Telegram when a job dies, and shows notices in the dashboard's
+notification area (AD-15, INT-8, UX-DR5). The `notify` service (`nextron/app/notify/api.py`) owns
+the `alerts` and `notifications` tables; `nextron/domain/alert.py` holds the Alert machine
+(`pending`, `sent`, `unknown`, `failed`) and the rules.
+
+**Set it up.**
+
+1. Create a bot with Telegram's @BotFather and save its token as "Telegram bot token" on the
+   Credentials page (keyring name `telegram/bot_token`). It is read on every send and never
+   stored anywhere else.
+2. Start a chat with the bot (or add it to a group), send the bot a message in that chat, and
+   find the chat's numeric id. A private chat's id is positive, a basic group's is a shorter
+   negative number, and a supergroup's or channel's starts with `-100`. A group upgraded to a
+   supergroup gets a new `-100` id: alerts then fail as `telegram_refused` until you change the
+   setting. To read the id without putting the token in a browser's address bar or history,
+   run this in PowerShell (never open that URL in a browser):
+
+   ```powershell
+   $token = Read-Host "Bot token"
+   (Invoke-RestMethod "https://api.telegram.org/bot$token/getUpdates").result.message.chat |
+       Select-Object id, type, title
+   Remove-Variable token
+   ```
+
+   Enter the id as "Telegram alert chat id" (`alert_chat_id`, Settings, Alerts and recipients).
+   Only a numeric id is accepted: a `@name` can be handed to someone else. It is read on every
+   send, so a change applies to the next alert.
+3. **Outside `prod`**, alerts go through the sink: add the same chat id to "Dev and test
+   allowlist" (Settings, Engine), or every alert is written to `<data dir>\sink\<date>.jsonl`
+   instead of being sent (see [Dev and test sink](#dev-and-test-sink)), and still counts as
+   sent.
+
+**Raising an alert.** A service calls `notify.alert(kind, subject, text, channels)` inside its
+own transaction. `channels` holds `telegram`, `dashboard` or both. Telegram gets an `alerts` row
+(`pending`, with its `requested` event) and a `send_alert` job (realtime lane, priority 90,
+`max_runtime` 3 minutes, retry limit 5, key `send_alert:<alert id>:0`); the dashboard gets a
+`notifications` row. Each is unique per kind and subject, so raising the same alert again
+changes nothing. The kind is `[a-z][a-z0-9_]{0,31}`, the subject a ULID or a token, and the text
+plain, at most 4,096 UTF-16 units, with no control or format character but a line feed;
+anything else raises `InvalidAlert` and nothing is written.
+
+**What each send's outcome does.** The `send_alert` job reads the chat id, then calls the
+Telegram adapter (`nextron/adapters/telegram`) between two transactions, never inside one. The
+adapter POSTs `{"chat_id", "text"}` to `sendMessage`, plain text with no `parse_mode`.
+
+| Telegram's answer | The alert |
+|---|---|
+| 2xx with a `message_id` | `sent`, the message id stored (none for a sink delivery) |
+| 429, 5xx, or a connection failure before the request went out | stays `pending`; the job retries after 30 s, 60 s, 120 s and so on, 6 runs in all, then dies (a dashboard-only `job_dead` notice) |
+| any other 4xx (400, 401, 403, 404), a 3xx, a missing or malformed bot token, or an unset chat id | `failed`, with the error code |
+| a timeout or a dropped connection after the request went out, or a 2xx without a message id | `unknown`, then re-sent once 60 s later; if the resend is unknown too, it stays `unknown` and is never tried a third time |
+
+An alert that ends `failed`, or `unknown` after its resend, adds a dashboard notification
+(kind `alert_not_delivered`): "Telegram alert not delivered: <kind> <alert ULID>, <code>", or
+"Telegram alert may not have been delivered: ...". Delivery is at least once: a crash between
+Telegram's answer and the commit sends the alert again. A database error in the send (`database
+is locked`, say) is not retried: the `send_alert` job dies (a dashboard-only `job_dead` notice)
+and the alert stays `pending`, even if Telegram already took it. Each status change appends an
+`events` row (entity `alerts`, actor `system:notify`). Logs carry `alert_sent` (with `sink`),
+`alert_unknown` and `alert_failed` (with the `code`), and only the alert id, kind and channel:
+never the text, the chat id or the token. The `httpx2` logger stays at WARNING (its INFO line
+names the request URL, which holds the token), and redaction masks `/bot<token>` anyway.
+
+**`job_dead`.** When a job dies, Telegram and the dashboard get "Job dead: <type> <ULID>,
+attempts: <n>", with nothing else (no payload, no error text, no environment name). The `ops`
+sweep (`DeadJobAlerts`) raises it for every `dead` job not yet alerted, right after a run that
+died and on every 30 s keeper tick, so a job that died anywhere (a failed run, a reaped lease,
+an unrunnable claim, a release at shutdown) is alerted once, even across a crash. A dead
+`send_alert` job alerts only the dashboard, so a broken Telegram can't feed itself. A sweep that
+fails logs `dead_job_alerts_failed` and the runner goes on.
+
+**The notification area** sits under the navigation on every page. It loads once per page view
+(no polling) and shows "Notifications (<count>)", the newest 5 undismissed notices with their
+time in UTC, and "and <n> more" when there are more. Dismiss removes one (a CSRF-checked POST to
+`/notifications/dismiss`); it never comes back. With nothing undismissed the area is empty and
+takes no space.
+
+**Error notices.** When the dashboard refuses an action (a 403 security check, a 400 malformed
+form, a 500), HTMX shows the answer's text above the notifications, as plain text, until the
+page reloads. A request after the engine restarted (no session) shows "The dashboard is locked:
+run nextron open in a terminal to open it again." A request that gets no answer at all (the
+engine is down) shows nothing.
+
 ## Logs
 
 `serve` writes `<data dir>\logs\nextron.log`, for example
@@ -904,7 +993,9 @@ uv run lint-imports         # the import contracts on their own
   `monkeypatch.delenv("NEXTRON_ENV")`.
 - **No live adapter can be built.** `nextron.adapters.secrets.default_backend` (Credential
   Manager), `nextron.adapters.google_oauth.default_http_client` (Google's OAuth endpoints, built
-  on a `GoogleOAuthClient`'s first call) and the `build` of every `ROLE_ADAPTERS` entry raise
+  on a `GoogleOAuthClient`'s first call), `nextron.adapters.telegram.default_http_client` (the
+  Telegram Bot API, built on a `TelegramAlert`'s first send) and the `build` of every
+  `ROLE_ADAPTERS` entry raise
   `LiveAdapterInTests`, so `KeyringSecrets("test")`, or `main.build_app` without injected
   secrets, fails. Inject a fake
   (or patch `main.KeyringSecrets`). A test that has neutralised what a constructor reaches may

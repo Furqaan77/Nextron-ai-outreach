@@ -501,13 +501,53 @@ def test_sender_timezone_is_declared_required_in_the_sender_section() -> None:
     assert setting("sender_timezone") is found
 
 
-def test_the_declared_keys_are_the_sender_timezone_the_sink_allowlist_and_bulk_threads() -> None:
-    assert [key.value for key in Key] == ["sender_timezone", "sink_allowlist", "bulk_threads"]
+def test_the_declared_keys_in_order() -> None:
+    assert [key.value for key in Key] == [
+        "sender_timezone",
+        "sink_allowlist",
+        "bulk_threads",
+        "alert_chat_id",
+    ]
     assert declared() == (
         setting(Key.SENDER_TIMEZONE),
         setting(Key.SINK_ALLOWLIST),
         setting(Key.BULK_THREADS),
+        setting(Key.ALERT_CHAT_ID),
     )
+
+
+# Row: Setting (alert_chat_id) -------------------------------------------------------------------
+
+ALERT_CHAT_UNIT = (
+    "The numeric id of the Telegram chat that receives ops alerts, such as -1001234567890; user "
+    "names (@name) aren't accepted."
+)
+
+
+def test_alert_chat_id_is_a_required_numeric_chat_id_in_the_alerts_section() -> None:
+    found = setting(Key.ALERT_CHAT_ID)
+
+    assert (found.key, found.type, found.section) == (
+        "alert_chat_id",
+        SettingType.STRING,
+        Section.ALERTS_AND_RECIPIENTS,
+    )
+    assert (found.label, found.unit) == ("Telegram alert chat id", ALERT_CHAT_UNIT)
+    assert found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("telegram_chat_id", "must be a numeric Telegram chat id, such as -1001234567890")
+    ]
+    assert parse(found, " -1001234567890 ") == "-1001234567890"
+    assert encode(found, "42") == "42"
+
+
+@pytest.mark.parametrize("text", ["@ops_channel", "0", "01", "-", "12 34", "1" * 21, "chat"])
+def test_alert_chat_id_refuses_anything_but_a_numeric_id(text: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.ALERT_CHAT_ID), text)
+
+    assert raised.value.rule == "telegram_chat_id"
+    assert raised.value.reason == "must be a numeric Telegram chat id, such as -1001234567890"
 
 
 # Row: Setting (sink_allowlist) ------------------------------------------------------------------
@@ -767,7 +807,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     schema = declare(named("extra_one", T.STRING))
 
     assert schema_problems(schema) == [
-        "Key members not declared: bulk_threads, sender_timezone, sink_allowlist",
+        "Key members not declared: alert_chat_id, bulk_threads, sender_timezone, sink_allowlist",
         "declared but not in Key: extra_one",
     ]
     assert schema_problems(schema, keys=["extra_one"]) == []

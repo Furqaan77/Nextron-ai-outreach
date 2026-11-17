@@ -14,6 +14,7 @@ from sqlalchemy import Engine
 
 from nextron import main
 from nextron.adapters.sink import AlertSink, MailSink
+from nextron.adapters.telegram import TelegramAlert
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
@@ -308,7 +309,12 @@ def test_a_registration_needs_a_callable_build() -> None:
         RoleAdapter("x", SinkRole.ALERT, InMemoryAlert, "not callable")  # type: ignore[arg-type]
 
 
-def test_the_registry_ships_empty_and_the_roles_are_mail_and_alert() -> None:
-    assert main.ROLE_ADAPTERS == ()
+def test_the_registry_holds_telegram_and_the_roles_are_mail_and_alert() -> None:
+    [telegram] = main.ROLE_ADAPTERS
+    assert (telegram.name, telegram.role, telegram.adapter_type) == (
+        "telegram",
+        SinkRole.ALERT,
+        TelegramAlert,
+    )
     assert [role.value for role in SinkRole] == ["mail", "alert"]
     assert main.SINK_DIR_NAME == "sink"

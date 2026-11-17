@@ -33,6 +33,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``nextron.web.google_page``. They go through ``google`` (``GoogleAccess``), which touches no
   database. Only ``google_grant_start`` starts a consent flow; Google's redirect is served by
   the flow's own listener, never by a dashboard route.
+- ``GET /notifications`` (``notifications_area``) and ``POST /notifications/dismiss``
+  (``notification_dismiss``), both ``@personal_data(True)``: the notification area (UX-DR5),
+  which the base layout loads once per page view (``hx-trigger="load"``), and its Dismiss
+  button. The area (``notifications.html``) is empty when nothing is undismissed; otherwise it
+  shows "Notifications (<count>)", the newest ``AREA_LIMIT`` (5), each with its text
+  (``|plain``), its time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and "and <n> more" when
+  there are more. The POST's fields, apart from ``csrf_token``, must be exactly one
+  ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it dismisses
+  through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the area again
+  in a read-only one.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -47,6 +57,14 @@ Pages render with ``app.state.templates`` (``template_environment()``: autoescap
 ``nav`` and the session's ``csrf_token``, which ``base.html`` puts in ``<body hx-headers>`` for
 HTMX and ``csrf_field()`` puts in forms, and answers with ``Cache-Control: no-store``, whatever
 the route declared, because the page carries that token.
+
+**Error notices.** ``base.html``'s ``<meta name="htmx-config">`` sets HTMX's
+``responseHandling``: a 204 swaps nothing, a 2xx or 3xx swaps as usual, and any 4xx or 5xx body
+is put, as text (``swapOverride: textContent``, never parsed as HTML), in
+``#request-error`` inside ``section#notifications``. So a refused action (a 403 CSRF refusal,
+a 400 malformed form, a 500) shows its plain-text answer, and a request without a session gets
+the guard's plain-text 401 (``nextron.web.guard``). A request that gets no answer at all (the
+engine is down) shows nothing, and a notice stays until the page reloads.
 
 The base layout's navigation lists, in ``NAV_SECTIONS`` order, each section whose page route
 (a GET route with that name) exists; a later story adds the route and its link appears.
@@ -69,7 +87,9 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.notify.api import Notify
 from nextron.app.ops.api import DashboardEntry
+from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
     Credentials,
@@ -80,13 +100,21 @@ from nextron.app.setup.api import (
 )
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
+from nextron.domain.ids import is_ulid
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
 from nextron.web import google_page as google_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
-from nextron.web.forms import FormFields, MalformedForm, form_fields, malformed_form
+from nextron.web.forms import (
+    REPEATED_FIELD,
+    WRONG_FIELDS,
+    FormFields,
+    MalformedForm,
+    form_fields,
+    malformed_form,
+)
 from nextron.web.guard import Guard
 from nextron.web.routing import (
     Units,
@@ -124,6 +152,11 @@ NAV_SECTIONS: Final = (
 NO_STORE: Final = {"Cache-Control": "no-store"}
 BROWSER_STARTED: Final = "none"  # Sec-Fetch-Site of a navigation the user started
 CROSS_SITE: Final = "cross_site"
+NOTIFICATIONS_TEMPLATE: Final = "notifications.html"
+AREA_LIMIT: Final = 5  # the newest notifications the area lists
+NOTIFICATION_FIELD: Final = "notification"
+CSRF_FIELD_NAME: Final = "csrf_token"
+TIME_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
 
 # An async context manager factory taking the app: what FastAPI(lifespan=...) accepts.
 type Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
@@ -135,6 +168,36 @@ log = logging.getLogger(__name__)
 class NavLink:
     label: str
     href: str
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationItem:
+    """One notification as the area shows it: its id, its text and its time in UTC."""
+
+    id: str
+    text: str
+    time: str
+
+
+def area_context(found: notify_queries.OpenNotifications) -> dict[str, object]:
+    """What ``notifications.html`` renders: the count, the listed items and how many more."""
+    items = [
+        NotificationItem(row.id, row.text, f"{row.created_at:{TIME_FORMAT}}")
+        for row in found.newest
+    ]
+    return {"count": found.count, "items": items, "more": max(found.count - len(items), 0)}
+
+
+def submitted_notification(fields: FormFields) -> str:
+    """The one ``notification`` ULID a Dismiss form posts; ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD_NAME} != {NOTIFICATION_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+    values = fields[NOTIFICATION_FIELD]
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    if not is_ulid(values[0]):
+        raise MalformedForm(WRONG_FIELDS)
+    return values[0]
 
 
 def template_environment() -> Environment:
@@ -171,6 +234,7 @@ def create_app(
     setup: Setup,
     credentials: Credentials,
     google: GoogleAccess,
+    notify: Notify,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -178,7 +242,8 @@ def create_app(
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``credentials`` the external credentials
-    and ``google`` the Google client and grants (both in Credential Manager, not the database).
+    and ``google`` the Google client and grants (both in Credential Manager, not the database);
+    ``notify`` dismisses notifications.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -407,6 +472,26 @@ def create_app(
             return grant_answer(request, grant, notice=google_rows.store_failed())
         notice = google_rows.removed_notice(removal.revocation)
         return grant_answer(request, grant, status=removal.status, notice=notice)
+
+    def notification_list(request: Request) -> HTMLResponse:
+        found = notify_queries.open_notifications(AREA_LIMIT)
+        return page(request, NOTIFICATIONS_TEMPLATE, **area_context(found))
+
+    @app.get("/notifications", name="notifications_area")
+    @personal_data(True)
+    def notifications_area(request: Request) -> HTMLResponse:
+        return notification_list(request)
+
+    @app.post("/notifications/dismiss", name="notification_dismiss")
+    @personal_data(True)
+    def notification_dismiss(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        notification_id = submitted_notification(fields)
+        with units.open():
+            notify.dismiss(notification_id)
+        with units.open(read_only=True):
+            return notification_list(request)
 
     require_declared(app)
     require_route_rules(app)

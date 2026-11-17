@@ -1,10 +1,10 @@
 """The job runner (AD-10): worker threads per lane and a keeper thread.
 
-``nextron.main`` builds one ``Runner(units, queue, job_types)`` and the FastAPI lifespan starts
-and stops it (``nextron.main.engine_lifespan``), so handlers never run on the event loop. It
-imports only ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup``, the domain and the
-standard library: it never reads the keyring or the network, and ``JobQueue.fail`` classifies
-errors.
+``nextron.main`` builds one ``Runner(units, queue, job_types, dead_jobs=...)`` and the FastAPI
+lifespan starts and stops it (``nextron.main.engine_lifespan``), so handlers never run on the
+event loop. It imports only ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup``, the
+domain and the standard library: it never reads the keyring or the network, and
+``JobQueue.fail`` classifies errors.
 
 **start()** reads ``bulk_threads`` once (``queries.setup.get(Key.BULK_THREADS)``) in a
 read-only unit of work it closes before any thread starts; any error means 1 and logs
@@ -27,8 +27,9 @@ as ``InvalidJob("the handler returned a value")``), and finishes in a third: ``c
 runs: a ``finally`` drops it as soon as the handler returns, before finishing, so a keeper tick
 after the finish commits never takes it for a lost claim (the lease, renewed every 30 s, still
 has at least ``max_runtime`` + 30 s left). A failure to finish logs ``job_finish_failed`` and
-leaves the lease to expire. A ``BaseException`` that isn't an ``Exception`` re-raises and ends
-the thread. Once the runner is stopping, ``run_one`` claims nothing.
+leaves the lease to expire. When ``fail`` returns ``dead``, the dead-job sweep runs (below). A
+``BaseException`` that isn't an ``Exception`` re-raises and ends the thread. Once the runner is
+stopping, ``run_one`` claims nothing.
 
 **The keeper** ticks at once and then every ``renew_interval`` (30 s). ``keep_once()`` (one
 tick, also a test hook) calls ``JobQueue.keep`` with every held claim, which renews their
@@ -38,7 +39,15 @@ its ``max_runtime``: Python can't stop a thread, so the lease is still renewed. 
 purge (``maintain_once()``, also a test hook) on the first tick and then whenever
 ``maintenance_interval`` (24 h) has passed since the last purge that succeeded, so a failed
 purge is tried again on the next tick. Any exception logs ``job_keeper_failed`` and the keeper
-goes on.
+goes on. Each tick then runs the dead-job sweep.
+
+**The dead-job sweep.** ``dead_jobs`` (``DeadJobs``: anything with ``alert_dead_jobs() -> int``,
+the ``ops`` service's ``DeadJobAlerts`` in ``nextron.main``) raises the ``job_dead`` alert for
+every dead job not yet alerted. The runner calls it in its own unit of work right after a run
+whose ``fail`` returned ``dead``, and on every keeper tick, which catches the jobs that died
+anywhere else (a reaped lease, an unrunnable claim, a release at shutdown) and any alert lost
+to a crash. A sweep that raises logs ``dead_job_alerts_failed`` (ERROR, with the traceback) and
+nothing stops. Without ``dead_jobs`` there is no sweep.
 
 **stop()** sets the stop event (no thread claims again), joins the lane threads until
 ``shutdown_grace`` (15 s) has passed, one deadline for all, then the keeper; then it calls
@@ -68,7 +77,14 @@ from typing import Final, Protocol
 from nextron.app.jobqueue.api import Claim, JobQueue
 from nextron.app.queries import setup as setup_queries
 from nextron.domain.errors import DomainError
-from nextron.domain.job import MAX_BULK_THREADS, RENEW_INTERVAL, InvalidJob, JobTypes, Lane
+from nextron.domain.job import (
+    MAX_BULK_THREADS,
+    RENEW_INTERVAL,
+    InvalidJob,
+    JobStatus,
+    JobTypes,
+    Lane,
+)
 from nextron.domain.settings_schema import Key
 
 THREAD_PREFIX: Final = "nextron-job"
@@ -84,6 +100,13 @@ class Units(Protocol):
     """What the runner needs of ``nextron.db.uow.UnitOfWorkFactory``."""
 
     def open(self, *, read_only: bool = False) -> AbstractContextManager[object]: ...
+
+
+class DeadJobs(Protocol):
+    """The dead-job sweep: raise the ``job_dead`` alert of every dead job not yet alerted, and
+    return how many it alerted (``nextron.app.ops.api.DeadJobAlerts``)."""
+
+    def alert_dead_jobs(self) -> int: ...
 
 
 @dataclass(slots=True)
@@ -128,10 +151,12 @@ class Runner:
         maintenance_interval: float = 86_400.0,
         shutdown_grace: float = 15.0,
         monotonic: Callable[[], float] = time.monotonic,
+        dead_jobs: DeadJobs | None = None,
     ) -> None:
         self._units = units
         self._queue = queue
         self._job_types = job_types
+        self._dead_jobs = dead_jobs
         self._poll_interval = poll_interval
         self._renew_interval = renew_interval
         self._maintenance_interval = maintenance_interval
@@ -290,14 +315,29 @@ class Runner:
         return None
 
     def _finish(self, claim: Claim, error: Exception | None) -> None:
+        status: JobStatus | None = None
         try:
             with self._units.open():
                 if error is None:
                     self._queue.complete(claim)
                 else:
-                    self._queue.fail(claim, error)
+                    status = self._queue.fail(claim, error)
         except Exception:
             log.exception("job_finish_failed", extra=_fields(claim))
+            return
+        if status is JobStatus.DEAD:
+            self.sweep_dead_jobs()
+
+    def sweep_dead_jobs(self) -> None:
+        """Run the dead-job sweep in its own unit of work; a failure is logged, never
+        raised. Does nothing without ``dead_jobs``."""
+        if self._dead_jobs is None:
+            return
+        try:
+            with self._units.open():
+                self._dead_jobs.alert_dead_jobs()
+        except Exception:
+            log.exception("dead_job_alerts_failed")
 
     # The keeper ------------------------------------------------------------------------------
 
@@ -322,6 +362,7 @@ class Runner:
                 self.maintain_once()
             except Exception:
                 log.exception("job_keeper_failed")
+        self.sweep_dead_jobs()
 
     def _renew(self) -> None:
         held = self._snapshot()

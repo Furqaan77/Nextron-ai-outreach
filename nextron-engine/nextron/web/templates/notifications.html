@@ -1,0 +1,23 @@
+{#- The notification area (UX-DR5): GET /notifications, which base.html loads into
+    #notification-list once per page view, and the answer to POST /notifications/dismiss, which
+    HTMX swaps into the same list. It renders nothing at all when no notification is
+    undismissed, so the list stays empty and takes no space. -#}
+{%- if count -%}
+<h2 class="notifications-heading">Notifications ({{ count }})</h2>
+<ul class="notification-items">
+{%- for item in items %}
+<li class="notification">
+<p class="notification-text">{{ item.text|plain }}</p>
+<p class="notification-time">{{ item.time }}</p>
+<form method="post" hx-post="/notifications/dismiss" hx-target="#notification-list">
+{{ csrf_field() }}
+<input type="hidden" name="notification" value="{{ item.id }}">
+<button type="submit" class="secondary">Dismiss</button>
+</form>
+</li>
+{%- endfor %}
+</ul>
+{%- if more %}
+<p class="notification-more">and {{ more }} more</p>
+{%- endif %}
+{%- endif -%}

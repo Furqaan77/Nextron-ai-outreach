@@ -185,7 +185,8 @@ class SettingsHtml(HTMLParser):
         elif tag == "p" and values.get("class") == "field-error" and field_ is not None:
             field_.error_id = values.get("id")
             self._capture("error", tag)
-        elif tag == "p" and values.get("role"):
+        elif tag == "p" and values.get("role") and values.get("id") != "request-error":
+            # a form's notice; the layout's empty error notice (#request-error) is not one
             self._role = values.get("role")
             self._capture("notice", tag)
 
@@ -515,7 +516,7 @@ def test_the_sender_section_shows_the_sender_timezone_as_required(
 ) -> None:
     _, page = settings_page(dashboard, session[0])
 
-    assert page.legends == ["Sender", "Engine"]
+    assert page.legends == ["Sender", "Alerts and recipients", "Engine"]
     shown = page.fields["sender_timezone"]
     assert (shown.key, shown.label, shown.value) == ("sender_timezone", "Sender's timezone", "")
     assert shown.hint == "IANA timezone name, such as America/Los_Angeles; required"
@@ -526,7 +527,12 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
 ) -> None:
     _, page = settings_page(dashboard, session[0])
 
-    assert list(page.fields) == ["sender_timezone", "sink_allowlist", "bulk_threads"]
+    assert list(page.fields) == [
+        "sender_timezone",
+        "alert_chat_id",
+        "sink_allowlist",
+        "bulk_threads",
+    ]
     shown = page.fields["sink_allowlist"]
     assert (shown.tag, shown.label, shown.value) == ("textarea", "Dev and test allowlist", "")
     assert shown.hint == (
@@ -534,6 +540,36 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "reach only these; everything else is written to the sink folder.; default: none; "
         "leave blank to use it"
     )
+
+
+def test_the_alerts_section_shows_the_required_telegram_chat_id(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    _, page = settings_page(dashboard, session[0])
+
+    shown = page.fields["alert_chat_id"]
+    assert (shown.tag, shown.label, shown.value) == ("input", "Telegram alert chat id", "")
+    assert shown.hint == (
+        "The numeric id of the Telegram chat that receives ops alerts, such as -1001234567890; "
+        "user names (@name) aren't accepted.; required"
+    )
+
+
+def test_the_telegram_chat_id_saves_a_numeric_id_and_refuses_a_user_name(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    token = session[1]
+
+    saved = save(dashboard, session, real_body(token, alert_chat_id=" -1001234567890 "))
+
+    assert saved.status == 200
+    assert get_value(units, Key.ALERT_CHAT_ID) == "-1001234567890"
+    for refused_text in ("@ops_channel", "12 34", "chat"):
+        refused = save(dashboard, session, real_body(token, alert_chat_id=refused_text))
+        field = SettingsHtml(refused.text).fields["alert_chat_id"]
+        assert field.attrs["aria-invalid"] == "true" and field.error is not None
+        assert "numeric Telegram chat id" in field.error
+        assert get_value(units, Key.ALERT_CHAT_ID) == "-1001234567890"
 
 
 def test_the_sink_allowlist_saves_addresses_and_chat_ids_and_refuses_anything_else(

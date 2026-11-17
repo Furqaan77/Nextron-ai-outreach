@@ -7,8 +7,10 @@ For an ``http`` request, in this order:
    IPv6, no header, two headers) gets 400 ``Bad request: unexpected Host header`` before
    routing, which stops DNS rebinding.
 2. Session: any path other than exactly ``/enter`` needs a ``nextron_session`` cookie that
-   names a live session; otherwise 401 with the locked page, GET included. The CSRF token of
-   the first live ``nextron_session`` value goes into ``scope["nextron.csrf_token"]``, where
+   names a live session; otherwise 401 with the locked page, GET included. An HTMX request
+   (exactly one ``HX-Request: true`` header) gets the 401 as plain text instead,
+   ``LOCKED_TEXT``, which HTMX puts in the page's error notice. The CSRF token of the first
+   live ``nextron_session`` value goes into ``scope["nextron.csrf_token"]``, where
    ``nextron.web.csrf.require_csrf`` and the page renderer read it.
 3. For any method other than ``GET`` and ``HEAD``, before routing (so unknown paths and wrong
    methods are covered too):
@@ -65,6 +67,11 @@ NO_STORE: Final = (b"cache-control", b"no-store")
 BAD_HOST_BODY: Final = b"Bad request: unexpected Host header"
 SECURITY_CHECK_FAILED_BODY: Final = SECURITY_CHECK_FAILED.encode("ascii")
 INTERNAL_ERROR_BODY: Final = b"Internal error"
+LOCKED_TEXT: Final = (
+    "The dashboard is locked: run nextron open in a terminal to open it again."
+)
+LOCKED_TEXT_BODY: Final = LOCKED_TEXT.encode("ascii")
+HX_REQUEST: Final = b"hx-request"
 TEXT_PLAIN: Final = b"text/plain; charset=utf-8"
 TEXT_HTML: Final = b"text/html; charset=utf-8"
 POLICY_VIOLATION: Final = 1008  # WebSocket close code
@@ -158,7 +165,10 @@ class Guard:
         if csrf_token is not None:
             scope[CSRF_SCOPE_KEY] = csrf_token
         elif scope.get("path") != ENTER_PATH:
-            await _respond(send, 401, TEXT_HTML, self.locked_page)
+            if _header_values(scope, HX_REQUEST) == [b"true"]:
+                await _respond(send, 401, TEXT_PLAIN, LOCKED_TEXT_BODY)
+            else:
+                await _respond(send, 401, TEXT_HTML, self.locked_page)
             return
         if scope.get("method") not in SAFE_METHODS:
             failed = _failed_check(scope)

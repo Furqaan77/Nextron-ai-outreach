@@ -3,7 +3,8 @@
 - **One registry each.** Only ``build_job_types()`` in ``nextron/main.py`` constructs
   ``JobTypes`` or calls ``register_job_type``, and only ``build_triggers()`` there constructs
   ``Triggers`` or calls ``register_trigger``, under any alias.
-- **They ship frozen and empty** until a story registers a job type or a trigger.
+- **They ship frozen.** The job types are exactly the ones the stories registered so far
+  (``send_alert``, Story 1.12, with its settings); the triggers are still empty.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -11,7 +12,8 @@
   which only ``scheduler.py`` imports. ``__init__.py``: nothing; ``runner.py``:
   ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup`` and the domain; ``triggers.py``:
   the domain; ``scheduler.py``: ``apscheduler``, ``nextron.app.jobqueue.api``,
-  ``nextron.jobs.triggers`` and the domain; ``heartbeat.py``: ``nextron.app.ops.api``.
+  ``nextron.jobs.triggers`` and the domain; ``heartbeat.py``: ``nextron.app.ops.api``;
+  ``handlers.py``: the domain.
 - **Indexes and checks.** Every table's indexes (partial ones' ``sqlite_where`` included) and
   checks are the same in the model and in the database at head. Alembic's drift comparison sees
   neither a ``WHERE`` clause nor a check, so this compares the SQL itself; ``jobs`` is the first
@@ -25,6 +27,7 @@ import ast
 import re
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -35,8 +38,9 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from nextron import main
 from nextron.db.models import Base
 from nextron.db.models.jobqueue import JobRecord
+from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
-from nextron.domain.job import JobTypes
+from nextron.domain.job import Job, JobTypes, Lane
 from nextron.jobs.triggers import Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
@@ -47,6 +51,7 @@ RUNNER = "nextron/jobs/runner.py"
 TRIGGERS_PY = "nextron/jobs/triggers.py"
 SCHEDULER_PY = "nextron/jobs/scheduler.py"
 HEARTBEAT_PY = "nextron/jobs/heartbeat.py"
+HANDLERS_PY = "nextron/jobs/handlers.py"
 UNUSED = '"""unused"""\n'
 
 
@@ -76,6 +81,7 @@ JOBS_IMPORTS: ImportRules = {
         ("apscheduler",),
     ),
     HEARTBEAT_PY: (("nextron.app.ops.api",), ()),
+    HANDLERS_PY: (("nextron.domain",), ()),
 }
 
 
@@ -255,17 +261,47 @@ def test_the_registry_check_catches_another_function_in_main(
     assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
-def test_build_job_types_is_frozen_and_empty() -> None:
-    job_types = main.build_job_types()
+class RecordingAlerts:
+    """Stands in for the ``notify`` service: records each alert id it is asked to send."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, alert_id: str) -> None:
+        self.sent.append(alert_id)
+
+
+def test_build_job_types_is_frozen_and_registers_send_alert() -> None:
+    alerts = RecordingAlerts()
+    calls: list[str] = []
+
+    def lookup() -> RecordingAlerts:
+        calls.append("looked up")
+        return alerts
+
+    job_types = main.build_job_types(alerts=lookup)
 
     assert isinstance(job_types, JobTypes)
     assert job_types.frozen
-    assert job_types.names() == ()
-    assert main.build_job_types() is not job_types  # a new registry each time
+    assert job_types.names() == ("send_alert",)
+    send_alert = job_types.get("send_alert")
+    assert (
+        send_alert.default_lane,
+        send_alert.lanes,
+        send_alert.priority,
+        send_alert.max_runtime,
+        send_alert.retry_limit,
+    ) == (Lane.REALTIME, frozenset({Lane.REALTIME}), 90, timedelta(minutes=3), 5)
+    assert calls == []  # building looks nothing up
+    alert_id = "01JD0000000000000000000000"
+    job = Job("01JD0000000000000000000001", "send_alert", Lane.REALTIME, {"alert_id": alert_id}, 1)
+    assert send_alert.handler(job) is None  # type: ignore[func-returns-value]
+    assert (calls, alerts.sent) == (["looked up"], [alert_id])
+    assert main.build_job_types(alerts=lookup) is not job_types  # a new registry each time
 
 
 def test_build_triggers_is_frozen_and_empty() -> None:
-    job_types = main.build_job_types()
+    job_types = main.build_job_types(alerts=RecordingAlerts)
 
     triggers = main.build_triggers(job_types)
 
@@ -391,6 +427,7 @@ def test_a_nested_modules_relative_imports_resolve_against_its_own_package(
         (TRIGGERS_PY, "nextron.domain.job"),
         (SCHEDULER_PY, "apscheduler"),
         (HEARTBEAT_PY, "nextron.app.ops.api"),
+        (HANDLERS_PY, "nextron.domain.job"),
     ],
 )
 def test_each_jobs_module_imports_only_what_it_may(module: str, needle: str) -> None:
@@ -451,6 +488,12 @@ FORBIDDEN_IMPORTS = [
     (HEARTBEAT_PY, "from nextron.ports.clock import Clock", "nextron.ports.clock.Clock"),
     (HEARTBEAT_PY, "from nextron.jobs.runner import Runner", "nextron.jobs.runner.Runner"),
     (HEARTBEAT_PY, "from . import scheduler", "nextron.jobs.scheduler"),
+    (HANDLERS_PY, "from nextron.app.notify.api import Notify", "nextron.app.notify.api.Notify"),
+    (HANDLERS_PY, "from nextron.app.queries import notify", "nextron.app.queries.notify"),
+    (HANDLERS_PY, "from nextron.ports.alert import AlertPort", "nextron.ports.alert.AlertPort"),
+    (HANDLERS_PY, "from nextron.db.uow import current", "nextron.db.uow.current"),
+    (HANDLERS_PY, "from . import runner", "nextron.jobs.runner"),
+    (HANDLERS_PY, "import httpx2", "httpx2"),
 ]
 
 
@@ -481,6 +524,8 @@ def test_the_import_check_catches_any_other_import(
         (SCHEDULER_PY, "from nextron.domain.job import Lane"),
         (HEARTBEAT_PY, "from nextron.app.ops import api"),
         (HEARTBEAT_PY, "import time"),
+        (HANDLERS_PY, "from nextron.domain.alert import SEND_ALERT_JOB"),
+        (HANDLERS_PY, "import functools"),
     ],
 )
 def test_the_import_check_allows_each_modules_own_imports(
@@ -552,6 +597,36 @@ def test_every_tables_indexes_and_checks_match_the_database_at_head(db_engine: E
         "settings",
         "jobs",
         "runner_heartbeat",
+        "alerts",
+        "notifications",
+    }
+
+
+def test_the_notify_indexes_and_checks_are_the_specified_ones() -> None:
+    alert_indexes, alert_checks = _model_schema(AlertRecord.__table__)  # type: ignore[arg-type]
+    notice_indexes, notice_checks = _model_schema(
+        NotificationRecord.__table__  # type: ignore[arg-type]
+    )
+
+    assert alert_indexes == {}
+    assert alert_checks == {"ck_alerts_status": "status IN ('pending','sent','unknown','failed')"}
+    assert notice_indexes == {
+        "ix_notifications_open": (
+            "CREATE INDEX ix_notifications_open ON notifications (dismissed_at, created_at)"
+        )
+    }
+    assert notice_checks == {}
+    unique = {
+        table: {
+            str(constraint.name): tuple(column.name for column in constraint.columns)
+            for constraint in record.__table__.constraints  # type: ignore[attr-defined]
+            if type(constraint).__name__ == "UniqueConstraint"
+        }
+        for table, record in (("alerts", AlertRecord), ("notifications", NotificationRecord))
+    }
+    assert unique == {
+        "alerts": {"uq_alerts_kind_subject_channel": ("kind", "subject", "channel")},
+        "notifications": {"uq_notifications_kind_subject": ("kind", "subject")},
     }
 
 

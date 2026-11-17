@@ -41,6 +41,7 @@ import pytest
 import nextron.adapters
 from nextron import main
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
+from nextron.adapters.telegram import TelegramAlert
 from nextron.bootstrap import load_bootstrap
 from nextron.main import AdapterContext, RoleAdapter, SinkRole, build_role_adapter
 from nextron.ports.alert import AlertDelivery, AlertMessage
@@ -303,9 +304,12 @@ def test_every_mail_and_alert_adapter_is_registered_for_its_role() -> None:
     assert set(senders).isdisjoint(SINK_CLASSES)
 
 
-def test_the_sinks_are_the_only_senders_today() -> None:
-    """Story 1.12 adds the first live one, Telegram; this pins the starting point."""
-    assert senders_in(adapter_modules()) == {}
+def test_telegram_is_the_only_live_sender_today() -> None:
+    """Story 1.12 added the first live one, Telegram; this pins where things stand."""
+    assert senders_in(adapter_modules()) == {TelegramAlert: SinkRole.ALERT}
+    assert [(entry.name, entry.role, entry.adapter_type) for entry in main.ROLE_ADAPTERS] == [
+        ("telegram", SinkRole.ALERT, TelegramAlert)
+    ]
     assert role_of_send(AlertSink) is SinkRole.ALERT
     assert role_of_send(MailSink) is SinkRole.MAIL
 
@@ -513,8 +517,16 @@ def registry_problems(root: Path, senders: set[str]) -> list[str]:
 
 def test_mail_and_alert_adapters_are_built_only_through_the_registry() -> None:
     source = (PACKAGE / "main.py").read_text(encoding="utf-8")
+    senders = sender_modules(adapter_modules())
 
-    assert registry_problems(PACKAGE.parent, sender_modules(adapter_modules())) == []
+    assert senders == {"nextron.adapters.telegram"}
+    assert registry_problems(PACKAGE.parent, senders) == []
+    # Neither the jobs, the web, the app nor the startup checks refer to the Telegram package.
+    others = [*(PACKAGE / "jobs").rglob("*.py"), *(PACKAGE / "web").rglob("*.py")]
+    others += [*(PACKAGE / "app").rglob("*.py"), PACKAGE / "startup_checks.py"]
+    for path in others:
+        text = path.read_text(encoding="utf-8")
+        assert "adapters.telegram" not in text and "TelegramAlert" not in text, path
     assert _registry_value(ast.parse(source)) is not None
     assert _builder(ast.parse(source)) is not None
 

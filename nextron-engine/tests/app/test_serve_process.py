@@ -238,7 +238,10 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0004_1_11_heartbeat"
+    assert HEAD == "0005_1_12_notify"
+    # no alert was raised or sent: nothing built the Telegram adapter or reached the sink
+    assert not [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]
+    assert not (data_dir / "sink").exists()
     for line in lines:
         assert {"ts", "level", "logger", "event"} <= set(line)
     assert PLANTED_CODE not in log_text(data_dir)

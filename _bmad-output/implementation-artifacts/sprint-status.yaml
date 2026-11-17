@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 12:05
+last_updated: 11-17-2026 14:10
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -47,7 +47,7 @@ development_status:
   1-9-grant-google-oauth-access-through-a-loopback-flow: review
   1-10-run-durable-jobs-on-three-lanes-with-leases-and-retries: review
   1-11-schedule-periodic-triggers-and-write-the-runner-heartbeat: review
-  1-12-send-ops-alerts-by-telegram-and-show-dashboard-notifications: backlog
+  1-12-send-ops-alerts-by-telegram-and-show-dashboard-notifications: review
   1-13-meter-every-external-call-and-stop-non-essential-work-at-quo: backlog
   1-14-check-install-readiness-with-nextron-doctor: backlog
   1-15-see-engine-health-on-one-panel: backlog

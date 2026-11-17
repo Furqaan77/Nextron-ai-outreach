@@ -16,6 +16,13 @@
   fails (``str(exc)``, ``f"{exc}"``, ``exc.args``, ``exc.response.json()``,
   ``exc.headers[...]``), and so does any ``traceback.*``, ``sys.exc_info()`` or
   ``sys.exception()`` call.
+- **Taint tracking.** The text may not arrive through a local either. A local assigned from the
+  caught exception's text (``m = str(exc)``, ``m = f"{exc}"``, ``m = exc.args``,
+  ``m = repr(exc)``, by ``=``, an annotated or augmented assignment, ``:=``, a ``for`` or a
+  comprehension target), directly or through another such local (``n = m.upper()``), is
+  tainted for its whole function (and the functions nested in it), whatever the branch;
+  passing it into the error fails. A local assigned from an allowed attribute
+  (``status = exc.status_code``) is not tainted.
 
 The adapter check reads the source (AST); the proofs run it on a temporary copy of the tree with
 a probe module.
@@ -348,12 +355,107 @@ def _leaks(node: ast.AST, caught: frozenset[str]) -> bool:
     return any(_leaks(child, caught) for child in ast.iter_child_nodes(node))
 
 
+class _Taint(ast.NodeVisitor):
+    """The locals of one scope that carry a caught exception's text: assigned from it, directly
+    or through another such local. A nested function or class is a scope of its own, scanned
+    with ``known``: the names caught or tainted where it is defined."""
+
+    def __init__(self, known: frozenset[str] = frozenset()) -> None:
+        self.known = known
+        self.caught: list[str] = []
+        self.tainted: set[str] = set()
+        self.changed = False
+
+    def scan(self, body: list[ast.stmt]) -> frozenset[str]:
+        """The tainted locals of ``body``, repeated until no new one turns up."""
+        while True:
+            self.changed = False
+            for statement in body:
+                self.visit(statement)
+            if not self.changed:
+                return frozenset(self.tainted)
+
+    def visit_FunctionDef(self, node: ast.AST) -> None:
+        """A nested scope: ``_RaiseChecker`` scans it on its own."""
+
+    visit_AsyncFunctionDef = visit_ClassDef = visit_Lambda = visit_FunctionDef
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self.caught.append(node.name)
+        self.generic_visit(node)
+        if node.name:
+            self.caught.pop()
+
+    def _taint(self, target: ast.AST | None, value: ast.AST | None) -> None:
+        if target is None or value is None:
+            return
+        if not _leaks(value, self.known | frozenset(self.caught) | self.tainted):
+            return
+        for node in ast.walk(target):
+            if isinstance(node, ast.Name) and node.id not in self.tainted:
+                self.tainted.add(node.id)
+                self.changed = True
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._taint(target, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._taint(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._taint(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._taint(node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self._taint(node.target, node.iter)
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def visit_comprehension(self, node: ast.comprehension) -> None:
+        self._taint(node.target, node.iter)
+        self.generic_visit(node)
+
+    def visit_withitem(self, node: ast.withitem) -> None:
+        self._taint(node.optional_vars, node.context_expr)
+        self.generic_visit(node)
+
+
+def tainted_locals(body: list[ast.stmt], known: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The locals of the scope ``body`` that carry a caught exception's text; ``known`` are the
+    names caught or tainted in the scopes around it."""
+    return _Taint(known).scan(body)
+
+
 class _RaiseChecker(ast.NodeVisitor):
     def __init__(self, label: str, raisable: _Raisable) -> None:
         self.label = label
         self.raisable = raisable
         self.caught: list[str] = []
+        self.tainted: list[frozenset[str]] = []  # one entry per enclosing scope
         self.problems: list[str] = []
+
+    def _scope(self, node: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        known = frozenset(self.caught).union(*self.tainted)
+        self.tainted.append(tainted_locals(node.body, known))
+        self.generic_visit(node)
+        self.tainted.pop()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._scope(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._scope(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name:
@@ -383,7 +485,7 @@ class _RaiseChecker(ast.NodeVisitor):
             or (isinstance(cause, ast.Constant) and cause.value is None)
         ):
             return f"raises from {ast.unparse(cause)}; use from the caught exception or None"
-        caught = frozenset(self.caught)
+        caught = frozenset(self.caught).union(*self.tainted)
         arguments = [*node.exc.args, *(keyword.value for keyword in node.exc.keywords)]
         if any(_leaks(argument, caught) for argument in arguments):
             return f"puts exception text into {ast.unparse(node.exc)}"
@@ -504,6 +606,139 @@ def test_the_raise_check_catches_an_adapter_error_from_elsewhere(
 
     assert problems, "an AdapterError not imported from nextron.ports.errors must fail"
     assert all("not AdapterError(...) imported from" in problem for problem in problems)
+
+
+TAINTED = [
+    "m = str(exc)\n        raise AdapterError(True, 'sdk_failed', m)",
+    "m = f'call failed: {exc}'\n        raise AdapterError(True, 'sdk_failed', m) from exc",
+    "m = exc.args\n        raise AdapterError(True, 'sdk_failed', str(m))",
+    "m = exc.args[0]\n        raise AdapterError(True, 'sdk_failed', message=m)",
+    "m = repr(exc)\n        raise RateLimited(True, 'rate_limited', f'{m}')",
+    "m = repr(exc)\n        n = m.upper()\n        raise AdapterError(True, 'sdk_failed', n)",
+    "text = str(exc)\n        parts = [text, 'x']\n        message = ' '.join(parts)\n"
+    "        raise AdapterError(True, 'sdk_failed', message)",
+    "m: str = exc.response.text\n        raise AdapterError(True, 'sdk_failed', m)",
+    "m = 'failed: '\n        m += str(exc)\n        raise AdapterError(True, 'sdk_failed', m)",
+    "if (m := str(exc)):\n            raise AdapterError(True, 'sdk_failed', m)",
+    "for m in exc.args:\n            raise AdapterError(True, 'sdk_failed', m)",
+    "found = [part for part in exc.args]\n        raise AdapterError(True, 'sdk_failed', found[0])",
+    "alias = exc\n        raise AdapterError(True, 'sdk_failed', f'{alias}')",
+    "m = traceback.format_exc()\n        raise AdapterError(True, 'sdk_failed', m)",
+]
+
+
+@pytest.mark.parametrize("statement", TAINTED)
+def test_the_raise_check_catches_exception_text_carried_by_a_local(
+    statement: str, tmp_path: Path
+) -> None:
+    _, root = copy_with_probe(tmp_path, "nextron.adapters", probe(statement))
+
+    [problem] = adapter_raise_problems(root)
+
+    line = PROBE_LINE + statement.count("\n")
+    assert problem.startswith(f"{PROBE_FILE}:{line} ")
+    assert "puts exception text into" in problem
+
+
+LATER_RAISE = '''"""A probe: the text is kept in the handler and raised after it."""
+
+from nextron.ports.errors import AdapterError
+
+
+def call() -> None:
+    """Stands in for an SDK call."""
+
+
+def wrapped() -> None:
+    note = "the call failed"
+    try:
+        call()
+    except OSError as exc:
+        note = str(exc)
+    if note:
+        raise AdapterError(False, "os_failed", note)
+
+
+def nested() -> None:
+    try:
+        call()
+    except OSError as exc:
+        detail = f"{exc}"
+
+        def later() -> None:
+            raise AdapterError(False, "os_failed", detail)
+
+        later()
+'''
+
+
+def test_the_raise_check_follows_a_tainted_local_past_its_handler_and_into_a_closure(
+    tmp_path: Path,
+) -> None:
+    _, root = copy_with_probe(tmp_path, "nextron.adapters", LATER_RAISE)
+
+    problems = adapter_raise_problems(root)
+
+    assert [problem.split(" ", 1)[0] for problem in problems] == [
+        f"{PROBE_FILE}:17",
+        f"{PROBE_FILE}:27",
+    ]
+    assert all("puts exception text into" in problem for problem in problems)
+
+
+NESTED_TAINT = '''"""A probe: a nested function turns its enclosing handler's exception to text."""
+
+from nextron.ports.errors import AdapterError
+
+
+def call() -> None:
+    """Stands in for an SDK call."""
+
+
+def wrapped() -> None:
+    try:
+        call()
+    except OSError as exc:
+
+        def later() -> None:
+            detail = str(exc)
+            raise AdapterError(False, "os_failed", detail)
+
+        later()
+'''
+
+
+def test_the_raise_check_taints_a_local_of_a_nested_function_from_the_enclosing_handler(
+    tmp_path: Path,
+) -> None:
+    _, root = copy_with_probe(tmp_path, "nextron.adapters", NESTED_TAINT)
+
+    [problem] = adapter_raise_problems(root)
+
+    raise_line = '            raise AdapterError(False, "os_failed", detail)'
+    line = NESTED_TAINT.splitlines().index(raise_line) + 1
+    assert problem.startswith(f"{PROBE_FILE}:{line} ")
+    assert "puts exception text into" in problem
+
+
+CLEAN_LOCALS = [
+    "status = exc.status_code\n        raise RateLimited(True, 'rate_limited', f'HTTP {status}')",
+    "code = exc.response.status_code\n"
+    "        raise AdapterError(True, 'rate_limited', f'HTTP {code}') from exc",
+    "number = exc.errno\n        shown = number\n"
+    "        raise AdapterError(False, 'os_failed', f'errno {shown}') from None",
+    "m = 'the SDK call failed'\n        raise AdapterError(True, 'sdk_failed', m) from exc",
+    "wait = exc.retry_after\n        raise AdapterError(True, 'rate_limited', f'wait {wait} s')",
+]
+
+
+@pytest.mark.parametrize("statement", CLEAN_LOCALS)
+def test_the_raise_check_allows_a_local_from_an_allowed_attribute_or_own_text(
+    statement: str, tmp_path: Path
+) -> None:
+    _, root = copy_with_probe(tmp_path, "nextron.adapters", probe(statement))
+
+    assert adapter_raise_problems(root) == []
 
 
 def test_the_raise_check_reaches_adapter_subpackages(tmp_path: Path) -> None:

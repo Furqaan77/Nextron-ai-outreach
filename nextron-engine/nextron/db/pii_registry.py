@@ -67,4 +67,28 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "started_at": PiiClass.NONE,
         "beat_at": PiiClass.NONE,
     },
+    # Story 1.12. Ops alert text carries IDs and counts only, but later kinds (Hot Lead,
+    # LinkedIn) are free text that may name a person; every other column is an ID, a code or a
+    # time.
+    "alerts": {
+        "id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "subject": PiiClass.NONE,
+        "channel": PiiClass.NONE,
+        "text": PiiClass.REDACT,
+        "status": PiiClass.NONE,
+        "provider_message_id": PiiClass.NONE,
+        "error_code": PiiClass.NONE,
+        "resent_at": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
+    "notifications": {
+        "id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "subject": PiiClass.NONE,
+        "text": PiiClass.REDACT,
+        "created_at": PiiClass.NONE,
+        "dismissed_at": PiiClass.NONE,
+    },
 }

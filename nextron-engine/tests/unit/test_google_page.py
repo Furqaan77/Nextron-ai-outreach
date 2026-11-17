@@ -426,7 +426,8 @@ def test_the_polled_row_keeps_polling_until_the_flow_ends(
     assert done.buttons() == ["Grant again", "Remove"]
     assert done.notices == []
     html = page(dashboard, session)
-    assert html.count("hx-get") == 0
+    assert html.count("hx-get") == 1  # only the layout's notification list, loaded once
+    assert 'hx-get="/notifications" hx-trigger="load"' in html
     assert dashboard.oauth.verifiers == [VERIFIER]
 
 
@@ -437,7 +438,9 @@ def test_only_a_waiting_row_polls(dashboard: Dashboard, session: tuple[bytes, st
     html = Html(page(dashboard, session))
 
     polling = [node.attrs.get("id") for node in html.root.all() if "hx-get" in node.attrs]
-    assert polling == ["google-grant-postmaster"]
+    assert polling == ["notification-list", "google-grant-postmaster"]  # the layout's loads once
+    [layout] = [node for node in html.root.all() if node.attrs.get("id") == "notification-list"]
+    assert layout.attrs.get("hx-trigger") == "load"
 
 
 def test_grant_without_a_client_asks_for_the_import_first(

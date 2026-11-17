@@ -18,8 +18,8 @@ It returns ``{name: [value, ...]}``, ``csrf_token`` included. Anything else rais
 ``Request refused: malformed form`` (plain text, ``Cache-Control: no-store``) and logs
 ``request_refused`` with ``check=form``, the fixed ``reason`` (``not_urlencoded``,
 ``bad_body``, ``wrong_fields`` or ``repeated_field``), the ``method`` and the ``path``; never a
-field name or value. HTMX doesn't swap the 400, so the form stays as it was (the notification
-arrives in Story 1.12).
+field name or value. The form stays as it was, and HTMX puts the 400's text in the page's error
+notice (``#request-error``, see ``nextron.web.app``).
 
 ``require_csrf`` runs first and parses an urlencoded body itself, so a repeated
 ``Content-Type``, a non-ASCII urlencoded body or more than 1,000 fields get its 403

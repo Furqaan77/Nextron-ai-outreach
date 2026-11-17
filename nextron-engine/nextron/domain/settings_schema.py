@@ -78,6 +78,7 @@ from functools import cache
 from types import MappingProxyType
 from typing import Any, Final, NamedTuple
 
+from nextron.domain.alert import is_telegram_chat_id
 from nextron.domain.errors import DomainError
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.sink import is_sink_recipient
@@ -129,6 +130,7 @@ class Key(StrEnum):
     SENDER_TIMEZONE = "sender_timezone"
     SINK_ALLOWLIST = "sink_allowlist"
     BULK_THREADS = "bulk_threads"
+    ALERT_CHAT_ID = "alert_chat_id"
 
 
 class _Required(Enum):
@@ -793,6 +795,12 @@ SINK_RECIPIENT_RULE: Final = Rule(
     lambda value: all(is_sink_recipient(item) for item in value),
 )
 
+TELEGRAM_CHAT_ID_RULE: Final = Rule(
+    "telegram_chat_id",
+    "must be a numeric Telegram chat id, such as -1001234567890",
+    is_telegram_chat_id,
+)
+
 SCHEMA: Mapping[str, Setting] = _declare(
     Setting(
         key=Key.SENDER_TIMEZONE,
@@ -828,6 +836,20 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=1,
         rules=(minimum(1, "1"), maximum(MAX_BULK_THREADS, str(MAX_BULK_THREADS))),
+    ),
+    # The Telegram chat that receives ops alerts (AD-15, Story 1.12), read when each alert is
+    # sent. Numeric only: a @name can be handed to someone else.
+    Setting(
+        key=Key.ALERT_CHAT_ID,
+        type=SettingType.STRING,
+        section=Section.ALERTS_AND_RECIPIENTS,
+        label="Telegram alert chat id",
+        unit=(
+            "The numeric id of the Telegram chat that receives ops alerts, such as "
+            "-1001234567890; user names (@name) aren't accepted."
+        ),
+        default=REQUIRED,
+        rules=(TELEGRAM_CHAT_ID_RULE,),
     ),
 )
 

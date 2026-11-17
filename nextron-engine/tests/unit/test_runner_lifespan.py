@@ -12,6 +12,7 @@ stops them, and building the app starts none.
 import asyncio
 import logging
 import os
+import sqlite3
 import threading
 from datetime import UTC, datetime
 from typing import Any
@@ -20,9 +21,19 @@ import pytest
 from fastapi import FastAPI
 
 from nextron import main
+from nextron.app.notify.api import Notify
+from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
+from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
-from nextron.db.uow import UnitOfWorkFactory
+from nextron.db.uow import UnitOfWorkFactory, current, use_case
+from nextron.domain.alert import Channel
+from nextron.domain.job import Lane
+from nextron.domain.settings_schema import Key
+from nextron.jobs.runner import Runner
+from nextron.main import AdapterContext
+from nextron.ports.alert import AlertMessage
+from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
 
@@ -83,6 +94,124 @@ def test_building_the_app_starts_no_thread(units: UnitOfWorkFactory) -> None:
     assert job_threads() == []
     assert set(threading.enumerate()) == before
     assert not (load_bootstrap().data_dir / main.HEARTBEAT_FILE_NAME).exists()
+
+
+def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[object] = []
+    registries: list[object] = []
+    real_build_job_types = main.build_job_types
+
+    def recording_job_types(**kwargs: Any) -> Any:
+        registries.append(real_build_job_types(**kwargs))
+        return registries[-1]
+
+    monkeypatch.setattr(main, "build_job_types", recording_job_types)
+    monkeypatch.setattr(main, "build_role_adapter", lambda *args, **kwargs: built.append(args))
+    load_bootstrap().data_dir.mkdir(parents=True)
+    app = build(units)
+
+    sent, _ = drive_lifespan(app)
+
+    assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+    [job_types] = registries
+    assert job_types.names() == ("send_alert",)  # type: ignore[attr-defined]
+    assert built == []  # no role adapter, so no Telegram client and no request
+    with units.open(read_only=True):
+        assert notify_queries.open_notifications(5).count == 0
+
+
+def spy[T](monkeypatch: pytest.MonkeyPatch, name: str) -> list[Any]:
+    """Every object ``main.<name>`` builds while the test runs, built by the real class."""
+    built: list[Any] = []
+    real = getattr(main, name)
+
+    def build_and_keep(*args: Any, **kwargs: Any) -> Any:
+        built.append(real(*args, **kwargs))
+        return built[-1]
+
+    monkeypatch.setattr(main, name, build_and_keep)
+    return built
+
+
+def raw_query(units: UnitOfWorkFactory, statement: str, params: tuple[object, ...] = ()) -> Any:
+    assert units.engine.url.database
+    connection = sqlite3.connect(units.engine.url.database, isolation_level=None)
+    try:
+        return connection.execute(statement, params).fetchall()
+    finally:
+        connection.close()
+
+
+def test_the_built_runner_sweeps_dead_jobs_into_job_dead_alerts(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runners = spy(monkeypatch, "Runner")
+    build(units)
+    [runner] = runners
+    assert isinstance(runner, Runner)
+    job_id = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
+    raw_query(  # a queued job of a type no longer registered: its claim makes it dead
+        units,
+        "INSERT INTO jobs (id, type, lane, status, priority, payload, idempotency_key, "
+        "concurrency_key, run_after, attempts, lease_until, last_error, created_at, "
+        "updated_at) VALUES (?, 'retire_lead', 'bulk', 'queued', 50, '{\"v\":1}', "
+        "'retire_lead:global:tick', NULL, '2026-11-17T09:00:00.000000Z', 0, NULL, NULL, "
+        "'2026-11-17T09:00:00.000000Z', '2026-11-17T09:00:00.000000Z')",
+        (job_id,),
+    )
+
+    assert runner.run_one(Lane.BULK) is False  # claimed straight to dead; nothing ran
+    runner.keep_once()  # the keeper's tick runs the sweep
+
+    text = f"Job dead: retire_lead {job_id}, attempts: 1"
+    assert raw_query(units, "SELECT kind, subject, text FROM notifications") == [
+        ("job_dead", job_id, text)
+    ]
+    assert raw_query(units, "SELECT kind, subject, channel, status FROM alerts") == [
+        ("job_dead", job_id, "telegram", "pending")
+    ]
+
+
+def test_the_built_notify_sends_telegram_alerts_through_the_role_adapter(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    port = InMemoryAlert()
+
+    def build_role_adapter(*args: Any, **kwargs: Any) -> InMemoryAlert:
+        calls.append((args, kwargs))
+        return port
+
+    monkeypatch.setattr(main, "build_role_adapter", build_role_adapter)
+    notifies = spy(monkeypatch, "Notify")
+    runners = spy(monkeypatch, "Runner")
+    config, secrets, clock = load_bootstrap(), InMemorySecrets("test"), FrozenClock(T)
+    main.build_app(config, units=units, secrets=secrets, clock=clock)
+    [notify], [runner] = notifies, runners
+    assert isinstance(notify, Notify)
+    assert calls == []  # building the app builds no adapter
+    with units.open():
+        Setup(clock).set(Key.ALERT_CHAT_ID, "-1001234567890")
+    subject = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
+
+    @use_case
+    def raise_alert() -> None:
+        with current().transaction():
+            notify.alert("job_dead", subject, "Job dead: x, attempts: 1", [Channel.TELEGRAM])
+
+    with units.open():
+        raise_alert()
+
+    assert runner.run_one(Lane.REALTIME) is True
+
+    assert calls == [(("telegram", AdapterContext(config, secrets, clock)), {"units": units})]
+    [(args, _)] = calls
+    context = args[1]
+    assert context.secrets is secrets and context.clock is clock and context.config is config
+    assert port.sent == [AlertMessage("-1001234567890", "Job dead: x, attempts: 1")]
+    assert raw_query(units, "SELECT status FROM alerts") == [("sent",)]
 
 
 def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_stops_them(

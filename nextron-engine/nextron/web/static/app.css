@@ -53,11 +53,64 @@ nav a:focus-visible {
   text-decoration: underline;
 }
 
-/* The notification area stays rendered (and in the accessibility tree) while empty; it takes
-   space only once it holds a notice. */
-#notifications:not(:empty) {
+/* The notification area (UX-DR5): the error notice and the notification list stay rendered
+   (and in the accessibility tree) while empty, never display: none; each takes space only once
+   it holds something. */
+.request-error {
+  margin: 0;
+}
+
+#request-error:not(:empty) {
+  padding: 0.5rem 1.5rem;
+  color: var(--ink);
+  background: var(--band);
+  border-bottom: 1px solid var(--line);
+  border-left: 4px solid var(--refused);
+}
+
+#notification-list:not(:empty) {
   padding: 0.5rem 1.5rem;
   border-bottom: 1px solid var(--line);
+}
+
+.notifications-heading {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.notification-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notification {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 1rem;
+  padding: 0.25rem 0;
+}
+
+.notification-text {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.notification-time,
+.notification-more {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.notification form {
+  margin: 0;
+}
+
+.notification button {
+  padding: 0.1rem 0.6rem;
+  font-size: 0.875rem;
 }
 
 main {

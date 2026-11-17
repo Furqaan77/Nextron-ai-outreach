@@ -154,6 +154,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/credentials/google/grant",
         "/credentials/google/grant/{grant}",
         "/credentials/google/remove",
+        "/notifications",
+        "/notifications/dismiss",
     ]
     assert async_route_handlers(app) == []
 
@@ -548,6 +550,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "home.html",
         "locked.html",
         "macros.html",
+        "notifications.html",
         "settings.html",
         "settings_form.html",
     ]

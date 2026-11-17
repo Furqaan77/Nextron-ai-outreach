@@ -15,6 +15,11 @@ a ``FakeConsentListener`` per flow and keeps it in ``listeners`` (set ``next_ans
 Grant click, or the listener's ``answer`` before running the job). A flow's background job is
 never started on its own: ``start`` keeps it in ``jobs``, and ``run_jobs()`` runs them, so a
 test sees the waiting row before Google answers.
+
+Its ``Notify`` (``notify``) uses the same clock, a ``JobQueue`` (``queue``) on the real job types
+(``job_types``, from ``nextron.main.build_job_types``) and, for Telegram, the ``alert`` port
+(``InMemoryAlert`` unless a test passes another ``AlertPort``); the notification area and its
+Dismiss go through it, on the dashboard's units of work.
 """
 
 import json
@@ -25,12 +30,19 @@ from urllib.parse import urlencode
 
 from fastapi import FastAPI
 
+from nextron import main
+from nextron.app.jobqueue.api import JobQueue
+from nextron.app.notify.api import Notify
 from nextron.app.ops.api import DashboardEntry
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
+from nextron.domain.alert import Channel
+from nextron.domain.job import JobTypes
+from nextron.ports.alert import AlertPort
 from nextron.ports.google_oauth import Query
 from nextron.web.app import create_app
 from nextron.web.routing import Units
 from tests.asgi import DEFAULT_HOST, Headers, Reply, request
+from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.secrets import InMemorySecrets
@@ -105,11 +117,15 @@ class Dashboard:
     listen_error: Exception | None = None
     listeners: list[FakeConsentListener] = field(default_factory=list)
     jobs: list[Callable[[], None]] = field(default_factory=list)
+    alert: AlertPort = field(default_factory=InMemoryAlert)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
     credentials: Credentials = field(init=False)
     google: GoogleAccess = field(init=False)
+    job_types: JobTypes = field(init=False)
+    queue: JobQueue = field(init=False)
+    notify: Notify = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -126,6 +142,11 @@ class Dashboard:
             allowlist=self.read_allowlist,
             start=self.jobs.append,
         )
+        self.job_types = main.build_job_types(alerts=lambda: self.notify)
+        self.queue = JobQueue(self.clock, self.job_types)
+        self.notify = Notify(
+            self.clock, self.queue, alert_ports={Channel.TELEGRAM: lambda: self.alert}
+        )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -135,6 +156,7 @@ class Dashboard:
             setup=self.setup,
             credentials=self.credentials,
             google=self.google,
+            notify=self.notify,
             units=self.units,
             **extra,
         )

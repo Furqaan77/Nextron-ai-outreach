@@ -35,7 +35,10 @@ SECURITY_HEADERS = {
 }
 HTMX_CONFIG = (
     '{"allowEval":false,"allowScriptTags":false,"selfRequestsOnly":true,'
-    '"historyCacheSize":0,"includeIndicatorStyles":false}'
+    '"historyCacheSize":0,"includeIndicatorStyles":false,'
+    '"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},'
+    '{"code":"[45]..","swap":true,"error":true,"target":"#request-error",'
+    '"swapOverride":"textContent"}]}'
 )
 LOCKED_TEXT = "Run nextron open in a terminal to open the dashboard."
 KEY = ("nextron-engine/test", OPEN_CODE_SECRET)
@@ -653,6 +656,17 @@ def test_htmx_is_configured_through_the_meta_tag_before_the_script(dashboard: Da
         "selfRequestsOnly": True,
         "historyCacheSize": 0,
         "includeIndicatorStyles": False,
+        "responseHandling": [
+            {"code": "204", "swap": False},
+            {"code": "[23]..", "swap": True},
+            {
+                "code": "[45]..",
+                "swap": True,
+                "error": True,
+                "target": "#request-error",
+                "swapOverride": "textContent",
+            },
+        ],
     }
     [script] = page.find("script")
     assert script == {"src": "/static/htmx-2.0.11.min.js", "defer": None}
@@ -682,6 +696,10 @@ def test_the_layout_has_a_brand_nav_notifications_and_main(dashboard: Dashboard)
     assert page.find("a", href="/", **{"class": "brand"})
     assert page.find("nav")
     assert page.find("section", id="notifications", **{"aria-live": "polite"})
+    assert page.find("p", id="request-error", role="alert", **{"class": "request-error"})
+    assert page.find(
+        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load"}
+    )
     assert page.find("main")
 
 

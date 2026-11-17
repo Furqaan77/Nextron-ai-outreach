@@ -36,11 +36,24 @@ Any other error is logged as ``engine_crashed`` and ends with exit 1.
 constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists.
 
-**Jobs (AD-10).** ``build_job_types`` is the job type registry: the only code that constructs
-``JobTypes`` or calls ``register_job_type``. It ships empty and frozen; each story that adds a
-job type registers its ``JobType`` (lanes, priority, ``max_runtime``, retry limit and a thin
-handler) there. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one
-``Runner(units, queue, job_types)`` (``nextron.jobs.runner``).
+**Jobs (AD-10).** ``build_job_types(*, alerts)`` is the job type registry: the only code that
+constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's ``JobType``
+(lanes, priority, ``max_runtime``, retry limit and a thin handler from
+``nextron.jobs.handlers``), then freezes it. So far: ``send_alert`` (Story 1.12: the realtime
+lane only, priority 90, ``max_runtime`` 3 minutes, retry limit 5,
+``handlers.send_alert(alerts)``). ``build_app`` builds one ``JobQueue(clock, job_types)`` and one
+``Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
+
+**Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
+alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
+``notifications`` tables and sends each Telegram alert as a ``send_alert`` job. Its Telegram
+port is ``functools.partial(build_role_adapter, "telegram", AdapterContext(config, secrets,
+clock), units=units)``, built on the first send, never when the app is built. The registry
+needs the handler, the handler needs ``Notify``, ``Notify`` needs the queue and the queue needs
+the registry: ``build_job_types(alerts=lambda: notify)`` breaks the cycle, with ``notify`` bound
+just below it. The runner's dead-job sweep (``DeadJobAlerts(notify)``, ``nextron.app.ops.api``)
+raises the ``job_dead`` alert for every dead job, and the dashboard (``create_app(...,
+notify=notify)``) shows the notifications and dismisses them.
 
 **Triggers (AD-10).** ``build_triggers(job_types)`` is the trigger registry: the only code that
 constructs ``Triggers`` or calls ``register_trigger``. It ships empty and frozen, so the
@@ -104,8 +117,8 @@ otherwise). In ``prod`` it returns that adapter. Anywhere else
 ``<data dir>\\sink`` and reads the allowlist through ``read_sink_allowlist`` on every send. A
 live ``mail`` or ``alert`` adapter could be obtained outside ``prod`` only by constructing it
 directly, which ``tests/contracts/test_sink_contracts.py`` refuses anywhere in this module but
-the ``ROLE_ADAPTERS`` assignment. The registry ships empty: Stories 1.12 (Telegram), 6.x (Gmail)
-and 7.9 add the entries.
+the ``ROLE_ADAPTERS`` assignment. The entries so far: ``telegram`` (``TelegramAlert``, the
+``alert`` role, Story 1.12); Stories 6.x (Gmail) and 7.9 add the others.
 
 ``read_sink_allowlist(units)`` returns ``queries.setup.get(Key.SINK_ALLOWLIST)``, read in its
 own read-only unit of work inside a fresh ``contextvars.Context()``: a port call happens inside
@@ -135,6 +148,7 @@ import sys
 import webbrowser
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -148,17 +162,21 @@ from nextron.adapters.clock import SystemClock
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
+from nextron.adapters.telegram import TelegramAlert
 from nextron.app.jobqueue.api import JobQueue
-from nextron.app.ops.api import DashboardEntry, Heartbeat
+from nextron.app.notify.api import Notify
+from nextron.app.ops.api import DashboardEntry, DeadJobAlerts, Heartbeat
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine
 from nextron.db.migrations import DatabaseStateError, ensure_current
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
-from nextron.domain.job import JobTypes
+from nextron.domain.alert import SEND_ALERT_JOB, Channel
+from nextron.domain.job import JobType, JobTypes, Lane
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
+from nextron.jobs import handlers
 from nextron.jobs.heartbeat import HeartbeatWriter
 from nextron.jobs.runner import Runner
 from nextron.jobs.scheduler import Scheduler
@@ -243,7 +261,8 @@ def build_app(
     is reached through ``google_oauth`` (``GoogleOAuthClient()`` unless injected) and the
     consent page opens with ``browser`` (``open_in_browser`` unless injected). The job runner,
     the scheduler and the heartbeat writer are built here and started by the app's lifespan
-    (``engine_lifespan``), never by building."""
+    (``engine_lifespan``), never by building; ``Notify`` builds its Telegram adapter on the
+    first send."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     google = GoogleAccess(
@@ -256,9 +275,13 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
-    job_types = build_job_types()
+    job_types = build_job_types(alerts=lambda: notify)  # notify is bound just below
     queue = JobQueue(clock, job_types)
-    runner = Runner(units, queue, job_types)
+    telegram = functools.partial(
+        build_role_adapter, "telegram", AdapterContext(config, secrets, clock), units=units
+    )
+    notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
+    runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
     scheduler = Scheduler(units, queue, build_triggers(job_types))
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
     writer = HeartbeatWriter(units, heartbeat, runner, scheduler)
@@ -270,15 +293,28 @@ def build_app(
         setup=Setup(clock),
         credentials=Credentials(secrets, clock),
         google=google,
+        notify=notify,
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )
 
 
-def build_job_types() -> JobTypes:
-    """The job type registry (AD-10), frozen. Empty until a story adds a job type: register each
-    with ``register_job_type(JobType(...))`` before ``freeze()``."""
+def build_job_types(*, alerts: Callable[[], handlers.AlertSending]) -> JobTypes:
+    """The job type registry (AD-10), frozen: register each story's job type with
+    ``register_job_type(JobType(...))`` before ``freeze()``. ``alerts`` returns the ``notify``
+    service that ``send_alert`` jobs call."""
     job_types = JobTypes()
+    job_types.register_job_type(
+        JobType(
+            name=SEND_ALERT_JOB,
+            default_lane=Lane.REALTIME,
+            lanes=frozenset({Lane.REALTIME}),
+            priority=90,
+            max_runtime=timedelta(minutes=3),  # 10 s connect, 15 s per phase, database waits
+            retry_limit=5,  # 30 s doubling: about 15 minutes of backoff
+            handler=handlers.send_alert(alerts),
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -352,8 +388,11 @@ class RoleAdapter:
 
 
 # The role adapter registry (AD-14): the only place a mail or alert adapter is constructed.
-# Stories 1.12, 6.x and 7.9 add the entries. Only build_role_adapter reads it.
-ROLE_ADAPTERS: tuple[RoleAdapter, ...] = ()
+# Story 1.12 added Telegram; Stories 6.x and 7.9 add the others. Only build_role_adapter reads
+# it.
+ROLE_ADAPTERS: tuple[RoleAdapter, ...] = (
+    RoleAdapter("telegram", SinkRole.ALERT, TelegramAlert, lambda c: TelegramAlert(c.secrets)),
+)
 
 ROLE_PORTS: Final[Mapping[SinkRole, type]] = MappingProxyType(
     {SinkRole.MAIL: MailPort, SinkRole.ALERT: AlertPort}

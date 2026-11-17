@@ -15,6 +15,7 @@ applies the Job machine. Rows come back as ``JobRow``, a frozen copy of every co
   attempts, ...)``: changes a job only while it is ``running`` with exactly those attempts (the
   fence). Both return their row count;
 - ``expired(now, exclude)``: the ``running`` jobs whose lease ended by ``now``;
+- ``dead()``: every ``dead`` job, oldest change first;
 - ``purge_done(cutoff)``: deletes ``done`` rows last changed before ``cutoff``, except each
   type's newest ``done`` row; returns how many it deleted.
 """
@@ -184,6 +185,16 @@ def expired(now: datetime, exclude: Collection[str] = ()) -> list[JobRow]:
     )
     if exclude:
         statement = statement.where(JobRecord.id.not_in(list(exclude)))
+    return _rows(statement)
+
+
+def dead() -> list[JobRow]:
+    """Every ``dead`` job, by ``updated_at`` then id."""
+    statement = (
+        select(*_COLUMNS)
+        .where(JobRecord.status == str(JobStatus.DEAD))
+        .order_by(JobRecord.updated_at.asc(), JobRecord.id.asc())
+    )
     return _rows(statement)
 
 

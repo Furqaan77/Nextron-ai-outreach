@@ -14,7 +14,13 @@ package is classified. A ``mail`` or ``alert`` adapter is built only through
 ``nextron.main.ROLE_ADAPTERS``, which wraps it in the dev and test sink (``adapters.sink``).
 
 The adapters so far: ``clock`` (the system clock), ``secrets`` (Windows Credential Manager;
-live constructor ``default_backend``), ``sink`` (the dev and test sink) and ``google_oauth``
+live constructor ``default_backend``), ``sink`` (the dev and test sink), ``google_oauth``
 (Google's OAuth endpoints over ``httpx2``, the one-shot consent listener on ``127.0.0.1`` and the
-downloaded client file; live constructor ``default_http_client``). ``ai`` is reserved.
+downloaded client file; live constructor ``default_http_client``) and ``telegram`` (ops alerts
+through the Telegram Bot API's ``sendMessage`` over ``httpx2``, the ``alert`` role's first
+adapter; live constructor ``default_http_client``). ``ai`` is reserved.
+
+Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
+port calls, whatever the transport raises or answers, and never carries a secret into an error:
+``tests/contracts/test_adapter_boundary.py`` proves it for each one.
 """

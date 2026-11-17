@@ -8,7 +8,8 @@
   ``monkeypatch.delenv("NEXTRON_ENV")``.
 - No test reaches a real external system (AD-14, ``tests/live_guard.py``). These raise
   ``LiveAdapterInTests``: ``nextron.adapters.secrets.default_backend``,
-  ``nextron.adapters.google_oauth.default_http_client``, the ``build`` of each
+  ``nextron.adapters.google_oauth.default_http_client``,
+  ``nextron.adapters.telegram.default_http_client``, the ``build`` of each
   ``nextron.main.ROLE_ADAPTERS`` entry, ``WinVaultKeyring``'s ``get_password``,
   ``set_password``, ``delete_password`` and ``get_credential``, and ``webbrowser.open``,
   ``open_new`` and ``open_new_tab`` (no test opens a browser). These raise ``NetworkInTests``

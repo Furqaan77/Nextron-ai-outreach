@@ -10,7 +10,9 @@ a real external system to raise ``LiveAdapterInTests``:
   ``nextron.adapters.secrets.default_backend`` (Windows Credential Manager), so
   ``KeyringSecrets("test")`` and ``main.build_app`` without injected secrets raise, and
   ``nextron.adapters.google_oauth.default_http_client`` (Google's OAuth endpoints), so a
-  ``GoogleOAuthClient()`` raises on its first call;
+  ``GoogleOAuthClient()`` raises on its first call, and
+  ``nextron.adapters.telegram.default_http_client`` (the Telegram Bot API), so a
+  ``TelegramAlert`` raises on its first send;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
 
@@ -73,6 +75,7 @@ ROLE_ADAPTER_MODULE: Final = "nextron.main"
 LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.secrets", "default_backend"),
     ("nextron.adapters.google_oauth", "default_http_client"),
+    ("nextron.adapters.telegram", "default_http_client"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -115,6 +118,7 @@ class NotYetBuilt:
 ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "secrets": Guarded(("default_backend",)),
     "google_oauth": Guarded(("default_http_client",)),
+    "telegram": Guarded(("default_http_client",)),
     "clock": NoExternalSystem("reads the system clock; reaches no external system"),
     "sink": NoExternalSystem(
         "writes JSON lines under the data dir and only calls the adapter it wraps"
