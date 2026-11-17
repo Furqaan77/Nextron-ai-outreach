@@ -14,7 +14,12 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.ops`` only.
   ``HealthIssue("backup_failed", <backup id>, backup_failed_text(kind, id), detail="Error: " +
   redact(error))``. The list clears when a later backup verifies; there is no Dismiss. The
   error was redacted when it was stored; it is redacted again here, because it is free text
-  (``redact``-class in ``pii_registry``).
+  (``redact``-class in ``pii_registry``). After those come the failed off-PC copies (Story
+  1.17): each row whose ``offpc_status`` is ``failed`` and that is newer than the newest
+  ``copied`` or ``not_configured`` one (every such row when there is none), oldest first, as
+  ``HealthIssue("backup_failed", <backup id>, offpc_failed_text(kind, id), detail="Error: " +
+  redact(offpc_error))``. That list clears when a later backup is copied off the PC or the
+  off-PC copy is no longer configured.
 
 It reads through the current unit of work, read-only ones included.
 """
@@ -25,7 +30,14 @@ from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
 from nextron.db.repos.ops.backups import BackupRow
 from nextron.db.repos.ops.heartbeat import HeartbeatRow
-from nextron.domain.backup import BACKUP_FAILED, BackupKind, BackupStatus, backup_failed_text
+from nextron.domain.backup import (
+    BACKUP_FAILED,
+    BackupKind,
+    BackupStatus,
+    OffpcStatus,
+    backup_failed_text,
+    offpc_failed_text,
+)
 from nextron.domain.health import HealthIssue
 from nextron.domain.redaction import redact
 
@@ -48,11 +60,12 @@ def newest_backup(kind: BackupKind) -> BackupRow | None:
 
 
 def health_issues() -> tuple[HealthIssue, ...]:
-    """One ``backup_failed`` issue per failed backup newer than the newest verified one, oldest
-    first."""
+    """One ``backup_failed`` issue per failed backup newer than the newest verified one, then
+    one per failed off-PC copy newer than the newest copied or not configured one, each
+    oldest first."""
     verified = backups_repo.newest(status=str(BackupStatus.VERIFIED))
     since = None if verified is None else verified.started_at
-    return tuple(
+    local = tuple(
         HealthIssue(
             BACKUP_FAILED,
             row.id,
@@ -61,3 +74,17 @@ def health_issues() -> tuple[HealthIssue, ...]:
         )
         for row in backups_repo.failed_after(since)
     )
+    settled = backups_repo.newest_offpc(
+        (str(OffpcStatus.COPIED), str(OffpcStatus.NOT_CONFIGURED))
+    )
+    offpc_since = None if settled is None else settled.started_at
+    offpc = tuple(
+        HealthIssue(
+            BACKUP_FAILED,
+            row.id,
+            offpc_failed_text(row.kind, row.id),
+            detail=ERROR_LEAD + redact(row.offpc_error or ""),
+        )
+        for row in backups_repo.offpc_failed_after(offpc_since)
+    )
+    return local + offpc

@@ -73,6 +73,15 @@ The doctor checks here, in the order ``doctor`` runs them:
   In the engine (``refresh=False``, the health panel) the callable is ``check_stored_grant``,
   which reads only what is stored and calls no one, so a GET never refreshes the grant: its
   ``ok`` says the panel doesn't refresh it (``nextron doctor`` does).
+- ``offpc_backup`` (Story 1.17, OQ-A3): the encrypted off-PC backup is configured. It reads the
+  Backup passphrase's state first (``backup/passphrase``, through Credential Manager; the value
+  is dropped at once), then the ``backup_offpc_dir`` setting (``offpc_dir()``, the database),
+  and touches no file or folder. It warns ``off-PC backup not configured (OQ-A3): backups are
+  local only; <reasons>``, giving every reason with its fix: the folder is blank, the data dir
+  or the backup dir (or inside either), or can't be read (by type name), or the passphrase is
+  not set, too long or unreadable. It warns when the folder is on the data dir's drive
+  (``nextron.domain.backup.same_volume``: a lost disk would take both); otherwise it is
+  ``ok``.
 - ``required_settings``: every required setting is set and parses; it fails listing
   ``<label> (<key>)`` for each one that isn't, or naming the error type when the settings can't
   be read.
@@ -96,6 +105,15 @@ from pathlib import PurePath
 from typing import Any, Final
 
 from nextron.domain import credentials
+from nextron.domain.backup import (
+    FOLDER_IN_BACKUP_DIR,
+    FOLDER_IN_DATA_DIR,
+    FOLDER_NOT_SET,
+    drive_of,
+    offpc_problem,
+    same_volume,
+)
+from nextron.domain.credentials import CredentialKey
 from nextron.domain.google_oauth import GoogleGrant
 from nextron.domain.health import HEARTBEAT_FRESH
 from nextron.domain.readiness import CheckResult, Status, tally
@@ -125,6 +143,7 @@ BACKUP_DIR_SEPARATE: Final = "backup_dir_separate"
 PORT_FREE: Final = "port_free"
 REQUIRED_CREDENTIALS: Final = "required_credentials"
 INTERNAL_NOTIFY_GRANT: Final = "internal_notify_grant"
+OFFPC_BACKUP: Final = "offpc_backup"
 REQUIRED_SETTINGS: Final = "required_settings"
 DATABASE_REVISION: Final = "database_revision"
 ENGINE_PROBE_TIMEOUT_S: Final = 1.0
@@ -549,6 +568,88 @@ def check_internal_notify_grant(
         INTERNAL_NOTIFY_GRANT,
         Status.OK,
         f"{grant} is granted and Google refreshed its access token",
+    )
+
+
+OFFPC_NOT_CONFIGURED: Final = "off-PC backup not configured (OQ-A3): backups are local only"
+_SETTINGS_FIX: Final = "set Off-PC backup folder (backup_offpc_dir) on the Settings page"
+_ANOTHER_FOLDER: Final = (
+    "choose a folder on another drive or a network share in Off-PC backup folder "
+    "(backup_offpc_dir) on the Settings page"
+)
+
+
+def _offpc_folder_reason(folder: str, data_dir: PurePath, backup_dir: PurePath) -> str | None:
+    problem = offpc_problem(folder, data_dir, backup_dir)
+    if problem == FOLDER_NOT_SET:
+        return f"no off-PC backup folder is set; {_SETTINGS_FIX}"
+    if problem == FOLDER_IN_DATA_DIR:
+        return f"the off-PC backup folder {folder} is in the data dir {data_dir}; {_ANOTHER_FOLDER}"
+    if problem == FOLDER_IN_BACKUP_DIR:
+        return (
+            f"the off-PC backup folder {folder} is in the backup dir {backup_dir}; "
+            f"{_ANOTHER_FOLDER}"
+        )
+    return None
+
+
+def _passphrase_reason(state: str) -> str | None:
+    on_page = "enter it on the Credentials page"
+    if state == "not set":
+        return f"the Backup passphrase is not set; {on_page}"
+    if state == "too long":
+        return f"the Backup passphrase is over {MAX_SECRET_LENGTH:,} characters; {on_page}"
+    if state == "unreadable":
+        return (
+            "the Backup passphrase could not be read (Windows Credential Manager failed); "
+            "run doctor again, or enter it again on the Credentials page"
+        )
+    return None
+
+
+def check_offpc_backup(
+    read: Callable[[str], str | None],
+    offpc_dir: Callable[[], str],
+    data_dir: PurePath,
+    backup_dir: PurePath,
+) -> CheckResult:
+    """``ok`` when the off-PC folder is set (not in the data or backup dir, and on another
+    drive than the data dir) and the Backup passphrase is set; ``warn`` otherwise, with every
+    reason and its fix. ``read`` is ``SecretsPort.read`` (called first) and ``offpc_dir`` reads
+    the ``backup_offpc_dir`` setting. No I/O on the folder."""
+    passphrase = _credential_state(
+        read, credentials.credential(CredentialKey.BACKUP_PASSPHRASE).secret_name
+    )
+    reasons: list[str] = []
+    folder: str | None = None
+    try:
+        folder = str(offpc_dir())
+    except Exception as exc:  # noqa: BLE001 - any read failure is a reason, not a crash
+        reasons.append(
+            f"the off-PC backup folder setting could not be read ({type(exc).__name__}); "
+            f"{_SETTINGS_FIX}"
+        )
+    if folder is not None and (found := _offpc_folder_reason(folder, data_dir, backup_dir)):
+        reasons.append(found)
+    if (found := _passphrase_reason(passphrase)) is not None:
+        reasons.append(found)
+    if reasons or folder is None:  # an unread folder is always one of the reasons
+        return CheckResult(
+            OFFPC_BACKUP, Status.WARN, f"{OFFPC_NOT_CONFIGURED}; {'; '.join(reasons)}"
+        )
+    if same_volume(folder, data_dir):
+        return CheckResult(
+            OFFPC_BACKUP,
+            Status.WARN,
+            f"off-PC backup folder {folder} is on the same drive as the data dir "
+            f"({drive_of(data_dir)}); a failed or lost disk would take both, so "
+            f"{_ANOTHER_FOLDER}",
+        )
+    return CheckResult(
+        OFFPC_BACKUP,
+        Status.OK,
+        f"off-PC backup folder {folder} is set and the Backup passphrase is set; each daily "
+        "and manual backup is encrypted and copied there",
     )
 
 

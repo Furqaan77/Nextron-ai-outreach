@@ -9,7 +9,7 @@ threads, beats once (the ``runner_heartbeat`` row and ``<data dir>\\heartbeat``)
 stops them, and building the app starts none.
 
 The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
-``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the eleven
+``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the twelve
 doctor rows in order (``port_free`` ok without a probe, the grant ok without a refresh) and the
 dead job, and writes nothing; a wiring that ran doctor's own forms would be caught.
 
@@ -17,12 +17,16 @@ Backups (Story 1.16), on the real ``build_app`` over ``open_database(config)`` w
 running on a thread of its own: the scheduler registers the ``backup_db`` cron trigger (10:00
 UTC, no catch-up on a new database), a ``POST /health/backup`` is run by the real runner into
 ``<backup dir>\\local`` (a ``verified`` ``manual`` row), and a failed backup shows in the
-panel's error list.
+panel's error list. Off-PC copies (Story 1.17): with a Backup passphrase in ``InMemorySecrets``
+and ``backup_offpc_dir`` set to a temporary folder, the same POST leaves a ``copied`` row and a
+``.db.enc`` that the real adapter decrypts to the row's SHA-256, and no planted secret reaches a
+file, a row, the log or the panel.
 """
 
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import logging
 import os
 import sqlite3
@@ -41,6 +45,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 
 import nextron.adapters.telegram as telegram_adapter
+from nextron.adapters.backup_target import FolderBackupTarget
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -378,6 +383,7 @@ DOCTOR_IDS = [
     "port_free",
     "required_credentials",
     "internal_notify_grant",
+    "offpc_backup",
     "required_settings",
     "database_revision",
 ]
@@ -550,6 +556,12 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
             assert oauth.calls == [("refresh", REFRESH_TOKEN)]
             assert port.calls == [("127.0.0.1", config.port)]
         assert statuses["required_credentials"][0] == "ok"
+        assert statuses["offpc_backup"] == (  # EngineDatabase.offpc_dir read the blank default
+            "warn",
+            "off-PC backup not configured (OQ-A3): backups are local only; no off-PC backup "
+            "folder is set; set Off-PC backup folder (backup_offpc_dir) on the Settings page; "
+            "the Backup passphrase is not set; enter it on the Credentials page",
+        )
         assert statuses["required_settings"][0] == "fail"  # nothing is set yet
         assert statuses["database_revision"] == (
             "ok",
@@ -888,12 +900,15 @@ class RealEngine:
         return raw_query(self.units, "SELECT kind, status, path, error FROM backups")
 
 
-def real_engine(monkeypatch: pytest.MonkeyPatch) -> RealEngine:
+def real_engine(
+    monkeypatch: pytest.MonkeyPatch, secrets: InMemorySecrets | None = None
+) -> RealEngine:
     monkeypatch.setattr(main, "build_role_adapter", lambda *args, **kwargs: InMemoryAlert())
     config = load_bootstrap()
     config.data_dir.mkdir(parents=True)
     units, _ = main.open_database(config)  # the file the snapshot is bound to
-    clock, secrets = FrozenClock(T), InMemorySecrets("test")
+    clock = FrozenClock(T)
+    secrets = secrets if secrets is not None else InMemorySecrets("test")
     app = main.build_app(
         config,
         units=units,
@@ -1059,3 +1074,73 @@ def test_a_failed_backup_appears_in_the_panels_error_list(
         ("done",)  # a failed copy never raises, so the job is not retried
     ]
     assert blocked.read_bytes() == b"a file where the backup dir should be"
+
+
+PLANTED_PASSPHRASE = "QZXPLANTEDBACKUPPASSPHRASE horse battery"
+PLANTED_KEY = "QZXPLANTEDHUNTERAPIKEY"
+
+
+def wait_for_offpc(engine: RealEngine) -> tuple[str, str | None, str]:
+    """The backup's off-PC status, its off-PC name and its SHA-256, once it is recorded."""
+    for _ in range(POLL_ATTEMPTS):
+        rows = raw_query(
+            engine.units,
+            "SELECT offpc_status, offpc_name, sha256 FROM backups WHERE offpc_status IS NOT NULL",
+        )
+        if rows:
+            return rows[0]
+        time.sleep(POLL_SLICE)
+    pytest.fail("the backup_db job did not record the off-PC outcome")
+
+
+def test_back_up_now_copies_the_backup_off_the_pc_encrypted_with_the_real_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    folder = tmp_path / "offpc"
+    secrets = InMemorySecrets("test")
+    secrets.write("backup/passphrase", PLANTED_PASSPHRASE)
+    secrets.write("hunter/api_key", PLANTED_KEY)
+    engine = real_engine(monkeypatch, secrets)  # the default backup_targets: the real adapter
+    try:
+        with engine.units.open():
+            Setup(FrozenClock(T)).set(Key.BACKUP_OFFPC_DIR, str(folder))
+        with serving(engine.app):
+            assert engine.back_up_now().status == 200
+            status, name, digest = wait_for_offpc(engine)
+            panel = engine.get("/health/panel/live").text
+        dump = database_dump(engine.units)
+    finally:
+        engine.units.engine.dispose()
+
+    assert status == "copied"
+    assert name == "nextron-test-20261117T090000.000Z.db.enc"
+    assert [found.name for found in folder.iterdir()] == [name]
+    sealed = (folder / name).read_bytes()
+    assert sealed[:8] == b"NXBK\x01\x11\x08\x01"  # format v1, the default scrypt: 2**17, 8, 1
+    restored = tmp_path / "restored.db"
+    fetched = FolderBackupTarget(folder, secrets=secrets).get(name, restored)
+    assert fetched.plain_sha256 == digest
+    assert hashlib.sha256(restored.read_bytes()).hexdigest() == digest
+    assert "Last backup: 2026-11-17 09:00:00 UTC, verified (manual), copied off the PC" in panel
+    readiness = {row[1]: (row[0], row[2]) for row in Rows(panel).rows if len(row) == 3}
+    assert readiness["offpc_backup"] == (  # tmp is on the data dir's drive
+        "warn",
+        f"off-PC backup folder {folder} is on the same drive as the data dir "
+        f"({engine.config.data_dir.drive}); a failed or lost disk would take both, so choose a "
+        "folder on another drive or a network share in Off-PC backup folder (backup_offpc_dir) "
+        "on the Settings page",
+    )
+    assert raw_query(engine.units, "SELECT status FROM jobs WHERE type = 'backup_db'") == [
+        ("done",)
+    ]
+    files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert len(files) >= 4  # the database, its local copy, the off-PC copy and the restore
+    logged = caplog.text + "".join(str(vars(record)) for record in caplog.records)
+    for planted in (PLANTED_PASSPHRASE, "QZXPLANTED", PLANTED_KEY):
+        for path in files:
+            data = path.read_bytes()
+            assert planted.encode() not in data and planted.encode("utf-16-le") not in data
+        assert all(planted not in line for line in dump)
+        assert planted not in logged
+        assert planted not in panel

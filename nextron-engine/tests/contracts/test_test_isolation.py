@@ -133,6 +133,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
 
     assert {port.__name__ for port in protocols} == {
         "AlertPort",
+        "BackupTargetPort",
         "ClientFilePort",
         "Clock",
         "ConsentListener",
@@ -402,7 +403,16 @@ def classification_problems(
 def test_every_adapter_package_is_classified_once() -> None:
     packages = adapter_packages()
 
-    assert packages == {"ai", "clock", "google_oauth", "secrets", "sink", "telegram"}
+    assert packages == {
+        "ai",
+        "backup_target",
+        "clock",
+        "crypto",
+        "google_oauth",
+        "secrets",
+        "sink",
+        "telegram",
+    }
     assert classification_problems(packages, ADAPTER_PACKAGES, LIVE_CONSTRUCTORS) == []
 
 
@@ -416,13 +426,16 @@ def test_the_ai_package_is_not_built_yet_and_defines_nothing() -> None:
 
 
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
-    for name in ("ai", "clock", "google_oauth", "secrets", "sink", "telegram", "gmail"):
+    names = ("ai", "backup_target", "clock", "crypto", "google_oauth", "secrets", "sink")
+    for name in (*names, "telegram", "gmail"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "__init__.py").write_text("")
     (tmp_path / "ai" / "gateway.py").write_text("")
     modules = {
         "nextron.adapters.ai": [probe_module("nextron.adapters.ai", "route = 'haiku'")],
+        "nextron.adapters.backup_target": package_modules("nextron.adapters.backup_target"),
         "nextron.adapters.clock": package_modules("nextron.adapters.clock"),
+        "nextron.adapters.crypto": package_modules("nextron.adapters.crypto"),
         "nextron.adapters.google_oauth": package_modules("nextron.adapters.google_oauth"),
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),

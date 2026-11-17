@@ -1,9 +1,10 @@
 """The health panel (``GET /health/panel``, ``GET /health/panel/live``, ``POST
-/health/jobs/dismiss`` and ``POST /health/backup``, FR-58, UX-DR29, Stories 1.15 and 1.16)
+/health/jobs/dismiss`` and ``POST /health/backup``, FR-58, UX-DR29, Stories 1.15 to 1.17)
 through ``Dashboard(units=units)`` on a temporary database at head: the page, the fragment and
 their exact ``hx-*`` attributes, each section's text in order, the Dismiss form and its
-refusals, the Backups section (each last-backup line, the "Back up now" form and its POST:
-created, absorbed, an extra field, no CSRF token), the notification area's error count
+refusals, the Backups section (each last-backup line, each off-PC label and the failed
+class, the "Back up now" form and its POST: created, absorbed, an extra field, no CSRF token),
+the notification area's error count
 (singular, plural and absent at 0), ``no-store``, the navigation link, the guard's
 ``HX-Refresh`` on an HTMX GET only, and a hostile ``last_error`` rendered as escaped text."""
 
@@ -17,11 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from nextron.app.ops.api import DeadJobAlerts, Heartbeat, TakenBackup
+from nextron.app.ops.api import DeadJobAlerts, Heartbeat, OffpcOutcome, TakenBackup
 from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
-from nextron.domain.backup import BackupKind, copy_name
+from nextron.domain.backup import BackupKind, LedgerStatus, OffpcStatus, copy_name
 from nextron.domain.budget import AiCall
 from nextron.domain.job import Lane
 from nextron.domain.readiness import CheckResult, Status
@@ -310,7 +311,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
-        "11 ok, 0 warn, 0 fail",
+        "12 ok, 0 warn, 0 fail",
     ]
     assert panel.tables == [*NEVER_RUN, READINESS_TABLE]
     assert panel.forms == [(BACKUP_FORM, [csrf_input(session[1])])]
@@ -355,7 +356,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
-        "11 ok, 0 warn, 0 fail",
+        "12 ok, 0 warn, 0 fail",
     ]
     assert panel.tables[:2] == [
         [["Job type", "Last success"], ["backup_db", "never"]],
@@ -781,6 +782,82 @@ def test_a_failed_backup_shows_in_the_error_list_until_a_later_one_verifies(
         "Errors needing attention (0)",
         "No errors need attention.",
     ]
+
+
+# The off-PC copy on the Backups line (Story 1.17) ---------------------------------------------
+
+
+def record_offpc(
+    dashboard: Dashboard, units: UnitOfWorkFactory, backup_id: str, outcome: OffpcOutcome
+) -> None:
+    """Record ``outcome`` on the backup's row through the dashboard's ``OffpcBackups``."""
+
+    @use_case
+    def record() -> int:
+        with current().transaction():
+            return dashboard.offpc.record(backup_id, outcome)
+
+    with units.open():
+        assert record() == 1
+
+
+@pytest.mark.parametrize(
+    ("outcome", "suffix", "failed"),
+    [
+        (
+            OffpcOutcome(OffpcStatus.COPIED, name="x.db.enc", ledger=LedgerStatus.ABSENT),
+            "copied off the PC",
+            False,
+        ),
+        (
+            OffpcOutcome(OffpcStatus.FAILED, error="backup_target_unavailable: unreachable"),
+            "off-PC copy failed",
+            True,
+        ),
+        (
+            OffpcOutcome(OffpcStatus.NOT_CONFIGURED, reason="folder_not_set"),
+            "off-PC not configured",
+            False,
+        ),
+    ],
+    ids=["copied", "failed", "not configured"],
+)
+def test_the_backups_line_shows_the_off_pc_outcome(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    units: UnitOfWorkFactory,
+    outcome: OffpcOutcome,
+    suffix: str,
+    failed: bool,
+) -> None:
+    backup_id = record_backup(dashboard, units, BackupKind.DAILY, verified=True)
+    record_offpc(dashboard, units, backup_id, outcome)
+
+    reply = get(dashboard, LIVE, session[0])
+
+    text, classes = backup_line(reply)
+    assert text == f"Last backup: 2026-11-17 09:00:00 UTC, verified (daily), {suffix}"
+    assert classes == (["health-backup", "health-backup-failed"] if failed else ["health-backup"])
+    issues = Panel(reply.text).texts[6:9]
+    if failed:
+        assert issues == [
+            "Errors needing attention (1)",
+            f"Off-PC backup copy failed: daily {backup_id}",
+            "Error: backup_target_unavailable: unreachable",
+        ]
+    else:
+        assert issues[:2] == ["Errors needing attention (0)", "No errors need attention."]
+
+
+def test_a_backup_with_no_off_pc_outcome_shows_no_label(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    record_backup(dashboard, units, BackupKind.PRE_MIGRATE, verified=True)
+
+    text, classes = backup_line(get(dashboard, LIVE, session[0]))
+
+    assert text == "Last backup: 2026-11-17 09:00:00 UTC, verified (before a migration)"
+    assert classes == ["health-backup"]
 
 
 def back_up_now(dashboard: Dashboard, session: tuple[bytes, str], body: bytes) -> Reply:

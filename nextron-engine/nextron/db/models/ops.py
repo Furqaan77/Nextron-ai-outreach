@@ -30,6 +30,25 @@ row. It holds no personal data.
 ``ck_backups_outcome`` keeps the outcome whole: a ``verified`` row has a size, a SHA-256 and a
 revision and no error; a ``failed`` row has an error, no size, no SHA-256 and no
 ``local_deleted_at``.
+
+The off-PC columns (Story 1.17, migration ``0009_1_17_offpc``, all ``NULL`` until the off-PC step
+of a daily or manual backup records its outcome, once; a ``pre_migrate`` row keeps them
+``NULL``):
+
+- ``offpc_status``: ``copied``, ``failed`` or ``not_configured`` (``ck_backups_offpc_status``);
+- ``offpc_name``: the encrypted copy's file name in the off-PC folder (never the folder);
+- ``offpc_ledger``: ``copied`` or ``absent``, whether the erasure ledger went with it
+  (``ck_backups_offpc_ledger``);
+- ``offpc_at``: when the outcome was recorded; ``offpc_deleted_at``: when rotation deleted the
+  off-PC copy;
+- ``offpc_error``: why the copy failed, ``"<code>: <message>"``, redacted and at most 500
+  characters; free text, so ``redact`` in the PII registry.
+
+``ck_backups_offpc`` keeps that outcome whole: ``NULL`` with every off-PC column ``NULL``;
+``copied`` on a verified row with a name, a ledger status and a time, and no error; ``failed``
+on a verified row with an error and a time, and no name, ledger status or ``offpc_deleted_at``;
+``not_configured`` on a verified row with a time only. The migration adds the three checks as
+column constraints of ``offpc_error``; their text here is the same, character for character.
 """
 
 from datetime import datetime
@@ -51,6 +70,22 @@ BACKUP_OUTCOME_CHECK: Final = (
     "AND db_revision IS NOT NULL AND error IS NULL) "
     "OR (status = 'failed' AND error IS NOT NULL AND size_bytes IS NULL "
     "AND sha256 IS NULL AND local_deleted_at IS NULL)"
+)
+OFFPC_STATUS_CHECK: Final = (
+    "offpc_status IS NULL OR offpc_status IN ('copied','failed','not_configured')"
+)
+OFFPC_LEDGER_CHECK: Final = "offpc_ledger IS NULL OR offpc_ledger IN ('copied','absent')"
+OFFPC_CHECK: Final = (
+    "(offpc_status IS NULL AND offpc_name IS NULL AND offpc_ledger IS NULL "
+    "AND offpc_at IS NULL AND offpc_deleted_at IS NULL AND offpc_error IS NULL) "
+    "OR (offpc_status IS 'copied' AND status = 'verified' AND offpc_name IS NOT NULL "
+    "AND offpc_ledger IS NOT NULL AND offpc_at IS NOT NULL AND offpc_error IS NULL) "
+    "OR (offpc_status IS 'failed' AND status = 'verified' AND offpc_error IS NOT NULL "
+    "AND offpc_at IS NOT NULL AND offpc_name IS NULL AND offpc_ledger IS NULL "
+    "AND offpc_deleted_at IS NULL) "
+    "OR (offpc_status IS 'not_configured' AND status = 'verified' AND offpc_at IS NOT NULL "
+    "AND offpc_name IS NULL AND offpc_ledger IS NULL AND offpc_deleted_at IS NULL "
+    "AND offpc_error IS NULL)"
 )
 
 
@@ -82,6 +117,9 @@ class BackupRecord(Base):
             name="counts",
         ),
         CheckConstraint("length(sha256) = 64", name="sha256"),
+        CheckConstraint(OFFPC_STATUS_CHECK, name="offpc_status"),
+        CheckConstraint(OFFPC_LEDGER_CHECK, name="offpc_ledger"),
+        CheckConstraint(OFFPC_CHECK, name="offpc"),
         Index("ix_backups_started_at", "started_at"),
     )
 
@@ -98,3 +136,9 @@ class BackupRecord(Base):
     provenance_count: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(String(ERROR_LENGTH))
     local_deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    offpc_status: Mapped[str | None] = mapped_column(String(CODE_LENGTH))
+    offpc_name: Mapped[str | None] = mapped_column(Text)
+    offpc_ledger: Mapped[str | None] = mapped_column(String(CODE_LENGTH))
+    offpc_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    offpc_deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    offpc_error: Mapped[str | None] = mapped_column(String(ERROR_LENGTH))

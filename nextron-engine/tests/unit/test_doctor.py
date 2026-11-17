@@ -55,6 +55,7 @@ CHECKS = [
     "port_free",
     "required_credentials",
     "internal_notify_grant",
+    "offpc_backup",
     "required_settings",
     "database_revision",
 ]
@@ -65,8 +66,10 @@ PLANTED_REFRESH = "1//QZXPLANTEDREFRESH"
 PLANTED_CLIENT_SECRET = "GOCSPX-QZXPLANTEDCLIENTSECRET"
 PLANTED_ACCOUNT = "qzxplanted.account@nextronai.com"
 PLANTED_ACCESS = "ya29.QZXPLANTEDACCESS"
+PLANTED_PASSPHRASE = "QZXPLANTEDBACKUPPASSPHRASE"
 PLANTED = (
     PLANTED_CREDENTIAL,
+    PLANTED_PASSPHRASE,
     PLANTED_REFRESH,
     PLANTED_CLIENT_SECRET,
     PLANTED_ACCOUNT,
@@ -95,9 +98,18 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return folder
 
 
-def make_database(data_dir: Path, settings: dict[str, str] | None = None) -> Path:
+def other_drive_folder(data_dir: Path) -> str:
+    """An off-PC folder on another drive than ``data_dir`` (doctor never touches it)."""
+    drive = "Q:" if data_dir.drive.casefold() != "q:" else "R:"
+    return f"{drive}\\NextronBackups"
+
+
+def make_database(
+    data_dir: Path, settings: dict[str, str] | None = None, *, offpc: bool = True
+) -> Path:
     """``<data_dir>\\nextron.db`` at head holding ``settings`` (both required ones unless
-    given), its engine disposed so the WAL is checkpointed into the file."""
+    given) and, with ``offpc``, an off-PC folder on another drive; its engine disposed so the
+    WAL is checkpointed into the file."""
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "nextron.db"
     engine = create_engine(path)
@@ -106,19 +118,24 @@ def make_database(data_dir: Path, settings: dict[str, str] | None = None) -> Pat
         subscribers = Subscribers()
         subscribers.freeze()
         units = UnitOfWorkFactory(engine, subscribers)
+        chosen = dict(SETTINGS if settings is None else settings)
+        if offpc:
+            chosen["backup_offpc_dir"] = other_drive_folder(data_dir)
         with units.open():
-            Setup(FrozenClock()).save(SETTINGS if settings is None else settings)
+            Setup(FrozenClock()).save(chosen)
     finally:
         engine.dispose()
     return path
 
 
 def healthy_secrets() -> InMemorySecrets:
-    """Every required credential, the Google client and the ``internal_notify`` grant."""
+    """Every required credential, the Backup passphrase, the Google client and the
+    ``internal_notify`` grant."""
     secrets = InMemorySecrets("dev")
     for found in credentials.declared():
         if found.required:
             secrets.write(found.secret_name, f"{PLANTED_CREDENTIAL}{found.key}")
+    secrets.write("backup/passphrase", PLANTED_PASSPHRASE)
     secrets.write(
         CLIENT_SECRET_NAME, encode_client_config(ClientConfig(CLIENT_ID, PLANTED_CLIENT_SECRET))
     )
@@ -179,7 +196,7 @@ def table_rows(out: str) -> list[tuple[str, str, str]]:
 # Row: All ok ------------------------------------------------------------------------------------
 
 
-def test_all_ok_prints_eleven_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
+def test_all_ok_prints_twelve_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
     before = sha256(healthy)
     oauth = FakeGoogleOAuth()
 
@@ -192,8 +209,8 @@ def test_all_ok_prints_eleven_ok_rows_and_changes_no_database_byte(healthy: Path
     assert [(status, check) for status, check, _ in table_rows(out)] == [
         ("ok", check) for check in CHECKS
     ]
-    assert lines[-1] == "11 ok, 0 warn, 0 fail"
-    assert len(lines) == 13
+    assert lines[-1] == "12 ok, 0 warn, 0 fail"
+    assert len(lines) == 14
     assert out.endswith("\n") and not out.endswith("\n\n")
     assert sha256(healthy) == before
     assert stored_revisions(healthy) == [head_revision()]
@@ -306,9 +323,15 @@ def test_a_fresh_install_fails_on_what_it_lacks_and_creates_nothing(data_dir: Pa
     assert statuses(results) == ALL_OK | {
         "required_credentials": "fail",
         "internal_notify_grant": "fail",
+        "offpc_backup": "warn",
         "required_settings": "fail",
         "database_revision": "warn",
     }
+    assert results["offpc_backup"][1] == (
+        "off-PC backup not configured (OQ-A3): backups are local only; no off-PC backup folder "
+        "is set; set Off-PC backup folder (backup_offpc_dir) on the Settings page; the Backup "
+        "passphrase is not set; enter it on the Credentials page"
+    )
     assert results["required_settings"][1] == (
         "required settings not set or no longer valid: Sender's timezone (sender_timezone), "
         "Telegram alert chat id (alert_chat_id); set them on the Settings page"
@@ -627,6 +650,35 @@ def test_an_unreadable_credential_manager_fails_the_grant(healthy: Path) -> None
         "Windows Credential Manager could not be read (keyring_failed)",
     )
     assert code == 1
+
+
+# Row: Off-PC backup (Story 1.17) ------------------------------------------------------------------
+
+
+def test_an_off_pc_folder_on_the_data_dirs_drive_warns_and_is_not_touched(data_dir: Path) -> None:
+    folder = data_dir.parent / "offpc"
+    make_database(data_dir, {**SETTINGS, "backup_offpc_dir": str(folder)}, offpc=False)
+
+    code, results = run_doctor()
+
+    assert code == 0  # a warning is not a failure
+    assert statuses(results) == ALL_OK | {"offpc_backup": "warn"}
+    assert results["offpc_backup"][1].startswith(
+        f"off-PC backup folder {folder} is on the same drive as the data dir"
+    )
+    assert not folder.exists()
+
+
+def test_an_off_pc_folder_in_the_data_dir_is_not_configured(data_dir: Path) -> None:
+    make_database(data_dir, {**SETTINGS, "backup_offpc_dir": str(data_dir)}, offpc=False)
+
+    code, results = run_doctor()
+
+    assert statuses(results) == ALL_OK | {"offpc_backup": "warn"}
+    assert results["offpc_backup"][1].startswith(
+        "off-PC backup not configured (OQ-A3): backups are local only; the off-PC backup "
+        f"folder {data_dir} is in the data dir {data_dir}; "
+    )
 
 
 # Row: Settings ----------------------------------------------------------------------------------

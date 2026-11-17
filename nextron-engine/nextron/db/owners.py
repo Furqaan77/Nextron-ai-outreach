@@ -98,6 +98,12 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "provenance_count",
             "error",
             "local_deleted_at",
+            "offpc_status",
+            "offpc_name",
+            "offpc_ledger",
+            "offpc_at",
+            "offpc_deleted_at",
+            "offpc_error",
         ),
     },
     "alerts": {

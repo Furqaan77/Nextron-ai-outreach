@@ -508,6 +508,7 @@ def test_the_declared_keys_in_order() -> None:
         "bulk_threads",
         "backup_time",
         "backup_rotation_days",
+        "backup_offpc_dir",
         "alert_chat_id",
         "quota_hunter_credits",
         "quota_prospeo_credits",
@@ -523,6 +524,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.BULK_THREADS),
         setting(Key.BACKUP_TIME),
         setting(Key.BACKUP_ROTATION_DAYS),
+        setting(Key.BACKUP_OFFPC_DIR),
         setting(Key.ALERT_CHAT_ID),
         setting(Key.QUOTA_HUNTER_CREDITS),
         setting(Key.QUOTA_PROSPEO_CREDITS),
@@ -720,6 +722,59 @@ def test_backup_rotation_days_refuses_anything_outside_7_to_35(text: str, rule: 
         parse(setting(Key.BACKUP_ROTATION_DAYS), text)
 
     assert raised.value.rule == rule
+
+
+# Row: Settings (backup_offpc_dir; Story 1.17) --------------------------------------------------
+
+OFFPC_UNIT = (
+    r"A folder on another drive or a network share, such as E:\NextronBackups or "
+    r"\\nas\backups\nextron. Each daily and manual backup is encrypted with the Backup "
+    "passphrase (Credentials page) and copied there; copies older than 35 days are deleted. "
+    "Blank keeps backups on this PC only."
+)
+
+
+def test_backup_offpc_dir_is_a_blank_by_default_folder_in_the_engine_section() -> None:
+    found = setting(Key.BACKUP_OFFPC_DIR)
+
+    assert (found.key, found.type, found.section) == (
+        "backup_offpc_dir",
+        SettingType.STRING,
+        Section.ENGINE,
+    )
+    assert (found.label, found.unit) == ("Off-PC backup folder", OFFPC_UNIT)
+    assert found.default == "" and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        (
+            "offpc_folder",
+            "must be blank, or a full path to a folder on a drive or a network share, such as "
+            r"E:\NextronBackups or \\nas\backups\nextron",
+        )
+    ]
+    assert default_text(found) == ""
+    assert parse(found, r" E:\NextronBackups ") == r"E:\NextronBackups"
+    assert parse(found, r"\\nas\backups\nextron") == r"\\nas\backups\nextron"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"backups\nextron",
+        r"E:backups",
+        r"\\?\E:\backups",
+        r"E:\a\..\b",
+        r"\\nas",
+        r"E:\backups:ads",
+        r"E:\back*ups",
+        r"E:\NUL",
+        r"E:\backups.",
+    ],
+)
+def test_backup_offpc_dir_refuses_anything_but_a_full_folder_path(text: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.BACKUP_OFFPC_DIR), text)
+
+    assert raised.value.rule == "offpc_folder"
 
 
 # Budget and limits (Story 1.13) ----------------------------------------------------------------
@@ -966,9 +1021,9 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     assert schema_problems(schema) == [
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
-            "backup_rotation_days, backup_time, bulk_threads, quota_hunter_credits, "
-            "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
-            "quota_prospeo_credits, sender_timezone, sink_allowlist"
+            "backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
+            "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
+            "quota_places_pro, quota_prospeo_credits, sender_timezone, sink_allowlist"
         ),
         "declared but not in Key: extra_one",
     ]

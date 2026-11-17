@@ -15,6 +15,17 @@ do). Rows come back as ``BackupRow``, a frozen copy of every column.
   oldest first;
 - ``mark_deleted(ids, at)``: sets ``local_deleted_at`` on those rows while it is ``NULL``;
   returns the row count.
+
+The off-PC outcome (Story 1.17):
+
+- ``set_offpc(backup_id, *, status, name, ledger, at, error)``: records it on the row, only
+  while ``offpc_status IS NULL`` (it is written once); returns the row count;
+- ``newest_offpc(statuses)``: the newest row (``started_at``, then id, descending) whose
+  ``offpc_status`` is one of ``statuses``, or ``None``;
+- ``offpc_failed_after(since)``: every row whose ``offpc_status`` is ``failed`` that started
+  after ``since`` (every one when ``since`` is ``None``), oldest first;
+- ``mark_offpc_deleted(names, at)``: sets ``offpc_deleted_at`` on the rows whose
+  ``offpc_name`` is one of ``names``, while it is ``NULL``; returns the row count.
 """
 
 from collections.abc import Iterable
@@ -30,6 +41,7 @@ from nextron.db.uow import current
 
 FAILED = "failed"  # nextron.domain.backup.BackupStatus.FAILED
 VERIFIED = "verified"  # nextron.domain.backup.BackupStatus.VERIFIED
+OFFPC_FAILED = "failed"  # nextron.domain.backup.OffpcStatus.FAILED
 _NO_SYNC = {"synchronize_session": False}
 
 
@@ -50,6 +62,12 @@ class BackupRow:
     provenance_count: int | None
     error: str | None
     local_deleted_at: datetime | None
+    offpc_status: str | None
+    offpc_name: str | None
+    offpc_ledger: str | None
+    offpc_at: datetime | None
+    offpc_deleted_at: datetime | None
+    offpc_error: str | None
 
 
 _COLUMNS = tuple(getattr(BackupRecord, field.name) for field in fields(BackupRow))
@@ -139,6 +157,72 @@ def mark_deleted(ids: Iterable[str], at: datetime) -> int:
         update(BackupRecord)
         .where(BackupRecord.id.in_(chosen), BackupRecord.local_deleted_at.is_(None))
         .values(local_deleted_at=at)
+        .execution_options(**_NO_SYNC)
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+# The off-PC outcome (Story 1.17) ----------------------------------------------------------------
+
+
+def set_offpc(
+    backup_id: str,
+    *,
+    status: str,
+    name: str | None,
+    ledger: str | None,
+    at: datetime,
+    error: str | None,
+) -> int:
+    """Record the off-PC outcome on ``backup_id`` while none is recorded; the row count."""
+    result = current().session.execute(
+        update(BackupRecord)
+        .where(BackupRecord.id == backup_id, BackupRecord.offpc_status.is_(None))
+        .values(
+            offpc_status=status,
+            offpc_name=name,
+            offpc_ledger=ledger,
+            offpc_at=at,
+            offpc_error=error,
+        )
+        .execution_options(**_NO_SYNC)
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+def newest_offpc(statuses: Iterable[str]) -> BackupRow | None:
+    """The newest row whose off-PC status is one of ``statuses``, or ``None``."""
+    chosen = list(statuses)
+    if not chosen:
+        return None
+    rows = _rows(
+        select(*_COLUMNS)
+        .where(BackupRecord.offpc_status.in_(chosen))
+        .order_by(BackupRecord.started_at.desc(), BackupRecord.id.desc())
+        .limit(1)
+    )
+    return rows[0] if rows else None
+
+
+def offpc_failed_after(since: datetime | None) -> tuple[BackupRow, ...]:
+    """Every row whose off-PC copy failed that started after ``since`` (all when ``None``),
+    oldest first."""
+    statement = select(*_COLUMNS).where(BackupRecord.offpc_status == OFFPC_FAILED)
+    if since is not None:
+        statement = statement.where(BackupRecord.started_at > since)
+    return tuple(_rows(statement.order_by(BackupRecord.started_at, BackupRecord.id)))
+
+
+def mark_offpc_deleted(names: Iterable[str], at: datetime) -> int:
+    """Set ``offpc_deleted_at`` to ``at`` on the rows whose ``offpc_name`` is one of ``names``,
+    while it is ``NULL``; the row count."""
+    chosen = list(names)
+    if not chosen:
+        return 0
+    result = current().session.execute(
+        update(BackupRecord)
+        .where(BackupRecord.offpc_name.in_(chosen), BackupRecord.offpc_deleted_at.is_(None))
+        .values(offpc_deleted_at=at)
         .execution_options(**_NO_SYNC)
     )
     return int(result.rowcount)  # type: ignore[attr-defined]

@@ -104,7 +104,14 @@ builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), a
 ``LocalBackups(clock, env=config.env, local_dir=<backup dir>\\local,
 snapshot=functools.partial(snapshot, <data dir>\\nextron.db))``: ``serve`` uses it for the
 ``pre_migrate`` copy and ``build_app`` for the daily and manual ones. ``build_app`` builds one
-``Backups(clock, local, notify=notify, queue=queue)`` (``nextron.app.ops.api``); the registry
+``Backups(clock, local, notify=notify, queue=queue, offpc=build_offpc_backups(config, clock,
+targets))`` (``nextron.app.ops.api``). ``build_offpc_backups`` is ``OffpcBackups(clock,
+env=config.env, data_dir=..., backup_dir=..., targets=targets)`` (Story 1.17), and ``targets``
+is ``build_app``'s ``backup_targets``, by default ``functools.partial(FolderBackupTarget,
+secrets=secrets)`` (``nextron.adapters.backup_target``): after each verified daily or manual
+backup, the copy is encrypted with the Backup passphrase and written to the
+``backup_offpc_dir`` folder. Building it reaches no folder and reads no secret; the
+``pre_migrate`` copy stays local. The registry
 needs the ``backup_db`` handler, the handler needs ``Backups`` and ``Backups`` needs the queue,
 so ``build_job_types(..., backups=lambda: backups)`` breaks the cycle, as it does for
 ``notify``. The dashboard gets it (``create_app(..., backups=backups)``) for the health panel's
@@ -141,7 +148,7 @@ migrates: the reloader brought it to head before starting Uvicorn.
 
 **Doctor (FR-56).** ``build_doctor_checks()`` is the doctor check registry: the only code that
 constructs ``DoctorChecks`` or calls ``register_check`` (``nextron.startup_checks``). It
-registers eleven ``DoctorCheck``s, each binding a pure check function to a ``DoctorContext``
+registers twelve ``DoctorCheck``s, each binding a pure check function to a ``DoctorContext``
 (``config``, ``env_source``, ``probes``, ``secrets``, ``google``, ``database``), then freezes
 it; later stories register their checks there. ``doctor(env=..., as_json=...)`` loads the
 bootstrap config (``--env`` overrides ``NEXTRON_ENV`` for the run), runs the registry
@@ -156,8 +163,9 @@ writes no usage row; with no client or grant stored, or a grant already marked f
 nothing is sent to Google. Its browser always refuses and its allowlist is empty, because
 doctor never starts a consent flow.
 
-``DoctorContext.database`` is a ``ReadinessDatabase`` (``exists``, ``revision`` and
-``required_unset``): ``DoctorDatabase`` for ``doctor``, ``EngineDatabase`` in the engine.
+``DoctorContext.database`` is a ``ReadinessDatabase`` (``exists``, ``revision``,
+``required_unset`` and ``offpc_dir``): ``DoctorDatabase`` for ``doctor`` (``offpc_dir`` is blank
+with no database file), ``EngineDatabase`` in the engine.
 
 **Health (AD-10, AD-20, FR-58, OP-9).** ``build_health_issues(*, budget)`` is the health-issue
 registry: the only code that constructs ``HealthIssues`` or calls ``register_source``
@@ -182,11 +190,12 @@ doctor's; with ``in_engine`` only two checks change form: ``port_free`` probes n
 ``GoogleAccess.check_stored_grant`` with ``refresh=False``, which reads Credential Manager and
 never calls Google, so a GET makes no refresh, no ``api_usage`` row and no re-consent mark
 (``nextron doctor`` tests the refresh). ``EngineDatabase`` reads the revision
-(``nextron.db.migrations.current_revision_in_unit``) and the required settings
-(``queries.setup.required_unset``) in the caller's unit of work: the GET's read-only one; those
-two checks come last, so the Credential Manager and registry reads before them never hold the
-read transaction (``build_doctor_checks`` states the order rule). Building the app runs no
-check.
+(``nextron.db.migrations.current_revision_in_unit``), the required settings
+(``queries.setup.required_unset``) and ``backup_offpc_dir`` in the caller's unit of work: the
+GET's read-only one; ``offpc_backup`` reads the Backup passphrase before that setting, and the
+checks that read the database come last, so the Credential Manager and registry reads before
+them never hold the read transaction (``build_doctor_checks`` states the order rule). Building
+the app runs no check.
 
 ``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
 Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
@@ -283,6 +292,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from nextron import __version__
+from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
@@ -298,6 +308,7 @@ from nextron.app.ops.api import (
     EngineHealth,
     Heartbeat,
     LocalBackups,
+    OffpcBackups,
     TakenBackup,
 )
 from nextron.app.queries import jobqueue as jobqueue_queries
@@ -340,6 +351,7 @@ from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.ports.alert import AlertPort
+from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
@@ -351,6 +363,7 @@ from nextron.startup_checks import (
     DATA_DIR_OUTSIDE_ONEDRIVE,
     DATABASE_REVISION,
     INTERNAL_NOTIFY_GRANT,
+    OFFPC_BACKUP,
     PORT_FREE,
     PROD_ENV_NOT_PERSISTENT,
     PYTHON_VERSION,
@@ -368,6 +381,7 @@ from nextron.startup_checks import (
     check_data_dir_outside_onedrive,
     check_database_revision,
     check_internal_notify_grant,
+    check_offpc_backup,
     check_port_free,
     check_prod_env_not_persistent,
     check_python_version,
@@ -453,6 +467,7 @@ def build_app(
     google_oauth: GoogleOAuthPort | None = None,
     browser: Browser | None = None,
     probes: Probes | None = None,
+    backup_targets: BackupTargets | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -465,8 +480,9 @@ def build_app(
     runs the budget's threshold check (``check_usage``). The health panel's ``EngineHealth``
     runs the doctor registry in the engine on ``probes`` (``Probes.system()`` unless injected)
     when the panel is read, never when the app is built. ``Backups`` takes the daily and
-    manual backups (the ``backup_db`` job) into ``<backup dir>\\local``; the scheduler reads
-    the daily time when it starts, never when the app is built."""
+    manual backups (the ``backup_db`` job) into ``<backup dir>\\local`` and sends each off the
+    PC through ``backup_targets`` (``FolderBackupTarget`` with these secrets unless injected);
+    the scheduler reads the daily time when it starts, never when the app is built."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -487,7 +503,18 @@ def build_app(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
-    backups = Backups(clock, build_local_backups(config, clock), notify=notify, queue=queue)
+    targets = (
+        backup_targets
+        if backup_targets is not None
+        else functools.partial(FolderBackupTarget, secrets=secrets)
+    )
+    backups = Backups(
+        clock,
+        build_local_backups(config, clock),
+        notify=notify,
+        queue=queue,
+        offpc=build_offpc_backups(config, clock, targets),
+    )
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
     triggers = build_triggers(
@@ -569,7 +596,8 @@ def build_job_types(
             default_lane=Lane.BULK,
             lanes=frozenset({Lane.BULK}),
             priority=80,
-            max_runtime=timedelta(minutes=30),  # a copy, its check and its hash
+            # a copy, its check and its hash, then the encrypted off-PC copy
+            max_runtime=timedelta(minutes=30),
             retry_limit=2,  # a failed copy never raises: only recording its row is retried
             handler=handlers.backup_db(backups),
             group=JobGroup.BACKUP,
@@ -613,6 +641,21 @@ def build_local_backups(config: BootstrapConfig, clock: Clock) -> LocalBackups:
         env=config.env,
         local_dir=config.backup_dir / LOCAL_DIR_NAME,
         snapshot=functools.partial(snapshot, config.data_dir / DB_FILE_NAME),
+    )
+
+
+def build_offpc_backups(
+    config: BootstrapConfig, clock: Clock, targets: BackupTargets
+) -> OffpcBackups:
+    """The encrypted off-PC copies: this environment's names, the data and backup dirs (which
+    the off-PC folder must not be in, and where the erasure ledger is) and ``targets``, the
+    ``BackupTargetPort`` of a folder. Building it reaches no folder and reads no secret."""
+    return OffpcBackups(
+        clock,
+        env=config.env,
+        data_dir=config.data_dir,
+        backup_dir=config.backup_dir,
+        targets=targets,
     )
 
 
@@ -980,16 +1023,18 @@ class DoctorMeter:
 
 
 class ReadinessDatabase(Protocol):
-    """What the ``required_settings`` and ``database_revision`` checks read: whether the
-    database file exists, its revision (``None`` when empty; a database that isn't this
-    engine's raises ``CheckFailed``) and the required settings that are unset or no longer
-    valid."""
+    """What the ``offpc_backup``, ``required_settings`` and ``database_revision`` checks read:
+    whether the database file exists, its revision (``None`` when empty; a database that isn't
+    this engine's raises ``CheckFailed``), the required settings that are unset or no longer
+    valid, and the ``backup_offpc_dir`` setting."""
 
     def exists(self) -> bool: ...
 
     def revision(self) -> str | None: ...
 
     def required_unset(self) -> tuple[str, ...]: ...
+
+    def offpc_dir(self) -> str: ...
 
 
 class DoctorDatabase:
@@ -1033,6 +1078,14 @@ class DoctorDatabase:
         with self._read_only_units().open(read_only=True):
             return setup_queries.required_unset()
 
+    def offpc_dir(self) -> str:
+        """The ``backup_offpc_dir`` setting: blank when there is no database file, else read in
+        a read-only unit of work (an error propagates)."""
+        if not self.exists():
+            return ""
+        with self._read_only_units().open(read_only=True):
+            return str(setup_queries.get(Key.BACKUP_OFFPC_DIR))
+
     def close(self) -> None:
         """Dispose the read-only engine, if one was built."""
         units, self._units = self._units, None
@@ -1065,6 +1118,10 @@ class EngineDatabase:
         of work."""
         return setup_queries.required_unset()
 
+    def offpc_dir(self) -> str:
+        """The ``backup_offpc_dir`` setting, read in the current unit of work."""
+        return str(setup_queries.get(Key.BACKUP_OFFPC_DIR))
+
 
 @dataclass(frozen=True, slots=True)
 class DoctorContext:
@@ -1084,17 +1141,20 @@ class DoctorContext:
 
 
 def build_doctor_checks() -> DoctorChecks[DoctorContext]:
-    """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, in the order
+    """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14 and Story
+    1.17's ``offpc_backup`` (after ``internal_notify_grant``), twelve in all, in the order
     doctor prints them (the health panel shows the same list). With ``DoctorContext.in_engine``,
     ``port_free`` and ``internal_notify_grant`` take their no-probe, no-network forms. Later
     stories register their checks here, before ``freeze()``.
 
     The order rule: the health panel runs this registry inside a GET's read-only unit of work,
-    where ``required_settings`` and ``database_revision`` begin the read transaction (AD-2's
+    where the first check that reads the database (``offpc_backup``'s setting read, then
+    ``required_settings`` and ``database_revision``) begins the read transaction (AD-2's
     ``BEGIN IMMEDIATE``). Any check that reads Credential Manager, the registry or the network
-    goes before ``required_settings``, so it never runs while that lock is held. A check that
-    calls the network also needs an in-engine form (``c.in_engine``) that doesn't, because a GET
-    makes no network call."""
+    goes before them, and ``offpc_backup`` reads the Backup passphrase before its setting, so
+    none of those reads runs while that lock is held. A check that calls the network (or the
+    off-PC folder) also needs an in-engine form (``c.in_engine``) that doesn't, because a GET
+    makes no network call; ``offpc_backup`` touches no folder at all."""
     checks: DoctorChecks[DoctorContext] = DoctorChecks()
     for check in (
         DoctorCheck(PYTHON_VERSION, lambda c: check_python_version(c.probes)),
@@ -1124,6 +1184,12 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
         ),
         DoctorCheck(REQUIRED_CREDENTIALS, lambda c: check_required_credentials(c.secrets.read)),
         DoctorCheck(INTERNAL_NOTIFY_GRANT, _internal_notify_grant),
+        DoctorCheck(
+            OFFPC_BACKUP,
+            lambda c: check_offpc_backup(
+                c.secrets.read, c.database.offpc_dir, c.config.data_dir, c.config.backup_dir
+            ),
+        ),
         DoctorCheck(
             REQUIRED_SETTINGS, lambda c: check_required_settings(c.database.required_unset)
         ),

@@ -4,8 +4,18 @@ Record fails, Rotation and Schedule rows of the story's matrix, a rotation that 
 the row is recorded, ``record_pre_migrate``, the table's checks, ``build_local_backups``'s
 binding, the lock (two threads never copy at once), ``health_issues`` and the health report's
 last backup.
+
+Off-PC copies (Story 1.17), with the real ``FolderBackupTarget`` on a temporary folder
+(``ScryptParams(10, 8, 1)``) or ``InMemoryBackupTarget`` for scripted failures: the Copied,
+Ledger, Not configured (each reason), Copy fails (unreachable, refused, a hash mismatch, a
+fake refusal, an unparsable setting, a failed ledger) and Rotation rows of the matrix, the
+``pre_migrate`` copy staying local, a failed off-PC record (logged, the job ``done``),
+rotation's own failures, ``health_issues``, raw-SQL violations of the three new checks (and
+0007's after 0008), the outcome written once, ``build_offpc_backups``'s binding and the
+planted-secret check.
 Nothing waits longer than 0.05 s per step."""
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -26,7 +36,9 @@ from sqlalchemy import Engine
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Backups, EngineHealth, LocalBackups, TakenBackup
+from nextron.adapters.backup_target import FolderBackupTarget
+from nextron.adapters.crypto import ScryptParams
+from nextron.app.ops.api import Backups, EngineHealth, LocalBackups, OffpcBackups, TakenBackup
 from nextron.app.queries import ops as ops_queries
 from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
@@ -42,21 +54,26 @@ from nextron.domain.backup import (
     BackupNotVerified,
     BackupSchedule,
     copy_name,
+    offpc_names,
 )
 from nextron.domain.health import HealthIssue
 from nextron.domain.job import InvalidJob, Job, JobStatus, Lane
 from nextron.domain.readiness import CheckResult, Status
 from nextron.domain.settings_schema import Key
 from nextron.jobs import handlers
+from nextron.ports.backup_target import BackupTargets
 from nextron.ports.errors import AdapterError
 from tests.fakes.alert import InMemoryAlert
+from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
+from tests.fakes.secrets import InMemorySecrets
 
 T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 OPS_LOGGER = "nextron.app.ops.api"
 SNAPSHOT_LOGGER = "nextron.db.repos.ops.snapshot"
 HEAD = head_revision()
 READINESS = (CheckResult("python_version", Status.OK, "fine"),)
+LOW_SCRYPT = ScryptParams(10, 8, 1)
 
 
 def sha256(path: Path) -> str:
@@ -72,9 +89,12 @@ class World:
     clock: FrozenClock
     tmp_path: Path
     snap: Callable[[Path], Snapshot] | None = None
+    targets: BackupTargets | None = None
+    secrets: InMemorySecrets = field(default_factory=InMemorySecrets)
     notify: Notify = field(init=False)
     queue: JobQueue = field(init=False)
     local: LocalBackups = field(init=False)
+    offpc: OffpcBackups = field(init=False)
     backups: Backups = field(init=False)
 
     def __post_init__(self) -> None:
@@ -89,7 +109,28 @@ class World:
             local_dir=self.local_dir,
             snapshot=self.snap if self.snap is not None else self.real_snapshot,
         )
-        self.backups = Backups(self.clock, self.local, notify=self.notify, queue=self.queue)
+        self.offpc = OffpcBackups(
+            self.clock,
+            env="test",
+            data_dir=self.db_file.parent,
+            backup_dir=self.backup_dir,
+            targets=self.targets if self.targets is not None else self.folder_target,
+        )
+        self.backups = Backups(
+            self.clock, self.local, notify=self.notify, queue=self.queue, offpc=self.offpc
+        )
+
+    def folder_target(self, folder: Path) -> FolderBackupTarget:
+        """The real folder adapter on ``folder``, with cheap scrypt parameters."""
+        return FolderBackupTarget(folder, secrets=self.secrets, params=LOW_SCRYPT)
+
+    @property
+    def backup_dir(self) -> Path:
+        return self.tmp_path / "backups"
+
+    @property
+    def offpc_dir(self) -> Path:
+        return self.tmp_path / "offpc"
 
     @property
     def db_file(self) -> Path:
@@ -98,7 +139,7 @@ class World:
 
     @property
     def local_dir(self) -> Path:
-        return self.tmp_path / "backups" / "local"
+        return self.backup_dir / "local"
 
     def real_snapshot(self, target: Path) -> Snapshot:
         return snapshot(self.db_file, target)
@@ -127,6 +168,11 @@ class World:
         with self.units.open():
             Setup(self.clock).set(key, value)
 
+    def clear_setting(self, key: Key) -> None:
+        """Back to the default, as a blank field on the Settings page does."""
+        with self.units.open():
+            Setup(self.clock).save({str(key): ""})
+
     def rotate(self) -> int:
         @use_case
         def run() -> int:
@@ -148,8 +194,21 @@ def world(
     return World(units, db_engine, clock, tmp_path)
 
 
-def make_world(world: World, snap: Callable[[Path], Snapshot]) -> World:
-    return World(world.units, world.engine, world.clock, world.tmp_path, snap)
+def make_world(
+    world: World,
+    snap: Callable[[Path], Snapshot] | None = None,
+    *,
+    targets: BackupTargets | None = None,
+) -> World:
+    return World(
+        world.units,
+        world.engine,
+        world.clock,
+        world.tmp_path,
+        snap if snap is not None else world.snap,
+        targets=targets if targets is not None else world.targets,
+        secrets=world.secrets,
+    )
 
 
 def records(caplog: pytest.LogCaptureFixture, logger: str = OPS_LOGGER) -> list[logging.LogRecord]:
@@ -1004,7 +1063,13 @@ def test_two_threads_never_copy_at_once(world: World) -> None:
 
     ticking = TickingClock(T0)
     local = LocalBackups(ticking, env="test", local_dir=world.local_dir, snapshot=watched)  # type: ignore[arg-type]
-    backups = Backups(ticking, local, notify=world.notify, queue=world.queue)  # type: ignore[arg-type]
+    backups = Backups(
+        ticking,  # type: ignore[arg-type]
+        local,
+        notify=world.notify,
+        queue=world.queue,
+        offpc=world.offpc,
+    )
     made: list[str] = []
     errors: list[BaseException] = []
 
@@ -1117,3 +1182,716 @@ def test_build_local_backups_copies_the_data_dirs_database_into_backup_dir_local
         assert copy.execute("SELECT count(*) FROM planted").fetchone() == (0,)
     finally:
         copy.close()
+
+
+# Off-PC copies (Story 1.17) ----------------------------------------------------------------------
+
+PASSPHRASE = "QZXPLANTEDBACKUPPASSPHRASE horse battery"
+PLANTED_KEY = "QZXPLANTEDHUNTERAPIKEY"
+OFFPC_NAME = "nextron-test-20261117T090000.000Z.db.enc"
+LEDGER_NAME = "nextron-test-20261117T090000.000Z.ledger.jsonl.enc"
+OFFPC_COLUMNS = (
+    "offpc_status, offpc_name, offpc_ledger, offpc_at, offpc_deleted_at, offpc_error"
+)
+T0_TEXT = "2026-11-17T09:00:00.000000Z"
+
+
+def configure(world: World, folder: Path | None = None, *, passphrase: bool = True) -> Path:
+    """Set the off-PC folder (``<tmp>\\offpc`` unless given) and the Backup passphrase."""
+    chosen = folder if folder is not None else world.offpc_dir
+    world.set_setting(Key.BACKUP_OFFPC_DIR, str(chosen))
+    if passphrase:
+        world.secrets.write("backup/passphrase", PASSPHRASE)
+    return chosen
+
+
+def offpc_of(world: World, backup_id: str) -> tuple[Any, ...]:
+    [row] = world.query(f"SELECT {OFFPC_COLUMNS} FROM backups WHERE id = ?", (backup_id,))
+    return tuple(row)
+
+
+def offpc_files(world: World) -> list[str]:
+    folder = world.offpc_dir
+    return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
+
+
+def decrypted(world: World, name: str, folder: Path | None = None) -> tuple[str, bytes]:
+    """The SHA-256 and the bytes the real adapter restores from ``name``."""
+    target = world.tmp_path / f"restored-{name}"
+    fetched = FolderBackupTarget(
+        folder if folder is not None else world.offpc_dir, secrets=world.secrets
+    ).get(name, target)
+    data = target.read_bytes()
+    assert fetched.plain_sha256 == hashlib.sha256(data).hexdigest()
+    return fetched.plain_sha256, data
+
+
+def run_backup_job(world: World) -> None:
+    """Run one ``backup_db`` tick through the queue and its handler, then finish the job."""
+    with world.units.open():
+        world.queue.enqueue_tick("backup_db")
+    with world.units.open():
+        claim = world.queue.claim(Lane.BULK)
+    assert claim is not None
+    handler = world.queue._job_types.get("backup_db").handler  # noqa: SLF001
+    assert handler is not None
+    with world.units.open():
+        assert handler(claim.job) is None  # the use case returns: the off-PC step never raises
+    with world.units.open():
+        assert world.queue.complete(claim)
+
+
+def messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in records(caplog)]
+
+
+# Row: Copied
+
+
+def test_a_verified_backup_is_encrypted_and_copied_off_the_pc(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    configure(world)
+
+    backup_id = world.back_up(BackupKind.DAILY)
+
+    assert offpc_files(world) == [OFFPC_NAME]  # no part left, no ledger to copy
+    assert offpc_of(world, backup_id) == ("copied", OFFPC_NAME, "absent", T0_TEXT, None, None)
+    row = world.read(ops_queries.last_backup)
+    assert (row.status, row.offpc_status, row.offpc_at) == ("verified", "copied", T0)
+    digest, data = decrypted(world, OFFPC_NAME)
+    assert digest == row.sha256 == sha256(Path(row.path))
+    assert data == Path(row.path).read_bytes()
+    sealed = (world.offpc_dir / OFFPC_NAME).read_bytes()
+    assert b"SQLite format 3" not in sealed and data[:100] not in sealed
+    [copied] = [r for r in records(caplog) if r.getMessage() == "offpc_backup_copied"]
+    assert copied.levelno == logging.INFO
+    assert (copied.backup_id, copied.file, copied.ledger) == (backup_id, OFFPC_NAME, "absent")  # type: ignore[attr-defined]
+    assert messages(caplog).index("backup_completed") < messages(caplog).index(
+        "offpc_backup_copied"
+    )
+    assert world.query("SELECT count(*) FROM alerts") == [(0,)]
+    assert world.read(ops_queries.health_issues) == ()
+
+
+def test_a_manual_backup_goes_off_the_pc_too(world: World) -> None:
+    configure(world)
+
+    backup_id = world.back_up(BackupKind.MANUAL)
+
+    assert offpc_of(world, backup_id)[:3] == ("copied", OFFPC_NAME, "absent")
+
+
+# Row: Ledger
+
+
+def test_the_erasure_ledger_goes_off_the_pc_beside_the_copy(world: World) -> None:
+    configure(world)
+    ledger = world.backup_dir / "erasure-ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b'{"erased_at": "2026-11-16T10:00:00Z", "hash": "ab12"}\n')
+
+    backup_id = world.back_up()
+
+    assert offpc_files(world) == [OFFPC_NAME, LEDGER_NAME]
+    assert offpc_of(world, backup_id)[:3] == ("copied", OFFPC_NAME, "copied")
+    assert decrypted(world, LEDGER_NAME)[1] == ledger.read_bytes()
+    assert b"erased_at" not in (world.offpc_dir / LEDGER_NAME).read_bytes()
+
+
+# Row: Not configured
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("blank", "folder_not_set"),
+        ("data dir", "folder_in_data_dir"),
+        ("inside the data dir", "folder_in_data_dir"),
+        ("backup dir", "folder_in_backup_dir"),
+        ("inside the backup dir", "folder_in_backup_dir"),
+        ("no passphrase", "passphrase_not_set"),
+    ],
+)
+def test_an_off_pc_copy_that_is_not_configured_is_recorded_without_an_alert(
+    world: World, caplog: pytest.LogCaptureFixture, case: str, reason: str
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    folders = {
+        "data dir": world.db_file.parent,
+        "inside the data dir": world.db_file.parent / "offpc",
+        "backup dir": world.backup_dir,
+        "inside the backup dir": world.backup_dir / "offpc",
+        "no passphrase": world.offpc_dir,
+    }
+    if case == "blank":
+        world.secrets.write("backup/passphrase", PASSPHRASE)
+    else:
+        configure(world, folders[case], passphrase=case != "no passphrase")
+
+    backup_id = world.back_up()
+
+    assert world.read(ops_queries.last_backup).status == "verified"  # the local backup is fine
+    assert offpc_of(world, backup_id) == ("not_configured", None, None, T0_TEXT, None, None)
+    assert [path for path in world.tmp_path.rglob("*.enc*")] == []  # nothing sent anywhere
+    assert not world.offpc_dir.exists()
+    assert world.query("SELECT count(*) FROM alerts") == [(0,)]
+    assert world.query("SELECT count(*) FROM notifications") == [(0,)]
+    [skipped] = [r for r in records(caplog) if r.getMessage() == "offpc_backup_skipped"]
+    assert skipped.levelno == logging.INFO
+    assert (skipped.backup_id, skipped.reason) == (backup_id, reason)  # type: ignore[attr-defined]
+    assert world.read(ops_queries.health_issues) == ()
+
+
+# Row: Copy fails
+
+
+def assert_offpc_failed(
+    world: World, backup_id: str, code: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    status, name, ledger, at, deleted, error = offpc_of(world, backup_id)
+    assert (status, name, ledger, at, deleted) == ("failed", None, None, T0_TEXT, None)
+    assert error.startswith(f"{code}: ")
+    text = f"Off-PC backup copy failed: daily {backup_id}"
+    assert world.query("SELECT kind, subject, channel, text, status FROM alerts") == [
+        (BACKUP_FAILED, backup_id, "telegram", text, "pending")
+    ]
+    assert world.query("SELECT kind, subject, text FROM notifications") == [
+        (BACKUP_FAILED, backup_id, text)
+    ]
+    [failed] = [r for r in records(caplog) if r.getMessage() == "offpc_backup_failed"]
+    assert failed.levelno == logging.ERROR
+    assert (failed.backup_id, failed.code) == (backup_id, code)  # type: ignore[attr-defined]
+    assert world.read(ops_queries.health_issues) == (
+        HealthIssue(BACKUP_FAILED, backup_id, text, detail=f"Error: {error}"),
+    )
+    assert world.read(ops_queries.last_backup).status == "verified"
+    assert world.query("SELECT status FROM jobs WHERE type = 'backup_db'") == [("done",)]
+    assert [path for path in world.tmp_path.rglob("*.part")] == []
+    assert str(world.tmp_path) not in caplog.text  # file names and codes only
+
+
+def test_an_unreachable_folder_fails_the_off_pc_copy_and_alerts(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    configure(world, world.tmp_path / "unplugged" / "backups")
+
+    run_backup_job(world)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "backup_target_unavailable", caplog)
+    assert not (world.tmp_path / "unplugged").exists()  # no tree is grown
+
+
+def test_a_refused_name_fails_the_off_pc_copy_and_leaves_the_file_alone(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    folder = configure(world)
+    folder.mkdir()
+    (folder / OFFPC_NAME).write_bytes(b"someone else's file")
+
+    run_backup_job(world)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "backup_target_exists", caplog)
+    assert (folder / OFFPC_NAME).read_bytes() == b"someone else's file"
+
+
+def test_a_hash_mismatch_deletes_the_off_pc_copy_and_fails(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    configure(world)
+
+    def misreported(target: Path) -> Snapshot:
+        made = snapshot(world.db_file, target)
+        return dataclasses.replace(made, sha256="f" * 64)  # not the bytes the copy holds
+
+    mismatched = make_world(world, misreported)
+
+    run_backup_job(mismatched)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "offpc_copy_mismatch", caplog)
+    assert offpc_files(world) == []  # the copy was deleted
+
+
+def test_a_passphrase_that_cannot_be_read_fails_the_off_pc_copy_and_alerts(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    configure(world)  # the real FolderBackupTarget; only credential_not_set is not_configured
+    world.secrets.failing.add("read")
+
+    run_backup_job(world)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "keyring_failed", caplog)
+    assert not world.offpc_dir.exists()
+
+
+def test_a_folder_the_target_refuses_through_the_fake_fails(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    fake = InMemoryBackupTarget()
+    fake.failures["put"] = AdapterError(False, "backup_source_unreadable", "unreadable")
+    failing = make_world(world, targets=lambda folder: fake)
+    configure(failing)
+
+    run_backup_job(failing)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "backup_source_unreadable", caplog)
+
+
+def test_a_stored_folder_that_no_longer_parses_fails_the_off_pc_copy(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    world.secrets.write("backup/passphrase", PASSPHRASE)
+    world.query(
+        "INSERT INTO settings (id, key, value, updated_at) VALUES (?, ?, ?, ?)",
+        ("01JD3QZ8X5V9K2M7N4P6R8T0AB", "backup_offpc_dir", "relative\\folder", T0_TEXT),
+    )
+
+    run_backup_job(world)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "invalid_setting", caplog)
+
+
+def test_a_ledger_copy_that_fails_after_the_database_copy_fails_and_keeps_the_copy(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    fake = InMemoryBackupTarget()
+    fake.failures[f"put:{LEDGER_NAME}"] = AdapterError(True, "backup_target_unavailable", "x")
+    failing = make_world(world, targets=lambda folder: fake)
+    configure(failing)
+    ledger = world.backup_dir / "erasure-ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b"{}\n")
+
+    run_backup_job(failing)
+
+    [(backup_id,)] = world.query("SELECT id FROM backups")
+    assert_offpc_failed(world, backup_id, "backup_target_unavailable", caplog)
+    assert list(fake.files) == [OFFPC_NAME]  # stays until rotation (decision 9)
+
+
+# pre_migrate stays local
+
+
+def test_a_pre_migrate_copy_stays_local(world: World) -> None:
+    configure(world)
+    taken = world.local.take(BackupKind.PRE_MIGRATE)
+
+    with world.units.open():
+        backup_id = world.local.record_pre_migrate(taken)
+
+    assert offpc_of(world, backup_id) == (None,) * 6
+    assert not world.offpc_dir.exists()
+
+
+# The off-PC record fails
+
+
+@pytest.mark.parametrize("where", ["destination", "set_offpc", "alert"])
+def test_a_failed_off_pc_record_is_logged_and_the_backup_still_succeeds(
+    world: World,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+
+    def locked(*args: object, **kwargs: object) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    if where == "destination":
+        configure(world)
+        monkeypatch.setattr(OffpcBackups, "destination", locked)
+    elif where == "set_offpc":
+        configure(world)
+        monkeypatch.setattr(backups_repo, "set_offpc", locked)
+    else:  # a failed copy whose alert can't be raised
+        configure(world, world.tmp_path / "unplugged" / "backups")
+        monkeypatch.setattr(world.notify, "alert", locked)
+
+    run_backup_job(world)
+
+    [(backup_id, status)] = world.query("SELECT id, status FROM backups")
+    assert status == "verified"
+    assert offpc_of(world, backup_id) == (None,) * 6  # rolled back: nothing recorded
+    assert world.query("SELECT status FROM jobs WHERE type = 'backup_db'") == [("done",)]
+    [failed] = [r for r in records(caplog) if r.getMessage() == "offpc_record_failed"]
+    assert failed.levelno == logging.ERROR
+    assert (failed.backup_id, failed.code) == (backup_id, "OperationalError")  # type: ignore[attr-defined]
+    assert failed.exc_info is not None
+    names = messages(caplog)
+    assert not {"offpc_backup_copied", "offpc_backup_failed", "offpc_backup_skipped"} & set(names)
+    assert "backup_record_failed" not in names
+    if where == "destination":
+        assert not world.offpc_dir.exists()
+    if where == "set_offpc":
+        assert offpc_files(world) == [OFFPC_NAME]  # the copy was made; rotation finds it later
+
+
+# Row: Rotation
+
+
+def test_off_pc_rotation_deletes_copies_ledgers_and_parts_older_than_35_days(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    configure(world)
+    ledger = world.backup_dir / "erasure-ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b"{}\n")
+    old = [backup_at(world, T0 - timedelta(days=days)) for days in (40, 36, 34)]
+    names = {backup_id: offpc_of(world, backup_id)[1] for backup_id in old}
+    long_ago = T0 - timedelta(days=50)
+    planted = [
+        offpc_names("test", long_ago)[0] + ".part",  # a stale part
+        offpc_names("prod", long_ago)[0],  # another environment's
+        "notes.txt",  # not a backup
+    ]
+    for name in planted:
+        (world.offpc_dir / name).write_bytes(b"x")
+    assert len(offpc_files(world)) == 9  # nothing was old enough before now
+    caplog.clear()
+
+    new = backup_at(world, T0)
+
+    kept_names = [names[old[2]], offpc_names("test", T0 - timedelta(days=34))[1]]
+    assert offpc_files(world) == sorted(
+        [*kept_names, OFFPC_NAME, LEDGER_NAME, *planted[1:]]
+    )
+    marks = {backup_id: offpc_of(world, backup_id)[4] for backup_id in [*old, new]}
+    assert marks[old[0]] == marks[old[1]] == T0_TEXT
+    assert marks[old[2]] is None and marks[new] is None
+    [rotated] = [r for r in records(caplog) if r.getMessage() == "offpc_backups_rotated"]
+    assert (rotated.levelno, rotated.count, rotated.backup_id) == (logging.INFO, 5, new)  # type: ignore[attr-defined]
+
+    caplog.clear()
+    backup_at(world, T0 + timedelta(minutes=1))  # nothing more is old enough
+    assert "offpc_backups_rotated" not in messages(caplog)
+
+
+def test_off_pc_rotation_keeps_the_newest_copy_even_when_it_is_40_days_old(
+    world: World,
+) -> None:
+    configure(world)
+    kept = backup_at(world, T0 - timedelta(days=40))
+    world.clock.set(T0)
+
+    @use_case
+    def rotate() -> int:
+        return world.offpc.rotate(world.offpc_dir, kept)
+
+    with world.units.open():
+        assert rotate() == 0
+
+    assert len(offpc_files(world)) == 1
+    assert offpc_of(world, kept)[4] is None
+
+
+def test_off_pc_rotation_runs_only_after_a_copied_backup(world: World) -> None:
+    configure(world)
+    old = backup_at(world, T0 - timedelta(days=40))
+    backup_at(world, T0 - timedelta(days=39))
+    world.clear_setting(Key.BACKUP_OFFPC_DIR)  # not configured now
+
+    backup_at(world, T0)
+
+    assert len(offpc_files(world)) == 2
+    assert offpc_of(world, old)[4] is None
+
+
+def test_a_failed_off_pc_delete_is_logged_and_the_others_still_go(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    fake = InMemoryBackupTarget()
+    faked = make_world(world, targets=lambda folder: fake)
+    configure(faked)
+    first, second = (backup_at(faked, T0 - timedelta(days=days)) for days in (40, 36))
+    first_name, second_name = offpc_of(faked, first)[1], offpc_of(faked, second)[1]
+    fake.failures[f"delete:{first_name}"] = AdapterError(True, "backup_target_unavailable", "x")
+    faked.clock.set(T0)
+    caplog.clear()
+
+    run_backup_job(faked)
+
+    assert sorted(fake.files) == sorted([first_name, OFFPC_NAME])
+    assert offpc_of(faked, first)[4] is None  # still there: not marked
+    assert offpc_of(faked, second)[4] == T0_TEXT
+    [rotated] = [r for r in records(caplog) if r.getMessage() == "offpc_backups_rotated"]
+    assert rotated.count == 1  # type: ignore[attr-defined]
+    [failed] = [r for r in records(caplog) if r.getMessage() == "offpc_rotation_failed"]
+    assert failed.levelno == logging.ERROR
+    assert failed.code == "backup_target_unavailable"  # type: ignore[attr-defined]
+    [(new_id,)] = world.query("SELECT id FROM backups WHERE started_at = ?", (T0_TEXT,))
+    assert failed.backup_id == new_id  # type: ignore[attr-defined]
+    assert offpc_of(faked, new_id)[0] == "copied"
+    assert world.query("SELECT status FROM jobs WHERE type = 'backup_db'") == [("done",)]
+
+
+def test_a_folder_that_cannot_be_listed_only_logs_the_rotation_failure(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=OPS_LOGGER)
+    fake = InMemoryBackupTarget()
+    fake.failures["list"] = AdapterError(True, "backup_target_unavailable", "x")
+    faked = make_world(world, targets=lambda folder: fake)
+    configure(faked)
+
+    backup_id = faked.back_up()
+
+    assert offpc_of(faked, backup_id)[0] == "copied"
+    [failed] = [r for r in records(caplog) if r.getMessage() == "offpc_rotation_failed"]
+    assert (failed.backup_id, failed.code) == (backup_id, "backup_target_unavailable")  # type: ignore[attr-defined]
+
+
+# health_issues
+
+
+def test_health_issues_list_each_off_pc_failure_since_the_newest_copied_or_skipped_one(
+    world: World,
+) -> None:
+    unplugged = world.tmp_path / "unplugged" / "backups"
+    configure(world, unplugged)
+    first = backup_at(world, T0)
+    second = backup_at(world, T0 + timedelta(minutes=1), BackupKind.MANUAL)
+
+    issues = world.read(ops_queries.health_issues)
+
+    assert [(issue.kind, issue.subject, issue.text) for issue in issues] == [
+        (BACKUP_FAILED, first, f"Off-PC backup copy failed: daily {first}"),
+        (BACKUP_FAILED, second, f"Off-PC backup copy failed: manual {second}"),
+    ]
+    assert all(
+        issue.detail is not None and issue.detail.startswith("Error: backup_target_unavailable")
+        for issue in issues
+    )
+
+    world.set_setting(Key.BACKUP_OFFPC_DIR, str(world.offpc_dir))
+    backup_at(world, T0 + timedelta(minutes=2))  # copied: the list clears
+    assert world.read(ops_queries.health_issues) == ()
+
+    world.set_setting(Key.BACKUP_OFFPC_DIR, str(unplugged))
+    third = backup_at(world, T0 + timedelta(minutes=3))
+    assert [issue.subject for issue in world.read(ops_queries.health_issues)] == [third]
+
+    world.clear_setting(Key.BACKUP_OFFPC_DIR)
+    backup_at(world, T0 + timedelta(minutes=4))  # not configured: the list clears too
+    assert world.read(ops_queries.health_issues) == ()
+
+
+def test_local_failures_come_before_off_pc_failures(world: World) -> None:
+    configure(world, world.tmp_path / "unplugged" / "backups")
+    offpc_failed = backup_at(world, T0)
+
+    def broken(target: Path) -> Snapshot:
+        raise OSError("disk full")
+
+    local_failed = backup_at(make_world(world, broken), T0 + timedelta(minutes=1))
+
+    issues = world.read(ops_queries.health_issues)
+
+    assert [issue.text for issue in issues] == [
+        f"Backup failed: daily {local_failed}",
+        f"Off-PC backup copy failed: daily {offpc_failed}",
+    ]
+
+
+# The off-PC checks
+
+
+COPIED_ROW: dict[str, object] = {
+    **VERIFIED_ROW,
+    "offpc_status": "copied",
+    "offpc_name": OFFPC_NAME,
+    "offpc_ledger": "absent",
+    "offpc_at": T0_TEXT,
+    "offpc_deleted_at": None,
+    "offpc_error": None,
+}
+OFFPC_FAILED_ROW: dict[str, object] = {
+    **COPIED_ROW,
+    "offpc_status": "failed",
+    "offpc_name": None,
+    "offpc_ledger": None,
+    "offpc_error": "backup_target_unavailable: the folder could not be reached",
+}
+NOT_CONFIGURED_ROW: dict[str, object] = {
+    **COPIED_ROW,
+    "offpc_status": "not_configured",
+    "offpc_name": None,
+    "offpc_ledger": None,
+}
+
+
+def test_valid_rows_of_each_off_pc_status_are_accepted(world: World) -> None:
+    rows = [
+        VERIFIED_ROW,
+        COPIED_ROW,
+        {**COPIED_ROW, "offpc_ledger": "copied", "offpc_deleted_at": T0_TEXT},
+        OFFPC_FAILED_ROW,
+        NOT_CONFIGURED_ROW,
+        FAILED_ROW,
+    ]
+    for number, row in enumerate(rows):
+        insert_row(world, {**row, "id": f"01JD3QZ8X5V9K2M7N4P6R8T0A{number}"})
+
+    assert world.query("SELECT count(*) FROM backups") == [(len(rows),)]
+
+
+@pytest.mark.parametrize(
+    ("row", "constraint"),
+    [
+        ({**COPIED_ROW, "offpc_status": "sent"}, "ck_backups_offpc_status"),
+        ({**COPIED_ROW, "offpc_ledger": "maybe"}, "ck_backups_offpc_ledger"),
+        ({**VERIFIED_ROW, "offpc_name": OFFPC_NAME}, "ck_backups_offpc"),
+        ({**VERIFIED_ROW, "offpc_ledger": "absent"}, "ck_backups_offpc"),
+        ({**VERIFIED_ROW, "offpc_at": T0_TEXT}, "ck_backups_offpc"),
+        ({**VERIFIED_ROW, "offpc_deleted_at": T0_TEXT}, "ck_backups_offpc"),
+        ({**VERIFIED_ROW, "offpc_error": "x"}, "ck_backups_offpc"),
+        ({**COPIED_ROW, "offpc_name": None}, "ck_backups_offpc"),
+        ({**COPIED_ROW, "offpc_ledger": None}, "ck_backups_offpc"),
+        ({**COPIED_ROW, "offpc_at": None}, "ck_backups_offpc"),
+        ({**COPIED_ROW, "offpc_error": "x"}, "ck_backups_offpc"),
+        ({**COPIED_ROW, **FAILED_ROW}, "ck_backups_offpc"),  # a failed backup's columns
+        ({**OFFPC_FAILED_ROW, "offpc_error": None}, "ck_backups_offpc"),
+        ({**OFFPC_FAILED_ROW, "offpc_at": None}, "ck_backups_offpc"),
+        ({**OFFPC_FAILED_ROW, "offpc_name": OFFPC_NAME}, "ck_backups_offpc"),
+        ({**OFFPC_FAILED_ROW, "offpc_ledger": "absent"}, "ck_backups_offpc"),
+        ({**OFFPC_FAILED_ROW, "offpc_deleted_at": T0_TEXT}, "ck_backups_offpc"),
+        ({**NOT_CONFIGURED_ROW, "offpc_at": None}, "ck_backups_offpc"),
+        ({**NOT_CONFIGURED_ROW, "offpc_name": OFFPC_NAME}, "ck_backups_offpc"),
+        ({**NOT_CONFIGURED_ROW, "offpc_ledger": "absent"}, "ck_backups_offpc"),
+        ({**NOT_CONFIGURED_ROW, "offpc_error": "x"}, "ck_backups_offpc"),
+        ({**NOT_CONFIGURED_ROW, "offpc_deleted_at": T0_TEXT}, "ck_backups_offpc"),
+        ({**COPIED_ROW, "sha256": None}, "ck_backups_outcome"),  # 0007's checks still apply
+        ({**COPIED_ROW, "size_bytes": -1}, "ck_backups_counts"),
+        ({**COPIED_ROW, "kind": "weekly"}, "ck_backups_kind"),
+    ],
+    ids=[
+        "unknown off-PC status",
+        "unknown ledger status",
+        "no status with a name",
+        "no status with a ledger",
+        "no status with a time",
+        "no status with a deletion",
+        "no status with an error",
+        "copied without a name",
+        "copied without a ledger",
+        "copied without a time",
+        "copied with an error",
+        "copied on a failed backup",
+        "failed without an error",
+        "failed without a time",
+        "failed with a name",
+        "failed with a ledger",
+        "failed with a deletion",
+        "not configured without a time",
+        "not configured with a name",
+        "not configured with a ledger",
+        "not configured with an error",
+        "not configured with a deletion",
+        "0007 outcome",
+        "0007 counts",
+        "0007 kind",
+    ],
+)
+def test_the_table_refuses_an_off_pc_outcome_that_breaks_a_check(
+    world: World, row: dict[str, object], constraint: str
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError, match=rf"{constraint}$"):
+        insert_row(world, row)
+
+    assert world.query("SELECT count(*) FROM backups") == [(0,)]
+
+
+def test_an_off_pc_outcome_is_recorded_once(world: World) -> None:
+    backup_id = world.back_up()  # not configured: recorded
+    later = datetime(2026, 11, 18, tzinfo=UTC)
+
+    @use_case
+    def record_again() -> int:
+        with current().transaction():
+            return backups_repo.set_offpc(
+                backup_id, status="copied", name=OFFPC_NAME, ledger="absent", at=later, error=None
+            )
+
+    with world.units.open():
+        assert record_again() == 0
+
+    assert offpc_of(world, backup_id)[0] == "not_configured"
+
+
+# Planted secrets
+
+
+def test_no_planted_secret_reaches_a_copy_a_row_or_the_log(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    configure(world)
+    world.secrets.write("hunter/api_key", PLANTED_KEY)
+    ledger = world.backup_dir / "erasure-ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b"{}\n")
+    copied = world.back_up()
+    world.set_setting(Key.BACKUP_OFFPC_DIR, str(world.tmp_path / "unplugged" / "x"))
+    failed = backup_at(world, T0 + timedelta(minutes=1))
+    assert (offpc_of(world, copied)[0], offpc_of(world, failed)[0]) == ("copied", "failed")
+
+    files = [path for path in world.tmp_path.rglob("*") if path.is_file()]
+    assert any(path.suffix == ".enc" for path in files)
+    connection = sqlite3.connect(world.db_file)
+    try:
+        dump = "\n".join(connection.iterdump())
+    finally:
+        connection.close()
+    logged = caplog.text + "".join(
+        str(vars(record)) for record in caplog.records
+    )
+    for planted in (PASSPHRASE, "QZXPLANTED", PLANTED_KEY):
+        for path in files:
+            data = path.read_bytes()
+            assert planted.encode() not in data and planted.encode("utf-16-le") not in data
+        assert planted not in dump
+        assert planted not in logged
+
+
+# Composition
+
+
+def test_build_offpc_backups_binds_the_environment_its_dirs_and_the_targets(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEXTRON_DATA_DIR", str(world.db_file.parent))
+    monkeypatch.setenv("NEXTRON_BACKUP_DIR", str(tmp_path / "the backups"))
+    config = load_bootstrap()
+    fake = InMemoryBackupTarget()
+    asked: list[Path] = []
+
+    def targets(folder: Path) -> InMemoryBackupTarget:
+        asked.append(folder)
+        return fake
+
+    offpc = main.build_offpc_backups(config, world.clock, targets)
+    world.set_setting(Key.BACKUP_OFFPC_DIR, str(world.offpc_dir))
+
+    assert world.read(offpc.destination) == world.offpc_dir
+    taken = world.local.take(BackupKind.DAILY)
+    outcome = offpc.send(taken, world.offpc_dir)
+    assert (outcome.status, outcome.name) == ("copied", OFFPC_NAME)
+    assert asked == [world.offpc_dir]
+    world.set_setting(Key.BACKUP_OFFPC_DIR, str(tmp_path / "the backups" / "offpc"))
+    assert world.read(offpc.destination) == "folder_in_backup_dir"

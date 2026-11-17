@@ -29,8 +29,10 @@ In order, the panel shows:
 2. **Worker**: "Running (last beat <time> UTC)" while the heartbeat is under 2 minutes old,
    else "Not running: last beat <time> UTC", or "Not running: no heartbeat yet";
 3. **Backups**: "No backup yet." or "Last backup: <YYYY-MM-DD HH:MM:SS UTC>, <status> (<kind
-   label>)" from the newest backup's ``started_at`` (a failed one gets the
-   ``health-backup-failed`` class), then the notice of a "Back up now" click
+   label>)" from the newest backup's ``started_at``, followed by ", <off-PC label>" when its
+   off-PC outcome is recorded (Story 1.17: "copied off the PC", "off-PC copy failed" or
+   "off-PC not configured"). A failed backup, or a failed off-PC copy, gets the
+   ``health-backup-failed`` class. Then the notice of a "Back up now" click
    (``<p class="health-backup-notice" role="status">``) when there is one, then the "Back up
    now" form (``id="backup-now"``);
 4. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
@@ -49,7 +51,7 @@ from typing import Final
 from nextron.app.ops.api import HealthReport, Worker
 from nextron.app.queries.ops import BackupRow
 from nextron.domain.alert import JOB_DEAD
-from nextron.domain.backup import BackupKind, BackupStatus
+from nextron.domain.backup import BackupKind, BackupStatus, OffpcStatus
 from nextron.domain.ids import is_ulid
 from nextron.domain.readiness import tally
 from nextron.web.csrf import CSRF_FIELD
@@ -117,11 +119,22 @@ def worker_text(worker: Worker) -> str:
 
 
 def backup_text(backup: BackupRow | None) -> str:
-    """The Backups line: the newest backup's start, status and kind, or "No backup yet."."""
+    """The Backups line: the newest backup's start, status and kind, and its off-PC outcome
+    when there is one, or "No backup yet."."""
     if backup is None:
         return NO_BACKUP
     label = BackupKind(backup.kind).label
-    return f"Last backup: {shown_time(backup.started_at)}, {backup.status} ({label})"
+    text = f"Last backup: {shown_time(backup.started_at)}, {backup.status} ({label})"
+    if backup.offpc_status is not None:
+        text += f", {OffpcStatus(backup.offpc_status).label}"
+    return text
+
+
+def backup_failed(backup: BackupRow | None) -> bool:
+    """Whether the Backups line shows a failure: the backup, or its off-PC copy, failed."""
+    return backup is not None and (
+        backup.status == BackupStatus.FAILED or backup.offpc_status == OffpcStatus.FAILED
+    )
 
 
 def panel_context(report: HealthReport, *, notice: str | None = None) -> dict[str, object]:
@@ -154,8 +167,7 @@ def panel_context(report: HealthReport, *, notice: str | None = None) -> dict[st
         "worker": worker_text(report.worker),
         "worker_running": report.worker.running,
         "backup": backup_text(report.backup),
-        "backup_failed": report.backup is not None
-        and report.backup.status == BackupStatus.FAILED,
+        "backup_failed": backup_failed(report.backup),
         "backup_notice": notice,
         "issues": issues,
         "no_errors": NO_ERRORS,

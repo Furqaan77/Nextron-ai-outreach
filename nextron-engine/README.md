@@ -69,6 +69,7 @@ has an id, a status (`ok`, `warn` or `fail`) and a one-line message:
 | `port_free` | the dashboard port is free, or it is busy and `<data dir>\heartbeat` is under 2 minutes old: this environment's running engine holds it | | busy with no fresh heartbeat (a hung engine shows the same), or the probe fails |
 | `required_credentials` | the 5 required credentials (see [Credentials](#credentials)) are set, each 1,280 characters or fewer | | lists the labels that are not set, too long, or unreadable in Credential Manager |
 | `internal_notify_grant` | the Google `internal_notify` grant is stored and Google refreshed it | Google can't be reached: run doctor again later | the Desktop client is not imported, the grant is missing or needs re-consent, Credential Manager fails, or another error (by its code) |
+| `offpc_backup` | "Off-PC backup folder" (`backup_offpc_dir`) is set, on another drive than the data dir, and the Backup passphrase is set (see [Backups](#backups)) | `off-PC backup not configured (OQ-A3): backups are local only; ...`, listing every reason with its fix: the folder is blank, is the data dir or the backup dir (or inside either), or can't be read; the passphrase is not set, too long or unreadable. Or the folder is on the data dir's drive (a lost disk would take both) | |
 | `required_settings` | every required setting (`sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
 | `database_revision` | the database is at the code's head revision | no database file, an empty one, or one behind head: "will migrate on next start" | a revision this code doesn't know ("newer than this code"), or not this engine's database |
 
@@ -79,7 +80,7 @@ status  check                      message
 ok      python_version             Python 3.14.8 (needs 3.14.8 or later)
 ...
 warn    database_revision          no database file yet; it will be created and migrated on next start
-10 ok, 1 warn, 0 fail
+11 ok, 1 warn, 0 fail
 ```
 
 `--json` prints the same list as `[{"id", "status", "message"}, ...]` (ASCII-only), and
@@ -100,6 +101,16 @@ with `BEGIN IMMEDIATE`; on a read-only file that opens a read transaction, so a 
 wait for the engine's writes. Reading may leave empty `nextron.db-wal` and `nextron.db-shm`
 files; the engine reuses them, and SQLite deletes them when the engine's last connection closes
 at a clean stop.
+
+**The off-PC check.** `offpc_backup` reads the Backup passphrase from Credential Manager first
+(the value is dropped at once), then the `backup_offpc_dir` setting from the database (blank when
+there is no database file). It never opens, lists or creates the folder, so an unplugged drive
+or a slow share can't hold doctor or the health panel; "same drive" compares drive letters and
+`\\server\share` names only, so a volume mounted inside a folder of `C:\` isn't detected. A
+share or drive letter that points back at this PC isn't off the PC either, and doctor can't tell:
+`\\localhost\...`, `\\127.0.0.1\...`, `\\<this PC's name>\...`, an admin share such as `C$` on
+this PC, or a `subst` or mapped letter. Choose a folder that is really on another disk or
+another machine.
 
 **The Google refresh.** When the Desktop client and the `internal_notify` grant are stored,
 doctor asks Google for one fresh access token through the same code the engine uses, so
@@ -332,6 +343,9 @@ name or label such as `skip_eligibility` or "Disable footer"), and a key name or
 names a secret (`token`, `password`, `api_key`, `private`, or the word `key` or `pass`, and so
 on).
 
+The backup settings (`backup_time`, `backup_rotation_days` and `backup_offpc_dir`, all in the
+Engine section) are described under [Backups](#backups).
+
 **Read a value** through `queries.setup.get` inside the entry point's unit of work:
 
 ```python
@@ -525,8 +539,8 @@ value.
 1. **The panel is its own page,** `/credentials`, linked from the Settings page. The top
    navigation keeps its six sections.
 2. **The keyring names are the ones in the table above.** `backup/passphrase` is the name the
-   encrypted off-PC backup (Story 1.17) reads. The backup passphrase is optional here; the
-   doctor check that Story 1.17 adds covers it.
+   encrypted off-PC backup reads (see [Backups](#backups)). The backup passphrase is optional
+   here; doctor's `offpc_backup` check warns while it isn't set.
 3. **"Set" is read from the credential's own entry; only the time comes from `meta/<name>`.** A
    row can never say "set" for a credential that is gone. A missing, garbled or unreadable meta
    entry shows "last update time unknown". If Credential Manager can't be read at all, the row
@@ -700,6 +714,7 @@ the log line carries the copy's `file` name.
 | `0006_1_13_metering` | `api_usage` (three checks, `ix_api_usage_at`) and `ai_usage` (two checks, `ix_ai_usage_at`) (see [Metering, quotas and the AI budget](#metering-quotas-and-the-ai-budget)) | `db.metering` |
 | `0007_1_16_backups` | `backups`: one row per backup, its five checks and `ix_backups_started_at` (see [Backups](#backups)) | `ops` |
 | `0008_2_1_segments` | `segments` (unique `key`, `ck_segments_version`) (see [Seeds](#seeds)) | `setup` |
+| `0009_1_17_offpc` | six nullable off-PC columns on `backups` (`offpc_status`, `offpc_name`, `offpc_ledger`, `offpc_at`, `offpc_deleted_at`, `offpc_error`), added with `ALTER TABLE ... ADD COLUMN`, and their three checks (`ck_backups_offpc_status`, `ck_backups_offpc_ledger`, `ck_backups_offpc`) | `ops` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -992,16 +1007,109 @@ time (`backup_copy_not_deleted`). A rotation setting that can't be read skips ro
 rotation that fails after the row is recorded (a locked database, say) is logged
 (`backup_rotation_failed`, ERROR) and the backup still succeeds; the next backup rotates again.
 
-**Logs** carry IDs, kinds, codes, counts and file names, never a full path or an error's text:
-`backup_requested` (`job_id`, `job_created`), `backup_completed` (`backup_id`, `kind`,
-`size_bytes`, `file`), `backup_failed` (ERROR: `backup_id`, `kind`, `code`), `backups_rotated`
-(`count`), `backup_rotation_skipped`, `backup_rotation_failed` (ERROR: `backup_id`, `code`),
-`backup_copy_not_deleted`, `pre_migrate_backup_failed` and `backup_record_failed`.
+### Off the PC
 
-**Not done yet.** Copies stay on this PC, unencrypted: the encrypted off-PC copy and the
-erasure ledger arrive with Story 1.17, the monthly restore test with Story 1.18, and
-`nextron restore` with recovery mode with Story 1.19. `nextron doctor` checks only that the
-backup dir is separate from the data dir (`backup_dir_separate`).
+A lost, stolen or failed PC must not take every copy with it (AD-17, OP-6, NFR-17). After each
+verified daily or manual backup, `ops` (`OffpcBackups` in `nextron/app/ops/api.py`) encrypts the
+copy and writes it to **"Off-PC backup folder"** (`backup_offpc_dir`, Settings, Engine): a
+folder on another drive or a network share, such as `E:\NextronBackups` or
+`\\nas\backups\nextron`. It is blank by default: backups then stay on this PC only, and
+`nextron doctor` warns (`offpc_backup`, OQ-A3). A `pre_migrate` copy always stays local: it
+guards an upgrade, and a network call before the engine starts could hold startup on a slow
+share.
+
+**Set it up.**
+
+1. Choose a passphrase and save it as "Backup passphrase" on the Credentials page (keyring
+   `backup/passphrase`). It is read on every copy and stored nowhere else.
+2. **Keep the passphrase somewhere safe off this PC** (escrow): a password manager, or on paper
+   in a safe place. Without it no off-PC copy can ever be read; there is no recovery and no
+   back door.
+3. Set "Off-PC backup folder" to a folder on another drive or a network share. It must be a full
+   path (`E:\...` or `\\server\share\...`, no `..`, not a `\\?\` or `\\.\` device path),
+   not the data dir or the backup dir or inside either. The engine creates only the folder's last
+   level, so a wrong or unplugged drive fails instead of growing a new tree.
+4. Run `nextron doctor`: `offpc_backup` is `ok` once both are set and the folder is on another
+   drive than the data dir. "Back up now" on the health panel then shows "copied off the PC".
+
+**Changing the passphrase** affects only the copies made after the change. Each older copy still
+needs the passphrase it was made with, so keep the old one (with its date) until no copy made
+before the change is left in the folder: at least 35 days, and longer while no new copy
+succeeds, because the newest complete copy is always kept, however old.
+
+**Changing the folder** leaves the old folder's copies where they are: the engine only ever
+lists and rotates the folder that is set now. Delete them yourself 35 days after the change
+(erased data must age out of backups), or move them into the new folder, where rotation then
+treats them like any other copy.
+
+**What goes there.** `<folder>\nextron-<env>-<YYYYMMDDTHHMMSS.mmm>Z.db.enc`: the local copy's
+name plus `.enc`. When `<backup dir>\erasure-ledger.jsonl` exists (Story 4.x writes it), it
+goes beside it as `nextron-<env>-<stamp>.ledger.jsonl.enc`. Each file is written as
+`<name>.part` (encrypted from the first byte), flushed to the disk and then renamed, so a
+half-written file never has a final name and nothing reaches the folder in plaintext. An
+existing name is never overwritten. The SHA-256 of the plaintext read while encrypting must
+equal the verified backup's, or the off-PC copy is deleted and the copy fails.
+
+**The file format (v1).** A 40-byte header, then the chunks (`nextron/adapters/crypto`):
+
+- the header is `NXBK`, the format version (1), the scrypt parameters (`log2_n`, `r`, `p`), a
+  16-byte random salt (new for every file) and a 16-byte key check;
+- scrypt (n = 2^17, r = 8, p = 1: 128 MiB and about 0.3 s per file) turns the passphrase
+  (NFC-normalised UTF-8) and the salt into a 32-byte AES-256-GCM key and a 32-byte check key.
+  The key check is the first 16 bytes of HMAC-SHA256(check key, the first 24 header bytes), so
+  a wrong passphrase is told apart from a damaged file. The parameters are stored in each file,
+  so later versions can raise them and still read older copies;
+- each chunk holds 64 KiB of plaintext (the last one may be shorter) plus a 16-byte tag. Its
+  nonce is its index (safe, because every file has its own key), and the header, the index and
+  a "final" flag are authenticated with it. So a changed byte, a reordered, removed or added
+  chunk, or a cut file is refused: `backup_tampered`, or `backup_truncated` for a file cut at a
+  chunk boundary. A wrong passphrase is `backup_wrong_passphrase`, and anything that isn't a
+  version-1 backup is `backup_bad_format`.
+
+`nextron/adapters/backup_target` (`FolderBackupTarget`, the `BackupTargetPort`) streams each file
+through it: `put`, `list`, `get` (decrypt into a new local file; Story 1.18's restore test uses
+it) and `delete`. Its errors never carry a path, the passphrase or an exception's text.
+
+**What each backup records.** The off-PC step runs after the backup's row is recorded and never
+fails the backup: the job still ends `done`. Its outcome is written once on the `backups` row
+(migration `0009_1_17_offpc`): `offpc_status`, `offpc_name` (the file name, never the folder),
+`offpc_ledger` (`copied` or `absent`), `offpc_at`, `offpc_error` for a failure, and
+`offpc_deleted_at` once rotation deletes it.
+
+| Outcome | When | What you see |
+|---|---|---|
+| `copied` | the copy (and the ledger, if any) is in the folder | "…, copied off the PC" on the health panel |
+| `not_configured` | the folder is blank, is the data dir or the backup dir (or inside either), or the passphrase isn't set | "…, off-PC not configured"; no alert (doctor warns instead); `offpc_backup_skipped` with the `reason` |
+| `failed` | the folder can't be reached or written, the name exists, the hash differs, the ledger copy failed, or the stored folder setting no longer parses | the `backup_failed` ops alert "Off-PC backup copy failed: <kind> <ULID>" (Telegram and the dashboard), "…, off-PC copy failed" marked on the panel, and an error on the panel's list until a later backup is copied off the PC (or off-PC is no longer configured) |
+
+A failed off-PC copy isn't retried automatically, as with a failed local copy: the next daily time
+or "Back up now" tries again. If the ledger fails after the database copy, the outcome is
+`failed` and the database copy stays until rotation. If recording the outcome itself fails (a
+locked database), `offpc_record_failed` is logged and the backup still succeeds.
+
+**Rotation off the PC.** After each copy that succeeded, the folder is listed and this
+environment's copies, ledgers and stale `.part` files older than 35 days are deleted; their rows
+get `offpc_deleted_at`. The 35 days are fixed: they don't follow "Keep local backups for
+(days)", because the off-PC copy is the disaster copy and erased data must age out of backups
+within 35 days (AD-17). The newest complete copy and its ledger are always kept, however old.
+Rotation goes by the name, so a copy with no row (an interrupted run) goes too; other files and
+other environments' copies are never touched. A delete that fails is logged
+(`offpc_rotation_failed`), the others still go, and the next copy tries again.
+
+**Logs** carry IDs, kinds, codes, counts and file names, never a full path (the off-PC folder
+included), a passphrase or an error's text: `backup_requested` (`job_id`, `job_created`),
+`backup_completed` (`backup_id`, `kind`, `size_bytes`, `file`), `backup_failed` (ERROR:
+`backup_id`, `kind`, `code`), `backups_rotated` (`count`), `backup_rotation_skipped`,
+`backup_rotation_failed` (ERROR: `backup_id`, `code`), `backup_copy_not_deleted`,
+`pre_migrate_backup_failed`, `backup_record_failed`, and off the PC `offpc_backup_copied`
+(`backup_id`, `file`, `ledger`), `offpc_backup_failed` (ERROR: `backup_id`, `code`),
+`offpc_backup_skipped` (`backup_id`, `reason`), `offpc_backups_rotated` (`backup_id`, `count`),
+`offpc_rotation_failed` (ERROR: `backup_id`, `code`) and `offpc_record_failed` (ERROR:
+`backup_id`, `code`).
+
+**Not done yet.** The monthly restore test arrives with Story 1.18, and `nextron restore` with
+recovery mode with Story 1.19; Story 4.x writes the erasure ledger. There is no passphrase-strength
+rule. A failed off-PC copy is never retried before the next backup.
 
 ## Triggers and the heartbeat
 
@@ -1284,8 +1392,10 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    was set back, isn't fresh either), "Not running: last beat <time> UTC" otherwise, or "Not
    running: no heartbeat yet".
 3. **Backups**: "No backup yet." or "Last backup: <YYYY-MM-DD HH:MM:SS> UTC, <verified or
-   failed> (<daily, manual or before a migration>)", from the newest backup's start (marked
-   when it failed), and the **Back up now** button (see [Backups](#backups)).
+   failed> (<daily, manual or before a migration>)", from the newest backup's start, followed by
+   ", copied off the PC", ", off-PC copy failed" or ", off-PC not configured" once its off-PC
+   outcome is recorded (marked when the backup or its off-PC copy failed), and the **Back up
+   now** button (see [Backups](#backups)).
 4. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
    attention." The errors are:
    - each `dead` job, oldest first: "Job dead: <type> <ULID>, attempts: <n>", with "Last error:
@@ -1297,6 +1407,9 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    - each failed backup newer than the newest verified one, oldest first: "Backup failed:
      <kind> <ULID>", with "Error: <redacted error>". The list clears when a later backup
      verifies; there is no Dismiss;
+   - then each failed off-PC copy newer than the newest one copied or not configured, oldest
+     first: "Off-PC backup copy failed: <kind> <ULID>", with "Error: <redacted error>". It clears
+     when a later backup is copied off the PC, or off-PC is no longer configured;
    - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
      fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
      traceback); the other sources still show.
@@ -1304,7 +1417,7 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
 6. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
-   the same eleven ids in the same order, with "<n> ok, <n> warn, <n> fail".
+   the same twelve ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
 (`GET /health/panel/live`, the panel alone) while the page is open. Every answer is
@@ -1335,7 +1448,8 @@ with two checks in a no-side-effect form, because a GET never changes anything:
   grant still refreshes.
 
 The checks that read Credential Manager or the registry run before the panel's first database
-read, so they never hold the read transaction (AD-2: every read begins with `BEGIN IMMEDIATE`).
+read, so they never hold the read transaction (AD-2: every read begins with `BEGIN IMMEDIATE`);
+`offpc_backup` reads the Backup passphrase before its setting, and never touches the folder.
 Building the app runs no check.
 
 **The error count.** The notification area shows "Engine health: 1 error needs attention" (or
@@ -1347,7 +1461,7 @@ view; the area isn't polled.
 `HealthIssue(kind, subject, text, detail=None)` values (`nextron/domain/health.py`), and
 registers it in `nextron.main.build_health_issues`, the only code that builds the registry
 (`tests/contracts/test_health_contracts.py`). The sources so far, in order: `jobqueue` (dead
-jobs), `budget` (AI spend and quotas) and `backups` (failed backups).
+jobs), `budget` (AI spend and quotas) and `backups` (failed backups, then failed off-PC copies).
 
 ## Logs
 
@@ -1406,16 +1520,19 @@ uv run lint-imports                      # the import contracts on their own
 - `tests/fakes`: one in-memory fake per port, listed in `tests.fakes.PORT_FAKES` (`FrozenClock`
   for `Clock`, `InMemorySecrets` for `SecretsPort`, `InMemoryAlert` for `AlertPort`,
   `InMemoryUsageMeter` for `UsageMeterPort` (every HTTP adapter takes a `meter`),
-  `InMemoryMail` for `MailPort`, and in `tests/fakes/google_oauth.py` `FakeGoogleOAuth` for
+  `InMemoryMail` for `MailPort`, `InMemoryBackupTarget` for `BackupTargetPort` (it stores
+  plaintext and can be scripted to fail any call), and in `tests/fakes/google_oauth.py`
+  `FakeGoogleOAuth` for
   `GoogleOAuthPort`, `FakeConsentListener` for `ConsentListener` and `FakeClientFiles` for
   `ClientFilePort`, with `id_token(...)`, an unsigned ID token builder), plus `FakeUnits`, which
   stands in for the unit-of-work factory in dashboard tests (`tests/dashboard.py`) and records
   each unit opened. `tests/dashboard.py`'s `Dashboard` builds `GoogleAccess` on these fakes with
   a recording browser and an `allowlist` field, and keeps each consent flow's job in `jobs`
   until a test calls `run_jobs()`. Its `EngineHealth` (`health`) reads the real health-issue
-  registry and a fixed `readiness` list (all eleven doctor checks `ok`) unless a test passes
+  registry and a fixed `readiness` list (all twelve doctor checks `ok`) unless a test passes
   its own. Its `Backups` (`backups`) queues the panel's "Back up now"; its snapshot takes no
-  copy unless a test passes one (`snapshot=`).
+  copy unless a test passes one (`snapshot=`), and its off-PC copies go to an
+  `InMemoryBackupTarget` (`offpc_target`).
   `tests/contracts/test_test_isolation.py` fails when a port has no fake there, or a fake
   doesn't match its port.
 - `tests/fixtures`: fixture files, such as the hostile-text page
