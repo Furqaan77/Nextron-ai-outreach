@@ -60,4 +60,11 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # The engine's process id and two times (Story 1.11).
+    "runner_heartbeat": {
+        "id": PiiClass.NONE,
+        "pid": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "beat_at": PiiClass.NONE,
+    },
 }

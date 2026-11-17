@@ -769,6 +769,38 @@ def test_the_keeper_logs_an_overrun_once_and_keeps_renewing(
         worker.join(20)
 
 
+def test_overrunning_returns_the_held_claims_past_their_max_runtime(
+    units: UnitOfWorkFactory, clock: FrozenClock, monotonic: Monotonic, runners: list[Runner]
+) -> None:
+    gate = Gate()
+    runner, queue = build(
+        runners,
+        units,
+        clock,
+        job_type(gate, max_runtime=timedelta(seconds=60)),
+        monotonic=monotonic,
+    )
+    created = enqueue(units, queue)
+    assert runner.overrunning() == ()
+    worker = run_in_background(runner)
+    try:
+        assert wait_for(gate.entered)
+        assert runner.overrunning() == ()
+        monotonic.now += 60
+        assert runner.overrunning() == ()  # at its max_runtime, not past it
+
+        monotonic.now += 1
+        [claim] = runner.overrunning()
+        assert (claim.job.id, claim.max_runtime) == (created.job_id, timedelta(seconds=60))
+        runner.keep_once()  # logging the overrun doesn't end it
+        assert [c.job.id for c in runner.overrunning()] == [created.job_id]
+    finally:
+        gate.open()
+        worker.join(20)
+
+    assert runner.overrunning() == ()  # the handler returned: the claim is dropped
+
+
 def finish_old_done_jobs(
     units: UnitOfWorkFactory, queue: JobQueue, clock: FrozenClock, ages: tuple[int, int] = (40, 35)
 ) -> tuple[str, str]:

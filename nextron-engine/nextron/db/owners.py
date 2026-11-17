@@ -75,4 +75,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "updated_at",
         ),
     },
+    "runner_heartbeat": {
+        "ops": ("id", "pid", "started_at", "beat_at"),
+    },
 }

@@ -52,8 +52,8 @@ The base layout's navigation lists, in ``NAV_SECTIONS`` order, each section whos
 (a GET route with that name) exists; a later story adds the route and its link appears.
 
 ``create_app(..., lifespan=None)`` hands ``lifespan`` to ``FastAPI``; ``Guard`` passes lifespan
-scopes through untouched, so the job runner that ``nextron.main`` wires there starts and stops
-with the server.
+scopes through untouched, so the job runner, the scheduler and the heartbeat writer that
+``nextron.main`` wires there start and stop with the server.
 """
 
 import logging
@@ -181,7 +181,7 @@ def create_app(
     and ``google`` the Google client and grants (both in Credential Manager, not the database).
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
-    runner (``runner_lifespan``).
+    runner, the scheduler and the heartbeat writer (``engine_lifespan``).
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()

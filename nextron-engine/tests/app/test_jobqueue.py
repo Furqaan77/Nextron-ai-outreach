@@ -24,7 +24,7 @@ from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.db.models.jobqueue import LIVE_WHERE
 from nextron.db.repos.jobqueue import jobs as jobs_repo
 from nextron.db.repos.jobqueue.jobs import JobRow
-from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, use_case
+from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, is_use_case, use_case
 from nextron.domain.job import (
     LIVE_STATUSES,
     InvalidJob,
@@ -378,6 +378,75 @@ def test_a_bad_enqueue_writes_nothing_and_dooms_the_transaction(
 def test_a_queue_needs_a_job_type_registry(clock: FrozenClock) -> None:
     with pytest.raises(TypeError):
         JobQueue(clock, {})  # type: ignore[arg-type]
+
+
+# Row: Enqueue tick (Story 1.11) -----------------------------------------------------------------
+
+
+def tick(units: UnitOfWorkFactory, queue: JobQueue, job_type: str = "sync_mailbox") -> Enqueued:
+    """A periodic trigger's firing: one use case in its own unit of work."""
+    return call(units, queue.enqueue_tick, job_type)
+
+
+def test_enqueue_tick_enqueues_one_global_tick_job_with_its_creation_event(
+    units: UnitOfWorkFactory, queue: JobQueue, db_engine: Engine
+) -> None:
+    created = tick(units, queue)
+
+    assert created.created is True
+    found = row(units, created.job_id)
+    assert (found.type, found.lane, found.status, found.priority) == (
+        "sync_mailbox",
+        "realtime",  # the type's default lane
+        "queued",
+        90,
+    )
+    assert (found.idempotency_key, found.payload, found.concurrency_key) == (
+        "sync_mailbox:global:tick",
+        '{"v":1}',
+        None,
+    )
+    assert (found.run_after, found.attempts, found.created_at) == (T0, 0, T0)
+    assert events(db_engine, created.job_id) == [(None, "queued", "enqueued")]
+
+
+def test_a_tick_is_absorbed_while_its_job_is_queued_or_running_and_not_after(
+    units: UnitOfWorkFactory, queue: JobQueue, clock: FrozenClock, db_engine: Engine
+) -> None:
+    first = tick(units, queue)
+    clock.advance(timedelta(minutes=1))
+
+    assert tick(units, queue) == Enqueued(first.job_id, False)
+    held = claimed(units, queue, Lane.REALTIME)
+    assert tick(units, queue) == Enqueued(first.job_id, False)
+    assert job_ids(db_engine) == {first.job_id}
+    assert call(units, queue.complete, held) is True
+
+    later = tick(units, queue)
+
+    assert later.created is True and later.job_id != first.job_id
+    assert row(units, later.job_id).run_after == T0 + timedelta(minutes=1)
+    assert job_ids(db_engine) == {first.job_id, later.job_id}
+
+
+def test_a_tick_of_an_unregistered_type_raises_and_writes_nothing(
+    units: UnitOfWorkFactory, queue: JobQueue, db_engine: Engine
+) -> None:
+    with pytest.raises(UnknownJobType):
+        tick(units, queue, "send_due_messages")
+
+    assert query(db_engine, "SELECT count(*) FROM jobs") == [(0,)]
+    assert query(db_engine, "SELECT count(*) FROM events") == [(0,)]
+
+
+def test_enqueue_tick_is_a_use_case_with_its_own_transaction(
+    units: UnitOfWorkFactory, queue: JobQueue, db_engine: Engine
+) -> None:
+    assert is_use_case(JobQueue.enqueue_tick)
+    with pytest.raises(UnitOfWorkError):
+        transact(units, lambda: queue.enqueue_tick("sync_mailbox"))  # inside another use case
+
+    assert query(db_engine, "SELECT count(*) FROM jobs") == [(0,)]
 
 
 # Row: Claim order -------------------------------------------------------------------------------
@@ -1103,8 +1172,9 @@ def test_each_call_reads_the_clock_once(units: UnitOfWorkFactory, counting: Coun
     measure(lambda: call(units, queue.complete, second))
     measure(lambda: call(units, queue.release, ()))
     measure(lambda: call(units, queue.purge_done))
+    measure(lambda: call(units, queue.enqueue_tick, "sync_mailbox"))
 
-    assert reads == [1] * 8
+    assert reads == [1] * 9
 
 
 def test_the_query_returns_none_for_an_unknown_job(units: UnitOfWorkFactory) -> None:

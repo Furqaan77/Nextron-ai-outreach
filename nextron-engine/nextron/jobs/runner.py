@@ -1,7 +1,7 @@
 """The job runner (AD-10): worker threads per lane and a keeper thread.
 
 ``nextron.main`` builds one ``Runner(units, queue, job_types)`` and the FastAPI lifespan starts
-and stops it (``nextron.main.runner_lifespan``), so handlers never run on the event loop. It
+and stops it (``nextron.main.engine_lifespan``), so handlers never run on the event loop. It
 imports only ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup``, the domain and the
 standard library: it never reads the keyring or the network, and ``JobQueue.fail`` classifies
 errors.
@@ -48,7 +48,10 @@ still running keeps its thread; when it ends, its finish finds the claim gone an
 ``job_claim_lost``. ``stop()`` does nothing before ``start()`` or a second time.
 
 **alive()** is true while the runner has started, hasn't stopped, and every lane thread and the
-keeper are alive (Story 1.11's heartbeat reads it).
+keeper are alive. **overrunning()** returns the held claims whose run has passed their
+``max_runtime`` on the runner's monotonic clock, the rule ``job_overran`` uses: a hung handler
+keeps its thread alive, so the heartbeat writer (``nextron.jobs.heartbeat``) reads both and
+withholds the beat while either says the runner is unwell.
 
 Log records carry ``job_id``, ``job_type``, ``lane`` and ``attempts``, never a payload value.
 """
@@ -100,6 +103,11 @@ def _key(claim: Claim) -> tuple[str, int]:
 def _fields(claim: Claim) -> dict[str, object]:
     job = claim.job
     return {"job_id": job.id, "job_type": job.type, "lane": job.lane, "attempts": job.attempts}
+
+
+def _overran(entry: _Held, now: float) -> bool:
+    """Whether the run of ``entry`` has passed its ``max_runtime`` at monotonic ``now``."""
+    return now - entry.started > entry.claim.max_runtime.total_seconds()
 
 
 def _code(error: BaseException) -> str:
@@ -213,6 +221,17 @@ class Runner:
             thread is not None and thread.is_alive() for thread in threads
         )
 
+    def overrunning(self) -> tuple[Claim, ...]:
+        """The held claims whose run has passed their ``max_runtime`` (the ``job_overran``
+        rule), oldest run first."""
+        now = self._monotonic()
+        with self._lock:
+            entries = sorted(
+                (entry for entry in self._held.values() if _overran(entry, now)),
+                key=lambda entry: entry.started,
+            )
+        return tuple(entry.claim for entry in entries)
+
     # The held claims -------------------------------------------------------------------------
 
     def _hold(self, claim: Claim) -> None:
@@ -323,8 +342,7 @@ class Runner:
         overran: list[Claim] = []
         with self._lock:
             for entry in self._held.values():
-                limit = entry.claim.max_runtime.total_seconds()
-                if not entry.overran and now - entry.started > limit:
+                if not entry.overran and _overran(entry, now):
                     entry.overran = True
                     overran.append(entry.claim)
         for claim in overran:

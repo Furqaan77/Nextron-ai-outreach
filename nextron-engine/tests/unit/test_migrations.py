@@ -33,7 +33,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0003_1_10_jobs"
+HEAD = "0004_1_11_heartbeat"
 
 
 @pytest.fixture

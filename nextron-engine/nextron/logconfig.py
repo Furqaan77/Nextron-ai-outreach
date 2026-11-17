@@ -29,8 +29,9 @@ handler is configured: ``doctor``, records before ``configure_logging``, and the
 of ``serve --reload``) with a redacting stderr handler at WARNING.
 
 The loggers of the SDKs in ``SDK_LOGGERS`` stay at WARNING whatever the root level, because at
-DEBUG they log request details. Uvicorn runs with ``log_config=None``, so its records, the
-access log included, reach these handlers through the root logger.
+DEBUG they log request details (and APScheduler logs two INFO lines per firing). Uvicorn runs
+with ``log_config=None``, so its records, the access log included, reach these handlers through
+the root logger.
 """
 
 import json
@@ -68,6 +69,7 @@ SDK_LOGGERS: Final = (
     "requests_oauthlib",
     "oauthlib",
     "anthropic",
+    "apscheduler",  # its INFO lines say "Running job" and "executed successfully" per firing
 )
 SDK_LEVEL: Final = logging.WARNING
 CRASH_EVENT: Final = "engine_crashed"

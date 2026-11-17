@@ -559,6 +559,7 @@ traceback in `nextron.log`.
 | `0001_1_3_persistence_foundation` | `events`, the append-only audit log, and its triggers | `db.eventlog` |
 | `0002_1_6_settings` | `settings` (see [Settings](#settings)) | `setup` |
 | `0003_1_10_jobs` | `jobs` (see [Jobs](#jobs)), its checks and its indexes, two of them partial | `jobqueue` |
+| `0004_1_11_heartbeat` | `runner_heartbeat`, one row and its two checks (see [Triggers and the heartbeat](#triggers-and-the-heartbeat)) | `ops` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -737,6 +738,97 @@ only `job_id`, `job_type`, `lane`, `attempts` and an error `code`: `job_runner_s
 `job_claim_lost`, `job_lease_expired`, `job_lease_lost`, `job_released`, `job_overran`,
 `job_claim_failed`, `job_finish_failed`, `job_keeper_failed` and `jobs_purged` (with `count`).
 
+## Triggers and the heartbeat
+
+**Periodic triggers** (AD-10) start periodic work: sends, mailbox syncs, unsubscribe polls,
+backups. The closed list is the `Trigger` enum in `nextron/jobs/triggers.py`, exactly AD-10's
+table (`tests/unit/test_triggers.py` checks it against the spine). A trigger only enqueues: each
+firing enqueues one job of the job type with the trigger's own name, with the key
+`<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
+still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
+job. No trigger is registered yet, so the scheduler runs with none until a story adds one.
+
+**Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
+(`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
+`build_job_types`:
+
+```python
+triggers.register_trigger(Trigger.SEND_DUE_MESSAGES, Every(timedelta(minutes=1)))
+triggers.register_trigger(Trigger.RECONCILE_SENDS, Every(timedelta(minutes=2), at_startup=True))
+```
+
+- `Every(period, at_startup=False)`: `period` is whole seconds from 1 minute to 31 days;
+  `at_startup` also fires once right after the engine starts. Only interval schedules exist so
+  far; daily, monthly and Operator-time schedules arrive with their first trigger (`backup_db`,
+  Story 1.16).
+- A trigger that isn't a `Trigger` member (a plain string included), whose job type isn't
+  registered, or that is already registered is refused (`TypeError`, `UnknownJobType`,
+  `ValueError`).
+- Per-inbox triggers (`sync_mailbox`) and data-dependent ones (`check_recovery`) add their own
+  enqueue use case in their stories.
+- **An `Every` restarts from zero at each engine start**, because schedules live in memory. A
+  period longer than the engine usually runs between restarts (a day, say, on a PC shut down
+  every night) never fires unless `at_startup=True`. Daily work wants `at_startup` with a
+  handler that skips what is already done, or the calendar schedule its story adds.
+- **Retries slow a trigger down.** A periodic job waiting out a retry backoff is still
+  `queued`, so the firings meanwhile are absorbed and it retries on its backoff (30 s doubling
+  to 30 minutes), not every period. Choose a periodic job type's retry limit with that in mind.
+
+**How they fire.** The FastAPI lifespan starts APScheduler's `AsyncIOScheduler(timezone=UTC)`
+right after the job runner (`scheduler_started`, with the trigger count) and stops it right
+before (`scheduler_stopped`). Each trigger is an interval job with `coalesce=True`,
+`max_instances=1` and a misfire grace equal to its period. A firing runs on a worker thread,
+never on the event loop, and never runs a handler; one that fails logs `trigger_failed` (with
+`trigger` and the error `code`) and later firings still run. A firing that succeeds logs
+nothing: the job's creation event records it.
+
+**After the PC sleeps** through several firings, a trigger fires once on wake, not once per
+missed firing:
+
+- On Windows the event loop's clock (QueryPerformanceCounter) counts the time asleep, and
+  Uvicorn's server loop wakes the event loop every 0.1 s, so APScheduler finds the overdue
+  firings within a moment of the wake.
+- With `coalesce` it runs only the latest missed slot. The next firing keeps the original
+  schedule: it is due at that slot plus one period, the first slot after the wake, between 0
+  and one period later (not a full period after the catch-up).
+- The grace equals the period, so the catch-up normally runs. When the wake lands just before a
+  slot, though, the catch-up can be past its grace by the time it runs: APScheduler logs it as
+  missed (a WARNING) and the slot that has just come due fires at once instead.
+- This has not yet been observed on a real PC sleep; Story 1.20's spike on the PC checks it.
+
+**The heartbeat** (AD-20, NFR-14) proves the engine is alive. The `nextron-job-heartbeat`
+thread beats once at startup and then every 30 s: it writes the `runner_heartbeat` row (owner
+`ops`, exactly one row: `pid`, `started_at`, the time of this process's first beat, and
+`beat_at`), then touches `<data dir>\heartbeat`, for example
+`%LOCALAPPDATA%\Nextron\dev\heartbeat`. The row is written first, so a database that keeps
+failing also leaves the file stale. The beat is **withheld** while:
+
+1. `runner_down`: any lane thread or the keeper has ended;
+2. `job_overran`: a running job has passed its `max_runtime` (a hung handler keeps its thread
+   alive, so this is what catches it);
+3. `scheduler_down`: the scheduler stopped, or the event loop doesn't answer within 10 s.
+
+The supervisor (`scripts/run.ps1`, Story 1.21) restarts the engine when the file is more than
+5 minutes old. A dead thread or a stuck event loop therefore restarts the engine about 5
+minutes later. A hung handler stops the beat only once its job passes its `max_runtime`, so the
+engine restarts about `max_runtime` + 5 minutes after that job started. The restart interrupts
+every lane, not just the hung one; the interrupted jobs run again (handlers are idempotent).
+
+**After a PC sleep** the heartbeat file is as old as the sleep until the next beat, up to 30 s
+after the wake. A job running across the sleep counts the sleep toward its `max_runtime`
+(the runner's clock counts sleep too), so the beat may stay withheld until that job returns.
+`run.ps1` must allow for a wake before it calls the file stale; that is left to Story 1.21.
+
+Logs carry no personal data and are written only when the outcome changes:
+`heartbeat_withheld` (WARNING, `reason`), `heartbeat_failed` (ERROR, `code`, once per streak of
+failures) and `heartbeat_resumed` (INFO, the first beat after either). The heartbeat writes no
+`events` rows. The health panel's "running" rule (a heartbeat under 2 minutes old) arrives in
+Story 1.15.
+
+```powershell
+(Get-Item "$env:LOCALAPPDATA\Nextron\dev\heartbeat").LastWriteTime
+```
+
 ## Logs
 
 `serve` writes `<data dir>\logs\nextron.log`, for example
@@ -761,7 +853,8 @@ WARNING and above go to stderr, redacted.
   `nextron.log.9`: 10 files at most.
 - **Level:** INFO. The loggers of `googleapiclient`, `google_auth_oauthlib`, `google.auth`,
   `google_auth_httplib2`, `httplib2`, `httpx2`, `httpcore2`, `urllib3`, `requests_oauthlib`,
-  `oauthlib` and `anthropic` stay at WARNING.
+  `oauthlib`, `anthropic` and `apscheduler` stay at WARNING (APScheduler would log two INFO
+  lines per trigger firing).
 - **Redaction:** logs hold IDs only. As a safety net, every message, argument, traceback and
   string field passes through `nextron.domain.redaction.redact`. It removes URL query strings
   and fragments and masks URL userinfo, `/bot<token>` paths, `Bearer` and `Basic` credentials,

@@ -159,7 +159,7 @@ def engines(local_app_data: Path, tmp_path: Path) -> Iterator[dict[str, Engine]]
             engine.process.wait(timeout=30)
 
 
-REQUIRED_FILES = {"nextron.db", "nextron.lock", "logs", "logs/nextron.log"}
+REQUIRED_FILES = {"nextron.db", "nextron.lock", "heartbeat", "logs", "logs/nextron.log"}
 SQLITE_SIDE_FILES = {"nextron.db-wal", "nextron.db-shm"}  # WAL mode keeps these while open
 
 

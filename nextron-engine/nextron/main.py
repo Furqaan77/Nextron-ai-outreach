@@ -40,12 +40,33 @@ adds a subscriber registers its owner command there, in the order AD-3 lists.
 ``JobTypes`` or calls ``register_job_type``. It ships empty and frozen; each story that adds a
 job type registers its ``JobType`` (lanes, priority, ``max_runtime``, retry limit and a thin
 handler) there. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one
-``Runner(units, queue, job_types)`` (``nextron.jobs.runner``) and hands
-``runner_lifespan(runner)`` to ``create_app``, so the runner's lane threads and keeper start
-when the server starts and stop when it stops, in whichever process serves the app (the reload
-worker included). Building the app starts nothing. ``runner_lifespan`` runs ``runner.start``
-and ``runner.stop`` through ``asyncio.to_thread``, off the event loop: stopping waits up to 15 s
-for running handlers, then releases their jobs back to the queue.
+``Runner(units, queue, job_types)`` (``nextron.jobs.runner``).
+
+**Triggers (AD-10).** ``build_triggers(job_types)`` is the trigger registry: the only code that
+constructs ``Triggers`` or calls ``register_trigger``. It ships empty and frozen, so the
+scheduler runs with no triggers until a story adds one: register each AD-10 ``Trigger`` with an
+``Every`` schedule there, after its job type (a firing enqueues the job type with the trigger's
+own name). ``build_app`` builds one ``Scheduler(units, queue, triggers)``
+(``nextron.jobs.scheduler``), an ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
+
+**The heartbeat (AD-20, NFR-14).** ``build_app`` builds one ``Heartbeat(clock, heartbeat
+file)`` (``nextron.app.ops.api``), whose file is ``<data dir>\\heartbeat``
+(``HEARTBEAT_FILE_NAME``), and one ``HeartbeatWriter(units, heartbeat, runner, scheduler)``
+(``nextron.jobs.heartbeat``). Its ``nextron-job-heartbeat`` thread beats at once and every
+30 s, writing the ``runner_heartbeat`` row and then touching the file, but only while every lane
+thread and the keeper are alive, no running job has passed its ``max_runtime`` and the
+scheduler's event loop answers its probe. The supervisor (``scripts/run.ps1``, Story 1.21)
+restarts the engine when the file is more than 5 minutes old.
+
+**The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer)`` to
+``create_app``, so all three start when the server starts and stop when it stops, in whichever
+process serves the app (the reload worker included). Building the app starts nothing. Startup
+runs ``runner.start`` through ``asyncio.to_thread``, then ``scheduler.start()`` on the event
+loop (APScheduler needs the running loop), then ``writer.start`` through ``asyncio.to_thread``.
+Shutdown runs in reverse: ``writer.stop`` (to a thread), ``await scheduler.stop()``, then
+``runner.stop`` (to a thread), which waits up to 15 s for running handlers and then releases
+their jobs back to the queue. Each part that started is stopped even when a later start, or the
+server, failed.
 
 With ``--reload`` (``dev`` only), Uvicorn serves from a worker process that does not write
 ``nextron.log``: only the reloader's own records reach the file. The worker's WARNING and above
@@ -128,7 +149,7 @@ from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, L
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.app.jobqueue.api import JobQueue
-from nextron.app.ops.api import DashboardEntry
+from nextron.app.ops.api import DashboardEntry, Heartbeat
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
@@ -138,7 +159,10 @@ from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain.job import JobTypes
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
+from nextron.jobs.heartbeat import HeartbeatWriter
 from nextron.jobs.runner import Runner
+from nextron.jobs.scheduler import Scheduler
+from nextron.jobs.triggers import Triggers
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.ports.alert import AlertPort
@@ -163,6 +187,7 @@ WORKERS: Final = 1
 LOGS_DIR_NAME: Final = "logs"
 DB_FILE_NAME: Final = "nextron.db"
 SINK_DIR_NAME: Final = "sink"
+HEARTBEAT_FILE_NAME: Final = "heartbeat"
 DATABASE_REVISION_CHECK: Final = "database_revision"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
@@ -216,8 +241,9 @@ def build_app(
     object, keyring unless injected, serves the entry code, the credentials and the Google
     grants; one clock, the system clock unless injected, serves them and the settings. Google
     is reached through ``google_oauth`` (``GoogleOAuthClient()`` unless injected) and the
-    consent page opens with ``browser`` (``open_in_browser`` unless injected). The job runner
-    is built here and started by the app's lifespan (``runner_lifespan``), never by building."""
+    consent page opens with ``browser`` (``open_in_browser`` unless injected). The job runner,
+    the scheduler and the heartbeat writer are built here and started by the app's lifespan
+    (``engine_lifespan``), never by building."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     google = GoogleAccess(
@@ -231,7 +257,11 @@ def build_app(
         allowlist=functools.partial(read_sink_allowlist, units),
     )
     job_types = build_job_types()
-    runner = Runner(units, JobQueue(clock, job_types), job_types)
+    queue = JobQueue(clock, job_types)
+    runner = Runner(units, queue, job_types)
+    scheduler = Scheduler(units, queue, build_triggers(job_types))
+    heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
+    writer = HeartbeatWriter(units, heartbeat, runner, scheduler)
     return create_app(
         env=config.env,
         version=__version__,
@@ -241,7 +271,7 @@ def build_app(
         credentials=Credentials(secrets, clock),
         google=google,
         units=units,
-        lifespan=runner_lifespan(runner),
+        lifespan=engine_lifespan(runner, scheduler, writer),
     )
 
 
@@ -253,17 +283,32 @@ def build_job_types() -> JobTypes:
     return job_types
 
 
-def runner_lifespan(runner: Runner) -> Lifespan:
-    """The app's lifespan: start ``runner`` when the server starts and stop it when the server
-    stops, both on a worker thread, never on the event loop."""
+def build_triggers(job_types: JobTypes) -> Triggers:
+    """The trigger registry (AD-10), frozen. Empty until a story adds a trigger: register each
+    with ``register_trigger(Trigger.X, Every(...))``, after its job type, before ``freeze()``."""
+    triggers = Triggers(job_types)
+    triggers.freeze()
+    return triggers
+
+
+def engine_lifespan(
+    runner: Runner, scheduler: Scheduler, writer: HeartbeatWriter
+) -> Lifespan:
+    """The app's lifespan: start the runner (on a worker thread), the scheduler (on the event
+    loop) and the heartbeat writer (on a worker thread) when the server starts, and stop them
+    in reverse when it stops. Each part that started is stopped even when a later start, or the
+    server, failed."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await asyncio.to_thread(runner.start)
-        try:
+        async with contextlib.AsyncExitStack() as started:
+            await asyncio.to_thread(runner.start)
+            started.push_async_callback(asyncio.to_thread, runner.stop)
+            scheduler.start()
+            started.push_async_callback(scheduler.stop)
+            await asyncio.to_thread(writer.start)
+            started.push_async_callback(asyncio.to_thread, writer.stop)
             yield
-        finally:
-            await asyncio.to_thread(runner.stop)
 
     return lifespan
 

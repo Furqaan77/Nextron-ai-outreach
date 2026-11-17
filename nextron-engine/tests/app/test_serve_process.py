@@ -1,5 +1,6 @@
 """``python -m nextron`` as a real process: env refusal, the guarded health page, the database
-at head, the log file, the second instance, and ``nextron open`` with no engine running.
+at head, the log file, the runner, scheduler and heartbeat started by the lifespan, the second
+instance, and ``nextron open`` with no engine running.
 
 Nothing here runs ``nextron open`` against a live engine or touches Credential Manager: entering
 the dashboard is covered in-process with fakes (``tests/unit/test_dashboard.py``)."""
@@ -8,6 +9,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import sysconfig
@@ -15,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from email.message import Message
 from pathlib import Path
 
@@ -98,6 +101,17 @@ def running_engine(engine_env: dict[str, str], tmp_path: Path) -> Iterator[subpr
         process.terminate()
         process.wait(timeout=30)
         log.close()
+
+
+def heartbeat_rows(path: Path) -> list[tuple[str, int, str, str]]:
+    """The ``runner_heartbeat`` rows of the running engine's database, read outside it."""
+    reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        return reader.execute(
+            "SELECT id, pid, started_at, beat_at FROM runner_heartbeat"
+        ).fetchall()
+    finally:
+        reader.close()
 
 
 def _read(tmp_path: Path) -> str:
@@ -208,7 +222,23 @@ def test_guarded_health_page_and_second_instance(
     [runner_started] = [line for line in lines if line["event"] == "job_runner_started"]
     assert (runner_started["logger"], runner_started["bulk_threads"]) == ("nextron.jobs.runner", 1)
     assert lines.index(started) < lines.index(runner_started)
-    assert HEAD == "0003_1_10_jobs"
+    # then the scheduler, with no triggers yet, and the heartbeat writer's first beat
+    [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
+    assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
+        "nextron.jobs.scheduler",
+        0,
+    )
+    assert lines.index(runner_started) < lines.index(scheduler_started)
+    [(row_id, pid, started_at, beat_at)] = heartbeat_rows(data_dir / "nextron.db")
+    assert (row_id, pid > 0) == ("00000000000000000000000000", True)
+    first_beat = datetime.fromisoformat(started_at)
+    assert timedelta(0) <= datetime.fromisoformat(beat_at) - first_beat
+    runner_ts = datetime.fromisoformat(str(runner_started["ts"]))
+    assert abs(first_beat - runner_ts) < timedelta(seconds=1)  # fresh at startup
+    heartbeat = data_dir / "heartbeat"
+    assert heartbeat.is_file()
+    assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
+    assert HEAD == "0004_1_11_heartbeat"
     for line in lines:
         assert {"ts", "level", "logger", "event"} <= set(line)
     assert PLANTED_CODE not in log_text(data_dir)

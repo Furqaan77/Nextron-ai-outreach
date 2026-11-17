@@ -16,6 +16,10 @@ status change follows the Job machine (``nextron.domain.job.transition``) and ap
   writes nothing; otherwise the job is inserted ``queued`` with no attempts, the type's
   priority, the lane (the type's default unless given) and ``run_after`` (now unless given),
   with its creation event.
+- ``@use_case enqueue_tick(job_type) -> Enqueued``: a periodic trigger's firing
+  (``nextron.jobs.scheduler``). In one transaction it calls ``enqueue(job_type,
+  scope="global", discriminator="tick", payload={"v": 1})``, with the type's default lane and
+  ``run_after`` now, so a live job with that key absorbs the firing (``created=False``).
 - ``@use_case claim(lane) -> Claim | None`` takes the next candidate in one transaction: a
   ``queued`` job of the lane with ``run_after <= now`` whose ``concurrency_key`` is ``NULL`` or
   held by no ``running`` job, by ``priority DESC, run_after ASC, id ASC``. The conditional
@@ -61,6 +65,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import MappingProxyType
 from typing import Final
 
 from nextron.db import eventlog
@@ -70,7 +75,9 @@ from nextron.domain.errors import DomainError
 from nextron.domain.job import (
     CREATION,
     DONE_RETENTION,
+    GLOBAL_SCOPE,
     MAX_ERROR_LENGTH,
+    TICK,
     InvalidJob,
     Job,
     JobCause,
@@ -102,6 +109,7 @@ RELEASED: Final = "released"
 LEASE_EXPIRED_ERROR: Final = f"{LEASE_EXPIRED}: the lease expired before the job finished"
 RELEASED_ERROR: Final = f"{RELEASED}: the engine stopped before the job finished"
 UNRUNNABLE_RUNTIME: Final = timedelta(0)  # an unrunnable job's lease lasts only its transaction
+TICK_PAYLOAD: Final[Mapping[str, object]] = MappingProxyType({"v": 1})
 
 JOB_RETRY_SCHEDULED: Final = "job_retry_scheduled"
 JOB_DEAD: Final = "job_dead"
@@ -283,6 +291,15 @@ class JobQueue:
         )
         _record(job_id, None, CREATION, now)
         return Enqueued(job_id, True)
+
+    @use_case
+    def enqueue_tick(self, job_type: str) -> Enqueued:
+        """Enqueue a periodic trigger's global ``tick`` job of ``job_type``, or find the live
+        one."""
+        with current().transaction():
+            return self.enqueue(
+                job_type, scope=GLOBAL_SCOPE, discriminator=TICK, payload=TICK_PAYLOAD
+            )
 
     # Claim -----------------------------------------------------------------------------------
 

@@ -15,14 +15,32 @@ and touches no database, so its methods are not ``@use_case``s and need no unit 
   ``unavailable`` when that delete fails, so a code is never accepted twice; ``expired`` and
   ``malformed`` delete it on a best-effort basis; ``mismatch`` and ``absent`` delete nothing, so
   a junk request from another website can't cancel a pending code.
+
+``Heartbeat(clock, heartbeat_file)`` (AD-20, NFR-14) writes the engine's heartbeat. The
+heartbeat writer (``nextron.jobs.heartbeat``) calls it every 30 s while the runner, its jobs and
+the scheduler are healthy, and the supervisor (``scripts/run.ps1``) restarts the engine when
+the file goes stale.
+
+- ``@use_case beat()`` reads the clock once. In one transaction it saves the ``runner_heartbeat``
+  row: ``beat_at`` = now, ``pid`` = ``os.getpid()`` and ``started_at`` = the time of this
+  object's first ``beat()`` call, kept for its life (the engine's start, within a second). After
+  the commit it touches ``heartbeat_file``, creating it when it is missing. The row comes
+  first, so a database that keeps failing leaves the file stale too, and a failed row write
+  touches no file. Any failure raises to the caller. It writes no ``events`` row, and neither
+  the row nor the file holds personal data.
 """
 
 import contextlib
+import os
 import secrets
 import threading
 from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 from typing import Final
 
+from nextron.db.repos.ops import heartbeat as heartbeat_repo
+from nextron.db.uow import current, use_case
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
@@ -80,3 +98,22 @@ class DashboardEntry:
                 with contextlib.suppress(AdapterError):
                     self._secrets.delete(OPEN_CODE_SECRET)
             return result
+
+
+class Heartbeat:
+    """The engine's heartbeat: the ``runner_heartbeat`` row, then the heartbeat file."""
+
+    def __init__(self, clock: Clock, heartbeat_file: Path) -> None:
+        self._clock = clock
+        self._file = heartbeat_file
+        self._started_at: datetime | None = None
+
+    @use_case
+    def beat(self) -> None:
+        """Save the heartbeat row in one transaction, then touch the heartbeat file."""
+        now = self._clock.now()
+        if self._started_at is None:
+            self._started_at = now
+        with current().transaction():
+            heartbeat_repo.save(pid=os.getpid(), started_at=self._started_at, beat_at=now)
+        self._file.touch()

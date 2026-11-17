@@ -250,6 +250,7 @@ def test_sdk_loggers_stay_at_warning_when_the_root_is_at_debug(logs_dir: Path) -
         "requests_oauthlib",
         "oauthlib",
         "anthropic",
+        "apscheduler",
     }
     for name in SDK_LOGGERS:
         assert logging.getLogger(name).level == logging.WARNING

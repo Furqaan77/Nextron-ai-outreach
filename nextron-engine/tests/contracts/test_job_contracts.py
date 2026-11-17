@@ -1,11 +1,17 @@
 """Job contracts (AD-10), each with a live proof.
 
-- **One registry.** Only ``build_job_types()`` in ``nextron/main.py`` constructs ``JobTypes`` or
-  calls ``register_job_type``, under any alias.
-- **It ships frozen and empty** until a story registers a job type.
-- **The runner's imports.** ``nextron/jobs/runner.py`` imports only
-  ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup``, ``nextron.domain`` and the
-  standard library: nothing from ``nextron.ports``, ``nextron.db`` or a third-party package.
+- **One registry each.** Only ``build_job_types()`` in ``nextron/main.py`` constructs
+  ``JobTypes`` or calls ``register_job_type``, and only ``build_triggers()`` there constructs
+  ``Triggers`` or calls ``register_trigger``, under any alias.
+- **They ship frozen and empty** until a story registers a job type or a trigger.
+- **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
+  ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
+  gets one) and imports only the modules its rule allows, and the standard library: nothing
+  from ``nextron.ports`` or ``nextron.db``, and no third-party package but ``apscheduler``,
+  which only ``scheduler.py`` imports. ``__init__.py``: nothing; ``runner.py``:
+  ``nextron.app.jobqueue.api``, ``nextron.app.queries.setup`` and the domain; ``triggers.py``:
+  the domain; ``scheduler.py``: ``apscheduler``, ``nextron.app.jobqueue.api``,
+  ``nextron.jobs.triggers`` and the domain; ``heartbeat.py``: ``nextron.app.ops.api``.
 - **Indexes and checks.** Every table's indexes (partial ones' ``sqlite_where`` included) and
   checks are the same in the model and in the database at head. Alembic's drift comparison sees
   neither a ``WHERE`` clause nor a check, so this compares the SQL itself; ``jobs`` is the first
@@ -18,6 +24,7 @@ probe module (``tests/contracts/support.py``), never on the real tree.
 import ast
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -28,32 +35,69 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from nextron import main
 from nextron.db.models import Base
 from nextron.db.models.jobqueue import JobRecord
+from nextron.db.models.ops import HeartbeatRecord
 from nextron.domain.job import JobTypes
+from nextron.jobs.triggers import Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
-REGISTRY = ("nextron/main.py", "build_job_types")
+MAIN = "nextron/main.py"
+JOBS_DIR = "nextron/jobs"
+JOBS_INIT = "nextron/jobs/__init__.py"
 RUNNER = "nextron/jobs/runner.py"
-RUNNER_IMPORTS = ("nextron.app.jobqueue.api", "nextron.app.queries.setup", "nextron.domain")
+TRIGGERS_PY = "nextron/jobs/triggers.py"
+SCHEDULER_PY = "nextron/jobs/scheduler.py"
+HEARTBEAT_PY = "nextron/jobs/heartbeat.py"
+UNUSED = '"""unused"""\n'
+
+
+@dataclass(frozen=True)
+class Registry:
+    """A registry that only one function of ``nextron/main.py`` may build and fill."""
+
+    builder: str  # the function in main.py
+    cls: str  # the registry class
+    module: str  # the module that defines it
+    register: str  # its registration method
+
+
+JOB_TYPES = Registry("build_job_types", "JobTypes", "nextron.domain.job", "register_job_type")
+TRIGGERS = Registry("build_triggers", "Triggers", "nextron.jobs.triggers", "register_trigger")
+REGISTRIES = (JOB_TYPES, TRIGGERS)
+
+# Each module under nextron/jobs, nested ones included, by its path: (the nextron modules it may
+# import, the third-party packages it may import).
+type ImportRules = dict[str, tuple[tuple[str, ...], tuple[str, ...]]]
+JOBS_IMPORTS: ImportRules = {
+    JOBS_INIT: ((), ()),
+    RUNNER: (("nextron.app.jobqueue.api", "nextron.app.queries.setup", "nextron.domain"), ()),
+    TRIGGERS_PY: (("nextron.domain",), ()),
+    SCHEDULER_PY: (
+        ("nextron.app.jobqueue.api", "nextron.jobs.triggers", "nextron.domain"),
+        ("apscheduler",),
+    ),
+    HEARTBEAT_PY: (("nextron.app.ops.api",), ()),
+}
 
 
 def _parse(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
-# One registry -----------------------------------------------------------------------------------
+# One registry each ------------------------------------------------------------------------------
 
 
 class _RegistrationChecker(ast.NodeVisitor):
-    def __init__(self, label: str, tree: ast.Module) -> None:
+    def __init__(self, label: str, tree: ast.Module, registry: Registry) -> None:
         self.label = label
+        self.registry = registry
         self.problems: list[str] = []
         self.functions: list[str] = []
-        self.registry_names = {"JobTypes"} | {
+        self.registry_names = {registry.cls} | {
             alias.asname or alias.name
             for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "nextron.domain.job"
+            if isinstance(node, ast.ImportFrom) and node.module == registry.module
             for alias in node.names
-            if alias.name == "JobTypes"
+            if alias.name == registry.cls
         }
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -66,84 +110,149 @@ class _RegistrationChecker(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        registry = self.registry
         what = None
-        if name == "register_job_type":
-            what = "calls register_job_type"
+        if name == registry.register:
+            what = f"calls {registry.register}"
         elif (isinstance(func, ast.Name) and name in self.registry_names) or (
-            isinstance(func, ast.Attribute) and name == "JobTypes"
+            isinstance(func, ast.Attribute) and name == registry.cls
         ):
-            what = "constructs JobTypes"
-        if what and (self.label, self.functions[:1]) != (REGISTRY[0], [REGISTRY[1]]):
+            what = f"constructs {registry.cls}"
+        if what and (self.label, self.functions[:1]) != (MAIN, [registry.builder]):
             self.problems.append(f"{self.label}:{node.lineno} {what}")
         self.generic_visit(node)
 
 
-def registration_problems(root: Path) -> list[str]:
-    """Each call outside ``main.build_job_types`` that builds or fills a job type registry."""
+def registration_problems(root: Path, registry: Registry) -> list[str]:
+    """Each call outside ``main.<builder>`` that builds or fills ``registry``."""
     problems = []
     for path in sorted((root / "nextron").rglob("*.py")):
         label = path.relative_to(root).as_posix()
-        checker = _RegistrationChecker(label, _parse(path))
-        checker.visit(_parse(path))
+        tree = _parse(path)
+        checker = _RegistrationChecker(label, tree, registry)
+        checker.visit(tree)
         problems += checker.problems
     return problems
 
 
-def test_only_build_job_types_in_main_builds_the_registry() -> None:
-    assert registration_problems(ENGINE_ROOT) == []
-    tree = _parse(ENGINE_ROOT / REGISTRY[0])
+@pytest.mark.parametrize("registry", REGISTRIES, ids=lambda registry: registry.builder)
+def test_only_its_builder_in_main_builds_each_registry(registry: Registry) -> None:
+    assert registration_problems(ENGINE_ROOT, registry) == []
+    tree = _parse(ENGINE_ROOT / MAIN)
     [build] = [
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == REGISTRY[1]
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == registry.builder
     ]
-    assert any(isinstance(node, ast.Call) for node in ast.walk(build))
+    assert any(
+        isinstance(node, ast.Call) and getattr(node.func, "id", None) == registry.cls
+        for node in ast.walk(build)
+    )
 
 
-@pytest.mark.parametrize(
-    ("source", "what"),
-    [
-        ("from nextron.domain.job import JobTypes\nregistry = JobTypes()", "constructs"),
-        ("from nextron.domain.job import JobTypes as Types\nregistry = Types()", "constructs"),
-        ("from nextron.domain import job\nregistry = job.JobTypes()", "constructs"),
-        ("import nextron.domain.job\nregistry = nextron.domain.job.JobTypes()", "constructs"),
-        ("def wire(registry, job_type):\n    registry.register_job_type(job_type)", "calls"),
-        (
-            "from nextron.domain.job import JobTypes\n"
-            "def wire(registry, job_type):\n"
-            "    JobTypes.register_job_type(registry, job_type)",
-            "calls",
-        ),
-    ],
-)
+PROBES = [
+    (JOB_TYPES, "from nextron.domain.job import JobTypes\nregistry = JobTypes()", "constructs"),
+    (
+        JOB_TYPES,
+        "from nextron.domain.job import JobTypes as Types\nregistry = Types()",
+        "constructs",
+    ),
+    (JOB_TYPES, "from nextron.domain import job\nregistry = job.JobTypes()", "constructs"),
+    (
+        JOB_TYPES,
+        "import nextron.domain.job\nregistry = nextron.domain.job.JobTypes()",
+        "constructs",
+    ),
+    (JOB_TYPES, "def wire(registry, job_type):\n    registry.register_job_type(job_type)", "calls"),
+    (
+        JOB_TYPES,
+        "from nextron.domain.job import JobTypes\n"
+        "def wire(registry, job_type):\n"
+        "    JobTypes.register_job_type(registry, job_type)",
+        "calls",
+    ),
+    (
+        TRIGGERS,
+        "from nextron.jobs.triggers import Triggers\nregistry = Triggers(None)",
+        "constructs",
+    ),
+    (
+        TRIGGERS,
+        "from nextron.jobs.triggers import Triggers as Schedule\nregistry = Schedule(None)",
+        "constructs",
+    ),
+    (
+        TRIGGERS,
+        "from nextron.jobs import triggers\nregistry = triggers.Triggers(None)",
+        "constructs",
+    ),
+    (
+        TRIGGERS,
+        "import nextron.jobs.triggers\nregistry = nextron.jobs.triggers.Triggers(None)",
+        "constructs",
+    ),
+    (
+        TRIGGERS,
+        "def wire(registry, trigger, every):\n    registry.register_trigger(trigger, every)",
+        "calls",
+    ),
+    (
+        TRIGGERS,
+        "from nextron.jobs.triggers import Triggers\n"
+        "def wire(registry, trigger, every):\n"
+        "    Triggers.register_trigger(registry, trigger, every)",
+        "calls",
+    ),
+]
+
+
+@pytest.mark.parametrize(("registry", "source", "what"), PROBES)
 def test_the_registry_check_catches_registration_outside_main(
-    source: str, what: str, tmp_path: Path
+    registry: Registry, source: str, what: str, tmp_path: Path
 ) -> None:
     _, root = copy_with_probe(tmp_path, "nextron.jobs", source + "\n")
 
-    [problem] = registration_problems(root)
+    [problem] = registration_problems(root, registry)
 
     assert problem.startswith("nextron/jobs/_lint_probe.py:")
     assert what in problem
+    [other] = [found for found in REGISTRIES if found is not registry]
+    assert registration_problems(root, other) == []
 
 
-def test_the_registry_check_catches_another_function_in_main(tmp_path: Path) -> None:
-    _, root = copy_with_probe(tmp_path, "nextron.jobs", '"""unused"""\n')
-    main_py = root / "nextron" / "main.py"
-    main_py.write_text(
-        main_py.read_text(encoding="utf-8")
-        + "\n\ndef late_job_types(job_type) -> JobTypes:\n"
+LATE_BUILDERS = {
+    JOB_TYPES: (
+        "\n\ndef late_job_types(job_type) -> JobTypes:\n"
         "    registry = JobTypes()\n"
         "    registry.register_job_type(job_type)\n"
-        "    return registry\n",
-        encoding="utf-8",
+        "    return registry\n"
+    ),
+    TRIGGERS: (
+        "\n\ndef late_triggers(job_types, trigger, every) -> Triggers:\n"
+        "    registry = Triggers(job_types)\n"
+        "    registry.register_trigger(trigger, every)\n"
+        "    return registry\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("registry", REGISTRIES, ids=lambda registry: registry.builder)
+def test_the_registry_check_catches_another_function_in_main(
+    registry: Registry, tmp_path: Path
+) -> None:
+    _, root = copy_with_probe(tmp_path, "nextron.jobs", UNUSED)
+    main_py = root / MAIN
+    main_py.write_text(
+        main_py.read_text(encoding="utf-8") + LATE_BUILDERS[registry], encoding="utf-8"
     )
 
-    problems = registration_problems(root)
+    problems = registration_problems(root, registry)
 
     assert [problem.split(" ", 1)[1] for problem in problems] == [
-        "constructs JobTypes",
-        "calls register_job_type",
+        f"constructs {registry.cls}",
+        f"calls {registry.register}",
     ]
-    assert all(problem.startswith("nextron/main.py:") for problem in problems)
+    assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
 def test_build_job_types_is_frozen_and_empty() -> None:
@@ -155,14 +264,33 @@ def test_build_job_types_is_frozen_and_empty() -> None:
     assert main.build_job_types() is not job_types  # a new registry each time
 
 
-# The runner's imports ---------------------------------------------------------------------------
+def test_build_triggers_is_frozen_and_empty() -> None:
+    job_types = main.build_job_types()
+
+    triggers = main.build_triggers(job_types)
+
+    assert isinstance(triggers, Triggers)
+    assert triggers.frozen
+    assert triggers.specs() == ()
+    assert main.build_triggers(job_types) is not triggers  # a new registry each time
 
 
-def _targets(node: ast.Import | ast.ImportFrom) -> list[str]:
+# The jobs modules' imports ----------------------------------------------------------------------
+
+
+def _package(module: str) -> str:
+    """The dotted package a module path such as ``nextron/jobs/handlers/send.py`` is in (a
+    package's own ``__init__.py`` is in the package itself)."""
+    return ".".join(Path(module).parent.parts)
+
+
+def _targets(node: ast.Import | ast.ImportFrom, package: str) -> list[str]:
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
-    if node.level:  # a relative import: inside nextron.jobs
-        base = "nextron.jobs" + (f".{node.module}" if node.module else "")
+    if node.level:  # a relative import, resolved against the module's own package
+        parts = package.split(".")
+        base = ".".join(parts[: len(parts) - node.level + 1])
+        base += f".{node.module}" if node.module else ""
         return [f"{base}.{alias.name}" for alias in node.names]
     module = node.module or ""
     if module.startswith("nextron"):
@@ -171,89 +299,194 @@ def _targets(node: ast.Import | ast.ImportFrom) -> list[str]:
     return [module]
 
 
-def _allowed(target: str) -> bool:
+def _allowed(target: str, modules: tuple[str, ...], packages: tuple[str, ...]) -> bool:
     if target == "nextron" or target.startswith("nextron."):
-        return any(target == p or target.startswith(p + ".") for p in RUNNER_IMPORTS) or any(
+        return any(target == p or target.startswith(p + ".") for p in modules) or any(
             # a name imported from an allowed module, such as nextron.app.jobqueue.api.Claim
-            target.rpartition(".")[0] == p for p in RUNNER_IMPORTS
+            target.rpartition(".")[0] == p for p in modules
         )
-    return target.split(".")[0] in sys.stdlib_module_names
+    top = target.split(".")[0]
+    return top in sys.stdlib_module_names or top in packages
 
 
-def runner_import_problems(root: Path) -> list[str]:
-    """Each import in the runner outside its allowed modules and the standard library."""
-    path = root / RUNNER
+def import_problems(root: Path, module: str, rules: ImportRules = JOBS_IMPORTS) -> list[str]:
+    """Each import in the jobs ``module`` outside its allowed modules and the standard
+    library."""
+    modules, packages = rules[module]
+    package = _package(module)
     problems = []
-    for node in ast.walk(_parse(path)):
+    for node in ast.walk(_parse(root / module)):
         if isinstance(node, ast.Import | ast.ImportFrom):
             problems += [
-                f"{RUNNER}:{node.lineno} imports {target}"
-                for target in _targets(node)
-                if not _allowed(target)
+                f"{module}:{node.lineno} imports {target}"
+                for target in _targets(node, package)
+                if not _allowed(target, modules, packages)
             ]
     return problems
 
 
-def test_the_runner_imports_only_the_queue_the_settings_query_the_domain_and_stdlib() -> None:
-    assert runner_import_problems(ENGINE_ROOT) == []
-    source = (ENGINE_ROOT / RUNNER).read_text(encoding="utf-8")
-    assert "nextron.app.jobqueue.api" in source and "nextron.app.queries" in source
+def rule_coverage(root: Path) -> tuple[list[str], list[str]]:
+    """The modules under ``nextron/jobs`` (nested ones included) with no import rule, and the
+    rules whose module is gone."""
+    modules = {
+        path.relative_to(root).as_posix() for path in (root / JOBS_DIR).rglob("*.py")
+    }
+    return sorted(modules - set(JOBS_IMPORTS)), sorted(set(JOBS_IMPORTS) - modules)
 
 
-@pytest.mark.parametrize(
-    ("line", "target"),
-    [
-        ("from nextron.ports.errors import AdapterError", "nextron.ports.errors.AdapterError"),
-        ("import nextron.ports.clock", "nextron.ports.clock"),
-        ("from nextron.db import uow", "nextron.db.uow"),
-        ("from nextron.db.uow import current", "nextron.db.uow.current"),
-        ("from nextron.app.setup import api", "nextron.app.setup.api"),
-        ("from nextron.app.queries import jobqueue", "nextron.app.queries.jobqueue"),
-        ("from nextron.adapters.clock import SystemClock", "nextron.adapters.clock.SystemClock"),
-        ("import sqlalchemy", "sqlalchemy"),
-        (
-            "from apscheduler.schedulers.asyncio import AsyncIOScheduler",
-            "apscheduler.schedulers.asyncio",
-        ),
-    ],
-)
-def test_the_runner_import_check_catches_any_other_import(
-    line: str, target: str, tmp_path: Path
+def test_every_jobs_module_has_its_import_rule() -> None:
+    assert rule_coverage(ENGINE_ROOT) == ([], [])
+
+
+def test_the_rule_coverage_check_catches_a_new_module_nested_or_not_and_a_stale_rule(
+    tmp_path: Path,
 ) -> None:
-    _, root = copy_with_probe(tmp_path, "nextron.jobs", '"""unused"""\n')
-    runner = root / RUNNER
-    runner.write_text(
-        runner.read_text(encoding="utf-8").replace(
-            "import contextvars\n", f"import contextvars\n{line}\n", 1
-        ),
+    _, root = copy_with_probe(tmp_path, "nextron.jobs", UNUSED)
+    handlers = root / JOBS_DIR / "handlers"
+    handlers.mkdir()
+    (handlers / "__init__.py").write_text(UNUSED, encoding="utf-8")
+    (handlers / "send_due_messages.py").write_text(UNUSED, encoding="utf-8")
+    (root / HEARTBEAT_PY).unlink()
+
+    assert rule_coverage(root) == (
+        [
+            "nextron/jobs/_lint_probe.py",
+            "nextron/jobs/handlers/__init__.py",
+            "nextron/jobs/handlers/send_due_messages.py",
+        ],
+        [HEARTBEAT_PY],
+    )
+
+
+def test_a_nested_modules_relative_imports_resolve_against_its_own_package(
+    tmp_path: Path,
+) -> None:
+    _, root = copy_with_probe(tmp_path, "nextron.jobs", UNUSED)
+    nested = "nextron/jobs/handlers/send_due_messages.py"
+    (root / JOBS_DIR / "handlers").mkdir()
+    (root / nested).write_text(
+        "from .. import scheduler\n"
+        "from ..runner import Runner\n"
+        "from . import tick\n"
+        "from .tick import Tick\n"
+        "from nextron.domain.job import Job\n",
         encoding="utf-8",
     )
 
-    [problem] = runner_import_problems(root)
+    problems = import_problems(root, nested, {nested: (("nextron.domain",), ())})
 
+    assert [problem.split(" imports ")[1] for problem in problems] == [
+        "nextron.jobs.scheduler",
+        "nextron.jobs.runner.Runner",
+        "nextron.jobs.handlers.tick",
+        "nextron.jobs.handlers.tick.Tick",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("module", "needle"),
+    [
+        (JOBS_INIT, '"""Delivery'),
+        (RUNNER, "nextron.app.jobqueue.api"),
+        (TRIGGERS_PY, "nextron.domain.job"),
+        (SCHEDULER_PY, "apscheduler"),
+        (HEARTBEAT_PY, "nextron.app.ops.api"),
+    ],
+)
+def test_each_jobs_module_imports_only_what_it_may(module: str, needle: str) -> None:
+    assert import_problems(ENGINE_ROOT, module) == []
+    assert needle in (ENGINE_ROOT / module).read_text(encoding="utf-8")
+
+
+def _with_line(tmp_path: Path, module: str, line: str) -> Path:
+    """A copy of the tree with ``line`` appended to ``module``; the copy's root."""
+    _, root = copy_with_probe(tmp_path, "nextron.jobs", UNUSED)
+    path = root / module
+    path.write_text(path.read_text(encoding="utf-8") + f"\n{line}\n", encoding="utf-8")
+    return root
+
+
+FORBIDDEN_IMPORTS = [
+    (RUNNER, "from nextron.ports.errors import AdapterError", "nextron.ports.errors.AdapterError"),
+    (RUNNER, "import nextron.ports.clock", "nextron.ports.clock"),
+    (RUNNER, "from nextron.db import uow", "nextron.db.uow"),
+    (RUNNER, "from nextron.db.uow import current", "nextron.db.uow.current"),
+    (RUNNER, "from nextron.app.setup import api", "nextron.app.setup.api"),
+    (RUNNER, "from nextron.app.queries import jobqueue", "nextron.app.queries.jobqueue"),
+    (
+        RUNNER,
+        "from nextron.adapters.clock import SystemClock",
+        "nextron.adapters.clock.SystemClock",
+    ),
+    (RUNNER, "import sqlalchemy", "sqlalchemy"),
+    (
+        RUNNER,
+        "from apscheduler.schedulers.asyncio import AsyncIOScheduler",
+        "apscheduler.schedulers.asyncio",
+    ),
+    (TRIGGERS_PY, "import apscheduler", "apscheduler"),
+    (TRIGGERS_PY, "from nextron.ports.clock import Clock", "nextron.ports.clock.Clock"),
+    (TRIGGERS_PY, "from nextron.db.uow import current", "nextron.db.uow.current"),
+    (
+        TRIGGERS_PY,
+        "from nextron.app.jobqueue.api import JobQueue",
+        "nextron.app.jobqueue.api.JobQueue",
+    ),
+    (
+        SCHEDULER_PY,
+        "from nextron.ports.errors import AdapterError",
+        "nextron.ports.errors.AdapterError",
+    ),
+    (SCHEDULER_PY, "from nextron.db import uow", "nextron.db.uow"),
+    (SCHEDULER_PY, "from nextron.app.ops.api import Heartbeat", "nextron.app.ops.api.Heartbeat"),
+    (SCHEDULER_PY, "from nextron.jobs import runner", "nextron.jobs.runner"),
+    (SCHEDULER_PY, "import sqlalchemy", "sqlalchemy"),
+    (
+        HEARTBEAT_PY,
+        "from apscheduler.schedulers.asyncio import AsyncIOScheduler",
+        "apscheduler.schedulers.asyncio",
+    ),
+    (HEARTBEAT_PY, "from nextron.domain.job import Lane", "nextron.domain.job.Lane"),
+    (HEARTBEAT_PY, "from nextron.db.uow import current", "nextron.db.uow.current"),
+    (HEARTBEAT_PY, "from nextron.ports.clock import Clock", "nextron.ports.clock.Clock"),
+    (HEARTBEAT_PY, "from nextron.jobs.runner import Runner", "nextron.jobs.runner.Runner"),
+    (HEARTBEAT_PY, "from . import scheduler", "nextron.jobs.scheduler"),
+]
+
+
+@pytest.mark.parametrize(("module", "line", "target"), FORBIDDEN_IMPORTS)
+def test_the_import_check_catches_any_other_import(
+    module: str, line: str, target: str, tmp_path: Path
+) -> None:
+    root = _with_line(tmp_path, module, line)
+
+    [problem] = import_problems(root, module)
+
+    assert problem.startswith(f"{module}:")
     assert problem.endswith(f"imports {target}")
 
 
 @pytest.mark.parametrize(
-    "line",
+    ("module", "line"),
     [
-        "from nextron.app.queries import setup as settings_reader",
-        "from nextron.domain.ids import is_ulid",
-        "import nextron.domain.job",
-        "from collections import deque",
+        (RUNNER, "from nextron.app.queries import setup as settings_reader"),
+        (RUNNER, "from nextron.domain.ids import is_ulid"),
+        (RUNNER, "import nextron.domain.job"),
+        (RUNNER, "from collections import deque"),
+        (TRIGGERS_PY, "from nextron.domain.ids import is_ulid"),
+        (TRIGGERS_PY, "import re"),
+        (SCHEDULER_PY, "from apscheduler.triggers.cron import CronTrigger"),
+        (SCHEDULER_PY, "from nextron.jobs import triggers"),
+        (SCHEDULER_PY, "from .triggers import Every"),
+        (SCHEDULER_PY, "from nextron.domain.job import Lane"),
+        (HEARTBEAT_PY, "from nextron.app.ops import api"),
+        (HEARTBEAT_PY, "import time"),
     ],
 )
-def test_the_runner_import_check_allows_its_own_modules(line: str, tmp_path: Path) -> None:
-    _, root = copy_with_probe(tmp_path, "nextron.jobs", '"""unused"""\n')
-    runner = root / RUNNER
-    runner.write_text(
-        runner.read_text(encoding="utf-8").replace(
-            "import contextvars\n", f"import contextvars\n{line}\n", 1
-        ),
-        encoding="utf-8",
-    )
-
-    assert runner_import_problems(root) == []
+def test_the_import_check_allows_each_modules_own_imports(
+    module: str, line: str, tmp_path: Path
+) -> None:
+    assert import_problems(_with_line(tmp_path, module, line), module) == []
 
 
 # Indexes and checks -----------------------------------------------------------------------------
@@ -314,7 +547,22 @@ def schema_differences(engine: Engine) -> list[str]:
 
 def test_every_tables_indexes_and_checks_match_the_database_at_head(db_engine: Engine) -> None:
     assert schema_differences(db_engine) == []
-    assert {table.name for table in Base.metadata.sorted_tables} >= {"events", "settings", "jobs"}
+    assert {table.name for table in Base.metadata.sorted_tables} >= {
+        "events",
+        "settings",
+        "jobs",
+        "runner_heartbeat",
+    }
+
+
+def test_the_heartbeat_checks_are_the_specified_ones() -> None:
+    indexes, checks = _model_schema(HeartbeatRecord.__table__)  # type: ignore[arg-type]
+
+    assert indexes == {}
+    assert checks == {
+        "ck_runner_heartbeat_singleton": "id = '00000000000000000000000000'",
+        "ck_runner_heartbeat_pid": "pid > 0",
+    }
 
 
 def test_the_jobs_partial_indexes_and_checks_are_the_specified_ones() -> None:
