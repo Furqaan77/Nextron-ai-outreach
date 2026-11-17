@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`) and **Story 4.7** (merge `fb662d6`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`) and **Story 4.2** (merge `c511e23`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -158,11 +158,38 @@ Main after these merges: **6789 tests, 29 contracts.**
 - More than 3 inboxes on one domain triggers a warning.
 - New required setting `sender_name`.
 
-Main now: **8912 tests, 29 contracts.**
+**Story 2.4 result:** the Leads list at `/leads` (the nav's Leads/Pipeline), with stage and Segment filters, search and paging, and a Lead page at `/leads/<id>` showing Contacts and their Provenance. Merged Leads redirect to the survivor.
+
+**Story 3.2 result:** each Contact gets a Market and an IANA timezone, with the reason for each (`market_basis`, `tz_basis`).
+- Sources: office location, the email's ccTLD and the Lead's country. A conflict between them takes the stricter Market, and a non-US/UK ccTLD blocks.
+- A vendored US state→timezone table.
+- CSV rows from countries outside the enabled Markets aren't imported ("blocked by Market").
+- A one-off job resolves existing Contacts.
+
+**Story 2.5 result:** a polite website crawler (`enrich_lead`):
+- it obeys robots.txt;
+- the egress filter blocks private, loopback and the PC's own addresses on every hop;
+- it fetches 15 pages at most, to depth 2;
+- the FR-49 denylist and shared platforms are refused;
+- only visible text is stored (`crawled_pages`, purged after 30 days).
+
+The User-Agent is `NextronBot/1.0`. It has never fetched a real website; it is tested only on mocks.
+
+**Story 1.20 result (spike, OQ-A9):** a conditional **go** for a logon task plus supervisor. See `docs/spikes/oq-a9-logon-task.md`.
+- A contained proof showed restarts after a crash and after a stale heartbeat.
+- `Stop-ScheduledTask` leaves the engine running; Story 1.21 handles that.
+- No real logon task was registered. One on-demand test task was registered by accident and removed at once; verified clean.
+
+**Story 4.2 result:** Campaigns, Offers and Variants, seeded and shown on Settings.
+- There is one Campaign per Segment × Market, starting at `draft`, with 1–2 Variants.
+- A UK Campaign can't be activated without a recorded LIA, enforced by DB triggers.
+- Pause and resume.
+
+Main now: **10383 tests, 29 contracts.**
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 28 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 33 are done (Story 3.3 is built and waiting to merge). Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -229,6 +256,15 @@ Main now: **8912 tests, 29 contracts.**
 - **Story 1.19:**
   - the environment guard on restore reads file names only, so a renamed prod copy would be accepted in dev;
   - `pre_restore` safety copies are never rotated.
+- **Logon task (Story 1.20):** your at-the-PC steps (registration, start at logon, sleep/wake, unregister) are in `docs/spikes/oq-a9-logon-task.md`. Story 1.21 will finalise them.
+- **Story 4.2 default Offer:** a ladder of a reply, then an audit ($2,500–$3,500, credited to a build), then a build ($10k–$30k). It is commercial configuration only: drafts never contain a price. Check the figures.
+- **Story 3.2:**
+  - Contacts blocked when no Market is enabled stay blocked after one is enabled;
+  - before the first `nextron seed sync`, every CSV row is refused as "isn't an enabled Market". Run `seed sync` before importing.
+- **Story 2.5 crawler limits that would change the approved spec:**
+  - lawyer-bio pages can use up the 15-page budget;
+  - EU Greenhouse and Lever boards aren't in `ats_hosts`;
+  - http-only sites, and sites with bad certificates, are unreachable.
 - **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
