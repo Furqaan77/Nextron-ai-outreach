@@ -107,6 +107,25 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "updated_at",
         ),
     },
+    "company_facts": {
+        "playbook": (
+            "id",
+            "fact_id",
+            "version",
+            "type",
+            "wording",
+            "source_url",
+            "allowed_segment_ids",
+            "allowed_market_ids",
+            "metric",
+            "metric_confirmed_at",
+            "scope_note",
+            "last_checked_on",
+            "created_by",
+            "created_at",
+            "retracted_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

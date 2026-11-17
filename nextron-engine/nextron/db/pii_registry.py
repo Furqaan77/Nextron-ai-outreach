@@ -101,6 +101,25 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 4.3. Approved Company Facts are claims about Nextron, its work, its Offer and public
+    # regulation, never about a person.
+    "company_facts": {
+        "id": PiiClass.NONE,
+        "fact_id": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "type": PiiClass.NONE,
+        "wording": PiiClass.NONE,
+        "source_url": PiiClass.NONE,
+        "allowed_segment_ids": PiiClass.NONE,
+        "allowed_market_ids": PiiClass.NONE,
+        "metric": PiiClass.NONE,
+        "metric_confirmed_at": PiiClass.NONE,
+        "scope_note": PiiClass.NONE,
+        "last_checked_on": PiiClass.NONE,
+        "created_by": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "retracted_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

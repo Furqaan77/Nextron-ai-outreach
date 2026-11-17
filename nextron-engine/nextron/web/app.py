@@ -45,6 +45,13 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   exactly one ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it
   dismisses through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the
   area again in a read-only one.
+- ``GET /facts`` (``company_facts_page``), ``POST /facts/add`` (``company_fact_add``), ``POST
+  /facts/edit`` (``company_fact_edit``) and ``POST /facts/retract`` (``company_fact_retract``),
+  all ``@personal_data(False)``: the Approved Company Facts page (FR-72, Story 4.3), linked from
+  the Settings page; see ``nextron.web.facts_page``. Each POST runs its use case through
+  ``facts`` (``CompanyFacts``, the ``playbook`` service) in its own unit of work, then renders
+  the panel again in a read-only one; a refused one (``InvalidFact``) answers 200 with the
+  refused form re-rendered.
 - ``GET /quotas`` (``quotas_page``, ``@personal_data(False)``): the Quotas and cost page
   (UX-DR28), rendered from ``budget.status()`` (the ``ops`` service's ``Budget``) through
   ``nextron.web.quotas_page``, and linked from the Settings page; see that module.
@@ -111,7 +118,9 @@ from starlette.routing import BaseRoute
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth
+from nextron.app.playbook.api import CompanyFacts
 from nextron.app.queries import notify as notify_queries
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
     Credentials,
@@ -120,12 +129,14 @@ from nextron.app.setup.api import (
     GrantStatus,
     Setup,
 )
+from nextron.domain.company_facts import InvalidFact
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
+from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
 from nextron.web import quotas_page as quota_rows
@@ -273,6 +284,7 @@ def create_app(
     port: int,
     entry: DashboardEntry,
     setup: Setup,
+    facts: CompanyFacts,
     credentials: Credentials,
     google: GoogleAccess,
     notify: Notify,
@@ -286,8 +298,9 @@ def create_app(
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
-    ``units.open()``. ``setup`` stores the settings, ``credentials`` the external credentials
-    and ``google`` the Google client and grants (both in Credential Manager, not the database);
+    ``units.open()``. ``setup`` stores the settings, ``facts`` the Approved Company Facts,
+    ``credentials`` the external credentials and ``google`` the Google client and grants (both
+    in Credential Manager, not the database);
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
     ``health`` gives the health panel its report and the notification area its error count;
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now".
@@ -385,6 +398,87 @@ def create_app(
             context = form_context(texts, problems=refused.problems, refused=True)
             return page(request, FORM_TEMPLATE, **context)
         return page(request, FORM_TEMPLATE, **form_context(shown_values(stored), saved=True))
+
+    def facts_answer(
+        request: Request,
+        template: str,
+        *,
+        notice: str | None = None,
+        refusal: fact_rows.Refusal | None = None,
+    ) -> HTMLResponse:
+        segments = [
+            fact_rows.Named(seeded.id, seeded.definition.name)
+            for seeded in setup_queries.segments()
+        ]
+        markets = [
+            fact_rows.Named(seeded.id, seeded.definition.name)
+            for seeded in setup_queries.markets()
+        ]
+        context = fact_rows.panel_context(
+            playbook_queries.company_facts(),
+            segments,
+            markets,
+            facts.today(),
+            notice=notice,
+            refusal=refusal,
+        )
+        return page(request, template, **context)
+
+    @app.get("/facts", name="company_facts_page")
+    @personal_data(False)  # facts are claims about Nextron, never about a person
+    def company_facts_page(request: Request) -> HTMLResponse:
+        return facts_answer(request, fact_rows.PAGE_TEMPLATE)
+
+    @app.post("/facts/add", name="company_fact_add")
+    @personal_data(False)
+    def company_fact_add(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        fact_id, submitted = fact_rows.submitted_add(fields)
+        try:
+            with units.open():
+                saved = facts.add(fact_id, submitted)
+        except InvalidFact as refused:  # 200, so HTMX swaps the panel in; nothing was saved
+            refusal = fact_rows.Refusal("add", fact_id, refused.problems, submitted)
+            with units.open(read_only=True):
+                return facts_answer(request, fact_rows.PANEL_TEMPLATE, refusal=refusal)
+        notice = fact_rows.saved_notice(saved)
+        with units.open(read_only=True):
+            return facts_answer(request, fact_rows.PANEL_TEMPLATE, notice=notice)
+
+    @app.post("/facts/edit", name="company_fact_edit")
+    @personal_data(False)
+    def company_fact_edit(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        fact_id, based_on, submitted = fact_rows.submitted_edit(fields)
+        try:
+            with units.open():
+                saved = facts.edit(fact_id, based_on, submitted)
+        except InvalidFact as refused:  # 200, so HTMX swaps the panel in; nothing was saved
+            refusal = fact_rows.Refusal("edit", fact_id, refused.problems, submitted, based_on)
+            with units.open(read_only=True):
+                return facts_answer(request, fact_rows.PANEL_TEMPLATE, refusal=refusal)
+        notice = fact_rows.saved_notice(saved)
+        with units.open(read_only=True):
+            return facts_answer(request, fact_rows.PANEL_TEMPLATE, notice=notice)
+
+    @app.post("/facts/retract", name="company_fact_retract")
+    @personal_data(False)
+    def company_fact_retract(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        fact_id = fact_rows.submitted_retract(fields)
+        try:
+            with units.open():
+                retracted = facts.retract(fact_id)
+        except InvalidFact as refused:  # 200: nothing was retracted
+            refusal = fact_rows.Refusal("retract", fact_id, refused.problems)
+            with units.open(read_only=True):
+                return facts_answer(request, fact_rows.PANEL_TEMPLATE, refusal=refusal)
+        notice = fact_rows.retracted_notice(retracted)
+        with units.open(read_only=True):
+            return facts_answer(request, fact_rows.PANEL_TEMPLATE, notice=notice)
 
     def row_answer(request: Request, row: credential_rows.CredentialRow) -> HTMLResponse:
         return page(request, credential_rows.ROW_TEMPLATE, row=row)

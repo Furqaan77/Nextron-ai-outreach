@@ -1,11 +1,11 @@
 """Build the dashboard with fakes and open a session on it, as ``nextron open`` would.
 
 ``Dashboard`` reads through ``FakeUnits`` unless a test passes real units of work (the
-``units`` fixture); its ``Setup`` uses the dashboard's frozen clock, and its ``Credentials`` the
-dashboard's in-memory secrets and that clock. ``post`` sends a POST from
-the dashboard's own origin by default; ``csrf_token(cookie)`` reads the session's CSRF token
-from ``GET /``'s ``<body hx-headers>``, as HTMX would; ``form(**fields)`` builds an urlencoded
-body.
+``units`` fixture); its ``Setup`` and ``CompanyFacts`` (``facts``, Story 4.3) use the dashboard's
+frozen clock, and its ``Credentials`` the dashboard's in-memory secrets and that clock. ``post``
+sends a POST from the dashboard's own origin by default; ``csrf_token(cookie)`` reads the
+session's CSRF token from ``GET /``'s ``<body hx-headers>``, as HTMX would; ``form(**fields)``
+builds an urlencoded body.
 
 Its ``GoogleAccess`` (``google``) uses the same secrets and clock with fakes:
 ``FakeGoogleOAuth`` (``oauth``), ``FakeClientFiles`` (``files``), a ``RecordingBrowser``
@@ -53,6 +53,7 @@ from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, LocalBackups
+from nextron.app.playbook.api import CompanyFacts
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.domain.alert import Channel
@@ -174,6 +175,7 @@ class Dashboard:
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
+    facts: CompanyFacts = field(init=False)
     credentials: Credentials = field(init=False)
     google: GoogleAccess = field(init=False)
     job_types: JobTypes = field(init=False)
@@ -187,6 +189,7 @@ class Dashboard:
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
         self.setup = Setup(self.clock)
+        self.facts = CompanyFacts(self.clock)
         self.credentials = Credentials(self.secrets, self.clock)
         self.google = GoogleAccess(
             self.secrets,
@@ -226,6 +229,7 @@ class Dashboard:
             port=PORT,
             entry=self.entry,
             setup=self.setup,
+            facts=self.facts,
             credentials=self.credentials,
             google=self.google,
             notify=self.notify,
