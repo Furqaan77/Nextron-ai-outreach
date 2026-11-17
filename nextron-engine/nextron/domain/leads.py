@@ -22,6 +22,17 @@ A problem raises ``InvalidLeadIdentity(field, reason)`` (code ``invalid_lead_ide
 
 **``MergeRefused(reason)``** (code ``merge_refused``) is ``Discovery.merge`` refusing two Leads:
 the same Lead twice, an unknown Lead, a Lead already merged, or a survivor newer than the loser.
+
+**Shared platforms.** ``is_shared_platform(web_domain)`` is true when a registrable domain is
+one that many unrelated organizations share, so it can't key one organization's Lead: it is in
+``SHARED_PLATFORM_DOMAINS`` (site builders such as ``wix.com``, profile and link pages such as
+``linktr.ee``, directories such as ``yelp.com`` and ``lawsociety.org.uk``, review sites and
+business registers such as ``trustpilot.com`` and ``company-information.service.gov.uk``, and
+URL shorteners such as ``bit.ly``), or its first label is in
+``SHARED_PLATFORM_BRANDS`` (``google``, ``facebook``: ``sites.google.com`` and
+``facebook.co.uk`` key as ``google.com`` and ``facebook.co.uk``). A site under a public-suffix
+platform (``x.wixsite.com``, ``x.blogspot.com``) already keys as its own registrable domain and
+isn't listed. Story 2.3's CSV import refuses such a website rather than merge unrelated firms.
 """
 
 import unicodedata
@@ -44,6 +55,79 @@ MAX_NAME_LENGTH: Final = 200
 KEY_FIELDS: Final = ("web_domain", "ch_number", "place_id")
 # control, format, line separator and paragraph separator characters
 REFUSED_NAME_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+# Registrable domains that many unrelated organizations share (each one's own, as
+# registrable_domain gives it: tests/unit/test_leads_domain.py checks).
+SHARED_PLATFORM_DOMAINS: Final = frozenset(
+    {
+        # site builders
+        "business.site",
+        "company.site",
+        "godaddysites.com",
+        "squarespace.com",
+        "wordpress.com",
+        "weebly.com",
+        "jimdosite.com",
+        "wix.com",
+        "mailchimpsites.com",
+        "strikingly.com",
+        "mystrikingly.com",
+        "site123.me",
+        "ueniweb.com",
+        "webnode.com",
+        "hubspotpagebuilder.com",
+        "myportfolio.com",
+        # profile and link pages
+        "tumblr.com",
+        "substack.com",
+        "medium.com",
+        "linktr.ee",
+        "about.me",
+        "g.page",
+        "fb.com",
+        "x.com",
+        "twitter.com",
+        "youtube.com",
+        "tiktok.com",
+        "pinterest.com",
+        "threads.net",
+        "bsky.app",
+        "calendly.com",
+        # directories
+        "yelp.com",
+        "yell.com",
+        "avvo.com",
+        "justia.com",
+        "findlaw.com",
+        "lawyers.com",
+        "martindale.com",
+        "lawsociety.org.uk",
+        "sra.org.uk",
+        "chambers.com",
+        "legal500.com",
+        # review sites and business registers
+        "trustpilot.com",
+        "checkatrade.com",
+        "yellowpages.com",
+        "bbb.org",
+        "company-information.service.gov.uk",
+        "opencorporates.com",
+        # URL shorteners
+        "bit.ly",
+        "goo.gl",
+        "g.co",
+        "share.google",
+        "tinyurl.com",
+        "t.co",
+        "ow.ly",
+        "rebrand.ly",
+        "cutt.ly",
+        "is.gd",
+        "buff.ly",
+    }
+)
+# First labels of registrable domains that are shared platforms under any suffix.
+SHARED_PLATFORM_BRANDS: Final = frozenset({"google", "facebook"})
 
 _NORMALISERS: Final[dict[str, Callable[[str], str]]] = {
     "web_domain": registrable_domain,
@@ -82,7 +166,9 @@ class MergeRefused(DomainError):
         self.reason = reason
 
 
-def _check_name(name: object) -> None:
+def check_name(name: object) -> None:
+    """Raise ``InvalidLeadIdentity("name", ...)`` unless ``name`` follows ``LeadIdentity``'s
+    name rule (the CSV import checks a row's name with it before building the identity)."""
     if not isinstance(name, str):
         raise InvalidLeadIdentity("name", "must be a str")
     if not 1 <= len(name) <= MAX_NAME_LENGTH:
@@ -118,7 +204,7 @@ class LeadIdentity:
     country_code: str | None = None
 
     def __post_init__(self) -> None:
-        _check_name(self.name)
+        check_name(self.name)
         if not is_ulid(self.segment_id):
             raise InvalidLeadIdentity("segment_id", "must be a ULID")
         for field in KEY_FIELDS:
@@ -135,3 +221,14 @@ class LeadIdentity:
         return {
             field: value for field in KEY_FIELDS if (value := getattr(self, field)) is not None
         }
+
+
+def is_shared_platform(web_domain: str) -> bool:
+    """Whether the registrable domain ``web_domain`` is a shared platform; see the module
+    docstring."""
+    if not isinstance(web_domain, str):
+        raise TypeError(f"is_shared_platform takes a str, not {type(web_domain).__name__}")
+    return (
+        web_domain in SHARED_PLATFORM_DOMAINS
+        or web_domain.split(".", 1)[0] in SHARED_PLATFORM_BRANDS
+    )

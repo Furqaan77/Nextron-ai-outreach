@@ -326,7 +326,7 @@ def test_a_restore_test_of_a_good_copy_passes_and_leaves_nothing_behind(
     world.query("CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)")
     world.query("INSERT INTO suppression_entries DEFAULT VALUES")
     world.query("INSERT INTO suppression_entries DEFAULT VALUES")
-    world.query("CREATE TABLE provenance_records (id INTEGER PRIMARY KEY)")
+    # provenance_records exists at head (Story 2.3), empty here
     backup_id = copied_backup(world)
     system_temp = world.tmp_path / "system-temp"
     system_temp.mkdir()
@@ -388,15 +388,16 @@ def test_a_restore_test_of_a_good_copy_passes_and_leaves_nothing_behind(
 
 
 def test_a_table_recorded_absent_is_skipped_and_the_test_still_passes(world: World) -> None:
-    backup_id = copied_backup(world)  # neither counted table exists yet
+    # suppression_entries is absent until its story; provenance_records exists (Story 2.3)
+    backup_id = copied_backup(world)
 
     test_id = world.run()
 
     assert test_id is not None
     row = world.row(test_id)
     assert (row["result"], row["backup_id"], row["copy_revision"]) == ("pass", backup_id, HEAD)
-    assert (row["check_suppression"], row["check_provenance"]) == ("skipped", "skipped")
-    assert (row["suppression_count"], row["provenance_count"], row["reason"]) == (None, None, None)
+    assert (row["check_suppression"], row["check_provenance"]) == ("skipped", "pass")
+    assert (row["suppression_count"], row["provenance_count"], row["reason"]) == (None, 0, None)
 
 
 def test_the_newest_copied_copy_is_tested_and_a_rotated_one_never(world: World) -> None:
@@ -761,7 +762,7 @@ def test_a_copy_with_fewer_rows_than_recorded_fails_both_counts_with_the_first_r
         world,
         "CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)",
         "INSERT INTO suppression_entries DEFAULT VALUES",
-        "CREATE TABLE provenance_records (id INTEGER PRIMARY KEY)",
+        # provenance_records exists at head (Story 2.3), empty here
     )
     plant(world, fake, data, suppression=5, provenance=3)
 
@@ -787,7 +788,8 @@ def test_a_copy_missing_a_recorded_table_fails_that_count(
 ) -> None:
     caplog.set_level(logging.INFO, logger=OPS_LOGGER)
     world, fake = planted
-    plant(world, fake, changed_copy(world), provenance=3)
+    # provenance_records exists at head (Story 2.3): this copy lost it
+    plant(world, fake, changed_copy(world, "DROP TABLE provenance_records"), provenance=3)
 
     assert_failed(
         world,

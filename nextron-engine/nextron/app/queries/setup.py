@@ -18,7 +18,8 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   by key; ``segment(key)``: one, or ``None``. ``definition`` is the ``SegmentDef`` decoded by
   ``nextron.domain.segments.segment_from_text``, which raises ``InvalidSegments`` for a stored
   text that no longer validates. Research, scoring and drafting (Stories 2.2 onwards) read the
-  Segments only through these two.
+  Segments only through these two. ``segment_ids()``: every stored Segment's id, a
+  ``frozenset`` (``Discovery.upsert_lead`` checks a candidate's Segment against it).
 - ``markets()``: every stored Market as a ``SeededMarket(id, code, version, definition)``, by
   code; ``market(code)``: one, or ``None``. ``definition`` is the
   ``nextron.domain.markets.MarketDef`` the ``markets`` repository decodes through
@@ -129,6 +130,11 @@ def _seeded(stored: StoredSegment) -> SeededSegment:
 def segments() -> tuple[SeededSegment, ...]:
     """Every stored Segment, by key."""
     return tuple(_seeded(stored) for stored in segments_repo.all_segments())
+
+
+def segment_ids() -> frozenset[str]:
+    """Every stored Segment's id."""
+    return segments_repo.segment_ids()
 
 
 def segment(key: str) -> SeededSegment | None:

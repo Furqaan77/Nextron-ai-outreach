@@ -247,7 +247,8 @@ def test_a_daily_backup_is_a_verified_copy_in_local(
     assert (row.kind, row.status, row.path) == ("daily", "verified", str(copy))
     assert (row.size_bytes, row.sha256) == (copy.stat().st_size, sha256(copy))
     assert row.db_revision == HEAD
-    assert (row.suppression_count, row.provenance_count) == (None, None)  # absent tables
+    # suppression_entries is absent until its story; provenance_records exists (Story 2.3)
+    assert (row.suppression_count, row.provenance_count) == (None, 0)
     assert (row.started_at, row.finished_at, row.error, row.local_deleted_at) == (
         T0,
         T0,
@@ -273,7 +274,7 @@ def test_the_copy_counts_the_suppression_and_provenance_tables_when_they_exist(
     world.query("CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)")
     world.query("INSERT INTO suppression_entries DEFAULT VALUES")
     world.query("INSERT INTO suppression_entries DEFAULT VALUES")
-    world.query("CREATE TABLE provenance_records (id INTEGER PRIMARY KEY)")
+    # provenance_records exists at head (Story 2.3), empty here
 
     backup_id = world.back_up()
 
@@ -540,7 +541,7 @@ def test_snapshot_describes_a_verified_copy(world: World) -> None:
 
     made = snapshot(world.db_file, target)
 
-    assert made == Snapshot(target, target.stat().st_size, sha256(target), HEAD, None, None)
+    assert made == Snapshot(target, target.stat().st_size, sha256(target), HEAD, None, 0)
 
 
 # Row: Record fails --------------------------------------------------------------------------------

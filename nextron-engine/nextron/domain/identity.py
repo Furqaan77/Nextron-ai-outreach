@@ -6,6 +6,11 @@ the reason and never holds the input, which may be an email address. A non-``str
 raises ``TypeError``, and any input longer than ``MAX_INPUT_LENGTH`` (2,048) characters is
 refused. Each normaliser is idempotent: it returns its own output unchanged.
 
+- ``url_host(text)``: a website's or URL's host name, steps 1 to 4 below: the ASCII,
+  lowercased, IDNA-encoded host, with one trailing separator dropped and ``www`` kept
+  (``https://WWW.Smith-Law.co.uk./team`` gives ``www.smith-law.co.uk``). It applies every
+  refusal of those steps; nothing checks the host against the Public Suffix List.
+  ``nextron.domain.fetch_policy`` matches hosts with it.
 - ``registrable_domain(text)``: a website's registrable domain (eTLD+1).
 
   1. The text is stripped; an empty text, or one holding whitespace or a ``Cc`` character, is
@@ -13,7 +18,7 @@ refused. Each normaliser is idempotent: it returns its own output unchanged.
   2. A text with a ``<scheme>://`` prefix must use ``http`` or ``https`` (in any case); any
      other scheme is refused. A text without one is read as ``http://`` + text.
   3. The hostname comes from ``urllib.parse.urlsplit``; a missing one or an IP address is
-     refused. One trailing dot is dropped.
+     refused. One trailing separator is dropped (and the rest checked again).
   4. Each label (split on the IDNA 2003 separators: ``.``, ``U+3002``, ``U+FF0E``,
      ``U+FF61``) is IDNA-encoded with the stdlib ``encodings.idna.ToASCII`` (IDNA 2003) and
      lowercased, and must fullmatch ``LABEL_PATTERN`` (letters, digits and hyphens, at most
@@ -49,9 +54,10 @@ refused. Each normaliser is idempotent: it returns its own output unchanged.
   zero-padded to 8; otherwise the text must fullmatch ``[A-Z0-9]{8}`` with at least one digit.
 - ``normalize_place_id(text)``: stripped; it must fullmatch ``[A-Za-z0-9_-]{1,512}``. Case is
   kept.
-- ``normalize_country_code(text)``: stripped and uppercased (ASCII only); it must be in
-  ``COUNTRY_CODES``, the 249 assigned ISO 3166-1 alpha-2 codes (the set in tzdata's
-  ``iso3166.tab``). There is no alias such as ``UK``.
+- ``normalize_country_code(text)``: stripped and uppercased (ASCII only); an alias in
+  ``COUNTRY_ALIASES`` becomes its code (``UK`` is ``GB``, the one alias), and the result must be
+  in ``COUNTRY_CODES``, the 249 assigned ISO 3166-1 alpha-2 codes (the set in tzdata's
+  ``iso3166.tab``).
 
 **The Public Suffix List** is vendored byte for byte at ``nextron/domain/psl/
 public_suffix_list.dat`` (MPL-2.0, header kept; its SHA-256 is pinned in
@@ -66,9 +72,11 @@ import ipaddress
 import re
 import unicodedata
 import urllib.parse
+from collections.abc import Mapping
 from dataclasses import dataclass
 from encodings import idna
 from importlib import resources
+from types import MappingProxyType
 from typing import Final
 
 from nextron.domain.errors import DomainError
@@ -121,6 +129,8 @@ COUNTRY_CODES: Final = frozenset(
     VN VU WF WS YE YT ZA ZM ZW
     """.split()
 )
+# Common names that aren't ISO codes, each mapped to its code (Story 2.3: CSV files say UK).
+COUNTRY_ALIASES: Final[Mapping[str, str]] = MappingProxyType({"UK": "GB"})
 
 
 class IdentityError(DomainError):
@@ -305,18 +315,25 @@ def _public_suffix_length(labels: tuple[str, ...]) -> int | None:
 # The normalisers ------------------------------------------------------------------------------
 
 
-def registrable_domain(text: str) -> str:
-    """The registrable domain (eTLD+1) of a website or URL; see the module docstring."""
-    _, hostname = _web_url(_checked(text, "registrable_domain"))
+def url_host(text: str) -> str:
+    """The ASCII, lowercased host name of a website or URL, ``www`` kept: steps 1 to 4 of
+    ``registrable_domain``; see the module docstring."""
+    _, hostname = _web_url(_checked(text, "url_host"))
     if LABEL_SEPARATORS.fullmatch(hostname[-1]):
         hostname = hostname[:-1]
     if not hostname:
         raise IdentityError("has no host name")
     if _is_ip_address(hostname):
         raise IdentityError("is an IP address, not a domain")
-    labels = _ascii_labels(hostname)
-    if len(".".join(labels)) > MAX_DOMAIN_LENGTH:
+    host = ".".join(_ascii_labels(hostname))
+    if len(host) > MAX_DOMAIN_LENGTH:
         raise IdentityError(f"is longer than {MAX_DOMAIN_LENGTH} characters")
+    return host
+
+
+def registrable_domain(text: str) -> str:
+    """The registrable domain (eTLD+1) of a website or URL; see the module docstring."""
+    labels = tuple(url_host(_checked(text, "registrable_domain")).split("."))
     if labels[0] == WWW:
         labels = labels[1:]
     if len(labels) < 2:
@@ -418,6 +435,10 @@ def normalize_place_id(text: str) -> str:
 def normalize_country_code(text: str) -> str:
     """An ISO 3166-1 alpha-2 country code, uppercased."""
     value = _checked(text, "normalize_country_code").strip()
-    if not value.isascii() or value.upper() not in COUNTRY_CODES:
+    if not value.isascii():
         raise IdentityError("is not an ISO 3166-1 alpha-2 country code")
-    return value.upper()
+    code = value.upper()
+    code = COUNTRY_ALIASES.get(code, code)
+    if code not in COUNTRY_CODES:
+        raise IdentityError("is not an ISO 3166-1 alpha-2 country code")
+    return code

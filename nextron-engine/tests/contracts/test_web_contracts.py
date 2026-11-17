@@ -162,6 +162,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/health/jobs/dismiss",
         "/health/backup",
         "/health/restore-test",
+        "/leads/import",
+        "/leads/import",
     ]
     assert async_route_handlers(app) == []
 
@@ -565,6 +567,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "health.html",
         "health_panel.html",
         "home.html",
+        "lead_import.html",
+        "lead_import_form.html",
         "locked.html",
         "macros.html",
         "notifications.html",

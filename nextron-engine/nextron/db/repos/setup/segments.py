@@ -7,6 +7,7 @@ returned; this module stores and returns it as it is and checks nothing.
 
 - ``all_segments()``: every row as a ``StoredSegment``, by key;
 - ``by_key(key)``: the row of ``key``, or ``None``;
+- ``segment_ids()``: every row's id;
 - ``insert(key, definition, at) -> id``: a new row at version 1, created and updated at ``at``;
 - ``update(segment_id, definition, version, at)``: sets the row's definition, version and
   ``updated_at``.
@@ -59,6 +60,12 @@ def by_key(key: str) -> StoredSegment | None:
     statement = select(*_COLUMNS).where(SegmentRecord.key == str(key))
     row = current().session.execute(statement).one_or_none()
     return None if row is None else StoredSegment(*row)
+
+
+def segment_ids() -> frozenset[str]:
+    """Every stored Segment's id."""
+    statement = select(SegmentRecord.id)
+    return frozenset(current().session.execute(statement).scalars())
 
 
 def insert(key: str, definition: str, at: datetime) -> str:

@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0014_2_8_ai_routes"
+HEAD = "0015_2_3_contacts_provenance"
 
 
 @pytest.fixture

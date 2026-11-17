@@ -73,7 +73,14 @@ Any other error is logged as ``engine_crashed`` and ends with exit 1.
 that constructs ``Subscribers`` or registers a subscriber, frozen once filled. Each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
-the more advanced Pipeline Stage), with ``SystemClock()`` when no clock is given.
+the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
+Lead's Contacts move to the survivor), with ``SystemClock()`` when no clock is given.
+
+**The CSV import (Story 2.3).** ``build_app`` builds one ``LeadImports(clock,
+Discovery(clock, Pipeline(clock)), Research(clock), EmailValidatorSyntax())``
+(``nextron.app.discovery.api``; the syntax adapter is ``nextron.adapters.email_syntax``,
+offline) and hands it to the dashboard (``create_app(..., lead_imports=...)``) for the
+``/leads/import`` page.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests)`` is the job type
 registry: the only
@@ -347,10 +354,12 @@ from fastapi import FastAPI
 from nextron import __version__
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
+from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -370,6 +379,7 @@ from nextron.app.playbook.api import Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research.api import Research
 from nextron.app.setup.api import (
     Credentials,
     GoogleAccess,
@@ -568,7 +578,8 @@ def build_app(
     PC through ``backup_targets`` (``FolderBackupTarget`` with these secrets unless injected);
     ``RestoreTests`` fetches the newest off-PC copy back through the same targets and checks
     it (the ``restore_test`` job); the scheduler reads the daily times when it starts, never
-    when the app is built."""
+    when the app is built. ``LeadImports`` runs the CSV import on ``/leads/import`` with the
+    offline ``EmailValidatorSyntax``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -642,6 +653,9 @@ def build_app(
         queue=queue,
         backups=backups,
         restore_tests=restore_tests,
+        lead_imports=LeadImports(
+            clock, Discovery(clock, Pipeline(clock)), Research(clock), EmailValidatorSyntax()
+        ),
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )
@@ -966,6 +980,7 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     chosen = clock if clock is not None else SystemClock()
     subscribers = Subscribers()
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
+    subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
     subscribers.freeze()
     return subscribers
 

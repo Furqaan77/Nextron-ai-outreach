@@ -139,6 +139,40 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "activated_at": PiiClass.NONE,
         "deactivated_at": PiiClass.NONE,
     },
+    # Story 2.3. A Contact is a person: free text is redacted, the address is kept as a hash so
+    # suppression and dedupe still match after an erasure, and the LinkedIn URL is nulled.
+    "contacts": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "name": PiiClass.REDACT,
+        "role": PiiClass.REDACT,
+        "email": PiiClass.KEEP_HASH,
+        "address_class": PiiClass.NONE,
+        "linkedin_url": PiiClass.NULL,
+        "is_primary": PiiClass.NONE,
+        "tz": PiiClass.NONE,
+        "market_id": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
+    # Story 2.3. A record's source detail (a CSV's origin, a URL) and notes are free text; its
+    # address is the Contact's address at the time, kept as a hash like contacts.email.
+    "provenance_records": {
+        "id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "subject": PiiClass.NONE,
+        "source_kind": PiiClass.NONE,
+        "source_detail": PiiClass.REDACT,
+        "address": PiiClass.KEEP_HASH,
+        "retrieved_at": PiiClass.NONE,
+        "address_class": PiiClass.NONE,
+        "notes": PiiClass.REDACT,
+        "basis_rule": PiiClass.NONE,
+        "basis_campaign_id": PiiClass.NONE,
+        "lia_ref": PiiClass.NONE,
+        "lia_date": PiiClass.NONE,
+        "basis_recorded_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

@@ -439,3 +439,26 @@ button.secondary {
   font-weight: 600;
   color: var(--refused);
 }
+
+/* The CSV import's summary: the counts, then the rejected rows and the rows with notes. A row's
+   label is imported text, in an untrusted block inside its cell. */
+.import-counts {
+  font-weight: 600;
+}
+
+.import-table {
+  margin: 0 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.import-table th,
+.import-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.import-table td.number {
+  text-align: right;
+}

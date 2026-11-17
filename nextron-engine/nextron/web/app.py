@@ -72,6 +72,14 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   result shows here when it finishes." when the job was created, else "A restore test is
   already queued or running.". The test runs on the job runner's bulk lane, never in the
   request.
+- ``GET /leads/import`` (``lead_import_page``, ``@personal_data(False)``: Segment names only)
+  and ``POST /leads/import`` (``lead_import``, ``@personal_data(True)``): the CSV Lead import
+  (Story 2.3), linked from the home page; see ``nextron.web.lead_import_page``. The POST reads
+  its ``multipart/form-data`` body through ``nextron.web.forms.upload_form``, runs
+  ``lead_imports.run`` (``LeadImports``) in its own unit of work, then renders the import block
+  again, with the Segment choices read in a read-only one: a refusal by its field, the summary
+  above a fresh form, or a stopped import's summary above the form with the origin and default
+  kept, always 200.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -116,6 +124,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -131,11 +140,13 @@ from nextron.app.setup.api import (
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
+from nextron.domain.lead_import import ImportRefused
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
+from nextron.web import lead_import_page as import_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
@@ -144,8 +155,10 @@ from nextron.web.forms import (
     WRONG_FIELDS,
     FormFields,
     MalformedForm,
+    UploadForm,
     form_fields,
     malformed_form,
+    upload_form,
 )
 from nextron.web.guard import Guard
 from nextron.web.routing import (
@@ -289,6 +302,7 @@ def create_app(
     queue: JobQueue,
     backups: Backups,
     restore_tests: RestoreTests,
+    lead_imports: LeadImports,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -300,7 +314,7 @@ def create_app(
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
     ``health`` gives the health panel its report and the notification area its error count;
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
-    ``restore_tests`` its "Run restore test now".
+    ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -620,6 +634,44 @@ def create_app(
         )
         with units.open(read_only=True):
             return health_answer(request, health_rows.PANEL_TEMPLATE, restore_notice=notice)
+
+    def import_answer(request: Request, **context: object) -> HTMLResponse:
+        with units.open(read_only=True):
+            options = import_rows.segment_options(setup_queries.segments())
+            return page(request, import_rows.FORM_TEMPLATE, segments=options, **context)
+
+    @app.get("/leads/import", name="lead_import_page")
+    @personal_data(False)  # Segment names only
+    def lead_import_page(request: Request) -> HTMLResponse:
+        options = import_rows.segment_options(setup_queries.segments())
+        context = import_rows.form_context()
+        return page(request, import_rows.PAGE_TEMPLATE, segments=options, **context)
+
+    @app.post("/leads/import", name="lead_import")
+    @personal_data(True)
+    def lead_import(
+        request: Request, form: Annotated[UploadForm, Depends(upload_form)]
+    ) -> HTMLResponse:
+        if form.too_large:  # the body was discarded unread, so nothing typed can be kept
+            return import_answer(request, **import_rows.too_large_context())
+        submitted = import_rows.submitted_import(form)
+        imported = ImportRequest(submitted.origin, submitted.default_segment, submitted.data)
+        try:
+            with units.open():
+                summary = lead_imports.run(imported)
+        except ImportRefused as refused:
+            # 200, so HTMX swaps the block in; nothing was imported
+            return import_answer(request, **import_rows.refused_context(submitted, refused))
+        except ImportStopped as stopped:
+            # keep what was typed: the notice says to import the same file again
+            context = import_rows.form_context(
+                origin=submitted.origin,
+                default_segment=submitted.default_segment or "",
+                summary=stopped.summary,
+                stopped=import_rows.stop_notice(stopped.at_row),
+            )
+            return import_answer(request, **context)
+        return import_answer(request, **import_rows.form_context(summary=summary))
 
     require_declared(app)
     require_route_rules(app)

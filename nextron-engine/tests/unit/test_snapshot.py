@@ -54,13 +54,16 @@ def unchanged(path: Path) -> Iterator[None]:
     assert sorted(found.name for found in path.parent.iterdir()) == beside
 
 
-def test_a_good_copy_at_head_with_no_counted_tables(db_engine: Engine, tmp_path: Path) -> None:
+def test_a_good_copy_at_head_counts_the_counted_tables_it_has(
+    db_engine: Engine, tmp_path: Path
+) -> None:
     copy = copy_of(db_engine, tmp_path)
 
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    assert found == CopyInspection("ok", HEAD, HEAD, True, None, None)
+    # suppression_entries is absent until its story; provenance_records exists (Story 2.3)
+    assert found == CopyInspection("ok", HEAD, HEAD, True, None, 0)
 
 
 def test_a_good_copy_counts_the_suppression_and_provenance_rows(
@@ -73,7 +76,7 @@ def test_a_good_copy_counts_the_suppression_and_provenance_rows(
         "INSERT INTO suppression_entries DEFAULT VALUES",
         "INSERT INTO suppression_entries DEFAULT VALUES",
         "INSERT INTO suppression_entries DEFAULT VALUES",
-        "CREATE TABLE provenance_records (id INTEGER PRIMARY KEY)",
+        # provenance_records exists at head (Story 2.3), empty here
     )
 
     with unchanged(copy):
@@ -86,14 +89,15 @@ def test_a_copy_with_one_counted_table_absent(db_engine: Engine, tmp_path: Path)
     copy = copy_of(
         db_engine,
         tmp_path,
-        "CREATE TABLE provenance_records (id INTEGER PRIMARY KEY)",
-        "INSERT INTO provenance_records DEFAULT VALUES",
+        "CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)",
+        "INSERT INTO suppression_entries DEFAULT VALUES",
+        "DROP TABLE provenance_records",  # it exists at head (Story 2.3)
     )
 
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    assert (found.suppression_count, found.provenance_count) == (None, 1)
+    assert (found.suppression_count, found.provenance_count) == (1, None)
 
 
 def test_a_file_that_is_not_a_database_is_an_integrity_error(tmp_path: Path) -> None:
@@ -127,7 +131,8 @@ def test_a_copy_at_another_revision_reports_it_and_whether_it_is_known(
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    assert found == CopyInspection("ok", revision, HEAD, known, None, None)
+    # provenance_records exists at head (Story 2.3), empty here
+    assert found == CopyInspection("ok", revision, HEAD, known, None, 0)
 
 
 @pytest.mark.parametrize(
@@ -143,7 +148,8 @@ def test_a_copy_whose_revision_cannot_be_read_has_none(
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    assert found == CopyInspection("ok", None, HEAD, False, None, None)
+    # provenance_records exists at head (Story 2.3), empty here
+    assert found == CopyInspection("ok", None, HEAD, False, None, 0)
 
 
 def test_a_corrupted_copy_reports_the_first_integrity_line_and_reads_nothing_else(

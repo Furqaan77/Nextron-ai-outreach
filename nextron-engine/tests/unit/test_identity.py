@@ -1,7 +1,8 @@
 """``nextron.domain.identity`` (FR-9, SC-8): Story 2.2's Identity rows, every refusal (whose
 message never holds the input), the Public Suffix List's wildcard, exception and private rules,
 the 253 and 63 character limits, ``COUNTRY_CODES`` against tzdata, and each normaliser being
-idempotent on its own output."""
+idempotent on its own output. Story 2.3 adds ``url_host`` (steps 1 to 4 of
+``registrable_domain``, ``www`` kept) and the ``UK`` alias of ``normalize_country_code``."""
 
 import re
 import unicodedata
@@ -13,6 +14,7 @@ import pytest
 from nextron.domain import identity
 from nextron.domain.errors import DomainError
 from nextron.domain.identity import (
+    COUNTRY_ALIASES,
     COUNTRY_CODES,
     MAX_INPUT_LENGTH,
     IdentityError,
@@ -24,10 +26,12 @@ from nextron.domain.identity import (
     normalize_place_id,
     psl_version,
     registrable_domain,
+    url_host,
 )
 from tests.contracts.support import PACKAGE
 
 NORMALISERS: list[Callable[[str], str]] = [
+    url_host,
     registrable_domain,
     normalize_email,
     normalize_name,
@@ -443,9 +447,86 @@ def test_normalize_country_code() -> None:
     assert normalize_country_code("US") == "US"
 
 
-@pytest.mark.parametrize("text", ["", "UK", "GBR", "G", "zz", "gı"])
+@pytest.mark.parametrize("text", ["UK", "uk", " Uk "])
+def test_uk_is_an_alias_of_gb(text: str) -> None:
+    assert normalize_country_code(text) == "GB"
+
+
+def test_the_one_alias_is_uk_and_it_maps_to_a_real_code() -> None:
+    assert dict(COUNTRY_ALIASES) == {"UK": "GB"}
+    assert set(COUNTRY_ALIASES.values()) <= COUNTRY_CODES
+    assert set(COUNTRY_ALIASES).isdisjoint(COUNTRY_CODES)
+    with pytest.raises(TypeError):
+        COUNTRY_ALIASES["EN"] = "GB"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("text", ["", "GBR", "G", "zz", "gı", "UKK", "U K", "ＵＫ", "EN"])
 def test_normalize_country_code_refuses(text: str) -> None:
     refused(normalize_country_code, text)
+
+
+# url_host -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("https://WWW.Smith-Law.co.uk./team", "www.smith-law.co.uk"),
+        ("www.smith-law.co.uk", "www.smith-law.co.uk"),
+        ("smith-law.co.uk/team?x=1#y", "smith-law.co.uk"),
+        ("HTTP://uk.Indeed.com/jobs", "uk.indeed.com"),
+        ("bücher.de", "xn--bcher-kva.de"),
+        ("maps.app.goo.gl/abc", "maps.app.goo.gl"),
+        ("co.uk", "co.uk"),  # a public suffix is still a host
+        ("localhost", "localhost"),  # and so is a single label
+        ("example.local", "example.local"),  # url_host checks no suffix list
+        ("https://user:pw@example.com:8443/x", "example.com"),
+        (LONGEST_NAME, LONGEST_NAME),
+    ],
+)
+def test_url_host_keeps_www_and_skips_the_suffix_list(text: str, expected: str) -> None:
+    assert url_host(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   ",
+        "not a url",
+        "ftp://example.com",
+        "10.0.0.1",
+        "[::1]",
+        "https://",
+        "a..b.com",
+        "x" * 64 + ".com",
+        LONGEST_NAME + "x",
+        "stra\u00dfe.de",
+        "exa\x00mple.com",
+    ],
+)
+def test_url_host_refuses_what_registrable_domain_refuses_before_the_suffix_list(
+    text: str,
+) -> None:
+    refused(url_host, text)
+    refused(registrable_domain, text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://www.Smith-Law.co.uk/team",
+        "bücher.de",
+        "a.b.ck",
+        "foo.blogspot.com",
+        "www.example.com.",
+        "WWW.EXAMPLE.CO.UK",
+    ],
+)
+def test_registrable_domain_is_url_host_then_the_suffix_list(text: str) -> None:
+    host = url_host(text)
+
+    assert registrable_domain(host) == registrable_domain(text)
 
 
 def test_country_codes_are_the_codes_in_tzdatas_iso3166_tab() -> None:
@@ -494,6 +575,8 @@ PLANTED = "plantedzq"
         (normalize_company_number, PLANTED),
         (normalize_place_id, f"{PLANTED}!"),
         (normalize_country_code, PLANTED),
+        (url_host, f"ftp://{PLANTED}.com"),
+        (url_host, f"{PLANTED} .com"),
     ],
 )
 def test_no_refusal_message_holds_the_input(fn: Callable[[str], str], text: str) -> None:
@@ -529,7 +612,8 @@ def test_no_refusal_message_holds_the_input(fn: Callable[[str], str], text: str)
         ),
         (normalize_company_number, ["12345", "sc123456"]),
         (normalize_place_id, [" ChIJ_x-Y "]),
-        (normalize_country_code, ["gb", " Us "]),
+        (normalize_country_code, ["gb", " Us ", "uk"]),
+        (url_host, ["https://WWW.Smith-Law.co.uk./team", "bücher.de", "co.uk"]),
     ],
 )
 def test_every_normaliser_is_idempotent(fn: Callable[[str], str], samples: list[str]) -> None:

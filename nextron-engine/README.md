@@ -239,8 +239,10 @@ code.
     POST must carry `Origin`**: all current browsers send it, so a POST without one is refused.
   - Every POST route runs `require_csrf` first: the request must present the session's token in
     an `X-CSRF-Token` header or a `csrf_token` field of an `application/x-www-form-urlencoded`
-    body, and every token it presents must match (compared in constant time). **A plain
-    multipart form can't carry the token, so it is refused** until a story needs one.
+    body, and every token it presents must match (compared in constant time). A multipart
+    body presents nothing itself, so **an upload (the CSV import, see
+    [CSV import, Contacts and Provenance](#csv-import-contacts-and-provenance)) passes only
+    through HTMX's `X-CSRF-Token` header**; a plain multipart form without it is refused.
   - A refused request gets **403 `Request refused: security check failed` as plain text**, and
     the handler never runs. HTMX shows that text in the page's error notice (see
     [Alerts and notifications](#alerts-and-notifications)). It is logged as `request_refused`
@@ -271,7 +273,9 @@ code.
   (`application/x-www-form-urlencoded`) and an ASCII body that `parse_qs` reads strictly
   (percent-escapes as strict UTF-8, at most 1,000 fields). Anything else, or fields other than
   the form's own, gets **400 `Request refused: malformed form`** as plain text, logged as
-  `request_refused` with `check=form`.
+  `request_refused` with `check=form`. The one upload form reads its body through
+  `upload_form` instead, a strict standard-library `multipart/form-data` parser (see
+  [CSV import, Contacts and Provenance](#csv-import-contacts-and-provenance)).
 
   A GET handler renders its page inside its body (`page(request, "x.html")`): the read-only
   unit of work closes before FastAPI serialises what the handler returns.
@@ -658,7 +662,10 @@ loser's `merged_into`, moves to the survivor every key the survivor lacks, and p
 `LeadsMerged`. A key the survivor holds with another value stays on the merged Lead, where a
 lookup still finds it and leads on to the survivor. The merge itself writes no `events` row:
 `merged_into` is the record. Every owner that adds Lead-scoped rows in a later story registers
-its `reparent_lead` for `LeadsMerged` in `main.build_subscribers`; so far only `pipeline` does.
+its `reparent_lead` for `LeadsMerged` in `main.build_subscribers`: so far `pipeline`, then
+`research` (Story 2.3: Contacts move to the survivor). A contract test
+(`tests/contracts/test_persistence_contracts.py`) fails when a table with a foreign key to
+`leads.id` has a writer that registers none.
 
 **The Pipeline Stage** (`nextron/domain/pipeline_stage.py`, owner `pipeline`) is one of `new`,
 `queued`, `contacted`, `replied`, `interested`, `call_booked`, `call_held`, `audit_proposed`,
@@ -684,13 +691,14 @@ input over 2,048 characters:
 
 | Function | Result | Refused |
 |---|---|---|
+| `url_host` | `https://WWW.Smith-Law.co.uk./team` → `www.smith-law.co.uk`: the host alone, `www` kept, with no Public Suffix List check (the FR-49 denylist matches hosts with it) | what `registrable_domain` refuses before its Public Suffix List step |
 | `registrable_domain` | `https://www.Smith-Law.co.uk/team` → `smith-law.co.uk`; `bücher.de` → `xn--bcher-kva.de` (IDNA 2003); one leading `www.` is dropped | a scheme other than `http`/`https`, an IP address, a public suffix (`co.uk`, `www.co.uk`), a single label (`localhost`), a top-level label the Public Suffix List doesn't know (`example.local`), a label over 63 or a name over 253 characters, a label holding an IDNA 2008 deviation character (`ß`, `ẞ`, `ς`, ZWNJ, ZWJ: IDNA 2003 would map `straße.de` to `strasse.de`, another registered domain) |
 | `normalize_email` | `" Jane.Doe+x@Example.COM "` → `jane.doe+x@example.com`: trimmed, NFC'd, lowercased and NFC'd again, dots and plus tags kept, the domain IDNA-encoded | anything but one `@`, whitespace, a control or format character (a zero-width space or soft hyphen), a local part over 64 characters, a one-label domain, a deviation character in the domain, over 254 characters |
 | `normalize_name` | `Smith & Jones, LLP` → `smith jones llp` (NFKC, case-folded, punctuation runs to one space, NFKC again; a combining mark stays with its letter, so `J̌ane` is `ǰane`, not `j ane`) | no letters or digits, over 500 characters |
 | `normalize_linkedin_url` | `linkedin.com/in/Jane-Doe/?trk=x` → `https://www.linkedin.com/in/jane-doe` | any other host, anything but an `/in/` profile, a slug with whitespace or a control or format character |
 | `normalize_company_number` | `12345` → `00012345`, `sc123456` → `SC123456` | anything but 1 to 8 digits or 8 letters and digits with at least one digit |
 | `normalize_place_id` | stripped, case kept | anything but 1 to 512 of `A-Z a-z 0-9 _ -` |
-| `normalize_country_code` | `gb` → `GB` | anything but the 249 ISO 3166-1 alpha-2 codes (`UK` is not one) |
+| `normalize_country_code` | `gb` → `GB`; the one alias `UK` → `GB` | anything but the 249 ISO 3166-1 alpha-2 codes and `UK` |
 
 The registrable domain comes from the Public Suffix List, both its ICANN and private sections
 (so `foo.blogspot.com` is its own organization), vendored byte for byte with its MPL-2.0
@@ -701,6 +709,108 @@ publicsuffix.org and record its SHA-256 and version in `tests/contracts/test_ven
 
 **Every `leads` column is PII class `none`**: they are organization data, so erasing a Contact
 never removes the firm's Lead. No column records the source: the creation `events` row does.
+
+## CSV import, Contacts and Provenance
+
+**Importing a list (FR-59).** Open the dashboard and follow **Import Leads from a CSV file** on
+the home page (`/leads/import`). Give the list's origin (3 to 200 characters, such as `Law
+Society directory, Manchester solicitors, exported 17 November 2026`), choose a default Segment
+or none, choose the file and press **Import**. Nothing is crawled and no email is sent: the
+import only stores Leads and Contacts.
+
+The file is UTF-8 CSV (a BOM is fine; Excel's "CSV UTF-8" works), comma-separated, at most
+5 MB (5 MiB) and 5,000 rows, with a header row. Header names ignore case, and any run of
+spaces, `_` or `-` counts as one space (`Organisation_Name` works); other columns are ignored
+and never stored:
+
+| Field | Accepted headers |
+|---|---|
+| organization name (required) | `organization name`, `organisation name`, `organization`, `organisation`, `company`, `company name` |
+| website (required) | `website`, `website url`, `web site`, `url` |
+| country (required) | `country`, `country code`: a two-letter ISO code, or `UK` |
+| Segment | `segment`: a Segment's key or name, any case |
+| Contact name | `contact name`, `contact` |
+| role | `role`, `contact role`, `title`, `job title` |
+| email | `email`, `email address`, `contact email` |
+| LinkedIn URL | `linkedin url`, `linkedin`, `contact linkedin url` |
+
+**What happens to each row.** Rows are numbered as in a spreadsheet: each record's position in
+the file, the header usually row 1; blank rows keep their number but are skipped, and blank rows
+before the header are allowed (the first non-blank row is the header). Each row becomes `Discovery.upsert_lead` with the
+website's registrable domain, the country code and the row's Segment (or the default): a new
+Lead counts as **imported**, and a row whose domain an earlier row or a stored Lead already has
+counts as **merged** (the stored Lead's name, Segment and country never change). A row is
+**rejected**, with nothing written, for the first of: a non-blank cell past the header's
+columns (blank trailing cells, such as a trailing comma, are fine); a missing organization
+name, website or country; an organization name over 200 characters or holding control
+characters; a website that isn't a web address; a LinkedIn, Instagram, Maps or job-site URL
+(the FR-49 denylist, `nextron/domain/fetch_policy.py`); a page on a shared platform
+(`leads.SHARED_PLATFORM_DOMAINS`), which isn't the firm's own website: a site builder or
+profile page (Google Sites, Facebook, Wix, Linktree), a directory or review site (Yelp, the Law
+Society, the SRA, Chambers, Legal 500, Trustpilot, Checkatrade, BBB), a company register
+(Companies House, OpenCorporates) or a URL shortener (`bit.ly`, `goo.gl`, `t.co`); an unknown
+country; a Segment that doesn't exist (even when a default is chosen: a
+typo shouldn't land a firm in the wrong playbook); or no Segment and no default.
+
+An accepted row with a Contact name or email adds a Contact to the Lead through
+`Research.add_contact(source=csv)`. A Contact cell that fails its check is dropped and the row
+is noted, while the rest imports: an email that `normalize_email` or the syntax check refuses,
+a LinkedIn URL that isn't a `linkedin.com/in/` profile, a name or role over 200 characters or
+holding control characters, or a name with no letters or digits. A row with Contact cells but neither a name nor a valid email
+gets no Contact and a note.
+
+**The summary** shows the imported, merged and rejected counts, each rejected row (number,
+organization, reason) and each imported row with notes. Every CSV text shows escaped, inside an
+`untrusted` block. A refused import (a bad origin, an empty, non-UTF-8 or invalid file, a
+missing required column, too many rows, an unknown default Segment) writes nothing and shows the
+reason by its field, keeping what was typed. A file over 5 MB is discarded unread, so the form
+comes back empty with "The file is over 5 MB.".
+
+**Batches.** Rows are written in batches of 200, each in its own transaction, so the database
+is never locked for long. If a batch fails, it is rolled back and the import stops there; the
+page shows the counts so far and which row the import stopped at. Importing the same file again
+is safe: rows already imported are merged and their Contacts match, so nothing is duplicated.
+
+**Contacts (`contacts`, owner `research`, migration `0015_2_3_contacts_provenance`).** A
+Contact belongs to one Lead and has a name or an email (or both), an optional role and
+LinkedIn URL (normalised, stored as a source and never fetched), a Primary flag (false until
+Story 2.10 picks one), and `tz` and Market, NULL until Epic 3 sets them. Contacts are
+deduplicated within their Lead: a candidate matches the first Contact with the same normalised
+email, else the first with the same normalised name (`normalize_name`). A match only fills what
+the Contact lacks and never overwrites; a different email on the match is kept, and the new one
+is dropped with the note "the Contact already has a different email address, so this one was
+not stored". On a merge, the merged Lead's Contacts move to the survivor (duplicates are kept
+until Story 2.10 folds them), and a moved Contact loses its Primary flag when the survivor
+already has a Primary. Read them with `queries.research.contacts(lead_id)`.
+
+**Address Class (FR-15, `nextron/domain/address_class.py`).** An address is `published`,
+`guessed`, `verified` or `invalid` (terminal). Its first class comes from its source: CSV,
+pattern and finder addresses start `guessed` (the only class that uses verification credits),
+website addresses `published`. Only `guessed → verified`, `guessed → published` and any →
+`invalid` (a failed check or a hard bounce) are allowed; later stories apply them. Each
+assignment appends an `events` row (entity `contacts`, actor `system:research`, cause
+`assigned_from_<source>`) with IDs and codes only.
+
+**Provenance Records (FR-51, `provenance_records`).** Every Contact gets a `contact` record and
+every address an `address` record: the source kind (`csv`, `website`, `signal_inbox`,
+`referral`, `replier`, `operator`, `pattern`, `finder` or `eligibility_basis`), the detail (for
+a CSV, the list's origin), the retrieval time and, on an `address` record, the address and its
+class at the time. A later source that fills a name, role or LinkedIn URL adds one more
+`contact` record. The eligibility-basis fields (`basis_rule`, `basis_campaign_id`, `lia_ref`,
+`lia_date`, `basis_recorded_at`) stay NULL until Epic 3. Read them with
+`queries.research.provenance(contact_id)`. A row without a Contact records its origin only
+through the Lead's creation event (`created_from_csv`).
+
+**Personal data.** A Contact's name and role and a record's detail and notes are `redact`; the
+email and a record's address are `keep_hash`, so suppression and dedupe still match after an
+erasure; the LinkedIn URL is `null`. No log line or `events` row holds a CSV cell, the origin,
+an email address or the file name: the import logs `lead_import_finished` (counts),
+`lead_import_refused` (`field`) and `lead_import_stopped` (`at_row`, the error's type).
+
+**Email syntax.** The syntax check is `EmailSyntaxPort` (`nextron/ports/email_syntax.py`),
+implemented by `nextron.adapters.email_syntax.EmailValidatorSyntax` over email-validator with
+deliverability checks off: no DNS lookup, so it is free and unmetered, and test and special-use
+domains (`.test`, `.local`) fail. The MX and disposable-domain checks come with Story 2.14.
 
 ## Secrets
 
@@ -954,6 +1064,7 @@ the log line carries the copy's `file` name.
 | `0012_1_18_restore_tests` | `restore_tests`: one row per restore test, each check's outcome, its nine checks (`kind`, `result`, one per check, `ck_restore_tests_outcome`, `ck_restore_tests_counts`) and `ix_restore_tests_started_at` (see [The restore test](#the-restore-test)) | `ops` |
 | `0013_4_1_sequences` | `sequences` (unique `key`, `ck_sequences_version`) and `step_briefs` (a foreign key to `sequences.id` with no cascade; unique on `sequence_id` and `step`; three checks) (see [Sequences](#sequences)) | `setup` |
 | `0014_2_8_ai_routes` | `prompt_snapshots` (unique `(route, prompt_version)` and `(route, prompt_version, sha256)`, two checks) and `ai_route_activations` (a composite foreign key to the snapshot, three checks, the partial unique index `uq_ai_route_activations_active_route`) (see [Prompts and the active route tuple](#prompts-and-the-active-route-tuple)) | `playbook` |
+| `0015_2_3_contacts_provenance` | `contacts` (`ix_contacts_lead_id`, foreign keys to `leads` and `markets` with no cascade, three checks) and `provenance_records` (`ix_provenance_records_contact_id`, a foreign key to `contacts` with no cascade, four checks, the nullable eligibility-basis fields) (see [CSV import, Contacts and Provenance](#csv-import-contacts-and-provenance)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

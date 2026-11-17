@@ -43,6 +43,11 @@ Its ``OffpcBackups`` (``offpc``, Story 1.17) sends verified copies to ``offpc_ta
 Its ``RestoreTests`` (``restore_tests``, Story 1.18) uses the same clock, ``offpc``, ``notify``
 and ``queue``, that backup dir and ``inspect`` (``nextron.db.repos.ops.snapshot.inspect_copy``
 unless a test passes another). The panel's "Run restore test now" queues its job.
+
+Its ``LeadImports`` (``lead_imports``, Story 2.3) uses the same clock, a ``Discovery`` and a
+``Research`` on it, and ``email_syntax`` (a ``FakeEmailSyntax`` unless a test passes another);
+the CSV import page runs it, so it needs real units of work too. ``upload(**texts, file=...)``
+builds a ``multipart/form-data`` body as a browser would, with its ``Content-Type``.
 """
 
 import json
@@ -56,6 +61,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron import main
+from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -67,12 +73,15 @@ from nextron.app.ops.api import (
     OffpcBackups,
     RestoreTests,
 )
+from nextron.app.pipeline.api import Pipeline
+from nextron.app.research.api import Research
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.alert import Channel
 from nextron.domain.job import JobTypes
 from nextron.domain.readiness import CheckResult, Status
 from nextron.ports.alert import AlertPort
+from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import Query
 from nextron.web.app import create_app
 from nextron.web.routing import Units
@@ -80,6 +89,7 @@ from tests.asgi import DEFAULT_HOST, Headers, Reply, request
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
+from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
@@ -121,6 +131,37 @@ def default_local_dir() -> Path:
     """``<%LOCALAPPDATA%>\\Nextron\\backups\\test\\local``: under the test's temporary
     folder."""
     return Path(os.environ["LOCALAPPDATA"]) / "Nextron" / "backups" / "test" / "local"
+
+
+UPLOAD_BOUNDARY = "----NextronTestBoundary7MA4YWxkTrZu0gW"
+
+
+def upload(
+    file: bytes | None = None, *, filename: str = "leads.csv", **texts: str
+) -> tuple[bytes, Headers]:
+    """A ``multipart/form-data`` body of ``texts`` (in order) then, unless ``file`` is
+    ``None``, the file part ``file``, as a browser encodes them; with its ``Content-Type``
+    header, to pass as ``headers``."""
+    lines: list[bytes] = []
+    for name, value in texts.items():
+        lines += [
+            f"--{UPLOAD_BOUNDARY}".encode(),
+            f'Content-Disposition: form-data; name="{name}"'.encode(),
+            b"",
+            value.encode("utf-8"),
+        ]
+    if file is not None:
+        lines += [
+            f"--{UPLOAD_BOUNDARY}".encode(),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"'.encode(),
+            b"Content-Type: text/csv",
+            b"",
+            file,
+        ]
+    lines.append(f"--{UPLOAD_BOUNDARY}--".encode())
+    body = b"\r\n".join(lines) + b"\r\n"
+    content_type = f"multipart/form-data; boundary={UPLOAD_BOUNDARY}".encode()
+    return body, [(b"content-type", content_type)]
 
 
 def form(**fields: str) -> bytes:
@@ -194,6 +235,7 @@ class Dashboard:
     local_dir: Path = field(default_factory=default_local_dir)
     offpc_target: InMemoryBackupTarget = field(default_factory=InMemoryBackupTarget)
     inspect: Callable[[Path], CopyInspection] = inspect_copy
+    email_syntax: EmailSyntaxPort = field(default_factory=FakeEmailSyntax)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -208,6 +250,7 @@ class Dashboard:
     offpc: OffpcBackups = field(init=False)
     backups: Backups = field(init=False)
     restore_tests: RestoreTests = field(init=False)
+    lead_imports: LeadImports = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -264,6 +307,12 @@ class Dashboard:
             issues=main.build_health_issues(budget=self.budget),
             readiness=self.readiness,
         )
+        self.lead_imports = LeadImports(
+            self.clock,
+            Discovery(self.clock, Pipeline(self.clock)),
+            Research(self.clock),
+            self.email_syntax,
+        )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -279,6 +328,7 @@ class Dashboard:
             queue=self.queue,
             backups=self.backups,
             restore_tests=self.restore_tests,
+            lead_imports=self.lead_imports,
             units=self.units,
             **extra,
         )

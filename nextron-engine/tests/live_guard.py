@@ -142,6 +142,9 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
         "writes JSON lines under the data dir and only calls the adapter it wraps"
     ),
     "ai": Guarded(("default_http_client",)),
+    "email_syntax": NoExternalSystem(
+        "checks an address's syntax with email-validator, deliverability off; no DNS or network"
+    ),
 }
 
 
