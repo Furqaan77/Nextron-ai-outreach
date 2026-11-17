@@ -15,11 +15,13 @@ from nextron import main
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
 from nextron.db import migrations
 from nextron.db.migrations import ensure_current, head_revision
-from nextron.db.uow import UnitOfWorkFactory
-from nextron.domain.notifications import NOTIFICATIONS
+from nextron.app.pipeline.api import Pipeline
+from nextron.db.uow import UnitOfWorkFactory, is_command
+from nextron.domain.notifications import NOTIFICATIONS, LeadsMerged
 from nextron.lock import InstanceLock, LockHeldError
 from nextron.startup_checks import Probes
 from tests.asgi import get
+from tests.fakes.clock import FrozenClock
 from tests.fakes.probes import PortProbe, fake_probes
 from tests.fakes.secrets import InMemorySecrets
 from tests.migration_chains import (
@@ -666,11 +668,24 @@ def test_the_database_engine_is_disposed_when_a_migration_fails(
     assert_disposed(engine, dev / "nextron.db")
 
 
-def test_build_subscribers_ships_an_empty_frozen_registry() -> None:
+def test_build_subscribers_registers_reparent_lead_for_leads_merged_only() -> None:
     subscribers = main.build_subscribers()
 
     assert subscribers.frozen
-    assert all(subscribers.subscribers_of(kind) == () for kind in NOTIFICATIONS)
+    [subscriber] = subscribers.subscribers_of(LeadsMerged)
+    assert is_command(subscriber)
+    assert subscriber.__name__ == "reparent_lead"
+    assert isinstance(getattr(subscriber, "__self__", None), Pipeline)
+    others = [kind for kind in NOTIFICATIONS if kind is not LeadsMerged]
+    assert all(subscribers.subscribers_of(kind) == () for kind in others)
+
+
+def test_build_subscribers_gives_its_services_the_clock() -> None:
+    clock = FrozenClock()
+
+    [subscriber] = main.build_subscribers(clock=clock).subscribers_of(LeadsMerged)
+
+    assert subscriber.__self__._clock is clock  # type: ignore[attr-defined]
 
 
 def test_cli_dispatches_serve(monkeypatch: pytest.MonkeyPatch) -> None:

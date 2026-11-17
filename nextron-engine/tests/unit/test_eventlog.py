@@ -150,7 +150,7 @@ BAD_ARGUMENTS = [
     ("actor", "ai:r" + "x" * 64 + "@1"),
     ("actor", "ai:r@" + "V" * 33),
     ("actor", None),
-    ("entity", "leads"),
+    ("entity", "no_such_table"),
     ("entity", "EVENTS"),
     ("entity", None),
     ("entity_id", LEAD.lower()),

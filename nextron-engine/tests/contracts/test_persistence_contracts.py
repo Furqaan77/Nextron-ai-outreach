@@ -69,7 +69,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0007_2_1_segments"
+HEAD = "0008_2_2_leads"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -419,11 +419,11 @@ def test_the_coverage_check_names_an_unmapped_dummy_column() -> None:
 
 def test_the_coverage_check_names_a_table_missing_from_both_maps() -> None:
     metadata = metadata_copy()
-    Table("leads", metadata, Column("id", Ulid, primary_key=True))
+    Table("probe", metadata, Column("id", Ulid, primary_key=True))
 
     assert coverage_problems(metadata) == [
-        "leads.id is unmapped in owners.TABLES",
-        "leads.id is unclassified in pii_registry.PII",
+        "probe.id is unmapped in owners.TABLES",
+        "probe.id is unclassified in pii_registry.PII",
     ]
 
 
@@ -667,19 +667,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0008_next"}], None),
-        ([{"revision": "0008-next"}], "the chain does not load"),
-        ([{"revision": "0008_Next"}], "the id does not match"),
+        ([{"revision": "0009_next"}], None),
+        ([{"revision": "0009-next"}], "the chain does not load"),
+        ([{"revision": "0009_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0009_next"}], "the id starts 0009, but it is revision 8"),
-        ([{"revision": "0008_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0008_next", "file": "0008_other"}], "the id is not its file name"),
-        ([{"revision": "0008_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0008_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0008_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0008_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0010_next"}], "the id starts 0010, but it is revision 9"),
+        ([{"revision": "0009_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0009_next", "file": "0009_other"}], "the id is not its file name"),
+        ([{"revision": "0009_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0009_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0009_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0009_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0008_a"}, {"revision": "0009_b", "down": HEAD}],
+            [{"revision": "0009_a"}, {"revision": "0010_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],

@@ -454,6 +454,97 @@ problem exits 1 before the database is opened.
 Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
 `id`, `key`, `version` and decoded `SegmentDef`) and `queries.setup.segment(key)`.
 
+## Leads and identity
+
+**One Lead per organization (FR-9).** A Lead is an organization, stored once in the `leads`
+table (migration `0008_2_2_leads`) and matched by any of three keys: its registrable website
+domain (`web_domain`), its Companies House number (`ch_number`) or its Google place ID
+(`place_id`). Each key is unique across every Lead, at every Pipeline Stage, Disqualified and
+merged Leads included, so nothing ever creates a second Lead for an organization the engine
+already knows. Other code adds or finds a Lead only through `Discovery.upsert_lead`
+(`nextron/app/discovery/api.py`), an owner command that joins the caller's transaction:
+
+```python
+identity = LeadIdentity(
+    name="Smith Law LLP",
+    segment_id=segment.id,                                    # a stored Segment
+    web_domain=registrable_domain("https://www.Smith-Law.co.uk/team"),   # "smith-law.co.uk"
+    ch_number=normalize_company_number("oc123456"),           # "OC123456"
+    country_code="GB",
+)
+result = discovery.upsert_lead(identity, LeadSource.CSV)      # UpsertedLead(lead_id, created, merged)
+```
+
+1. **A wrong type** raises `TypeError`, and a `segment_id` that is not a stored Segment raises
+   `InvalidLeadIdentity` (code `invalid_lead_identity`, `segment_id: is not a stored Segment`).
+   `LeadIdentity` itself refuses a field that breaks its rule, naming the field and never the
+   value: a name of 1 to 200 characters with no control or format character and no spaces at
+   either end, a ULID Segment, keys already in normalised form, a known country code, and at
+   least one key.
+2. **Each key is looked up,** and a Lead that was merged leads on (`merged_into`) to the Lead
+   it was merged into; a chain of more than 64 links raises `RuntimeError`.
+3. **No match:** a new Lead is stored at stage `new`, with one `events` row (entity `leads`,
+   `None` to `new`, actor `system:pipeline`) whose cause records where it came from:
+   `created_from_csv`, `created_from_signal_inbox`, `created_from_places`,
+   `created_from_companies_house` or `created_from_job_aggregator`. `created` is `True`.
+4. **Two or more Leads match** (the domain is one Lead's and the place ID another's): they are
+   one organization, so the newer ones are merged into the oldest (by `created_at`, then `id`),
+   in age order, in the same transaction, and listed in `merged`.
+5. **Then** each of the candidate's keys that no Lead holds and the Lead lacks is added to it.
+   An existing Lead's name, Segment and country never change, and a key that conflicts with
+   the Lead's own (another domain, say) is dropped.
+
+**Merging.** `Discovery.merge(survivor_id, loser_id)` (also an owner command) refuses, with
+`MergeRefused` (code `merge_refused`), the same Lead twice, an unknown or already merged Lead,
+and a survivor newer than the loser: the older Lead always survives. Otherwise it sets the
+loser's `merged_into`, moves to the survivor every key the survivor lacks, and publishes
+`LeadsMerged`. A key the survivor holds with another value stays on the merged Lead, where a
+lookup still finds it and leads on to the survivor. The merge itself writes no `events` row:
+`merged_into` is the record. Every owner that adds Lead-scoped rows in a later story registers
+its `reparent_lead` for `LeadsMerged` in `main.build_subscribers`; so far only `pipeline` does.
+
+**The Pipeline Stage** (`nextron/domain/pipeline_stage.py`, owner `pipeline`) is one of `new`,
+`queued`, `contacted`, `replied`, `interested`, `call_booked`, `call_held`, `audit_proposed`,
+`audit_won`, `build_proposed`, `won` (the open stages), `not_now` (parked), `lost` and
+`disqualified` (closed). The module's table lists every move the later stories make (enrolment,
+sends, replies, calls, proposals, closing); a closed Lead moves only when the Operator reopens
+it. On a merge, `pipeline.reparent_lead` gives the survivor the more advanced stage of the two
+and records it in `events` (cause `leads_merged`, `cause_ref` the merged Lead):
+
+- a closed survivor keeps its stage;
+- otherwise a closed loser's stage wins, so a merge never makes a Lost or Disqualified
+  organization contactable again;
+- otherwise the later stage wins, with Not Now ranked just after `replied`;
+- a tie keeps the survivor's stage. The merged Lead keeps its own stage.
+
+Read a Lead with `queries.discovery.lead(lead_id)` (its identity group, merged or not, or
+`None`) and its stage with `queries.pipeline.stage(lead_id)` (a `PipelineStage`, or `None`).
+
+**Identity normalisation (SC-8).** `nextron/domain/identity.py` is the only code that
+normalises an identity; everything else calls it. Each function refuses with `IdentityError`
+(code `invalid_identity`), whose message is the reason and never the input, and refuses any
+input over 2,048 characters:
+
+| Function | Result | Refused |
+|---|---|---|
+| `registrable_domain` | `https://www.Smith-Law.co.uk/team` → `smith-law.co.uk`; `bücher.de` → `xn--bcher-kva.de` (IDNA 2003); one leading `www.` is dropped | a scheme other than `http`/`https`, an IP address, a public suffix (`co.uk`, `www.co.uk`), a single label (`localhost`), a top-level label the Public Suffix List doesn't know (`example.local`), a label over 63 or a name over 253 characters, a label holding an IDNA 2008 deviation character (`ß`, `ẞ`, `ς`, ZWNJ, ZWJ: IDNA 2003 would map `straße.de` to `strasse.de`, another registered domain) |
+| `normalize_email` | `" Jane.Doe+x@Example.COM "` → `jane.doe+x@example.com`: trimmed, NFC'd, lowercased and NFC'd again, dots and plus tags kept, the domain IDNA-encoded | anything but one `@`, whitespace, a control or format character (a zero-width space or soft hyphen), a local part over 64 characters, a one-label domain, a deviation character in the domain, over 254 characters |
+| `normalize_name` | `Smith & Jones, LLP` → `smith jones llp` (NFKC, case-folded, punctuation runs to one space, NFKC again; a combining mark stays with its letter, so `J̌ane` is `ǰane`, not `j ane`) | no letters or digits, over 500 characters |
+| `normalize_linkedin_url` | `linkedin.com/in/Jane-Doe/?trk=x` → `https://www.linkedin.com/in/jane-doe` | any other host, anything but an `/in/` profile, a slug with whitespace or a control or format character |
+| `normalize_company_number` | `12345` → `00012345`, `sc123456` → `SC123456` | anything but 1 to 8 digits or 8 letters and digits with at least one digit |
+| `normalize_place_id` | stripped, case kept | anything but 1 to 512 of `A-Z a-z 0-9 _ -` |
+| `normalize_country_code` | `gb` → `GB` | anything but the 249 ISO 3166-1 alpha-2 codes (`UK` is not one) |
+
+The registrable domain comes from the Public Suffix List, both its ICANN and private sections
+(so `foo.blogspot.com` is its own organization), vendored byte for byte with its MPL-2.0
+header at `nextron/domain/psl/public_suffix_list.dat`; `psl_version()` returns its version,
+`2026-11-16_22-30-55_UTC`. To update it, replace the file with a fresh copy from
+publicsuffix.org and record its SHA-256 and version in `tests/contracts/test_vendored_assets.py`
+(`.gitattributes` keeps git from changing its line endings).
+
+**Every `leads` column is PII class `none`**: they are organization data, so erasing a Contact
+never removes the firm's Lead. No column records the source: the creation `events` row does.
+
 ## Secrets
 
 Secrets live only in Windows Credential Manager, through `SecretsPort`
@@ -695,6 +786,7 @@ traceback in `nextron.log`.
 | `0005_1_12_notify` | `alerts` (unique on kind, subject and channel, a status check) and `notifications` (unique on kind and subject, `ix_notifications_open`) (see [Alerts and notifications](#alerts-and-notifications)) | `notify` |
 | `0006_1_13_metering` | `api_usage` (three checks, `ix_api_usage_at`) and `ai_usage` (two checks, `ix_ai_usage_at`) (see [Metering, quotas and the AI budget](#metering-quotas-and-the-ai-budget)) | `db.metering` |
 | `0007_2_1_segments` | `segments` (unique `key`, `ck_segments_version`) (see [Seeds](#seeds)) | `setup` |
+| `0008_2_2_leads` | `leads` (unique `web_domain`, `ch_number` and `place_id`, four checks, two foreign keys) (see [Leads and identity](#leads-and-identity)) | `discovery` (identity group), `pipeline` (`pipeline_stage`) |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

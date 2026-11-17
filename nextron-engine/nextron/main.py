@@ -32,9 +32,11 @@ database, the notification subscriber registry and Uvicorn.
 
 Any other error is logged as ``engine_crashed`` and ends with exit 1.
 
-``build_subscribers`` is the notification subscriber registry (AD-3): the only code that
-constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
-adds a subscriber registers its owner command there, in the order AD-3 lists.
+``build_subscribers(clock=None)`` is the notification subscriber registry (AD-3): the only code
+that constructs ``Subscribers`` or registers a subscriber, frozen once filled. Each story that
+adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
+``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
+the more advanced Pipeline Stage), with ``SystemClock()`` when no clock is given.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts)`` is the job type registry: the only code that
 constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's ``JobType``
@@ -251,6 +253,7 @@ from nextron.adapters.telegram import TelegramAlert
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Budget, DashboardEntry, DeadJobAlerts, EngineHealth, Heartbeat
+from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, SegmentSync, Setup
@@ -271,6 +274,7 @@ from nextron.domain.alert import SEND_ALERT_JOB, Channel
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
+from nextron.domain.notifications import LeadsMerged
 from nextron.domain.seed_yaml import SeedSyntaxError
 from nextron.domain.segments import InvalidSegments, SegmentDef, validate_segments
 from nextron.domain.settings_schema import Key
@@ -631,11 +635,13 @@ def build_role_adapter(
     return ROLE_SINKS[entry.role](adapter, allowlist, recorder)  # type: ignore[arg-type]
 
 
-def build_subscribers() -> Subscribers:
-    """The notification subscriber registry (AD-3), frozen. Empty until a story adds one:
-    register each subscriber with ``register_subscriber(<Notification>, <owner command>)``,
-    in the order AD-3 lists, before ``freeze()``."""
+def build_subscribers(clock: Clock | None = None) -> Subscribers:
+    """The notification subscriber registry (AD-3), frozen. Register each subscriber with
+    ``register_subscriber(<Notification>, <owner command>)``, in the order AD-3 lists, before
+    ``freeze()``. The subscribers' services use ``clock``, or a ``SystemClock``."""
+    chosen = clock if clock is not None else SystemClock()
     subscribers = Subscribers()
+    subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
     subscribers.freeze()
     return subscribers
 

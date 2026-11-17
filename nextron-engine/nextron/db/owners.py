@@ -62,6 +62,20 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "segments": {
         "setup": ("id", "key", "definition", "version", "created_at", "updated_at"),
     },
+    "leads": {
+        "discovery": (
+            "id",
+            "name",
+            "web_domain",
+            "ch_number",
+            "place_id",
+            "segment_id",
+            "country_code",
+            "merged_into",
+            "created_at",
+        ),
+        "pipeline": ("pipeline_stage",),
+    },
     "jobs": {
         "jobqueue": (
             "id",
