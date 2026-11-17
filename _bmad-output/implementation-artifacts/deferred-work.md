@@ -94,3 +94,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-5-crawl-a-lead-s-website-politely-inside-the-egress-filter.md`
   summary: Canonicalisation (`canonicalize_lead`) still trusts parking and domain-marketplace hosts (for example sedo.com, dan.com, hugedomains.com, afternic.com) that an expired Lead domain may forward to; two such Leads would be merged.
   evidence: Review pass 1 finding #4 (B3+E4). Story 2.3's `is_shared_platform` list, now used by the crawl, covers site builders, profile pages, directories and shorteners but no parking hosts; adding a vetted parking list needs Mac's review.
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-20-spike-register-the-logon-task-and-prove-restarts.md`
+  summary: Observe, with the real engine, that triggers catch up within a moment of a PC wake. The spec-1-11 entry above gave this check to Story 1.20, but the spike checks only the supervisor across a sleep, with a fake engine. Hand it to Story 1.21's first real sleep with `run.ps1` and the engine, or to Mac's first week of running it.
+  evidence: Review pass 1 of Story 1.20 (EC19, entry AI, low). The engine README ("After the PC sleeps") still says the catch-up is unobserved on a real sleep, and the spike's row 5 uses `scripts/spike/fake_serve.py`, which has no scheduler.
