@@ -228,7 +228,8 @@ code.
     in `<body hx-headers='{"X-CSRF-Token": ...}'>`, so every HTMX request sends it, and every
     `<form>` carries it as the hidden `csrf_token` field (`{{ csrf_field() }}`). Pages that
     carry it are never cached (`page()` answers with `Cache-Control: no-store`).
-  - **Every form posts through HTMX** (`<form method="post" hx-post="...">`). Under the
+  - **Every form that changes state posts through HTMX** (`<form method="post"
+    hx-post="...">`); the one GET form, the Leads list's filters, changes nothing. Under the
     dashboard's `Referrer-Policy: no-referrer`, a browser's native form submission sends
     `Origin: null`, which the `Origin` check refuses; HTMX's request keeps the real `Origin`. If
     the HTMX script ever fails to load, the native fallback is refused with 403: it fails
@@ -300,9 +301,10 @@ code.
   An unlisted use, or a listed line that no longer exists, fails the contract tests.
 
 `tests/contracts/test_web_contracts.py` checks the handler, declaration, route, inline-code,
-autoescaping, form and safe-allowlist rules. No form uses GET yet: every `<form>` must have
-`method="post"`, `hx-post` and `{{ csrf_field() }}`, and a future GET filter form must amend that
-contract.
+autoescaping, form and safe-allowlist rules. Every `<form>` must have `method="post"`, `hx-post`
+and `{{ csrf_field() }}`, except a GET filter form (Story 2.4's Leads list): `method="get"`, with
+no `hx-post`, nothing naming `csrf` inside it (a token must never reach a URL) and an `action`
+that is a local path (`/`, then neither `/` nor a backslash).
 
 ## Settings
 
@@ -994,6 +996,70 @@ causes are `operator`, `bounce_rate`, `policy_bounce`, `blocklist` and `spam_rat
 | `auth_fail` | `active`, `paused` | `auth_failed` | `invalid_grant` |
 | `reconsent` | `auth_failed` | `active` | `reconsented` |
 | `remove` | every status except `removed` | `removed` | `operator_removed` |
+
+## Leads list and Lead page
+
+**The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
+The list shows every Lead that wasn't merged into another, at every stage (Disqualified
+included), newest first (by created date, then id), 50 per page: its name (linked to its page),
+website domain (or "—"), Segment, country (or "—"), Pipeline Stage and created date
+(`YYYY-MM-DD`, UTC). Above it, "Showing 1–50 of 132 Leads", "No Leads yet." or "No Leads match
+these filters.", and a link to **Import Leads from a CSV file**. When there is more than one
+page, "Page 1 of 3" sits below it with **Previous** and **Next** links that keep the filters; a
+page past the end shows the last page.
+
+**Filtering.** Choose a stage, a Segment or both, type part of a name or website in **Name or
+website** (at most 200 characters) and press **Filter**; **Clear filters** goes back to the whole
+list. The search is a substring match on the name or the stored website domain, ignoring case
+for ASCII letters only (`smith` finds `Smith Law`, but `ärzte` doesn't find `Ärzte`), with `%` and
+`_` matched literally. Only the registrable domain is stored, so `www.` or `https://` in a search
+matches nothing. An internationalised domain is stored and shown in its ASCII `xn--` form
+(`bücher.de` is `xn--bcher-kva.de`), so search for that form: the Unicode spelling misses it. The
+filters live in the URL, so a filtered list can be bookmarked:
+
+    /leads?stage=contacted&segment=law_private_ai&q=smith&page=2
+
+The parameters are `stage` (a stage, such as `call_booked`), `segment` (a Segment key), `q` and
+`page` (1 to 7 digits), each at most once; a blank one (empty or whitespace only) is unset. In
+`q`, whitespace characters (tabs, line breaks and the like) count as spaces, and each run of them
+collapses to one. Any other parameter, a repeated one, an unknown stage or Segment, a `q` over
+200 characters or holding any other control character, or a bad `page` is refused with 400
+"Request refused: malformed form", so a hand-edited URL never shows an unfiltered list that looks
+filtered. The filter form is the dashboard's one GET form: it carries no CSRF token, because a
+token must never reach a URL (`tests/contracts/test_web_contracts.py` allows a GET form only
+without `hx-post`, without the token and with a local `action`).
+
+**The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
+to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created
+date, with a link back to **All Leads**. **Contacts** lists every Contact, oldest first, with its
+name, role, email, Address Class, LinkedIn URL (a link Mac can open; the engine never fetches
+it) and Primary (`Yes` or `No`), a blank showing "—"; or "No Contacts yet.". Under each
+Contact, its Provenance Records (FR-51): the record ("Contact", or "Address" and the address),
+the source (CSV import, Website, Signal Inbox (manual), Referral, Replier, Entered by Mac, Email
+pattern, Email finder or Eligibility basis), the detail (for a CSV, the list's origin), the
+retrieval date and the Address Class at the time; or "No Provenance Record.". Market, Tier,
+scores, Signals, Evidence, job postings, the timeline, stage actions, changing the Primary and
+the data-subject actions come with their stories (3.2 and 3.7, 2.9, 2.11, 2.15, Epics 5 and 9,
+2.10, 3.13 onwards).
+
+A merged Lead's URL redirects (303) straight to the Lead at the end of its merge chain, following
+at most 32 merges; an id that isn't a ULID, an unknown id or a broken chain gets 404 "Lead not
+found", which never repeats the id. Both pages show personal data (a Lead's name can be a sole
+trader's name), so both send `Cache-Control: no-store`. Every Lead, Contact and Provenance text
+is imported or crawled, so it renders escaped (`|plain`, or `safe_link` for the two links)
+inside an element carrying `hx-disable`.
+
+**Reads.** The pages read only through `nextron.app.queries`:
+
+- `queries.discovery.lead_list(stage=, segment_id=, search=, page=)` returns a `LeadListPage`
+  (`leads`, `total`, `page`, `pages`); a `page` that isn't an `int` raises `TypeError`, one below
+  1 `ValueError`. It reads the pipeline group's `pipeline_stage` column of the same `leads` rows,
+  read-only, so the stage filter and the paging stay in one SQL statement; only `pipeline`
+  writes it.
+- `queries.discovery.survivor_of(lead_id)` follows `merged_into` to the Lead that isn't merged
+  (at most `MAX_MERGE_HOPS`, 32, hops), or returns `None`. Story 2.5's jobs reuse it.
+- `queries.research.lead_provenance(lead_id)` maps each Contact id that has records to its
+  Provenance Records, by retrieval time then id, in one statement joining `contacts`.
 
 ## Secrets
 

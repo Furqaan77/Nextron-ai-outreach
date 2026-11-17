@@ -7,7 +7,9 @@ the running use case's transaction. It checks nothing; ``nextron.app.research`` 
 
 - ``StoredProvenance``: one row;
 - ``insert(...) -> id``: a new record; ``notes`` and the eligibility-basis fields are NULL;
-- ``for_contact(contact_id)``: the Contact's records, by ``retrieved_at``, then ``id``.
+- ``for_contact(contact_id)``: the Contact's records, by ``retrieved_at``, then ``id``;
+- ``for_lead(lead_id)`` (Story 2.4): the records of every Contact of the Lead, by
+  ``retrieved_at``, then ``id``, in one statement joining ``contacts``.
 """
 
 from dataclasses import dataclass
@@ -17,7 +19,7 @@ from sqlalchemy import insert as insert_rows
 from sqlalchemy import select
 
 from nextron.db.models.base import new_id
-from nextron.db.models.research import ProvenanceRecord
+from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.uow import current
 
 
@@ -91,6 +93,18 @@ def for_contact(contact_id: str) -> tuple[StoredProvenance, ...]:
     statement = (
         select(*_COLUMNS)
         .where(ProvenanceRecord.contact_id == contact_id)
+        .order_by(ProvenanceRecord.retrieved_at, ProvenanceRecord.id)
+    )
+    return tuple(StoredProvenance(*row) for row in current().session.execute(statement))
+
+
+def for_lead(lead_id: str) -> tuple[StoredProvenance, ...]:
+    """The Provenance Records of every Contact of the Lead ``lead_id``, by ``retrieved_at``,
+    then ``id``."""
+    statement = (
+        select(*_COLUMNS)
+        .join(ContactRecord, ContactRecord.id == ProvenanceRecord.contact_id)
+        .where(ContactRecord.lead_id == lead_id)
         .order_by(ProvenanceRecord.retrieved_at, ProvenanceRecord.id)
     )
     return tuple(StoredProvenance(*row) for row in current().session.execute(statement))

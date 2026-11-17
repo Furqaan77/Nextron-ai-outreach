@@ -577,3 +577,76 @@ button.secondary {
   margin: 0.25rem 0 0;
   font-size: 0.875rem;
 }
+
+/* The Leads list and the Lead page: the filter form, the tables (imported text wraps anywhere),
+   the pager and the header facts. */
+.lead-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0 1rem;
+  margin-bottom: 1rem;
+}
+
+.lead-filters .field {
+  min-width: 12rem;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.lead-count {
+  font-weight: 600;
+}
+
+.lead-table,
+.provenance-table {
+  margin: 0 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.lead-table th,
+.lead-table td,
+.provenance-table th,
+.provenance-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.provenance-row > td {
+  padding-left: 2rem;
+  background: var(--band);
+}
+
+.provenance-table {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.lead-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.lead-facts dt {
+  font-weight: 600;
+}
+
+.lead-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

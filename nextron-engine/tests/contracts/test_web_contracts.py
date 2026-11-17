@@ -23,8 +23,12 @@
 - **Forms post through HTMX with a CSRF token.** Every ``<form>`` in the templates has
   ``method="post"`` and ``hx-post``, and calls ``csrf_field()`` before its ``</form>``. Under
   ``Referrer-Policy: no-referrer`` a native form submission sends ``Origin: null``, which the
-  guard refuses; HTMX's request keeps the real ``Origin``. (No form uses GET yet; a GET filter
-  form must amend this contract.)
+  guard refuses; HTMX's request keeps the real ``Origin``. A ``<form>`` may also be
+  ``method="get"`` (a filter form, Story 2.4) when it has no ``hx-post`` (nor
+  ``data-hx-post``), nothing naming ``csrf`` before its ``</form>`` (no ``csrf_field()`` and no
+  ``csrf_token``: a token must never reach a URL), and an ``action`` that is a local path: it
+  starts with ``/`` followed by neither ``/`` nor a backslash. A ``<form>`` with more than one
+  ``method`` fails (a browser takes the first).
 - **The safe allowlist.** Outside ``tests/contracts/safe_allowlist.txt``, no template (scanned
   as a whole, so a match may span lines) reaches the ``safe`` filter (``|safe``, a quoted
   ``'safe'`` filter name inside a Jinja tag such as ``map('safe')``, or a ``{% filter safe %}``
@@ -170,6 +174,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/import",
         "/inboxes",
         "/inboxes",
+        "/leads",
+        "/leads/{lead_id}",
     ]
     assert async_route_handlers(app) == []
 
@@ -589,8 +595,11 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "home.html",
         "inboxes.html",
         "inboxes_panel.html",
+        "lead.html",
         "lead_import.html",
         "lead_import_form.html",
+        "lead_missing.html",
+        "leads.html",
         "locked.html",
         "macros.html",
         "notifications.html",
@@ -753,25 +762,47 @@ def test_the_autoescape_check_catches_an_unescaped_environment() -> None:
 FORM_TAG = re.compile(r"<form\b[^>]*>", re.IGNORECASE)
 FORM_END = re.compile(r"</form\s*>", re.IGNORECASE)
 POST_METHOD = re.compile(r"""\smethod\s*=\s*(["']?)post\1(?=[\s>/])""", re.IGNORECASE)
+GET_METHOD = re.compile(r"""\smethod\s*=\s*(["']?)get\1(?=[\s>/])""", re.IGNORECASE)
 HX_POST = re.compile(r"\shx-post\s*=", re.IGNORECASE)
+ANY_HX_POST = re.compile(r"\s(?:data-)?hx-post\s*=", re.IGNORECASE)
+# a local path: "/", then anything but a second "/" or a "\" (either makes it another host)
+LOCAL_ACTION = re.compile(
+    r"""\saction\s*=\s*(["']?)/(?![/\\])[^"'\s>]*\1(?=[\s>/])""", re.IGNORECASE
+)
 CSRF_FIELD_CALL = re.compile(r"\{\{-?\s*csrf_field\(\)\s*-?\}\}")
+CSRF_MENTION = re.compile(r"csrf", re.IGNORECASE)
+METHOD_ATTRIBUTE = re.compile(r"\smethod\s*=", re.IGNORECASE)
 
 
 def form_problems(root: Path) -> list[str]:
-    """Each ``<form>`` in ``root``'s templates without ``method="post"``, without ``hx-post``,
-    or without a ``csrf_field()`` call before its ``</form>``."""
+    """Each ``<form>`` in ``root``'s templates that breaks the forms contract: a POST form (any
+    form that isn't ``method="get"``) without ``method="post"``, without ``hx-post``, or without
+    a ``csrf_field()`` call before its ``</form>``; a GET form with ``hx-post``, with anything
+    naming ``csrf`` before its ``</form>``, or without a local ``action``; and a form with more
+    than one ``method`` (a browser takes the first, which the checks might not)."""
     problems = []
     for path in sorted((root / "nextron" / "web" / "templates").rglob("*.html")):
         label = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8")
         for start in FORM_TAG.finditer(text):
             line = text.count("\n", 0, start.start()) + 1
+            end = FORM_END.search(text, start.end())
+            inside = text[start.end() : end.start() if end else len(text)]
+            if len(METHOD_ATTRIBUTE.findall(start[0])) > 1:
+                problems.append(f"{label}:{line} <form> with more than one method")
+                continue
+            if GET_METHOD.search(start[0]):
+                if ANY_HX_POST.search(start[0]):
+                    problems.append(f"{label}:{line} GET <form> with hx-post")
+                if CSRF_MENTION.search(inside):
+                    problems.append(f"{label}:{line} GET <form> with a CSRF token before </form>")
+                if not LOCAL_ACTION.search(start[0]):
+                    problems.append(f"{label}:{line} GET <form> without a local action")
+                continue
             if not POST_METHOD.search(start[0]):
                 problems.append(f"{label}:{line} <form> without method=\"post\"")
             if not HX_POST.search(start[0]):
                 problems.append(f"{label}:{line} <form> without hx-post")
-            end = FORM_END.search(text, start.end())
-            inside = text[start.end() : end.start() if end else len(text)]
             if not CSRF_FIELD_CALL.search(inside):
                 problems.append(f"{label}:{line} <form> without csrf_field() before </form>")
     return problems
@@ -785,7 +816,7 @@ def test_every_form_posts_with_a_csrf_field() -> None:
     ("template", "why"),
     [
         ('<form hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
-        ('<form method="get" hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
+        ('<form method="got" hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
         ('<form method="postal" hx-post="/x">{{ csrf_field() }}</form>', 'without method="post"'),
         ('<form data-method="post" hx-post="/x">{{ csrf_field() }}</form>', "without method="),
         # a native submission sends Origin: null under no-referrer, which the guard refuses
@@ -795,6 +826,11 @@ def test_every_form_posts_with_a_csrf_field() -> None:
         ('<form method="post" hx-post="/x"></form>{{ csrf_field() }}', "without csrf_field()"),
         ('<form method="post" hx-post="/x">{{ csrf_token }}</form>', "without csrf_field()"),
         ('<FORM METHOD="POST" HX-POST="/x">', "without csrf_field()"),
+        (
+            '<form method="post" method="get" action="/x" hx-post="/x">{{ csrf_field() }}</form>',
+            "with more than one method",
+        ),
+        ('<form method="get" method="post" action="/x"></form>', "with more than one method"),
     ],
 )
 def test_the_form_check_catches_a_form_without_post_hx_post_or_csrf_field(
@@ -818,6 +854,56 @@ def test_the_form_check_catches_a_form_without_post_hx_post_or_csrf_field(
     ],
 )
 def test_the_form_check_allows_an_htmx_post_form_with_a_csrf_field(
+    template: str, tmp_path: Path
+) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "templates" / "_probe.html").write_text(template, "utf-8")
+
+    assert form_problems(root) == []
+
+
+@pytest.mark.parametrize(
+    ("template", "why"),
+    [
+        ('<form method="get" action="/x" hx-post="/x"></form>', "GET <form> with hx-post"),
+        ('<form method="get" action="/x" data-hx-post="/x"></form>', "GET <form> with hx-post"),
+        ('<form method="get" action="/x">{{ csrf_field() }}</form>', "with a CSRF token"),
+        (
+            '<form method="get" action="/x"><input name="t" value="{{ csrf_token }}"></form>',
+            "with a CSRF token",
+        ),
+        ('<form method="get" action="/x">\n{{ csrf_field() }}', "with a CSRF token"),  # no end
+        ('<form method="get"></form>', "without a local action"),
+        ('<form method="get" action=""></form>', "without a local action"),
+        ('<form method="get" action="x"></form>', "without a local action"),
+        ('<form method="get" action="https://evil.example/x"></form>', "without a local action"),
+        ('<form method="get" action="//evil.example/x"></form>', "without a local action"),
+        ('<form method="get" action="/\\evil.example/x"></form>', "without a local action"),
+        ('<form method="get" action="{{ next }}"></form>', "without a local action"),
+        ('<form method="get" data-action="/x"></form>', "without a local action"),
+    ],
+)
+def test_the_form_check_catches_a_get_form_with_hx_post_a_token_or_no_local_action(
+    template: str, why: str, tmp_path: Path
+) -> None:
+    root = web_copy(tmp_path)
+    (root / "nextron" / "web" / "templates" / "_probe.html").write_text(template, "utf-8")
+
+    [problem] = form_problems(root)
+
+    assert problem.startswith("nextron/web/templates/_probe.html:1 GET <form> ")
+    assert why in problem
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        '<form method="get" action="/leads"><input name="q"><button>Filter</button></form>',
+        "<form class='f' method=GET action=/leads role='search'>\n</form>",
+        '<form method="get" action="/leads?x=1" role="search"></form>',
+    ],
+)
+def test_the_form_check_allows_a_get_form_to_a_local_path_without_a_token(
     template: str, tmp_path: Path
 ) -> None:
     root = web_copy(tmp_path)

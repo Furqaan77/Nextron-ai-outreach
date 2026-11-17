@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{#- The 404 answer of GET /leads/{lead_id} (nextron.web.leads_page): it never echoes the id. -#}
+{% block title %}Nextron: Lead not found{% endblock %}
+{% block content %}
+<h1>Lead not found</h1>
+<p>No Lead has this address. Open the Lead from the Leads list.</p>
+<p><a href="/leads">All Leads</a></p>
+{% endblock %}
