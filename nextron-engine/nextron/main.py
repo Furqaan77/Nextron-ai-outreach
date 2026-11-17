@@ -22,6 +22,26 @@ database, the notification subscriber registry and Uvicorn.
    be opened, or a failed migration (rolled back), exits 2, logged as
    ``database_migration_failed`` with the traceback. A second instance or a busy port never
    reaches this step.
+
+   **The pre_migrate backup (Story 1.16).** ``open_database(config, before_upgrade=hook)``
+   passes a ``PreMigrateBackup(build_local_backups(config, SystemClock()))``, which
+   ``ensure_current`` calls only for a non-empty database behind head, inside the migration's
+   write transaction, so nothing changes between the copy and the upgrade. A new file or a
+   database at head takes no copy. The hook calls ``LocalBackups.take(PRE_MIGRATE)`` (a copy
+   in ``<backup dir>\\local``, verified), keeps it and raises ``PreMigrateBackupFailed`` when
+   it failed. Then:
+
+   - the backup fails: exit 2 without migrating, printing ``startup check failed:
+     pre_migrate_backup: <error>; the database was not migrated`` and logging
+     ``pre_migrate_backup_failed`` (ERROR, ``code``);
+   - the migration fails after a copy: exit 2; the message names the copy's full path and
+     ``nextron restore "<path>"`` (quoted, so a path with a space pastes whole), and
+     ``database_migration_failed`` carries the copy's ``file`` name. The copy stays (it has no
+     row, so rotation never deletes it);
+   - the upgrade succeeds: ``with units.open(): local.record_pre_migrate(taken)`` records the
+     copy's row and rotates (a failed rotation only logs ``backup_rotation_failed``). If
+     recording fails, ``backup_record_failed`` (ERROR) is logged and
+     startup continues: the copy stays on disk.
 7. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
    The dashboard's GET handlers read through the unit-of-work factory step 6 returned.
    ``engine_started`` (with ``db_revision``) is logged before it and ``engine_stopped`` (with
@@ -36,12 +56,14 @@ Any other error is logged as ``engine_crashed`` and ends with exit 1.
 constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists.
 
-**Jobs (AD-10).** ``build_job_types(*, alerts)`` is the job type registry: the only code that
-constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's ``JobType``
-(lanes, priority, ``max_runtime``, retry limit, a thin handler from ``nextron.jobs.handlers``
-and the health panel's ``JobGroup``, always named), then freezes it. So far: ``send_alert``
-(Story 1.12: the realtime lane only, priority 90, ``max_runtime`` 3 minutes, retry limit 5,
-``handlers.send_alert(alerts)``, group ``other``: the panel's groups have none for alerts).
+**Jobs (AD-10).** ``build_job_types(*, alerts, backups)`` is the job type registry: the only
+code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
+``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
+``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
+So far: ``send_alert`` (Story 1.12: the realtime lane only, priority 90, ``max_runtime`` 3
+minutes, retry limit 5, ``handlers.send_alert(alerts)``, group ``other``: the panel's groups
+have none for alerts) and ``backup_db`` (Story 1.16: the bulk lane only, priority 80,
+``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -70,12 +92,28 @@ dashboard notice once a month. The meter needs the hook, the hook needs ``budget
 ``budget`` needs the meter: the lambda breaks the cycle, with ``budget`` bound just below it.
 Building the app builds no adapter or HTTP client and records nothing.
 
-**Triggers (AD-10).** ``build_triggers(job_types)`` is the trigger registry: the only code that
-constructs ``Triggers`` or calls ``register_trigger``. It ships empty and frozen, so the
-scheduler runs with no triggers until a story adds one: register each AD-10 ``Trigger`` with an
-``Every`` schedule there, after its job type (a firing enqueues the job type with the trigger's
-own name). ``build_app`` builds one ``Scheduler(units, queue, triggers)``
-(``nextron.jobs.scheduler``), an ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
+**Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule)`` is the trigger
+registry: the only code that constructs ``Triggers`` or calls ``register_trigger``. Register
+each AD-10 ``Trigger`` there, after its job type (a firing enqueues the job type with the
+trigger's own name), then it is frozen. So far: ``backup_db`` (Story 1.16), a
+``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``. ``build_app``
+builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
+``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
+
+**Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5).** ``build_local_backups(config, clock)`` is
+``LocalBackups(clock, env=config.env, local_dir=<backup dir>\\local,
+snapshot=functools.partial(snapshot, <data dir>\\nextron.db))``: ``serve`` uses it for the
+``pre_migrate`` copy and ``build_app`` for the daily and manual ones. ``build_app`` builds one
+``Backups(clock, local, notify=notify, queue=queue)`` (``nextron.app.ops.api``); the registry
+needs the ``backup_db`` handler, the handler needs ``Backups`` and ``Backups`` needs the queue,
+so ``build_job_types(..., backups=lambda: backups)`` breaks the cycle, as it does for
+``notify``. The dashboard gets it (``create_app(..., backups=backups)``) for the health panel's
+"Back up now". The trigger's ``backup_schedule`` is ``functools.partial(read_backup_schedule,
+units, backups)``: when the scheduler starts, ``read_backup_schedule`` runs
+``backups.schedule()`` in a read-only unit of work inside a fresh ``contextvars.Context()`` and
+returns ``DailyRun(at, timezone, catch_up=missed)``. So ``backup_time`` and
+``sender_timezone`` are read once per engine start, and a daily time missed while the engine
+was off is made up once at start; a new database (no daily backup yet) never catches up.
 
 **The heartbeat (AD-20, NFR-14).** ``build_app`` builds one ``Heartbeat(clock, heartbeat
 file)`` (``nextron.app.ops.api``), whose file is ``<data dir>\\heartbeat``
@@ -125,8 +163,10 @@ doctor never starts a consent flow.
 registry: the only code that constructs ``HealthIssues`` or calls ``register_source``
 (``nextron.domain.health``; ``tests/contracts/test_health_contracts.py``). It registers
 ``IssueSource("jobqueue", queries.jobqueue.health_issues)`` (each dead job), then
-``IssueSource("budget", budget.health_issues)`` (AI spend and quotas), then freezes it; each
-later owner registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
+``IssueSource("budget", budget.health_issues)`` (AI spend and quotas), then
+``IssueSource("backups", queries.ops.health_issues)`` (each failed backup newer than the newest
+verified one), then freezes it; each later owner registers its ``queries.<owner>.health_issues``
+there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
 (``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
@@ -221,10 +261,20 @@ from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, L
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
-from nextron.app.jobqueue.api import JobQueue
+from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Budget, DashboardEntry, DeadJobAlerts, EngineHealth, Heartbeat
+from nextron.app.ops.api import (
+    Backups,
+    Budget,
+    DashboardEntry,
+    DeadJobAlerts,
+    EngineHealth,
+    Heartbeat,
+    LocalBackups,
+    TakenBackup,
+)
 from nextron.app.queries import jobqueue as jobqueue_queries
+from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
@@ -238,9 +288,16 @@ from nextron.db.migrations import (
     head_revision,
     known_revisions,
 )
+from nextron.db.repos.ops.snapshot import snapshot
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain import settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
+from nextron.domain.backup import (
+    BACKUP_DB_JOB,
+    DEFAULT_BACKUP_TIME,
+    LOCAL_DIR_NAME,
+    BackupKind,
+)
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
@@ -250,7 +307,7 @@ from nextron.jobs import handlers
 from nextron.jobs.heartbeat import HeartbeatWriter
 from nextron.jobs.runner import Runner
 from nextron.jobs.scheduler import Scheduler
-from nextron.jobs.triggers import Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.ports.alert import AlertPort
@@ -307,6 +364,8 @@ HEARTBEAT_FILE_NAME: Final = "heartbeat"
 DATABASE_REVISION_CHECK: Final = DATABASE_REVISION
 ENV_SOURCE_FLAG: Final = "--env"
 ENV_SOURCE_VARIABLE: Final = "NEXTRON_ENV"
+PRE_MIGRATE_BACKUP_CHECK: Final = "pre_migrate_backup"
+FALLBACK_TIMEZONE: Final = "UTC"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -366,7 +425,9 @@ def build_app(
     on the first send. The usage meter records each adapter's requests and, after each record,
     runs the budget's threshold check (``check_usage``). The health panel's ``EngineHealth``
     runs the doctor registry in the engine on ``probes`` (``Probes.system()`` unless injected)
-    when the panel is read, never when the app is built."""
+    when the panel is read, never when the app is built. ``Backups`` takes the daily and
+    manual backups (the ``backup_db`` job) into ``<backup dir>\\local``; the scheduler reads
+    the daily time when it starts, never when the app is built."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -380,15 +441,20 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
-    job_types = build_job_types(alerts=lambda: notify)  # notify is bound just below
+    # notify and backups are bound just below
+    job_types = build_job_types(alerts=lambda: notify, backups=lambda: backups)
     queue = JobQueue(clock, job_types)
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
+    backups = Backups(clock, build_local_backups(config, clock), notify=notify, queue=queue)
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
-    scheduler = Scheduler(units, queue, build_triggers(job_types))
+    triggers = build_triggers(
+        job_types, backup_schedule=functools.partial(read_backup_schedule, units, backups)
+    )
+    scheduler = Scheduler(units, queue, triggers)
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
     writer = HeartbeatWriter(units, heartbeat, runner, scheduler)
     context = DoctorContext(
@@ -418,6 +484,7 @@ def build_app(
         budget=budget,
         health=health,
         queue=queue,
+        backups=backups,
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )
@@ -435,10 +502,15 @@ def check_usage(units: Units, budget: Budget) -> None:
     contextvars.Context().run(run)
 
 
-def build_job_types(*, alerts: Callable[[], handlers.AlertSending]) -> JobTypes:
+def build_job_types(
+    *,
+    alerts: Callable[[], handlers.AlertSending],
+    backups: Callable[[], handlers.BackingUp],
+) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
-    returns the ``notify`` service that ``send_alert`` jobs call."""
+    returns the ``notify`` service that ``send_alert`` jobs call, and ``backups`` the ``ops``
+    service's ``Backups`` that ``backup_db`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -452,27 +524,91 @@ def build_job_types(*, alerts: Callable[[], handlers.AlertSending]) -> JobTypes:
             group=JobGroup.OTHER,  # the health panel's groups have none for alerts
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=BACKUP_DB_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=80,
+            max_runtime=timedelta(minutes=30),  # a copy, its check and its hash
+            retry_limit=2,  # a failed copy never raises: only recording its row is retried
+            handler=handlers.backup_db(backups),
+            group=JobGroup.BACKUP,
+        )
+    )
     job_types.freeze()
     return job_types
 
 
 def build_health_issues(*, budget: Budget) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
-    quotas. Each later owner registers its ``queries.<owner>.health_issues`` here, before
-    ``freeze()``."""
+    quotas, then the failed backups. Each later owner registers its
+    ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
     issues.register_source(IssueSource("budget", budget.health_issues))
+    issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.freeze()
     return issues
 
 
-def build_triggers(job_types: JobTypes) -> Triggers:
-    """The trigger registry (AD-10), frozen. Empty until a story adds a trigger: register each
-    with ``register_trigger(Trigger.X, Every(...))``, after its job type, before ``freeze()``."""
+def build_triggers(job_types: JobTypes, *, backup_schedule: Callable[[], DailyRun]) -> Triggers:
+    """The trigger registry (AD-10), frozen: register each trigger with
+    ``register_trigger(Trigger.X, Every(...))`` or ``DailyAt(...)``, after its job type, before
+    ``freeze()``. ``backup_schedule`` returns the daily backup's ``DailyRun``; the scheduler
+    calls it when it starts."""
     triggers = Triggers(job_types)
+    triggers.register_trigger(
+        Trigger.BACKUP_DB,
+        DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, FALLBACK_TIMEZONE)),
+    )
     triggers.freeze()
     return triggers
+
+
+def build_local_backups(config: BootstrapConfig, clock: Clock) -> LocalBackups:
+    """The local backup copies: ``<backup dir>\\local``, copied from ``<data dir>\\nextron.db``
+    with SQLite's backup API. Building it creates no folder."""
+    return LocalBackups(
+        clock,
+        env=config.env,
+        local_dir=config.backup_dir / LOCAL_DIR_NAME,
+        snapshot=functools.partial(snapshot, config.data_dir / DB_FILE_NAME),
+    )
+
+
+def read_backup_schedule(units: Units, backups: Backups) -> DailyRun:
+    """The daily backup's ``DailyRun``: ``backups.schedule()`` read in its own read-only unit
+    of work inside a fresh ``contextvars.Context()``, so it works whatever the caller has
+    open; ``catch_up`` is whether the last daily time was missed."""
+
+    def read() -> DailyRun:
+        with units.open(read_only=True):
+            found = backups.schedule()
+        return DailyRun(found.at, found.timezone, catch_up=found.missed)
+
+    return contextvars.Context().run(read)
+
+
+class PreMigrateBackupFailed(RuntimeError):
+    """The ``pre_migrate`` backup failed, so the database was not migrated; the message is the
+    backup's error."""
+
+
+class PreMigrateBackup:
+    """``ensure_current``'s ``before_upgrade`` hook in ``serve``: take a ``pre_migrate`` copy
+    and keep it in ``taken``; raise ``PreMigrateBackupFailed`` when it failed, so nothing is
+    migrated."""
+
+    def __init__(self, local: LocalBackups) -> None:
+        self._local = local
+        self.taken: TakenBackup | None = None
+
+    def __call__(self, before: str) -> None:
+        taken = self._local.take(BackupKind.PRE_MIGRATE)
+        self.taken = taken
+        if taken.error is not None:
+            raise PreMigrateBackupFailed(taken.error)
 
 
 def engine_lifespan(
@@ -613,17 +749,20 @@ def connect_database(config: BootstrapConfig) -> UnitOfWorkFactory:
         raise
 
 
-def open_database(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
+def open_database(
+    config: BootstrapConfig, *, before_upgrade: Callable[[str], None] | None = None
+) -> tuple[UnitOfWorkFactory, str]:
     """Open ``<data dir>\\nextron.db`` and bring it to head; return the entry points' factory and
-    the database's revision.
+    the database's revision. ``before_upgrade(before)`` runs just before the upgrade of a
+    non-empty database behind head, in the migration's transaction (``ensure_current``).
 
     Raises ``DatabaseStateError`` (``DatabaseAheadError`` included) or ``ConnectionSettingError``
-    when the database is refused, and whatever made opening or a migration fail; either way the
-    engine is disposed first.
+    when the database is refused, whatever ``before_upgrade`` raised, and whatever made opening
+    or a migration fail; either way the engine is disposed first.
     """
     units = connect_database(config)
     try:
-        before, after = ensure_current(units.engine)
+        before, after = ensure_current(units.engine, before_upgrade=before_upgrade)
     except BaseException:
         units.engine.dispose()
         raise
@@ -711,22 +850,43 @@ def serve(
         if _report_failures([port_check], err):
             log.error("startup_check_failed", extra={"check": port_check.id})
             return EXIT_STARTUP_FAILED
+        local = build_local_backups(config, SystemClock())
+        pre_migrate = PreMigrateBackup(local)
         try:
-            units, db_revision = open_database(config)
+            units, db_revision = open_database(config, before_upgrade=pre_migrate)
+        except PreMigrateBackupFailed as exc:
+            print(
+                f"startup check failed: {PRE_MIGRATE_BACKUP_CHECK}: {exc}; "
+                "the database was not migrated",
+                file=err,
+            )
+            code = None if pre_migrate.taken is None else pre_migrate.taken.code
+            log.error("pre_migrate_backup_failed", extra={"code": code})
+            return EXIT_STARTUP_FAILED
         except (DatabaseStateError, ConnectionSettingError) as exc:
             print(f"startup check failed: {DATABASE_REVISION_CHECK}: {exc}", file=err)
             log.error("startup_check_failed", extra={"check": DATABASE_REVISION_CHECK})
             return EXIT_STARTUP_FAILED
         except Exception:
-            print(
+            copy = pre_migrate.taken
+            message = (
                 "database startup failed: it could not be opened, or a migration failed and "
                 f"was rolled back; the traceback is in "
-                f"{config.data_dir / LOGS_DIR_NAME / LOG_FILE_NAME}",
-                file=err,
+                f"{config.data_dir / LOGS_DIR_NAME / LOG_FILE_NAME}"
             )
-            log.exception("database_migration_failed")
+            if copy is not None and copy.verified:
+                message += (
+                    f". The database was copied before the migration to {copy.path}; "
+                    f'to go back to that copy, run: nextron restore "{copy.path}"'
+                )
+                log.exception("database_migration_failed", extra={"file": copy.path.name})
+            else:
+                log.exception("database_migration_failed")
+            print(message, file=err)
             return EXIT_STARTUP_FAILED
         try:
+            if pre_migrate.taken is not None:  # a verified copy, and the upgrade succeeded
+                record_pre_migrate(units, local, pre_migrate.taken)
             identity = {"env": config.env, "version": __version__}
             log.info("engine_started", extra={**identity, "db_revision": db_revision})
             exit_code = EXIT_CRASHED
@@ -751,6 +911,18 @@ def serve(
             units.engine.dispose()
     finally:
         lock.release()
+
+
+def record_pre_migrate(units: UnitOfWorkFactory, local: LocalBackups, taken: TakenBackup) -> None:
+    """Record the ``pre_migrate`` copy taken before a successful upgrade; a failure logs
+    ``backup_record_failed`` and startup goes on (the copy stays on disk)."""
+    try:
+        with units.open():
+            local.record_pre_migrate(taken)
+    except Exception as exc:  # noqa: BLE001 - the upgrade succeeded; the engine still starts
+        log.exception(
+            "backup_record_failed", extra={"code": error_code(exc), "file": taken.path.name}
+        )
 
 
 class DoctorMeter:

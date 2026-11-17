@@ -347,6 +347,25 @@ button.secondary {
   border-left-color: var(--refused);
 }
 
+/* The Backups section (Story 1.16): the last backup, marked when it failed, and the notice of a
+   "Back up now" click. */
+.health-backup {
+  max-width: 48rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--ink);
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}
+
+.health-backup-failed {
+  border-left-color: var(--refused);
+}
+
+.health-backup-notice {
+  max-width: 48rem;
+  color: var(--muted);
+}
+
 .health-issues {
   max-width: 48rem;
   margin: 0;

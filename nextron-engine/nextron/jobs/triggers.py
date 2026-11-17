@@ -22,29 +22,45 @@ normally runs; when the wake lands just before a slot, that slot fires instead (
 Schedules live in memory, so an ``Every`` restarts from zero at each engine start. A period
 longer than the engine usually runs between restarts (a day, say, on a PC that is shut down
 every night) therefore never fires unless ``at_startup=True``. Daily work wants ``at_startup``
-with a handler that skips what is already done, or the calendar schedule (daily at a time,
-monthly, Operator time) its story adds; calendar schedules arrive with their first trigger.
+with a handler that skips what is already done, or the daily calendar schedule below.
+
+**DailyRun(at, timezone, catch_up=False)** is one day's schedule: ``at`` is a naive
+``datetime.time`` in whole minutes, ``timezone`` an IANA name that ``ZoneInfo`` loads, and
+``catch_up`` (a ``bool``) fires once right after the scheduler starts too, to make up a run the
+engine missed while it was off. Each rule raises ``TypeError`` or ``ValueError``.
+
+**DailyAt(when, *, fallback)** fires every day at a time read when the scheduler starts:
+``when()`` returns the ``DailyRun`` (``nextron.main`` reads the setting and the missed run
+there), and ``fallback`` (a ``DailyRun``) is used when ``when()`` raises or returns anything
+else. Its misfire ``grace`` is 24 hours, so a firing the PC slept through runs on wake. It only
+knows "a time, a timezone and whether to fire now": the rules of what to schedule (the backup
+time, a missed backup) live with the owner that supplies ``when``. A change to the time takes
+effect when the engine restarts.
 
 **TriggerSpec(trigger, schedule)** is one registration; its ``job_type`` is ``trigger.value``.
 
 **Triggers(job_types)** is the registry. It takes only a frozen ``JobTypes`` (``TypeError``,
 ``RuntimeError``). ``register_trigger(trigger, schedule)`` raises ``RuntimeError`` after
 ``freeze()``, ``TypeError`` unless ``trigger`` is a ``Trigger`` member (a plain ``str`` is
-refused) and ``schedule`` an ``Every``, ``UnknownJobType`` unless a job type named
+refused) and ``schedule`` an ``Every`` or a ``DailyAt``, ``UnknownJobType`` unless a job type named
 ``trigger.value`` is registered, and ``ValueError`` for a trigger registered already.
 ``specs()`` returns the registrations in order. Only ``nextron.main.build_triggers`` builds
 one (``tests/contracts/test_job_contracts.py`` checks it).
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import time, timedelta
 from enum import StrEnum
 from typing import Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nextron.domain.job import JobTypes
 
 MIN_PERIOD: Final = timedelta(minutes=1)
 MAX_PERIOD: Final = timedelta(days=31)
+DAILY_GRACE: Final = timedelta(hours=24)
+SCHEDULE_REFUSED: Final = "the schedule must be an Every or a DailyAt"
 
 
 class Trigger(StrEnum):
@@ -93,17 +109,64 @@ class Every:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyRun:
+    """One day's schedule: ``at`` in ``timezone``; with ``catch_up``, also right after the
+    scheduler starts."""
+
+    at: time
+    timezone: str
+    catch_up: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.at, time):
+            raise TypeError("a daily run's at must be a datetime.time")
+        if self.at.tzinfo is not None or self.at.second or self.at.microsecond:
+            raise ValueError("a daily run's at must be a naive time in whole minutes")
+        if not isinstance(self.timezone, str):
+            raise TypeError("a daily run's timezone must be a str")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ValueError("a daily run's timezone must be an IANA name ZoneInfo loads") from None
+        if not isinstance(self.catch_up, bool):
+            raise TypeError("a daily run's catch_up must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class DailyAt:
+    """Fire daily at the ``DailyRun`` that ``when()`` returns when the scheduler starts, or at
+    ``fallback`` when it can't be read."""
+
+    when: Callable[[], DailyRun]
+    fallback: DailyRun = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        if not callable(self.when):
+            raise TypeError("a daily schedule's when must be callable")
+        if not isinstance(self.fallback, DailyRun):
+            raise TypeError("a daily schedule's fallback must be a DailyRun")
+
+    @property
+    def grace(self) -> timedelta:
+        """How late a firing may still run: a day."""
+        return DAILY_GRACE
+
+
+type Schedule = Every | DailyAt
+
+
+@dataclass(frozen=True, slots=True)
 class TriggerSpec:
     """One registered trigger and its schedule."""
 
     trigger: Trigger
-    schedule: Every
+    schedule: Schedule
 
     def __post_init__(self) -> None:
         if not isinstance(self.trigger, Trigger):
             raise TypeError("a trigger must be a Trigger member")
-        if not isinstance(self.schedule, Every):
-            raise TypeError(f"trigger {self.trigger}: the schedule must be an Every")
+        if not isinstance(self.schedule, Every | DailyAt):
+            raise TypeError(f"trigger {self.trigger}: {SCHEDULE_REFUSED}")
 
     @property
     def job_type(self) -> str:
@@ -127,14 +190,14 @@ class Triggers:
     def frozen(self) -> bool:
         return self._frozen
 
-    def register_trigger(self, trigger: Trigger, schedule: Every) -> None:
+    def register_trigger(self, trigger: Trigger, schedule: Schedule) -> None:
         """Schedule ``trigger``; see the module docstring for what it refuses."""
         if self._frozen:
             raise RuntimeError("the trigger registry is frozen")
         if not isinstance(trigger, Trigger):
             raise TypeError(f"{trigger!r} is not a Trigger member")
-        if not isinstance(schedule, Every):
-            raise TypeError(f"trigger {trigger}: the schedule must be an Every")
+        if not isinstance(schedule, Every | DailyAt):
+            raise TypeError(f"trigger {trigger}: {SCHEDULE_REFUSED}")
         self._job_types.get(trigger.value)  # raises UnknownJobType
         if trigger in self._specs:
             raise ValueError(f"trigger {trigger} is already registered")

@@ -5,7 +5,8 @@ APScheduler's clock is a ``FrozenClock``: its time sources (the ``datetime.now``
 ``schedulers/base.py``, ``executors/base.py`` and ``triggers/interval.py``, and the scheduler
 module's own ``next_run_time`` for ``at_startup``) are patched with a ``datetime`` subclass that
 reads it. A test simulates the PC sleeping by moving that clock forward and calling
-``wakeup()``, as APScheduler's own timer does when the PC wakes.
+``wakeup()``, as APScheduler's own timer does when the PC wakes. A ``DailyAt`` trigger (Story
+1.16) is a ``CronTrigger``, which takes the time APScheduler passes it.
 
 ``fire`` runs on the loop's executor threads. A firing holds its ``max_instances=1`` slot until
 its future's callback runs on the loop, which then dispatches ``EVENT_JOB_EXECUTED``; the tests
@@ -18,8 +19,9 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable, Coroutine, Iterator
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobEvent
@@ -27,6 +29,7 @@ from apscheduler.executors import base as aps_executors
 from apscheduler.schedulers import base as aps_base
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers import interval as aps_interval
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import Engine
 
@@ -36,7 +39,7 @@ from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain.job import Job, JobType, JobTypes, Lane, UnknownJobType
 from nextron.jobs import scheduler as scheduler_module
 from nextron.jobs.scheduler import Scheduler
-from nextron.jobs.triggers import Every, Trigger, Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from tests.fakes.clock import FrozenClock
 from tests.fakes.units import FakeUnits
 
@@ -600,3 +603,182 @@ def test_after_stop_nothing_fires(clock: FrozenClock) -> None:
     run(scenario)
 
     assert queue.calls == []
+
+
+# Daily schedules (Story 1.16) -------------------------------------------------------------------
+
+
+def daily(
+    when: Callable[[], object], *, fallback: DailyRun | None = None
+) -> tuple[Trigger, DailyAt]:
+    chosen = fallback if fallback is not None else DailyRun(time(10, 0), "UTC")
+    return (Trigger.BACKUP_DB, DailyAt(when, fallback=chosen))  # type: ignore[arg-type]
+
+
+def test_a_daily_trigger_is_a_cron_job_at_its_time_in_its_timezone(
+    clock: FrozenClock, aps: Captured, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    calls: list[str] = []
+
+    def when() -> DailyRun:
+        calls.append("read")
+        return DailyRun(time(2, 30), "America/Los_Angeles")
+
+    scheduler = build(RecordingQueue(), daily(when), SEND)
+    assert calls == []  # building reads nothing
+
+    async def scenario() -> None:
+        scheduler.start()
+        try:
+            job = aps.only.get_job("backup_db")
+            assert job is not None
+            assert job.func == scheduler.fire
+            assert job.args == (Trigger.BACKUP_DB,)
+            assert isinstance(job.trigger, CronTrigger)
+            fields = {field.name: str(field) for field in job.trigger.fields}
+            assert (fields["hour"], fields["minute"], fields["second"]) == ("2", "30", "0")
+            assert job.trigger.timezone == ZoneInfo("America/Los_Angeles")
+            assert job.coalesce is True
+            assert job.misfire_grace_time == 86400
+            assert job.max_instances == 1
+            # T0 is 01:00 PST: the next run is 02:30 PST today, 10:30 UTC
+            assert job.next_run_time == datetime(2026, 11, 17, 10, 30, tzinfo=UTC)
+        finally:
+            await scheduler.stop()
+
+    run(scenario)
+
+    assert calls == ["read"]  # once, when the scheduler started
+    [scheduled] = records(caplog, "daily_trigger_scheduled")
+    assert scheduled.levelno == logging.INFO
+    assert (
+        getattr(scheduled, "trigger"),
+        getattr(scheduled, "at"),
+        getattr(scheduled, "timezone"),
+        getattr(scheduled, "catch_up"),
+    ) == (Trigger.BACKUP_DB, "02:30", "America/Los_Angeles", False)
+    [started] = records(caplog, "scheduler_started")
+    assert getattr(started, "triggers") == 2
+    assert records(caplog, "trigger_schedule_failed") == []
+
+
+def test_a_daily_trigger_fires_at_its_time_and_once_after_a_sleep(
+    clock: FrozenClock, aps: Captured
+) -> None:
+    queue = RecordingQueue()
+    scheduler = build(queue, daily(lambda: DailyRun(time(10, 0), "UTC")))
+
+    async def scenario() -> None:
+        scheduler.start()
+        try:
+            await settle()
+            assert queue.calls == []  # no catch-up: 10:00 is still to come
+
+            clock.advance(timedelta(hours=1))  # 10:00 UTC
+            await scheduler.wakeup()
+            assert await fired(aps, 1)
+
+            clock.advance(timedelta(days=2, hours=3))  # slept through two daily times
+            await scheduler.wakeup()
+            assert await fired(aps, 2)
+            await settle()
+            assert len(queue.calls) == 2  # the missed times coalesce into one firing
+            job = aps.only.get_job("backup_db")
+            assert job is not None
+            assert job.next_run_time == datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+        finally:
+            await scheduler.stop()
+
+    run(scenario)
+
+    assert queue.names() == ["backup_db", "backup_db"]
+
+
+def test_a_daily_trigger_with_catch_up_fires_right_after_start(
+    clock: FrozenClock, aps: Captured, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    queue = RecordingQueue()
+    scheduler = build(queue, daily(lambda: DailyRun(time(10, 0), "UTC", catch_up=True)))
+
+    async def scenario() -> None:
+        scheduler.start()
+        try:
+            job = aps.only.get_job("backup_db")
+            assert job is not None
+            assert job.next_run_time == T0  # now, read before the loop turns
+            assert await fired(aps, 1)
+            assert queue.names() == ["backup_db"]
+            next_job = aps.only.get_job("backup_db")
+            assert next_job is not None
+            assert next_job.next_run_time == datetime(2026, 11, 17, 10, 0, tzinfo=UTC)
+        finally:
+            await scheduler.stop()
+
+    run(scenario)
+
+    [scheduled] = records(caplog, "daily_trigger_scheduled")
+    assert getattr(scheduled, "catch_up") is True
+
+
+def _raises() -> DailyRun:
+    raise RuntimeError("the database is locked")
+
+
+@pytest.mark.parametrize(
+    ("when", "code"),
+    [(_raises, "RuntimeError"), (lambda: "10:00", "TypeError"), (lambda: None, "TypeError")],
+)
+def test_an_unreadable_daily_time_falls_back_and_is_logged(
+    when: Callable[[], object],
+    code: str,
+    clock: FrozenClock,
+    aps: Captured,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    scheduler = build(RecordingQueue(), daily(when))
+
+    async def scenario() -> None:
+        scheduler.start()
+        try:
+            job = aps.only.get_job("backup_db")
+            assert job is not None
+            fields = {field.name: str(field) for field in job.trigger.fields}
+            assert (fields["hour"], fields["minute"]) == ("10", "0")
+            assert job.trigger.timezone == ZoneInfo("UTC")
+            assert job.misfire_grace_time == 86400
+            assert job.next_run_time == datetime(2026, 11, 17, 10, 0, tzinfo=UTC)  # no catch-up
+        finally:
+            await scheduler.stop()
+
+    run(scenario)
+
+    [failed] = records(caplog, "trigger_schedule_failed")
+    assert failed.levelno == logging.WARNING
+    assert (getattr(failed, "trigger"), getattr(failed, "code")) == (Trigger.BACKUP_DB, code)
+    [scheduled] = records(caplog, "daily_trigger_scheduled")
+    assert (getattr(scheduled, "at"), getattr(scheduled, "timezone")) == ("10:00", "UTC")
+
+
+def test_the_fallback_is_whatever_the_registration_names(
+    clock: FrozenClock, aps: Captured
+) -> None:
+    def broken() -> DailyRun:
+        raise ValueError("no schedule")
+
+    fallback = DailyRun(time(23, 45), "Europe/London")
+    scheduler = build(RecordingQueue(), daily(broken, fallback=fallback))
+
+    async def scenario() -> None:
+        scheduler.start()
+        try:
+            job = aps.only.get_job("backup_db")
+            assert job is not None
+            assert job.trigger.timezone == ZoneInfo("Europe/London")
+            assert job.next_run_time == datetime(2026, 11, 17, 23, 45, tzinfo=UTC)  # GMT
+        finally:
+            await scheduler.stop()
+
+    run(scenario)

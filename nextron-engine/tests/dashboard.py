@@ -31,12 +31,20 @@ returning a fixed list (``READINESS``, the eleven doctor checks, all ``ok``) unl
 passes another; the health panel and the notification area's error count read it, and the
 panel's Dismiss goes through ``queue``. They read the database, so they need real units of
 work too.
+
+Its ``Backups`` (``backups``, Story 1.16) uses the same clock, ``notify`` and ``queue``, and a
+``LocalBackups`` (``local``) in ``<%LOCALAPPDATA%>\\Nextron\\backups\\test\\local`` (the
+test's temporary folder) whose ``snapshot`` is ``snapshot`` (a test passes
+``functools.partial(nextron.db.repos.ops.snapshot.snapshot, <db file>)`` to take real copies;
+by default a copy fails with ``RuntimeError``). The panel's "Back up now" queues its job.
 """
 
 import json
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
@@ -44,8 +52,9 @@ from fastapi import FastAPI
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Budget, DashboardEntry, EngineHealth
+from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, LocalBackups
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
+from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.domain.alert import Channel
 from nextron.domain.job import JobTypes
 from nextron.domain.readiness import CheckResult, Status
@@ -80,6 +89,17 @@ READINESS = tuple(
         "database_revision",
     )
 )
+
+
+def no_copies(target: Path) -> Snapshot:
+    """The dashboard's default snapshot: it takes no copies."""
+    raise RuntimeError("this dashboard takes no copies")
+
+
+def default_local_dir() -> Path:
+    """``<%LOCALAPPDATA%>\\Nextron\\backups\\test\\local``: under the test's temporary
+    folder."""
+    return Path(os.environ["LOCALAPPDATA"]) / "Nextron" / "backups" / "test" / "local"
 
 
 def form(**fields: str) -> bytes:
@@ -149,6 +169,8 @@ class Dashboard:
     alert: AlertPort = field(default_factory=InMemoryAlert)
     meter: InMemoryUsageMeter | None = None  # on the dashboard's clock unless a test passes one
     readiness: Callable[[], Sequence[CheckResult]] = lambda: READINESS
+    snapshot: Callable[[Path], Snapshot] = no_copies
+    local_dir: Path = field(default_factory=default_local_dir)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -159,6 +181,8 @@ class Dashboard:
     notify: Notify = field(init=False)
     budget: Budget = field(init=False)
     health: EngineHealth = field(init=False)
+    local: LocalBackups = field(init=False)
+    backups: Backups = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -175,11 +199,17 @@ class Dashboard:
             allowlist=self.read_allowlist,
             start=self.jobs.append,
         )
-        self.job_types = main.build_job_types(alerts=lambda: self.notify)
+        self.job_types = main.build_job_types(
+            alerts=lambda: self.notify, backups=lambda: self.backups
+        )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
             self.clock, self.queue, alert_ports={Channel.TELEGRAM: lambda: self.alert}
         )
+        self.local = LocalBackups(
+            self.clock, env="test", local_dir=self.local_dir, snapshot=self.snapshot
+        )
+        self.backups = Backups(self.clock, self.local, notify=self.notify, queue=self.queue)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)
@@ -202,6 +232,7 @@ class Dashboard:
             budget=self.budget,
             health=self.health,
             queue=self.queue,
+            backups=self.backups,
             units=self.units,
             **extra,
         )

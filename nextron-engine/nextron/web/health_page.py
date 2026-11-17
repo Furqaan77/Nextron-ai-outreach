@@ -12,22 +12,33 @@ on one page.
 - ``POST /health/jobs/dismiss`` (``health_job_dismiss``) dismisses a dead job: apart from
   ``csrf_token`` its fields must be exactly one ``job`` holding a ULID (``submitted_job``;
   anything else is ``MalformedForm``, 400). It deletes the job through ``JobQueue.dismiss`` in
-  its own unit of work, then renders ``health_panel.html`` in a read-only one.
+  its own unit of work, then renders ``health_panel.html`` in a read-only one;
+- ``POST /health/backup`` (``health_backup_now``, Story 1.16) is "Back up now": its only field
+  is ``csrf_token`` (``submitted_backup``; anything else is ``MalformedForm``, 400). It queues a
+  manual backup through ``Backups.request_backup`` in its own unit of work, then renders
+  ``health_panel.html`` in a read-only one with a notice: ``BACKUP_QUEUED`` when the job was
+  created, ``BACKUP_ALREADY_QUEUED`` when one was already queued or running.
 
-All three are ``@personal_data(True)``: a dead job's ``last_error`` is free text that may hold
-personal data (redacted when stored and again when read), so every answer is ``no-store``.
+All four are ``@personal_data(True)``: a dead job's ``last_error`` and a failed backup's error
+are free text that may hold personal data (redacted when stored and again when read), so every
+answer is ``no-store``.
 
 In order, the panel shows:
 
 1. "Checked at <YYYY-MM-DD HH:MM:SS> UTC; refreshes every 30 seconds.";
 2. **Worker**: "Running (last beat <time> UTC)" while the heartbeat is under 2 minutes old,
    else "Not running: last beat <time> UTC", or "Not running: no heartbeat yet";
-3. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
+3. **Backups**: "No backup yet." or "Last backup: <YYYY-MM-DD HH:MM:SS UTC>, <status> (<kind
+   label>)" from the newest backup's ``started_at`` (a failed one gets the
+   ``health-backup-failed`` class), then the notice of a "Back up now" click
+   (``<p class="health-backup-notice" role="status">``) when there is one, then the "Back up
+   now" form (``id="backup-now"``);
+4. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
    ``|plain``); a ``job_dead`` issue has a Dismiss form. With none: "No errors need
    attention.";
-4. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
+5. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
    type that has not succeeded;
-5. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
+6. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
    fail".
 """
 
@@ -36,7 +47,9 @@ from datetime import UTC, datetime
 from typing import Final
 
 from nextron.app.ops.api import HealthReport, Worker
+from nextron.app.queries.ops import BackupRow
 from nextron.domain.alert import JOB_DEAD
+from nextron.domain.backup import BackupKind, BackupStatus
 from nextron.domain.ids import is_ulid
 from nextron.domain.readiness import tally
 from nextron.web.csrf import CSRF_FIELD
@@ -49,6 +62,9 @@ JOB_FIELD: Final = "job"
 NEVER: Final = "never"
 NO_ERRORS: Final = "No errors need attention."
 NO_HEARTBEAT: Final = "Not running: no heartbeat yet"
+NO_BACKUP: Final = "No backup yet."
+BACKUP_QUEUED: Final = "Backup queued; its result shows here when it finishes."
+BACKUP_ALREADY_QUEUED: Final = "A backup is already queued or running."
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +116,17 @@ def worker_text(worker: Worker) -> str:
     return f"Not running: last beat {shown_time(worker.beat_at)}"
 
 
-def panel_context(report: HealthReport) -> dict[str, object]:
-    """What ``health_panel.html`` renders for ``report``."""
+def backup_text(backup: BackupRow | None) -> str:
+    """The Backups line: the newest backup's start, status and kind, or "No backup yet."."""
+    if backup is None:
+        return NO_BACKUP
+    label = BackupKind(backup.kind).label
+    return f"Last backup: {shown_time(backup.started_at)}, {backup.status} ({label})"
+
+
+def panel_context(report: HealthReport, *, notice: str | None = None) -> dict[str, object]:
+    """What ``health_panel.html`` renders for ``report``, with the "Back up now" ``notice``
+    when there is one."""
     issues = [
         IssueItem(issue.text, issue.detail, issue.subject if issue.kind == JOB_DEAD else None)
         for issue in report.issues
@@ -128,6 +153,10 @@ def panel_context(report: HealthReport) -> dict[str, object]:
         "checked_at": shown_time(report.checked_at),
         "worker": worker_text(report.worker),
         "worker_running": report.worker.running,
+        "backup": backup_text(report.backup),
+        "backup_failed": report.backup is not None
+        and report.backup.status == BackupStatus.FAILED,
+        "backup_notice": notice,
         "issues": issues,
         "no_errors": NO_ERRORS,
         "groups": groups,
@@ -146,3 +175,9 @@ def submitted_job(fields: FormFields) -> str:
     if not is_ulid(values[0]):
         raise MalformedForm(WRONG_FIELDS)
     return values[0]
+
+
+def submitted_backup(fields: FormFields) -> None:
+    """A "Back up now" form posts only its ``csrf_token``; ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)

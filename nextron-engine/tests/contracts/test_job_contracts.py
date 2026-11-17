@@ -4,7 +4,8 @@
   ``JobTypes`` or calls ``register_job_type``, and only ``build_triggers()`` there constructs
   ``Triggers`` or calls ``register_trigger``, under any alias.
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
-  (``send_alert``, Story 1.12, with its settings); the triggers are still empty.
+  (``send_alert``, Story 1.12, and ``backup_db``, Story 1.16, with their settings); the
+  triggers are exactly ``backup_db``'s daily schedule (Story 1.16).
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -27,7 +28,7 @@ import ast
 import re
 import sys
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,7 @@ from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
 from nextron.domain.job import Job, JobGroup, JobTypes, Lane
-from nextron.jobs.triggers import Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
 MAIN = "nextron/main.py"
@@ -271,19 +272,35 @@ class RecordingAlerts:
         self.sent.append(alert_id)
 
 
-def test_build_job_types_is_frozen_and_registers_send_alert() -> None:
+class RecordingBackups:
+    """Stands in for the ``ops`` service's ``Backups``."""
+
+    def __init__(self) -> None:
+        self.kinds: list[str] = []
+
+    def back_up(self, kind: str) -> str:
+        self.kinds.append(kind)
+        return "01JD0000000000000000000002"
+
+
+def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> None:
     alerts = RecordingAlerts()
+    backups = RecordingBackups()
     calls: list[str] = []
 
     def lookup() -> RecordingAlerts:
         calls.append("looked up")
         return alerts
 
-    job_types = main.build_job_types(alerts=lookup)
+    def backups_lookup() -> RecordingBackups:
+        calls.append("backups looked up")
+        return backups
+
+    job_types = main.build_job_types(alerts=lookup, backups=backups_lookup)
 
     assert isinstance(job_types, JobTypes)
     assert job_types.frozen
-    assert job_types.names() == ("send_alert",)
+    assert job_types.names() == ("send_alert", "backup_db")
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,
@@ -298,18 +315,36 @@ def test_build_job_types_is_frozen_and_registers_send_alert() -> None:
     job = Job("01JD0000000000000000000001", "send_alert", Lane.REALTIME, {"alert_id": alert_id}, 1)
     assert send_alert.handler(job) is None  # type: ignore[func-returns-value]
     assert (calls, alerts.sent) == (["looked up"], [alert_id])
-    assert main.build_job_types(alerts=lookup) is not job_types  # a new registry each time
+    backup_db = job_types.get("backup_db")
+    assert (
+        backup_db.default_lane,
+        backup_db.lanes,
+        backup_db.priority,
+        backup_db.max_runtime,
+        backup_db.retry_limit,
+        backup_db.group,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 80, timedelta(minutes=30), 2, JobGroup.BACKUP)
+    tick = Job("01JD0000000000000000000003", "backup_db", Lane.BULK, {"v": 1}, 1)
+    assert backup_db.handler(tick) is None  # type: ignore[func-returns-value]
+    assert (calls[-1], backups.kinds) == ("backups looked up", ["daily"])
+    main_registry = main.build_job_types(alerts=lookup, backups=backups_lookup)
+    assert main_registry is not job_types  # a new registry each time
 
 
-def test_build_triggers_is_frozen_and_empty() -> None:
-    job_types = main.build_job_types(alerts=RecordingAlerts)
+def test_build_triggers_registers_the_daily_backup() -> None:
+    job_types = main.build_job_types(alerts=RecordingAlerts, backups=RecordingBackups)
+    schedule = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
 
-    triggers = main.build_triggers(job_types)
+    triggers = main.build_triggers(job_types, backup_schedule=schedule)
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    assert triggers.specs() == ()
-    assert main.build_triggers(job_types) is not triggers  # a new registry each time
+    [spec] = triggers.specs()
+    assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
+    assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
+    assert spec.schedule.grace == timedelta(hours=24)
+    built_again = main.build_triggers(job_types, backup_schedule=schedule)
+    assert built_again is not triggers  # a new registry each time
 
 
 # The jobs modules' imports ----------------------------------------------------------------------

@@ -1,8 +1,10 @@
 """``nextron.db.engine``: the six connection settings, the write lock, the transaction-SQL guard,
-the foreign-keys-off connection, the read-only connection and the read-only engine."""
+the foreign-keys-off connection, the read-only connection, the read-only engine, and the backup
+copy (``copy_database`` and ``open_copy``)."""
 
 import logging
 import sqlite3
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -18,13 +20,16 @@ from nextron.db.engine import (
     ConnectionSettingError,
     ReadOnlySqlError,
     TransactionSqlError,
+    _file_uri,
     _on_begin,
     _on_connect,
     _refuse_transaction_sql,
+    copy_database,
     create_engine,
     create_read_only_engine,
     fk_off_connection,
     leading_keyword,
+    open_copy,
     read_only_connection,
 )
 
@@ -802,3 +807,150 @@ def test_create_read_only_engine_opens_database_files_only(path: Path) -> None:
 def test_create_read_only_engine_takes_a_path() -> None:
     with pytest.raises(TypeError, match="pathlib.Path"):
         create_read_only_engine("nextron.db")  # type: ignore[arg-type]
+
+
+# The backup copy (Story 1.16) -------------------------------------------------------------------
+
+
+def empty_target(folder: Path) -> Path:
+    """An empty file for ``copy_database`` to write, as ``snapshot`` creates it."""
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "copy.db"
+    with target.open("xb"):
+        pass
+    return target
+
+
+def side_files(path: Path) -> list[Path]:
+    return [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm", "-journal")]
+
+
+def test_the_copy_is_one_file_in_wal_mode_and_the_live_file_is_unchanged(
+    scratch: Engine, tmp_path: Path
+) -> None:
+    live = Path(db_path(scratch))
+    with scratch.connect() as connection:
+        connection.exec_driver_sql("INSERT INTO scratch (note) VALUES ('copied')")
+        connection.commit()
+    before = file_bytes(live)
+    target = empty_target(tmp_path / "backups" / "local")
+
+    copy_database(live, target)
+
+    assert file_bytes(live) == before
+    assert not any(path.exists() for path in side_files(target))
+    header = file_bytes(target)[:100]
+    assert header.startswith(b"SQLite format 3\x00")
+    assert (header[18], header[19]) == (2, 2)  # WAL: the engine opens the copy unchanged
+    with open_copy(target) as copy:
+        assert copy.execute("SELECT note FROM scratch").fetchall() == [("copied",)]
+        assert copy.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
+def test_the_copy_holds_committed_rows_still_in_the_wal(scratch: Engine, tmp_path: Path) -> None:
+    live = Path(db_path(scratch))
+    with scratch.connect() as connection:  # the pool keeps it open: no checkpoint
+        connection.exec_driver_sql("INSERT INTO scratch (note) VALUES ('in the wal')")
+        connection.commit()
+    assert live.with_name(live.name + "-wal").stat().st_size > 0
+    target = empty_target(tmp_path / "copies")
+
+    copy_database(live, target)
+
+    with open_copy(target) as copy:
+        assert copy.execute("SELECT note FROM scratch").fetchall() == [("in the wal",)]
+
+
+def test_the_copy_leaves_out_an_open_transactions_rows(scratch: Engine, tmp_path: Path) -> None:
+    live = Path(db_path(scratch))
+    writer = sqlite3.connect(live, isolation_level=None)
+    target = empty_target(tmp_path / "copies")
+    try:
+        writer.execute("BEGIN IMMEDIATE")  # the migration's write transaction holds the lock
+        writer.execute("INSERT INTO scratch (note) VALUES ('uncommitted')")
+        copy_database(live, target)
+        writer.execute("ROLLBACK")
+    finally:
+        writer.close()
+
+    with open_copy(target) as copy:
+        assert copy.execute("SELECT count(*) FROM scratch").fetchone() == (0,)
+
+
+def test_open_copy_leaves_no_side_files_and_the_hash_unchanged(
+    scratch: Engine, tmp_path: Path
+) -> None:
+    target = empty_target(tmp_path / "copies")
+    copy_database(Path(db_path(scratch)), target)
+    before = file_bytes(target)
+
+    with open_copy(target) as copy:
+        copy.execute("SELECT count(*) FROM scratch").fetchall()
+        assert not any(path.exists() for path in side_files(target))
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            copy.execute("INSERT INTO scratch (note) VALUES ('no')")
+
+    assert file_bytes(target) == before
+    assert sorted(path.name for path in target.parent.iterdir()) == ["copy.db"]
+
+
+def test_open_copy_closes_its_connection(scratch: Engine, tmp_path: Path) -> None:
+    target = empty_target(tmp_path / "copies")
+    copy_database(Path(db_path(scratch)), target)
+
+    with open_copy(target) as copy:
+        pass
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        copy.execute("SELECT 1")
+
+
+def test_copying_a_missing_source_raises_and_creates_nothing(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    target = empty_target(tmp_path / "copies")
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        copy_database(data / "nextron.db", target)
+
+    assert list(data.iterdir()) == []
+    assert file_bytes(target) == b""
+    assert sorted(path.name for path in target.parent.iterdir()) == ["copy.db"]
+
+
+def test_copying_never_creates_its_target(scratch: Engine, tmp_path: Path) -> None:
+    folder = tmp_path / "copies"
+    folder.mkdir()
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        copy_database(Path(db_path(scratch)), folder / "copy.db")
+
+    assert list(folder.iterdir()) == []
+
+
+def test_copy_database_and_open_copy_take_paths(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="pathlib.Path"):
+        copy_database("nextron.db", tmp_path / "copy.db")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="pathlib.Path"):
+        with open_copy("copy.db"):  # type: ignore[arg-type]
+            pass
+
+
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows drive and UNC paths")
+
+
+@WINDOWS_ONLY
+def test_a_drive_path_is_a_percent_encoded_file_uri() -> None:
+    path = Path(r"C:\Users\mac\AppData\Local\Nextron\backups\prod\local\copy 1#%.db")
+
+    assert _file_uri(path, "rw") == (
+        "file:///C:/Users/mac/AppData/Local/Nextron/backups/prod/local/copy%201%23%25.db?mode=rw"
+    )
+
+
+@WINDOWS_ONLY
+def test_a_unc_path_gets_an_empty_authority() -> None:
+    path = Path(r"\\nas\share\Nextron backups\local\copy#1.db")
+
+    # SQLite refuses file://nas/... ("invalid uri authority"); file:////nas/... opens the share
+    assert _file_uri(path, "ro") == "file:////nas/share/Nextron%20backups/local/copy%231.db?mode=ro"

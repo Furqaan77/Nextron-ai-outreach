@@ -34,6 +34,22 @@ raises on connect and is never created. Reading a WAL file may leave empty ``-wa
 files next to it; the engine reuses them, and SQLite deletes them when the engine's last
 connection closes at a clean stop.
 
+``copy_database(db_path, target)`` is the one place a backup copies the database (AD-20, Story
+1.16), with SQLite's backup API and never by copying the file: it opens the live file read-only
+(``<file URI>?mode=ro``, ``busy_timeout``), opens ``target`` (an empty file the caller has
+already created; ``mode=rw``, so it is never created here), runs ``source.backup(destination)``
+and closes both connections. It sends no statement to the destination, so the copy is one file
+(no ``-wal`` or ``-shm`` left beside it) whose header keeps the source's WAL mode, and the engine
+can open it unchanged. A read-only source copies what is committed, WAL frames included, and
+stays consistent while the engine commits. A missing source raises and creates nothing. Both
+paths become percent-encoded file URIs (``_file_uri``); a UNC path (a backup dir on a network
+share, ``\\\\nas\\share\\...``) is written with an empty authority, ``file:////nas/share/...``,
+because SQLite refuses the ``file://nas/...`` form ("invalid uri authority").
+
+``open_copy(path)`` is a context manager on a copy: ``sqlite3.connect(<file URI>?mode=ro&
+immutable=1)``. It never writes the copy, never creates ``-wal`` or ``-shm`` files and doesn't
+change the bytes a backup hashed. It closes the connection on exit.
+
 ``fk_off_connection(engine)`` is the one place that turns ``foreign_keys`` off: the startup
 migration (``nextron.db.migrations``) runs on it, following Alembic's SQLite batch guidance.
 
@@ -202,6 +218,54 @@ def create_read_only_engine(db_path: Path) -> Engine:
     event.listen(engine, "begin", _on_begin)
     event.listen(engine, "before_cursor_execute", _refuse_transaction_sql)
     return engine
+
+
+def _file_uri(path: Path, mode: str) -> str:
+    """``path`` as an SQLite file URI with ``?mode=<mode>``, percent-encoded. A UNC path
+    (``\\\\nas\\share\\...``) gets an empty authority, ``file:////nas/share/...``: SQLite
+    refuses the ``file://nas/...`` that ``Path.as_uri`` writes."""
+    uri = path.absolute().as_uri()
+    if not uri.startswith("file:///"):  # a UNC path: the server became the authority
+        uri = "file:////" + uri.removeprefix("file://")
+    return f"{uri}?mode={mode}"
+
+
+def copy_database(db_path: Path, target: Path) -> None:
+    """Copy the database file ``db_path`` into ``target`` with SQLite's backup API; see the
+    module docstring. ``target`` must already exist, empty."""
+    if not (isinstance(db_path, Path) and isinstance(target, Path)):
+        raise TypeError("copy_database takes two pathlib.Path values")
+    source = sqlite3.connect(
+        _file_uri(db_path, "ro"), uri=True, autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL
+    )
+    try:
+        source.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        destination = sqlite3.connect(
+            _file_uri(target, "rw"), uri=True, autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL
+        )
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+    finally:
+        source.close()
+
+
+@contextmanager
+def open_copy(path: Path) -> Iterator[sqlite3.Connection]:
+    """A read-only, ``immutable`` connection to the copy at ``path``; see the module
+    docstring."""
+    if not isinstance(path, Path):
+        raise TypeError("open_copy takes a pathlib.Path")
+    connection = sqlite3.connect(
+        f"{_file_uri(path, 'ro')}&immutable=1",
+        uri=True,
+        autocommit=sqlite3.LEGACY_TRANSACTION_CONTROL,
+    )
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 def _set_foreign_keys(dbapi_connection: sqlite3.Connection, on: bool) -> None:

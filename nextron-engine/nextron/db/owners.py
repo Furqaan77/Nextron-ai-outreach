@@ -80,6 +80,23 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "runner_heartbeat": {
         "ops": ("id", "pid", "started_at", "beat_at"),
     },
+    "backups": {
+        "ops": (
+            "id",
+            "kind",
+            "status",
+            "started_at",
+            "finished_at",
+            "path",
+            "size_bytes",
+            "sha256",
+            "db_revision",
+            "suppression_count",
+            "provenance_count",
+            "error",
+            "local_deleted_at",
+        ),
+    },
     "alerts": {
         "notify": (
             "id",

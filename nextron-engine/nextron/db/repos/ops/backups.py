@@ -1,0 +1,144 @@
+"""The ``backups`` table's repository (AD-3, AD-20, Story 1.16): the only SQL on it.
+
+Every function works through the current unit of work's session (``nextron.db.uow.current()``):
+reads work in a read-only unit of work too, writes only inside the running use case's
+transaction. It stores what the ``ops`` service gives it and checks nothing (the table's checks
+do). Rows come back as ``BackupRow``, a frozen copy of every column.
+
+- ``insert(...)``: a new row, written once; returns its new ULID;
+- ``newest(*, kind=None, status=None)``: the newest row (``started_at``, then id, descending),
+  of ``kind`` and ``status`` when given, or ``None``;
+- ``failed_after(since)``: every ``failed`` row that started after ``since`` (every one when
+  ``since`` is ``None``), oldest first;
+- ``rotation_candidates(before, keep_id)``: every ``verified`` row whose local copy is still
+  there (``local_deleted_at IS NULL``), that started before ``before`` and isn't ``keep_id``,
+  oldest first;
+- ``mark_deleted(ids, at)``: sets ``local_deleted_at`` on those rows while it is ``NULL``;
+  returns the row count.
+"""
+
+from collections.abc import Iterable
+from dataclasses import dataclass, fields
+from datetime import datetime
+
+from sqlalchemy import Executable, select, update
+from sqlalchemy import insert as sql_insert
+
+from nextron.db.models.base import new_id
+from nextron.db.models.ops import BackupRecord
+from nextron.db.uow import current
+
+FAILED = "failed"  # nextron.domain.backup.BackupStatus.FAILED
+VERIFIED = "verified"  # nextron.domain.backup.BackupStatus.VERIFIED
+_NO_SYNC = {"synchronize_session": False}
+
+
+@dataclass(frozen=True, slots=True)
+class BackupRow:
+    """Every column of one ``backups`` row."""
+
+    id: str
+    kind: str
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    path: str
+    size_bytes: int | None
+    sha256: str | None
+    db_revision: str | None
+    suppression_count: int | None
+    provenance_count: int | None
+    error: str | None
+    local_deleted_at: datetime | None
+
+
+_COLUMNS = tuple(getattr(BackupRecord, field.name) for field in fields(BackupRow))
+
+
+def _rows(statement: Executable) -> list[BackupRow]:
+    return [BackupRow(*row) for row in current().session.execute(statement)]
+
+
+def insert(
+    *,
+    kind: str,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime,
+    path: str,
+    size_bytes: int | None,
+    sha256: str | None,
+    db_revision: str | None,
+    suppression_count: int | None,
+    provenance_count: int | None,
+    error: str | None,
+) -> str:
+    """Insert one backup row; return its new id."""
+    backup_id = new_id()
+    current().session.execute(
+        sql_insert(BackupRecord).values(
+            id=backup_id,
+            kind=kind,
+            status=status,
+            started_at=started_at,
+            finished_at=finished_at,
+            path=path,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            db_revision=db_revision,
+            suppression_count=suppression_count,
+            provenance_count=provenance_count,
+            error=error,
+            local_deleted_at=None,
+        )
+    )
+    return backup_id
+
+
+def newest(*, kind: str | None = None, status: str | None = None) -> BackupRow | None:
+    """The newest row, of ``kind`` and ``status`` when given; ``None`` when there is none."""
+    statement = select(*_COLUMNS)
+    if kind is not None:
+        statement = statement.where(BackupRecord.kind == kind)
+    if status is not None:
+        statement = statement.where(BackupRecord.status == status)
+    rows = _rows(
+        statement.order_by(BackupRecord.started_at.desc(), BackupRecord.id.desc()).limit(1)
+    )
+    return rows[0] if rows else None
+
+
+def failed_after(since: datetime | None) -> tuple[BackupRow, ...]:
+    """Every ``failed`` row that started after ``since`` (all when ``None``), oldest first."""
+    statement = select(*_COLUMNS).where(BackupRecord.status == FAILED)
+    if since is not None:
+        statement = statement.where(BackupRecord.started_at > since)
+    return tuple(_rows(statement.order_by(BackupRecord.started_at, BackupRecord.id)))
+
+
+def rotation_candidates(before: datetime, keep_id: str | None) -> tuple[BackupRow, ...]:
+    """Every ``verified`` row with its local copy still there that started before ``before``,
+    except ``keep_id``, oldest first."""
+    statement = select(*_COLUMNS).where(
+        BackupRecord.status == VERIFIED,
+        BackupRecord.local_deleted_at.is_(None),
+        BackupRecord.started_at < before,
+    )
+    if keep_id is not None:
+        statement = statement.where(BackupRecord.id != keep_id)
+    return tuple(_rows(statement.order_by(BackupRecord.started_at, BackupRecord.id)))
+
+
+def mark_deleted(ids: Iterable[str], at: datetime) -> int:
+    """Set ``local_deleted_at`` to ``at`` on the rows ``ids`` while it is ``NULL``; the row
+    count."""
+    chosen = list(ids)
+    if not chosen:
+        return 0
+    result = current().session.execute(
+        update(BackupRecord)
+        .where(BackupRecord.id.in_(chosen), BackupRecord.local_deleted_at.is_(None))
+        .values(local_deleted_at=at)
+        .execution_options(**_NO_SYNC)
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]

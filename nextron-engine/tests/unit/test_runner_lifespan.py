@@ -12,19 +12,32 @@ The health panel (Story 1.15), on the real ``build_app`` with injected secrets, 
 ``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the eleven
 doctor rows in order (``port_free`` ok without a probe, the grant ok without a refresh) and the
 dead job, and writes nothing; a wiring that ran doctor's own forms would be caught.
+
+Backups (Story 1.16), on the real ``build_app`` over ``open_database(config)`` with its lifespan
+running on a thread of its own: the scheduler registers the ``backup_db`` cron trigger (10:00
+UTC, no catch-up on a new database), a ``POST /health/backup`` is run by the real runner into
+``<backup dir>\\local`` (a ``verified`` ``manual`` row), and a failed backup shows in the
+panel's error list.
 """
 
 import asyncio
+import contextlib
+import dataclasses
 import logging
 import os
 import sqlite3
 import threading
+import time
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from datetime import time as dt_time
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 import httpx2
 import pytest
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 
 import nextron.adapters.telegram as telegram_adapter
@@ -49,10 +62,12 @@ from nextron.domain.google_oauth import (
 )
 from nextron.domain.job import Lane
 from nextron.domain.settings_schema import Key
+from nextron.jobs import scheduler as scheduler_module
 from nextron.jobs.runner import Runner
 from nextron.main import AdapterContext
 from nextron.ports.alert import AlertMessage
 from tests.asgi import request
+from tests.dashboard import body_hx_headers
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import CLIENT_ID, FakeGoogleOAuth
@@ -70,6 +85,11 @@ EXPECTED_THREADS = [
     "nextron-job-realtime-1",
 ]
 LIFESPAN_LOGGERS = ("nextron.jobs.runner", "nextron.jobs.scheduler", "nextron.jobs.heartbeat")
+
+
+def no_backups() -> Any:
+    """``build_job_types``'s ``backups`` where no ``backup_db`` job runs."""
+    raise AssertionError("no backup_db job runs in these tests")
 
 
 def job_threads() -> list[str]:
@@ -140,7 +160,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
 
     assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
     [job_types] = registries
-    assert job_types.names() == ("send_alert",)  # type: ignore[attr-defined]
+    assert job_types.names() == ("send_alert", "backup_db")  # type: ignore[attr-defined]
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
         assert notify_queries.open_notifications(5).count == 0
@@ -433,7 +453,8 @@ def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> N
 
 def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
     """A ``send_alert`` job that died on its first run; its id."""
-    queue = JobQueue(clock, main.build_job_types(alerts=InMemoryAlert))  # never called
+    job_types = main.build_job_types(alerts=InMemoryAlert, backups=no_backups)  # never called
+    queue = JobQueue(clock, job_types)
 
     @use_case
     def enqueue() -> str:
@@ -618,6 +639,7 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     events = [r.getMessage() for r in caplog.records if r.name in LIFESPAN_LOGGERS]
     assert events == [
         "job_runner_started",
+        "daily_trigger_scheduled",
         "scheduler_started",
         "scheduler_stopped",
         "job_runner_stopped",
@@ -625,7 +647,7 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    assert scheduled.triggers == 0  # type: ignore[attr-defined]
+    assert scheduled.triggers == 1  # type: ignore[attr-defined]  # backup_db's daily time
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -761,3 +783,279 @@ def test_a_failed_stop_still_stops_the_other_parts() -> None:
         serve(parts)
 
     assert parts.names()[-3:] == ["writer.stop", "scheduler.stop", "runner.stop"]
+
+
+# Backups through the real app (Story 1.16) -----------------------------------------------------
+
+POLL_SLICE = 0.05  # the longest single wait
+POLL_ATTEMPTS = 200  # 10 s: the bulk lane looks for work every second
+
+
+@contextlib.contextmanager
+def serving(app: FastAPI) -> Iterator[None]:
+    """The app's lifespan started on its own thread and event loop, as Uvicorn would, while
+    the test sends requests; shut down on exit."""
+    started = threading.Event()
+    shutdown: list[Callable[[], None]] = []
+    problems: list[object] = []
+
+    def serve() -> None:
+        async def run() -> None:
+            loop = asyncio.get_running_loop()
+            incoming: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+            await incoming.put({"type": "lifespan.startup"})
+            shutdown.append(
+                lambda: loop.call_soon_threadsafe(
+                    incoming.put_nowait, {"type": "lifespan.shutdown"}
+                )
+            )
+
+            async def receive() -> dict[str, Any]:
+                return await incoming.get()
+
+            async def send(message: dict[str, Any]) -> None:
+                if message["type"].endswith(".failed"):
+                    problems.append(message)
+                if message["type"].startswith("lifespan.startup."):
+                    started.set()
+
+            scope = {"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}
+            await app(scope, receive, send)
+
+        try:
+            asyncio.run(run())
+        except BaseException as exc:  # noqa: BLE001 - reported to the test
+            problems.append(exc)
+            started.set()
+
+    thread = threading.Thread(target=serve, name="lifespan-under-test")
+    thread.start()
+    try:
+        assert started.wait(30)
+        assert problems == []
+        yield
+    finally:
+        if shutdown:
+            shutdown[0]()
+        thread.join(60)
+        assert not thread.is_alive()
+    assert problems == []
+
+
+@dataclasses.dataclass
+class RealEngine:
+    """The real ``build_app`` on ``open_database(config)``, with a dashboard session."""
+
+    config: Any
+    units: UnitOfWorkFactory
+    app: FastAPI
+    host: bytes
+    cookie: bytes = b""
+    token: str = ""
+
+    def enter(self, secrets: InMemorySecrets, clock: FrozenClock) -> None:
+        code = main.build_entry(self.config, secrets=secrets, clock=clock).issue_code()
+        entered = request(
+            self.app, "/enter", query=b"t=" + code.encode(), headers=[(b"host", self.host)]
+        )
+        cookie = entered.header(b"set-cookie")
+        assert entered.status == 303 and cookie is not None
+        self.cookie = cookie.split(b";")[0]
+        token = body_hx_headers(self.get("/").text)["X-CSRF-Token"]
+        assert isinstance(token, str)
+        self.token = token
+
+    def get(self, path: str) -> Any:
+        reply = request(self.app, path, headers=[(b"host", self.host), (b"cookie", self.cookie)])
+        assert reply.status == 200, reply
+        return reply
+
+    def back_up_now(self) -> Any:
+        return request(
+            self.app,
+            "/health/backup",
+            method="POST",
+            headers=[
+                (b"host", self.host),
+                (b"cookie", self.cookie),
+                (b"origin", b"http://" + self.host),
+                (b"x-csrf-token", self.token.encode()),
+                (b"content-type", b"application/x-www-form-urlencoded"),
+            ],
+        )
+
+    def backups(self) -> list[tuple[str, str, str, str | None]]:
+        return raw_query(self.units, "SELECT kind, status, path, error FROM backups")
+
+
+def real_engine(monkeypatch: pytest.MonkeyPatch) -> RealEngine:
+    monkeypatch.setattr(main, "build_role_adapter", lambda *args, **kwargs: InMemoryAlert())
+    config = load_bootstrap()
+    config.data_dir.mkdir(parents=True)
+    units, _ = main.open_database(config)  # the file the snapshot is bound to
+    clock, secrets = FrozenClock(T), InMemorySecrets("test")
+    app = main.build_app(
+        config,
+        units=units,
+        secrets=secrets,
+        clock=clock,
+        google_oauth=FakeGoogleOAuth(),
+        probes=fake_probes(),
+    )
+    engine = RealEngine(config, units, app, f"127.0.0.1:{config.port}".encode())
+    engine.enter(secrets, clock)
+    return engine
+
+
+def wait_for_backup(engine: RealEngine) -> list[tuple[str, str, str, str | None]]:
+    for _ in range(POLL_ATTEMPTS):
+        rows = engine.backups()
+        if rows:
+            return rows
+        time.sleep(POLL_SLICE)
+    pytest.fail("the backup_db job did not record a backup")
+
+
+def test_the_scheduler_registers_the_backup_db_cron_trigger(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    schedulers = spy(monkeypatch, "Scheduler")
+    engine = real_engine(monkeypatch)
+    jobs: list[Any] = []
+    try:
+        with serving(engine.app):
+            [scheduler] = schedulers
+            created = scheduler._scheduler  # noqa: SLF001 - the APScheduler it runs
+            assert created is not None
+            jobs.extend(created.get_jobs())
+    finally:
+        engine.units.engine.dispose()
+
+    [job] = jobs
+    assert job.id == "backup_db"
+    assert isinstance(job.trigger, CronTrigger)
+    fields = {field.name: str(field) for field in job.trigger.fields}
+    assert (fields["hour"], fields["minute"]) == ("10", "0")
+    assert str(job.trigger.timezone) == "UTC"
+    assert (job.misfire_grace_time, job.coalesce, job.max_instances) == (86400, True, 1)
+    [scheduled] = [r for r in caplog.records if r.getMessage() == "daily_trigger_scheduled"]
+    assert getattr(scheduled, "catch_up") is False  # a new database never catches up
+    assert engine.backups() == []
+    assert not (engine.config.backup_dir).exists()
+
+
+
+def test_the_scheduler_reads_the_stored_time_zone_and_a_missed_daily_backup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    added: list[dict[str, Any]] = []
+
+    class Recording(scheduler_module.AsyncIOScheduler):  # type: ignore[misc]
+        def add_job(self, *args: Any, **kwargs: Any) -> Any:
+            added.append({"trigger": args[1], **kwargs})
+            return super().add_job(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler_module, "AsyncIOScheduler", Recording)
+    engine = real_engine(monkeypatch)
+    try:
+        with engine.units.open():
+            Setup(FrozenClock(T)).set(Key.BACKUP_TIME, dt_time(7, 30))
+        with engine.units.open():
+            Setup(FrozenClock(T)).set(Key.SENDER_TIMEZONE, "America/New_York")
+        # T is 04:00 in New York, so the latest 07:30 slot was 2026-11-16 12:30 UTC; the newest
+        # daily backup started before it: the engine was off then
+        raw_query(
+            engine.units,
+            "INSERT INTO backups (id, kind, status, started_at, finished_at, path, size_bytes, "
+            "sha256, db_revision) VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0AB', 'daily', 'verified', "
+            "'2026-11-15T12:30:00.000000Z', '2026-11-15T12:30:01.000000Z', 'gone.db', 1, ?, ?)",
+            ("a" * 64, head_revision()),
+        )
+        before = datetime.now(UTC)
+        with serving(engine.app):
+            after = datetime.now(UTC)
+            caught_up = wait_for_daily(engine)
+    finally:
+        engine.units.engine.dispose()
+
+    [scheduled] = [r for r in caplog.records if r.getMessage() == "daily_trigger_scheduled"]
+    assert (
+        getattr(scheduled, "at"),
+        getattr(scheduled, "timezone"),
+        getattr(scheduled, "catch_up"),
+    ) == ("07:30", "America/New_York", True)
+    [job] = added
+    assert job["id"] == "backup_db"
+    trigger = job["trigger"]
+    assert isinstance(trigger, CronTrigger)
+    fields = {field.name: str(field) for field in trigger.fields}
+    assert (fields["hour"], fields["minute"]) == ("7", "30")
+    assert str(trigger.timezone) == "America/New_York"
+    assert before <= job["next_run_time"] <= after  # the catch-up: now
+    assert caught_up == ("daily", "verified")  # and the runner took it
+
+
+def wait_for_daily(engine: RealEngine) -> tuple[str, str]:
+    """The catch-up daily backup's kind and status, once the runner has recorded it."""
+    for _ in range(POLL_ATTEMPTS):
+        rows = raw_query(
+            engine.units,
+            "SELECT kind, status FROM backups WHERE started_at = '2026-11-17T09:00:00.000000Z'",
+        )
+        if rows:
+            return rows[0]
+        time.sleep(POLL_SLICE)
+    pytest.fail("the catch-up backup_db job did not record a backup")
+
+
+def test_back_up_now_is_run_by_the_real_runner_into_backup_dir_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = real_engine(monkeypatch)
+    try:
+        with serving(engine.app):
+            reply = engine.back_up_now()
+            assert reply.status == 200
+            assert "Backup queued; its result shows here when it finishes." in reply.text
+            [(kind, status, path, error)] = wait_for_backup(engine)
+            panel = engine.get("/health/panel/live").text
+    finally:
+        engine.units.engine.dispose()
+
+    assert (kind, status, error) == ("manual", "verified", None)
+    copy = Path(path)
+    assert copy.parent == engine.config.backup_dir / "local"
+    assert [found.name for found in copy.parent.iterdir()] == [copy.name]
+    assert copy.name.startswith("nextron-test-20261117T090000.000Z")
+    assert "Last backup: 2026-11-17 09:00:00 UTC, verified (manual)" in panel
+    assert raw_query(engine.units, "SELECT status FROM jobs WHERE type = 'backup_db'") == [
+        ("done",)
+    ]
+
+
+def test_a_failed_backup_appears_in_the_panels_error_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blocked = tmp_path / "not-a-folder"
+    blocked.write_bytes(b"a file where the backup dir should be")
+    monkeypatch.setenv("NEXTRON_BACKUP_DIR", str(blocked))
+    engine = real_engine(monkeypatch)
+    try:
+        with serving(engine.app):
+            assert engine.back_up_now().status == 200
+            [(kind, status, _, error)] = wait_for_backup(engine)
+            panel = engine.get("/health/panel/live").text
+    finally:
+        engine.units.engine.dispose()
+
+    assert (kind, status) == ("manual", "failed")
+    assert error is not None
+    [(backup_id,)] = raw_query(engine.units, "SELECT id FROM backups")
+    assert f"Backup failed: manual {backup_id}" in panel
+    assert 'class="health-backup health-backup-failed"' in panel
+    assert raw_query(engine.units, "SELECT status FROM jobs WHERE type = 'backup_db'") == [
+        ("done",)  # a failed copy never raises, so the job is not retried
+    ]
+    assert blocked.read_bytes() == b"a file where the backup dir should be"

@@ -67,6 +67,23 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "started_at": PiiClass.NONE,
         "beat_at": PiiClass.NONE,
     },
+    # Story 1.16. The copy's path, size, hash, revision, counts and times. error is free text:
+    # an exception's message, redacted and cut to 500 characters, could still name a person.
+    "backups": {
+        "id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "finished_at": PiiClass.NONE,
+        "path": PiiClass.NONE,
+        "size_bytes": PiiClass.NONE,
+        "sha256": PiiClass.NONE,
+        "db_revision": PiiClass.NONE,
+        "suppression_count": PiiClass.NONE,
+        "provenance_count": PiiClass.NONE,
+        "error": PiiClass.REDACT,
+        "local_deleted_at": PiiClass.NONE,
+    },
     # Story 1.12. Ops alert text carries IDs and counts only, but later kinds (Hot Lead,
     # LinkedIn) are free text that may name a person; every other column is an ID, a code or a
     # time.

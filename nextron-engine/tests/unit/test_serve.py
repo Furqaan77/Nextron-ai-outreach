@@ -1,11 +1,17 @@
-"""``serve`` against the story's I/O matrix, with fake probes and a fake server runner."""
+"""``serve`` against the story's I/O matrix, with fake probes and a fake server runner; since
+Story 1.16 also the ``pre_migrate`` backup rows (Pre-migrate, Pre-migrate fails, Migration
+fails, No pre-migrate, and a record that fails while startup continues), through the
+``tests/migration_chains.py`` helpers."""
 
 import importlib
 import io
 import json
+import re
+import shutil
 import sqlite3
 import zoneinfo
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,7 +21,9 @@ from nextron import main
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
 from nextron.db import migrations
 from nextron.db.migrations import ensure_current, head_revision
+from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.uow import UnitOfWorkFactory
+from nextron.domain.backup import BackupKind, BackupNotVerified
 from nextron.domain.notifications import NOTIFICATIONS
 from nextron.lock import InstanceLock, LockHeldError
 from nextron.startup_checks import Probes
@@ -395,8 +403,8 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[UnitOfWorkFactory]:
     factories: list[UnitOfWorkFactory] = []
     real = main.open_database
 
-    def spy(config: BootstrapConfig) -> tuple[UnitOfWorkFactory, str]:
-        units, revision = real(config)
+    def spy(config: BootstrapConfig, **kwargs: Any) -> tuple[UnitOfWorkFactory, str]:
+        units, revision = real(config, **kwargs)
         factories.append(units)
         return units, revision
 
@@ -681,3 +689,243 @@ def test_cli_dispatches_serve(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert cli.main(["serve", "--reload"]) == 0
     assert seen == [True]
+
+
+# The pre_migrate backup (Story 1.16) ------------------------------------------------------------
+
+
+def local_copies(local_app_data: Path) -> list[Path]:
+    """The copies in ``dev``'s default ``<backup dir>\\local``."""
+    folder = local_app_data / "Nextron" / "backups" / "dev" / "local"
+    return sorted(folder.iterdir()) if folder.exists() else []
+
+
+def copy_revision(copy: Path) -> str:
+    """The Alembic revision of a copy, read without changing it."""
+    reader = sqlite3.connect(f"{copy.as_uri()}?mode=ro&immutable=1", uri=True)
+    try:
+        [(revision,)] = reader.execute("SELECT version_num FROM alembic_version").fetchall()
+        return str(revision)
+    finally:
+        reader.close()
+
+
+def backup_rows(db_file: Path) -> list[tuple[str, str, str, str | None, str | None]]:
+    reader = sqlite3.connect(f"{db_file.as_uri()}?mode=ro", uri=True)
+    try:
+        return reader.execute(
+            "SELECT kind, status, path, db_revision, sha256 FROM backups"
+        ).fetchall()
+    finally:
+        reader.close()
+
+
+def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) -> Path:
+    """The real chain, a database at its head, then one more revision: the database is
+    behind the code by one revision that the real ``backups`` table predates."""
+    location = chain(tmp_path)
+    for revision in (migrations.SCRIPT_LOCATION / "versions").glob("*.py"):
+        shutil.copy2(revision, location / "versions" / revision.name)
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0008_more", create_table("more")))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+    return dev / "nextron.db"
+
+
+# Row: Pre-migrate
+def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_app_data: Path
+) -> None:
+    db_file = real_chain_plus(tmp_path, monkeypatch, dev)
+
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    assert spy.calls[0]["db_revision"] == "0008_more"
+    [copy] = local_copies(local_app_data)
+    assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
+    assert copy_revision(copy) == HEAD  # taken before the upgrade
+    assert backup_rows(db_file) == [("pre_migrate", "verified", str(copy), HEAD, sha256(copy))]
+    assert events(dev) == ["database_migrated", "engine_started", "engine_stopped"]
+    assert not [line for line in main_log(dev) if "backup" in line["event"]]
+
+
+
+def test_a_failed_rotation_after_the_pre_migrate_copy_is_no_record_failure(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_app_data: Path
+) -> None:
+    db_file = real_chain_plus(tmp_path, monkeypatch, dev)
+
+    def locked(*args: object, **kwargs: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(backups_repo, "rotation_candidates", locked)
+
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    [copy] = local_copies(local_app_data)
+    assert backup_rows(db_file) == [("pre_migrate", "verified", str(copy), HEAD, sha256(copy))]
+    assert events(dev) == ["database_migrated", "engine_started", "engine_stopped"]
+    text = (dev / "logs" / "nextron.log").read_text(encoding="utf-8")
+    lines = [json.loads(line) for line in text.splitlines()]
+    [failed] = [line for line in lines if line["event"] == "backup_rotation_failed"]
+    assert (failed["logger"], failed["level"], failed["code"]) == (
+        "nextron.app.ops.api",
+        "ERROR",
+        "OperationalError",
+    )
+
+
+# Row: Pre-migrate fails
+def test_a_failed_pre_migrate_backup_exits_2_and_migrates_nothing(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_app_data: Path
+) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_b", create_table("b")))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+    before = sha256(dev / "nextron.db")
+
+    def broken_snapshot(db_path: Path, target: Path) -> object:
+        raise BackupNotVerified("integrity_check: database disk image is malformed")
+
+    monkeypatch.setattr(main, "snapshot", broken_snapshot)
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert err.strip() == (
+        "startup check failed: pre_migrate_backup: backup_not_verified: integrity_check: "
+        "database disk image is malformed; the database was not migrated"
+    )
+    assert spy.calls == []
+    assert stored_revisions(dev / "nextron.db") == ["0001_a"]
+    assert sha256(dev / "nextron.db") == before
+    assert local_copies(local_app_data) == []
+    [failed] = main_log(dev)
+    assert (failed["event"], failed["level"], failed["code"]) == (
+        "pre_migrate_backup_failed",
+        "ERROR",
+        "backup_not_verified",
+    )
+    with InstanceLock(dev / "nextron.lock"):
+        pass
+
+
+def test_a_pre_migrate_copy_that_cannot_be_made_exits_2(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_app_data: Path
+) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_b", create_table("b")))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+    backups = local_app_data / "Nextron" / "backups"
+    backups.mkdir(parents=True)
+    (backups / "dev").write_bytes(b"a file where the backup dir should be")
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert err.startswith("startup check failed: pre_migrate_backup: ")
+    assert err.strip().endswith("; the database was not migrated")
+    assert spy.calls == []
+    assert stored_revisions(dev / "nextron.db") == ["0001_a"]
+    [failed] = main_log(dev)
+    assert failed["event"] == "pre_migrate_backup_failed"
+
+
+# Row: Migration fails
+def test_a_failed_migration_after_a_copy_names_the_copy_and_keeps_it(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_app_data: Path
+) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_fails", "raise RuntimeError('the migration broke')"))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+
+    code, err, spy = run_serve()
+
+    assert code == 2
+    assert spy.calls == []
+    assert stored_revisions(dev / "nextron.db") == ["0001_a"]
+    [copy] = local_copies(local_app_data)
+    assert copy_revision(copy) == "0001_a"
+    assert "database startup failed: it could not be opened, or a migration failed" in err
+    assert f"The database was copied before the migration to {copy}" in err
+    assert f'nextron restore "{copy}"' in err
+    [failed] = main_log(dev)
+    assert (failed["event"], failed["level"], failed["file"]) == (
+        "database_migration_failed",
+        "ERROR",
+        copy.name,
+    )
+    assert "RuntimeError: the migration broke" in failed["exc"]
+
+
+# Row: No pre-migrate
+def test_a_new_database_or_one_at_head_takes_no_copy(dev: Path, local_app_data: Path) -> None:
+    assert run_serve()[0] == 0  # a new file
+    assert run_serve()[0] == 0  # at head
+
+    assert local_copies(local_app_data) == []
+    assert not (local_app_data / "Nextron" / "backups").exists()
+    assert backup_rows(dev / "nextron.db") == []
+
+
+# A failed record continues
+def test_a_copy_whose_row_cannot_be_recorded_is_kept_and_startup_continues(
+    dev: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_app_data: Path
+) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))  # no backups table at all
+    dev.mkdir(parents=True)
+    with engine_on(dev / "nextron.db") as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_b", create_table("b")))
+    monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
+
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    assert spy.calls[0]["db_revision"] == "0002_b"
+    [copy] = local_copies(local_app_data)
+    assert copy_revision(copy) == "0001_a"
+    assert events(dev) == [
+        "database_migrated",
+        "backup_record_failed",
+        "engine_started",
+        "engine_stopped",
+    ]
+    failed = main_log(dev)[1]
+    assert (failed["level"], failed["code"], failed["file"]) == (
+        "ERROR",
+        "OperationalError",
+        copy.name,
+    )
+    assert str(local_app_data) not in json.dumps(failed)  # the file name, never its path
+
+
+def test_the_hook_takes_one_copy_and_raises_when_it_failed(tmp_path: Path) -> None:
+    taken: list[str] = []
+
+    class Local:
+        def take(self, kind: BackupKind) -> object:
+            taken.append(str(kind))
+            return failed
+
+    failed = SimpleNamespace(error="OSError: disk full", code="OSError")
+    hook = main.PreMigrateBackup(Local())  # type: ignore[arg-type]
+
+    with pytest.raises(main.PreMigrateBackupFailed, match="OSError: disk full"):
+        hook("0001_a")
+
+    assert taken == ["pre_migrate"]
+    assert hook.taken is failed

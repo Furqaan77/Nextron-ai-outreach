@@ -233,13 +233,24 @@ def test_guarded_health_page_and_second_instance(
     [runner_started] = [line for line in lines if line["event"] == "job_runner_started"]
     assert (runner_started["logger"], runner_started["bulk_threads"]) == ("nextron.jobs.runner", 1)
     assert lines.index(started) < lines.index(runner_started)
-    # then the scheduler, with no triggers yet, and the heartbeat writer's first beat
+    # then the scheduler, with backup_db's daily time (no catch-up on a new database), and the
+    # heartbeat writer's first beat
+    [daily] = [line for line in lines if line["event"] == "daily_trigger_scheduled"]
+    assert (daily["trigger"], daily["at"], daily["timezone"], daily["catch_up"]) == (
+        "backup_db",
+        "10:00",
+        "UTC",
+        False,
+    )
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        0,
+        1,
     )
-    assert lines.index(runner_started) < lines.index(scheduler_started)
+    assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
+    # a new database takes no pre_migrate copy and no catch-up backup: the backup dir is empty
+    assert not (tmp_path / "backups").exists()
+    assert not [line for line in lines if str(line["event"]).startswith("backup")]
     [(row_id, pid, started_at, beat_at)] = heartbeat_rows(data_dir / "nextron.db")
     assert (row_id, pid > 0) == ("00000000000000000000000000", True)
     first_beat = datetime.fromisoformat(started_at)
@@ -249,7 +260,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0006_1_13_metering"
+    assert HEAD == "0007_1_16_backups"
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # no alert was raised or sent: nothing built the Telegram adapter or reached the sink

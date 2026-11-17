@@ -13,12 +13,15 @@ Import rule: ``nextron.app.*.api``, ``nextron.app.queries.*``, domain types and
   runner finishes the job with ``JobQueue.defer``: back to ``queued`` an hour later with its
   attempt given back, never ``dead``.
 - ``handlers`` (Story 1.12): the thin job handlers, each built by ``nextron.main`` around what
-  it calls (``send_alert(alerts)``). It imports only the domain and the standard library.
-- ``triggers`` (Story 1.11): the closed AD-10 ``Trigger`` enum, the ``Every`` interval schedule
-  and the ``Triggers`` registry, which ``nextron.main.build_triggers`` alone builds. It imports
+  it calls (``send_alert(alerts)``, and ``backup_db(backups)`` since Story 1.16). It imports
   only the domain and the standard library.
+- ``triggers`` (Story 1.11): the closed AD-10 ``Trigger`` enum, the ``Every`` interval schedule,
+  the ``DailyAt`` daily schedule with its ``DailyRun`` (Story 1.16) and the ``Triggers``
+  registry, which ``nextron.main.build_triggers`` alone builds. It imports only the domain and
+  the standard library.
 - ``scheduler`` (Story 1.11): ``Scheduler``, APScheduler's ``AsyncIOScheduler(timezone=UTC)``
-  with one interval job per registered trigger; each firing only enqueues its tick job
+  with one interval job per ``Every`` trigger and one cron job per ``DailyAt`` trigger (its
+  time read when the scheduler starts); each firing only enqueues its tick job
   (``JobQueue.enqueue_tick``). It is the only module that imports ``apscheduler``, with
   ``nextron.app.jobqueue.api``, ``triggers``, the domain and the standard library.
 - ``heartbeat`` (Story 1.11): ``HeartbeatWriter``, the ``nextron-job-heartbeat`` thread that

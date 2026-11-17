@@ -5,6 +5,7 @@ The real chain has one revision, so "behind" and "a migration fails" use tempora
 (which checkpoints the WAL into the file) before a SHA-256 is taken.
 """
 
+import sqlite3
 import warnings
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0006_1_13_metering"
+HEAD = "0007_1_16_backups"
 
 
 @pytest.fixture
@@ -295,3 +296,76 @@ def test_the_config_is_built_in_code() -> None:
     assert config.config_file_name is None
     assert Path(config.get_main_option("script_location") or "") == SCRIPT_LOCATION
     assert config.get_main_option("path_separator") == "os"
+
+
+# The before_upgrade hook (Story 1.16) -----------------------------------------------------------
+
+
+def test_the_hook_runs_before_the_upgrade_of_a_database_behind(tmp_path: Path) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_b", create_table("b")))
+    seen: list[tuple[str, set[str]]] = []
+
+    def hook(before: str) -> None:
+        # another connection can't write: the migration's write transaction is already held
+        writer = sqlite3.connect(path, isolation_level=None, timeout=0.05)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                writer.execute("BEGIN IMMEDIATE")
+        finally:
+            writer.close()
+        seen.append((before, tables(path)))
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location, before_upgrade=hook) == (
+            "0001_a",
+            "0002_b",
+        )
+
+    [(before, found)] = seen
+    assert before == "0001_a"
+    assert "b" not in found  # called before the upgrade
+    assert "b" in tables(path)
+
+
+def test_a_hook_that_raises_migrates_nothing(tmp_path: Path) -> None:
+    location = chain(tmp_path, ("0001_a", create_table("a")))
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        ensure_current(engine, script_location=location)
+    extend(location, ("0002_b", create_table("b")))
+
+    def hook(before: str) -> None:
+        raise RuntimeError("the backup failed")
+
+    with engine_on(path) as engine:
+        with pytest.raises(RuntimeError, match="the backup failed"):
+            ensure_current(engine, script_location=location, before_upgrade=hook)
+        assert current_revision(engine) == "0001_a"
+
+    assert "b" not in tables(path)
+
+
+def test_the_hook_never_runs_for_a_new_file_or_a_database_at_head(tmp_path: Path) -> None:
+    calls: list[str] = []
+    path = tmp_path / "nextron.db"
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine, before_upgrade=calls.append) == (None, HEAD)
+        assert ensure_current(engine, before_upgrade=calls.append) == (HEAD, HEAD)
+
+    assert calls == []
+
+
+def test_the_hook_never_runs_for_a_refused_database(db_file: Path) -> None:
+    run_sql(db_file, "UPDATE alembic_version SET version_num = '0099_future'")
+    calls: list[str] = []
+
+    with engine_on(db_file) as engine:
+        with pytest.raises(DatabaseAheadError):
+            ensure_current(engine, before_upgrade=calls.append)
+
+    assert calls == []

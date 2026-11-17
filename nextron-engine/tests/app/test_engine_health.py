@@ -55,6 +55,11 @@ JOBQUEUE_LOGGER = "nextron.app.jobqueue.api"
 READINESS = (CheckResult("python_version", Status.OK, "fine"),)
 
 
+def no_backups() -> Any:
+    """``build_job_types``'s ``backups`` where no ``backup_db`` job runs."""
+    raise AssertionError("no backup_db job runs in these tests")
+
+
 def enrich(job: Job) -> None:
     return None
 
@@ -173,7 +178,7 @@ def clock() -> FrozenClock:
 
 def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
     """The real registered ``send_alert``, plus ``enrich_lead`` (Enrichment)."""
-    registered = main.build_job_types(alerts=world_notify)
+    registered = main.build_job_types(alerts=world_notify, backups=no_backups)
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
     job_types.register_job_type(ENRICH)
@@ -262,17 +267,22 @@ def test_last_done_is_each_types_latest_done_change(world: World, clock: FrozenC
         found["send_alert"] = t2  # type: ignore[index]
 
 
-def test_the_real_registry_groups_send_alert_as_other(world: World) -> None:
+def test_the_real_registry_groups_backup_db_as_backup_and_send_alert_as_other(
+    world: World,
+) -> None:
     health = EngineHealth(
         world.clock,
-        main.build_job_types(alerts=lambda: world.notify),
+        main.build_job_types(alerts=lambda: world.notify, backups=no_backups),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
     )
 
     report = world.read(health.report)
 
-    assert report.groups == (GroupRuns(JobGroup.OTHER, (LastRun("send_alert", None),)),)
+    assert report.groups == (
+        GroupRuns(JobGroup.BACKUP, (LastRun("backup_db", None),)),
+        GroupRuns(JobGroup.OTHER, (LastRun("send_alert", None),)),
+    )
     assert report.readiness == READINESS
     assert report.issues == ()
 

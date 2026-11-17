@@ -11,12 +11,19 @@ handler runs in.
   the ``notify`` service (``nextron.main`` passes ``lambda: notify``, which breaks the cycle
   registry, handler, ``Notify``, queue, registry); the handler calls
   ``alerts().send(job.payload["alert_id"])`` once and returns ``None``.
+- ``backup_db(backups)`` (Story 1.16): the ``backup_db`` job's handler. ``backups`` returns the
+  ``ops`` service's ``Backups`` (``nextron.main`` passes ``lambda: backups``, which breaks the
+  cycle registry, handler, ``Backups``, queue, registry). The kind is
+  ``job.payload.get("kind", "daily")`` (a trigger's tick payload has none); an unknown kind, or
+  ``pre_migrate`` (only ``serve`` takes those), raises ``InvalidJob``. Otherwise it calls
+  ``backups().back_up(kind)`` once and returns ``None``.
 """
 
 from collections.abc import Callable
 from typing import Final, Protocol
 
-from nextron.domain.job import Handler, Job
+from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
+from nextron.domain.job import Handler, InvalidJob, Job
 
 ALERT_ID_FIELD: Final = "alert_id"
 
@@ -34,3 +41,23 @@ def send_alert(alerts: Callable[[], AlertSending]) -> Handler:
         alerts().send(str(job.payload[ALERT_ID_FIELD]))
 
     return handle_send_alert
+
+
+class BackingUp(Protocol):
+    """What ``backup_db`` needs of the ``ops`` service's ``Backups``."""
+
+    def back_up(self, kind: BackupKind) -> str: ...
+
+
+def backup_db(backups: Callable[[], BackingUp]) -> Handler:
+    """The ``backup_db`` job's handler: take the payload's daily or manual backup through
+    ``backups()``."""
+
+    def handle_backup_db(job: Job) -> None:
+        value = job.payload.get(KIND_FIELD, str(BackupKind.DAILY))
+        kind = next((kind for kind in JOB_KINDS if kind.value == value), None)
+        if kind is None:
+            raise InvalidJob("backup_db: the kind field must be daily or manual")
+        backups().back_up(kind)
+
+    return handle_backup_db

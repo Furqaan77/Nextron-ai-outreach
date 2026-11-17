@@ -74,15 +74,85 @@ transaction, for a dashboard GET's read-only unit of work:
   read (<ExceptionType>)")`` and logs ``health_check_failed`` (ERROR, ``source``, ``code`` and
   the traceback); the other sources still run.
 - ``issue_count() -> int`` is ``len(issues())``: the notification area's error count.
-- ``report() -> HealthReport(checked_at, worker, groups, issues, readiness)`` reads the clock
-  once, then runs ``readiness()`` before its own database reads. Readiness ends with the
+- ``report() -> HealthReport(checked_at, worker, groups, issues, readiness, backup)`` reads
+  the clock once, then runs ``readiness()`` before its own database reads. Readiness ends with the
   checks that read the database (``required_settings``, ``database_revision``), which begin the
   read transaction; the checks that reach Credential Manager or the registry are registered
   before them (``nextron.main.build_doctor_checks``), so they never hold its lock (AD-2's
   ``BEGIN IMMEDIATE`` covers reads). ``worker`` is ``Worker(running, beat_at)`` from
   ``queries.ops.heartbeat()`` and ``nextron.domain.health.worker_running`` (``beat_at`` is
   ``None`` before the first beat); ``groups`` is ``job_group_runs`` of the registered job types
-  (by ``JobType.group``) and ``queries.jobqueue.last_successes()``.
+  (by ``JobType.group``) and ``queries.jobqueue.last_successes()``; ``backup`` is
+  ``queries.ops.last_backup()``, the newest backup of any kind and status, read after
+  readiness (``None`` before the first one).
+
+**Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5, OP-6, NFR-16).** Every copy is made with
+SQLite's backup API (``nextron.db.repos.ops.snapshot``), verified and recorded in ``backups``,
+once, with no state machine and no ``events`` row (backups aren't one of AD-4's machines).
+
+``TakenBackup(kind, path, started_at, finished_at, snapshot, error, code)`` is one copy as
+taken: ``snapshot`` (a verified ``Snapshot``) or ``error`` and ``code`` (why it failed), never
+both.
+
+``LocalBackups(clock, *, env, local_dir, snapshot)`` takes and records local copies in
+``local_dir`` (``<backup dir>\\local``); ``snapshot(path)`` copies and verifies
+(``nextron.main`` binds ``snapshot.snapshot`` to ``<data dir>\\nextron.db``):
+
+- ``take(kind) -> TakenBackup`` touches no database, so ``serve`` can call it inside the
+  migration's write transaction. It reads the clock, names the copy ``local_dir /
+  copy_name(env, now)`` and calls ``snapshot``. Any ``Exception`` becomes ``error``
+  (``jobqueue.error_text``) and ``code`` (``jobqueue.error_code``): it never raises. It then
+  reads the clock again for ``finished_at``.
+- ``@command insert(taken) -> str`` writes the row in the caller's transaction (``verified``
+  with the snapshot's size, SHA-256, revision and counts, or ``failed`` with the error) and
+  returns its ULID.
+- ``rotate() -> int`` runs inside a running use case, after a verified backup. In one
+  transaction it reads ``backup_rotation_days`` (a value that doesn't parse skips rotation and
+  logs ``backup_rotation_skipped``), the newest ``verified`` row (always kept) and the
+  candidates (``verified``, copy not yet deleted, started more than that many days ago). Outside
+  any transaction it deletes (``discard``) each candidate whose file is directly in
+  ``local_dir`` (compared with ``normcase`` and ``abspath``) and whose name passes
+  ``is_copy_name(env, ...)``; any other is skipped and logged (``backup_rotation_skipped``,
+  WARNING, ``backup_id``, ``reason``). A file with no row (a crash mid-copy, or a
+  ``pre_migrate`` copy whose migration failed) is never deleted. In a second transaction it
+  marks each copy that is gone (``local_deleted_at``); a copy that couldn't be deleted (locked)
+  is tried again next time. It logs ``backups_rotated`` (INFO, ``count``) when it deleted any,
+  and returns the count. ``back_up`` and ``record_pre_migrate`` call it after their row has
+  committed, guarded: a rotation that raises (a locked database, say) logs
+  ``backup_rotation_failed`` (ERROR: ``backup_id``, ``code``, the traceback) and the backup
+  still succeeds, so a recorded backup is never reported as failed; the next backup rotates
+  again.
+- ``@use_case record_pre_migrate(taken) -> str`` records a verified ``pre_migrate`` copy
+  (``ValueError`` for anything else) after ``serve``'s upgrade succeeded: one transaction, then
+  ``backup_completed``, then the guarded ``rotate()``; it returns the row's ULID.
+
+``Backups(clock, local, *, notify, queue)`` is the ``backup_db`` job's service and the health
+panel's "Back up now":
+
+- ``@use_case back_up(kind) -> str`` takes a ``JOB_KINDS`` kind only (``ValueError``
+  otherwise). Under one ``threading.Lock``, so two backups never copy at once, it calls
+  ``take(kind)``, then in one transaction ``insert``s the row and, for a failed copy, raises the
+  ``backup_failed`` ops alert (``notify.alert(BACKUP_FAILED, <id>, backup_failed_text(kind,
+  id), (telegram, dashboard))``). If that transaction raises, a verified copy is deleted
+  (never a copy without a row), ``backup_record_failed`` is logged (ERROR: ``kind``, ``code``,
+  ``file``, the traceback) and it raises ``AdapterError(retryable=True,
+  code="backup_not_recorded")`` from the error, so jobqueue retries the job (retry limit 2; a
+  retry takes a new copy). After the commit it logs
+  ``backup_completed`` (INFO: ``backup_id``, ``kind``, ``size_bytes``, ``file``) or
+  ``backup_failed`` (ERROR: ``backup_id``, ``kind``, ``code``); a verified backup then rotates
+  (guarded: a failed rotation is logged and the backup's id is still returned).
+  A failed copy never raises, so the job never retries it: the ``failed`` row, the alert and
+  the health panel report it, and the next daily time or "Back up now" tries again.
+- ``@use_case request_backup() -> Enqueued`` enqueues the ``backup_db`` job (scope ``global``,
+  discriminator the UTC date, payload ``{"v": 1, "kind": "manual"}``) in one transaction, so a
+  click while a manual backup is queued or running is absorbed (``created=False``). After the
+  commit it logs ``backup_requested`` (INFO, ``job_id``, ``job_created``).
+- ``schedule() -> BackupSchedule`` is a plain read for a read-only unit of work: ``at`` is
+  ``backup_time``, ``timezone`` is ``sender_timezone`` (``"UTC"`` while it is unset) and
+  ``missed`` is ``missed_daily`` of the newest ``daily`` row's ``started_at``. ``nextron.main``
+  reads it once, when the scheduler starts.
+
+Logs carry IDs, kinds, codes, counts and file names only, never a full path or an error's text.
 """
 
 import contextlib
@@ -90,21 +160,38 @@ import logging
 import os
 import secrets
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from nextron.app.jobqueue.api import error_code
+from nextron.app.jobqueue.api import Enqueued, JobQueue, error_code, error_text
 from nextron.app.notify.api import Notify
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
-from nextron.db.uow import current, use_case
+from nextron.db.repos.ops.backups import BackupRow
+from nextron.db.repos.ops.snapshot import Snapshot, discard
+from nextron.db.uow import command, current, use_case
 from nextron.domain.alert import JOB_DEAD, SEND_ALERT_JOB, Channel, job_dead_text
+from nextron.domain.backup import (
+    BACKUP_DB_JOB,
+    BACKUP_FAILED,
+    JOB_KINDS,
+    KIND_FIELD,
+    BackupKind,
+    BackupSchedule,
+    BackupStatus,
+    backup_failed_text,
+    copy_name,
+    is_copy_name,
+    is_env_name,
+    missed_daily,
+)
 from nextron.domain.budget import Assessment, Threshold, assess, budget_issues, thresholds
 from nextron.domain.health import (
     GroupRuns,
@@ -114,9 +201,10 @@ from nextron.domain.health import (
     job_group_runs,
     worker_running,
 )
-from nextron.domain.job import JobTypes
+from nextron.domain.job import GLOBAL_SCOPE, JobTypes
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.domain.readiness import CheckResult
+from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import SecretsPort
@@ -126,6 +214,13 @@ OPEN_CODE_SECRET: Final = "session/open_code"
 HEALTH_CHECK_FAILED: Final = "health_check_failed"
 ALL_CHANNELS: Final = (Channel.TELEGRAM, Channel.DASHBOARD)
 DASHBOARD_ONLY: Final = (Channel.DASHBOARD,)  # a dead send_alert job: never Telegram again
+UTC_TIMEZONE: Final = "UTC"  # the daily backup's zone while sender_timezone is unset
+PAYLOAD_VERSION: Final = 1
+BACKUP_COMPLETED: Final = "backup_completed"
+BACKUP_ROTATION_SKIPPED: Final = "backup_rotation_skipped"
+BACKUP_RECORD_FAILED: Final = "backup_record_failed"
+BACKUP_ROTATION_FAILED: Final = "backup_rotation_failed"
+BACKUP_NOT_RECORDED: Final = "backup_not_recorded"  # the retryable AdapterError's code
 
 log = logging.getLogger(__name__)
 
@@ -280,6 +375,7 @@ class HealthReport:
     groups: tuple[GroupRuns, ...]
     issues: tuple[HealthIssue, ...]
     readiness: tuple[CheckResult, ...]
+    backup: BackupRow | None
 
 
 def _source_failed(source: IssueSource, error: Exception) -> HealthIssue:
@@ -346,6 +442,7 @@ class EngineHealth:
         Credential Manager and registry reads before their database ones), then the rest."""
         now = self._clock.now()
         readiness = tuple(self._readiness())  # its last checks begin the read transaction
+        backup = ops_queries.last_backup()
         beat = ops_queries.heartbeat()
         worker = Worker(
             beat is not None and worker_running(beat.beat_at, now),
@@ -353,4 +450,263 @@ class EngineHealth:
         )
         pairs = [(name, self._job_types.get(name).group) for name in self._job_types.names()]
         groups = job_group_runs(pairs, jobqueue_queries.last_successes())
-        return HealthReport(now, worker, groups, self.issues(), readiness)
+        return HealthReport(now, worker, groups, self.issues(), readiness, backup)
+
+
+# Backups ------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TakenBackup:
+    """One copy as taken: verified (``snapshot``) or failed (``error`` and ``code``)."""
+
+    kind: BackupKind
+    path: Path
+    started_at: datetime
+    finished_at: datetime
+    snapshot: Snapshot | None
+    error: str | None
+    code: str | None
+
+    def __post_init__(self) -> None:
+        if (self.snapshot is None) == (self.error is None):
+            raise ValueError("a taken backup has either a snapshot or an error")
+
+    @property
+    def verified(self) -> bool:
+        """Whether the copy was made and verified."""
+        return self.snapshot is not None
+
+
+def _backup_completed(backup_id: str, taken: TakenBackup) -> None:
+    size = None if taken.snapshot is None else taken.snapshot.size_bytes
+    log.info(
+        BACKUP_COMPLETED,
+        extra={
+            "backup_id": backup_id,
+            "kind": taken.kind,
+            "size_bytes": size,
+            "file": taken.path.name,
+        },
+    )
+
+
+def _rotate_after(local: "LocalBackups", backup_id: str) -> None:
+    """Rotate after the recorded backup ``backup_id``; a failed rotation is logged, never
+    raised, because the backup itself succeeded."""
+    try:
+        local.rotate()
+    except Exception as exc:  # noqa: BLE001 - the backup is recorded; the next one rotates
+        log.exception(
+            BACKUP_ROTATION_FAILED, extra={"backup_id": backup_id, "code": error_code(exc)}
+        )
+
+
+def _same_folder(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+class LocalBackups:
+    """Local copies in ``local_dir``: take, record and rotate them; see the module
+    docstring."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        env: str,
+        local_dir: Path,
+        snapshot: Callable[[Path], Snapshot],
+    ) -> None:
+        if not is_env_name(env):
+            raise ValueError("env must be an environment name such as dev, test or prod")
+        if not isinstance(local_dir, Path):
+            raise TypeError("local_dir must be a pathlib.Path")
+        if not callable(snapshot):
+            raise TypeError("snapshot must be callable")
+        self._clock = clock
+        self._env = env
+        self._local_dir = local_dir
+        self._snapshot = snapshot
+
+    @property
+    def local_dir(self) -> Path:
+        return self._local_dir
+
+    def take(self, kind: BackupKind) -> TakenBackup:
+        """Copy and verify the database now; never raises for a failed copy, and touches no
+        database table."""
+        kind = BackupKind(kind)
+        started_at = self._clock.now()
+        path = self._local_dir / copy_name(self._env, started_at)
+        made: Snapshot | None = None
+        error: str | None = None
+        code: str | None = None
+        try:
+            made = self._snapshot(path)
+        except Exception as exc:  # noqa: BLE001 - a failed copy is recorded, never raised
+            error, code = error_text(exc), error_code(exc)
+        return TakenBackup(kind, path, started_at, self._clock.now(), made, error, code)
+
+    @command
+    def insert(self, taken: TakenBackup) -> str:
+        """Record ``taken`` in the caller's transaction; return the new row's ULID."""
+        made = taken.snapshot
+        return backups_repo.insert(
+            kind=str(taken.kind),
+            status=str(BackupStatus.VERIFIED if made is not None else BackupStatus.FAILED),
+            started_at=taken.started_at,
+            finished_at=taken.finished_at,
+            path=str(taken.path),
+            size_bytes=None if made is None else made.size_bytes,
+            sha256=None if made is None else made.sha256,
+            db_revision=None if made is None else made.db_revision,
+            suppression_count=None if made is None else made.suppression_count,
+            provenance_count=None if made is None else made.provenance_count,
+            error=None if made is not None else taken.error,
+        )
+
+    def _deletable(self, row: BackupRow) -> str | None:
+        """Why ``row``'s copy must not be deleted, or ``None`` when it may."""
+        path = Path(row.path)
+        if not _same_folder(path.parent, self._local_dir):
+            return "outside_local_dir"
+        if not is_copy_name(self._env, path.name):
+            return "not_a_copy_name"
+        return None
+
+    def rotate(self) -> int:
+        """Delete the verified local copies older than ``backup_rotation_days``, keeping the
+        newest verified one; how many were deleted. Called from a running use case."""
+        uow = current()
+        now = self._clock.now()
+        candidates: Iterable[BackupRow] = ()
+        unreadable: str | None = None
+        with uow.transaction():
+            try:
+                days = int(setup_queries.get(Key.BACKUP_ROTATION_DAYS))
+            except (InvalidSettingValue, SettingNotSet) as exc:
+                unreadable = error_code(exc)
+            else:
+                kept = backups_repo.newest(status=str(BackupStatus.VERIFIED))
+                candidates = backups_repo.rotation_candidates(
+                    now - timedelta(days=days), None if kept is None else kept.id
+                )
+        if unreadable is not None:
+            log.warning(
+                BACKUP_ROTATION_SKIPPED, extra={"reason": "setting_unreadable", "code": unreadable}
+            )
+            return 0
+        gone: list[str] = []
+        for row in candidates:
+            reason = self._deletable(row)
+            if reason is not None:
+                log.warning(BACKUP_ROTATION_SKIPPED, extra={"backup_id": row.id, "reason": reason})
+                continue
+            if discard(Path(row.path)):
+                gone.append(row.id)
+        if not gone:
+            return 0
+        with uow.transaction():
+            backups_repo.mark_deleted(gone, now)
+        log.info("backups_rotated", extra={"count": len(gone)})
+        return len(gone)
+
+    @use_case
+    def record_pre_migrate(self, taken: TakenBackup) -> str:
+        """Record the verified ``pre_migrate`` copy ``serve`` took before a successful upgrade,
+        then rotate; return its ULID."""
+        if taken.kind is not BackupKind.PRE_MIGRATE or taken.snapshot is None:
+            raise ValueError("record_pre_migrate records a verified pre_migrate backup only")
+        with current().transaction():
+            backup_id = self.insert(taken)
+        _backup_completed(backup_id, taken)
+        _rotate_after(self, backup_id)
+        return backup_id
+
+
+class Backups:
+    """Daily and manual backups and the daily schedule; see the module docstring."""
+
+    def __init__(
+        self, clock: Clock, local: LocalBackups, *, notify: Notify, queue: JobQueue
+    ) -> None:
+        if not isinstance(local, LocalBackups):
+            raise TypeError("local must be a LocalBackups")
+        self._clock = clock
+        self._local = local
+        self._notify = notify
+        self._queue = queue
+        self._lock = threading.Lock()  # one backup at a time
+
+    @use_case
+    def back_up(self, kind: BackupKind) -> str:
+        """Take, verify and record a daily or manual backup; return its row's ULID."""
+        if kind not in JOB_KINDS:
+            raise ValueError("back_up takes a daily or manual backup only")
+        kind = BackupKind(kind)
+        with self._lock:
+            taken = self._local.take(kind)
+            try:
+                with current().transaction():
+                    backup_id = self._local.insert(taken)
+                    if not taken.verified:
+                        self._notify.alert(
+                            BACKUP_FAILED,
+                            backup_id,
+                            backup_failed_text(kind, backup_id),
+                            ALL_CHANNELS,
+                        )
+            except BaseException as exc:
+                if taken.verified:
+                    discard(taken.path)  # never a copy without a row
+                if not isinstance(exc, Exception):
+                    raise
+                log.exception(
+                    BACKUP_RECORD_FAILED,
+                    extra={"kind": kind, "code": error_code(exc), "file": taken.path.name},
+                )
+                raise AdapterError(  # retryable, so jobqueue retries the job
+                    True,
+                    BACKUP_NOT_RECORDED,
+                    f"the backup's row could not be recorded ({error_code(exc)})",
+                ) from exc
+            if not taken.verified:
+                log.error(
+                    BACKUP_FAILED,
+                    extra={"backup_id": backup_id, "kind": kind, "code": taken.code},
+                )
+                return backup_id
+            _backup_completed(backup_id, taken)
+            _rotate_after(self._local, backup_id)
+            return backup_id
+
+    @use_case
+    def request_backup(self) -> Enqueued:
+        """Queue a manual backup, or find the one already queued or running today."""
+        now = self._clock.now()
+        with current().transaction():
+            enqueued = self._queue.enqueue(
+                BACKUP_DB_JOB,
+                scope=GLOBAL_SCOPE,
+                discriminator=now.astimezone(UTC).date().isoformat(),
+                payload={"v": PAYLOAD_VERSION, KIND_FIELD: str(BackupKind.MANUAL)},
+            )
+        log.info(
+            "backup_requested",
+            extra={"job_id": enqueued.job_id, "job_created": enqueued.created},
+        )
+        return enqueued
+
+    def schedule(self) -> BackupSchedule:
+        """When the daily backup runs and whether the last one was missed, read in the
+        current unit of work (a read-only one included)."""
+        now = self._clock.now()
+        at = setup_queries.get(Key.BACKUP_TIME)
+        try:
+            timezone = str(setup_queries.get(Key.SENDER_TIMEZONE))
+        except SettingNotSet:
+            timezone = UTC_TIMEZONE
+        newest = ops_queries.newest_backup(BackupKind.DAILY)
+        started = None if newest is None else newest.started_at
+        return BackupSchedule(at, timezone, missed_daily(started, now, at, timezone))

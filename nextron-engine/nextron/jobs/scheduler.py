@@ -8,11 +8,22 @@ starts it right after the job runner and stops it right before (``nextron.main.e
 It takes only a frozen ``Triggers`` (``TypeError``, ``RuntimeError``).
 
 **start()** runs on the event loop, once (a second call raises ``RuntimeError``). It creates an
-``AsyncIOScheduler(timezone=UTC)`` and, for each registered trigger, adds ``fire`` as an
-interval job: ``IntervalTrigger(seconds=<period>, timezone=UTC)``, ``args=(trigger,)``,
-``id=<trigger name>``, ``coalesce=True``, ``misfire_grace_time=<period in seconds>`` and
-``max_instances=1``; an ``at_startup`` trigger also gets ``next_run_time=<now>``. It then starts
-APScheduler and logs ``scheduler_started`` with ``triggers``, the count.
+``AsyncIOScheduler(timezone=UTC)`` and, for each registered trigger, adds ``fire`` as a job
+with ``args=(trigger,)``, ``id=<trigger name>``, ``coalesce=True`` and ``max_instances=1``:
+
+- an ``Every``: ``IntervalTrigger(seconds=<period>, timezone=UTC)`` with
+  ``misfire_grace_time=<period in seconds>``; an ``at_startup`` trigger also gets
+  ``next_run_time=<now>``;
+- a ``DailyAt``: it calls ``when()`` now. If that raises, or returns anything but a
+  ``DailyRun``, it logs ``trigger_schedule_failed`` (WARNING, ``trigger``, ``code``) and uses
+  ``fallback``. The job is ``CronTrigger(hour=<at.hour>, minute=<at.minute>,
+  timezone=ZoneInfo(<timezone>))`` with ``misfire_grace_time=86400`` (a firing the PC slept
+  through still runs on wake); a run with ``catch_up`` also gets ``next_run_time=<now>``. It
+  logs ``daily_trigger_scheduled`` (INFO: ``trigger``, ``at`` as ``HH:MM``, ``timezone``,
+  ``catch_up``). The time is read only here, so a change takes effect when the engine
+  restarts.
+
+It then starts APScheduler and logs ``scheduler_started`` with ``triggers``, the count.
 
 **Sleep.** On Windows the event loop's clock (QueryPerformanceCounter) counts the time the PC
 slept, and Uvicorn's server loop wakes the event loop every 0.1 s, so APScheduler's timer runs
@@ -26,7 +37,9 @@ one firing, not one per missed slot. This has not yet been observed on a real PC
 1.20's spike on the PC is where it gets checked.
 
 **Restarts.** The schedules live in memory, so each interval starts from zero at every engine
-start (see ``nextron.jobs.triggers.Every``).
+start (see ``nextron.jobs.triggers.Every``). A daily time missed while the engine was off is
+not APScheduler's to see (its grace covers only sleep): the ``DailyAt``'s ``when()`` reports it
+as ``catch_up``, and the trigger fires once at start.
 
 **fire(trigger)** is the job APScheduler runs, as a sync job on the loop's default executor
 thread, never on the loop. It opens one unit of work and calls
@@ -54,12 +67,14 @@ import threading
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Final, Protocol
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from nextron.app.jobqueue.api import JobQueue, error_code
-from nextron.jobs.triggers import Trigger, Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers, TriggerSpec
 
 DEFAULT_PROBE_TIMEOUT: Final = 10.0
 
@@ -109,24 +124,58 @@ class Scheduler:
         scheduler = AsyncIOScheduler(timezone=UTC)
         specs = self._triggers.specs()
         for spec in specs:
-            seconds = int(spec.schedule.period.total_seconds())
-            grace = int(spec.schedule.grace.total_seconds())
+            schedule = spec.schedule
+            if isinstance(schedule, DailyAt):
+                run = self._daily_run(spec, schedule)
+                trigger: CronTrigger | IntervalTrigger = CronTrigger(
+                    hour=run.at.hour, minute=run.at.minute, timezone=ZoneInfo(run.timezone)
+                )
+                at_startup = run.catch_up
+            else:
+                assert isinstance(schedule, Every)
+                trigger = IntervalTrigger(
+                    seconds=int(schedule.period.total_seconds()), timezone=UTC
+                )
+                at_startup = schedule.at_startup
             first: dict[str, datetime] = (
-                {"next_run_time": datetime.now(UTC)} if spec.schedule.at_startup else {}
+                {"next_run_time": datetime.now(UTC)} if at_startup else {}
             )
             scheduler.add_job(
                 self.fire,
-                IntervalTrigger(seconds=seconds, timezone=UTC),
+                trigger,
                 args=(spec.trigger,),
                 id=spec.trigger.value,
                 coalesce=True,
-                misfire_grace_time=grace,
+                misfire_grace_time=int(schedule.grace.total_seconds()),
                 max_instances=1,
                 **first,
             )
         self._scheduler = scheduler  # before starting it, so stop() can always shut it down
         scheduler.start()
         log.info("scheduler_started", extra={"triggers": len(specs)})
+
+    @staticmethod
+    def _daily_run(spec: TriggerSpec, schedule: DailyAt) -> DailyRun:
+        """``schedule.when()``, or its fallback (logged) when that fails."""
+        try:
+            run = schedule.when()
+            if not isinstance(run, DailyRun):
+                raise TypeError("a daily schedule's when() must return a DailyRun")
+        except Exception as exc:  # noqa: BLE001 - an unreadable time falls back, logged
+            log.warning(
+                "trigger_schedule_failed", extra={"trigger": spec.trigger, "code": error_code(exc)}
+            )
+            run = schedule.fallback
+        log.info(
+            "daily_trigger_scheduled",
+            extra={
+                "trigger": spec.trigger,
+                "at": f"{run.at:%H:%M}",
+                "timezone": run.timezone,
+                "catch_up": run.catch_up,
+            },
+        )
+        return run
 
     def fire(self, trigger: Trigger) -> None:
         """Enqueue ``trigger``'s tick job in its own unit of work; never raises."""

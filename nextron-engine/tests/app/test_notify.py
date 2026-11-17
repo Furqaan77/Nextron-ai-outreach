@@ -56,6 +56,11 @@ SINK_LOGGER = "nextron.adapters.sink"
 # Helpers ----------------------------------------------------------------------------------------
 
 
+def no_backups() -> Any:
+    """``build_job_types``'s ``backups`` where no ``backup_db`` job runs."""
+    raise AssertionError("no backup_db job runs in these tests")
+
+
 @dataclass
 class World:
     """The ``notify`` service on real units of work, its queue and its job types."""
@@ -151,7 +156,7 @@ def world_on(
     port: AlertPort | Callable[[], AlertPort],
 ) -> World:
     built: dict[str, Notify] = {}
-    job_types = main.build_job_types(alerts=lambda: built["notify"])
+    job_types = main.build_job_types(alerts=lambda: built["notify"], backups=no_backups)
     queue = JobQueue(clock, job_types)
     factory: Any = port if callable(port) and not isinstance(port, AlertPort) else lambda: port
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: factory})

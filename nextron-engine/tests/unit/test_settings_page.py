@@ -540,6 +540,8 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "ai_budget_alert_pct",
         "sink_allowlist",
         "bulk_threads",
+        "backup_time",
+        "backup_rotation_days",
     ]
     shown = page.fields["sink_allowlist"]
     assert (shown.tag, shown.label, shown.value) == ("textarea", "Dev and test allowlist", "")

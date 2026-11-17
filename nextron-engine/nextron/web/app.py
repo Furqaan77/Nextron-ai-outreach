@@ -57,6 +57,13 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``MalformedForm``, 400); it dismisses the dead job through ``queue`` (``JobQueue.dismiss``) in
   its own unit of work, then renders the panel again in a read-only one. (``GET /health`` keeps
   its JSON.)
+- ``POST /health/backup`` (``health_backup_now``, ``@personal_data(True)``): the health panel's
+  "Back up now" (Story 1.16). Its only field is ``csrf_token`` (anything else is
+  ``MalformedForm``, 400). It queues a manual backup through ``backups``
+  (``Backups.request_backup``, the ``backup_db`` job) in its own unit of work, then renders the
+  panel again in a read-only one, with "Backup queued; its result shows here when it
+  finishes." when the job was created, else "A backup is already queued or running.". The copy
+  is taken by the job runner's bulk lane, never in the request.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -103,7 +110,7 @@ from starlette.routing import BaseRoute
 
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Budget, DashboardEntry, EngineHealth
+from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
@@ -272,6 +279,7 @@ def create_app(
     budget: Budget,
     health: EngineHealth,
     queue: JobQueue,
+    backups: Backups,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -282,7 +290,7 @@ def create_app(
     and ``google`` the Google client and grants (both in Credential Manager, not the database);
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
     ``health`` gives the health panel its report and the notification area its error count;
-    ``queue`` dismisses a dead job.
+    ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now".
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -540,8 +548,11 @@ def create_app(
         context = quota_rows.page_context(budget.status())
         return page(request, quota_rows.PAGE_TEMPLATE, **context)
 
-    def health_answer(request: Request, template: str) -> HTMLResponse:
-        return page(request, template, **health_rows.panel_context(engine_health.report()))
+    def health_answer(
+        request: Request, template: str, *, notice: str | None = None
+    ) -> HTMLResponse:
+        context = health_rows.panel_context(engine_health.report(), notice=notice)
+        return page(request, template, **context)
 
     @app.get("/health/panel", name="health_page")
     @personal_data(True)  # a dead job's last error is free text
@@ -563,6 +574,20 @@ def create_app(
             queue.dismiss(job_id)
         with units.open(read_only=True):
             return health_answer(request, health_rows.PANEL_TEMPLATE)
+
+    @app.post("/health/backup", name="health_backup_now")
+    @personal_data(True)
+    def health_backup_now(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        health_rows.submitted_backup(fields)
+        with units.open():
+            enqueued = backups.request_backup()
+        notice = (
+            health_rows.BACKUP_QUEUED if enqueued.created else health_rows.BACKUP_ALREADY_QUEUED
+        )
+        with units.open(read_only=True):
+            return health_answer(request, health_rows.PANEL_TEMPLATE, notice=notice)
 
     require_declared(app)
     require_route_rules(app)

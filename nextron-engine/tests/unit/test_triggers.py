@@ -1,4 +1,5 @@
-"""The trigger enum, schedules and registry (``nextron/jobs/triggers.py``, AD-10).
+"""The trigger enum, schedules (``Every``, ``DailyRun`` and ``DailyAt``) and registry
+(``nextron/jobs/triggers.py``, AD-10).
 
 The enum is checked against a hard-coded copy of AD-10's closed list and against the spine's
 AD-10 table itself, parsed from ``ARCHITECTURE-SPINE.md`` (skipped only when the planning
@@ -7,12 +8,12 @@ folder isn't next to the engine).
 
 import dataclasses
 import re
-from datetime import timedelta
+from datetime import UTC, time, timedelta
 
 import pytest
 
 from nextron.domain.job import Job, JobType, JobTypes, Lane, UnknownJobType, is_job_type_name
-from nextron.jobs.triggers import Every, Trigger, Triggers, TriggerSpec
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers, TriggerSpec
 from tests.contracts.support import ENGINE_ROOT
 
 AD10_TRIGGERS = (
@@ -186,6 +187,11 @@ def test_a_spec_refuses_a_plain_name_or_a_bare_period(trigger: object, schedule:
         TriggerSpec(trigger, schedule)  # type: ignore[arg-type]
 
 
+def test_a_spec_refuses_a_bare_daily_run() -> None:
+    with pytest.raises(TypeError, match="the schedule must be an Every or a DailyAt"):
+        TriggerSpec(Trigger.BACKUP_DB, DailyRun(time(10, 0), "UTC"))  # type: ignore[arg-type]
+
+
 # Triggers ---------------------------------------------------------------------------------------
 
 
@@ -232,11 +238,11 @@ def test_register_refuses_anything_but_a_trigger_member(trigger: object) -> None
     assert triggers.specs() == ()
 
 
-@pytest.mark.parametrize("schedule", [MINUTE, 60, None])
-def test_register_refuses_a_schedule_that_is_not_an_every(schedule: object) -> None:
+@pytest.mark.parametrize("schedule", [MINUTE, 60, None, DailyRun(time(10, 0), "UTC")])
+def test_register_refuses_a_schedule_that_is_not_an_every_or_a_daily_at(schedule: object) -> None:
     triggers = Triggers(job_types("send_due_messages"))
 
-    with pytest.raises(TypeError, match="must be an Every"):
+    with pytest.raises(TypeError, match="the schedule must be an Every or a DailyAt"):
         triggers.register_trigger(Trigger.SEND_DUE_MESSAGES, schedule)  # type: ignore[arg-type]
 
 
@@ -268,3 +274,80 @@ def test_register_refuses_after_freeze() -> None:
         triggers.register_trigger(Trigger.SEND_DUE_MESSAGES, Every(MINUTE))
 
     assert triggers.specs() == ()
+
+
+# DailyRun and DailyAt (Story 1.16) -------------------------------------------------------------
+
+
+def test_a_daily_run_holds_a_time_a_timezone_and_catch_up() -> None:
+    run = DailyRun(time(2, 30), "America/Los_Angeles", catch_up=True)
+
+    assert (run.at, run.timezone, run.catch_up) == (time(2, 30), "America/Los_Angeles", True)
+    assert DailyRun(time(10, 0), "UTC").catch_up is False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        run.catch_up = False  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("at", "zone", "catch_up", "error", "message"),
+    [
+        ("10:00", "UTC", False, TypeError, "datetime.time"),
+        (time(10, 0, 30), "UTC", False, ValueError, "whole minutes"),
+        (time(10, 0, 0, 1), "UTC", False, ValueError, "whole minutes"),
+        (time(10, 0, tzinfo=UTC), "UTC", False, ValueError, "naive"),
+        (time(10, 0), None, False, TypeError, "timezone must be a str"),
+        (time(10, 0), "Mars/Olympus_Mons", False, ValueError, "IANA name"),
+        (time(10, 0), "", False, ValueError, "IANA name"),
+        (time(10, 0), "../etc/passwd", False, ValueError, "IANA name"),
+        (time(10, 0), "UTC", 1, TypeError, "catch_up must be a bool"),
+    ],
+)
+def test_a_daily_run_refuses_a_bad_field(
+    at: object, zone: object, catch_up: object, error: type[Exception], message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        DailyRun(at, zone, catch_up)  # type: ignore[arg-type]
+
+
+def test_a_daily_at_has_a_day_of_grace() -> None:
+    fallback = DailyRun(time(10, 0), "UTC")
+
+    schedule = DailyAt(lambda: fallback, fallback=fallback)
+
+    assert schedule.grace == timedelta(hours=24)
+
+
+@pytest.mark.parametrize(
+    ("when", "fallback", "message"),
+    [
+        (None, DailyRun(time(10, 0), "UTC"), "when must be callable"),
+        (lambda: None, time(10, 0), "fallback must be a DailyRun"),
+        (lambda: None, None, "fallback must be a DailyRun"),
+    ],
+)
+def test_a_daily_at_refuses_a_bad_field(when: object, fallback: object, message: str) -> None:
+    with pytest.raises(TypeError, match=message):
+        DailyAt(when, fallback=fallback)  # type: ignore[arg-type]
+
+
+def test_a_daily_at_needs_its_fallback_by_keyword() -> None:
+    fallback = DailyRun(time(10, 0), "UTC")
+
+    with pytest.raises(TypeError):
+        DailyAt(lambda: fallback, fallback)  # type: ignore[misc]
+
+
+def test_register_accepts_a_daily_at_and_does_not_call_it() -> None:
+    calls: list[str] = []
+
+    def when() -> DailyRun:
+        calls.append("read")
+        return DailyRun(time(10, 0), "UTC")
+
+    triggers = Triggers(job_types("backup_db"))
+    schedule = DailyAt(when, fallback=DailyRun(time(10, 0), "UTC"))
+
+    triggers.register_trigger(Trigger.BACKUP_DB, schedule)
+
+    assert triggers.specs() == (TriggerSpec(Trigger.BACKUP_DB, schedule),)
+    assert calls == []  # read when the scheduler starts, never when registered

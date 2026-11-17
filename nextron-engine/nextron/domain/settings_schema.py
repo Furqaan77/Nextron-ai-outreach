@@ -79,6 +79,12 @@ from types import MappingProxyType
 from typing import Any, Final, NamedTuple
 
 from nextron.domain.alert import is_telegram_chat_id
+from nextron.domain.backup import (
+    DEFAULT_BACKUP_TIME,
+    DEFAULT_ROTATION_DAYS,
+    MAX_ROTATION_DAYS,
+    MIN_ROTATION_DAYS,
+)
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.errors import DomainError
 from nextron.domain.job import MAX_BULK_THREADS
@@ -131,6 +137,8 @@ class Key(StrEnum):
     SENDER_TIMEZONE = "sender_timezone"
     SINK_ALLOWLIST = "sink_allowlist"
     BULK_THREADS = "bulk_threads"
+    BACKUP_TIME = "backup_time"
+    BACKUP_ROTATION_DAYS = "backup_rotation_days"
     ALERT_CHAT_ID = "alert_chat_id"
     QUOTA_HUNTER_CREDITS = "quota_hunter_credits"
     QUOTA_PROSPEO_CREDITS = "quota_prospeo_credits"
@@ -853,6 +861,39 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=1,
         rules=(minimum(1, "1"), maximum(MAX_BULK_THREADS, str(MAX_BULK_THREADS))),
+    ),
+    # The daily backup's time (Story 1.16, AD-20, OP-5), read once when the engine starts.
+    Setting(
+        key=Key.BACKUP_TIME,
+        type=SettingType.TIME,
+        section=Section.ENGINE,
+        label="Daily backup time",
+        unit=(
+            "HH:MM in the sender's timezone (UTC until that is set). A time missed while the "
+            "engine was off is made up once when the engine next starts; a change takes effect "
+            "when the engine restarts."
+        ),
+        default=DEFAULT_BACKUP_TIME,
+        timezone_key=Key.SENDER_TIMEZONE,
+    ),
+    # How long local backup copies are kept (Story 1.16, AD-17): at most 35 days, because
+    # erased data must age out of backups within the 35-day rotation.
+    Setting(
+        key=Key.BACKUP_ROTATION_DAYS,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Keep local backups for (days)",
+        unit=(
+            f"{MIN_ROTATION_DAYS} to {MAX_ROTATION_DAYS}. Local copies older than this are "
+            "deleted after each successful backup; the newest verified copy is always kept. "
+            f"{MAX_ROTATION_DAYS} days is the most, because erased data must age out of "
+            "backups."
+        ),
+        default=DEFAULT_ROTATION_DAYS,
+        rules=(
+            minimum(MIN_ROTATION_DAYS, str(MIN_ROTATION_DAYS)),
+            maximum(MAX_ROTATION_DAYS, str(MAX_ROTATION_DAYS)),
+        ),
     ),
     # The Telegram chat that receives ops alerts (AD-15, Story 1.12), read when each alert is
     # sent. Numeric only: a @name can be handed to someone else.

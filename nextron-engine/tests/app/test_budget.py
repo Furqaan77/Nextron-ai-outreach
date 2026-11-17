@@ -39,6 +39,11 @@ T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 DECEMBER = datetime(2026, 12, 1, 0, 0, tzinfo=UTC)
 
 
+def no_backups() -> Any:
+    """``build_job_types``'s ``backups`` where no ``backup_db`` job runs."""
+    raise AssertionError("no backup_db job runs in these tests")
+
+
 class World:
     """A meter, a budget and notify on one database, wired as ``nextron.main`` does."""
 
@@ -47,7 +52,7 @@ class World:
         self.engine = engine
         self.clock = FrozenClock(T)
         self.alert = InMemoryAlert()
-        job_types = main.build_job_types(alerts=lambda: self.notify)
+        job_types = main.build_job_types(alerts=lambda: self.notify, backups=no_backups)
         self.notify = Notify(
             self.clock,
             JobQueue(self.clock, job_types),

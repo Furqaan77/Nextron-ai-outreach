@@ -506,6 +506,8 @@ def test_the_declared_keys_in_order() -> None:
         "sender_timezone",
         "sink_allowlist",
         "bulk_threads",
+        "backup_time",
+        "backup_rotation_days",
         "alert_chat_id",
         "quota_hunter_credits",
         "quota_prospeo_credits",
@@ -519,6 +521,8 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.SENDER_TIMEZONE),
         setting(Key.SINK_ALLOWLIST),
         setting(Key.BULK_THREADS),
+        setting(Key.BACKUP_TIME),
+        setting(Key.BACKUP_ROTATION_DAYS),
         setting(Key.ALERT_CHAT_ID),
         setting(Key.QUOTA_HUNTER_CREDITS),
         setting(Key.QUOTA_PROSPEO_CREDITS),
@@ -659,6 +663,61 @@ def test_bulk_threads_is_an_integer_from_1_to_2_in_the_engine_section() -> None:
 def test_bulk_threads_refuses_anything_but_1_or_2(text: str, rule: str) -> None:
     with pytest.raises(InvalidSettingValue) as raised:
         parse(setting(Key.BULK_THREADS), text)
+
+    assert raised.value.rule == rule
+
+
+# Row: Settings (backup_time, backup_rotation_days; Story 1.16) ---------------------------------
+
+BACKUP_TIME_UNIT = (
+    "HH:MM in the sender's timezone (UTC until that is set). A time missed while the engine was "
+    "off is made up once when the engine next starts; a change takes effect when the engine "
+    "restarts."
+)
+ROTATION_UNIT = (
+    "7 to 35. Local copies older than this are deleted after each successful backup; the newest "
+    "verified copy is always kept. 35 days is the most, because erased data must age out of "
+    "backups."
+)
+
+
+def test_backup_time_is_a_time_in_the_senders_timezone_in_the_engine_section() -> None:
+    found = setting(Key.BACKUP_TIME)
+
+    assert (found.key, found.type, found.section) == (
+        "backup_time",
+        SettingType.TIME,
+        Section.ENGINE,
+    )
+    assert (found.label, found.unit) == ("Daily backup time", BACKUP_TIME_UNIT)
+    assert found.default == time(10, 0) and not found.required and found.rules == ()
+    assert found.timezone_key == "sender_timezone"
+    assert default_text(found) == "10:00"
+    assert parse(found, "02:30") == time(2, 30) and encode(found, time(23, 59)) == "23:59"
+
+
+def test_backup_rotation_days_is_an_integer_from_7_to_35_in_the_engine_section() -> None:
+    found = setting(Key.BACKUP_ROTATION_DAYS)
+
+    assert (found.key, found.type, found.section) == (
+        "backup_rotation_days",
+        SettingType.INTEGER,
+        Section.ENGINE,
+    )
+    assert (found.label, found.unit) == ("Keep local backups for (days)", ROTATION_UNIT)
+    assert found.default == 35 and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 7"),
+        ("maximum", "must be at most 35"),
+    ]
+    assert default_text(found) == "35"
+    assert parse(found, "7") == 7 and encode(found, 35) == "35"
+
+
+@pytest.mark.parametrize(("text", "rule"), [("6", "minimum"), ("36", "maximum"), ("x", "integer")])
+def test_backup_rotation_days_refuses_anything_outside_7_to_35(text: str, rule: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.BACKUP_ROTATION_DAYS), text)
 
     assert raised.value.rule == rule
 
@@ -907,9 +966,9 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     assert schema_problems(schema) == [
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
-            "bulk_threads, quota_hunter_credits, quota_job_aggregator, "
-            "quota_places_enterprise, quota_places_pro, quota_prospeo_credits, "
-            "sender_timezone, sink_allowlist"
+            "backup_rotation_days, backup_time, bulk_threads, quota_hunter_credits, "
+            "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
+            "quota_prospeo_credits, sender_timezone, sink_allowlist"
         ),
         "declared but not in Key: extra_one",
     ]

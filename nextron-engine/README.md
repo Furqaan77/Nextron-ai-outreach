@@ -146,7 +146,7 @@ that cross-origin POST gets 403 `Request refused: security check failed` instead
 |---|---|
 | 0 | stopped normally |
 | 1 | unexpected error (a Python traceback) |
-| 2 | `NEXTRON_ENV` unset or invalid, another invalid setting, a failed startup check (the message names it, `database_revision` included), a data dir that can't be created, a failed database migration, or a server that failed to start |
+| 2 | `NEXTRON_ENV` unset or invalid, another invalid setting, a failed startup check (the message names it, `database_revision` and `pre_migrate_backup` included), a data dir that can't be created, a failed database migration, or a server that failed to start |
 | 3 | another instance is running for this environment |
 
 The supervisor (`scripts/run.ps1`, a later story) restarts the engine on any exit except 3.
@@ -590,12 +590,14 @@ One SQLite file per environment: `<data dir>\nextron.db`, for example
 `%LOCALAPPDATA%\Nextron\dev\nextron.db`. Only `nextron/db/engine.py` opens it: WAL,
 `busy_timeout=5000`, `synchronous=NORMAL`, `foreign_keys=ON`, and `BEGIN IMMEDIATE` for every
 transaction, reads included, so keep transactions short. Transaction SQL sent any other way
-(`COMMIT`, `ROLLBACK`, `SAVEPOINT` and so on) raises. Nothing copies the file; backups arrive in
-a later story.
+(`COMMIT`, `ROLLBACK`, `SAVEPOINT` and so on) raises. Nothing copies the file: a backup reads it
+only through SQLite's backup API (see [Backups](#backups)).
 
 **Startup migration.** After the port check, `serve` creates the file if it is missing and runs
 `alembic upgrade head` in one transaction when the database is behind the code, logging
-`database_migrated` with `from_revision` and `to_revision`. `engine_started` carries
+`database_migrated` with `from_revision` and `to_revision`. Before upgrading a database that
+already has data, it takes a `pre_migrate` backup inside that transaction (see
+[Backups](#backups)); a new file or a database at head takes none. `engine_started` carries
 `db_revision`. `serve` refuses, with exit 2 and `startup_check_failed`
 (`check=database_revision`), and changes nothing, when:
 
@@ -606,7 +608,9 @@ a later story.
 
 A file that can't be opened (not SQLite, locked too long), or a migration that fails or leaves
 foreign-key violations (rolled back), ends with exit 2 and `database_migration_failed` with the
-traceback in `nextron.log`.
+traceback in `nextron.log`. When a `pre_migrate` copy was taken first, the message names the
+copy's full path and `nextron restore "<path>"` (quoted; Story 1.19 adds that command), and
+the log line carries the copy's `file` name.
 
 **The migrations so far**, in order (`nextron/db/alembic/versions/`):
 
@@ -618,10 +622,12 @@ traceback in `nextron.log`.
 | `0004_1_11_heartbeat` | `runner_heartbeat`, one row and its two checks (see [Triggers and the heartbeat](#triggers-and-the-heartbeat)) | `ops` |
 | `0005_1_12_notify` | `alerts` (unique on kind, subject and channel, a status check) and `notifications` (unique on kind and subject, `ix_notifications_open`) (see [Alerts and notifications](#alerts-and-notifications)) | `notify` |
 | `0006_1_13_metering` | `api_usage` (three checks, `ix_api_usage_at`) and `ai_usage` (two checks, `ix_ai_usage_at`) (see [Metering, quotas and the AI budget](#metering-quotas-and-the-ai-budget)) | `db.metering` |
+| `0007_1_16_backups` | `backups`: one row per backup, its five checks and `ix_backups_started_at` (see [Backups](#backups)) | `ops` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
-`pre_migrate` backup (a later story).
+`pre_migrate` backup `serve` took before it (see [Backups](#backups); `nextron restore`
+arrives with Story 1.19).
 
 **Adding a migration.** Alembic is configured in code (`nextron/db/migrations.py`); there is no
 `alembic.ini` and no `alembic` command. A story that changes the schema:
@@ -694,8 +700,9 @@ Background work (crawls, mailbox syncs, sends, AI calls) runs as durable jobs in
 table (owner `jobqueue`, AD-10), so it survives a crash or a restart, never runs twice at once,
 and retries only what may succeed later. The rules live in `nextron/domain/job.py`, the service
 in `nextron/app/jobqueue/api.py` (`JobQueue`) and the runner in `nextron/jobs/runner.py`. The
-job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)); the
-stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
+job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notifications)) and
+`backup_db` (see [Backups](#backups)); the stories that add work add theirs, with a thin handler
+in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -833,6 +840,92 @@ from the start, so the budget check (`domain.budget.allow`) comes first, and a u
 already written or called a provider must finish, not defer. Like every finish, the deferral is
 fenced on the claim's `attempts`: a lost claim changes nothing and logs `job_claim_lost`.
 
+## Backups
+
+The engine copies its database every day, on demand and before every migration, so a bad
+upgrade, a corrupted file or a damaged disk can't lose the Suppression List and the Provenance
+Records (FR-58, AD-2, AD-20, OP-5, OP-6, NFR-16). The `ops` service does it
+(`nextron/app/ops/api.py`: `LocalBackups` and `Backups`); the rules are in
+`nextron/domain/backup.py`.
+
+**How a copy is made.** Only SQLite's backup API reads the live file
+(`nextron.db.engine.copy_database`): a read-only connection to `<data dir>\nextron.db` is
+copied into a new, empty file, so the copy holds exactly what was committed, even while the
+engine writes. `tests/contracts/test_backup_contracts.py` refuses, anywhere under `nextron/`, an
+import of `shutil`, a `.copy(...)` call with arguments (`Path.copy`), `.copy_into(`,
+`hardlink_to(`, `symlink_to(`, `os.link(`, `os.symlink(` and `VACUUM INTO`, and `.backup(`
+outside `nextron/db/engine.py`. Then the copy is verified through a read-only,
+`immutable` connection that never changes it: `PRAGMA integrity_check` must answer exactly
+`ok`, the copy must have an Alembic revision, and the rows of the Suppression List
+(`suppression_entries`) and the Provenance Records (`provenance_records`) are counted while
+those tables exist. Last come its size and SHA-256. A copy that fails any of this is deleted.
+The copy is a single file whose header keeps WAL mode, so the engine can open it unchanged.
+
+**Where copies go.** `<backup dir>\local\nextron-<env>-<YYYYMMDDTHHMMSS.mmm>Z.db`, for example
+`%LOCALAPPDATA%\Nextron\backups\prod\local\nextron-prod-20261117T100000.123Z.db`, named by the
+UTC start time with milliseconds (Windows forbids `:` in a name). An existing file is never
+overwritten: that backup fails instead.
+
+**When.**
+
+- **Daily**, from the `backup_db` trigger, at "Daily backup time" (`backup_time`, Settings,
+  Engine; 10:00 by default) in the sender's timezone (`sender_timezone`; UTC until it is set).
+  Both are read when the engine starts, so a change takes effect at the next restart; if they
+  can't be read, the trigger uses 10:00 UTC and logs `trigger_schedule_failed`.
+- **A missed daily time is made up once**, right after the next start, when the newest daily
+  backup started before the latest daily time (the PC was shut down or rebooted across it).
+  A sleep across it needs no catch-up: the trigger's 24-hour grace runs it on wake. A new
+  database (no daily backup yet) waits for its first time, so a new install never backs up at
+  start.
+- **On demand**, from "Back up now" on the health panel (see [Engine health](#engine-health)).
+  It queues a `backup_db` job with the key `backup_db:global:<UTC date>` and the payload
+  `{"v": 1, "kind": "manual"}`; a click while that job is queued or running is absorbed, and
+  the panel says so.
+- **Before every migration**: `serve` takes a `pre_migrate` copy of a database that already
+  has data and is behind the code, inside the migration's write transaction, so nothing changes
+  between the copy and the upgrade. If the copy fails, `serve` exits 2 without migrating
+  (`startup check failed: pre_migrate_backup: <error>; the database was not migrated`, logged as
+  `pre_migrate_backup_failed`). If the migration then fails, the message names the copy and
+  `nextron restore "<path>"`, and the copy stays. After a successful upgrade the copy's row is
+  recorded; if that fails, `backup_record_failed` is logged and the engine starts anyway.
+
+**The job.** `backup_db` runs on the bulk lane only (priority 80, `max_runtime` 30 minutes,
+retry limit 2, group Backup). One backup copies at a time. Each backup writes one `backups` row
+(owner `ops`, migration `0007_1_16_backups`), once: `verified` with the path, size, SHA-256,
+revision and counts (a count is empty when its table doesn't exist yet), or `failed` with the
+redacted error. There is no state machine and no `events` row.
+
+**A failed backup** (the copy, its check or the disk failed) is recorded `failed`, raises the
+`backup_failed` ops alert ("Backup failed: <kind> <ULID>", Telegram and the dashboard) and shows
+on the health panel's error list until a later backup verifies. It is not retried
+automatically: the next daily time or "Back up now" tries again. Only a failure to record the
+row raises from the job: the copy is deleted (so there is never a copy without a row),
+`backup_record_failed` is logged, and a retryable `AdapterError` (`backup_not_recorded`) makes
+jobqueue retry the job (retry limit 2; each retry takes a new copy), then `dead` with `job_dead`.
+
+**Rotation.** After each verified backup (a `pre_migrate` one included), local copies older than
+"Keep local backups for (days)" (`backup_rotation_days`, Settings, Engine; 7 to 35, default 35)
+are deleted, and their rows marked (`local_deleted_at`). The newest verified copy is always kept,
+however old. 35 days is the most because erased data must age out of backups within the 35-day
+rotation (AD-17). Rotation deletes only files with a `verified` row, directly in
+`<backup dir>\local` and named for this environment; anything else is skipped and logged
+(`backup_rotation_skipped`). A file with no row (a crash mid-copy, or a `pre_migrate` copy whose
+migration failed) is never deleted. A copy that can't be deleted (locked) is tried again next
+time (`backup_copy_not_deleted`). A rotation setting that can't be read skips rotation. A
+rotation that fails after the row is recorded (a locked database, say) is logged
+(`backup_rotation_failed`, ERROR) and the backup still succeeds; the next backup rotates again.
+
+**Logs** carry IDs, kinds, codes, counts and file names, never a full path or an error's text:
+`backup_requested` (`job_id`, `job_created`), `backup_completed` (`backup_id`, `kind`,
+`size_bytes`, `file`), `backup_failed` (ERROR: `backup_id`, `kind`, `code`), `backups_rotated`
+(`count`), `backup_rotation_skipped`, `backup_rotation_failed` (ERROR: `backup_id`, `code`),
+`backup_copy_not_deleted`, `pre_migrate_backup_failed` and `backup_record_failed`.
+
+**Not done yet.** Copies stay on this PC, unencrypted: the encrypted off-PC copy and the
+erasure ledger arrive with Story 1.17, the monthly restore test with Story 1.18, and
+`nextron restore` with recovery mode with Story 1.19. `nextron doctor` checks only that the
+backup dir is separate from the data dir (`backup_dir_separate`).
+
 ## Triggers and the heartbeat
 
 **Periodic triggers** (AD-10) start periodic work: sends, mailbox syncs, unsubscribe polls,
@@ -841,7 +934,7 @@ table (`tests/unit/test_triggers.py` checks it against the spine). A trigger onl
 firing enqueues one job of the job type with the trigger's own name, with the key
 `<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
 still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
-job. No trigger is registered yet, so the scheduler runs with none until a story adds one.
+job. So far one trigger is registered: `backup_db`, daily (see [Backups](#backups)).
 
 **Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
@@ -850,12 +943,21 @@ job. No trigger is registered yet, so the scheduler runs with none until a story
 ```python
 triggers.register_trigger(Trigger.SEND_DUE_MESSAGES, Every(timedelta(minutes=1)))
 triggers.register_trigger(Trigger.RECONCILE_SENDS, Every(timedelta(minutes=2), at_startup=True))
+triggers.register_trigger(
+    Trigger.BACKUP_DB, DailyAt(backup_schedule, fallback=DailyRun(time(10, 0), "UTC"))
+)
 ```
 
 - `Every(period, at_startup=False)`: `period` is whole seconds from 1 minute to 31 days;
-  `at_startup` also fires once right after the engine starts. Only interval schedules exist so
-  far; daily, monthly and Operator-time schedules arrive with their first trigger (`backup_db`,
-  Story 1.16).
+  `at_startup` also fires once right after the engine starts.
+- `DailyAt(when, *, fallback)`: every day at a time read once, when the scheduler starts.
+  `when()` returns a `DailyRun(at, timezone, catch_up=False)`: `at` a time in whole minutes,
+  `timezone` an IANA name, and `catch_up` fires once right after the start, to make up a run
+  the engine missed while it was off. If `when()` fails or returns anything else, the
+  scheduler logs `trigger_schedule_failed` (WARNING, `trigger`, `code`) and uses `fallback`.
+  It logs `daily_trigger_scheduled` (INFO: `trigger`, `at`, `timezone`, `catch_up`). A change
+  to the time takes effect when the engine restarts. Monthly and Operator-time schedules arrive
+  with their first trigger.
 - A trigger that isn't a `Trigger` member (a plain string included), whose job type isn't
   registered, or that is already registered is refused (`TypeError`, `UnknownJobType`,
   `ValueError`).
@@ -871,8 +973,10 @@ triggers.register_trigger(Trigger.RECONCILE_SENDS, Every(timedelta(minutes=2), a
 
 **How they fire.** The FastAPI lifespan starts APScheduler's `AsyncIOScheduler(timezone=UTC)`
 right after the job runner (`scheduler_started`, with the trigger count) and stops it right
-before (`scheduler_stopped`). Each trigger is an interval job with `coalesce=True`,
-`max_instances=1` and a misfire grace equal to its period. A firing runs on a worker thread,
+before (`scheduler_stopped`). An `Every` is an interval job with `coalesce=True`,
+`max_instances=1` and a misfire grace equal to its period; a `DailyAt` is a cron job at its
+hour and minute in its timezone with `coalesce=True`, `max_instances=1` and a grace of 24
+hours. A firing runs on a worker thread,
 never on the event loop, and never runs a handler; one that fails logs `trigger_failed` (with
 `trigger` and the error `code`) and later firings still run. A firing that succeeds logs
 nothing: the job's creation event records it.
@@ -1102,7 +1206,10 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    under 2 minutes old (in either direction: a beat 2 minutes or more in the future, the clock
    was set back, isn't fresh either), "Not running: last beat <time> UTC" otherwise, or "Not
    running: no heartbeat yet".
-3. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
+3. **Backups**: "No backup yet." or "Last backup: <YYYY-MM-DD HH:MM:SS> UTC, <verified or
+   failed> (<daily, manual or before a migration>)", from the newest backup's start (marked
+   when it failed), and the **Back up now** button (see [Backups](#backups)).
+4. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
    attention." The errors are:
    - each `dead` job, oldest first: "Job dead: <type> <ULID>, attempts: <n>", with "Last error:
      <redacted last_error>" and a **Dismiss** button;
@@ -1110,19 +1217,28 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
      AI budget reached (then only that one), and each quota reached; a limit of 0 (off) is never
      an error. These are the same texts as the month's notices (see [Metering, quotas and the AI
      budget](#metering-quotas-and-the-ai-budget)), and they last while the condition does;
+   - each failed backup newer than the newest verified one, oldest first: "Backup failed:
+     <kind> <ULID>", with "Error: <redacted error>". The list clears when a later backup
+     verifies; there is no Dismiss;
    - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
      fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
      traceback); the other sources still show.
-4. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
+5. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
-5. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
+6. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
    the same eleven ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
 (`GET /health/panel/live`, the panel alone) while the page is open. Every answer is
 `Cache-Control: no-store` (a dead job's last error is free text). After an engine restart the
 poll gets the locked answer with `HX-Refresh: true`, so the page reloads to the locked page.
+
+**Back up now.** The button posts `POST /health/backup` (CSRF-checked, no other field; anything
+else is 400 `Request refused: malformed form`). It queues a manual backup and shows the panel
+again with "Backup queued; its result shows here when it finishes.", or "A backup is already
+queued or running." when one is. The copy is taken by the job runner's bulk lane, never in the
+request; the panel's next refresh shows the result.
 
 **Dismiss.** Dismissing a dead job deletes its `jobs` row (AD-10: `dead` rows stay until the
 Operator dismisses them), logs `job_dismissed`, and shows the panel again. Its history stays in
@@ -1153,7 +1269,8 @@ view; the area isn't polled.
 **Adding a source of errors.** An owner adds `queries.<owner>.health_issues()`, returning
 `HealthIssue(kind, subject, text, detail=None)` values (`nextron/domain/health.py`), and
 registers it in `nextron.main.build_health_issues`, the only code that builds the registry
-(`tests/contracts/test_health_contracts.py`).
+(`tests/contracts/test_health_contracts.py`). The sources so far, in order: `jobqueue` (dead
+jobs), `budget` (AI spend and quotas) and `backups` (failed backups).
 
 ## Logs
 
@@ -1219,7 +1336,8 @@ uv run lint-imports         # the import contracts on their own
   a recording browser and an `allowlist` field, and keeps each consent flow's job in `jobs`
   until a test calls `run_jobs()`. Its `EngineHealth` (`health`) reads the real health-issue
   registry and a fixed `readiness` list (all eleven doctor checks `ok`) unless a test passes
-  its own.
+  its own. Its `Backups` (`backups`) queues the panel's "Back up now"; its snapshot takes no
+  copy unless a test passes one (`snapshot=`).
   `tests/contracts/test_test_isolation.py` fails when a port has no fake there, or a fake
   doesn't match its port.
 - `tests/fixtures`: fixture files, such as the hostile-text page

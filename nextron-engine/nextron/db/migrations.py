@@ -6,7 +6,8 @@ Alembic is configured here in code: there is no ``alembic.ini``, no Alembic CLI 
 ``NNNN_<epic>_<story>_<short slug>`` (for example ``0001_1_3_persistence_foundation``):
 underscores only, at most 31 characters.
 
-``ensure_current(engine)`` reads the database's revision, holding the write lock:
+``ensure_current(engine, *, before_upgrade=None)`` reads the database's revision, holding the
+write lock:
 
 - unknown to this code: ``DatabaseAheadError`` ("database revision <rev> is newer than this
   code"); nothing is changed;
@@ -18,14 +19,20 @@ underscores only, at most 31 characters.
   (``ForeignKeyCheckError``) before the transaction commits. Any failure rolls the whole upgrade
   back and leaves the revision as it was.
 
+Only for a non-empty database that is behind head, ``before_upgrade(before)`` runs first, inside
+the same write transaction and before ``command.upgrade``: ``serve`` takes the ``pre_migrate``
+backup there (Story 1.16), so nothing can change between the copy and the upgrade. If the hook
+raises, nothing is migrated and the exception propagates. A new file and a database at head
+never call it.
+
 ``head_revision()`` is the revision this code migrates to, ``known_revisions()`` every revision id
 in its chain, and ``current_revision(engine)`` the database's own (``None`` for an empty one;
 several revisions, or tables but no revision, raise ``DatabaseStateError``). ``nextron doctor``
 reads them on a read-only engine and never migrates. ``current_revision_in_unit()`` reads the
 revision with the same rules (one implementation) through the current unit of work's session,
 so the health panel's readiness list reads it inside its GET's read-only unit of work.
-
-The ``pre_migrate`` backup before an upgrade arrives in Story 1.16.
+``stored_revision(rows)`` is that one implementation, for any ``rows(sql)`` that runs a
+``SELECT`` and returns its rows: a backup reads a copy's revision with it.
 """
 
 from collections.abc import Callable, Iterable, Sequence
@@ -88,7 +95,7 @@ def known_revisions(script_location: Path | None = None) -> frozenset[str]:
 type Rows = Callable[[str], Iterable[Sequence[Any]]]
 
 
-def _stored_revision(rows: Rows) -> str | None:
+def stored_revision(rows: Rows) -> str | None:
     """The database's one revision, or ``None`` for an empty database; refuses anything else.
     ``rows(sql)`` runs each ``SELECT``."""
     tables = {
@@ -120,7 +127,7 @@ def _stored_revision(rows: Rows) -> str | None:
 def current_revision(engine: Engine) -> str | None:
     """The database's revision, ``None`` for an empty database."""
     with engine.connect() as connection:
-        return _stored_revision(connection.exec_driver_sql)
+        return stored_revision(connection.exec_driver_sql)
 
 
 def _session_rows(sql: str) -> Iterable[Sequence[Any]]:
@@ -131,26 +138,35 @@ def current_revision_in_unit() -> str | None:
     """The database's revision, read through the current unit of work's session (a read-only
     one included), with ``current_revision``'s rules: ``None`` for an empty database, and
     ``DatabaseStateError`` for several revisions, or tables but no revision."""
-    return _stored_revision(_session_rows)
+    return stored_revision(_session_rows)
 
 
 def ensure_current(
-    engine: Engine, *, script_location: Path | None = None
+    engine: Engine,
+    *,
+    script_location: Path | None = None,
+    before_upgrade: Callable[[str], None] | None = None,
 ) -> tuple[str | None, str]:
     """Upgrade the database to head; return the revisions ``(before, after)``.
 
-    Raises ``DatabaseAheadError`` or ``DatabaseStateError`` (nothing changed), or whatever made
-    the upgrade fail, ``ForeignKeyCheckError`` included (rolled back).
+    ``before_upgrade(before)`` runs just before the upgrade of a non-empty database behind
+    head, in the same write transaction; if it raises, nothing is migrated.
+
+    Raises ``DatabaseAheadError`` or ``DatabaseStateError`` (nothing changed), whatever
+    ``before_upgrade`` raised (nothing changed), or whatever made the upgrade fail,
+    ``ForeignKeyCheckError`` included (rolled back).
     """
     config = alembic_config(script_location)
     script, head = _script(config)
     known = {revision.revision for revision in script.walk_revisions()}
     with fk_off_connection(engine) as connection, connection.begin():
-        before = _stored_revision(connection.exec_driver_sql)
+        before = stored_revision(connection.exec_driver_sql)
         if before is not None and before not in known:
             raise DatabaseAheadError(f"database revision {before} is newer than this code")
         if before == head:
             return before, head
+        if before is not None and before_upgrade is not None:
+            before_upgrade(before)
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
         violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
@@ -159,7 +175,7 @@ def ensure_current(
             raise ForeignKeyCheckError(
                 f"the upgrade left {len(violations)} foreign key violations in {tables}"
             )
-        after = _stored_revision(connection.exec_driver_sql)
+        after = stored_revision(connection.exec_driver_sql)
         if after != head:
             raise RuntimeError(f"the upgrade stopped at {after}, not {head}")
     return before, head

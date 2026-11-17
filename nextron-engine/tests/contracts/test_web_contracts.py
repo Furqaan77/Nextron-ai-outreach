@@ -160,6 +160,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/health/panel",
         "/health/panel/live",
         "/health/jobs/dismiss",
+        "/health/backup",
     ]
     assert async_route_handlers(app) == []
 
@@ -285,6 +286,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /credentials/google/grant",
         "POST /credentials/google/remove",
         "POST /health/jobs/dismiss",
+        "POST /health/backup",
     ):
         assert route in str(caught.value)
 

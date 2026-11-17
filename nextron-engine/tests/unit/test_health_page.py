@@ -1,10 +1,14 @@
-"""The health panel (``GET /health/panel``, ``GET /health/panel/live`` and ``POST
-/health/jobs/dismiss``, FR-58, UX-DR29, Story 1.15) through ``Dashboard(units=units)`` on a
-temporary database at head: the page, the fragment and their exact ``hx-*`` attributes, each
-section's text in order, the Dismiss form and its refusals, the notification area's error count
+"""The health panel (``GET /health/panel``, ``GET /health/panel/live``, ``POST
+/health/jobs/dismiss`` and ``POST /health/backup``, FR-58, UX-DR29, Stories 1.15 and 1.16)
+through ``Dashboard(units=units)`` on a temporary database at head: the page, the fragment and
+their exact ``hx-*`` attributes, each section's text in order, the Dismiss form and its
+refusals, the Backups section (each last-backup line, the "Back up now" form and its POST:
+created, absorbed, an extra field, no CSRF token), the notification area's error count
 (singular, plural and absent at 0), ``no-store``, the navigation link, the guard's
 ``HX-Refresh`` on an HTMX GET only, and a hostile ``last_error`` rendered as escaped text."""
 
+import json
+import re
 import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -13,9 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from nextron.app.ops.api import DeadJobAlerts, Heartbeat
+from nextron.app.ops.api import DeadJobAlerts, Heartbeat, TakenBackup
+from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
+from nextron.domain.backup import BackupKind, copy_name
 from nextron.domain.budget import AiCall
 from nextron.domain.job import Lane
 from nextron.domain.readiness import CheckResult, Status
@@ -30,6 +36,7 @@ UNKNOWN_JOB = "01JD3QZ8X5V9K2M7N4P6R8T0ZZ"
 PAGE = "/health/panel"
 LIVE = "/health/panel/live"
 DISMISS = "/health/jobs/dismiss"
+BACKUP = "/health/backup"
 MALFORMED = b"Request refused: malformed form"
 PANEL_ATTRS = {
     "id": "health-panel",
@@ -219,6 +226,10 @@ def beat(dashboard: Dashboard, units: UnitOfWorkFactory, tmp_path: Path) -> None
         Heartbeat(dashboard.clock, tmp_path / "heartbeat").beat()
 
 
+def csrf_input(token: str) -> dict[str, str | None]:
+    return {"type": "hidden", "name": "csrf_token", "value": token}
+
+
 def get(dashboard: Dashboard, path: str, cookie: bytes) -> Reply:
     reply = dashboard.get(path, cookie=cookie)
     assert reply.status == 200, reply
@@ -242,6 +253,17 @@ def dismiss(dashboard: Dashboard, session: tuple[bytes, str], body: bytes) -> Re
 
 READINESS_TABLE = [["Status", "Check", "Message"]] + [
     ["ok", result.id, result.message] for result in READINESS
+]
+BACKUP_FORM = {
+    "method": "post",
+    "hx-post": "/health/backup",
+    "hx-target": "#health-panel",
+    "hx-swap": "outerHTML",
+}
+BACKUP_BUTTON = {"type": "submit", "class": "secondary", "id": "backup-now"}
+NEVER_RUN = [
+    [["Job type", "Last success"], ["backup_db", "never"]],
+    [["Job type", "Last success"], ["send_alert", "never"]],
 ]
 
 
@@ -279,20 +301,23 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Checked at 2026-11-17 09:00:00 UTC; refreshes every 30 seconds.",
         "Worker",
         "Not running: no heartbeat yet",
+        "Backups",
+        "No backup yet.",
+        "Back up now",
         "Errors needing attention (0)",
         "No errors need attention.",
         "Last successful runs",
+        "Backup",
         "Other",
         "Readiness (nextron doctor)",
         "11 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables == [
-        [["Job type", "Last success"], ["send_alert", "never"]],
-        READINESS_TABLE,
-    ]
-    assert panel.forms == []
+    assert panel.tables == [*NEVER_RUN, READINESS_TABLE]
+    assert panel.forms == [(BACKUP_FORM, [csrf_input(session[1])])]
+    assert panel.buttons == [BACKUP_BUTTON]
     assert panel.heading_ids == [
         "health-worker-heading",
+        "health-backup-heading",
         "health-errors-heading",
         "health-runs-heading",
         "health-readiness-heading",
@@ -319,20 +344,25 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Checked at 2026-11-17 09:06:59 UTC; refreshes every 30 seconds.",
         "Worker",
         "Running (last beat 2026-11-17 09:05:00 UTC)",
+        "Backups",
+        "No backup yet.",
+        "Back up now",
         "Errors needing attention (1)",
         f"Job dead: send_alert {dead}, attempts: 1",
         "Last error: ValueError: broken",
         "Dismiss",
         "Last successful runs",
+        "Backup",
         "Other",
         "Readiness (nextron doctor)",
         "11 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables[0] == [
-        ["Job type", "Last success"],
-        ["send_alert", "2026-11-17 09:05:00 UTC"],
+    assert panel.tables[:2] == [
+        [["Job type", "Last success"], ["backup_db", "never"]],
+        [["Job type", "Last success"], ["send_alert", "2026-11-17 09:05:00 UTC"]],
     ]
-    [(attrs, inputs)] = panel.forms
+    backup_form, (attrs, inputs) = panel.forms
+    assert backup_form == (BACKUP_FORM, [csrf_input(session[1])])
     assert attrs == {
         "method": "post",
         "hx-post": "/health/jobs/dismiss",
@@ -345,6 +375,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
     ]
     # an id, so HTMX keeps a keyboard user's focus across the 30 s swap, and a distinct label
     assert panel.buttons == [
+        BACKUP_BUTTON,
         {
             "type": "submit",
             "class": "secondary",
@@ -376,11 +407,11 @@ def test_budget_issues_are_listed_without_a_dismiss_form(
 
     panel = panel_of(dashboard, session[0])
 
-    assert panel.texts[3:5] == [
+    assert panel.texts[6:8] == [
         "Errors needing attention (1)",
         "AI spend at 80% of $20: $16 spent in 2026-11",
     ]
-    assert panel.forms == []
+    assert [attrs for attrs, _ in panel.forms] == [BACKUP_FORM]  # no Dismiss form
 
 
 def test_the_readiness_list_counts_warnings_and_failures(
@@ -414,9 +445,9 @@ def test_a_hostile_last_error_renders_as_escaped_text(
 
     assert "<script>" not in reply.text and "<img" not in reply.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in reply.text
-    assert reply.text.count('hx-post="') == 1  # only the Dismiss form's own attribute
+    assert reply.text.count('hx-post="') == 2  # only the Back up now and Dismiss forms' own
     assert "mac@example.com" not in reply.text  # redacted when read
-    assert panel.texts[5] == (
+    assert panel.texts[8] == (
         'Last error: ValueError: <script>alert(1)</script><img src=x onerror="alert(2)"> '
         'hx-post="/health/jobs/dismiss" for <email>'
     )
@@ -438,7 +469,7 @@ def test_dismiss_deletes_the_dead_job_and_answers_with_the_panel(
     assert dead not in jobs.ids() and done in jobs.ids()
     panel = Panel(reply.text)
     assert panel.attrs == PANEL_ATTRS
-    assert panel.texts[3:5] == ["Errors needing attention (0)", "No errors need attention."]
+    assert panel.texts[6:8] == ["Errors needing attention (0)", "No errors need attention."]
 
 
 @pytest.mark.parametrize("which", ["queued", "done", "unknown"])
@@ -467,7 +498,7 @@ def test_dismissing_twice_is_a_no_op_the_second_time(
     reply = dismiss(dashboard, session, form(job=dead))
 
     assert reply.status == 200
-    assert Panel(reply.text).texts[3] == "Errors needing attention (0)"
+    assert Panel(reply.text).texts[6] == "Errors needing attention (0)"
 
 
 @pytest.mark.parametrize(
@@ -636,3 +667,201 @@ def test_the_panel_reads_in_one_read_only_unit_of_work(
         get(dashboard, path, session[0])
 
     assert jobs.ids() == before and dead in before
+
+
+# Backups (Story 1.16) ---------------------------------------------------------------------------
+
+
+def record_backup(
+    dashboard: Dashboard,
+    units: UnitOfWorkFactory,
+    kind: BackupKind,
+    *,
+    verified: bool,
+    started_at: datetime = T,
+) -> str:
+    """Record a backup row through the dashboard's ``LocalBackups``, without copying."""
+    path = dashboard.local_dir / copy_name("test", started_at)
+    made = Snapshot(path, 4096, "a" * 64, "0007_1_16_backups", None, None) if verified else None
+    error = None if verified else "OSError: disk full"
+    taken = TakenBackup(kind, path, started_at, started_at, made, error, None if verified else "x")
+
+    @use_case
+    def record() -> str:
+        with current().transaction():
+            return dashboard.local.insert(taken)
+
+    with units.open():
+        return record()
+
+
+def backup_line(reply: Reply) -> tuple[str, list[str]]:
+    """The Backups line's text and its classes."""
+    found = re.search(r'<p class="(health-backup[^"]*)">([^<]*)</p>', reply.text)
+    assert found is not None
+    return found.group(2), found.group(1).split()
+
+
+@pytest.mark.parametrize(
+    ("kind", "verified", "line", "failed"),
+    [
+        (BackupKind.DAILY, True, "verified (daily)", False),
+        (BackupKind.MANUAL, False, "failed (manual)", True),
+        (BackupKind.PRE_MIGRATE, True, "verified (before a migration)", False),
+    ],
+)
+def test_the_backups_section_shows_the_last_backup(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    units: UnitOfWorkFactory,
+    kind: BackupKind,
+    verified: bool,
+    line: str,
+    failed: bool,
+) -> None:
+    record_backup(dashboard, units, BackupKind.DAILY, verified=True, started_at=T - timedelta(1))
+    record_backup(dashboard, units, kind, verified=verified, started_at=T + timedelta(seconds=7))
+
+    reply = get(dashboard, LIVE, session[0])
+
+    text, classes = backup_line(reply)
+    assert text == f"Last backup: 2026-11-17 09:00:07 UTC, {line}"
+    assert classes == (["health-backup", "health-backup-failed"] if failed else ["health-backup"])
+    assert Panel(reply.text).texts[3:6] == ["Backups", text, "Back up now"]
+
+
+def test_no_backup_yet(dashboard: Dashboard, session: tuple[bytes, str]) -> None:
+    reply = get(dashboard, LIVE, session[0])
+
+    assert backup_line(reply) == ("No backup yet.", ["health-backup"])
+    assert 'class="health-backup-notice"' not in reply.text
+
+
+def test_the_back_up_now_form_posts_only_its_csrf_token_through_htmx(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = get(dashboard, PAGE, session[0])
+
+    assert (
+        '<form method="post" hx-post="/health/backup" hx-target="#health-panel" '
+        'hx-swap="outerHTML">'
+    ) in reply.text
+    assert '<button type="submit" class="secondary" id="backup-now">Back up now</button>' in (
+        reply.text
+    )
+    panel = Panel(reply.text)
+    assert panel.forms[0] == (BACKUP_FORM, [csrf_input(session[1])])
+    assert panel.buttons[0] == BACKUP_BUTTON
+
+
+def a_failed_backup_shows_in_the_error_list(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    backup_id = record_backup(dashboard, units, BackupKind.MANUAL, verified=False)
+
+    texts = panel_of(dashboard, session[0]).texts
+
+    assert texts[6:9] == [
+        "Errors needing attention (1)",
+        f"Backup failed: manual {backup_id}",
+        "Error: OSError: disk full",
+    ]
+
+
+def test_a_failed_backup_shows_in_the_error_list_until_a_later_one_verifies(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    a_failed_backup_shows_in_the_error_list(dashboard, session, units)
+
+    record_backup(
+        dashboard, units, BackupKind.DAILY, verified=True, started_at=T + timedelta(minutes=1)
+    )
+
+    assert panel_of(dashboard, session[0]).texts[6:8] == [
+        "Errors needing attention (0)",
+        "No errors need attention.",
+    ]
+
+
+def back_up_now(dashboard: Dashboard, session: tuple[bytes, str], body: bytes) -> Reply:
+    cookie, token = session
+    return dashboard.post(
+        BACKUP, cookie=cookie, token=token, headers=[(b"content-type", FORM)], body=body
+    )
+
+
+def backup_jobs(units: UnitOfWorkFactory) -> list[tuple[str, str, str]]:
+    database = units.engine.url.database
+    assert database
+    connection = sqlite3.connect(database, isolation_level=None)
+    try:
+        return connection.execute(
+            "SELECT idempotency_key, payload, status FROM jobs WHERE type = 'backup_db'"
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def notice(reply: Reply) -> list[str]:
+    return re.findall(r'<p class="health-backup-notice" role="status">([^<]*)</p>', reply.text)
+
+
+def test_back_up_now_queues_a_manual_backup_and_says_so(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    reply = back_up_now(dashboard, session, form(csrf_token=session[1]))
+
+    assert reply.status == 200
+    assert reply.header(b"cache-control") == b"no-store"
+    assert Panel(reply.text).attrs == PANEL_ATTRS
+    assert notice(reply) == ["Backup queued; its result shows here when it finishes."]
+    [(key, payload, status)] = backup_jobs(units)
+    assert (key, json.loads(payload), status) == (
+        "backup_db:global:2026-11-17",
+        {"v": 1, "kind": "manual"},
+        "queued",
+    )
+    assert list(dashboard.local_dir.parent.parent.parent.glob("**/*.db")) == []  # no copy yet
+
+
+def test_a_second_click_while_one_is_queued_is_absorbed(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    back_up_now(dashboard, session, b"")
+
+    reply = back_up_now(dashboard, session, b"")
+
+    assert reply.status == 200
+    assert notice(reply) == ["A backup is already queued or running."]
+    assert len(backup_jobs(units)) == 1
+    assert notice(get(dashboard, LIVE, session[0])) == []  # the notice is the POST's alone
+
+
+@pytest.mark.parametrize(
+    "body",
+    [form(extra="1"), form(job=SUBJECTS[0]), b"kind=daily", b"x=%FF"],
+    ids=["extra field", "a job", "a kind", "bad body"],
+)
+def test_a_malformed_back_up_now_is_refused_with_400_and_queues_nothing(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, body: bytes
+) -> None:
+    reply = back_up_now(dashboard, session, body)
+
+    assert (reply.status, reply.body) == (400, MALFORMED)
+    assert backup_jobs(units) == []
+
+
+def test_back_up_now_without_the_csrf_token_is_refused_with_403(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    reply = dashboard.post(BACKUP, cookie=session[0], headers=[(b"content-type", FORM)], body=b"")
+
+    assert reply.status == 403
+    assert backup_jobs(units) == []
+
+
+def test_back_up_now_needs_a_session(dashboard: Dashboard, units: UnitOfWorkFactory) -> None:
+    reply = dashboard.post(BACKUP, headers=[(b"content-type", FORM)], body=b"")
+
+    assert reply.status == 401
+    assert backup_jobs(units) == []
