@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`) and **Story 2.3** (merge `24bbda4`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`) and **Story 4.7** (merge `fb662d6`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -142,11 +142,27 @@ Main after these merges: **6789 tests, 29 contracts.**
 - The FR-49 never-crawl list (`domain/fetch_policy.py`) refuses shared-platform websites.
 - Merged Leads move their Contacts to the survivor.
 
-Main now: **8108 tests, 29 contracts.**
+**Story 1.19 result:** `nextron restore <copy>` checks a backup copy, takes a `pre_restore` safety copy, asks you to type `yes`, and swaps the copy in.
+- Recovery mode then turns on (`recovery_state`, migration `0016_1_19_recovery`). Every later send path must check `queries.ops.recovery_mode()`.
+- Stop the engine first, because restore holds the engine lock.
+- The erasure-ledger reapply step is deferred to Story 3.16.
+
+**Story 4.3 result:** Approved Company Facts.
+- `seed/company_facts.yaml` holds 8 facts: Playbook §6, the Offer with no price, ABA 512 for US only, and the SRA notice for UK only.
+- The `company_facts` table is append-only through DB triggers (migration `0017_4_3_company_facts`), and the `/facts` page under Settings adds, edits and retracts facts.
+- Drafting may cite only `allowed_facts(segment, market)`.
+- Seed sync moved to `ops.Seeds.sync_seed`.
+
+**Story 4.7 result:** register Sending Inboxes at `/inboxes`, under Settings (`sending_domains`, `sending_inboxes`, migration `0018_4_7_sending_inboxes`).
+- Refused: nextronai.com (also a DB CHECK), role addresses, and outside prod anything not on the allowlist.
+- More than 3 inboxes on one domain triggers a warning.
+- New required setting `sender_name`.
+
+Main now: **8912 tests, 29 contracts.**
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 25 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 28 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -204,6 +220,15 @@ Main now: **8108 tests, 29 contracts.**
 - **Story 2.3 items rejected only because they'd change the approved spec:**
   - when an email matches an existing Contact, a different name or role is dropped silently (e.g. a shared `info@` for two people keeps the first);
   - a Contact re-listed by a second list gets no Provenance Record naming it.
+- **Set the new required "Sender's name" setting** (Story 4.7). Doctor's `required_settings` fails until it's set.
+- **Decide on free-mail Sending Domains** (Story 4.7). `gmail.com`-style addresses are currently accepted as Sending Domains. This is logged in `deferred-work.md`.
+- **Check the company facts** in `seed/company_facts.yaml` before the first send (Story 4.3): the ABA 512 and SRA notice wording, and the Offer's URL.
+- **Story 4.3:**
+  - seed sync moved to a new `ops.Seeds` use case, because `setup` and `playbook` may not call each other; this adds to the spine's owner map;
+  - an Edit form opened in a second tab before a retraction can silently restore the retracted fact.
+- **Story 1.19:**
+  - the environment guard on restore reads file names only, so a renamed prod copy would be accepted in dev;
+  - `pre_restore` safety copies are never rotated.
 - **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
