@@ -16,14 +16,20 @@ package is classified. A ``mail`` or ``alert`` adapter is built only through
 The adapters so far: ``clock`` (the system clock), ``secrets`` (Windows Credential Manager;
 live constructor ``default_backend``), ``sink`` (the dev and test sink), ``google_oauth``
 (Google's OAuth endpoints over ``httpx2``, the one-shot consent listener on ``127.0.0.1`` and the
-downloaded client file; live constructor ``default_http_client``) and ``telegram`` (ops alerts
+downloaded client file; live constructor ``default_http_client``), ``telegram`` (ops alerts
 through the Telegram Bot API's ``sendMessage`` over ``httpx2``, the ``alert`` role's first
-adapter; live constructor ``default_http_client``). ``ai`` is reserved.
+adapter; live constructor ``default_http_client``) and ``ai`` (the Claude gateway,
+``ClaudeGateway``, the ``LlmPort`` over the ``anthropic`` SDK on ``httpx2``, with its route
+candidates, output schemas, request builder and prices; live constructor
+``default_http_client``).
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
 port calls, whatever the transport raises or answers, and never carries a secret into an error.
 It also takes a required keyword-only ``meter`` (``UsageMeterPort``, FR-57) and records exactly
 one ``ApiCall`` for every HTTP request it attempts, whatever the outcome (``ok``, or the
 ``AdapterError``'s code, recorded before the error is re-raised); a call refused before any
-request records nothing. ``tests/contracts/test_adapter_boundary.py`` proves both for each one.
+request records nothing. The AI gateway records an ``AiCall`` per request instead of an
+``ApiCall`` (its route, tuple, served model, tokens and cost; the error code of the raised
+error or of the ``LlmFailed``, ``LlmInvalid`` or ``LlmTruncated`` it returns).
+``tests/contracts/test_adapter_boundary.py`` proves both for each one.
 """
