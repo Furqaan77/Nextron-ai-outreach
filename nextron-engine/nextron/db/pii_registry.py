@@ -73,6 +73,20 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 2.2. A Lead is an organization: its name, keys and country are firm data, so erasing a
+    # Contact never tombstones the firm's Lead.
+    "leads": {
+        "id": PiiClass.NONE,
+        "name": PiiClass.NONE,
+        "web_domain": PiiClass.NONE,
+        "ch_number": PiiClass.NONE,
+        "place_id": PiiClass.NONE,
+        "segment_id": PiiClass.NONE,
+        "country_code": PiiClass.NONE,
+        "merged_into": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "pipeline_stage": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

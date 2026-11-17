@@ -2,7 +2,8 @@
 
 Import rule: the standard library only. Nothing here does I/O; a function that needs the time
 takes ``now`` as a UTC-aware ``datetime``. ``zoneinfo`` reads its IANA data from ``tzdata``,
-which is a data dependency, not an import.
+which is a data dependency, not an import. Likewise ``identity`` reads its vendored Public
+Suffix List (package data under ``psl/``) once, on first use.
 
 Enforced by import-linter contract 1 (lowest layer) and by
 ``tests/contracts/test_domain_stdlib_only.py``.
