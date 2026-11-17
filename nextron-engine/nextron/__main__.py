@@ -16,8 +16,17 @@ Commands:
   within 5 minutes (exit 0: opened; exit 1: the engine isn't running, or the code couldn't be
   stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
   invalid).
+- ``seed sync [--env {dev,test,prod}]``: load ``seed/segments.yaml`` into the database: create
+  each new Segment, give each changed one a new version, and leave a stored Segment the file no
+  longer lists as it is; print ``segments: <n> changed, <m> unchanged`` and a line per Segment
+  created, changed or not in the file. ``--env`` syncs that environment instead of
+  ``NEXTRON_ENV``. The database must exist and be migrated: start the engine once first (exit
+  0: synced; exit 1: the file is missing, unreadable or invalid (the message names the line or
+  field), the database is missing, behind, ahead of the code ("newer than this code") or not
+  this engine's, or the sync failed, and nothing was changed; exit 2: ``NEXTRON_ENV`` or
+  another bootstrap setting is invalid, or the arguments are).
 
-Later stories add ``seed sync`` and ``restore``.
+A later story adds ``restore``.
 """
 
 import argparse
@@ -57,6 +66,17 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "open", help="open the dashboard in the default browser with a one-time link"
     )
+    seed = commands.add_parser("seed", help="load the seed files into the database")
+    seed_commands = seed.add_subparsers(dest="seed_command", required=True, metavar="subcommand")
+    sync = seed_commands.add_parser(
+        "sync",
+        help="create or update the Segments from seed/segments.yaml (never re-scores a Lead)",
+    )
+    sync.add_argument(
+        "--env",
+        choices=ENVIRONMENTS,
+        help="the environment to sync, instead of NEXTRON_ENV (for this run only)",
+    )
     return parser
 
 
@@ -66,7 +86,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return engine.serve(reload=args.reload)
     if args.command == "open":
         return engine.open_dashboard()
-    return engine.doctor(env=args.env, as_json=args.as_json)
+    if args.command == "seed" and args.seed_command == "sync":
+        return engine.seed_sync(env=args.env)
+    if args.command == "doctor":
+        return engine.doctor(env=args.env, as_json=args.as_json)
+    raise AssertionError(f"the parser accepted a command main doesn't dispatch: {args}")
 
 
 if __name__ == "__main__":

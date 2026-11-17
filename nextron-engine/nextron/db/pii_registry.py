@@ -42,6 +42,15 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "value": PiiClass.REDACT,
         "updated_at": PiiClass.NONE,
     },
+    # Story 2.1. A Segment's definition holds role titles, keywords and rules, never a person.
+    "segments": {
+        "id": PiiClass.NONE,
+        "key": PiiClass.NONE,
+        "definition": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

@@ -28,6 +28,31 @@ that reads the clock once and opens one ``uow.transaction()``.
 Both log ``settings_changed`` with ``keys``, the changed key names comma-joined, when at least
 one key changed; never a value.
 
+``Setup.sync_segments(segments)`` (FR-1, AD-12, Story 2.1; ``nextron seed sync``) upserts the
+Segments of ``seed/segments.yaml``, as ``nextron.domain.segments.SegmentDef``s, by key into
+the ``segments`` table. Before any transaction it refuses an item that isn't a ``SegmentDef``
+(``TypeError``) or a repeated key (``ValueError``), and validates the definitions again as the
+file form (``validate_segments``, when there is at least one), so a hand-built ``SegmentDef``
+that breaks a rule raises ``InvalidSegments`` and nothing is stored. It reads the clock once,
+then works in one transaction. Before any write it decodes each stored Segment the input leaves
+out (``segment_from_text``) and raises ``InvalidSegments`` for the first input signal-type or
+disqualifier key, in file order, that such a Segment still uses (say, after a Segment's key
+was renamed in the file), naming the input field (``segments[<key>].signal_types[<key>].key``:
+"is also a key of the stored Segment <key>, which is no longer in the file: rename one of
+them"), so keys stay unique across every stored Segment; nothing is written. Then, in input
+order: a key with no row is inserted at version 1 with one ``events`` row
+(entity ``segments``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``); a row whose
+``definition`` differs from ``definition_text(segment)`` is updated to version n+1 with one
+``events`` row ``v<n>`` to ``v<n+1>``; anything else writes nothing. A stored key missing from
+the input is never changed or deleted (Leads may point to it). A sync enqueues no job,
+publishes no notification and touches no other table, so it never re-scores a Lead. It returns
+``SegmentSync(created, changed, unchanged, not_in_file)``: ``(key, version)``,
+``(key, from_version, to_version)`` and keys in input order, and ``(key, version)`` of each
+stored Segment not in the input, by key. After the commit it logs ``segments_synced`` (INFO)
+with the four counts: ``created_count``, ``changed_count``, ``unchanged_count`` and
+``not_in_file_count`` (``created`` alone is a ``LogRecord`` attribute, which ``extra`` may not
+overwrite).
+
 ``Credentials`` (AD-12, FR-56, NFR-18) stores the external credentials declared in
 ``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. It touches
 no database, so its methods are not ``@use_case``s and need no unit of work; one
@@ -136,15 +161,19 @@ secret, a code, the verifier, the state, a URL, a path or an account address.
 
 import functools
 import hmac
+import json
 import logging
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from secrets import token_urlsafe
 from typing import Final, NoReturn
 
+from nextron.db import eventlog
+from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import settings as settings_repo
 from nextron.db.uow import current, use_case
 from nextron.domain import credentials as credential_registry
@@ -186,6 +215,13 @@ from nextron.domain.google_oauth import (
     same_account,
     scope_granted,
 )
+from nextron.domain.segments import (
+    InvalidSegments,
+    SegmentDef,
+    definition_text,
+    segment_from_text,
+    validate_segments,
+)
 from nextron.domain.settings_schema import (
     REQUIRED,
     REQUIRED_RULE,
@@ -223,6 +259,10 @@ CREDENTIAL_SAVED: Final = "credential_saved"
 CREDENTIAL_REMOVED: Final = "credential_removed"
 CREDENTIAL_STORE_FAILED: Final = "credential_store_failed"
 CREDENTIAL_READ_FAILED: Final = "credential_read_failed"
+SEGMENTS_SYNCED: Final = "segments_synced"
+SEGMENTS_ENTITY: Final = "segments"
+SEED_SYNC_CAUSE: Final = "seed_sync"
+SEED_ACTOR: Final = "seed"
 SAVE: Final = "save"
 REMOVE: Final = "remove"
 VALUE_ENTRY: Final = "value"  # the credential's own keyring entry
@@ -231,13 +271,26 @@ META_ENTRY: Final = "meta"  # its meta/<name> entry
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class SegmentSync:
+    """What ``sync_segments`` did: ``created`` as ``(key, version)``, ``changed`` as ``(key,
+    from_version, to_version)`` and ``unchanged`` keys, each in input order, and
+    ``not_in_file`` as ``(key, version)`` of each stored Segment the input left out, by key."""
+
+    created: tuple[tuple[str, int], ...]
+    changed: tuple[tuple[str, int, int], ...]
+    unchanged: tuple[str, ...]
+    not_in_file: tuple[tuple[str, int], ...]
+
+
 def _log_changed(keys: list[str]) -> None:
     if keys:
         log.info(SETTINGS_CHANGED, extra={"keys": ",".join(keys)})
 
 
 class Setup:
-    """Operator settings: one typed value at a time, or a whole Settings page at once."""
+    """Operator settings, one typed value at a time or a whole Settings page at once, and the
+    Segments a seed sync loads."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
@@ -300,6 +353,99 @@ class Setup:
             after = settings_repo.stored_texts()
         _log_changed(changed)
         return after
+
+    @use_case
+    def sync_segments(self, segments: Sequence[SegmentDef]) -> SegmentSync:
+        """Upsert ``segments`` by key; see the module docstring."""
+        chosen = tuple(segments)
+        for segment in chosen:
+            if not isinstance(segment, SegmentDef):
+                raise TypeError(f"sync_segments takes SegmentDefs, not {type(segment).__name__}")
+        counts = Counter(segment.key for segment in chosen)
+        repeated = sorted(key for key, count in counts.items() if count > 1)
+        if repeated:
+            raise ValueError(f"sync_segments got a key more than once: {', '.join(repeated)}")
+        texts = tuple(definition_text(segment) for segment in chosen)
+        if texts:  # the file form again: InvalidSegments for a SegmentDef that breaks a rule
+            validate_segments({"segments": [json.loads(text) for text in texts]})
+        now = self._clock.now()
+        created: list[tuple[str, int]] = []
+        changed: list[tuple[str, int, int]] = []
+        unchanged: list[str] = []
+        with current().transaction():
+            keys = {segment.key for segment in chosen}
+            left_out = [row for row in segments_repo.all_segments() if row.key not in keys]
+            _refuse_shared_keys(chosen, left_out)  # before any write
+            for segment, text in zip(chosen, texts, strict=True):
+                stored = segments_repo.by_key(segment.key)
+                if stored is None:
+                    segment_id = segments_repo.insert(segment.key, text, now)
+                    _record_segment(segment_id, None, segments_repo.FIRST_VERSION, now)
+                    created.append((segment.key, segments_repo.FIRST_VERSION))
+                elif stored.definition != text:
+                    version = stored.version + 1
+                    segments_repo.update(stored.id, text, version, now)
+                    _record_segment(stored.id, stored.version, version, now)
+                    changed.append((segment.key, stored.version, version))
+                else:
+                    unchanged.append(segment.key)
+            not_in_file = tuple((row.key, row.version) for row in left_out)
+        result = SegmentSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+        log.info(  # "created" itself is a LogRecord attribute, so each count is suffixed
+            SEGMENTS_SYNCED,
+            extra={
+                "created_count": len(result.created),
+                "changed_count": len(result.changed),
+                "unchanged_count": len(result.unchanged),
+                "not_in_file_count": len(result.not_in_file),
+            },
+        )
+        return result
+
+
+def _refuse_shared_keys(
+    segments: Sequence[SegmentDef], left_out: Sequence[segments_repo.StoredSegment]
+) -> None:
+    """Signal-type and disqualifier keys stay unique across every stored Segment: raise
+    ``InvalidSegments`` for the first input key, in file order, that a stored Segment the input
+    leaves out still uses (a Segment renamed in the file, say)."""
+    owners: dict[tuple[str, str], str] = {}
+    for row in left_out:
+        definition = segment_from_text(row.definition)
+        for disqualifier in definition.disqualifiers:
+            owners.setdefault(("disqualifiers", disqualifier.key), row.key)
+        for signal_type in definition.signal_types:
+            owners.setdefault(("signal_types", signal_type.key), row.key)
+    for segment in segments:
+        used = [("disqualifiers", d.key) for d in segment.disqualifiers]
+        used += [("signal_types", t.key) for t in segment.signal_types]
+        for field_name, key in used:
+            owner = owners.get((field_name, key))
+            if owner is not None:
+                raise InvalidSegments(
+                    f"segments[{segment.key}].{field_name}[{key}].key",
+                    f"is also a key of the stored Segment {owner}, which is no longer in the "
+                    "file: rename one of them",
+                )
+
+
+def _version_status(version: int) -> str:
+    return f"v{version}"
+
+
+def _record_segment(
+    segment_id: str, from_version: int | None, to_version: int, at: datetime
+) -> None:
+    eventlog.append(
+        entity=SEGMENTS_ENTITY,
+        entity_id=segment_id,
+        from_status=None if from_version is None else _version_status(from_version),
+        to_status=_version_status(to_version),
+        cause=SEED_SYNC_CAUSE,
+        cause_ref=None,
+        actor=SEED_ACTOR,
+        at=at,
+    )
 
 
 # Credentials ----------------------------------------------------------------------------------
