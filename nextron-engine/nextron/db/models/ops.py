@@ -49,6 +49,29 @@ of a daily or manual backup records its outcome, once; a ``pre_migrate`` row kee
 on a verified row with an error and a time, and no name, ledger status or ``offpc_deleted_at``;
 ``not_configured`` on a verified row with a time only. The migration adds the three checks as
 column constraints of ``offpc_error``; their text here is the same, character for character.
+
+``restore_tests`` holds one row per restore test of an off-PC copy (Story 1.18), written once,
+after the test, only by ``nextron.db.repos.ops.restore_tests`` (migration
+``0009_1_18_restore_tests``):
+
+- ``kind``: ``monthly`` or ``manual`` (``ck_restore_tests_kind``), and ``result``: ``pass`` or
+  ``fail`` (``ck_restore_tests_result``);
+- ``started_at`` and ``finished_at``; ``ix_restore_tests_started_at`` serves the newest-first
+  reads;
+- ``backup_id``: the ``backups`` row whose off-PC copy was tested, with no foreign key; ``NULL``
+  when there was no copy to test;
+- ``check_fetch``, ``check_integrity``, ``check_revision``, ``check_suppression`` and
+  ``check_provenance``: each check's ``pass``, ``fail`` or ``skipped``
+  (``ck_restore_tests_check_<name>``);
+- ``reason``: the first failing check's reason code; ``copy_revision``: the copy's Alembic
+  revision; ``suppression_count`` and ``provenance_count``: the copy's row counts, never negative
+  (``ck_restore_tests_counts``);
+- ``detail``: what failed, at most 500 characters; free text built from codes, revisions and
+  counts, so ``redact`` in the PII registry.
+
+``ck_restore_tests_outcome`` keeps the outcome whole: a ``pass`` has no reason and no detail, a
+``backup_id``, ``pass`` for fetch, integrity and revision, and ``pass`` or ``skipped`` for both
+counts; a ``fail`` has a reason and at least one check that is ``fail``.
 """
 
 from datetime import datetime
@@ -57,7 +80,7 @@ from typing import Final
 from sqlalchemy import CheckConstraint, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from nextron.db.models.base import Base, UtcDateTime, ulid_pk
+from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 
 HEARTBEAT_ID: Final = "00000000000000000000000000"  # the one row's fixed id
 CODE_LENGTH: Final = 16
@@ -86,6 +109,15 @@ OFFPC_CHECK: Final = (
     "OR (offpc_status IS 'not_configured' AND status = 'verified' AND offpc_at IS NOT NULL "
     "AND offpc_name IS NULL AND offpc_ledger IS NULL AND offpc_deleted_at IS NULL "
     "AND offpc_error IS NULL)"
+)
+CHECK_VALUES: Final = "IN ('pass','fail','skipped')"
+REASON_LENGTH: Final = 32
+RESTORE_OUTCOME_CHECK: Final = (
+    "(result = 'pass' AND reason IS NULL AND detail IS NULL AND backup_id IS NOT NULL "
+    "AND check_fetch = 'pass' AND check_integrity = 'pass' AND check_revision = 'pass' "
+    "AND check_suppression IN ('pass','skipped') AND check_provenance IN ('pass','skipped')) "
+    "OR (result = 'fail' AND reason IS NOT NULL AND 'fail' IN (check_fetch, check_integrity, "
+    "check_revision, check_suppression, check_provenance))"
 )
 
 
@@ -142,3 +174,38 @@ class BackupRecord(Base):
     offpc_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     offpc_deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     offpc_error: Mapped[str | None] = mapped_column(String(ERROR_LENGTH))
+
+
+class RestoreTestRecord(Base):
+    """One restore test of an off-PC copy, and each check's outcome."""
+
+    __tablename__ = "restore_tests"
+    __table_args__ = (
+        CheckConstraint("kind IN ('monthly','manual')", name="kind"),
+        CheckConstraint("result IN ('pass','fail')", name="result"),
+        CheckConstraint(f"check_fetch {CHECK_VALUES}", name="check_fetch"),
+        CheckConstraint(f"check_integrity {CHECK_VALUES}", name="check_integrity"),
+        CheckConstraint(f"check_revision {CHECK_VALUES}", name="check_revision"),
+        CheckConstraint(f"check_suppression {CHECK_VALUES}", name="check_suppression"),
+        CheckConstraint(f"check_provenance {CHECK_VALUES}", name="check_provenance"),
+        CheckConstraint(RESTORE_OUTCOME_CHECK, name="outcome"),
+        CheckConstraint("suppression_count >= 0 AND provenance_count >= 0", name="counts"),
+        Index("ix_restore_tests_started_at", "started_at"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    kind: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    result: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    finished_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    backup_id: Mapped[str | None] = mapped_column(Ulid)
+    check_fetch: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    check_integrity: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    check_revision: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    check_suppression: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    check_provenance: Mapped[str] = mapped_column(String(CODE_LENGTH))
+    reason: Mapped[str | None] = mapped_column(String(REASON_LENGTH))
+    copy_revision: Mapped[str | None] = mapped_column(String(REVISION_LENGTH))
+    suppression_count: Mapped[int | None] = mapped_column(Integer)
+    provenance_count: Mapped[int | None] = mapped_column(Integer)
+    detail: Mapped[str | None] = mapped_column(String(ERROR_LENGTH))

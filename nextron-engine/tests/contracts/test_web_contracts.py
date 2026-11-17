@@ -161,6 +161,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/health/panel/live",
         "/health/jobs/dismiss",
         "/health/backup",
+        "/health/restore-test",
     ]
     assert async_route_handlers(app) == []
 

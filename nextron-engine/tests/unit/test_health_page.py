@@ -1,9 +1,12 @@
 """The health panel (``GET /health/panel``, ``GET /health/panel/live``, ``POST
-/health/jobs/dismiss`` and ``POST /health/backup``, FR-58, UX-DR29, Stories 1.15 to 1.17)
+/health/jobs/dismiss``, ``POST /health/backup`` and ``POST /health/restore-test``, FR-58,
+UX-DR29, Stories 1.15 to 1.18)
 through ``Dashboard(units=units)`` on a temporary database at head: the page, the fragment and
 their exact ``hx-*`` attributes, each section's text in order, the Dismiss form and its
 refusals, the Backups section (each last-backup line, each off-PC label and the failed
 class, the "Back up now" form and its POST: created, absorbed, an extra field, no CSRF token),
+the Restore test section (each last-test line, the failed class, the "Run restore test now" form
+and its POST, with its notice),
 the notification area's error count
 (singular, plural and absent at 0), ``no-store``, the navigation link, the guard's
 ``HX-Refresh`` on an HTMX GET only, and a hostile ``last_error`` rendered as escaped text."""
@@ -26,6 +29,7 @@ from nextron.domain.backup import BackupKind, LedgerStatus, OffpcStatus, copy_na
 from nextron.domain.budget import AiCall
 from nextron.domain.job import Lane
 from nextron.domain.readiness import CheckResult, Status
+from nextron.domain.restore_test import RestoreTestKind
 from nextron.web.guard import LOCKED_TEXT
 from tests.asgi import DEFAULT_HOST, Reply, request
 from tests.dashboard import FORM, READINESS, Dashboard, form
@@ -38,6 +42,7 @@ PAGE = "/health/panel"
 LIVE = "/health/panel/live"
 DISMISS = "/health/jobs/dismiss"
 BACKUP = "/health/backup"
+RESTORE = "/health/restore-test"
 MALFORMED = b"Request refused: malformed form"
 PANEL_ATTRS = {
     "id": "health-panel",
@@ -262,8 +267,15 @@ BACKUP_FORM = {
     "hx-swap": "outerHTML",
 }
 BACKUP_BUTTON = {"type": "submit", "class": "secondary", "id": "backup-now"}
+RESTORE_FORM = {
+    "method": "post",
+    "hx-post": "/health/restore-test",
+    "hx-target": "#health-panel",
+    "hx-swap": "outerHTML",
+}
+RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
-    [["Job type", "Last success"], ["backup_db", "never"]],
+    [["Job type", "Last success"], ["backup_db", "never"], ["restore_test", "never"]],
     [["Job type", "Last success"], ["send_alert", "never"]],
 ]
 
@@ -305,6 +317,9 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Backups",
         "No backup yet.",
         "Back up now",
+        "Restore test",
+        "No restore test yet.",
+        "Run restore test now",
         "Errors needing attention (0)",
         "No errors need attention.",
         "Last successful runs",
@@ -314,11 +329,15 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "12 ok, 0 warn, 0 fail",
     ]
     assert panel.tables == [*NEVER_RUN, READINESS_TABLE]
-    assert panel.forms == [(BACKUP_FORM, [csrf_input(session[1])])]
-    assert panel.buttons == [BACKUP_BUTTON]
+    assert panel.forms == [
+        (BACKUP_FORM, [csrf_input(session[1])]),
+        (RESTORE_FORM, [csrf_input(session[1])]),
+    ]
+    assert panel.buttons == [BACKUP_BUTTON, RESTORE_BUTTON]
     assert panel.heading_ids == [
         "health-worker-heading",
         "health-backup-heading",
+        "health-restore-heading",
         "health-errors-heading",
         "health-runs-heading",
         "health-readiness-heading",
@@ -348,6 +367,9 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Backups",
         "No backup yet.",
         "Back up now",
+        "Restore test",
+        "No restore test yet.",
+        "Run restore test now",
         "Errors needing attention (1)",
         f"Job dead: send_alert {dead}, attempts: 1",
         "Last error: ValueError: broken",
@@ -359,11 +381,12 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "12 ok, 0 warn, 0 fail",
     ]
     assert panel.tables[:2] == [
-        [["Job type", "Last success"], ["backup_db", "never"]],
+        [["Job type", "Last success"], ["backup_db", "never"], ["restore_test", "never"]],
         [["Job type", "Last success"], ["send_alert", "2026-11-17 09:05:00 UTC"]],
     ]
-    backup_form, (attrs, inputs) = panel.forms
+    backup_form, restore_form, (attrs, inputs) = panel.forms
     assert backup_form == (BACKUP_FORM, [csrf_input(session[1])])
+    assert restore_form == (RESTORE_FORM, [csrf_input(session[1])])
     assert attrs == {
         "method": "post",
         "hx-post": "/health/jobs/dismiss",
@@ -377,6 +400,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
     # an id, so HTMX keeps a keyboard user's focus across the 30 s swap, and a distinct label
     assert panel.buttons == [
         BACKUP_BUTTON,
+        RESTORE_BUTTON,
         {
             "type": "submit",
             "class": "secondary",
@@ -408,11 +432,11 @@ def test_budget_issues_are_listed_without_a_dismiss_form(
 
     panel = panel_of(dashboard, session[0])
 
-    assert panel.texts[6:8] == [
+    assert panel.texts[9:11] == [
         "Errors needing attention (1)",
         "AI spend at 80% of $20: $16 spent in 2026-11",
     ]
-    assert [attrs for attrs, _ in panel.forms] == [BACKUP_FORM]  # no Dismiss form
+    assert [attrs for attrs, _ in panel.forms] == [BACKUP_FORM, RESTORE_FORM]  # no Dismiss
 
 
 def test_the_readiness_list_counts_warnings_and_failures(
@@ -446,9 +470,9 @@ def test_a_hostile_last_error_renders_as_escaped_text(
 
     assert "<script>" not in reply.text and "<img" not in reply.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in reply.text
-    assert reply.text.count('hx-post="') == 2  # only the Back up now and Dismiss forms' own
+    assert reply.text.count('hx-post="') == 3  # only the three forms' own
     assert "mac@example.com" not in reply.text  # redacted when read
-    assert panel.texts[8] == (
+    assert panel.texts[11] == (
         'Last error: ValueError: <script>alert(1)</script><img src=x onerror="alert(2)"> '
         'hx-post="/health/jobs/dismiss" for <email>'
     )
@@ -470,7 +494,7 @@ def test_dismiss_deletes_the_dead_job_and_answers_with_the_panel(
     assert dead not in jobs.ids() and done in jobs.ids()
     panel = Panel(reply.text)
     assert panel.attrs == PANEL_ATTRS
-    assert panel.texts[6:8] == ["Errors needing attention (0)", "No errors need attention."]
+    assert panel.texts[9:11] == ["Errors needing attention (0)", "No errors need attention."]
 
 
 @pytest.mark.parametrize("which", ["queued", "done", "unknown"])
@@ -499,7 +523,7 @@ def test_dismissing_twice_is_a_no_op_the_second_time(
     reply = dismiss(dashboard, session, form(job=dead))
 
     assert reply.status == 200
-    assert Panel(reply.text).texts[6] == "Errors needing attention (0)"
+    assert Panel(reply.text).texts[9] == "Errors needing attention (0)"
 
 
 @pytest.mark.parametrize(
@@ -762,7 +786,7 @@ def a_failed_backup_shows_in_the_error_list(
 
     texts = panel_of(dashboard, session[0]).texts
 
-    assert texts[6:9] == [
+    assert texts[9:12] == [
         "Errors needing attention (1)",
         f"Backup failed: manual {backup_id}",
         "Error: OSError: disk full",
@@ -778,7 +802,7 @@ def test_a_failed_backup_shows_in_the_error_list_until_a_later_one_verifies(
         dashboard, units, BackupKind.DAILY, verified=True, started_at=T + timedelta(minutes=1)
     )
 
-    assert panel_of(dashboard, session[0]).texts[6:8] == [
+    assert panel_of(dashboard, session[0]).texts[9:11] == [
         "Errors needing attention (0)",
         "No errors need attention.",
     ]
@@ -838,7 +862,7 @@ def test_the_backups_line_shows_the_off_pc_outcome(
     text, classes = backup_line(reply)
     assert text == f"Last backup: 2026-11-17 09:00:00 UTC, verified (daily), {suffix}"
     assert classes == (["health-backup", "health-backup-failed"] if failed else ["health-backup"])
-    issues = Panel(reply.text).texts[6:9]
+    issues = Panel(reply.text).texts[9:12]
     if failed:
         assert issues == [
             "Errors needing attention (1)",
@@ -942,3 +966,270 @@ def test_back_up_now_needs_a_session(dashboard: Dashboard, units: UnitOfWorkFact
 
     assert reply.status == 401
     assert backup_jobs(units) == []
+
+
+# The Restore test section (Story 1.18) -----------------------------------------------------------
+
+RESTORE_PASS = ("pass", "pass", "pass", "skipped", "pass")
+
+
+def record_restore_test(
+    dashboard: Dashboard,
+    units: UnitOfWorkFactory,
+    test_id: str,
+    kind: RestoreTestKind,
+    *,
+    started_at: datetime = T,
+    checks: tuple[str, ...] = RESTORE_PASS,
+    reason: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """A ``restore_tests`` row, as the ``ops`` service writes one."""
+    database = units.engine.url.database
+    assert database
+    result = "pass" if reason is None else "fail"
+    connection = sqlite3.connect(database, isolation_level=None)
+    try:
+        connection.execute(
+            "INSERT INTO restore_tests (id, kind, result, started_at, finished_at, backup_id, "
+            "check_fetch, check_integrity, check_revision, check_suppression, check_provenance, "
+            "reason, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                test_id,
+                str(kind),
+                result,
+                f"{started_at:%Y-%m-%dT%H:%M:%S}.000000Z",
+                f"{started_at:%Y-%m-%dT%H:%M:%S}.000000Z",
+                SUBJECTS[19] if result == "pass" else None,
+                *checks,
+                reason,
+                detail,
+            ),
+        )
+    finally:
+        connection.close()
+
+
+def restore_line(reply: Reply) -> tuple[str, list[str]]:
+    """The Restore test line's text and its classes."""
+    found = re.search(r'<p class="(health-restore(?: [^"]*)?)">([^<]*)</p>', reply.text)
+    assert found is not None
+    return found.group(2), found.group(1).split()
+
+
+def test_no_restore_test_yet(dashboard: Dashboard, session: tuple[bytes, str]) -> None:
+    reply = get(dashboard, LIVE, session[0])
+
+    assert restore_line(reply) == ("No restore test yet.", ["health-restore"])
+    assert 'class="health-restore-notice"' not in reply.text
+
+
+@pytest.mark.parametrize(
+    ("kind", "checks", "reason", "line", "failed"),
+    [
+        (RestoreTestKind.MONTHLY, RESTORE_PASS, None, "pass (monthly)", False),
+        (RestoreTestKind.MANUAL, ("pass",) * 5, None, "pass (manual)", False),
+        (
+            RestoreTestKind.MANUAL,
+            ("pass", "pass", "fail", "pass", "pass"),
+            "revision_behind",
+            "fail (manual): revision_behind; failing checks: Alembic revision",
+            True,
+        ),
+        (
+            RestoreTestKind.MONTHLY,
+            ("fail", "skipped", "skipped", "skipped", "skipped"),
+            "no_offpc_copy",
+            "fail (monthly): no_offpc_copy; failing checks: fetch and decrypt",
+            True,
+        ),
+        (
+            RestoreTestKind.MONTHLY,
+            ("pass", "pass", "fail", "fail", "fail"),
+            "revision_unknown",
+            "fail (monthly): revision_unknown; failing checks: Alembic revision, "
+            "Suppression List count, Provenance Records count",
+            True,
+        ),
+        (
+            RestoreTestKind.MANUAL,
+            ("pass", "fail", "skipped", "skipped", "skipped"),
+            "integrity_failed",
+            "fail (manual): integrity_failed; failing checks: integrity check",
+            True,
+        ),
+    ],
+    ids=["monthly pass", "manual pass", "revision", "no copy", "three checks", "integrity"],
+)
+def test_the_restore_test_section_shows_the_last_test(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    units: UnitOfWorkFactory,
+    kind: RestoreTestKind,
+    checks: tuple[str, ...],
+    reason: str | None,
+    line: str,
+    failed: bool,
+) -> None:
+    record_restore_test(dashboard, units, SUBJECTS[0], RestoreTestKind.MONTHLY,
+                        started_at=T - timedelta(days=1))
+    record_restore_test(dashboard, units, SUBJECTS[1], kind, started_at=T + timedelta(seconds=7),
+                        checks=checks, reason=reason)
+
+    reply = get(dashboard, LIVE, session[0])
+
+    text, classes = restore_line(reply)
+    assert text == f"Last restore test: 2026-11-17 09:00:07 UTC, {line}"
+    assert classes == (
+        ["health-restore", "health-restore-failed"] if failed else ["health-restore"]
+    )
+    texts = Panel(reply.text).texts
+    assert texts[6:9] == ["Restore test", text, "Run restore test now"]
+    if failed:
+        assert texts[9:12] == [
+            "Errors needing attention (1)",
+            f"Restore test failed: {kind} {SUBJECTS[1]}, {reason}",
+            f"Error: {reason}",
+        ]
+
+
+def test_a_failed_test_lists_its_redacted_detail_until_a_later_one_passes(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    record_restore_test(
+        dashboard,
+        units,
+        SUBJECTS[0],
+        RestoreTestKind.MONTHLY,
+        checks=("pass", "pass", "pass", "fail", "skipped"),
+        reason="suppression_fewer",
+        detail="suppression_entries: copy 1, backup 5 <b>mac@example.com</b>",
+    )
+
+    reply = get(dashboard, LIVE, session[0])
+
+    assert Panel(reply.text).texts[9:12] == [
+        "Errors needing attention (1)",
+        f"Restore test failed: monthly {SUBJECTS[0]}, suppression_fewer",
+        "Error: suppression_entries: copy 1, backup 5 <b><email></b>",
+    ]
+    assert "<b>" not in reply.text and "mac@example.com" not in reply.text
+
+    record_restore_test(dashboard, units, SUBJECTS[1], RestoreTestKind.MANUAL,
+                        started_at=T + timedelta(minutes=1))
+
+    assert panel_of(dashboard, session[0]).texts[9:11] == [
+        "Errors needing attention (0)",
+        "No errors need attention.",
+    ]
+
+
+def test_the_run_restore_test_now_form_posts_only_its_csrf_token_through_htmx(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = get(dashboard, PAGE, session[0])
+
+    assert (
+        '<form method="post" hx-post="/health/restore-test" hx-target="#health-panel" '
+        'hx-swap="outerHTML">'
+    ) in reply.text
+    assert (
+        '<button type="submit" class="secondary" id="restore-test-now">Run restore test now'
+        "</button>"
+    ) in reply.text
+    panel = Panel(reply.text)
+    assert panel.forms[1] == (RESTORE_FORM, [csrf_input(session[1])])
+    assert panel.buttons[1] == RESTORE_BUTTON
+
+
+def run_restore_test_now(
+    dashboard: Dashboard, session: tuple[bytes, str], body: bytes
+) -> Reply:
+    cookie, token = session
+    return dashboard.post(
+        RESTORE, cookie=cookie, token=token, headers=[(b"content-type", FORM)], body=body
+    )
+
+
+def restore_jobs(units: UnitOfWorkFactory) -> list[tuple[str, str, str]]:
+    database = units.engine.url.database
+    assert database
+    connection = sqlite3.connect(database, isolation_level=None)
+    try:
+        return connection.execute(
+            "SELECT idempotency_key, payload, status FROM jobs WHERE type = 'restore_test'"
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def restore_notice(reply: Reply) -> list[str]:
+    return re.findall(r'<p class="health-restore-notice" role="status">([^<]*)</p>', reply.text)
+
+
+def test_run_restore_test_now_queues_a_manual_test_and_says_so(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    reply = run_restore_test_now(dashboard, session, form(csrf_token=session[1]))
+
+    assert reply.status == 200
+    assert reply.header(b"cache-control") == b"no-store"
+    assert Panel(reply.text).attrs == PANEL_ATTRS
+    assert restore_notice(reply) == [
+        "Restore test queued; its result shows here when it finishes."
+    ]
+    assert notice(reply) == []  # the backup notice is "Back up now"'s alone
+    [(key, payload, status)] = restore_jobs(units)
+    assert (key, json.loads(payload), status) == (
+        "restore_test:global:2026-11-17",
+        {"v": 1, "kind": "manual"},
+        "queued",
+    )
+    assert not (dashboard.local_dir.parent / "restore_test").exists()  # nothing tested yet
+
+
+def test_a_second_restore_click_while_one_is_queued_is_absorbed(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    run_restore_test_now(dashboard, session, b"")
+
+    reply = run_restore_test_now(dashboard, session, b"")
+
+    assert reply.status == 200
+    assert restore_notice(reply) == ["A restore test is already queued or running."]
+    assert len(restore_jobs(units)) == 1
+    assert restore_notice(get(dashboard, LIVE, session[0])) == []  # the POST's notice alone
+
+
+@pytest.mark.parametrize(
+    "body",
+    [form(extra="1"), form(kind="monthly"), form(job=SUBJECTS[0]), b"x=%FF"],
+    ids=["extra field", "a kind", "a job", "bad body"],
+)
+def test_a_malformed_run_restore_test_now_is_refused_with_400_and_queues_nothing(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, body: bytes
+) -> None:
+    reply = run_restore_test_now(dashboard, session, body)
+
+    assert (reply.status, reply.body) == (400, MALFORMED)
+    assert restore_jobs(units) == []
+
+
+def test_run_restore_test_now_without_the_csrf_token_is_refused_with_403(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    reply = dashboard.post(
+        RESTORE, cookie=session[0], headers=[(b"content-type", FORM)], body=b""
+    )
+
+    assert reply.status == 403
+    assert restore_jobs(units) == []
+
+
+def test_run_restore_test_now_needs_a_session(
+    dashboard: Dashboard, units: UnitOfWorkFactory
+) -> None:
+    reply = dashboard.post(RESTORE, headers=[(b"content-type", FORM)], body=b"")
+
+    assert reply.status == 401
+    assert restore_jobs(units) == []

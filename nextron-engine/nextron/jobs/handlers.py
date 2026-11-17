@@ -17,6 +17,13 @@ handler runs in.
   ``job.payload.get("kind", "daily")`` (a trigger's tick payload has none); an unknown kind, or
   ``pre_migrate`` (only ``serve`` takes those), raises ``InvalidJob``. Otherwise it calls
   ``backups().back_up(kind)`` once and returns ``None``.
+- ``restore_test(tests)`` (Story 1.18): the ``restore_test`` job's handler. ``tests`` returns
+  the ``ops`` service's ``RestoreTests`` (``nextron.main`` passes ``lambda: restore_tests``,
+  which breaks the cycle registry, handler, ``RestoreTests``, queue, registry). The kind is
+  ``job.payload.get("kind", "monthly")`` (a trigger's tick payload has none: the daily check of
+  the monthly test); an unknown kind raises ``InvalidJob``. Otherwise it calls
+  ``tests().run(kind)`` once and returns ``None`` (a monthly test that isn't due returns
+  without a row).
 """
 
 from collections.abc import Callable
@@ -24,6 +31,7 @@ from typing import Final, Protocol
 
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.job import Handler, InvalidJob, Job
+from nextron.domain.restore_test import RestoreTestKind
 
 ALERT_ID_FIELD: Final = "alert_id"
 
@@ -61,3 +69,23 @@ def backup_db(backups: Callable[[], BackingUp]) -> Handler:
         backups().back_up(kind)
 
     return handle_backup_db
+
+
+class RestoreTesting(Protocol):
+    """What ``restore_test`` needs of the ``ops`` service's ``RestoreTests``."""
+
+    def run(self, kind: RestoreTestKind) -> str | None: ...
+
+
+def restore_test(tests: Callable[[], RestoreTesting]) -> Handler:
+    """The ``restore_test`` job's handler: run the payload's monthly or manual restore test
+    through ``tests()``."""
+
+    def handle_restore_test(job: Job) -> None:
+        value = job.payload.get(KIND_FIELD, str(RestoreTestKind.MONTHLY))
+        kind = next((kind for kind in RestoreTestKind if kind.value == value), None)
+        if kind is None:
+            raise InvalidJob("restore_test: the kind field must be monthly or manual")
+        tests().run(kind)
+
+    return handle_restore_test

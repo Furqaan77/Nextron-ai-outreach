@@ -1,6 +1,7 @@
 {#- The health panel (nextron.web.health_page): rendered inside health.html, and alone as the
     answer to GET /health/panel/live (which HTMX fetches every 30 seconds), to
-    POST /health/jobs/dismiss and to POST /health/backup, each swapped in for this whole panel.
+    POST /health/jobs/dismiss, to POST /health/backup and to POST /health/restore-test, each
+    swapped in for this whole panel.
     Issue texts are escaped with |plain: a dead job's last error and a failed backup's error
     are free text. -#}
 <div id="health-panel" hx-get="/health/panel/live" hx-trigger="every 30s" hx-swap="outerHTML">
@@ -18,6 +19,17 @@
 <form method="post" hx-post="/health/backup" hx-target="#health-panel" hx-swap="outerHTML">
 {{ csrf_field() }}
 <button type="submit" class="secondary" id="backup-now">Back up now</button>
+</form>
+</section>
+<section aria-labelledby="health-restore-heading">
+<h2 id="health-restore-heading">Restore test</h2>
+<p class="health-restore{% if restore_test_failed %} health-restore-failed{% endif %}">{{ restore_test }}</p>
+{%- if restore_notice %}
+<p class="health-restore-notice" role="status">{{ restore_notice }}</p>
+{%- endif %}
+<form method="post" hx-post="/health/restore-test" hx-target="#health-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<button type="submit" class="secondary" id="restore-test-now">Run restore test now</button>
 </form>
 </section>
 <section aria-labelledby="health-errors-heading">

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-17-2026 22:30
+last_updated: 11-18-2026 00:30
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -53,7 +53,7 @@ development_status:
   1-15-see-engine-health-on-one-panel: review
   1-16-back-up-the-database-in-process-daily-and-before-every-migra: review
   1-17-encrypt-each-backup-and-copy-it-off-the-pc: review
-  1-18-prove-backups-restore-with-a-monthly-restore-test: backlog
+  1-18-prove-backups-restore-with-a-monthly-restore-test: review
   1-19-restore-a-backup-and-hold-sending-in-recovery-mode: backlog
   1-20-spike-register-the-logon-task-and-prove-crash-and-stale-hear: backlog
   1-21-start-the-engine-at-logon-and-supervise-it-with-run-ps1: backlog

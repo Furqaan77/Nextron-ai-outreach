@@ -40,6 +40,11 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_restore_tests() -> Any:
+    """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
+    raise AssertionError("no restore_test job runs in these tests")
+
+
 def fail_with_value_error(job: Job) -> None:
     raise ValueError(f"enrichment failed for job {job.id}")
 
@@ -121,7 +126,9 @@ def build_world(
 ) -> World:
     port = InMemoryAlert()
     built: dict[str, Notify] = {}
-    registered = main.build_job_types(alerts=lambda: built["notify"], backups=no_backups)
+    registered = main.build_job_types(
+        alerts=lambda: built["notify"], backups=no_backups, restore_tests=no_restore_tests
+    )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))  # the real, registered one
     for job_type in extra:

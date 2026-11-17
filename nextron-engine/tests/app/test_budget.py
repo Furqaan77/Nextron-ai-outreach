@@ -44,6 +44,11 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_restore_tests() -> Any:
+    """``build_job_types``'s ``restore_tests`` where no ``restore_test`` job runs."""
+    raise AssertionError("no restore_test job runs in these tests")
+
+
 class World:
     """A meter, a budget and notify on one database, wired as ``nextron.main`` does."""
 
@@ -52,7 +57,9 @@ class World:
         self.engine = engine
         self.clock = FrozenClock(T)
         self.alert = InMemoryAlert()
-        job_types = main.build_job_types(alerts=lambda: self.notify, backups=no_backups)
+        job_types = main.build_job_types(
+            alerts=lambda: self.notify, backups=no_backups, restore_tests=no_restore_tests
+        )
         self.notify = Notify(
             self.clock,
             JobQueue(self.clock, job_types),

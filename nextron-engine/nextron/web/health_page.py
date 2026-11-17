@@ -17,9 +17,15 @@ on one page.
   is ``csrf_token`` (``submitted_backup``; anything else is ``MalformedForm``, 400). It queues a
   manual backup through ``Backups.request_backup`` in its own unit of work, then renders
   ``health_panel.html`` in a read-only one with a notice: ``BACKUP_QUEUED`` when the job was
-  created, ``BACKUP_ALREADY_QUEUED`` when one was already queued or running.
+  created, ``BACKUP_ALREADY_QUEUED`` when one was already queued or running;
+- ``POST /health/restore-test`` (``health_restore_test_now``, Story 1.18) is "Run restore test
+  now": its only field is ``csrf_token`` (``submitted_restore_test``; anything else is
+  ``MalformedForm``, 400). It queues a manual restore test through
+  ``RestoreTests.request_restore_test`` in its own unit of work, then renders
+  ``health_panel.html`` in a read-only one with a notice: ``RESTORE_TEST_QUEUED`` when the job
+  was created, ``RESTORE_TEST_ALREADY_QUEUED`` when one was already queued or running.
 
-All four are ``@personal_data(True)``: a dead job's ``last_error`` and a failed backup's error
+All five are ``@personal_data(True)``: a dead job's ``last_error`` and a failed backup's error
 are free text that may hold personal data (redacted when stored and again when read), so every
 answer is ``no-store``.
 
@@ -35,12 +41,18 @@ In order, the panel shows:
    ``health-backup-failed`` class. Then the notice of a "Back up now" click
    (``<p class="health-backup-notice" role="status">``) when there is one, then the "Back up
    now" form (``id="backup-now"``);
-4. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
+4. **Restore test** (Story 1.18): "No restore test yet." or "Last restore test: <YYYY-MM-DD
+   HH:MM:SS UTC>, <result> (<kind label>)" from the newest test's ``started_at``; a failed test
+   adds ": <reason>; failing checks: <check labels, comma-separated>" and gets the
+   ``health-restore-failed`` class. Then the notice of a "Run restore test now" click
+   (``<p class="health-restore-notice" role="status">``) when there is one, then the "Run
+   restore test now" form (``id="restore-test-now"``);
+5. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
    ``|plain``); a ``job_dead`` issue has a Dismiss form. With none: "No errors need
    attention.";
-5. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
+6. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
    type that has not succeeded;
-6. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
+7. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
    fail".
 """
 
@@ -49,11 +61,12 @@ from datetime import UTC, datetime
 from typing import Final
 
 from nextron.app.ops.api import HealthReport, Worker
-from nextron.app.queries.ops import BackupRow
+from nextron.app.queries.ops import BackupRow, RestoreTestRow
 from nextron.domain.alert import JOB_DEAD
 from nextron.domain.backup import BackupKind, BackupStatus, OffpcStatus
 from nextron.domain.ids import is_ulid
 from nextron.domain.readiness import tally
+from nextron.domain.restore_test import CheckOutcome, RestoreCheck, RestoreResult, RestoreTestKind
 from nextron.web.csrf import CSRF_FIELD
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
@@ -67,6 +80,9 @@ NO_HEARTBEAT: Final = "Not running: no heartbeat yet"
 NO_BACKUP: Final = "No backup yet."
 BACKUP_QUEUED: Final = "Backup queued; its result shows here when it finishes."
 BACKUP_ALREADY_QUEUED: Final = "A backup is already queued or running."
+NO_RESTORE_TEST: Final = "No restore test yet."
+RESTORE_TEST_QUEUED: Final = "Restore test queued; its result shows here when it finishes."
+RESTORE_TEST_ALREADY_QUEUED: Final = "A restore test is already queued or running."
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +153,33 @@ def backup_failed(backup: BackupRow | None) -> bool:
     )
 
 
-def panel_context(report: HealthReport, *, notice: str | None = None) -> dict[str, object]:
+def restore_test_text(test: RestoreTestRow | None) -> str:
+    """The Restore test line: the newest test's start, result and kind, and for a failed one
+    its reason and failing checks, or "No restore test yet."."""
+    if test is None:
+        return NO_RESTORE_TEST
+    label = RestoreTestKind(test.kind).label
+    text = f"Last restore test: {shown_time(test.started_at)}, {test.result} ({label})"
+    if test.result == RestoreResult.FAIL:
+        failing = ", ".join(
+            check.label
+            for check, outcome in zip(RestoreCheck, test.checks, strict=True)
+            if outcome == CheckOutcome.FAIL
+        )
+        text += f": {test.reason}; failing checks: {failing}"
+    return text
+
+
+def restore_test_failed(test: RestoreTestRow | None) -> bool:
+    """Whether the Restore test line shows a failure."""
+    return test is not None and test.result == RestoreResult.FAIL
+
+
+def panel_context(
+    report: HealthReport, *, notice: str | None = None, restore_notice: str | None = None
+) -> dict[str, object]:
     """What ``health_panel.html`` renders for ``report``, with the "Back up now" ``notice``
-    when there is one."""
+    and the "Run restore test now" ``restore_notice`` when there is one."""
     issues = [
         IssueItem(issue.text, issue.detail, issue.subject if issue.kind == JOB_DEAD else None)
         for issue in report.issues
@@ -169,6 +209,9 @@ def panel_context(report: HealthReport, *, notice: str | None = None) -> dict[st
         "backup": backup_text(report.backup),
         "backup_failed": backup_failed(report.backup),
         "backup_notice": notice,
+        "restore_test": restore_test_text(report.restore_test),
+        "restore_test_failed": restore_test_failed(report.restore_test),
+        "restore_notice": restore_notice,
         "issues": issues,
         "no_errors": NO_ERRORS,
         "groups": groups,
@@ -191,5 +234,12 @@ def submitted_job(fields: FormFields) -> str:
 
 def submitted_backup(fields: FormFields) -> None:
     """A "Back up now" form posts only its ``csrf_token``; ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+
+
+def submitted_restore_test(fields: FormFields) -> None:
+    """A "Run restore test now" form posts only its ``csrf_token``; ``MalformedForm``
+    otherwise."""
     if set(fields) - {CSRF_FIELD}:
         raise MalformedForm(WRONG_FIELDS)

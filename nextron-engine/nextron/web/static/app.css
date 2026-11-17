@@ -366,6 +366,25 @@ button.secondary {
   color: var(--muted);
 }
 
+/* The Restore test section (Story 1.18): the last restore test, marked when it failed, and the
+   notice of a "Run restore test now" click. */
+.health-restore {
+  max-width: 48rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--ink);
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}
+
+.health-restore-failed {
+  border-left-color: var(--refused);
+}
+
+.health-restore-notice {
+  max-width: 48rem;
+  color: var(--muted);
+}
+
 .health-issues {
   max-width: 48rem;
   margin: 0;

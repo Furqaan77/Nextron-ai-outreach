@@ -40,6 +40,9 @@ by default a copy fails with ``RuntimeError``). The panel's "Back up now" queues
 Its ``OffpcBackups`` (``offpc``, Story 1.17) sends verified copies to ``offpc_target``, an
 ``InMemoryBackupTarget`` whatever the folder, with the data dir
 ``<%LOCALAPPDATA%>\\Nextron\\test`` and the backup dir that holds ``local_dir``.
+Its ``RestoreTests`` (``restore_tests``, Story 1.18) uses the same clock, ``offpc``, ``notify``
+and ``queue``, that backup dir and ``inspect`` (``nextron.db.repos.ops.snapshot.inspect_copy``
+unless a test passes another). The panel's "Run restore test now" queues its job.
 """
 
 import json
@@ -62,9 +65,10 @@ from nextron.app.ops.api import (
     EngineHealth,
     LocalBackups,
     OffpcBackups,
+    RestoreTests,
 )
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
-from nextron.db.repos.ops.snapshot import Snapshot
+from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.alert import Channel
 from nextron.domain.job import JobTypes
 from nextron.domain.readiness import CheckResult, Status
@@ -189,6 +193,7 @@ class Dashboard:
     snapshot: Callable[[Path], Snapshot] = no_copies
     local_dir: Path = field(default_factory=default_local_dir)
     offpc_target: InMemoryBackupTarget = field(default_factory=InMemoryBackupTarget)
+    inspect: Callable[[Path], CopyInspection] = inspect_copy
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -202,6 +207,7 @@ class Dashboard:
     local: LocalBackups = field(init=False)
     offpc: OffpcBackups = field(init=False)
     backups: Backups = field(init=False)
+    restore_tests: RestoreTests = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -219,7 +225,9 @@ class Dashboard:
             start=self.jobs.append,
         )
         self.job_types = main.build_job_types(
-            alerts=lambda: self.notify, backups=lambda: self.backups
+            alerts=lambda: self.notify,
+            backups=lambda: self.backups,
+            restore_tests=lambda: self.restore_tests,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -237,6 +245,15 @@ class Dashboard:
         )
         self.backups = Backups(
             self.clock, self.local, notify=self.notify, queue=self.queue, offpc=self.offpc
+        )
+        self.restore_tests = RestoreTests(
+            self.clock,
+            env="test",
+            backup_dir=self.local_dir.parent,
+            offpc=self.offpc,
+            inspect=self.inspect,
+            notify=self.notify,
+            queue=self.queue,
         )
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
@@ -261,6 +278,7 @@ class Dashboard:
             health=self.health,
             queue=self.queue,
             backups=self.backups,
+            restore_tests=self.restore_tests,
             units=self.units,
             **extra,
         )
