@@ -14,14 +14,23 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   settings make: each quota in ``QUOTAS`` (its setting × its ``scale``, so Hunter's credits
   are doubled like its stored units), ``ai_budget_monthly`` and ``ai_budget_alert_pct``. A
   stored value that no longer parses raises ``InvalidSettingValue``, like ``get``.
+- ``segments()``: every stored Segment as a ``SeededSegment(id, key, version, definition)``,
+  by key; ``segment(key)``: one, or ``None``. ``definition`` is the ``SegmentDef`` decoded by
+  ``nextron.domain.segments.segment_from_text``, which raises ``InvalidSegments`` for a stored
+  text that no longer validates. Research, scoring and drafting (Stories 2.2 onwards) read the
+  Segments only through these two.
 
 All read through the current unit of work, read-only ones included.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
+from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import settings as settings_repo
+from nextron.db.repos.setup.segments import StoredSegment
 from nextron.domain.budget import QUOTAS, Limits
+from nextron.domain.segments import SegmentDef, segment_from_text
 from nextron.domain.settings_schema import (
     REQUIRED,
     InvalidSettingValue,
@@ -76,3 +85,33 @@ def budget_limits() -> Limits:
         ai_budget_micros=get(Key.AI_BUDGET_MONTHLY),
         ai_alert_pct=get(Key.AI_BUDGET_ALERT_PCT),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SeededSegment:
+    """A stored Segment: its row id, key and version, and its decoded definition."""
+
+    id: str
+    key: str
+    version: int
+    definition: SegmentDef
+
+
+def _seeded(stored: StoredSegment) -> SeededSegment:
+    return SeededSegment(
+        id=stored.id,
+        key=stored.key,
+        version=stored.version,
+        definition=segment_from_text(stored.definition),
+    )
+
+
+def segments() -> tuple[SeededSegment, ...]:
+    """Every stored Segment, by key."""
+    return tuple(_seeded(stored) for stored in segments_repo.all_segments())
+
+
+def segment(key: str) -> SeededSegment | None:
+    """The stored Segment ``key``, or ``None``."""
+    stored = segments_repo.by_key(key)
+    return None if stored is None else _seeded(stored)

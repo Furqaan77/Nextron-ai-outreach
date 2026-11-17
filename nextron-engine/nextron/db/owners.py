@@ -59,6 +59,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "settings": {
         "setup": ("id", "key", "value", "updated_at"),
     },
+    "segments": {
+        "setup": ("id", "key", "definition", "version", "created_at", "updated_at"),
+    },
     "jobs": {
         "jobqueue": (
             "id",

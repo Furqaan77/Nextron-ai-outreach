@@ -378,6 +378,82 @@ its rules (one tightened since it was saved) is marked the same way when the pag
 7. **Setting names have at most 31 characters,** because log redaction masks any longer run as
    `<key>`.
 
+## Seeds
+
+The Segments (FR-1) come from `seed/segments.yaml` until the Slice 3 editing screens ship
+(AD-12): Law-PrivateAI and Ops-Automation, each with its industry keywords, size range, ranked
+decision-maker roles, disqualifiers, weighted Signal types (the PRD's FR-1 table, row for row)
+and discovery queries. Edit the file, then load it:
+
+```powershell
+uv run nextron seed sync                 # the environment NEXTRON_ENV names
+uv run nextron seed sync --env prod      # another environment, for this run only
+```
+
+```text
+segments: 2 changed, 0 unchanged
+  law_private_ai: created (version 1)
+  ops_automation: created (version 1)
+```
+
+The first line counts the Segments created or changed, then the unchanged ones; a line follows
+for each Segment created, changed (`changed (version 1 -> 2)`) or stored but no longer in the
+file (`not in seed/segments.yaml, left as it is (version 1)`: a Segment is never deleted, since
+Leads point to it). Running it again on the same file prints `segments: 0 changed, 2
+unchanged` and writes nothing.
+
+**What a sync does.** It upserts each Segment by key into the `segments` table (owner `setup`):
+a new one is stored at version 1, a changed definition gets the next version, and each of
+those appends one `events` row (entity `segments`, `v1` or `v<n>` to `v<n+1>`, cause
+`seed_sync`, actor `seed`). Everything happens in one transaction, so a failure changes
+nothing. Signal-type and disqualifier keys stay unique across every stored Segment: if a
+Segment that is no longer in the file (one whose key you renamed, say) still uses a key the
+file uses, the sync is refused before anything is written, naming the file's field
+(`seed/segments.yaml: segments[law_private_ai].signal_types[law_hiring_legal_ops].key: is also
+a key of the stored Segment old_segment, which is no longer in the file: rename one of them`).
+**A sync never re-scores a Lead**: it enqueues no job, publishes no notification and
+touches no other table. A changed Segment applies to Leads discovered afterwards and to
+re-scoring Mac starts.
+
+**The database must exist and be at head.** `seed sync` never creates or migrates the
+database: only `serve` does, after its backup. Start the engine once (`nextron serve`) first;
+otherwise it says so and exits 1, changing nothing. Like `doctor`, it reads the revision
+read-only, takes no lock (it runs while the engine runs), configures no logging and reads no
+credential.
+
+**The file is a strict subset of YAML** (`nextron/domain/seed_yaml.py`), read without a YAML
+library: mappings and lists indented with spaces, one-line `[a, b]` lists, `'single'` (`''` is
+a quote) or `"double"` (only `\\` and `\"` escapes) quoted text, plain text, whole numbers and
+`true`/`false`, with `#` comments. Everything else is refused with its line number: tabs,
+anchors and tags, `{...}`, `|` and `>` blocks, multi-line text, a list under a key at the key's
+own column, and any plain value another YAML reader would type differently (`yes`, `no`, `on`,
+`null`, `~`, `True`, `1.5`, `007`, `1_000`, `.inf`, dates and times). So the file is never
+misread, and a YAML library could replace the reader later without changing it. Write such a
+value in quotes (`'1.5'`) when it must stay text.
+
+**Validation** (`nextron/domain/segments.py`) then checks every field and names the first
+problem by its path, such as
+`seed/segments.yaml: segments[ops_automation].signal_types[ops_dynamics_gp].weight: must be
+from 1 to 100`. Besides the field rules (keys `[a-z][a-z0-9_]` of at most 31 characters,
+unique; clean texts; 1 to 50 distinct items per list, though `disqualifiers`, `match_terms` and
+`preferred_roles` may be empty; `tier` 1 to 3, `weight` 1 to 100), it refuses: within a
+Segment, a weight of a lower Tier number that isn't above every weight of a higher Tier number
+(so Tier 1 is above Tier 3 even with no Tier 2); an Event whose evidence isn't exactly
+`[quote]`, or that is `score_only`; a hiring Signal type (source `careers_page` or `ats_board`) without
+`match_terms`; preferred roles whose `when_terms` aren't among the match terms; a title listed
+twice in a Segment's ranks; and any Signal type that represents ABA Formal Opinion 512 or the
+SRA notice, which are Approved Company Facts (FR-72), not Signals. A syntax or validation
+problem exits 1 before the database is opened.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | synced (or nothing to change) |
+| 1 | the file is missing, unreadable, over 1 MiB, not UTF-8 or invalid; the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
+| 2 | `NEXTRON_ENV` (or another bootstrap variable) is unset or invalid; `--env` takes only `dev`, `test` or `prod` |
+
+Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
+`id`, `key`, `version` and decoded `SegmentDef`) and `queries.setup.segment(key)`.
+
 ## Secrets
 
 Secrets live only in Windows Credential Manager, through `SecretsPort`
@@ -623,6 +699,7 @@ the log line carries the copy's `file` name.
 | `0005_1_12_notify` | `alerts` (unique on kind, subject and channel, a status check) and `notifications` (unique on kind and subject, `ix_notifications_open`) (see [Alerts and notifications](#alerts-and-notifications)) | `notify` |
 | `0006_1_13_metering` | `api_usage` (three checks, `ix_api_usage_at`) and `ai_usage` (two checks, `ix_ai_usage_at`) (see [Metering, quotas and the AI budget](#metering-quotas-and-the-ai-budget)) | `db.metering` |
 | `0007_1_16_backups` | `backups`: one row per backup, its five checks and `ix_backups_started_at` (see [Backups](#backups)) | `ops` |
+| `0008_2_1_segments` | `segments` (unique `key`, `ck_segments_version`) (see [Seeds](#seeds)) | `setup` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

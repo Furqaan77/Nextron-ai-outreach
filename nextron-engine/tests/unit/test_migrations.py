@@ -35,7 +35,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0007_1_16_backups"
+HEAD = "0008_2_1_segments"
 
 
 @pytest.fixture

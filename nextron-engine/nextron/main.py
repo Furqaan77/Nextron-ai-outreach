@@ -224,6 +224,33 @@ its caller's unit of work, between that unit's transactions, and a second ``unit
 the same context would raise. The read-only unit takes ``BEGIN IMMEDIATE`` on its first read,
 so it must never run while the caller holds a transaction open.
 
+**Seed sync (FR-1, AD-12, Story 2.1).** ``seed_sync(env=..., seed_dir=...)`` (``nextron seed
+sync``) loads ``<seed_dir>\\segments.yaml`` (``SEED_DIR``, the engine's ``seed`` folder, unless
+given) into the ``segments`` table, stopping at the first failure:
+
+1. Bootstrap config (``--env`` overrides ``NEXTRON_ENV``): exit 2.
+2. The file, read as UTF-8, at most 1 MiB: missing, unreadable, larger or not UTF-8 prints
+   ``seed/segments.yaml: <reason>`` and exits 1.
+3. ``nextron.domain.seed_yaml.parse``, then ``nextron.domain.segments.validate_segments``: a
+   ``SeedSyntaxError`` or ``InvalidSegments`` prints ``seed/segments.yaml: <message>`` and exits
+   1, before any database access.
+4. ``<data dir>\\nextron.db`` must exist and be at ``head_revision()``, read with
+   ``current_revision`` on ``create_read_only_engine`` (disposed at once), as doctor does. A
+   missing or empty database, one behind or ahead of head, or one that isn't this engine's
+   prints why and exits 1, creating and changing nothing: a seed sync never creates or
+   migrates the database (only ``serve`` does, after its backup).
+5. ``connect_database`` (never ``open_database``) and one unit of work running
+   ``Setup(clock).sync_segments``. Its ``InvalidSegments`` (a signal-type or disqualifier key of
+   the file that a stored Segment no longer in the file still uses) prints
+   ``seed/segments.yaml: <message>`` and exits 1. Any other exception prints ``seed sync failed
+   (<type>); nothing was changed`` and exits 1. Either way the transaction rolled back.
+6. The summary on ``out`` (``format_seed_sync``) and exit 0: ``segments: <n> changed, <m>
+   unchanged`` (n counts created plus changed), then a line per created, changed and
+   not-in-file Segment.
+
+It takes no lock, configures no logging, reads no Credential Manager entry and builds no app,
+runner or scheduler; the engine is disposed in a ``finally``. A sync never re-scores a Lead.
+
 ``open_dashboard`` (``nextron open``) runs these steps and stops at the first failure:
 
 1. Bootstrap config: exit 2.
@@ -276,8 +303,8 @@ from nextron.app.ops.api import (
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
-from nextron.app.setup.api import Credentials, GoogleAccess, Setup
-from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
+from nextron.app.setup.api import Credentials, GoogleAccess, SegmentSync, Setup
+from nextron.bootstrap import ENGINE_ROOT, BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine, create_read_only_engine
 from nextron.db.metering import UsageMeter
 from nextron.db.migrations import (
@@ -290,7 +317,7 @@ from nextron.db.migrations import (
 )
 from nextron.db.repos.ops.snapshot import snapshot
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
-from nextron.domain import settings_schema
+from nextron.domain import seed_yaml, settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
 from nextron.domain.backup import (
     BACKUP_DB_JOB,
@@ -301,6 +328,8 @@ from nextron.domain.backup import (
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
+from nextron.domain.seed_yaml import SeedSyntaxError
+from nextron.domain.segments import InvalidSegments, SegmentDef, validate_segments
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
 from nextron.jobs import handlers
@@ -374,6 +403,16 @@ EXIT_CHECKS_FAILED: Final = 1  # doctor: at least one check failed
 EXIT_STARTUP_FAILED: Final = 2  # invalid config or a failed startup check
 EXIT_LOCK_HELD: Final = 3  # another instance runs for this environment
 EXIT_OPEN_FAILED: Final = 1  # open: the engine is down, or the code or the browser failed
+EXIT_SEED_FAILED: Final = 1  # seed sync: the file, the database or the sync failed
+
+SEED_DIR: Final = ENGINE_ROOT / "seed"
+SEGMENTS_FILE_NAME: Final = "segments.yaml"
+SEGMENTS_FILE_LABEL: Final = "seed/segments.yaml"  # how messages name the file
+MAX_SEED_FILE_BYTES: Final = 1024 * 1024
+SEED_DATABASE_MISSING: Final = (
+    "the database doesn't exist yet: start the engine once (nextron serve), "
+    "then run seed sync again"
+)
 
 ENGINE_NOT_RUNNING: Final = "engine not running"
 CODE_NOT_STORED: Final = "could not store the one-time code in Windows Credential Manager"
@@ -1206,4 +1245,129 @@ def open_dashboard(
         print(BROWSER_NOT_OPENED, file=err)
         return EXIT_OPEN_FAILED
     print(DASHBOARD_OPENED, file=out)
+    return EXIT_OK
+
+
+# Seed sync ------------------------------------------------------------------------------------
+
+
+class _SeedFileProblem(Exception):
+    """The seed file can't be used; the message is the reason, safe to print."""
+
+
+def _read_seed_file(path: Path) -> str:
+    """The text of the seed file at ``path``: UTF-8, at most ``MAX_SEED_FILE_BYTES``."""
+    try:
+        with path.open("rb") as file:
+            data = file.read(MAX_SEED_FILE_BYTES + 1)
+    except FileNotFoundError:
+        raise _SeedFileProblem("the file doesn't exist") from None
+    except OSError as exc:
+        raise _SeedFileProblem(f"the file can't be read ({type(exc).__name__})") from None
+    if len(data) > MAX_SEED_FILE_BYTES:
+        raise _SeedFileProblem("the file is larger than 1 MiB")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _SeedFileProblem("the file isn't valid UTF-8") from None
+
+
+def _seed_failed(exc: BaseException) -> str:
+    return f"seed sync failed ({type(exc).__name__}); nothing was changed"
+
+
+def _seed_database_problem(path: Path) -> str | None:
+    """Why ``seed sync`` can't write the database at ``path``, or ``None`` when it exists and is
+    at head. Reads it read-only, as doctor does; never creates or changes it."""
+    if not path.exists():
+        return SEED_DATABASE_MISSING
+    try:
+        engine = create_read_only_engine(path)
+        try:
+            revision = current_revision(engine)
+        finally:
+            engine.dispose()
+    except (DatabaseStateError, ConnectionSettingError) as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 - not a database this engine can read
+        return _seed_failed(exc)
+    if revision is None:  # an empty file: serve migrates it like a new one
+        return SEED_DATABASE_MISSING
+    head = head_revision()
+    if revision == head:
+        return None
+    if revision not in known_revisions():
+        return f"database revision {revision} is newer than this code"
+    return (
+        f"the database is at {revision}, not {head}: start the engine once (nextron serve) "
+        "to migrate it, then run seed sync again"
+    )
+
+
+def format_seed_sync(result: SegmentSync) -> str:
+    """``seed sync``'s summary: the counts, then a line per created, changed and not-in-file
+    Segment."""
+    lines = [
+        f"segments: {len(result.created) + len(result.changed)} changed, "
+        f"{len(result.unchanged)} unchanged"
+    ]
+    lines += [f"  {key}: created (version {version})" for key, version in result.created]
+    lines += [
+        f"  {key}: changed (version {before} -> {after})" for key, before, after in result.changed
+    ]
+    lines += [
+        f"  {key}: not in {SEGMENTS_FILE_LABEL}, left as it is (version {version})"
+        for key, version in result.not_in_file
+    ]
+    return "\n".join(lines)
+
+
+def seed_sync(
+    *,
+    env: str | None = None,
+    seed_dir: Path | None = None,
+    clock: Clock | None = None,
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+) -> int:
+    """Load ``<seed_dir>\\segments.yaml`` into the ``segments`` table for ``env``
+    (``NEXTRON_ENV`` unless given); return the exit code. See the module docstring."""
+    out = out if out is not None else sys.stdout
+    err = err if err is not None else sys.stderr
+    try:
+        config = load_bootstrap(env)
+    except BootstrapError as exc:
+        print(exc, file=err)
+        return EXIT_STARTUP_FAILED
+    folder = seed_dir if seed_dir is not None else SEED_DIR
+    try:
+        text = _read_seed_file(folder / SEGMENTS_FILE_NAME)
+    except _SeedFileProblem as exc:
+        print(f"{SEGMENTS_FILE_LABEL}: {exc}", file=err)
+        return EXIT_SEED_FAILED
+    try:
+        definitions: tuple[SegmentDef, ...] = validate_segments(seed_yaml.parse(text))
+    except (SeedSyntaxError, InvalidSegments) as exc:
+        print(f"{SEGMENTS_FILE_LABEL}: {exc.message}", file=err)
+        return EXIT_SEED_FAILED
+    problem = _seed_database_problem(config.data_dir / DB_FILE_NAME)
+    if problem is not None:
+        print(problem, file=err)
+        return EXIT_SEED_FAILED
+    setup = Setup(clock if clock is not None else SystemClock())
+    units: UnitOfWorkFactory | None = None
+    try:
+        units = connect_database(config)
+        with units.open():
+            result = setup.sync_segments(definitions)
+    except InvalidSegments as exc:  # a key a stored Segment left out of the file still uses
+        print(f"{SEGMENTS_FILE_LABEL}: {exc.message}", file=err)
+        return EXIT_SEED_FAILED
+    except Exception as exc:  # noqa: BLE001 - the transaction rolled back
+        print(_seed_failed(exc), file=err)
+        return EXIT_SEED_FAILED
+    finally:
+        if units is not None:
+            units.engine.dispose()
+    print(format_seed_sync(result), file=out)
     return EXIT_OK

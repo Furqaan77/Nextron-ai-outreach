@@ -1,0 +1,156 @@
+# The Segments (FR-1): Law-PrivateAI and Ops-Automation, with their industry keywords, size
+# ranges, ranked decision-maker roles, disqualifiers, weighted Signal types and discovery
+# queries. Each Signal type's name is the PRD's FR-1 Signal, word for word.
+#
+# `nextron seed sync` loads this file into the database (AD-12): it creates each Segment that
+# is new, gives each changed one a new version, and leaves alone a Segment that is stored but
+# no longer listed here. A sync never re-scores a Lead. The engine must have been started once
+# (nextron serve), so the database exists and is migrated.
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py): mappings and
+# lists indented with spaces, one-line [a, b] lists, 'single' or "double" quoted text, plain
+# text, whole numbers and true/false. Anything else (tabs, anchors, {...}, multi-line text, or
+# a plain value such as yes, no, null, 1.5 or a date) is refused with its line number, so the
+# file is never misread. Write a value in quotes when it must stay text.
+
+segments:
+  - key: law_private_ai
+    name: Law-PrivateAI
+    industry_keywords: [law firm, legal services, attorneys, solicitors]
+    size_range:
+      minimum: 5
+      maximum: 50
+      unit: lawyers
+    decision_maker_roles:  # ranks of equal titles, best first
+      - [Managing Partner]
+      - [Owner]
+    disqualifiers:
+      - key: law_fewer_than_5_lawyers
+        kind: fewer_than
+        size_clue: lawyers_firm_wide
+        threshold: 5
+        description: Fewer than 5 lawyers
+      - key: law_office_of_large_firm
+        kind: more_than
+        size_clue: lawyers_firm_wide
+        threshold: 50
+        description: Office of a firm with more than 50 lawyers
+    signal_types:
+      - key: law_hiring_legal_ops
+        name: Hiring intake, legal-ops, knowledge-management, or innovation staff
+        class: event
+        tier: 1
+        evidence: [quote]
+        sources: [careers_page, ats_board, signal_inbox]
+        score_only: false
+        weight: 60
+        match_terms: [intake, legal operations, knowledge management, innovation]
+      - key: law_ai_confidentiality_post
+        name: Post about AI or client confidentiality
+        class: event
+        tier: 1
+        evidence: [quote]
+        sources: [signal_inbox]
+        score_only: false
+        weight: 60
+      - key: law_expansion
+        name: New office, merger, or practice-area expansion
+        class: event
+        tier: 2
+        evidence: [quote]
+        sources: [news_pages, signal_inbox]
+        score_only: false
+        weight: 35
+      - key: law_size_document_heavy
+        name: '5–50 attorneys; document-heavy practice'
+        class: attribute
+        tier: 3
+        evidence: [count, quote]
+        sources: [team_pages, practice_pages]
+        score_only: false
+        weight: 15
+      - key: law_contact_form_only
+        name: Contact form only (no chat, booking, or after-hours line)
+        class: attribute
+        tier: 3
+        evidence: [absence]
+        sources: [website]
+        score_only: true
+        weight: 15
+    discovery_queries:
+      places: [law firm, solicitors]
+
+  - key: ops_automation
+    name: Ops-Automation
+    industry_keywords: [distributor, wholesale, logistics, freight, light manufacturing]
+    size_range:  # estimated annual revenue, US dollars
+      minimum: 10000000
+      maximum: 200000000
+      unit: usd_revenue
+    decision_maker_roles:  # ranks of equal titles, best first
+      - [COO, VP Operations]
+      - [Owner, CEO]
+    disqualifiers:
+      - key: ops_fewer_than_20_staff
+        kind: fewer_than
+        size_clue: staff
+        threshold: 20
+        description: Fewer than 20 staff
+      - key: ops_group_over_1000_staff
+        kind: more_than
+        size_clue: group_staff
+        threshold: 1000
+        description: Part of a group with more than 1,000 staff
+    signal_types:
+      - key: ops_hiring_manual_entry
+        name: Hiring data-entry, order-entry, AP/AR, or dispatch staff
+        class: event
+        tier: 1
+        evidence: [quote]
+        sources: [careers_page, ats_board, signal_inbox]
+        score_only: false
+        weight: 60
+        match_terms:
+          - data entry
+          - order entry
+          - accounts payable
+          - accounts receivable
+          - AP/AR
+          - dispatch
+        preferred_roles:  # finance roles, only when the posting matched an AP/AR term
+          - when_terms: [accounts payable, accounts receivable, AP/AR]
+            roles: [Controller, CFO, Finance Director]
+      - key: ops_rekeying_post
+        name: Post about manual re-keying or ERP pain
+        class: event
+        tier: 1
+        evidence: [quote]
+        sources: [signal_inbox]
+        score_only: false
+        weight: 60
+      - key: ops_expansion
+        name: New facility, acquisition, or expansion
+        class: event
+        tier: 2
+        evidence: [quote]
+        sources: [news_pages, signal_inbox]
+        score_only: false
+        weight: 35
+      - key: ops_dynamics_gp
+        name: Dynamics GP still in use
+        class: attribute
+        tier: 2
+        evidence: [quote]
+        sources: [job_ads, website]
+        score_only: false
+        weight: 30
+      - key: ops_manual_ordering
+        name: 'Ordering by PDF or order form with no portal; "advanced Excel" in job ads'
+        class: attribute
+        tier: 3
+        evidence: [quote, absence]
+        sources: [website, job_ads]
+        score_only: false
+        weight: 15
+    discovery_queries:
+      places: [wholesale distributor, logistics company, freight company, manufacturer]
