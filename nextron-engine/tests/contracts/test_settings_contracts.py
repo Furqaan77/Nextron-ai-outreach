@@ -132,7 +132,7 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "backup_rotation_days, backup_time, bulk_threads, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
-            "quota_prospeo_credits, sender_timezone, sink_allowlist"
+            "quota_prospeo_credits, sender_timezone, sink_allowlist, us_solicitation_label"
         ),
         "declared but not in Key: Footer-Address, footer_postal_address",
     ]

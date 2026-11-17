@@ -517,7 +517,13 @@ def test_the_sender_section_shows_the_sender_timezone_as_required(
 ) -> None:
     _, page = settings_page(dashboard, session[0])
 
-    assert page.legends == ["Sender", "Alerts and recipients", "Budget and limits", "Engine"]
+    assert page.legends == [
+        "Footer and booking",
+        "Sender",
+        "Alerts and recipients",
+        "Budget and limits",
+        "Engine",
+    ]
     shown = page.fields["sender_timezone"]
     assert (shown.key, shown.label, shown.value) == ("sender_timezone", "Sender's timezone", "")
     assert shown.hint == "IANA timezone name, such as America/Los_Angeles; required"
@@ -529,6 +535,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
     _, page = settings_page(dashboard, session[0])
 
     assert list(page.fields) == [
+        "us_solicitation_label",
         "sender_timezone",
         "alert_chat_id",
         "quota_hunter_credits",

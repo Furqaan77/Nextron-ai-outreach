@@ -516,6 +516,7 @@ def test_the_declared_keys_in_order() -> None:
         "quota_job_aggregator",
         "ai_budget_monthly",
         "ai_budget_alert_pct",
+        "us_solicitation_label",
     ]
     assert declared() == (
         setting(Key.SENDER_TIMEZONE),
@@ -531,6 +532,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.QUOTA_JOB_AGGREGATOR),
         setting(Key.AI_BUDGET_MONTHLY),
         setting(Key.AI_BUDGET_ALERT_PCT),
+        setting(Key.US_SOLICITATION_LABEL),
     )
 
 
@@ -566,6 +568,33 @@ def test_alert_chat_id_refuses_anything_but_a_numeric_id(text: str) -> None:
 
     assert raised.value.rule == "telegram_chat_id"
     assert raised.value.reason == "must be a numeric Telegram chat id, such as -1001234567890"
+
+
+# Row: Setting (us_solicitation_label, Story 3.1) ------------------------------------------------
+
+US_LABEL_UNIT = (
+    "Blank by default. When set, every US email's footer shows this text on its own line "
+    "(CAN-SPAM; decided with counsel before the first US send, OQ-8)."
+)
+
+
+def test_the_us_solicitation_label_is_a_blank_default_string_in_the_footer_section() -> None:
+    found = setting(Key.US_SOLICITATION_LABEL)
+
+    assert (found.key, found.type, found.section) == (
+        "us_solicitation_label",
+        SettingType.STRING,
+        Section.FOOTER_AND_BOOKING,
+    )
+    assert (found.label, found.unit) == ("US solicitation label", US_LABEL_UNIT)
+    assert found.default == "" and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("max_length", "must have a length of at most 200")
+    ]
+    assert parse(found, "a" * 200) == "a" * 200
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(found, "a" * 201)
+    assert raised.value.rule == "max_length"
 
 
 # Row: Setting (sink_allowlist) ------------------------------------------------------------------
@@ -968,7 +997,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "backup_rotation_days, backup_time, bulk_threads, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
-            "quota_prospeo_credits, sender_timezone, sink_allowlist"
+            "quota_prospeo_credits, sender_timezone, sink_allowlist, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

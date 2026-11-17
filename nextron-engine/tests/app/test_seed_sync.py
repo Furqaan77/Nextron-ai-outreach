@@ -35,6 +35,7 @@ from tests.migration_chains import run_sql, sha256, stored_revisions
 
 SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
 SHIPPED_TEXT = SHIPPED.read_text(encoding="utf-8")
+SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME  # Story 3.1: the second seed file
 LATER = DEFAULT_NOW + timedelta(days=3)
 KEYS = ("law_private_ai", "ops_automation")
 
@@ -71,6 +72,7 @@ def units(database: Path, config: BootstrapConfig) -> Iterator[UnitOfWorkFactory
 def seed_dir(tmp_path: Path, text: str | bytes, name: str = "seed") -> Path:
     folder = tmp_path / name
     folder.mkdir()
+    (folder / main.MARKETS_FILE_NAME).write_bytes(SHIPPED_MARKETS.read_bytes())
     path = folder / main.SEGMENTS_FILE_NAME
     if isinstance(text, bytes):
         path.write_bytes(text)
@@ -131,11 +133,19 @@ def table_dump(path: Path, *, skip: frozenset[str] = frozenset()) -> dict[str, l
     return {name: query(path, f"SELECT * FROM {name} ORDER BY rowid") for name in names}
 
 
-SUMMARY_FIRST = (
+SEGMENTS_FIRST = (
     "segments: 2 changed, 0 unchanged\n"
     "  law_private_ai: created (version 1)\n"
     "  ops_automation: created (version 1)\n"
 )
+# Story 3.1: the markets block follows the segments block
+MARKETS_FIRST = (
+    "markets: 2 changed, 0 unchanged\n"
+    "  us: created (version 1)\n"
+    "  uk: created (version 1)\n"
+)
+MARKETS_UNCHANGED = "markets: 0 changed, 2 unchanged\n"
+SUMMARY_FIRST = SEGMENTS_FIRST + MARKETS_FIRST
 
 
 # The I/O matrix -----------------------------------------------------------------------------------
@@ -149,7 +159,7 @@ def test_the_first_sync_creates_both_segments_at_version_1(database: Path) -> No
     assert [(key, version) for _, key, _, version, _, _ in rows] == [(k, 1) for k in KEYS]
     stamp = "2026-11-16T09:00:00.000000Z"
     assert all((created, updated) == (stamp, stamp) for *_, created, updated in rows)
-    assert event_rows(database) == [
+    assert event_rows(database)[:2] == [  # the markets' events follow
         ("segments", row_id, None, "v1", "seed_sync", None, "seed", stamp)
         for row_id, *_ in rows
     ]
@@ -169,7 +179,11 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 
     run = sync(clock=FrozenClock(LATER))
 
-    assert (run.code, run.out, run.err) == (0, "segments: 0 changed, 2 unchanged\n", "")
+    assert (run.code, run.out, run.err) == (
+        0,
+        "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED,
+        "",
+    )
     assert table_dump(database) == before
 
 
@@ -189,6 +203,7 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
     assert (run.code, run.err) == (0, "")
     assert run.out == (
         "segments: 1 changed, 1 unchanged\n  ops_automation: changed (version 1 -> 2)\n"
+        + MARKETS_UNCHANGED
     )
     law_after, ops_after = segment_rows(database)
     assert law_after == law_before
@@ -201,7 +216,10 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
         ("segments", ops_before[0], "v1", "v2", "seed_sync", None, "seed", ops_after[5]),
     ]
     # and the next sync of the same file changes nothing
-    assert sync(seed_dir(tmp_path, changed, "again")).out == "segments: 0 changed, 2 unchanged\n"
+    assert (
+        sync(seed_dir(tmp_path, changed, "again")).out
+        == "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED
+    )
 
 
 def test_each_change_adds_a_version(database: Path, tmp_path: Path) -> None:
@@ -215,7 +233,7 @@ def test_each_change_adds_a_version(database: Path, tmp_path: Path) -> None:
         assert f"ops_automation: changed (version {version - 1} -> {version})" in run.out
 
     assert [row[3] for row in segment_rows(database)] == [1, 4]
-    statuses = [(f, t) for _, _, f, t, *_ in event_rows(database)]
+    statuses = [(f, t) for entity, _, f, t, *_ in event_rows(database) if entity == "segments"]
     assert statuses == [(None, "v1"), (None, "v1"), ("v1", "v2"), ("v2", "v3"), ("v3", "v4")]
 
 
@@ -252,10 +270,12 @@ def test_a_stored_segment_not_in_the_file_is_left_as_it_is(
 
     assert run.code == 0
     assert run.out == (
-        SUMMARY_FIRST + "  old_segment: not in seed/segments.yaml, left as it is (version 1)\n"
+        SEGMENTS_FIRST
+        + "  old_segment: not in seed/segments.yaml, left as it is (version 1)\n"
+        + MARKETS_FIRST
     )
     assert segment_rows(database)[1] == old_row  # law, old, ops by key
-    assert len(event_rows(database)) == len(events_before) + 2
+    assert len(event_rows(database)) == len(events_before) + 4  # 2 Segments, 2 Markets
 
 
 @pytest.mark.parametrize(
@@ -584,7 +604,7 @@ def test_a_seed_file_with_a_bom_and_crlf_line_ends_is_read(database: Path, tmp_p
     run = sync(seed_dir(tmp_path, text))
 
     assert (run.code, run.out) == (0, SUMMARY_FIRST)
-    assert sync().out == "segments: 0 changed, 2 unchanged\n"  # the same definitions
+    assert sync().out == "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED  # the same
 
 
 def test_an_unset_environment_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:

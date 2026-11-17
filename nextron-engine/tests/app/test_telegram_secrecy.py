@@ -196,6 +196,7 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             quota_job_aggregator="",
             ai_budget_monthly="",
             ai_budget_alert_pct="",
+            us_solicitation_label="",
         ),
     )
     assert saved.status == 200 and "Saved." in saved.text

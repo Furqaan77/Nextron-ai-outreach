@@ -35,7 +35,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0008_2_1_segments"
+HEAD = "0009_3_1_markets"
 
 
 @pytest.fixture

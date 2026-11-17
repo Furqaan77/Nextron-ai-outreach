@@ -19,6 +19,13 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   ``nextron.domain.segments.segment_from_text``, which raises ``InvalidSegments`` for a stored
   text that no longer validates. Research, scoring and drafting (Stories 2.2 onwards) read the
   Segments only through these two.
+- ``markets()``: every stored Market as a ``SeededMarket(id, code, version, definition)``, by
+  code; ``market(code)``: one, or ``None``. ``definition`` is the
+  ``nextron.domain.markets.MarketDef`` the ``markets`` repository decodes through
+  ``market_from_form``, which raises ``InvalidMarkets`` for a row that no longer validates. A
+  Lead's Market is derived from these with ``nextron.domain.markets.market_for_country``, never
+  stored on the Lead; Market resolution (3.2), Eligibility (3.6), the footer (4.11), drafting
+  (4.15) and the send gate (6.9) read the Markets only through these two.
 
 All read through the current unit of work, read-only ones included.
 """
@@ -26,10 +33,13 @@ All read through the current unit of work, read-only ones included.
 from dataclasses import dataclass
 from typing import Any
 
+from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import settings as settings_repo
+from nextron.db.repos.setup.markets import StoredMarket
 from nextron.db.repos.setup.segments import StoredSegment
 from nextron.domain.budget import QUOTAS, Limits
+from nextron.domain.markets import MarketDef
 from nextron.domain.segments import SegmentDef, segment_from_text
 from nextron.domain.settings_schema import (
     REQUIRED,
@@ -115,3 +125,30 @@ def segment(key: str) -> SeededSegment | None:
     """The stored Segment ``key``, or ``None``."""
     stored = segments_repo.by_key(key)
     return None if stored is None else _seeded(stored)
+
+
+@dataclass(frozen=True, slots=True)
+class SeededMarket:
+    """A stored Market: its row id, code and version, and its decoded definition."""
+
+    id: str
+    code: str
+    version: int
+    definition: MarketDef
+
+
+def _seeded_market(stored: StoredMarket) -> SeededMarket:
+    return SeededMarket(
+        id=stored.id, code=stored.code, version=stored.version, definition=stored.market
+    )
+
+
+def markets() -> tuple[SeededMarket, ...]:
+    """Every stored Market, by code."""
+    return tuple(_seeded_market(stored) for stored in markets_repo.all_markets())
+
+
+def market(code: str) -> SeededMarket | None:
+    """The stored Market ``code``, or ``None``."""
+    stored = markets_repo.by_code(code)
+    return None if stored is None else _seeded_market(stored)
