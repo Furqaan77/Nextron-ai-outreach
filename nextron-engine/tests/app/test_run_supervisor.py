@@ -16,8 +16,9 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,12 @@ POWERSHELL = shutil.which("powershell.exe")
 RUN_TIMEOUT_S = 90
 WAIT_TIMEOUT_S = 60
 GONE_TIMEOUT_S = 15
+# Windows hands a freed pid to a new process soon, and other processes start all the time (the
+# suite's other workers, other checkouts' runs). A running process created more than this after a
+# log named its pid as ours is a newer process on the reused pid. The slack covers the log's
+# millisecond stamp and the coarser clocks behind it; an original process is always created
+# before the line that names it.
+PID_REUSE_SLACK = timedelta(seconds=1)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" or POWERSHELL is None, reason="needs Windows PowerShell 5.1"
@@ -66,23 +73,48 @@ def _kernel32():  # type: ignore[no-untyped-def]
         wintypes.LPWSTR,
         ctypes.POINTER(wintypes.DWORD),
     )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    filetime = ctypes.POINTER(wintypes.FILETIME)
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE, filetime, filetime, filetime, filetime)
     return kernel32
 
 
-def gone(pid: int, timeout_s: float = GONE_TIMEOUT_S) -> bool:
-    """Whether process ``pid`` has ended, waiting up to ``timeout_s`` for it."""
+def _reused(kernel32, handle: int, named_at: datetime | None) -> bool:  # type: ignore[no-untyped-def]
+    """Whether the process behind ``handle`` was created more than ``PID_REUSE_SLACK`` after
+    ``named_at``, so it isn't the one a log named: Windows reused the pid. False when unknown."""
+    import ctypes
+    from ctypes import wintypes
+
+    if named_at is None:
+        return False
+    times = [wintypes.FILETIME() for _ in range(4)]
+    if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+        return False
+    ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime  # 100 ns since 1601, UTC
+    created = datetime(1601, 1, 1, tzinfo=UTC) + timedelta(microseconds=ticks // 10)
+    return created > named_at + PID_REUSE_SLACK
+
+
+def gone(
+    pid: int, timeout_s: float = GONE_TIMEOUT_S, *, named_at: datetime | None = None
+) -> bool:
+    """Whether process ``pid`` has ended, waiting up to ``timeout_s`` for it. With ``named_at``
+    (when a log named ``pid`` as ours), a process on a reused pid counts as ours having ended."""
     kernel32 = _kernel32()
-    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return True
     try:
+        if _reused(kernel32, handle, named_at):
+            return True
         return kernel32.WaitForSingleObject(handle, int(timeout_s * 1000)) != WAIT_TIMEOUT
     finally:
         kernel32.CloseHandle(handle)
 
 
-def kill_python(pid: int) -> None:
-    """Ends ``pid`` if it is still a running ``python.exe`` (a pid can be reused)."""
+def kill_python(pid: int, *, named_at: datetime | None = None) -> None:
+    """Ends ``pid`` if it is still a running ``python.exe`` (a pid can be reused), and, with
+    ``named_at``, only if it isn't a newer process on a reused pid."""
     import ctypes
     from ctypes import wintypes
 
@@ -93,6 +125,8 @@ def kill_python(pid: int) -> None:
         return
     try:
         if kernel32.WaitForSingleObject(handle, 0) != WAIT_TIMEOUT:
+            return
+        if _reused(kernel32, handle, named_at):
             return
         buffer = ctypes.create_unicode_buffer(1024)
         size = wintypes.DWORD(len(buffer))
@@ -152,6 +186,28 @@ def pids_of(fake_events: list[dict[str, object]]) -> list[int]:
     return pids
 
 
+def named_pids(
+    events: list[dict[str, object]], fake_events: list[dict[str, object]]
+) -> dict[int, datetime]:
+    """Every pid of every child tree the logs name (the supervisor's ``start`` pids and
+    ``pids_of`` the fake's), each with the latest stamp of a line that names it."""
+    named: dict[int, datetime] = {}
+    starts = [event for event in events if event["event"] == "start"]
+    for event, pids in [
+        *((e, [int(e["pid"])]) for e in starts),  # type: ignore[call-overload]
+        *((e, pids_of([e])) for e in fake_events),
+    ]:
+        at = datetime.fromisoformat(str(event["ts"]))
+        for pid in pids:
+            named[pid] = max(at, named.get(pid, at))
+    return named
+
+
+def still_running(named: Mapping[int, datetime]) -> list[int]:
+    """The pids of ``named`` whose process hasn't ended (a reused pid isn't ours)."""
+    return sorted(pid for pid, at in named.items() if not gone(pid, named_at=at))
+
+
 @dataclass
 class Run:
     code: int
@@ -166,10 +222,9 @@ class Run:
     def of(self, name: str) -> list[dict[str, object]]:
         return [event for event in self.events if event["event"] == name]
 
-    def tree_pids(self) -> list[int]:
-        """Every pid of every child tree the logs name."""
-        pids = [int(event["pid"]) for event in self.of("start")]  # type: ignore[call-overload]
-        return sorted(set(pids + pids_of(self.fake_events)))
+    def tree_pids(self) -> dict[int, datetime]:
+        """Every pid of every child tree the logs name, with when it was last named."""
+        return named_pids(self.events, self.fake_events)
 
 
 # --- The harness ----------------------------------------------------------------------------------
@@ -299,10 +354,8 @@ class Supervision:
             if process.poll() is None:
                 kill_tree(process.pid)
                 process.wait(timeout=30)
-        starts = [e for e in self.events() if e["event"] == "start"]
-        pids = {int(e["pid"]) for e in starts}  # type: ignore[call-overload]
-        for pid in pids | set(pids_of(self.fake_events())):
-            kill_python(pid)
+        for pid, at in named_pids(self.events(), self.fake_events()).items():
+            kill_python(pid, named_at=at)
 
 
 def base_env(**extra: str) -> dict[str, str]:
@@ -493,7 +546,7 @@ def test_a_stale_heartbeat_kills_the_whole_job_and_restarts_it(sup: Supervision)
         assert len(tree) >= 4  # the launcher, the fake, and the grandchild's pids
         assert tree <= set(kill["pids"])  # type: ignore[arg-type]
     assert {(e["killed"], e["requested"]) for e in run.of("exit")} == {(True, False)}
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
 
 
 def test_when_the_job_kill_fails_each_process_is_stopped_and_the_child_restarts(
@@ -525,7 +578,7 @@ def test_when_the_job_kill_fails_each_process_is_stopped_and_the_child_restarts(
     tree = {int(first_start["pid"]), *pids_of([first_fake])}  # type: ignore[call-overload]
     assert len(tree) >= 4  # the launcher, the fake, and the grandchild's pids
     assert tree <= set(fallback["pids"])  # type: ignore[arg-type]
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
 
 
 def test_a_beat_slower_than_the_poll_never_counts_as_stale(sup: Supervision) -> None:
@@ -583,7 +636,7 @@ def test_a_start_with_no_beat_within_the_start_grace_is_killed_and_restarted(
         assert stale["limit_s"] == pytest.approx(0.8)
         assert stale["quiet_s"] == pytest.approx(stale["limit_s"])
     assert all(kill["ok"] is True for kill in run.of("kill"))
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
 
 
 # --- The job object -------------------------------------------------------------------------------
@@ -610,20 +663,20 @@ def test_orphans_left_in_the_job_are_killed_before_a_normal_restart(sup: Supervi
     assert grandchild <= set(kill["pids"])  # type: ignore[arg-type]
     exit_event = run.of("exit")[0]
     assert (exit_event["code"], exit_event["killed"], exit_event["requested"]) == (1, False, False)
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
 
 
 def test_killing_the_supervisor_ends_the_childs_whole_tree(sup: Supervision) -> None:
     process = sup.start(sup.fake("--interval", "0.05", "--grandchild"), **FAST)
     start = sup.wait_for("start")
     fake_start = sup.wait_for("start", fake=True)
-    tree = {int(start["pid"]), *pids_of([fake_start])}  # type: ignore[call-overload]
+    tree = named_pids([start], [fake_start])
     assert len(tree) >= 4
 
     process.kill()  # TerminateProcess on the supervisor's PowerShell, as ending its task does
     process.wait(timeout=30)
 
-    assert [pid for pid in tree if not gone(pid)] == []
+    assert still_running(tree) == []
     assert sup.count("exit") == 0  # nothing ran in the supervisor after it was killed
     assert sup.request("-Status").stdout.startswith("Supervisor : not running for test")
 
@@ -651,7 +704,7 @@ def test_stop_ends_the_child_gracefully_and_the_supervisor_with_exit_0(sup: Supe
     fake_names = [e["event"] for e in run.fake_events]
     assert fake_names == ["start", "break", "exit"]  # the fake stopped by itself, gracefully
     assert run.fake_events[-1]["code"] == 0
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
     assert not (sup.data_dir / "supervisor-request").exists()
 
 
@@ -669,7 +722,7 @@ def test_a_child_that_ignores_ctrl_break_is_killed_after_the_stop_grace(sup: Sup
     [exit_event] = run.of("exit")
     assert (exit_event["killed"], exit_event["requested"]) == (True, True)
     assert "break" in [e["event"] for e in run.fake_events]  # it got the CTRL_BREAK
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
 
 
 def test_stop_during_a_backoff_ends_the_loop_at_once(sup: Supervision) -> None:
@@ -1018,4 +1071,4 @@ def test_the_real_engine_migrates_before_its_first_beat_and_stops_cleanly_on_req
     stopped = [line for line in nextron_lines(sup.data_dir) if line["event"] == "engine_stopped"]
     assert [line["exit_code"] for line in stopped] == [0, 0]
     assert sorted((backups / "local").glob("*.db")) == [copy]  # one pre_migrate copy only
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
