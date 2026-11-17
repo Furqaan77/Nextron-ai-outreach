@@ -73,18 +73,35 @@ Any other error is logged as ``engine_crashed`` and ends with exit 1.
 that constructs ``Subscribers`` or registers a subscriber, frozen once filled. Each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
-the more advanced Pipeline Stage), with ``SystemClock()`` when no clock is given.
+the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.5: the merged
+Lead's crawl runs, and its pages and ATS links the survivor lacks, move to the survivor), with
+``SystemClock()`` when no clock is given.
 
-**Jobs (AD-10).** ``build_job_types(*, alerts, backups)`` is the job type registry: the only
+**Jobs (AD-10).** ``build_job_types(*, alerts, backups, crawls, discovery, research)`` is the
+job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
 So far: ``send_alert`` (Story 1.12: the realtime lane only, priority 90, ``max_runtime`` 3
 minutes, retry limit 5, ``handlers.send_alert(alerts)``, group ``other``: the panel's groups
 have none for alerts) and ``backup_db`` (Story 1.16: the bulk lane only, priority 80,
-``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``).
+``max_runtime`` 30 minutes, retry limit 2, ``handlers.backup_db(backups)``, group ``backup``),
+and Story 2.5's ``enrich_lead`` (the bulk lane by default, or interactive, priority 40,
+``max_runtime`` 20 minutes, retry limit 3, ``handlers.enrich_lead(crawls)``, group
+``enrichment``), ``canonicalize_lead`` (bulk by default, or interactive, priority 45, 2 minutes,
+retry limit 2, ``handlers.canonicalize_lead(discovery)``, ``enrichment``) and
+``purge_page_text`` (bulk only, priority 20, 10 minutes, retry limit 2,
+``handlers.purge_page_text(research)``, ``other``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
+
+**The website crawl (Story 2.5, AD-9, AD-18).** ``build_app`` builds one
+``HttpCrawler(meter=meter)`` (``nextron.adapters.crawler``) unless a ``crawler=`` is injected;
+building it builds no HTTP client and resolves nothing. ``WebsiteCrawls(clock, meter, crawler,
+queue)`` runs the ``enrich_lead`` jobs, ``Discovery(clock, Pipeline(clock), queue)`` the
+``canonicalize_lead`` jobs and ``Research(clock)`` the ``purge_page_text`` jobs; the registry
+reaches them through ``crawls=lambda: crawls``, ``discovery=lambda: discovery`` and
+``research=lambda: research``, which break the same cycle as ``notify``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -115,7 +132,9 @@ Building the app builds no adapter or HTTP client and records nothing.
 registry: the only code that constructs ``Triggers`` or calls ``register_trigger``. Register
 each AD-10 ``Trigger`` there, after its job type (a firing enqueues the job type with the
 trigger's own name), then it is frozen. So far: ``backup_db`` (Story 1.16), a
-``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``. ``build_app``
+``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``, and
+``purge_page_text`` (Story 2.5), ``Every(1 day, at_startup=True)``: the PC is not on at fixed
+times, so it also runs at every start. ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
 
@@ -319,10 +338,12 @@ from fastapi import FastAPI
 from nextron import __version__
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
+from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.app.discovery.api import Discovery
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -341,6 +362,7 @@ from nextron.app.playbook.api import Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research.api import Research, WebsiteCrawls
 from nextron.app.setup.api import (
     Credentials,
     GoogleAccess,
@@ -372,6 +394,7 @@ from nextron.domain.backup import (
 )
 from nextron.domain.ai import RouteSpec
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
+from nextron.domain.crawl import CANONICALIZE_LEAD_JOB, ENRICH_LEAD_JOB, PURGE_PAGE_TEXT_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
@@ -393,12 +416,13 @@ from nextron.jobs import handlers
 from nextron.jobs.heartbeat import HeartbeatWriter
 from nextron.jobs.runner import Runner
 from nextron.jobs.scheduler import Scheduler
-from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from nextron.lock import LOCK_FILE_NAME, InstanceLock, LockHeldError
 from nextron.logconfig import CRASH_EVENT, LOG_FILE_NAME, configure_logging, mark_logged
 from nextron.ports.alert import AlertPort
 from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
+from nextron.ports.crawler import CrawlerPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.mail import MailPort
@@ -456,6 +480,7 @@ ENV_SOURCE_VARIABLE: Final = "NEXTRON_ENV"
 PRE_MIGRATE_BACKUP_CHECK: Final = "pre_migrate_backup"
 PROMPTS_CHECK: Final = "prompts"
 FALLBACK_TIMEZONE: Final = "UTC"
+PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -518,6 +543,7 @@ def build_app(
     browser: Browser | None = None,
     probes: Probes | None = None,
     backup_targets: BackupTargets | None = None,
+    crawler: CrawlerPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -532,7 +558,9 @@ def build_app(
     when the panel is read, never when the app is built. ``Backups`` takes the daily and
     manual backups (the ``backup_db`` job) into ``<backup dir>\\local`` and sends each off the
     PC through ``backup_targets`` (``FolderBackupTarget`` with these secrets unless injected);
-    the scheduler reads the daily time when it starts, never when the app is built."""
+    the scheduler reads the daily time when it starts, never when the app is built. The
+    website crawl fetches through ``crawler`` (``HttpCrawler(meter=meter)`` unless injected),
+    which builds its HTTP client on its first fetch."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -546,9 +574,20 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
-    # notify and backups are bound just below
-    job_types = build_job_types(alerts=lambda: notify, backups=lambda: backups)
+    # notify, backups, crawls, discovery and research are bound just below
+    job_types = build_job_types(
+        alerts=lambda: notify,
+        backups=lambda: backups,
+        crawls=lambda: crawls,
+        discovery=lambda: discovery,
+        research=lambda: research,
+    )
     queue = JobQueue(clock, job_types)
+    crawls = WebsiteCrawls(
+        clock, meter, crawler if crawler is not None else HttpCrawler(meter=meter), queue
+    )
+    discovery = Discovery(clock, Pipeline(clock), queue)
+    research = Research(clock)
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -622,11 +661,17 @@ def build_job_types(
     *,
     alerts: Callable[[], handlers.AlertSending],
     backups: Callable[[], handlers.BackingUp],
+    crawls: Callable[[], handlers.Crawling],
+    discovery: Callable[[], handlers.Canonicalizing],
+    research: Callable[[], handlers.PurgingPageText],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
-    returns the ``notify`` service that ``send_alert`` jobs call, and ``backups`` the ``ops``
-    service's ``Backups`` that ``backup_db`` jobs call."""
+    returns the ``notify`` service that ``send_alert`` jobs call, ``backups`` the ``ops``
+    service's ``Backups`` that ``backup_db`` jobs call, ``crawls`` the ``research`` service's
+    ``WebsiteCrawls`` that ``enrich_lead`` jobs call, ``discovery`` the ``discovery`` service
+    that ``canonicalize_lead`` jobs call, and ``research`` the ``research`` service that
+    ``purge_page_text`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -651,6 +696,43 @@ def build_job_types(
             retry_limit=2,  # a failed copy never raises: only recording its row is retried
             handler=handlers.backup_db(backups),
             group=JobGroup.BACKUP,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=ENRICH_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=40,
+            # robots.txt, then up to 15 pages at 1 to 10 s apart within the 10-minute deadline
+            max_runtime=timedelta(minutes=20),
+            retry_limit=handlers.ENRICH_LEAD_RETRIES,  # the last attempt never fails a flaky site
+            handler=handlers.enrich_lead(crawls),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=CANONICALIZE_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            max_runtime=timedelta(minutes=2),
+            retry_limit=2,
+            handler=handlers.canonicalize_lead(discovery),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=PURGE_PAGE_TEXT_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=20,
+            max_runtime=timedelta(minutes=10),
+            retry_limit=2,
+            handler=handlers.purge_page_text(research),
+            group=JobGroup.OTHER,
         )
     )
     job_types.freeze()
@@ -678,6 +760,10 @@ def build_triggers(job_types: JobTypes, *, backup_schedule: Callable[[], DailyRu
     triggers.register_trigger(
         Trigger.BACKUP_DB,
         DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, FALLBACK_TIMEZONE)),
+    )
+    # the PC is not on at fixed times: purge at every start too
+    triggers.register_trigger(
+        Trigger.PURGE_PAGE_TEXT, Every(PURGE_PAGE_TEXT_PERIOD, at_startup=True)
     )
     triggers.freeze()
     return triggers
@@ -867,6 +953,7 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     chosen = clock if clock is not None else SystemClock()
     subscribers = Subscribers()
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
+    subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
     subscribers.freeze()
     return subscribers
 

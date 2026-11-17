@@ -60,6 +60,12 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 def enrich(job: Job) -> None:
     return None
 
@@ -178,7 +184,13 @@ def clock() -> FrozenClock:
 
 def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
     """The real registered ``send_alert``, plus ``enrich_lead`` (Enrichment)."""
-    registered = main.build_job_types(alerts=world_notify, backups=no_backups)
+    registered = main.build_job_types(
+        alerts=world_notify,
+        backups=no_backups,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
+    )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
     job_types.register_job_type(ENRICH)
@@ -272,7 +284,13 @@ def test_the_real_registry_groups_backup_db_as_backup_and_send_alert_as_other(
 ) -> None:
     health = EngineHealth(
         world.clock,
-        main.build_job_types(alerts=lambda: world.notify, backups=no_backups),
+        main.build_job_types(
+            alerts=lambda: world.notify,
+            backups=no_backups,
+            crawls=no_crawls,
+            discovery=no_crawls,
+            research=no_crawls,
+        ),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
     )
@@ -280,8 +298,14 @@ def test_the_real_registry_groups_backup_db_as_backup_and_send_alert_as_other(
     report = world.read(health.report)
 
     assert report.groups == (
+        GroupRuns(
+            JobGroup.ENRICHMENT,
+            (LastRun("enrich_lead", None), LastRun("canonicalize_lead", None)),
+        ),
         GroupRuns(JobGroup.BACKUP, (LastRun("backup_db", None),)),
-        GroupRuns(JobGroup.OTHER, (LastRun("send_alert", None),)),
+        GroupRuns(
+            JobGroup.OTHER, (LastRun("send_alert", None), LastRun("purge_page_text", None))
+        ),
     )
     assert report.readiness == READINESS
     assert report.issues == ()

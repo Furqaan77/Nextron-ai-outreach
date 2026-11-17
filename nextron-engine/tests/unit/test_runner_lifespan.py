@@ -97,6 +97,12 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 def job_threads() -> list[str]:
     return sorted(t.name for t in threading.enumerate() if t.name.startswith("nextron-job-"))
 
@@ -165,7 +171,13 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
 
     assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
     [job_types] = registries
-    assert job_types.names() == ("send_alert", "backup_db")  # type: ignore[attr-defined]
+    assert job_types.names() == (  # type: ignore[attr-defined]
+        "send_alert",
+        "backup_db",
+        "enrich_lead",
+        "canonicalize_lead",
+        "purge_page_text",
+    )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
         assert notify_queries.open_notifications(5).count == 0
@@ -459,7 +471,13 @@ def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> N
 
 def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
     """A ``send_alert`` job that died on its first run; its id."""
-    job_types = main.build_job_types(alerts=InMemoryAlert, backups=no_backups)  # never called
+    job_types = main.build_job_types(  # none is called
+        alerts=InMemoryAlert,
+        backups=no_backups,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
+    )
     queue = JobQueue(clock, job_types)
 
     @use_case
@@ -659,7 +677,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    assert scheduled.triggers == 1  # type: ignore[attr-defined]  # backup_db's daily time
+    # backup_db's daily time and purge_page_text's day
+    assert scheduled.triggers == 2  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -947,8 +966,8 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     finally:
         engine.units.engine.dispose()
 
-    [job] = jobs
-    assert job.id == "backup_db"
+    assert sorted(found.id for found in jobs) == ["backup_db", "purge_page_text"]
+    [job] = [found for found in jobs if found.id == "backup_db"]
     assert isinstance(job.trigger, CronTrigger)
     fields = {field.name: str(field) for field in job.trigger.fields}
     assert (fields["hour"], fields["minute"]) == ("10", "0")
@@ -1001,8 +1020,7 @@ def test_the_scheduler_reads_the_stored_time_zone_and_a_missed_daily_backup(
         getattr(scheduled, "timezone"),
         getattr(scheduled, "catch_up"),
     ) == ("07:30", "America/New_York", True)
-    [job] = added
-    assert job["id"] == "backup_db"
+    [job] = [found for found in added if found["id"] == "backup_db"]
     trigger = job["trigger"]
     assert isinstance(trigger, CronTrigger)
     fields = {field.name: str(field) for field in trigger.fields}

@@ -111,6 +111,47 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "activated_at": PiiClass.NONE,
         "deactivated_at": PiiClass.NONE,
     },
+    # Story 2.5. A page's visible text may quote a person, so it is redacted; the URLs are of an
+    # organization's public pages, and the rest are IDs, codes, counts, hashes and times.
+    "crawl_runs": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "site_domain": PiiClass.NONE,
+        "final_domain": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "ended_at": PiiClass.NONE,
+        "outcome": PiiClass.NONE,
+        "error_code": PiiClass.NONE,
+        "pages_fetched": PiiClass.NONE,
+        "pages_skipped_robots": PiiClass.NONE,
+        "renders": PiiClass.NONE,
+        "errors": PiiClass.NONE,
+    },
+    "crawled_pages": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "run_id": PiiClass.NONE,
+        "url": PiiClass.NONE,
+        "final_url": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "fetched_at": PiiClass.NONE,
+        "http_status": PiiClass.NONE,
+        "content_hash": PiiClass.NONE,
+        "text": PiiClass.REDACT,
+        "text_purge_after": PiiClass.NONE,
+        "changed_at": PiiClass.NONE,
+    },
+    "ats_links": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "run_id": PiiClass.NONE,
+        "page_id": PiiClass.NONE,
+        "url": PiiClass.NONE,
+        "host": PiiClass.NONE,
+        "tag": PiiClass.NONE,
+        "first_seen_at": PiiClass.NONE,
+        "last_seen_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

@@ -61,6 +61,12 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 @dataclass
 class World:
     """The ``notify`` service on real units of work, its queue and its job types."""
@@ -156,7 +162,13 @@ def world_on(
     port: AlertPort | Callable[[], AlertPort],
 ) -> World:
     built: dict[str, Notify] = {}
-    job_types = main.build_job_types(alerts=lambda: built["notify"], backups=no_backups)
+    job_types = main.build_job_types(
+        alerts=lambda: built["notify"],
+        backups=no_backups,
+        crawls=no_crawls,
+        discovery=no_crawls,
+        research=no_crawls,
+    )
     queue = JobQueue(clock, job_types)
     factory: Any = port if callable(port) and not isinstance(port, AlertPort) else lambda: port
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: factory})

@@ -3,8 +3,8 @@ transport raises or answers, only ``AdapterError`` comes out of a port call, and
 secret is in the error.
 
 - **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__``
-  takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient`` and ``ClaudeGateway``
-  today) has a driver in
+  takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway`` and
+  ``HttpCrawler`` today) has a driver in
   ``DRIVERS``: it builds the adapter on a client whose transport is the probe's, with secrets
   planted where the adapter reads them, and makes each of its port calls. The coverage check
   fails for a new such class until it gets one.
@@ -41,6 +41,7 @@ import pytest
 
 import nextron.adapters
 from nextron.adapters.ai import LLM_INVALID, LLM_TRUNCATED, ClaudeGateway
+from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.adapters.telegram import TelegramAlert
 from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
@@ -188,11 +189,28 @@ def claude_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tup
     yield "run", lambda: adapter.run(route, [block], Urgency.BULK)
 
 
+def crawler_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    adapter = HttpCrawler(
+        meter=meter,
+        http=http,
+        resolve=lambda host, port: ("93.184.216.34",),
+        own_addresses=frozenset(),
+        sleep=lambda seconds: None,
+    )
+    yield "fetch_robots", lambda: adapter.fetch_robots(
+        "https://smith-law.example.com/robots.txt", min_interval_s=1.0
+    )
+    yield "fetch_page", lambda: adapter.fetch_page(
+        "https://smith-law.example.com/team", site="example.com", min_interval_s=1.0
+    )
+
+
 # Every adapter class whose __init__ takes an http client, with its driver.
 DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
     GoogleOAuthClient: google_calls,
     ClaudeGateway: claude_calls,
+    HttpCrawler: crawler_calls,
 }
 # What each adapter records per request: an ApiCall, unless it is listed here.
 RECORDS: Final[dict[type, type]] = {ClaudeGateway: AiCall}

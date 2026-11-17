@@ -44,6 +44,12 @@ def no_backups() -> Any:
     raise AssertionError("no backup_db job runs in these tests")
 
 
+def no_crawls() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research`` where no Story 2.5 job
+    runs."""
+    raise AssertionError("no enrich_lead, canonicalize_lead or purge_page_text job runs here")
+
+
 class World:
     """A meter, a budget and notify on one database, wired as ``nextron.main`` does."""
 
@@ -52,7 +58,13 @@ class World:
         self.engine = engine
         self.clock = FrozenClock(T)
         self.alert = InMemoryAlert()
-        job_types = main.build_job_types(alerts=lambda: self.notify, backups=no_backups)
+        job_types = main.build_job_types(
+            alerts=lambda: self.notify,
+            backups=no_backups,
+            crawls=no_crawls,
+            discovery=no_crawls,
+            research=no_crawls,
+        )
         self.notify = Notify(
             self.clock,
             JobQueue(self.clock, job_types),

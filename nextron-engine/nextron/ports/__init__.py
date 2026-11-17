@@ -8,4 +8,8 @@ implements it, because metering writes the database, and every HTTP adapter take
 ``LlmPort`` (``llm``) is the one way to call Claude: ``run(route_tuple, inputs, urgency)``
 returns a typed ``LlmResult`` (ok, refused, truncated, invalid or failed) carrying the call's
 metered usage. Its values live in ``nextron.domain.ai``; ``nextron.adapters.ai`` implements it.
+
+``CrawlerPort`` (``crawler``) is the one way to fetch the web (Story 2.5): ``fetch_robots`` and
+``fetch_page`` pass every hop through ``nextron.domain.fetch_policy`` and return parsed, visible
+text; ``nextron.adapters.crawler`` implements it.
 """

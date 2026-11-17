@@ -13,6 +13,8 @@ nothing; ``nextron.app.discovery`` does.
   row holding that key, merged or not, or ``None``;
 - ``insert(...) -> id``: a new row; ``pipeline_stage`` is left to its server default (``new``);
 - ``set_keys(lead_id, **keys)``: sets the named key columns;
+- ``set_web_domain(lead_id, web_domain)``: replaces the Lead's ``web_domain`` (Story 2.5: the
+  domain its website now lives on);
 - ``mark_merged(loser_id, survivor_id, cleared_keys)``: sets ``merged_into`` and clears each
   key column named in ``cleared_keys``, in one statement.
 """
@@ -118,6 +120,13 @@ def set_keys(lead_id: str, **keys: str | None) -> None:
         return
     current().session.execute(
         update_rows(LeadRecord).where(LeadRecord.id == lead_id).values(**keys)
+    )
+
+
+def set_web_domain(lead_id: str, web_domain: str) -> None:
+    """Replace the Lead ``lead_id``'s ``web_domain`` with ``web_domain``."""
+    current().session.execute(
+        update_rows(LeadRecord).where(LeadRecord.id == lead_id).values(web_domain=web_domain)
     )
 
 

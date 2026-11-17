@@ -23,7 +23,10 @@ and AES-256-GCM over ``cryptography``; pure computation with no port of its own)
 ``backup_target`` (``FolderBackupTarget``, the ``BackupTargetPort``: encrypted backup copies in
 the off-PC folder, through ``crypto``) and ``ai`` (the Claude gateway, ``ClaudeGateway``, the
 ``LlmPort`` over the ``anthropic`` SDK on ``httpx2``, with its route candidates, output schemas,
-request builder and prices; live constructor ``default_http_client``).
+request builder and prices; live constructor ``default_http_client``) and ``crawler``
+(``HttpCrawler``, the ``CrawlerPort``: robots.txt and pages inside the egress filter, over
+``httpx2``, ``selectolax`` and ``protego``; live constructors ``default_http_client``,
+``default_resolver`` and ``default_own_addresses``).
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
 port calls, whatever the transport raises or answers, and never carries a secret into an error.

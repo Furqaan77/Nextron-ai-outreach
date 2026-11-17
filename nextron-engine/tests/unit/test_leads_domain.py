@@ -1,17 +1,22 @@
 """``nextron.domain.leads``: ``LeadSource``, ``LeadIdentity`` (each refusal names its field and
-never shows the value) and the two error codes."""
+never shows the value), the two error codes and Story 2.3's shared platforms (ported by Story
+2.5)."""
 
 import dataclasses
 
 import pytest
 
 from nextron.domain.errors import DomainError
+from nextron.domain.identity import registrable_domain
 from nextron.domain.leads import (
     KEY_FIELDS,
+    SHARED_PLATFORM_BRANDS,
+    SHARED_PLATFORM_DOMAINS,
     InvalidLeadIdentity,
     LeadIdentity,
     LeadSource,
     MergeRefused,
+    is_shared_platform,
 )
 
 SEGMENT = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
@@ -123,3 +128,72 @@ def test_merge_refused_carries_its_reason() -> None:
     assert isinstance(error, DomainError)
     assert error.code == "merge_refused"
     assert error.message == error.reason == "the survivor is newer than the Lead to merge"
+
+
+# Shared platforms ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("domain", sorted(SHARED_PLATFORM_DOMAINS))
+def test_each_listed_domain_is_its_own_registrable_domain(domain: str) -> None:
+    assert registrable_domain("x." + domain) == domain
+    assert is_shared_platform(domain)
+
+
+@pytest.mark.parametrize(
+    "website",
+    [
+        "sites.google.com/view/x",
+        "https://www.google.com/x",
+        "google.co.uk",
+        "https://www.facebook.com/smithlaw",
+        "facebook.co.uk",
+        "m.facebook.com/x",
+        "https://smithlaw.wixsite.com",  # wixsite.com is not, but wix.com is
+        "https://www.wix.com/x",
+        "business.site",
+        "smith-law.business.site",
+        "linktr.ee/smithlaw",
+        "https://www.yelp.com/biz/smith-law",
+        "x.com/smithlaw",
+        "https://solicitors.lawsociety.org.uk/office/1/smith-law",
+        "https://www.sra.org.uk/consumers/register/organisation/?sraNumber=1",
+        "https://chambers.com/law-firm/smith-law-uk-bar-1:1",
+        "https://www.legal500.com/firms/1-smith-law/",
+        "https://uk.trustpilot.com/review/smith-law.co.uk",
+        "https://www.checkatrade.com/trades/smithlaw",
+        "https://find-and-update.company-information.service.gov.uk/company/01234567",
+        "https://opencorporates.com/companies/gb/01234567",
+        "https://www.yellowpages.com/x/smith-law",
+        "https://www.bbb.org/us/x/smith-law",
+        "https://bit.ly/3abc",
+        "https://goo.gl/abc",
+        "https://g.co/kgs/abc",
+        "https://share.google/abc",
+        "tinyurl.com/smithlaw",
+        "https://t.co/abc",
+        "ow.ly/abc",
+        "rebrand.ly/abc",
+        "cutt.ly/abc",
+        "is.gd/abc",
+        "buff.ly/abc",
+    ],
+)
+def test_websites_on_shared_platforms(website: str) -> None:
+    domain = registrable_domain(website)
+    expected = domain != "smithlaw.wixsite.com"
+
+    assert is_shared_platform(domain) is expected
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["smith-law.co.uk", "googlelaw.com", "facebooklaw.co.uk", "x.blogspot.com", "wixlaw.com"],
+)
+def test_an_organizations_own_domain_is_not_a_shared_platform(domain: str) -> None:
+    assert not is_shared_platform(domain)
+
+
+def test_the_brands() -> None:
+    assert SHARED_PLATFORM_BRANDS == {"google", "facebook"}
+    with pytest.raises(TypeError):
+        is_shared_platform(None)  # type: ignore[arg-type]

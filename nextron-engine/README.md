@@ -1830,6 +1830,89 @@ It prints the report and asserts the bars: every case was answered (no failed ca
 proposed quote passes, at least 80% of the labelled Signals are found, and no injection
 succeeds. Without the key it skips.
 
+## Website crawling
+
+Each Lead's website is read politely and stored as visible text, with hidden content stripped,
+so the extraction (Story 2.9) and the job-board check (Story 2.11) work from what a visitor sees
+(FR-10, FR-49, FR-57, AD-7, AD-9, AD-18, NFR-6, NFR-34; Story 2.5).
+
+**What is never fetched** (`nextron/domain/fetch_policy.py`). The FR-49 denylist refuses
+LinkedIn, Instagram, Google Maps (a `maps` host under `google.*`, a `/maps` path, `goo.gl` maps
+links and `g.page`) and the job sites (Indeed, Glassdoor, ZipRecruiter, Reed, Totaljobs and
+CV-Library). The egress rules refuse a URL that isn't `http` or `https`, has credentials in it,
+uses a port other than 80 or 443, or names an IP address instead of a host; and an address that
+is private, loopback, link-local, multicast, CGNAT, unique-local, IPv4 hidden inside IPv6,
+otherwise not global, or this PC's own. No setting loosens any of this.
+
+**The crawler** (`nextron/adapters/crawler`, `HttpCrawler`) checks every hop itself:
+
+1. the URL against the egress rules and the denylist;
+2. the host name, resolved by the crawler (never by the HTTP client), and every address it
+   resolves to: the request then goes to that exact address, with the name in `Host` and in
+   TLS (so DNS can't be switched between the check and the request);
+3. pacing: at least 1 s between requests to one registrable domain (robots.txt's
+   `Crawl-delay`, up to 10 s, when it gives one);
+4. one GET, metered as `web` (`robots` or `page`) on the Quotas and cost page, within 30 s
+   for the whole fetch (every redirect included), with no cookies kept, no proxy taken from the environment and no keep-alive. It sends
+   `User-Agent: NextronBot/1.0 (+https://nextronai.com)`, and robots.txt rules are matched for
+   `NextronBot`;
+5. a redirect starts the next hop, so every redirect is checked again; a sixth redirect is
+   refused.
+
+A page must be HTML or XHTML (JSON is read but never stored) and at most 5 MiB; robots.txt at
+most 512 KiB. The text is what a visitor sees: `<head>`, scripts, styles, `<noscript>`,
+`<template>`, iframe content, `<noembed>`, `<noframes>`, datalists, SVG descriptions, closed
+dialogs, comments, elements marked `hidden` or `aria-hidden="true"`, and elements styled inline
+with `display: none` or `visibility: hidden` (CSS escapes read first) are removed first. Format characters
+(soft hyphens, zero-width spaces, bidi marks) are deleted, so a quote copied from a page matches
+the stored text exactly. Text is capped at 100,000 characters.
+
+**A crawl** is the `enrich_lead` job (bulk lane, key `enrich_lead:<lead>:<date>`, one site at a
+time):
+
+1. When the month's AI budget is spent, the job waits an hour (it is deferred, never failed).
+2. robots.txt from `https://<domain>`, or `https://www.<domain>` when the bare domain doesn't
+   answer. A 4xx (except 429) means everything is allowed; any other failure means nothing is
+   fetched this time.
+3. The homepage. When it can't be fetched the run is recorded as **website unreachable**
+   (`queries.research.latest_crawl_run` and `nextron.domain.crawl.OUTCOME_LABELS`, for the Lead
+   page of Story 2.4). When it lands on another domain, that domain is recorded, its own
+   robots.txt is read, and the rest of the crawl stays on it. When it lands on a shared
+   platform (a Facebook page, a site builder, a directory or a link shortener), nothing is
+   stored and the run is recorded as unreachable.
+4. Up to 15 pages in all (the **Pages crawled per Lead** setting), two links deep from the
+   homepage, chosen by keywords in the link or its text, in this order: team (people, staff,
+   attorneys, lawyers, solicitors), about, careers (jobs, vacancies, join us), contact (offices,
+   locations), services (practice areas, expertise, what we do) and news (press, blog,
+   insights). Files (PDFs, images, office files, archives, media) are never followed, and a
+   crawl stops after 10 minutes, or as soon as a page answers 429 or 503 (the site asked us to
+   slow down).
+5. The pages are stored in `crawled_pages` (one row per Lead and URL, updated in place), the run
+   in `crawl_runs`, and every link, embed or script pointing at a host in **ATS board hosts**
+   (Greenhouse, Lever and Ashby by default) in `ats_links`.
+
+A timeout or a 5xx from robots.txt or the homepage retries the job (up to 3 times); its last
+attempt completes instead of failing, so a flaky site never raises a dead-job alert. A DNS
+failure, a refused connection or a 404 is final.
+
+**Afterwards.**
+
+- A homepage found on another domain queues `canonicalize_lead`. The Lead moves to that domain
+  when no Lead holds it, or is merged with the Lead that does (the older one survives; the new
+  domain stays findable through the merged Lead).
+  Nothing changes when the Lead was merged meanwhile into a Lead with another website of its
+  own.
+- A Lead imported from CSV with a website gets its `enrich_lead` job when it is created, in the
+  same transaction.
+- `purge_page_text` runs at every start and every 24 hours. It clears page text 30 days after
+  it was fetched and keeps its SHA-256, so a change is still detectable.
+- When two Leads merge, the merged Lead's crawl runs move to the survivor, and so do the pages
+  and ATS links whose URL the survivor doesn't already have.
+
+**Settings** (Engine section): **Pages crawled per Lead** (1 to 15, default 15) and **ATS board
+hosts** (one host per line: `boards.greenhouse.io`, `job-boards.greenhouse.io`, `jobs.lever.co`
+and `jobs.ashbyhq.com` by default; a URL, an upper-case name or a never-fetch host is refused).
+
 ## Engine health
 
 The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page

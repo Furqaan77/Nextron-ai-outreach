@@ -98,7 +98,13 @@ class World:
     backups: Backups = field(init=False)
 
     def __post_init__(self) -> None:
-        job_types = main.build_job_types(alerts=lambda: self.notify, backups=lambda: self.backups)
+        job_types = main.build_job_types(
+            alerts=lambda: self.notify,
+            backups=lambda: self.backups,
+            crawls=lambda: None,  # type: ignore[arg-type,return-value]
+            discovery=lambda: None,  # type: ignore[arg-type,return-value]
+            research=lambda: None,  # type: ignore[arg-type,return-value]
+        )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(
             self.clock, self.queue, alert_ports={Channel.TELEGRAM: lambda: InMemoryAlert()}
@@ -1145,7 +1151,13 @@ def _no_budget() -> Any:
 
 
 def test_the_backup_job_type_is_registered_as_specified() -> None:
-    job_types = main.build_job_types(alerts=lambda: None, backups=lambda: None)  # type: ignore[arg-type,return-value]
+    job_types = main.build_job_types(
+        alerts=lambda: None,  # type: ignore[arg-type,return-value]
+        backups=lambda: None,  # type: ignore[arg-type,return-value]
+        crawls=lambda: None,  # type: ignore[arg-type,return-value]
+        discovery=lambda: None,  # type: ignore[arg-type,return-value]
+        research=lambda: None,  # type: ignore[arg-type,return-value]
+    )
 
     found = job_types.get("backup_db")
 

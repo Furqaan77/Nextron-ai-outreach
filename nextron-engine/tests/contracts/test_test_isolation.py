@@ -137,6 +137,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "ClientFilePort",
         "Clock",
         "ConsentListener",
+        "CrawlerPort",
         "GoogleOAuthPort",
         "LlmPort",
         "MailPort",
@@ -408,6 +409,7 @@ def test_every_adapter_package_is_classified_once() -> None:
         "ai",
         "backup_target",
         "clock",
+        "crawler",
         "crypto",
         "google_oauth",
         "secrets",
@@ -438,7 +440,16 @@ def test_the_ai_package_is_guarded_and_a_gateway_reaches_no_claude_api() -> None
 
 
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
-    names = ("ai", "backup_target", "clock", "crypto", "google_oauth", "secrets", "sink")
+    names = (
+        "ai",
+        "backup_target",
+        "clock",
+        "crawler",
+        "crypto",
+        "google_oauth",
+        "secrets",
+        "sink",
+    )
     for name in (*names, "telegram", "gmail"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "__init__.py").write_text("")
@@ -447,6 +458,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "nextron.adapters.ai": [probe_module("nextron.adapters.ai", "route = 'haiku'")],
         "nextron.adapters.backup_target": package_modules("nextron.adapters.backup_target"),
         "nextron.adapters.clock": package_modules("nextron.adapters.clock"),
+        "nextron.adapters.crawler": package_modules("nextron.adapters.crawler"),
         "nextron.adapters.crypto": package_modules("nextron.adapters.crypto"),
         "nextron.adapters.google_oauth": package_modules("nextron.adapters.google_oauth"),
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),

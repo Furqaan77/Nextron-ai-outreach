@@ -41,8 +41,8 @@ from nextron.db.models import Base
 from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
-from nextron.domain.job import Job, JobGroup, JobTypes, Lane
-from nextron.jobs.triggers import DailyAt, DailyRun, Trigger, Triggers
+from nextron.domain.job import DEFERRED, InvalidJob, Job, JobGroup, JobTypes, Lane
+from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
 MAIN = "nextron/main.py"
@@ -283,6 +283,54 @@ class RecordingBackups:
         return "01JD0000000000000000000002"
 
 
+class RecordingCrawls:
+    """Stands in for the ``research`` service's ``WebsiteCrawls``; ``allowed`` is what
+    ``enrich_lead`` returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[tuple[str, bool]] = []
+
+    def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool:
+        self.calls.append((lead_id, may_retry))
+        return self.allowed
+
+
+class RecordingDiscovery:
+    """Stands in for the ``discovery`` service."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def canonicalize_lead(self, lead_id: str, run_id: str) -> str:
+        self.calls.append((lead_id, run_id))
+        return "kept"
+
+
+class RecordingResearch:
+    """Stands in for the ``research`` service."""
+
+    def __init__(self) -> None:
+        self.purges = 0
+
+    def purge_page_text(self) -> int:
+        self.purges += 1
+        return 0
+
+
+def registry(**overrides: object) -> JobTypes:
+    """``main.build_job_types`` with recording services, each overridable."""
+    services: dict[str, object] = {
+        "alerts": RecordingAlerts,
+        "backups": RecordingBackups,
+        "crawls": RecordingCrawls,
+        "discovery": RecordingDiscovery,
+        "research": RecordingResearch,
+    }
+    services.update(overrides)
+    return main.build_job_types(**services)  # type: ignore[arg-type]
+
+
 def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> None:
     alerts = RecordingAlerts()
     backups = RecordingBackups()
@@ -296,11 +344,17 @@ def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> N
         calls.append("backups looked up")
         return backups
 
-    job_types = main.build_job_types(alerts=lookup, backups=backups_lookup)
+    job_types = registry(alerts=lookup, backups=backups_lookup)
 
     assert isinstance(job_types, JobTypes)
     assert job_types.frozen
-    assert job_types.names() == ("send_alert", "backup_db")
+    assert job_types.names() == (
+        "send_alert",
+        "backup_db",
+        "enrich_lead",
+        "canonicalize_lead",
+        "purge_page_text",
+    )
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,
@@ -327,22 +381,111 @@ def test_build_job_types_is_frozen_and_registers_send_alert_and_backup_db() -> N
     tick = Job("01JD0000000000000000000003", "backup_db", Lane.BULK, {"v": 1}, 1)
     assert backup_db.handler(tick) is None  # type: ignore[func-returns-value]
     assert (calls[-1], backups.kinds) == ("backups looked up", ["daily"])
-    main_registry = main.build_job_types(alerts=lookup, backups=backups_lookup)
+    main_registry = registry(alerts=lookup, backups=backups_lookup)
     assert main_registry is not job_types  # a new registry each time
 
 
-def test_build_triggers_registers_the_daily_backup() -> None:
-    job_types = main.build_job_types(alerts=RecordingAlerts, backups=RecordingBackups)
+LEAD = "01JD0000000000000000000010"
+RUN = "01JD0000000000000000000011"
+
+
+def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
+    job_types = registry()
+
+    shapes = {
+        name: (
+            found.default_lane,
+            found.lanes,
+            found.priority,
+            found.max_runtime,
+            found.retry_limit,
+            found.group,
+        )
+        for name in ("enrich_lead", "canonicalize_lead", "purge_page_text")
+        for found in [job_types.get(name)]
+    }
+
+    both = frozenset({Lane.BULK, Lane.INTERACTIVE})
+    assert shapes == {
+        "enrich_lead": (Lane.BULK, both, 40, timedelta(minutes=20), 3, JobGroup.ENRICHMENT),
+        "canonicalize_lead": (Lane.BULK, both, 45, timedelta(minutes=2), 2, JobGroup.ENRICHMENT),
+        "purge_page_text": (
+            Lane.BULK,
+            frozenset({Lane.BULK}),
+            20,
+            timedelta(minutes=10),
+            2,
+            JobGroup.OTHER,
+        ),
+    }
+
+
+@pytest.mark.parametrize(("attempts", "may_retry"), [(1, True), (3, True), (4, False)])
+def test_enrich_lead_may_retry_until_its_last_allowed_attempt(
+    attempts: int, may_retry: bool
+) -> None:
+    crawls = RecordingCrawls()
+    handler = registry(crawls=lambda: crawls).get("enrich_lead").handler
+
+    result = handler(Job(RUN, "enrich_lead", Lane.BULK, {"v": 1, "lead_id": LEAD}, attempts))
+
+    assert result is None
+    assert crawls.calls == [(LEAD, may_retry)]
+
+
+def test_enrich_lead_is_deferred_when_the_budget_refuses() -> None:
+    crawls = RecordingCrawls(allowed=False)
+    handler = registry(crawls=lambda: crawls).get("enrich_lead").handler
+
+    assert handler(Job(RUN, "enrich_lead", Lane.BULK, {"v": 1, "lead_id": LEAD}, 1)) is DEFERRED
+
+
+def test_canonicalize_lead_and_purge_page_text_call_their_services_once() -> None:
+    discovery = RecordingDiscovery()
+    research = RecordingResearch()
+    job_types = registry(discovery=lambda: discovery, research=lambda: research)
+    payload = {"v": 1, "lead_id": LEAD, "run_id": RUN}
+
+    job_types.get("canonicalize_lead").handler(
+        Job(RUN, "canonicalize_lead", Lane.BULK, payload, 1)
+    )
+    job_types.get("purge_page_text").handler(Job(RUN, "purge_page_text", Lane.BULK, {"v": 1}, 1))
+
+    assert (discovery.calls, research.purges) == ([(LEAD, RUN)], 1)
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [
+        ("enrich_lead", {"v": 1}),
+        ("enrich_lead", {"v": 1, "lead_id": "not-a-ulid"}),
+        ("canonicalize_lead", {"v": 1, "lead_id": LEAD}),
+        ("canonicalize_lead", {"v": 1, "run_id": RUN}),
+    ],
+)
+def test_a_crawl_job_without_its_ids_is_invalid(name: str, payload: dict[str, object]) -> None:
+    crawls, discovery = RecordingCrawls(), RecordingDiscovery()
+    job_types = registry(crawls=lambda: crawls, discovery=lambda: discovery)
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        job_types.get(name).handler(Job(RUN, name, Lane.BULK, payload, 1))
+    assert (crawls.calls, discovery.calls) == ([], [])
+
+
+def test_build_triggers_registers_the_daily_backup_and_the_page_text_purge() -> None:
+    job_types = registry()
     schedule = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
 
     triggers = main.build_triggers(job_types, backup_schedule=schedule)
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec] = triggers.specs()
+    [spec, purge] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
+    assert (purge.trigger, purge.job_type) == (Trigger.PURGE_PAGE_TEXT, "purge_page_text")
+    assert purge.schedule == Every(timedelta(days=1), at_startup=True)
     built_again = main.build_triggers(job_types, backup_schedule=schedule)
     assert built_again is not triggers  # a new registry each time
 

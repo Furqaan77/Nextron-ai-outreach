@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from nextron import main
 from nextron.app.discovery.api import MAX_MERGE_CHAIN, Discovery, UpsertedLead
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import pipeline as pipeline_queries
@@ -114,6 +115,19 @@ class World:
         )
 
 
+def no_jobs() -> Any:
+    """``build_job_types``'s services: no job runs in these tests."""
+    raise AssertionError("no job runs in these tests")
+
+
+def queue_on(clock: FrozenClock) -> JobQueue:
+    """A job queue on the real job types; ``upsert_lead`` enqueues a CSV Lead's crawl there."""
+    job_types = main.build_job_types(
+        alerts=no_jobs, backups=no_jobs, crawls=no_jobs, discovery=no_jobs, research=no_jobs
+    )
+    return JobQueue(clock, job_types)
+
+
 @pytest.fixture
 def world(db_engine: Engine) -> World:
     clock = FrozenClock(T0)
@@ -121,7 +135,8 @@ def world(db_engine: Engine) -> World:
     segments = validate_segments(seed_yaml.parse(SHIPPED.read_text(encoding="utf-8")))
     with units.open():
         Setup(clock).sync_segments(segments)
-    found = World(units, db_engine, clock, Discovery(clock, Pipeline(clock)), "", "")
+    discovery = Discovery(clock, Pipeline(clock), queue_on(clock))
+    found = World(units, db_engine, clock, discovery, "", "")
     [(first,), (second,)] = found.sql("SELECT id FROM segments ORDER BY key")
     found.segment, found.other_segment = first, second
     return found

@@ -164,7 +164,9 @@ def test_the_group_check_catches_a_registration_without_a_group(tmp_path: Path) 
     _, root = copy_with_probe(tmp_path, "nextron.app.ops", UNUSED)
     main_py = root / MAIN
     text = main_py.read_text(encoding="utf-8")
-    grouped = "            group=JobGroup.OTHER,"
+    grouped = (  # send_alert's; Story 2.5's purge_page_text is in group Other too
+        "            group=JobGroup.OTHER,  # the health panel's groups have none for alerts"
+    )
     assert text.count(grouped) == 1
     main_py.write_text(text.replace(grouped + "\n", "").replace(grouped, ""), encoding="utf-8")
 

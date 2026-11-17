@@ -55,6 +55,16 @@ def _no_backups() -> Any:
     raise AssertionError("no backup_db job runs here")
 
 
+# build_job_types's services: none is called here
+_NO_SERVICES: Final[dict[str, Any]] = {
+    "alerts": _no_backups,
+    "backups": _no_backups,
+    "crawls": _no_backups,
+    "discovery": _no_backups,
+    "research": _no_backups,
+}
+
+
 # No copy except through the backup API -----------------------------------------------------------
 
 
@@ -141,7 +151,7 @@ def backup_job_problems(job_types: JobTypes) -> list[str]:
 
 
 def test_backup_db_is_bulk_only_with_group_backup() -> None:
-    job_types = main.build_job_types(alerts=_no_backups, backups=_no_backups)
+    job_types = main.build_job_types(**_NO_SERVICES)
 
     assert backup_job_problems(job_types) == []
 
@@ -173,7 +183,7 @@ def test_the_backup_job_check_catches_another_lane_or_group(
 
 
 def test_the_backup_trigger_is_a_daily_schedule_on_its_registered_job_type() -> None:
-    job_types = main.build_job_types(alerts=_no_backups, backups=_no_backups)
+    job_types = main.build_job_types(**_NO_SERVICES)
 
     triggers = main.build_triggers(job_types, backup_schedule=lambda: DailyRun(time(10), "UTC"))
 
@@ -186,7 +196,7 @@ def test_the_backup_trigger_is_a_daily_schedule_on_its_registered_job_type() -> 
 def test_the_registry_refuses_the_backup_trigger_before_its_job_type() -> None:
     without_backup = JobTypes()
     without_backup.register_job_type(
-        main.build_job_types(alerts=_no_backups, backups=_no_backups).get("send_alert")
+        main.build_job_types(**_NO_SERVICES).get("send_alert")
     )
     without_backup.freeze()
 

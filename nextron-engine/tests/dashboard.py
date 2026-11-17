@@ -48,6 +48,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI
@@ -106,6 +107,12 @@ READINESS = tuple(
 def no_copies(target: Path) -> Snapshot:
     """The dashboard's default snapshot: it takes no copies."""
     raise RuntimeError("this dashboard takes no copies")
+
+
+def no_crawl_jobs() -> Any:
+    """``build_job_types``'s ``crawls``, ``discovery`` and ``research``: the dashboard runs no
+    Story 2.5 job."""
+    raise AssertionError("the dashboard runs no enrich_lead, canonicalize_lead or purge_page_text")
 
 
 def default_data_dir() -> Path:
@@ -219,7 +226,11 @@ class Dashboard:
             start=self.jobs.append,
         )
         self.job_types = main.build_job_types(
-            alerts=lambda: self.notify, backups=lambda: self.backups
+            alerts=lambda: self.notify,
+            backups=lambda: self.backups,
+            crawls=no_crawl_jobs,
+            discovery=no_crawl_jobs,
+            research=no_crawl_jobs,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(

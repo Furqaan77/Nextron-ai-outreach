@@ -6,6 +6,11 @@ the reason and never holds the input, which may be an email address. A non-``str
 raises ``TypeError``, and any input longer than ``MAX_INPUT_LENGTH`` (2,048) characters is
 refused. Each normaliser is idempotent: it returns its own output unchanged.
 
+- ``url_host(text)``: a website's or URL's host name, steps 1 to 4 below: the ASCII,
+  lowercased, IDNA-encoded host, with one trailing separator dropped and ``www`` kept
+  (``https://WWW.Smith-Law.co.uk./team`` gives ``www.smith-law.co.uk``). It applies every
+  refusal of those steps; nothing checks the host against the Public Suffix List.
+  ``nextron.domain.fetch_policy`` matches hosts with it.
 - ``registrable_domain(text)``: a website's registrable domain (eTLD+1).
 
   1. The text is stripped; an empty text, or one holding whitespace or a ``Cc`` character, is
@@ -13,7 +18,7 @@ refused. Each normaliser is idempotent: it returns its own output unchanged.
   2. A text with a ``<scheme>://`` prefix must use ``http`` or ``https`` (in any case); any
      other scheme is refused. A text without one is read as ``http://`` + text.
   3. The hostname comes from ``urllib.parse.urlsplit``; a missing one or an IP address is
-     refused. One trailing dot is dropped.
+     refused. One trailing separator is dropped (and the rest checked again).
   4. Each label (split on the IDNA 2003 separators: ``.``, ``U+3002``, ``U+FF0E``,
      ``U+FF61``) is IDNA-encoded with the stdlib ``encodings.idna.ToASCII`` (IDNA 2003) and
      lowercased, and must fullmatch ``LABEL_PATTERN`` (letters, digits and hyphens, at most
@@ -305,18 +310,25 @@ def _public_suffix_length(labels: tuple[str, ...]) -> int | None:
 # The normalisers ------------------------------------------------------------------------------
 
 
-def registrable_domain(text: str) -> str:
-    """The registrable domain (eTLD+1) of a website or URL; see the module docstring."""
-    _, hostname = _web_url(_checked(text, "registrable_domain"))
+def url_host(text: str) -> str:
+    """The ASCII, lowercased host name of a website or URL, ``www`` kept: steps 1 to 4 of
+    ``registrable_domain``; see the module docstring."""
+    _, hostname = _web_url(_checked(text, "url_host"))
     if LABEL_SEPARATORS.fullmatch(hostname[-1]):
         hostname = hostname[:-1]
     if not hostname:
         raise IdentityError("has no host name")
     if _is_ip_address(hostname):
         raise IdentityError("is an IP address, not a domain")
-    labels = _ascii_labels(hostname)
-    if len(".".join(labels)) > MAX_DOMAIN_LENGTH:
+    host = ".".join(_ascii_labels(hostname))
+    if len(host) > MAX_DOMAIN_LENGTH:
         raise IdentityError(f"is longer than {MAX_DOMAIN_LENGTH} characters")
+    return host
+
+
+def registrable_domain(text: str) -> str:
+    """The registrable domain (eTLD+1) of a website or URL; see the module docstring."""
+    labels = tuple(url_host(_checked(text, "registrable_domain")).split("."))
     if labels[0] == WWW:
         labels = labels[1:]
     if len(labels) < 2:
