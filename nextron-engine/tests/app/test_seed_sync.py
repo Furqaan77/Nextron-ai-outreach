@@ -965,7 +965,8 @@ def test_cli_dispatches_seed_sync_with_its_env(monkeypatch: pytest.MonkeyPatch) 
     "parsed",
     [
         {"command": "seed", "seed_command": "pull", "env": None},  # a later seed subcommand
-        {"command": "restore", "env": None, "as_json": False},  # a later command
+        # a later command (restore is dispatched since Story 1.19, so this names one no story has)
+        {"command": "export", "env": None, "as_json": False},
     ],
 )
 def test_cli_never_lets_an_undispatched_command_fall_through(
