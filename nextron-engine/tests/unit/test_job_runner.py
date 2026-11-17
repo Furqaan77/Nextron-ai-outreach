@@ -47,6 +47,12 @@ ATTEMPTS = 400  # slices before a condition counts as never reached (20 s)
 LOGGER = "nextron.jobs.runner"
 QUEUE_LOGGER = "nextron.app.jobqueue.api"
 FAST = {"poll_interval": 0.01, "renew_interval": 0.02, "shutdown_grace": SLICE}
+# stop() joins the lane threads only until shutdown_grace has passed. An idle lane can be in the
+# middle of a claim when stop() begins (opening a connection, or BEGIN IMMEDIATE waiting for
+# another thread's write), and on a loaded machine that outlasts 0.05 s. A test that needs every
+# thread gone once stop() returns uses this grace: stop() returns as soon as the idle threads
+# end, and a thread that ignored the stop would still be caught.
+JOINED = {**FAST, "shutdown_grace": 20.0}
 
 
 def wait_until(condition: Callable[[], bool]) -> bool:
@@ -176,11 +182,13 @@ def monotonic() -> Monotonic:
 
 @pytest.fixture
 def runners() -> Iterator[list[Runner]]:
-    """Every runner a test builds; each is stopped at teardown."""
+    """Every runner a test builds; each is stopped at teardown, and no job thread is left for
+    the next test."""
     built: list[Runner] = []
     yield built
     for runner in built:
         runner.stop()
+    assert wait_until(lambda: job_threads() == [])
 
 
 def build(
@@ -478,9 +486,9 @@ def test_run_one_claims_nothing_once_the_runner_stops(
     units: UnitOfWorkFactory, clock: FrozenClock, runners: list[Runner]
 ) -> None:
     gate = Gate(blocking=False)
-    runner, queue = build(runners, units, clock, job_type(gate), **FAST)
+    runner, queue = build(runners, units, clock, job_type(gate), **JOINED)
     runner.start()
-    runner.stop()
+    runner.stop()  # every lane has ended: no claim begun before the stop can take the job
     created = enqueue(units, queue)
 
     assert runner.run_one(Lane.BULK) is False
@@ -503,7 +511,7 @@ def test_start_runs_one_realtime_one_interactive_the_bulk_threads_and_the_keeper
     caplog.set_level(logging.INFO)
     if stored is not None:
         store_setting(db_engine, "bulk_threads", stored)  # "7" no longer passes the rule
-    runner, _ = build(runners, units, clock, **FAST)
+    runner, _ = build(runners, units, clock, **JOINED)
 
     runner.start()
 
@@ -570,7 +578,7 @@ def test_start_reads_bulk_threads_in_a_read_only_unit_it_closes_before_any_threa
 def test_a_second_start_raises_and_stop_is_idempotent(
     units: UnitOfWorkFactory, clock: FrozenClock, runners: list[Runner]
 ) -> None:
-    runner, _ = build(runners, units, clock, **FAST)
+    runner, _ = build(runners, units, clock, **JOINED)
     runner.stop()  # before start: nothing
     assert not runner.alive()
 
@@ -661,14 +669,14 @@ def test_stop_releases_a_blocked_handlers_job_and_its_late_finish_is_a_lost_clai
     [lost] = records(caplog, "job_claim_lost")
     assert (lost.name, lost.job_id) == (QUEUE_LOGGER, created.job_id)  # type: ignore[attr-defined]
     assert row(units, created.job_id).status == "queued"  # the late finish changed nothing
-    assert job_threads() == []
+    assert wait_until(lambda: job_threads() == [])  # an idle lane can outlast the 0.05 s grace
 
 
 def test_stop_waits_for_a_handler_that_finishes_within_the_grace(
     units: UnitOfWorkFactory, clock: FrozenClock, runners: list[Runner]
 ) -> None:
     gate = Gate()
-    runner, queue = build(runners, units, clock, job_type(gate), **{**FAST, "shutdown_grace": 20})
+    runner, queue = build(runners, units, clock, job_type(gate), **JOINED)
     created = enqueue(units, queue)
     runner.start()
     assert wait_for(gate.entered)
