@@ -5,8 +5,8 @@ violation.
   ``market`` (in any case) in its path, its route name or its endpoint's ``__module__`` or
   ``__qualname__``: Markets change only through ``seed/markets.yaml`` and ``nextron seed sync``.
 - **(b) The web layer can't reach the Market writers.** No module under ``nextron/web`` names
-  ``sync_markets`` or ``sync_seed`` (a name, an attribute, an imported name or a string), or
-  imports ``nextron.db.repos.setup.markets`` (AST).
+  ``sync_markets``, ``sync_seed`` or ``seed_sync`` (a name, an attribute, an imported name or a
+  string), or imports ``nextron.db.repos.setup.markets`` (AST).
 - **(c) A Lead's Market is derived, never stored.** A ``leads`` table in ``Base.metadata``, if
   one exists, has no column whose name contains ``market``. Until Story 2.2 adds ``leads`` the
   check is vacuous; the probe shows it bites.
@@ -33,7 +33,7 @@ from tests.contracts.support import PACKAGE
 from tests.dashboard import Dashboard
 
 WEB = PACKAGE / "web"
-FORBIDDEN_NAMES = frozenset({"sync_markets", "sync_seed"})
+FORBIDDEN_NAMES = frozenset({"sync_markets", "sync_seed", "seed_sync"})
 FORBIDDEN_MODULE = "nextron.db.repos.setup.markets"
 
 
@@ -166,6 +166,7 @@ def test_no_web_module_names_a_market_writer() -> None:
         ("setup.sync_markets([])\n", "probe.py:1 names sync_markets"),
         ("x = 1\nresult = setup.sync_seed(a, b)\n", "probe.py:2 names sync_seed"),
         ("from nextron.app.setup.api import sync_seed\n", "probe.py:1 names sync_seed"),
+        ("Setup(clock).seed_sync(checked, now)\n", "probe.py:1 names seed_sync"),
         ("getattr(setup, 'sync_markets')\n", "probe.py:1 names sync_markets"),
         (
             "from nextron.db.repos.setup import markets\n",

@@ -413,7 +413,10 @@ decision-maker roles, disqualifiers, weighted Signal types (the PRD's FR-1 table
 and discovery queries. The Markets (FR-2) come from `seed/markets.yaml`: the US and UK
 cold-email rules (see [Markets](#markets)). The Sequences (FR-4) come from
 `seed/sequences.yaml`: the default four-Step Sequence and its Step briefs (see
-[Sequences](#sequences)). All three files are required. Edit them, then load them:
+[Sequences](#sequences)). The Approved Company Facts (FR-72) come from
+`seed/company_facts.yaml`: the claims a Draft may make about Nextron (see
+[Approved Company Facts](#approved-company-facts)). All four files are required. Edit them, then
+load them:
 
 ```powershell
 uv run nextron seed sync                 # the environment NEXTRON_ENV names
@@ -429,23 +432,35 @@ markets: 2 changed, 0 unchanged
   uk: created (version 1)
 sequences: 1 changed, 0 unchanged
   default: created (version 1)
+company_facts: 8 changed, 0 unchanged
+  nextron_team: created (version 1)
+  ...
+  sra_ai_notice: created (version 1)
 ```
 
-Each block's first line counts the Segments (or Markets, or Sequences) created or changed, then
-the unchanged ones; a line follows for each one created, changed (`changed (version 1 -> 2)`)
-or stored but no longer in the file (`not in seed/segments.yaml, left as it is (version 1)`, or
-`not in seed/markets.yaml, ...` or `not in seed/sequences.yaml, ...`: a Segment, Market or
-Sequence is never deleted, since Leads, Campaigns and snapshots point to it). Running it again
-on the same files prints `segments: 0 changed, 2 unchanged`, `markets: 0 changed, 2 unchanged`
-and `sequences: 0 changed, 1 unchanged` and writes nothing.
+Each block's first line counts the Segments (or Markets, Sequences or facts) created or changed,
+then the unchanged ones; a line follows for each one created, changed (`changed (version 1 ->
+2)`) or stored but no longer in the file (`not in seed/segments.yaml, left as it is (version
+1)`, or `not in seed/markets.yaml, ...`, `not in seed/sequences.yaml, ...` or `not in
+seed/company_facts.yaml, ...`: nothing is ever deleted, since Leads, Campaigns, snapshots and
+Draft revisions point to it). The facts' block also counts conflicts (`company_facts: 0 changed,
+7 unchanged, 1 conflict`), with a line for each: `legal_ai: conflict, left as the Operator set it
+(version 2); seed/company_facts.yaml differs`. Running it again on the same files prints
+`segments: 0 changed, 2 unchanged`, `markets: 0 changed, 2 unchanged`, `sequences: 0 changed, 1
+unchanged` and `company_facts: 0 changed, 8 unchanged` and writes nothing.
 
 **What a sync does.** It upserts each Segment by key into the `segments` table, then each
 Market by code into the `markets` table, then each Sequence by key into the `sequences` and
 `step_briefs` tables (all owner `setup`): a new one is stored at version 1, a changed definition
 gets the next version, and each of those appends one `events` row (entity `segments`, `markets`
-or `sequences`, `v1` or `v<n>` to `v<n+1>`, cause `seed_sync`, actor `seed`). All three files
-are read and validated before the database is touched, and all the tables are written in one
-transaction, so a failure anywhere changes nothing in any of them. Signal-type and disqualifier keys
+or `sequences`, `v1` or `v<n>` to `v<n+1>`, cause `seed_sync`, actor `seed`). Then it loads each
+Approved Company Fact into the `company_facts` table (owner `playbook`; see
+[Approved Company Facts](#approved-company-facts)). All four files are read and validated before
+the database is touched, and all the tables are written in one transaction, so a failure
+anywhere changes nothing in any of them. `setup` and `playbook` sit in the same layer of the app
+DAG and may not call each other, so the use case lives in `ops`: `Seeds(clock).sync_seed`
+(`nextron/app/ops/api.py`) runs `setup`'s `seed_sync` command and `playbook`'s `seed_facts`
+command in its one transaction. Signal-type and disqualifier keys
 stay unique across every stored Segment: if a Segment that is no longer in the file (one whose
 key you renamed, say) still uses a key the file uses, the sync is refused before anything is
 written, naming the file's field (`seed/segments.yaml:
@@ -487,7 +502,7 @@ problem exits 1 before the database is opened.
 | Exit code | Meaning |
 |---|---|
 | 0 | synced (or nothing to change) |
-| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:`, `seed/markets.yaml:` or `seed/sequences.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
+| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:`, `seed/markets.yaml:`, `seed/sequences.yaml:` or `seed/company_facts.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
 | 2 | `NEXTRON_ENV` (or another bootstrap variable) is unset or invalid; `--env` takes only `dev`, `test` or `prod` |
 
 Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
@@ -614,6 +629,76 @@ Step order) and `queries.setup.sequence(key)`; a stored Sequence that no longer 
 and drafting (4.15, 4.18) read the briefs this way; `nextron.domain.sequences.max_words(limit,
 comparison)` turns a limit into a word count. Only `_sync_sequences` writes the Sequences
 (`tests/contracts/test_sequence_contracts.py`).
+
+### Approved Company Facts
+
+An Approved Company Fact (FR-72, NFR-24, AD-7, Story 4.3) is a claim a Draft may make about
+Nextron: the company, a case study, the Offer, a regulation or a statistic. Drafts may claim
+nothing else about Nextron, and each fact only for the Segments and Markets it allows.
+`seed/company_facts.yaml` ships the eight facts of Sales Playbook section 6, and the Operator
+maintains them on the Approved Company Facts page.
+
+| Field | Rule |
+|---|---|
+| `fact_id` | `[a-z][a-z0-9_]`, at most 31 characters, unique: the short key revisions cite with the version |
+| `type` | `company`, `case_study`, `offer`, `regulation` or `statistic` |
+| `wording` | the exact claim: a clean text of at most 500 characters |
+| `source_url` | at most 500 characters: an `http` or `https` link with a host, no user name or password, no space, backslash or control character (so it always renders as a link) |
+| `segments`, `markets` | 1 to 50 Segment keys and Market codes in the file (stored as the Segments' and Markets' ids), no repeats; there is no "all", so a new Segment or Market gets no facts until they are ticked or seeded |
+| `metric`, `metric_confirmed_at` | optional: a client-confirmed result (at most 200 characters) and the date the client confirmed it, `'YYYY-MM-DD'`; each needs the other |
+| `scope_note` | optional: how far the claim goes, a clean text of at most 500 characters |
+| `last_checked_on` | the date it was last checked, `'YYYY-MM-DD'` |
+
+Dates are quoted in the file (the reader refuses a plain date). Missing and unknown fields are
+refused.
+
+**The compliance floor.** On every write, from the seed or the page, each refused naming its
+field: a regulatory fact applies to one Market; a fact whose wording, scope note or metric names
+ABA Formal Opinion 512 is allowed only in US Markets ("ABA Formal Opinion 512 applies only to a US
+Market"), and one naming the SRA notice only in UK (GB) Markets ("The SRA notice applies only
+to a UK Market"); a metric needs the client's confirmation date; and no date may be in the
+future (later than tomorrow in UTC, so any timezone's today passes). Every Segment and Market a
+seeded fact names must be in the same sync's files. The Legal AI fact's scope note says the
+client was a legal-tech venture, not a law firm, and Wish Wheels' that it is a retail and
+services business, not a distributor.
+
+**Versions.** `company_facts` keeps every version of every fact: a row per (`fact_id`,
+`version`), never updated or deleted, enforced by database triggers. The only change a row
+accepts is its `retracted_at`, set once. A fact's *current* version is its highest version that
+isn't retracted. Each new version appends an `events` row (entity `company_facts`, `v<n>` to
+`v<n+1>`; cause `seed_sync`, `operator_add` or `operator_edit`).
+
+**Retraction.** Retracting a fact retracts every version (one `events` row, `v<n>` to
+`retracted`, cause `operator_retract`), so an older wording never silently becomes current, and
+Drafts can no longer cite it. Editing a retracted fact saves a new current version, which
+restores it.
+
+**The seed and the Operator.** A seed sync writes a new version of a fact only while its latest
+version is the seed's own and isn't retracted. Once the Operator has edited or retracted a fact,
+the Operator's version wins: a seed entry that changed since its last seed version is reported
+as a conflict (`legal_ai: conflict, left as the Operator set it (version 2);
+seed/company_facts.yaml differs`) and nothing is written; an unchanged one stays quiet. The seed
+never restores a retracted fact.
+
+**The page.** The Approved Company Facts page (`/facts`, linked from the Settings page; the
+navigation keeps its sections) lists each fact's current version (or "Retracted" with its
+latest one): its wording, type, source link, Segment and Market names, metric, last-checked
+date, version and who made it when, with its earlier versions under "Earlier versions (k)". An
+"Add a fact" form sits above the list; each fact has an Edit form (saving a new version, or
+nothing when nothing changed) and a Retract button. Every save is checked on the server: a
+refused form comes back with each problem beside its field and nothing saved, and an edit made
+against a page that is out of date is refused ("This fact changed since the page loaded; reload
+the page and edit again").
+
+**Reading the facts.** Other code reads them through `nextron.app.queries.playbook`:
+`company_facts()` and `fact(fact_id)` give each fact's versions, newest first, and its current
+version; `allowed_facts(segment_id, market_id)` gives the current version of every fact allowed
+for that Segment and Market, so drafting (4.15) and grounding (4.13, 4.14) see ABA Formal
+Opinion 512 only in US Drafts and the SRA notice only in UK Drafts. Only
+`nextron/app/playbook/api.py` writes the table (`tests/contracts/test_company_fact_contracts.py`).
+
+**Mac should check before the first send:** the ABA 512 and SRA notice wordings against their
+sources, and the Offer's source URL. The Offer names no price until prices are validated (FR-69).
 
 ## Leads and identity
 
@@ -1066,6 +1151,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0014_2_8_ai_routes` | `prompt_snapshots` (unique `(route, prompt_version)` and `(route, prompt_version, sha256)`, two checks) and `ai_route_activations` (a composite foreign key to the snapshot, three checks, the partial unique index `uq_ai_route_activations_active_route`) (see [Prompts and the active route tuple](#prompts-and-the-active-route-tuple)) | `playbook` |
 | `0015_2_3_contacts_provenance` | `contacts` (`ix_contacts_lead_id`, foreign keys to `leads` and `markets` with no cascade, three checks) and `provenance_records` (`ix_provenance_records_contact_id`, a foreign key to `contacts` with no cascade, four checks, the nullable eligibility-basis fields) (see [CSV import, Contacts and Provenance](#csv-import-contacts-and-provenance)) | `research` |
 | `0016_1_19_recovery` | `recovery_state`: one row per restore (`mode`, the times, the restored file's name, the safety copy's name, one status per recovery step), its six checks (`mode`, one per step, `ck_recovery_state_outcome`), the partial unique index `uq_recovery_state_on` (at most one `on` row) and `ix_recovery_state_restored_at` (see [Restore and recovery mode](#restore-and-recovery-mode)) | `ops` |
+| `0017_4_3_company_facts` | `company_facts`: append-only fact versions (unique on `fact_id` and `version`; three checks; three triggers refusing a delete, a reused id or version, and any change but one retraction) (see [Approved Company Facts](#approved-company-facts)) | `playbook` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

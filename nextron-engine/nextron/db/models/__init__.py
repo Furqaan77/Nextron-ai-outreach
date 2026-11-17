@@ -28,7 +28,11 @@ from nextron.db.models.ops import (
     RecoveryStateRecord,
     RestoreTestRecord,
 )
-from nextron.db.models.playbook import AiRouteActivationRecord, PromptSnapshotRecord
+from nextron.db.models.playbook import (
+    AiRouteActivationRecord,
+    CompanyFactRecord,
+    PromptSnapshotRecord,
+)
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.models.setup import (
     MarketRecord,
@@ -45,6 +49,7 @@ __all__ = [
     "ApiUsageRecord",
     "BackupRecord",
     "Base",
+    "CompanyFactRecord",
     "ContactRecord",
     "EventRecord",
     "HeartbeatRecord",

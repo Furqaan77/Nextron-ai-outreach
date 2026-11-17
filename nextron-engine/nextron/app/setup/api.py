@@ -75,7 +75,7 @@ not_in_file)``, shaped like ``SegmentSync`` with codes, and after the commit log
 ``markets_synced`` (INFO) with the same four ``*_count`` fields.
 
 The Sequences of ``seed/sequences.yaml`` (FR-4, AD-12, Story 4.1), as
-``nextron.domain.sequences.SequenceDef`` values, are synced only through ``sync_seed``, keyed by
+``nextron.domain.sequences.SequenceDef`` values, are synced only through ``seed_sync``, keyed by
 ``key`` into the ``sequences`` table with one ``step_briefs`` row per Step; there is no
 standalone ``sync_sequences``. Before any transaction ``_sequence_inputs`` refuses an item that
 isn't a ``SequenceDef`` (``TypeError``) or a repeated key (``ValueError``) and, when there is at
@@ -94,13 +94,20 @@ input is never changed or deleted. Decoding a stored Sequence that no longer val
 ``InvalidSequences`` (nothing is written). The result is ``SequenceSync(created, changed,
 unchanged, not_in_file)``, shaped like ``MarketSync`` with keys.
 
-``Setup.sync_seed(segments, markets, sequences)`` is what ``nextron seed sync`` calls (a unit of
-work runs one use case): every pre-transaction check of the three syncs (Segments, Markets, then
-Sequences, whose angles are checked against this call's Segments and Markets), the clock read
-once, then the three syncs in **one** transaction, Segments first and Sequences last, so a
-failure anywhere changes nothing. After the commit it logs ``segments_synced``, then
-``markets_synced``, then ``sequences_synced`` (each with the four ``*_count`` fields), and
-returns ``SeedSync(segments, markets, sequences)``.
+**The seed sync** (Story 4.3 split it so the Approved Company Facts, owned by ``playbook``,
+load in the same transaction; ``nextron.app.ops.api.Seeds.sync_seed`` is the use case
+``nextron seed sync`` calls, and a unit of work runs one use case):
+
+- ``check_seed(segments, markets, sequences) -> CheckedSeed`` runs every pre-transaction check
+  of the three syncs (Segments, Markets, then Sequences, whose angles are checked against this
+  call's Segments and Markets), raising as described above. ``CheckedSeed`` holds what they
+  return, with ``segment_keys`` (this sync's Segment keys) and ``market_countries`` (``{code:
+  country_code}`` of this sync's Markets) for the facts' checks.
+- ``@command Setup.seed_sync(checked, now) -> SetupSeedSync(segments, markets, sequences)``
+  runs the three syncs in the caller's transaction, Segments first and Sequences last, all at
+  ``now``, so a failure anywhere changes nothing.
+- ``log_seed_sync(result)``, after the commit, logs ``segments_synced``, then
+  ``markets_synced``, then ``sequences_synced``, each with the four ``*_count`` fields.
 
 ``Credentials`` (AD-12, FR-56, NFR-18) stores the external credentials declared in
 ``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. It touches
@@ -226,7 +233,7 @@ from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import sequences as sequences_repo
 from nextron.db.repos.setup import settings as settings_repo
-from nextron.db.uow import current, use_case
+from nextron.db.uow import command, current, use_case
 from nextron.domain import credentials as credential_registry
 from nextron.domain import settings_schema
 from nextron.domain.credentials import (
@@ -364,7 +371,7 @@ class MarketSync:
 
 @dataclass(frozen=True, slots=True)
 class SequenceSync:
-    """What ``sync_seed`` did to the Sequences: ``created`` as ``(key, version)``, ``changed``
+    """What ``seed_sync`` did to the Sequences: ``created`` as ``(key, version)``, ``changed``
     as ``(key, from_version, to_version)`` and ``unchanged`` keys, each in input order, and
     ``not_in_file`` as ``(key, version)`` of each stored Sequence the input left out, by key."""
 
@@ -375,12 +382,58 @@ class SequenceSync:
 
 
 @dataclass(frozen=True, slots=True)
-class SeedSync:
-    """What ``sync_seed`` did: the Segments' sync, then the Markets', then the Sequences'."""
+class SetupSeedSync:
+    """What ``seed_sync`` did: the Segments' sync, then the Markets', then the Sequences'."""
 
     segments: SegmentSync
     markets: MarketSync
     sequences: SequenceSync
+
+
+@dataclass(frozen=True, slots=True)
+class CheckedSeed:
+    """The seed's Segments (with their definition texts), Markets and Sequences, checked before
+    any transaction (``check_seed``)."""
+
+    segments: tuple[SegmentDef, ...]
+    segment_texts: tuple[str, ...]
+    markets: tuple[MarketDef, ...]
+    sequences: tuple[SequenceDef, ...]
+
+    @property
+    def segment_keys(self) -> frozenset[str]:
+        """This sync's Segment keys."""
+        return frozenset(segment.key for segment in self.segments)
+
+    @property
+    def market_countries(self) -> dict[str, str]:
+        """This sync's Markets, ``{code: country_code}``."""
+        return {market.code: market.country_code for market in self.markets}
+
+
+def check_seed(
+    segments: Sequence[SegmentDef],
+    markets: Sequence[MarketDef],
+    sequences: Sequence[SequenceDef],
+) -> CheckedSeed:
+    """Every check of the seed's three syncs before any transaction; see the module
+    docstring."""
+    chosen_segments, texts = _segment_inputs(segments)
+    chosen_markets = _market_inputs(markets)
+    chosen_sequences = _sequence_inputs(
+        sequences,
+        frozenset(segment.key for segment in chosen_segments),
+        {market.code: market.country_code for market in chosen_markets},
+    )
+    return CheckedSeed(chosen_segments, texts, chosen_markets, chosen_sequences)
+
+
+def log_seed_sync(result: SetupSeedSync) -> None:
+    """Log ``segments_synced``, ``markets_synced`` and ``sequences_synced`` with their
+    counts."""
+    _log_sync(SEGMENTS_SYNCED, result.segments)
+    _log_sync(MARKETS_SYNCED, result.markets)
+    _log_sync(SEQUENCES_SYNCED, result.sequences)
 
 
 def _log_changed(keys: list[str]) -> None:
@@ -474,31 +527,16 @@ class Setup:
         _log_sync(MARKETS_SYNCED, result)
         return result
 
-    @use_case
-    def sync_seed(
-        self,
-        segments: Sequence[SegmentDef],
-        markets: Sequence[MarketDef],
-        sequences: Sequence[SequenceDef],
-    ) -> SeedSync:
-        """Upsert ``segments``, ``markets`` and ``sequences`` in one transaction; see the
-        module docstring."""
-        chosen_segments, texts = _segment_inputs(segments)
-        chosen_markets = _market_inputs(markets)
-        chosen_sequences = _sequence_inputs(
-            sequences,
-            frozenset(segment.key for segment in chosen_segments),
-            {market.code: market.country_code for market in chosen_markets},
-        )
-        now = self._clock.now()
-        with current().transaction():
-            segment_result = _sync_segments(chosen_segments, texts, now)
-            market_result = _sync_markets(chosen_markets, now)
-            sequence_result = _sync_sequences(chosen_sequences, now)
-        _log_sync(SEGMENTS_SYNCED, segment_result)
-        _log_sync(MARKETS_SYNCED, market_result)
-        _log_sync(SEQUENCES_SYNCED, sequence_result)
-        return SeedSync(segment_result, market_result, sequence_result)
+    @command
+    def seed_sync(self, checked: CheckedSeed, now: datetime) -> SetupSeedSync:
+        """Upsert the checked Segments, Markets and Sequences in the caller's transaction; see
+        the module docstring."""
+        if not isinstance(checked, CheckedSeed):
+            raise TypeError(f"seed_sync takes a CheckedSeed, not {type(checked).__name__}")
+        segment_result = _sync_segments(checked.segments, checked.segment_texts, now)
+        market_result = _sync_markets(checked.markets, now)
+        sequence_result = _sync_sequences(checked.sequences, now)
+        return SetupSeedSync(segment_result, market_result, sequence_result)
 
 
 def _log_sync(event: str, result: SegmentSync | MarketSync | SequenceSync) -> None:
@@ -705,7 +743,7 @@ def _sequence_inputs(
     segment_keys: Collection[str],
     market_countries: Mapping[str, str],
 ) -> tuple[SequenceDef, ...]:
-    """``sync_seed``'s Sequence checks before any transaction: the Sequences as validation
+    """``check_seed``'s Sequence checks before any transaction: the Sequences as validation
     returns them from their file form, their angles checked against ``segment_keys`` and
     ``market_countries`` (a Market code to its country code), or ``TypeError``, ``ValueError``
     or ``InvalidSequences``."""

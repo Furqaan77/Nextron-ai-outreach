@@ -1,0 +1,129 @@
+{#- The Approved Company Facts panel (nextron.web.facts_page): rendered inside facts.html, and
+    alone as the answer to POST /facts/add, /facts/edit and /facts/retract, each swapped in for
+    this whole panel. Stored text is escaped with |plain and the source renders with safe_link. -#}
+{%- macro described(form, name) -%}
+id="{{ form.prefix }}-{{ name }}" name="{{ name }}"
+{%- if form.errors.get(name) %} aria-describedby="{{ form.prefix }}-{{ name }}-error" aria-invalid="true"{% endif %}
+{%- endmacro %}
+{%- macro field_error(form, name) -%}
+{%- if form.errors.get(name) %}
+<p class="field-error" id="{{ form.prefix }}-{{ name }}-error">{{ form.errors.get(name)|plain }}</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro text_field(form, name, label, hint=None) %}
+<div class="field">
+<label for="{{ form.prefix }}-{{ name }}">{{ label }}</label>
+<input type="text" {{ described(form, name) }} value="{{ form.values.get(name, '')|plain }}">
+{%- if hint %}
+<p class="hint">{{ hint }}</p>
+{%- endif %}
+{{- field_error(form, name) }}
+</div>
+{%- endmacro %}
+{%- macro text_area(form, name, label, hint=None) %}
+<div class="field">
+<label for="{{ form.prefix }}-{{ name }}">{{ label }}</label>
+<textarea {{ described(form, name) }} rows="3">
+{{ form.values.get(name, '')|plain }}</textarea>
+{%- if hint %}
+<p class="hint">{{ hint }}</p>
+{%- endif %}
+{{- field_error(form, name) }}
+</div>
+{%- endmacro %}
+{%- macro choices(form, name, legend, options) %}
+<fieldset class="fact-choices">
+<legend>{{ legend }}</legend>
+{%- for option in options %}
+<label><input type="checkbox" name="{{ name }}" value="{{ option.id }}" id="{{ form.prefix }}-{{ name }}-{{ option.id }}"
+{%- if option.checked %} checked{% endif %}
+{%- if form.errors.get(name + 's') %} aria-describedby="{{ form.prefix }}-{{ name }}s-error" aria-invalid="true"{% endif %}> {{ option.name|plain }}</label>
+{%- endfor %}
+{{- field_error(form, name + 's') }}
+</fieldset>
+{%- endmacro %}
+{%- macro fact_fields(form) %}
+<div class="field">
+<label for="{{ form.prefix }}-type">Type</label>
+<select {{ described(form, "type") }}>
+<option value=""{% if not form.types|selectattr("selected")|list %} selected{% endif %}>Choose a type</option>
+{%- for option in form.types %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+{{- field_error(form, "type") }}
+</div>
+{{- text_area(form, "wording", "Wording", "The exact claim a Draft may make, at most 500 characters.") }}
+{{- text_field(form, "source_url", "Source", "An http or https link to what backs the claim.") }}
+{{- choices(form, "segment", "Allowed Segments", form.segments) }}
+{{- choices(form, "market", "Allowed Markets", form.markets) }}
+{{- text_field(form, "metric", "Metric", "Optional: a result the client confirmed, at most 200 characters.") }}
+{{- text_field(form, "metric_confirmed_at", "Metric confirmed by the client on", "YYYY-MM-DD; only with a metric.") }}
+{{- text_area(form, "scope_note", "Scope note", "Optional: how far the claim goes, at most 500 characters.") }}
+{{- text_field(form, "last_checked_on", "Last checked on", "YYYY-MM-DD; not in the future.") }}
+{%- endmacro %}
+{%- macro version_details(found) %}
+<dl class="fact-version">
+<dt>Wording</dt><dd>{{ found.wording|plain }}</dd>
+<dt>Type</dt><dd>{{ found.type|plain }}</dd>
+<dt>Source</dt><dd>{{ safe_link(found.source_url) }}</dd>
+<dt>Segments</dt><dd>{{ found.segments|plain }}</dd>
+<dt>Markets</dt><dd>{{ found.markets|plain }}</dd>
+<dt>Metric</dt><dd>{{ found.metric|plain }}</dd>
+<dt>Last checked</dt><dd>{{ found.last_checked_on|plain }}</dd>
+<dt>Version</dt><dd>{{ found.version }}, made by {{ found.made_by|plain }} on {{ found.made_at }}
+{%- if found.retracted_at %}; retracted {{ found.retracted_at }}{% endif %}</dd>
+</dl>
+{%- endmacro -%}
+<div id="facts-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<details class="fact-add"{% if add.open %} open{% endif %}>
+<summary>Add a fact</summary>
+<form method="post" hx-post="/facts/add" hx-target="#facts-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+{{- text_field(add, "fact_id", "Fact id", "Lowercase letters, digits and underscores, starting with a letter; at most 31 characters. Drafts cite it.") }}
+{{- fact_fields(add) }}
+<button type="submit">Add the fact</button>
+</form>
+</details>
+<h2>Facts ({{ facts|length }})</h2>
+{%- if not facts %}
+<p>No facts yet. Run <code>nextron seed sync</code> or add one above.</p>
+{%- endif %}
+{%- for fact in facts %}
+<section class="fact" aria-labelledby="fact-{{ fact.fact_id }}-heading">
+<h3 id="fact-{{ fact.fact_id }}-heading">{{ fact.fact_id }}{% if fact.retracted %} <span class="fact-retracted">Retracted</span>{% endif %}</h3>
+{{- version_details(fact.shown) }}
+<details class="fact-edit"{% if fact.edit.open %} open{% endif %}>
+<summary>Edit {{ fact.fact_id }}</summary>
+<form method="post" hx-post="/facts/edit" hx-target="#facts-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="fact_id" value="{{ fact.fact_id }}">
+<input type="hidden" name="based_on" value="{{ fact.edit.based_on }}">
+{{- fact_fields(fact.edit) }}
+<button type="submit">Save a new version</button>
+</form>
+</details>
+{%- if not fact.retracted %}
+<form method="post" hx-post="/facts/retract" hx-target="#facts-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="fact_id" value="{{ fact.fact_id }}">
+<button type="submit" class="secondary" aria-label="Retract {{ fact.fact_id }}">Retract</button>
+</form>
+{%- endif %}
+{%- if fact.earlier %}
+<details class="fact-earlier">
+<summary>Earlier versions ({{ fact.earlier|length }})</summary>
+{%- for found in fact.earlier %}
+{{- version_details(found) }}
+{%- endfor %}
+</details>
+{%- endif %}
+</section>
+{%- endfor %}
+</div>

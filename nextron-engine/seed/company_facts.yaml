@@ -1,0 +1,102 @@
+# The Approved Company Facts (FR-72, Sales Playbook section 6): the only claims a Draft may make
+# about Nextron, its case studies, its Offer, a regulation or a statistic. Each fact names its
+# type, its exact wording, the source that backs it, the Segments and Markets whose Drafts may
+# cite it, an optional client-confirmed metric (with the date the client confirmed it), an
+# optional scope note (how far the claim goes) and the date it was last checked.
+#
+# The engine refuses a fact that loosens the compliance floor: a regulatory fact applies to one
+# Market; a fact whose wording, scope note or metric names ABA Formal Opinion 512 is allowed only
+# in a US Market, and one naming the SRA notice only in a UK (GB) Market; a metric needs the
+# client's confirmation date; and no date may be in the future. Every Segment and Market a fact
+# names must be in segments.yaml and markets.yaml.
+#
+# `nextron seed sync` loads this file into the database together with segments.yaml,
+# markets.yaml and sequences.yaml (AD-12). A fact is never overwritten: a new one is stored at
+# version 1, and a changed one gets a new version, but only while the latest version is the
+# seed's own. Once the Operator has edited or retracted a fact on the Approved Company Facts page,
+# the Operator's version wins: a changed entry here is reported as a conflict and not loaded. A
+# fact that is stored but no longer listed here is left as it is. The engine must have been
+# started once (nextron serve), so the database exists and is migrated.
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py): mappings and
+# lists indented with spaces, one-line [a, b] lists, 'single' or "double" quoted text, plain
+# text, whole numbers and true/false. Anything else (tabs, anchors, {...}, multi-line text, or
+# a plain value such as yes, no, null, 1.5, a date or a time) is refused with its line number,
+# so the file is never misread. Write dates in quotes ('2026-11-14'), and quote any text that
+# holds ": " or starts with a special character.
+
+company_facts:
+  - fact_id: nextron_team
+    type: company
+    wording: A 17+ person team of engineers, AI specialists and analysts, based in San Jose.
+    source_url: https://nextronai.com/
+    segments: [law_private_ai, ops_automation]
+    markets: [us, uk]
+    last_checked_on: '2026-11-14'
+
+  # The client was a legal-tech venture: never describe this work as "for a law firm".
+  - fact_id: legal_ai
+    type: case_study
+    wording: Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI).
+    source_url: https://nextronai.com/
+    segments: [law_private_ai, ops_automation]
+    markets: [us, uk]
+    scope_note: The client was a legal-tech venture, not a law firm.
+    last_checked_on: '2026-11-14'
+
+  # Wish Wheels is a retail and services business: never present it as distribution experience.
+  - fact_id: wish_wheels
+    type: case_study
+    wording: Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels).
+    source_url: https://nextronai.com/
+    segments: [law_private_ai, ops_automation]
+    markets: [us, uk]
+    scope_note: An automotive retail and services business, not a distributor; don't present it as distribution experience.
+    last_checked_on: '2026-11-14'
+
+  - fact_id: mp_online_digital
+    type: case_study
+    wording: Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital).
+    source_url: https://nextronai.com/
+    segments: [law_private_ai, ops_automation]
+    markets: [us, uk]
+    last_checked_on: '2026-11-14'
+
+  - fact_id: property_3d_sites
+    type: case_study
+    wording: Built immersive 3D property sites with CRM-connected lead capture (Sapphire Farms, Woodland 157).
+    source_url: https://nextronai.com/
+    segments: [law_private_ai, ops_automation]
+    markets: [us, uk]
+    last_checked_on: '2026-11-14'
+
+  # The Offer names no price: prices are still being validated (FR-69), and no Step names one.
+  # Check its source before the first send.
+  - fact_id: audit_offer
+    type: offer
+    wording: 'A fixed-fee Private AI & Workflow Audit, credited in full toward a build.'
+    source_url: https://nextronai.com/
+    segments: [law_private_ai, ops_automation]
+    markets: [us, uk]
+    scope_note: Name the audit only in Reply Drafts, never in a Step; no price until the Offer is validated.
+    last_checked_on: '2026-11-14'
+
+  # US Law-PrivateAI Drafts only. Check the wording against the opinion before the first send.
+  - fact_id: aba_formal_opinion_512
+    type: regulation
+    wording: ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool.
+    source_url: https://www.americanbar.org/content/dam/aba/administrative/professional_responsibility/ethics-opinions/aba-formal-opinion-512.pdf
+    segments: [law_private_ai]
+    markets: [us]
+    scope_note: Its informed-consent point concerns self-learning tools only; it is ethics guidance for US lawyers.
+    last_checked_on: '2026-11-14'
+
+  # UK Law-PrivateAI Drafts only. Check the wording against the notice before the first send.
+  - fact_id: sra_ai_notice
+    type: regulation
+    wording: The Solicitors Regulation Authority (SRA) warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards.
+    source_url: https://www.sra.org.uk/solicitors/guidance/misuse-ai/
+    segments: [law_private_ai]
+    markets: [uk]
+    scope_note: It also acknowledges that firms are building their own AI systems; cite it only for what it says about client data.
+    last_checked_on: '2026-11-14'

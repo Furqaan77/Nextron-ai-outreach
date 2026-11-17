@@ -37,6 +37,7 @@ SHIPPED = main.SEED_DIR / main.SEGMENTS_FILE_NAME
 SHIPPED_TEXT = SHIPPED.read_text(encoding="utf-8")
 SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME  # Story 3.1: the second seed file
 SHIPPED_SEQUENCES = main.SEED_DIR / main.SEQUENCES_FILE_NAME  # Story 4.1: the third seed file
+SHIPPED_FACTS = main.SEED_DIR / main.COMPANY_FACTS_FILE_NAME  # Story 4.3: the fourth
 LATER = DEFAULT_NOW + timedelta(days=3)
 KEYS = ("law_private_ai", "ops_automation")
 
@@ -75,6 +76,7 @@ def seed_dir(tmp_path: Path, text: str | bytes, name: str = "seed") -> Path:
     folder.mkdir()
     (folder / main.MARKETS_FILE_NAME).write_bytes(SHIPPED_MARKETS.read_bytes())
     (folder / main.SEQUENCES_FILE_NAME).write_bytes(SHIPPED_SEQUENCES.read_bytes())
+    (folder / main.COMPANY_FACTS_FILE_NAME).write_bytes(SHIPPED_FACTS.read_bytes())
     path = folder / main.SEGMENTS_FILE_NAME
     if isinstance(text, bytes):
         path.write_bytes(text)
@@ -150,7 +152,20 @@ MARKETS_UNCHANGED = "markets: 0 changed, 2 unchanged\n"
 # Story 4.1: the sequences block follows the markets block
 SEQUENCES_FIRST = "sequences: 1 changed, 0 unchanged\n  default: created (version 1)\n"
 SEQUENCES_UNCHANGED = "sequences: 0 changed, 1 unchanged\n"
-SUMMARY_FIRST = SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST
+# Story 4.3: the company_facts block follows the sequences block
+FACTS_FIRST = (
+    "company_facts: 8 changed, 0 unchanged\n"
+    "  nextron_team: created (version 1)\n"
+    "  legal_ai: created (version 1)\n"
+    "  wish_wheels: created (version 1)\n"
+    "  mp_online_digital: created (version 1)\n"
+    "  property_3d_sites: created (version 1)\n"
+    "  audit_offer: created (version 1)\n"
+    "  aba_formal_opinion_512: created (version 1)\n"
+    "  sra_ai_notice: created (version 1)\n"
+)
+FACTS_UNCHANGED = "company_facts: 0 changed, 8 unchanged\n"
+SUMMARY_FIRST = SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST
 
 
 # The I/O matrix -----------------------------------------------------------------------------------
@@ -186,7 +201,10 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 
     assert (run.code, run.out, run.err) == (
         0,
-        "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED,
+        "segments: 0 changed, 2 unchanged\n"
+        + MARKETS_UNCHANGED
+        + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED,
         "",
     )
     assert table_dump(database) == before
@@ -210,6 +228,7 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
         "segments: 1 changed, 1 unchanged\n  ops_automation: changed (version 1 -> 2)\n"
         + MARKETS_UNCHANGED
         + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED
     )
     law_after, ops_after = segment_rows(database)
     assert law_after == law_before
@@ -224,7 +243,10 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
     # and the next sync of the same file changes nothing
     assert (
         sync(seed_dir(tmp_path, changed, "again")).out
-        == "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+        == "segments: 0 changed, 2 unchanged\n"
+        + MARKETS_UNCHANGED
+        + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED
     )
 
 
@@ -280,10 +302,11 @@ def test_a_stored_segment_not_in_the_file_is_left_as_it_is(
         + "  old_segment: not in seed/segments.yaml, left as it is (version 1)\n"
         + MARKETS_FIRST
         + SEQUENCES_FIRST
+        + FACTS_FIRST
     )
     assert segment_rows(database)[1] == old_row  # law, old, ops by key
-    # 2 Segments, 2 Markets, 1 Sequence
-    assert len(event_rows(database)) == len(events_before) + 5
+    # 2 Segments, 2 Markets, 1 Sequence, 8 Approved Company Facts
+    assert len(event_rows(database)) == len(events_before) + 13
 
 
 @pytest.mark.parametrize(
@@ -613,7 +636,10 @@ def test_a_seed_file_with_a_bom_and_crlf_line_ends_is_read(database: Path, tmp_p
 
     assert (run.code, run.out) == (0, SUMMARY_FIRST)
     assert sync().out == (  # the same
-        "segments: 0 changed, 2 unchanged\n" + MARKETS_UNCHANGED + SEQUENCES_UNCHANGED
+        "segments: 0 changed, 2 unchanged\n"
+        + MARKETS_UNCHANGED
+        + SEQUENCES_UNCHANGED
+        + FACTS_UNCHANGED
     )
 
 

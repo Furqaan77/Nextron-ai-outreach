@@ -78,9 +78,16 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0016_1_19_recovery"
+HEAD = "0017_4_3_company_facts"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
+)
+COMPANY_FACTS_TRIGGERS = frozenset(  # Story 4.3: append-only fact versions
+    {
+        "trg_company_facts_no_delete",
+        "trg_company_facts_no_id_reuse",
+        "trg_company_facts_immutable",
+    }
 )
 
 
@@ -771,19 +778,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0017_next"}], None),
-        ([{"revision": "0017-next"}], "the chain does not load"),
-        ([{"revision": "0017_Next"}], "the id does not match"),
+        ([{"revision": "0018_next"}], None),
+        ([{"revision": "0018-next"}], "the chain does not load"),
+        ([{"revision": "0018_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0018_next"}], "the id starts 0018, but it is revision 17"),
-        ([{"revision": "0017_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0017_next", "file": "0017_other"}], "the id is not its file name"),
-        ([{"revision": "0017_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0017_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0017_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0017_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0019_next"}], "the id starts 0019, but it is revision 18"),
+        ([{"revision": "0018_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0018_next", "file": "0018_other"}], "the id is not its file name"),
+        ([{"revision": "0018_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0018_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0018_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0018_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0017_a"}, {"revision": "0018_b", "down": HEAD}],
+            [{"revision": "0018_a"}, {"revision": "0019_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],
@@ -874,6 +881,21 @@ def events_triggers(engine: Engine) -> set[str]:
 
 def test_the_events_triggers_exist_at_head(db_engine: Engine) -> None:
     assert events_triggers(db_engine) == EVENTS_TRIGGERS
+
+
+def company_facts_triggers(engine: Engine) -> set[str]:
+    with engine.connect() as connection:
+        return {
+            name
+            for (name,) in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = 'company_facts'"
+            )
+        }
+
+
+def test_the_company_facts_triggers_exist_at_head(db_engine: Engine) -> None:
+    assert company_facts_triggers(db_engine) == COMPANY_FACTS_TRIGGERS
 
 
 def test_the_trigger_check_catches_a_batch_rebuild_of_events(db_engine: Engine) -> None:

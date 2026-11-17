@@ -282,7 +282,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0016_1_19_recovery"
+    assert HEAD == "0017_4_3_company_facts"
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
