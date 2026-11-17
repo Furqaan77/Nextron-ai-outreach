@@ -12,8 +12,9 @@ normaliser).
 - ``@command upsert_lead(identity, source) -> UpsertedLead(lead_id, created, merged)``:
 
   1. A wrong type (``identity`` not a ``LeadIdentity``, ``source`` not a ``LeadSource``) raises
-     ``TypeError``; a ``segment_id`` not among ``queries.setup.segments()`` raises
-     ``InvalidLeadIdentity("segment_id", ...)``.
+     ``TypeError``; a ``segment_id`` not among ``queries.setup.segment_ids()`` raises
+     ``InvalidLeadIdentity("segment_id", ...)`` (it reads the ids alone, never decoding a
+     Segment's definition).
   2. Each key that is set is looked up, and ``merged_into`` is followed to the survivor; a
      chain longer than ``MAX_MERGE_CHAIN`` (64) links raises ``RuntimeError``.
   3. No match: a new Lead is inserted (``created_at`` = now, stage ``new``), and
@@ -31,21 +32,66 @@ normaliser).
   Otherwise, in order: ``mark_merged`` sets the loser's ``merged_into`` and clears each key the
   survivor lacks; ``set_keys`` gives those keys to the survivor; and ``LeadsMerged(survivor,
   loser)`` is published, so ``pipeline.reparent_lead`` (and every later owner of Lead-scoped
-  rows) runs in the same transaction. A key the survivor holds with another value stays on the
-  loser, where a lookup still finds it and follows ``merged_into``. The merge itself appends no
+  rows) runs in the same transaction: ``pipeline.reparent_lead``, then
+  ``research.reparent_lead``. A key the survivor holds with another value stays on the loser,
+  where a lookup still finds it and follows ``merged_into``. The merge itself appends no
   ``events`` row: ``merged_into`` is the record. Non-``str`` ids raise ``TypeError``.
+
+**The CSV import (FR-59, Story 2.3).** ``LeadImports(clock, discovery, research,
+email_syntax)`` turns an uploaded CSV into Leads and Contacts; the rules for the file and its
+rows are ``nextron.domain.lead_import``'s.
+
+- ``@use_case run(request: ImportRequest(origin, default_segment, data)) -> ImportSummary``:
+
+  1. **Checks before any write.** ``check_origin`` cleans the origin, then ``check_file_size``
+     refuses an empty file or one over 5 MiB. One transaction reads
+     ``queries.setup.segments()``; a ``default_segment`` key (``None`` for no default) that
+     isn't stored raises ``ImportRefused("default_segment", ...)``. Then ``plan_import`` runs,
+     outside any transaction, with each Segment's casefolded key and name and
+     ``email_syntax.is_valid`` (the ``EmailSyntaxPort``, offline). An ``ImportRefused`` means
+     nothing was written; it is logged as ``lead_import_refused`` with its ``field``.
+  2. **Rows.** ``imported_at`` is the clock's now. The plan's rows run in batches of
+     ``BATCH_ROWS`` (200), each in its own ``uow.transaction()``, so no write lock lasts long.
+     Each row runs ``discovery.upsert_lead(identity, LeadSource.CSV)``: ``created`` counts as
+     imported, otherwise merged (a domain met earlier in the file or already stored). With a
+     Contact, it then runs ``research.add_contact(lead_id, contact, source=csv, detail=origin,
+     retrieved_at=imported_at)``; ``email_dropped`` adds ``NOTE_EMAIL_DROPPED`` to the row.
+  3. **A failing batch** rolls back, and ``ImportStopped(summary, at_row)`` (a
+     ``RuntimeError``) is raised from the error, logged as ``lead_import_stopped`` with
+     ``at_row`` and the error's type. ``summary`` counts only the committed batches and
+     ``at_row`` is the failed batch's first row number. Importing the same file again is safe:
+     its committed rows are merged and their Contacts match.
+
+  ``ImportSummary(imported, merged, rejected, noted)`` holds the two counts, every
+  ``RejectedRow`` of the plan (all of them, even after a stop: they import nothing either way),
+  and a ``NotedRow(number, label, notes)`` for each committed row with notes, both in row
+  order. A finished import logs ``lead_import_finished`` with the four counts. No log line holds
+  a CSV cell, the origin or the file name.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research.api import Research
 from nextron.db.repos.discovery import leads as leads_repo
 from nextron.db.repos.discovery.leads import StoredLead
-from nextron.db.uow import command, current
+from nextron.db.uow import command, current, use_case
+from nextron.domain.contacts import ProvenanceSource
 from nextron.domain.ids import is_ulid
+from nextron.domain.lead_import import (
+    DEFAULT_SEGMENT_UNKNOWN,
+    FIELD_DEFAULT_SEGMENT,
+    NOTE_EMAIL_DROPPED,
+    ImportRefused,
+    RejectedRow,
+    check_file_size,
+    check_origin,
+    plan_import,
+)
 from nextron.domain.leads import (
     KEY_FIELDS,
     InvalidLeadIdentity,
@@ -55,8 +101,12 @@ from nextron.domain.leads import (
 )
 from nextron.domain.notifications import LeadsMerged
 from nextron.ports.clock import Clock
+from nextron.ports.email_syntax import EmailSyntaxPort
 
 MAX_MERGE_CHAIN: Final = 64
+BATCH_ROWS: Final = 200
+
+log = logging.getLogger(__name__)
 
 _LOOKUPS: Final = {
     "web_domain": leads_repo.by_web_domain,
@@ -112,7 +162,7 @@ class Discovery:
             raise TypeError(f"upsert_lead takes a LeadIdentity, not {type(identity).__name__}")
         if not isinstance(source, LeadSource):
             raise TypeError(f"upsert_lead takes a LeadSource, not {type(source).__name__}")
-        if identity.segment_id not in {segment.id for segment in setup_queries.segments()}:
+        if identity.segment_id not in setup_queries.segment_ids():
             raise InvalidLeadIdentity("segment_id", "is not a stored Segment")
         candidate = identity.keys()
         holders = {field: _LOOKUPS[field](value) for field, value in candidate.items()}
@@ -175,3 +225,151 @@ class Discovery:
         leads_repo.mark_merged(loser.id, survivor.id, tuple(moved))
         leads_repo.set_keys(survivor.id, **moved)
         current().publish(LeadsMerged(survivor_lead_id=survivor.id, merged_lead_id=loser.id))
+
+
+# The CSV import ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ImportRequest:
+    """What the import form sent: the list's origin, the default Segment's key (``None`` for no
+    default) and the file's bytes."""
+
+    origin: str
+    default_segment: str | None
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class NotedRow:
+    """An imported row with notes on what it didn't store: its number, label and notes."""
+
+    number: int
+    label: str
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ImportSummary:
+    """What an import did: how many rows created a Lead (``imported``) and how many matched one
+    (``merged``), the rejected rows and the imported rows with notes, in row order."""
+
+    imported: int
+    merged: int
+    rejected: tuple[RejectedRow, ...]
+    noted: tuple[NotedRow, ...]
+
+
+class ImportStopped(RuntimeError):
+    """A batch failed: it was rolled back and the import stopped at ``at_row``; ``summary``
+    counts the batches committed before it."""
+
+    def __init__(self, summary: ImportSummary, at_row: int) -> None:
+        super().__init__(f"the import stopped at row {at_row}; the rows before it were saved")
+        self.summary = summary
+        self.at_row = at_row
+
+
+def _segment_lookup(stored: tuple[setup_queries.SeededSegment, ...]) -> dict[str, str]:
+    """Each Segment's key, then each name, whitespace-collapsed (as the CSV cells are) and
+    casefolded, with its id; a key wins over a name that folds to the same text."""
+    lookup: dict[str, str] = {}
+    for segment in stored:
+        lookup.setdefault(_lookup_key(segment.key), segment.id)
+    for segment in stored:
+        lookup.setdefault(_lookup_key(segment.definition.name), segment.id)
+    return lookup
+
+
+def _lookup_key(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+class LeadImports:
+    """The CSV Lead import; see the module docstring."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        discovery: Discovery,
+        research: Research,
+        email_syntax: EmailSyntaxPort,
+    ) -> None:
+        self._clock = clock
+        self._discovery = discovery
+        self._research = research
+        self._email_syntax = email_syntax
+
+    @use_case
+    def run(self, request: ImportRequest) -> ImportSummary:
+        """Import the CSV in ``request``; see the module docstring."""
+        if not isinstance(request, ImportRequest):
+            raise TypeError(f"run takes an ImportRequest, not {type(request).__name__}")
+        uow = current()
+        try:
+            origin = check_origin(request.origin)
+            check_file_size(request.data)
+            with uow.transaction():
+                stored = setup_queries.segments()
+            default_id: str | None = None
+            if request.default_segment is not None:
+                chosen = [found.id for found in stored if found.key == request.default_segment]
+                if not chosen:
+                    raise ImportRefused(FIELD_DEFAULT_SEGMENT, DEFAULT_SEGMENT_UNKNOWN)
+                default_id = chosen[0]
+            plan = plan_import(
+                request.data,
+                segments=_segment_lookup(stored),
+                default_segment_id=default_id,
+                email_ok=self._email_syntax.is_valid,
+            )
+        except ImportRefused as refused:
+            log.info("lead_import_refused", extra={"field": refused.field})
+            raise
+        imported_at = self._clock.now()
+        imported = merged = 0
+        noted: list[NotedRow] = []
+        for start in range(0, len(plan.rows), BATCH_ROWS):
+            batch = plan.rows[start : start + BATCH_ROWS]
+            created = 0
+            batch_noted: list[NotedRow] = []
+            try:
+                with uow.transaction():
+                    for row in batch:
+                        upserted = self._discovery.upsert_lead(row.identity, LeadSource.CSV)
+                        created += upserted.created
+                        notes = list(row.notes)
+                        if row.contact is not None:
+                            added = self._research.add_contact(
+                                upserted.lead_id,
+                                row.contact,
+                                source=ProvenanceSource.CSV,
+                                detail=origin,
+                                retrieved_at=imported_at,
+                            )
+                            if added.email_dropped:
+                                notes.append(NOTE_EMAIL_DROPPED)
+                        if notes:
+                            batch_noted.append(NotedRow(row.number, row.label, tuple(notes)))
+            except Exception as error:
+                at_row = batch[0].number
+                log.warning(
+                    "lead_import_stopped",
+                    extra={"at_row": at_row, "error": type(error).__name__},
+                )
+                summary = ImportSummary(imported, merged, plan.rejected, tuple(noted))
+                raise ImportStopped(summary, at_row) from error
+            imported += created
+            merged += len(batch) - created
+            noted.extend(batch_noted)
+        summary = ImportSummary(imported, merged, plan.rejected, tuple(noted))
+        log.info(
+            "lead_import_finished",
+            extra={
+                "imported": imported,
+                "merged": merged,
+                "rejected": len(plan.rejected),
+                "noted": len(noted),
+            },
+        )
+        return summary

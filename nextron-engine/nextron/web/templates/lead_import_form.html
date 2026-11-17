@@ -1,0 +1,81 @@
+{#- The CSV import block (nextron.web.lead_import_page): rendered inside lead_import.html, and
+    alone as the answer to POST /leads/import, which HTMX swaps in for this block. A row's
+    label is CSV text: it renders only through untrusted_block. -#}
+{%- from "macros.html" import untrusted_block %}
+{%- macro described(name) -%}
+aria-describedby="hint-{{ name }}{% if errors[name] %} error-{{ name }}{% endif %}"
+{%- if errors[name] %} aria-invalid="true"{% endif %}
+{%- endmacro %}
+{%- macro error(name) %}
+{%- if errors[name] %}
+<p class="field-error" id="error-{{ name }}">{{ errors[name] }}</p>
+{%- endif %}
+{%- endmacro %}
+<div class="lead-import" id="lead-import">
+{%- if summary %}
+<section class="import-summary" aria-labelledby="import-summary-heading">
+<h2 id="import-summary-heading">{% if stopped %}Import stopped{% else %}Import finished{% endif %}</h2>
+{%- if stopped %}
+<p class="notice notice-refused" role="alert">{{ stopped }}</p>
+{%- endif %}
+<p class="import-counts" role="status">Imported: {{ "{:,}".format(summary.imported) }}.
+Merged: {{ "{:,}".format(summary.merged) }}.
+Rejected: {{ "{:,}".format(summary.rejected|length) }}.</p>
+{%- if summary.rejected %}
+<h3>Rejected rows</h3>
+<table class="import-table">
+<thead>
+<tr><th scope="col">Row</th><th scope="col">Organization</th><th scope="col">Reason</th></tr>
+</thead>
+<tbody>
+{%- for row in summary.rejected %}
+<tr><td class="number">{{ row.number }}</td><td>{{ untrusted_block(row.label) }}</td><td>{{ row.reason }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if summary.noted %}
+<h3>Imported rows with notes</h3>
+<table class="import-table">
+<thead>
+<tr><th scope="col">Row</th><th scope="col">Organization</th><th scope="col">Notes</th></tr>
+</thead>
+<tbody>
+{%- for row in summary.noted %}
+<tr><td class="number">{{ row.number }}</td><td>{{ untrusted_block(row.label) }}</td><td>
+{%- for note in row.notes %}{% if not loop.first %}; {% endif %}{{ note }}{% endfor -%}
+</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>
+{%- endif %}
+<form class="lead-import-form" method="post" enctype="multipart/form-data" hx-post="/leads/import" hx-encoding="multipart/form-data" hx-target="#lead-import" hx-swap="outerHTML" hx-disabled-elt="find button">
+{{ csrf_field() }}
+<div class="field">
+<label for="import-origin">Where this list came from</label>
+<input type="text" id="import-origin" name="origin" required minlength="3" maxlength="200" value="{{ origin }}" {{ described("origin") }}>
+<p class="hint" id="hint-origin">3 to 200 characters, stored with every imported Contact and address. For example: Law Society directory, Manchester solicitors, exported 17 November 2026.</p>
+{{- error("origin") }}
+</div>
+<div class="field">
+<label for="import-default-segment">Default Segment</label>
+<select id="import-default-segment" name="default_segment" {{ described("default_segment") }}>
+<option value=""{% if not default_segment %} selected{% endif %}>No default</option>
+{%- for option in segments %}
+<option value="{{ option.key }}"{% if option.key == default_segment %} selected{% endif %}>{{ option.name }}</option>
+{%- endfor %}
+</select>
+<p class="hint" id="hint-default_segment">Used for rows whose Segment column is blank. A row naming a Segment that doesn't exist is rejected.</p>
+{{- error("default_segment") }}
+</div>
+<div class="field">
+<label for="import-file">CSV file</label>
+<input type="file" id="import-file" name="file" accept=".csv,text/csv" required {{ described("file") }}>
+<p class="hint" id="hint-file">UTF-8 CSV, at most 5 MB and 5,000 rows, with a header row. Required columns: organization name, website and country (a two-letter code; UK works). Optional: Segment, contact name, role, email and LinkedIn URL. Other columns are ignored.</p>
+{{- error("file") }}
+</div>
+<button type="submit">Import</button>
+</form>
+</div>

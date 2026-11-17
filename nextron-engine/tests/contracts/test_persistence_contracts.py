@@ -20,6 +20,10 @@
   ``__init__.py`` in the script directory.
 - **Drift.** ``compare_metadata`` between the models and a database at head is empty.
 - **Triggers.** The three ``events`` triggers exist at head (a batch rebuild drops them).
+- **Reparenting.** For every column of a table other than ``leads`` with a foreign key to
+  ``leads.id``, each owner that writes it in ``owners.TABLES`` registers a ``reparent_lead``
+  bound to a class of ``nextron.app.<owner>.api`` for ``LeadsMerged`` in
+  ``main.build_subscribers()``, so a merge never strands a Lead-scoped row on the merged Lead.
 
 The AST checks read the source; their proofs run them on a temporary copy of the tree with a
 probe module (``tests/contracts/support.py``), never on the real tree.
@@ -48,11 +52,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeDecorator
 
+from nextron import main
+from nextron.app.pipeline.api import Pipeline
+from nextron.app.research.api import Research
 from nextron.db.migrations import SCRIPT_LOCATION, alembic_config
 from nextron.db.models import Base, Ulid, UtcDateTime
 from nextron.db.owners import OWNERS, SHARED_WRITERS, TABLES
 from nextron.db.pii_registry import PII, PiiClass
+from nextron.domain.notifications import LeadsMerged
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
+from tests.fakes.clock import FrozenClock
 
 CONFIGURATOR = "nextron/db/engine.py"
 ENGINE_FACTORIES = frozenset(
@@ -69,7 +78,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0011_2_2_leads"
+HEAD = "0012_2_3_contacts_provenance"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -452,6 +461,101 @@ def test_the_coverage_check_names_stale_doubled_and_unknown_entries() -> None:
     ]
 
 
+# Reparenting ----------------------------------------------------------------------------------
+
+LEADS_ID = "leads.id"
+REPARENT = "reparent_lead"
+
+
+def reparenting_owners(subscribers: Sequence[object]) -> set[str]:
+    """The owners whose ``reparent_lead`` is among ``subscribers``: each bound to an instance
+    of a class defined in ``nextron.app.<owner>.api``."""
+    owners = set()
+    for subscriber in subscribers:
+        bound_to = getattr(subscriber, "__self__", None)
+        if getattr(subscriber, "__name__", None) != REPARENT or bound_to is None:
+            continue
+        parts = type(bound_to).__module__.split(".")
+        if len(parts) == 4 and parts[:2] == ["nextron", "app"] and parts[3] == "api":
+            owners.add(parts[2])
+    return owners
+
+
+def reparent_problems(
+    metadata: MetaData,
+    subscribers: Sequence[object],
+    tables: Mapping[str, Mapping[str, Sequence[str]]] = TABLES,
+) -> list[str]:
+    """Each Lead-scoped column whose writer registers no ``reparent_lead`` for
+    ``LeadsMerged``."""
+    registered = reparenting_owners(subscribers)
+    problems = []
+    for table in metadata.tables.values():
+        if table.name == "leads":
+            continue
+        for column in table.columns:
+            if not any(key.target_fullname == LEADS_ID for key in column.foreign_keys):
+                continue
+            name = f"{table.name}.{column.name}"
+            mapping = tables.get(table.name, {})
+            writers = [writer for writer, names in mapping.items() if column.name in names]
+            if not writers:
+                problems.append(f"{name} references {LEADS_ID} but has no writer")
+            for writer in writers:
+                if writer not in registered:
+                    problems.append(
+                        f"{name} references {LEADS_ID}, but {writer} registers no {REPARENT} "
+                        "for LeadsMerged"
+                    )
+    return problems
+
+
+def lead_scoped_columns(metadata: MetaData) -> list[str]:
+    return [
+        f"{table.name}.{column.name}"
+        for table in metadata.tables.values()
+        if table.name != "leads"
+        for column in table.columns
+        if any(key.target_fullname == LEADS_ID for key in column.foreign_keys)
+    ]
+
+
+def test_every_owner_of_a_lead_scoped_row_reparents_it_on_a_merge() -> None:
+    subscribers = main.build_subscribers().subscribers_of(LeadsMerged)
+
+    assert lead_scoped_columns(Base.metadata) == ["contacts.lead_id"]
+    assert reparenting_owners(subscribers) == {"pipeline", "research"}
+    assert reparent_problems(Base.metadata, subscribers) == []
+
+
+def test_the_reparent_check_names_a_table_whose_owner_registers_nothing() -> None:
+    metadata = metadata_copy()
+    Table(
+        "probe_rows",
+        metadata,
+        Column("id", Ulid, primary_key=True),
+        Column("lead_id", Ulid, ForeignKey("leads.id")),
+    )
+    tables = {**TABLES, "probe_rows": {"scoring": ("id", "lead_id")}}
+    subscribers = main.build_subscribers().subscribers_of(LeadsMerged)
+
+    assert reparent_problems(metadata, subscribers, tables) == [
+        "probe_rows.lead_id references leads.id, but scoring registers no reparent_lead for "
+        "LeadsMerged"
+    ]
+
+
+def test_the_reparent_check_names_a_missing_registration() -> None:
+    clock = FrozenClock()
+    # research's other command is no reparent_lead
+    subscribers = [Pipeline(clock).reparent_lead, Research(clock).add_contact]
+
+    assert reparent_problems(Base.metadata, subscribers) == [
+        "contacts.lead_id references leads.id, but research registers no reparent_lead for "
+        "LeadsMerged"
+    ]
+
+
 # Metadata rules -------------------------------------------------------------------------------
 
 
@@ -667,19 +771,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0012_next"}], None),
-        ([{"revision": "0012-next"}], "the chain does not load"),
-        ([{"revision": "0012_Next"}], "the id does not match"),
+        ([{"revision": "0013_next"}], None),
+        ([{"revision": "0013-next"}], "the chain does not load"),
+        ([{"revision": "0013_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0013_next"}], "the id starts 0013, but it is revision 12"),
-        ([{"revision": "0012_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0012_next", "file": "0012_other"}], "the id is not its file name"),
-        ([{"revision": "0012_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0012_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0012_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0012_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0014_next"}], "the id starts 0014, but it is revision 13"),
+        ([{"revision": "0013_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0013_next", "file": "0013_other"}], "the id is not its file name"),
+        ([{"revision": "0013_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0013_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0013_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0013_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0012_a"}, {"revision": "0013_b", "down": HEAD}],
+            [{"revision": "0013_a"}, {"revision": "0014_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],

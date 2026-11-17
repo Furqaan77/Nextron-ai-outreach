@@ -1,17 +1,23 @@
 """``nextron.domain.leads``: ``LeadSource``, ``LeadIdentity`` (each refusal names its field and
-never shows the value) and the two error codes."""
+never shows the value), the two error codes, ``check_name`` and (Story 2.3) the shared
+platforms."""
 
 import dataclasses
 
 import pytest
 
 from nextron.domain.errors import DomainError
+from nextron.domain.identity import registrable_domain
 from nextron.domain.leads import (
     KEY_FIELDS,
+    SHARED_PLATFORM_BRANDS,
+    SHARED_PLATFORM_DOMAINS,
     InvalidLeadIdentity,
     LeadIdentity,
     LeadSource,
     MergeRefused,
+    check_name,
+    is_shared_platform,
 )
 
 SEGMENT = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
@@ -71,9 +77,9 @@ def test_a_name_of_1_to_200_clean_characters_passes(name: str) -> None:
         ({"name": f" {PLANTED}"}, "name"),
         ({"name": f"{PLANTED}\n"}, "name"),
         ({"name": f"{PLANTED}\x00Ltd"}, "name"),
-        ({"name": f"{PLANTED}​Ltd"}, "name"),  # Cf
+        ({"name": f"{PLANTED}\u200bLtd"}, "name"),  # Cf
         ({"name": f"{PLANTED}‮Ltd"}, "name"),  # a bidi override, Cf
-        ({"name": f"{PLANTED} Ltd"}, "name"),  # Zl
+        ({"name": f"{PLANTED}\u2028Ltd"}, "name"),  # Zl
         ({"name": f"{PLANTED} Ltd"}, "name"),  # Zp
         ({"name": None}, "name"),
         ({"name": 7}, "name"),
@@ -123,3 +129,85 @@ def test_merge_refused_carries_its_reason() -> None:
     assert isinstance(error, DomainError)
     assert error.code == "merge_refused"
     assert error.message == error.reason == "the survivor is newer than the Lead to merge"
+
+
+@pytest.mark.parametrize("name", ["Smith Law LLP", "x", "a" * 200])
+def test_check_name_is_the_identity_name_rule(name: str) -> None:
+    check_name(name)
+
+
+@pytest.mark.parametrize("name", ["", " x", "x ", "a" * 201, "a\x00b", "a\u200bb", "a\u2028b", 7])
+def test_check_name_refuses_what_the_identity_refuses(name: object) -> None:
+    with pytest.raises(InvalidLeadIdentity) as caught:
+        check_name(name)
+
+    assert caught.value.field == "name"
+
+
+# Shared platforms ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("domain", sorted(SHARED_PLATFORM_DOMAINS))
+def test_each_listed_domain_is_its_own_registrable_domain(domain: str) -> None:
+    assert registrable_domain("x." + domain) == domain
+    assert is_shared_platform(domain)
+
+
+@pytest.mark.parametrize(
+    "website",
+    [
+        "sites.google.com/view/x",
+        "https://www.google.com/x",
+        "google.co.uk",
+        "https://www.facebook.com/smithlaw",
+        "facebook.co.uk",
+        "m.facebook.com/x",
+        "https://smithlaw.wixsite.com",  # wixsite.com is not, but wix.com is
+        "https://www.wix.com/x",
+        "business.site",
+        "smith-law.business.site",
+        "linktr.ee/smithlaw",
+        "https://www.yelp.com/biz/smith-law",
+        "x.com/smithlaw",
+        "https://solicitors.lawsociety.org.uk/office/1/smith-law",
+        "https://www.sra.org.uk/consumers/register/organisation/?sraNumber=1",
+        "https://chambers.com/law-firm/smith-law-uk-bar-1:1",
+        "https://www.legal500.com/firms/1-smith-law/",
+        "https://uk.trustpilot.com/review/smith-law.co.uk",
+        "https://www.checkatrade.com/trades/smithlaw",
+        "https://find-and-update.company-information.service.gov.uk/company/01234567",
+        "https://opencorporates.com/companies/gb/01234567",
+        "https://www.yellowpages.com/x/smith-law",
+        "https://www.bbb.org/us/x/smith-law",
+        "https://bit.ly/3abc",
+        "https://goo.gl/abc",
+        "https://g.co/kgs/abc",
+        "https://share.google/abc",
+        "tinyurl.com/smithlaw",
+        "https://t.co/abc",
+        "ow.ly/abc",
+        "rebrand.ly/abc",
+        "cutt.ly/abc",
+        "is.gd/abc",
+        "buff.ly/abc",
+    ],
+)
+def test_websites_on_shared_platforms(website: str) -> None:
+    domain = registrable_domain(website)
+    expected = domain != "smithlaw.wixsite.com"
+
+    assert is_shared_platform(domain) is expected
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["smith-law.co.uk", "googlelaw.com", "facebooklaw.co.uk", "x.blogspot.com", "wixlaw.com"],
+)
+def test_an_organizations_own_domain_is_not_a_shared_platform(domain: str) -> None:
+    assert not is_shared_platform(domain)
+
+
+def test_the_brands() -> None:
+    assert SHARED_PLATFORM_BRANDS == {"google", "facebook"}
+    with pytest.raises(TypeError):
+        is_shared_platform(None)  # type: ignore[arg-type]

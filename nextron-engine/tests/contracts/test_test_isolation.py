@@ -137,6 +137,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "ClientFilePort",
         "Clock",
         "ConsentListener",
+        "EmailSyntaxPort",
         "GoogleOAuthPort",
         "LlmPort",
         "MailPort",
@@ -409,6 +410,7 @@ def test_every_adapter_package_is_classified_once() -> None:
         "backup_target",
         "clock",
         "crypto",
+        "email_syntax",
         "google_oauth",
         "secrets",
         "sink",
@@ -438,7 +440,16 @@ def test_the_ai_package_is_guarded_and_a_gateway_reaches_no_claude_api() -> None
 
 
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
-    names = ("ai", "backup_target", "clock", "crypto", "google_oauth", "secrets", "sink")
+    names = (
+        "ai",
+        "backup_target",
+        "clock",
+        "crypto",
+        "email_syntax",
+        "google_oauth",
+        "secrets",
+        "sink",
+    )
     for name in (*names, "telegram", "gmail"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "__init__.py").write_text("")
@@ -448,6 +459,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "nextron.adapters.backup_target": package_modules("nextron.adapters.backup_target"),
         "nextron.adapters.clock": package_modules("nextron.adapters.clock"),
         "nextron.adapters.crypto": package_modules("nextron.adapters.crypto"),
+        "nextron.adapters.email_syntax": package_modules("nextron.adapters.email_syntax"),
         "nextron.adapters.google_oauth": package_modules("nextron.adapters.google_oauth"),
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),
