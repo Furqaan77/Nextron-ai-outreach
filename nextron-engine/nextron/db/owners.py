@@ -304,6 +304,15 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "footer_snapshots": {
         "drafting": ("id", "market_id", "sha256", "text", "created_at"),
     },
+    "unsub_tokens": {
+        "compliance": (
+            "id",
+            "token_hash",
+            "om_id",
+            "kid",
+            "issued_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

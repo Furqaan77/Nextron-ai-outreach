@@ -21,7 +21,7 @@ from nextron.db.models import (
     setup,
 )
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
-from nextron.db.models.compliance import SuppressionEntryRecord
+from nextron.db.models.compliance import SuppressionEntryRecord, UnsubTokenRecord
 from nextron.db.models.crawl import AtsLinkRecord, CrawledPageRecord, CrawlRunRecord
 from nextron.db.models.drafting import FooterSnapshotRecord
 from nextron.db.models.events import EventRecord
@@ -86,6 +86,7 @@ __all__ = [
     "StepBriefRecord",
     "SuppressionEntryRecord",
     "Ulid",
+    "UnsubTokenRecord",
     "UtcDateTime",
     "VariantRecord",
     "compliance",

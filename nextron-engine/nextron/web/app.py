@@ -37,7 +37,15 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   and ``POST /credentials/remove`` (``credential_remove``): the write-only Credentials page and
   its per-row save and two-step remove, the POSTs ``@personal_data(False)``; see
   ``nextron.web.credentials_page``. They go through ``credentials`` (``Credentials``), which
-  touches no database, so the POSTs open no unit of work.
+  touches no database, so the POSTs open no unit of work. The page's "Unsubscribe token keys"
+  section (Story 3.8) reads the ``unsub_active_kid`` setting and the newest token of each kid in
+  the GET's read-only unit of work, after every other Credential Manager read of the page, so
+  only its own keys' reads run inside the read transaction.
+- ``POST /credentials/unsub/save`` (``unsub_key_save``) and ``POST /credentials/unsub/remove``
+  (``unsub_key_remove``), both ``@personal_data(False)``: the unsubscribe token keys' per-row
+  save and two-step remove (Story 3.8), each running its ``Credentials`` call inside
+  ``units.open(read_only=True)``, so the newest token is read before any keyring write; see
+  ``nextron.web.credentials_page``.
 - ``POST /credentials/google/client`` (``google_client_import``), ``POST
   /credentials/google/grant`` (``google_grant_start``), ``GET /credentials/google/grant/{grant}``
   (``google_grant_row``) and ``POST /credentials/google/remove`` (``google_grant_remove``): the
@@ -201,6 +209,7 @@ from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
+from nextron.domain.unsub_token import UnsubKeyInUse
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import facts_page as fact_rows
@@ -683,13 +692,18 @@ def create_app(
     def credentials_page(request: Request) -> HTMLResponse:
         rows = credential_rows.page_rows(credentials.statuses())
         client = google.client_status()
+        google_section = google_rows.grant_rows(google.grant_statuses(), client)
+        # last: its database read begins the read transaction, so every Credential Manager read
+        # but its own unsubscribe keys' runs before it
+        unsub_groups = credential_rows.unsub_groups(credentials.unsub_keys())
         return page(
             request,
             credential_rows.PAGE_TEMPLATE,
             rows=rows,
+            unsub_groups=unsub_groups,
             env=env,
             client=google_rows.client_row(client),
-            google_rows=google_rows.grant_rows(google.grant_statuses(), client),
+            google_rows=google_section,
         )
 
     @app.post("/credentials/save", name="credential_save")
@@ -728,6 +742,59 @@ def create_app(
         return row_answer(
             request, credential_rows.credential_row(status, notice=credential_rows.removed())
         )
+
+    def unsub_row_answer(
+        request: Request,
+        kid: int,
+        key: str,
+        *,
+        notice: credential_rows.Notice | None = None,
+        confirming: bool = False,
+    ) -> HTMLResponse:
+        # 200, so HTMX swaps the row in, showing what Credential Manager holds now
+        status = credentials.unsub_key_status(kid, key)
+        row = credential_rows.unsub_key_row(status, notice=notice, confirming=confirming)
+        return page(request, credential_rows.UNSUB_ROW_TEMPLATE, row=row)
+
+    @app.post("/credentials/unsub/save", name="unsub_key_save")
+    @personal_data(False)
+    def unsub_key_save(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        kid, key, text = credential_rows.submitted_unsub_save(fields)
+        try:
+            with units.open(read_only=True):
+                status = credentials.save_unsub_key(kid, key, text)
+        except InvalidCredentialValue as refused:  # nothing was written; the field is empty
+            return unsub_row_answer(
+                request, kid, key, notice=credential_rows.refused(refused.reason)
+            )
+        except UnsubKeyInUse as in_use:
+            return unsub_row_answer(request, kid, key, notice=credential_rows.refused(str(in_use)))
+        except CredentialStoreFailed:
+            return unsub_row_answer(request, kid, key, notice=credential_rows.store_failed())
+        row = credential_rows.unsub_key_row(status, notice=credential_rows.saved())
+        return page(request, credential_rows.UNSUB_ROW_TEMPLATE, row=row)
+
+    @app.post("/credentials/unsub/remove", name="unsub_key_remove")
+    @personal_data(False)
+    def unsub_key_remove(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        kid, key, confirmed = credential_rows.submitted_unsub_remove(fields)
+        if not confirmed:  # the first click only asks; nothing is deleted
+            return unsub_row_answer(request, kid, key, confirming=True)
+        try:
+            with units.open(read_only=True):
+                status = credentials.remove_unsub_key(kid, key)
+        except UnsubKeyInUse as in_use:
+            return unsub_row_answer(
+                request, kid, key, notice=credential_rows.not_removed(str(in_use))
+            )
+        except CredentialStoreFailed:
+            return unsub_row_answer(request, kid, key, notice=credential_rows.store_failed())
+        row = credential_rows.unsub_key_row(status, notice=credential_rows.removed())
+        return page(request, credential_rows.UNSUB_ROW_TEMPLATE, row=row)
 
     def client_answer(request: Request, row: google_rows.ClientRow) -> HTMLResponse:
         return page(request, google_rows.CLIENT_ROW_TEMPLATE, client=row)

@@ -1,28 +1,33 @@
 """The Credentials page (AD-12, FR-56, NFR-18, UX-DR27) through ``Dashboard``, with the HTML
 parsed: the Panel, Save, Replace, Refused, Remove, Store fails, Malformed and Unchecked rows, the
-form rules, the Settings link and the wiring in ``main.build_app``."""
+form rules, the Settings link and the wiring in ``main.build_app``; and its Unsubscribe token
+keys section (Story 3.8): the listing, Save key, Bad key, Remove in use, Remove retired, the
+refusals, a store failure, malformed forms and the read-only unit each POST runs in."""
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import pytest
+from fastapi.routing import APIRoute
 
 from nextron import main
 from nextron.bootstrap import load_bootstrap
-from nextron.db.uow import UnitOfWorkFactory
+from nextron.db.uow import UnitOfWorkFactory, current, in_transaction
 from nextron.web.credentials_page import STORE_FAILED
 from nextron.web.csrf import SECURITY_CHECK_FAILED
 from nextron.web.forms import MALFORMED_FORM, REPEATED_FIELD, WRONG_FIELDS
+from nextron.web.routing import PERSONAL_DATA_ATTRIBUTE
 from tests.asgi import Reply
 from tests.dashboard import FORM, Dashboard, form
 from tests.fakes.clock import FrozenClock
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
+from tests.migration_chains import run_sql
 from tests.unit.test_credentials import TABLE
 
 T = datetime(2026, 11, 17, 9, 30, 0, tzinfo=UTC)
@@ -43,6 +48,7 @@ DECLINE = (
 )
 UNREADABLE = "Unknown: Windows Credential Manager could not be read"
 VOID = frozenset({"input", "meta", "link", "br", "img"})
+UNSUB_ROW = "unsub-key-"
 
 
 # Parsing the page ------------------------------------------------------------------------------
@@ -79,6 +85,8 @@ class Page(HTMLParser):
         row = parent.row if parent else None
         if tag == "div" and values.get("class") == "credential":
             row = (values.get("id") or "").removeprefix("credential-")
+        elif tag == "div" and values.get("class") == "credential unsub-key":
+            row = values.get("id")  # unsub-key-<kid>-<key>
         form_index = parent.form if parent else None
         if tag == "form":
             form_index = len(self.forms)
@@ -133,8 +141,18 @@ class Page(HTMLParser):
 
     @property
     def credential_forms(self) -> list[Element]:
-        """The forms of the credential rows; the Google section's forms aside."""
-        return [form_ for form_ in self.forms if form_.row is not None]
+        """The forms of the credential rows; the Google section's and the unsubscribe keys'
+        forms aside."""
+        return [
+            form_
+            for form_ in self.forms
+            if form_.row is not None and not form_.row.startswith(UNSUB_ROW)
+        ]
+
+    @property
+    def unsub_rows(self) -> list[str]:
+        """The ids of the unsubscribe token key rows, in page order."""
+        return [str(e.row) for e in self.find("div", class_="credential unsub-key")]
 
     def inside(self, form_: Element, tag: str) -> list[Element]:
         index = self.forms.index(form_)
@@ -165,8 +183,11 @@ def clock() -> FrozenClock:
 
 
 @pytest.fixture
-def dashboard(secrets: InMemorySecrets, clock: FrozenClock) -> Dashboard:
-    return Dashboard(secrets=secrets, clock=clock)
+def dashboard(
+    secrets: InMemorySecrets, clock: FrozenClock, units: UnitOfWorkFactory
+) -> Dashboard:
+    # real units of work: the page's Unsubscribe token keys section reads the database
+    return Dashboard(secrets=secrets, clock=clock, units=units)
 
 
 @pytest.fixture
@@ -350,8 +371,10 @@ def test_the_page_extends_the_layout_and_links_back_to_settings(
 
 
 @pytest.mark.parametrize("env", ["dev", "test", "prod"])
-def test_the_page_names_the_environment_its_values_are_stored_for(env: str) -> None:
-    dashboard = Dashboard(env=env)
+def test_the_page_names_the_environment_its_values_are_stored_for(
+    env: str, units: UnitOfWorkFactory
+) -> None:
+    dashboard = Dashboard(env=env, units=units)
 
     _, page = credentials_page(dashboard, dashboard.open_session())
 
@@ -404,7 +427,13 @@ def test_each_save_form_has_an_empty_password_field_without_maxlength_and_its_hi
     _, page = credentials_page(dashboard, session[0])
 
     passwords = page.find("input", type="password")
-    assert [element.row for element in passwords] == KEYS
+    assert [element.row for element in passwords] == [
+        *KEYS,  # then the unsubscribe token keys of key ids 1 (active) and 2 (next)
+        "unsub-key-1-k_tok",
+        "unsub-key-1-k_edge",
+        "unsub-key-2-k_tok",
+        "unsub-key-2-k_edge",
+    ]
     for key in KEYS:
         assert_value_field_is_empty(page, key)
         [label] = page.find("label", row=key)
@@ -874,3 +903,357 @@ def test_build_app_uses_injected_secrets_for_the_credentials(
 
     names = {getattr(route, "name", None) for route in app.routes}
     assert {"credentials_page", "credential_save", "credential_remove"} <= names
+
+
+# Unsubscribe token keys (Story 3.8) ---------------------------------------------------------------
+
+KEY_TEXT = "QZXUNSUBKEY" + "A" * 31 + "Q"  # 43 base64url characters: a 32-byte key
+OTHER_KEY = "QZXOTHERKEY" + "B" * 31 + "Q"
+THIRD_KEY = "QZXTHIRDKEY" + "C" * 31 + "Q"
+UNSUB_HINT = (
+    "A 32-byte key in base64url: 43 characters of A-Z, a-z, 0-9, - and _ (or 44 ending in =). "
+    "Spaces at either end are dropped. The value is never shown."
+)
+NOT_A_KEY = (
+    "Nothing was saved: enter a 32-byte key in base64url: 43 characters of A-Z, a-z, 0-9, - "
+    "and _ (or 44 ending in =)."
+)
+IN_USE = "Key 1 still has tokens under 2 years old"
+
+
+def unsub_post(
+    dashboard: Dashboard, session: tuple[bytes, str], path: str, **values: str
+) -> Reply:
+    return post(dashboard, session, f"/credentials/unsub/{path}", fields(session[1], **values))
+
+
+def unsub_row(reply: Reply, row_id: str) -> Page:
+    """The answer to an unsubscribe-key POST: 200, no-store, and the row alone."""
+    assert reply.status == 200, reply
+    assert reply.header(b"cache-control") == b"no-store"
+    assert reply.text.startswith(f'<div class="credential unsub-key" id="{row_id}">')
+    assert "<html" not in reply.text
+    page = Page(reply.text)
+    assert page.unsub_rows == [row_id]
+    return page
+
+
+def record_token(units: UnitOfWorkFactory, kid: int, issued_at: datetime, n: int = 0) -> None:
+    """An ``unsub_tokens`` row issued at ``issued_at`` under ``kid``."""
+    assert units.engine.url.database
+    stamp = issued_at.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    run_sql(
+        Path(units.engine.url.database),
+        "INSERT INTO unsub_tokens (id, token_hash, om_id, kid, issued_at) VALUES "
+        f"('01JD3QZ8X5V9K2M7N4P6R8T0{n:02d}', '{n:064x}', '01JD3QZ8X5V9K2M7N4P6R8T1{n:02d}', "
+        f"{kid}, '{stamp}')",
+    )
+
+
+def test_the_section_lists_the_active_and_next_key_ids_with_each_key_not_set(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    _, page = credentials_page(dashboard, session[0])
+
+    assert page.texts("h2", id="unsub-keys-heading") == ["Unsubscribe token keys"]
+    assert page.texts("h3")[:2] == ["Key id 1", "Key id 2"]
+    roles = page.texts("p", class_="unsub-kid-role")
+    assert roles == [
+        "active: new unsubscribe links use this key id; no tokens yet.",
+        "next: enter its keys here and in the Worker before switching Unsubscribe token key id "
+        "(Settings, Sending) to it; no tokens yet.",
+    ]
+    [escrow] = page.texts("p", class_="unsub-escrow")
+    assert escrow.startswith("Escrow every k_tok: keep a copy off this PC")
+    [worker] = page.texts("p", class_="unsub-worker")
+    assert worker.startswith("Put every k_edge in the unsubscribe Worker too, as the secret "
+                             "K_EDGE_<kid> (K_EDGE_1 for key id 1).")  # fmt: skip
+    assert page.unsub_rows == [
+        "unsub-key-1-k_tok",
+        "unsub-key-1-k_edge",
+        "unsub-key-2-k_tok",
+        "unsub-key-2-k_edge",
+    ]
+    for row_id in page.unsub_rows:
+        kid, key = row_id.removeprefix(UNSUB_ROW).split("-")
+        assert page.state(row_id) == "Not set"
+        [save_form] = page.row_forms(row_id)  # no Remove while not set
+        assert {name: save_form.attrs.get(name) for name in ("method", "hx-post", "hx-target")} == {
+            "method": "post",
+            "hx-post": "/credentials/unsub/save",
+            "hx-target": f"#{row_id}",
+        }
+        assert page.hidden(save_form) == {"csrf_token": session[1], "kid": kid, "key": key}
+        [value_input] = page.find("input", row=row_id, name="value")
+        assert value_input.attrs == {
+            "type": "password",
+            "id": f"value-{row_id}",
+            "name": "value",
+            "autocomplete": "new-password",
+            "aria-describedby": f"hint-{row_id}",
+        }
+        assert page.texts("p", row=row_id, id=f"hint-{row_id}") == [UNSUB_HINT]
+
+
+def test_saving_a_key_stores_its_canonical_text_and_answers_with_the_row(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets
+) -> None:
+    reply = unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=f" {KEY_TEXT}= ")
+
+    page = unsub_row(reply, "unsub-key-1-k_tok")
+    assert page.state("unsub-key-1-k_tok") == "Set, last updated 2026-11-17 09:30 UTC"
+    assert page.notices("unsub-key-1-k_tok") == [("status", "Saved.")]
+    assert KEY_TEXT not in reply.text
+    assert stored(secrets)["unsub/k_tok/1"] == KEY_TEXT
+    assert stored(secrets)["meta/unsub/k_tok/1"] == "2026-11-17T09:30:00.000000Z"
+    [remove_form] = page.row_forms("unsub-key-1-k_tok")[1:]
+    assert remove_form.attrs["hx-post"] == "/credentials/unsub/remove"
+    assert page.hidden(remove_form) == {"csrf_token": session[1], "kid": "1", "key": "k_tok"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "QZXSHORTKEY" + "A" * 30,  # 41 characters: 31 bytes
+        "QZX+STD/KEY" + "A" * 31 + "Q",  # standard base64
+        "QZXSPACE KEY" + "A" * 30 + "Q",  # a space inside
+    ],
+    ids=["31_bytes", "standard_base64", "space_inside"],
+)
+def test_a_bad_key_is_refused_with_200_and_nothing_is_stored(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets, value: str
+) -> None:
+    reply = unsub_post(dashboard, session, "save", kid="2", key="k_edge", value=value)
+
+    page = unsub_row(reply, "unsub-key-2-k_edge")
+    assert page.notices("unsub-key-2-k_edge") == [("alert", NOT_A_KEY)]
+    assert page.state("unsub-key-2-k_edge") == "Not set"
+    assert value not in reply.text
+    assert [name for name in stored(secrets) if name.startswith("unsub/")] == []
+
+
+def test_removing_a_key_in_use_asks_then_is_refused_and_deletes_nothing(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    secrets: InMemorySecrets,
+    units: UnitOfWorkFactory,
+) -> None:
+    unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=KEY_TEXT)
+    unsub_post(dashboard, session, "save", kid="1", key="k_edge", value=OTHER_KEY)
+    record_token(units, 1, T - timedelta(days=365))
+
+    asked = unsub_row(
+        unsub_post(dashboard, session, "remove", kid="1", key="k_tok"), "unsub-key-1-k_tok"
+    )
+    assert asked.notices("unsub-key-1-k_tok") == [
+        ("alert", "Remove the Token encryption key (k_tok) of key id 1 from Windows Credential "
+                  "Manager?"),
+    ]  # fmt: skip
+    [confirm_form] = asked.row_forms("unsub-key-1-k_tok")
+    assert asked.hidden(confirm_form) == {
+        "csrf_token": session[1],
+        "kid": "1",
+        "key": "k_tok",
+        "confirm": "yes",
+    }
+    refused = unsub_post(dashboard, session, "remove", kid="1", key="k_tok", confirm="yes")
+
+    page = unsub_row(refused, "unsub-key-1-k_tok")
+    assert page.notices("unsub-key-1-k_tok") == [("alert", f"Nothing was removed: {IN_USE}.")]
+    assert stored(secrets)["unsub/k_tok/1"] == KEY_TEXT
+    replaced = unsub_post(dashboard, session, "save", kid="1", key="k_edge", value=THIRD_KEY)
+    assert unsub_row(replaced, "unsub-key-1-k_edge").notices("unsub-key-1-k_edge") == [
+        ("alert", f"Nothing was saved: {IN_USE}.")
+    ]
+    assert stored(secrets)["unsub/k_edge/1"] == OTHER_KEY
+    _, listing = credentials_page(dashboard, session[0])
+    assert listing.texts("p", class_="unsub-kid-role")[0] == (
+        "active: new unsubscribe links use this key id; newest token 2025-11-17 09:30 UTC."
+    )
+
+
+def test_removing_a_retired_key_deletes_it_and_its_time(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    secrets: InMemorySecrets,
+    units: UnitOfWorkFactory,
+) -> None:
+    unsub_post(dashboard, session, "save", kid="3", key="k_tok", value=KEY_TEXT)
+    record_token(units, 3, T - timedelta(days=732))
+
+    reply = unsub_post(dashboard, session, "remove", kid="3", key="k_tok", confirm="yes")
+
+    page = unsub_row(reply, "unsub-key-3-k_tok")
+    assert page.notices("unsub-key-3-k_tok") == [("status", "Removed.")]
+    assert page.state("unsub-key-3-k_tok") == "Not set"
+    assert "unsub/k_tok/3" not in stored(secrets)
+    assert "meta/unsub/k_tok/3" not in stored(secrets)
+    _, listing = credentials_page(dashboard, session[0])
+    assert listing.texts("h3")[:4] == ["Key id 1", "Key id 2", "Key id 3", "Google Desktop client"]
+    assert listing.texts("p", class_="unsub-kid-role")[2] == (
+        "retired: every link is 2 years old or more; newest token 2024-11-15 09:30 UTC."
+    )
+
+
+def test_a_store_failure_answers_with_the_alert_and_the_row_as_stored_now(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets
+) -> None:
+    secrets.failing.add("write")
+
+    reply = unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=KEY_TEXT)
+
+    page = unsub_row(reply, "unsub-key-1-k_tok")
+    assert page.notices("unsub-key-1-k_tok") == [("alert", STORE_FAILED)]
+    assert page.state("unsub-key-1-k_tok") == "Not set"
+
+
+def test_saving_the_other_keys_value_is_refused_with_200(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets
+) -> None:
+    unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=KEY_TEXT)
+
+    reply = unsub_post(dashboard, session, "save", kid="1", key="k_edge", value=KEY_TEXT + "=")
+
+    page = unsub_row(reply, "unsub-key-1-k_edge")
+    assert page.notices("unsub-key-1-k_edge") == [
+        ("alert", "Nothing was saved: k_tok and k_edge of a key id must differ.")
+    ]
+    assert "unsub/k_edge/1" not in stored(secrets)
+
+
+def test_a_failed_unsubscribe_key_remove_shows_the_alert_and_the_row_as_stored_now(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets
+) -> None:
+    unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=KEY_TEXT)
+    secrets.failing = {"delete"}
+
+    reply = unsub_post(dashboard, session, "remove", kid="1", key="k_tok", confirm="yes")
+
+    page = unsub_row(reply, "unsub-key-1-k_tok")
+    assert page.notices("unsub-key-1-k_tok") == [("alert", STORE_FAILED)]
+    assert page.state("unsub-key-1-k_tok") == "Set, last updated 2026-11-17 09:30 UTC"
+    assert stored(secrets)["unsub/k_tok/1"] == KEY_TEXT
+
+
+def test_a_failing_read_shows_every_unsubscribe_row_as_unknown(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets
+) -> None:
+    unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=KEY_TEXT)
+    secrets.failing = {"read"}
+
+    _, page = credentials_page(dashboard, session[0])
+
+    assert [page.state(row_id) for row_id in page.unsub_rows] == [UNREADABLE] * 4
+    assert [len(page.row_forms(row_id)) for row_id in page.unsub_rows] == [1] * 4  # Save only
+
+
+def test_the_page_reads_only_the_unsubscribe_keys_inside_the_read_transaction(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    reads: list[tuple[str, bool]] = []
+    real_read = secrets.read
+
+    def recording_read(name: str) -> str | None:
+        reads.append((name, in_transaction()))
+        return real_read(name)
+
+    monkeypatch.setattr(secrets, "read", recording_read)
+
+    credentials_page(dashboard, session[0])
+
+    keys = ("unsub/k_tok/", "unsub/k_edge/", "meta/unsub/k_")  # the unsubscribe keys' entries
+    inside = [name for name, held in reads if held]
+    assert inside and all(name.startswith(keys) for name in inside)
+    assert [name for name, held in reads if not held and name.startswith(keys)] == []
+    assert reads[-len(inside):] == [(name, True) for name in inside]  # the reads come last
+    assert any(name.startswith("google/") for name, held in reads if not held)
+
+
+def test_a_stored_value_that_is_no_key_says_so(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets
+) -> None:
+    secrets.store[(SERVICE, "unsub/k_edge/1")] = "QZXGARBLED"
+
+    _, page = credentials_page(dashboard, session[0])
+
+    assert page.state("unsub-key-1-k_edge") == (
+        "Set, but not a 32-byte base64url key: enter it again"
+    )
+    assert "QZXGARBLED" not in page.texts("div", class_="credential unsub-key")[1]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"kid": "1", "key": "k_tok"},  # no value
+        {"kid": "1", "key": "k_tok", "value": KEY_TEXT, "credential": "hunter"},
+        {"kid": "0", "key": "k_tok", "value": KEY_TEXT},
+        {"kid": "256", "key": "k_tok", "value": KEY_TEXT},
+        {"kid": "01", "key": "k_tok", "value": KEY_TEXT},
+        {"kid": "1a", "key": "k_tok", "value": KEY_TEXT},
+        {"kid": "1000", "key": "k_tok", "value": KEY_TEXT},
+        {"kid": "1", "key": "k_other", "value": KEY_TEXT},
+        {"kid": "1", "key": "bearer", "value": KEY_TEXT},
+    ],
+    ids=range(9),
+)
+def test_a_malformed_save_is_refused_with_400(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets,
+    values: dict[str, str],
+) -> None:  # fmt: skip
+    reply = unsub_post(dashboard, session, "save", **values)
+
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert changes(secrets) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "kid=1&key=k_tok&confirm=no",
+        "kid=1&key=k_tok&kid=2",
+        "kid=1&key=k_tok&key=k_edge",
+        "kid=1",
+        "kid=1&key=k_tok&value=x",
+        "kid=-1&key=k_tok",
+    ],
+)
+def test_a_malformed_remove_is_refused_with_400(
+    dashboard: Dashboard, session: tuple[bytes, str], secrets: InMemorySecrets, body: str
+) -> None:
+    raw = f"csrf_token={session[1]}&{body}".encode()
+
+    reply = post(dashboard, session, "/credentials/unsub/remove", raw)
+
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert changes(secrets) == []
+
+
+def test_both_posts_run_the_service_inside_a_read_only_unit_of_work(
+    dashboard: Dashboard, session: tuple[bytes, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[bool] = []
+    for name in ("save_unsub_key", "remove_unsub_key"):
+        real = getattr(dashboard.credentials, name)
+
+        def spying(*args: Any, real: Any = real) -> Any:
+            seen.append(current().read_only)
+            return real(*args)
+
+        monkeypatch.setattr(dashboard.credentials, name, spying)
+
+    unsub_post(dashboard, session, "save", kid="4", key="k_tok", value=KEY_TEXT)
+    unsub_post(dashboard, session, "remove", kid="4", key="k_tok", confirm="yes")
+
+    assert seen == [True, True]
+
+
+def test_the_unsubscribe_key_posts_declare_no_personal_data(dashboard: Dashboard) -> None:
+    declared = {
+        getattr(route, "name", None): getattr(route.endpoint, PERSONAL_DATA_ATTRIBUTE, None)
+        for route in dashboard.app.routes
+        if isinstance(route, APIRoute)
+    }
+
+    assert (declared["unsub_key_save"], declared["unsub_key_remove"]) == (False, False)

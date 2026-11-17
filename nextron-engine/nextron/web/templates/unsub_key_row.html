@@ -1,0 +1,39 @@
+{#- One unsubscribe token key's row (nextron.web.credentials_page, Story 3.8): rendered inside
+    credentials.html, and alone as the answer to POST /credentials/unsub/save and
+    /credentials/unsub/remove, which HTMX swaps in for this row. It never holds a key's value. -#}
+<div class="credential unsub-key" id="{{ row.row_id }}">
+<h4>{{ row.label }}, key id {{ row.kid }}</h4>
+<p class="credential-state">{{ row.state }}</p>
+{%- if row.notice %}
+<p class="notice{% if row.notice.role == 'alert' %} notice-refused{% endif %}" role="{{ row.notice.role }}">{{ row.notice.text }}</p>
+{%- endif %}
+{%- if row.confirming %}
+<p class="notice notice-refused" role="alert">Remove the {{ row.label }} of key id {{ row.kid }} from Windows Credential Manager?</p>
+<form class="credential-actions" method="post" hx-post="/credentials/unsub/remove" hx-target="#{{ row.row_id }}" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="kid" value="{{ row.kid }}">
+<input type="hidden" name="key" value="{{ row.key }}">
+<input type="hidden" name="confirm" value="yes">
+<button type="submit">Yes, remove it</button>
+<a href="/credentials">Cancel</a>
+</form>
+{%- else %}
+<form method="post" hx-post="/credentials/unsub/save" hx-target="#{{ row.row_id }}" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="kid" value="{{ row.kid }}">
+<input type="hidden" name="key" value="{{ row.key }}">
+<label for="value-{{ row.row_id }}">New value for {{ row.label }}, key id {{ row.kid }}</label>
+<input type="password" id="value-{{ row.row_id }}" name="value" autocomplete="new-password" aria-describedby="hint-{{ row.row_id }}">
+<p class="hint" id="hint-{{ row.row_id }}">A 32-byte key in base64url: 43 characters of A-Z, a-z, 0-9, - and _ (or 44 ending in =). Spaces at either end are dropped. The value is never shown.</p>
+<button type="submit">Save</button>
+</form>
+{%- if row.removable %}
+<form class="credential-actions" method="post" hx-post="/credentials/unsub/remove" hx-target="#{{ row.row_id }}" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="kid" value="{{ row.kid }}">
+<input type="hidden" name="key" value="{{ row.key }}">
+<button type="submit" class="secondary">Remove</button>
+</form>
+{%- endif %}
+{%- endif %}
+</div>

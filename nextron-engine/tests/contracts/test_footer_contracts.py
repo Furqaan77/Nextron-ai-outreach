@@ -10,7 +10,11 @@ of a text lowercased with every run of characters other than ``a-z0-9`` read as 
   default, except ``us_solicitation_label`` (it only adds a line). The Footer and booking
   settings are exactly ``FOOTER_SETTING_KEYS``, in that order.
 - **(b) No other setting names the footer.** No declared setting outside
-  ``FOOTER_SETTING_KEYS`` holds one of ``FOOTER_WORDS`` in its key or label.
+  ``FOOTER_SETTING_KEYS`` holds one of ``FOOTER_WORDS`` in its key or label. The one exception,
+  ``NAMED_NOT_FOOTER``, is ``unsub_active_kid`` ("Unsubscribe token key id", Story 3.8): the
+  integer id, 1 to 255, of the unsubscribe token keys new links are made with, which can't hold
+  or hide footer text (a kid without keys refuses the enqueue, so no email goes out without a
+  working link). It passes only with exactly that key, that label and the ``integer`` type.
 - **(c) No route names the footer, and one handler writes settings.** No route of the built
   dashboard app holds one of ``FOOTER_WORDS`` in its path or name. Under ``nextron/web``, the
   only call of ``.save(...)`` or ``.set(...)`` on a receiver named ``setup`` (a name or an
@@ -63,6 +67,11 @@ FOOTER_WORDS: Final = (
     "legal",
     "solicitation",
     "unsubscribe",
+)
+# key -> the exact label of a setting outside the footer that names a footer word but is an
+# integer id, never footer text (the type is checked too).
+NAMED_NOT_FOOTER: Final[Mapping[str, str]] = MappingProxyType(
+    {"unsub_active_kid": "Unsubscribe token key id"}  # which unsubscribe keys (Story 3.8)
 )
 SETTINGS_WRITERS: Final = frozenset({"save", "set"})
 SETTINGS_ROUTE: Final = ("POST", "/settings", "settings_save")
@@ -198,6 +207,8 @@ def stray_footer_settings(
     for key, found in schema.items():
         if key in keys:
             continue
+        if NAMED_NOT_FOOTER.get(key) == found.label and found.type is SettingType.INTEGER:
+            continue  # an integer key id (Story 3.8), never footer text
         text = f"{words(key)}_{words(found.label)}"
         named = [word for word in FOOTER_WORDS if word in text]
         if named:
@@ -236,10 +247,44 @@ def test_no_other_setting_names_the_footer() -> None:
             string_setting("reply_words", label="Unsubscribe words", section=Section.ENGINE),
             "reply_words: names unsubscribe",
         ),
+        # the one exception holds only for its own key, label and integer type
+        (
+            string_setting(
+                "unsub_active_kid", label="Unsubscribe token key id", section=Section.SENDING
+            ),
+            "unsub_active_kid: names unsubscribe",
+        ),
+        (
+            string_setting(
+                "unsub_active_kid",
+                type=SettingType.INTEGER,
+                label="Unsubscribe footer key id",
+                section=Section.SENDING,
+                default=1,
+            ),
+            "unsub_active_kid: names footer, unsubscribe",
+        ),
+        (
+            string_setting(
+                "unsub_footer_kid",
+                type=SettingType.INTEGER,
+                label="Unsubscribe token key id",
+                section=Section.SENDING,
+                default=1,
+            ),
+            "unsub_footer_kid: names footer, unsubscribe",
+        ),
     ],
 )
 def test_the_stray_setting_check_catches_a_probe(found: Setting, problem: str) -> None:
     assert stray_footer_settings(probe(settings_schema.SCHEMA, found)) == [problem]
+
+
+def test_the_stray_setting_check_passes_the_unsubscribe_token_key_id() -> None:
+    found = settings_schema.SCHEMA[Key.UNSUB_ACTIVE_KID]
+
+    assert (found.label, found.type) == ("Unsubscribe token key id", SettingType.INTEGER)
+    assert stray_footer_settings(probe(settings_schema.SCHEMA, found)) == []
 
 
 # (c) No route names the footer; one handler writes settings --------------------------------------

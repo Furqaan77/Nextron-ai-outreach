@@ -32,6 +32,27 @@ undeclared key) and ``declared()`` (every credential, in declaration order); bot
 ``monkeypatch.setattr(credentials, "REGISTRY", probe)``.
 ``tests/contracts/test_credential_contracts.py`` checks every keyring name.
 
+**The unsubscribe token keys** (Story 3.8, AD-15) are a per-kid family beside ``REGISTRY``,
+not entries in it, because their keyring names depend on a kid (1 to 255,
+``nextron.domain.unsub_token``). ``UnsubKey`` is ``k_tok`` (the AES-256-GCM-SIV key, which never
+leaves the PC except in Mac's escrow copy) or ``k_edge`` (the HMAC key the unsubscribe Worker
+also holds, as ``K_EDGE_<kid>``). ``UnsubKeyCredential(key, label, secret_prefix,
+required=True)`` declares one; ``secret_name(kid)`` is ``<secret_prefix>/<kid>``
+(``unsub/k_tok/<kid>``, ``unsub/k_edge/<kid>``) and ``meta_name(kid)`` its ``meta/`` entry, and
+a kid outside 1 to 255 raises ``TypeError`` or ``ValueError``. ``required`` means "required for
+the active kid": doctor's ``unsub_token_keys`` check enforces it, not ``required_credentials``.
+Other modules reach the family only through ``unsub_key(key)`` (``UnknownCredential`` for
+another key) and ``declared_unsub_keys()`` (``k_tok``, then ``k_edge``); both read
+``UNSUB_KEYS`` when called. ``REGISTRY``, ``declared()`` and the ``required_credentials`` check
+don't include them.
+
+=============  =================================  ========================
+Key            Label                              Keyring name
+=============  =================================  ========================
+``k_tok``      Token encryption key (k_tok)       ``unsub/k_tok/<kid>``
+``k_edge``     Worker tag key (k_edge)            ``unsub/k_edge/<kid>``
+=============  =================================  ========================
+
 **Times.** ``encode_updated_at(at)`` is the text a ``meta/<name>`` entry holds:
 ``YYYY-MM-DDTHH:MM:SS.ffffffZ`` in UTC; a naive ``at`` raises ``ValueError``.
 ``decode_updated_at(text)`` reads it back as an aware UTC ``datetime``, and returns ``None`` for
@@ -51,6 +72,7 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.domain.errors import DomainError
+from nextron.domain.unsub_token import check_kid
 
 META_PREFIX: Final = "meta/"
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
@@ -87,6 +109,31 @@ class Credential:
     def meta_name(self) -> str:
         """The keyring entry that holds only this credential's last-updated time."""
         return META_PREFIX + self.secret_name
+
+
+class UnsubKey(StrEnum):
+    """The two keys each unsubscribe-token kid has."""
+
+    K_TOK = "k_tok"
+    K_EDGE = "k_edge"
+
+
+@dataclass(frozen=True, slots=True)
+class UnsubKeyCredential:
+    """One key of the per-kid unsubscribe-token family; see the module docstring."""
+
+    key: UnsubKey
+    label: str
+    secret_prefix: str
+    required: bool = True
+
+    def secret_name(self, kid: int) -> str:
+        """The keyring entry that holds this key for ``kid``: ``<secret_prefix>/<kid>``."""
+        return f"{self.secret_prefix}/{check_kid(kid)}"
+
+    def meta_name(self, kid: int) -> str:
+        """The keyring entry that holds only this key's last-updated time for ``kid``."""
+        return META_PREFIX + self.secret_name(kid)
 
 
 # Errors ---------------------------------------------------------------------------------------
@@ -190,4 +237,30 @@ REGISTRY: Mapping[str, Credential] = _declare(
     Credential(
         CredentialKey.JOB_AGGREGATOR, "Job aggregator API key", "job_aggregator/api_key", False
     ),
+)
+
+
+def unsub_key(key: str) -> UnsubKeyCredential:
+    """The declared unsubscribe-token key ``key`` (``k_tok`` or ``k_edge``); raises
+    ``UnknownCredential``."""
+    found = UNSUB_KEYS.get(key) if isinstance(key, str) else None
+    if found is None:
+        raise UnknownCredential(key)
+    return found
+
+
+def declared_unsub_keys() -> tuple[UnsubKeyCredential, ...]:
+    """Both unsubscribe-token keys, ``k_tok`` then ``k_edge``."""
+    return tuple(UNSUB_KEYS.values())
+
+
+UNSUB_KEYS: Mapping[str, UnsubKeyCredential] = MappingProxyType(
+    {
+        UnsubKey.K_TOK: UnsubKeyCredential(
+            UnsubKey.K_TOK, "Token encryption key (k_tok)", "unsub/k_tok"
+        ),
+        UnsubKey.K_EDGE: UnsubKeyCredential(
+            UnsubKey.K_EDGE, "Worker tag key (k_edge)", "unsub/k_edge"
+        ),
+    }
 )

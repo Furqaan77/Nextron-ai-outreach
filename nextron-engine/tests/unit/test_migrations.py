@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0023_4_11_footer_snapshots"
+HEAD = "0024_3_8_unsub_tokens"
 
 
 @pytest.fixture

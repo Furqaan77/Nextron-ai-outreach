@@ -72,6 +72,7 @@ has an id, a status (`ok`, `warn` or `fail`) and a one-line message:
 | `offpc_backup` | "Off-PC backup folder" (`backup_offpc_dir`) is set, on another drive than the data dir, and the Backup passphrase is set (see [Backups](#backups)) | `off-PC backup not configured (OQ-A3): backups are local only; ...`, listing every reason with its fix: the folder is blank, is the data dir or the backup dir (or inside either), or can't be read; the passphrase is not set, too long or unreadable. Or the folder is on the data dir's drive (a lost disk would take both) | |
 | `required_settings` | every required setting (`sender_name`, `sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
 | `database_revision` | the database is at the code's head revision | no database file, an empty one, or one behind head: "will migrate on next start" | a revision this code doesn't know ("newer than this code"), or not this engine's database |
+| `unsub_token_keys` | the active key id's two unsubscribe token keys (see [Unsubscribe tokens](#unsubscribe-tokens)) are set, are 32-byte base64url keys and differ | | either is missing, malformed or unreadable (naming its keyring entry, such as `unsub/k_tok/1`), the two are the same key, or the `unsub_active_kid` setting can't be read |
 
 The table looks like this (some rows left out):
 
@@ -80,7 +81,8 @@ status  check                      message
 ok      python_version             Python 3.14.8 (needs 3.14.8 or later)
 ...
 warn    database_revision          no database file yet; it will be created and migrated on next start
-11 ok, 1 warn, 0 fail
+ok      unsub_token_keys           the unsubscribe token keys of key id 1 (unsub/k_tok/1 and unsub/k_edge/1) are set and differ
+12 ok, 1 warn, 0 fail
 ```
 
 `--json` prints the same list as `[{"id", "status", "message"}, ...]` (ASCII-only), and
@@ -358,7 +360,9 @@ contract tests (`tests/contracts/test_settings_contracts.py`) also refuse a key 
 off Suppression, Eligibility, the footer, opt-out handling or Market rules (a boolean, or a key
 name or label such as `skip_eligibility` or "Disable footer"), and a key name or label that
 names a secret (`token`, `password`, `api_key`, `private`, or the word `key` or `pass`, and so
-on).
+on). The one exception is `unsub_active_kid` ("Unsubscribe token key id"), an integer that only
+picks which Credential Manager entries hold the keys; it passes only with exactly that key,
+label and type.
 
 The backup settings (`backup_time`, `backup_rotation_days` and `backup_offpc_dir`, all in the
 Engine section) are described under [Backups](#backups).
@@ -511,6 +515,11 @@ Nextron AI Ltd
 Not relevant? Reply 'no' and I won't contact you again.
 Advertisement
 ```
+
+**The unsubscribe token key id** (`unsub_active_kid`, "Unsubscribe token key id", the only
+setting in Sending so far; Story 3.8) is an integer from 1 to 255, 1 by default: the key id new
+unsubscribe tokens are encoded under. Its keys live in Credential Manager; see [Unsubscribe
+tokens](#unsubscribe-tokens) for how to change it.
 
 ## Seeds
 
@@ -1293,6 +1302,119 @@ Entries can't age out.
 
 Read one Contact with `queries.research.contact(contact_id)` (a `StoredContact`, or `None`).
 
+## Unsubscribe tokens
+
+Every Step's `List-Unsubscribe` link (RFC 8058, CAN-SPAM, PECR; FR-70, AD-15, Story 3.8)
+carries one opaque token. It identifies only a hashed address, so a click opts the person out
+without the address ever leaving the PC: the unsubscribe Worker (Story 3.10) checks only the
+token's tag and records the token; the engine decodes it (Story 3.11). The format is fixed in
+`nextron/domain/unsub_token.py`; `nextron.adapters.crypto.unsub_token.TokenCodec` is the
+`TokenCodecPort` (`nextron/ports/token_codec.py`) over `cryptography`'s AES-256-GCM-SIV.
+
+**The token format (for Story 3.10).** All integers are unsigned big-endian.
+
+| Bytes | Field | |
+|---|---|---|
+| 0 | `kid` | the key id, 1 to 255; 0 is reserved and is never a known kid |
+| 1 to 12 | `nonce` | 12 random bytes |
+| 13 to 68 | `ct` | AES-256-GCM-SIV under `k_tok[kid]`, with that nonce and **no** associated data, of `addr_hash` (32 bytes) ‖ `issued_at` (8 bytes, Unix seconds): 40 bytes of plaintext, 56 of ciphertext |
+| 69 to 80 | `tag` | the first 12 bytes of HMAC-SHA256 under `k_edge[kid]` over bytes 0 to 68 (`kid`, `nonce` and `ct`) |
+
+`raw` is 81 bytes, and the token is base64url of `raw` **without padding**: exactly 108
+characters of `[A-Za-z0-9_-]`. `addr_hash` is the Suppression List's address key as bytes,
+`bytes.fromhex(key_hash("address", address))`: the SHA-256 of `address:` plus
+`normalize_email(address)` (stripped, NFC'd and lowercased, with its domain in IDNA ASCII; no
+plus-tag or dot stripping). Only the engine computes `addr_hash`; the Worker never sees an
+address and checks only the tag. The database stores only
+`token_hash(token)`, the lowercase hex SHA-256 of the token's ASCII bytes.
+
+**What the Worker does with a token.** It holds only `k_edge` (as the secret `K_EDGE_<kid>`),
+so it can tell a forged or damaged token from a real one, but it can't read the address hash.
+It accepts a token exactly when it is 108 characters of the alphabet, its kid has a `K_EDGE_`
+secret, and its tag verifies (compare in constant time); anything else is refused.
+
+**The vectors.** `tests/fixtures/unsub_token_vectors.json` binds every implementation, the
+Worker included. It holds test keys for kids 1 and 2 (base64url, never deployed), valid cases
+(`kid`, `nonce` in hex, `address`, `addr_hash` in hex, `issued_at`, `token`, `token_hash`) and
+tampered tokens, each with the engine's `reason` and the Worker's `edge` verdict (`accept` only
+where the tag verifies, which is `bad_ciphertext`). `tests/unit/test_token_codec.py` rebuilds the
+whole file from raw `AESGCMSIV` and the standard library's `hmac` (`build_vectors()`), so the
+file, that recipe and the codec can't drift apart; the Worker's own tests must check every
+`valid` token is accepted and every `tampered` one gets its `edge` verdict.
+
+**Decoding** (`TokenCodec.decode`, Story 3.11) never raises for any token value, and checks in
+this order: the shape (`malformed`: another length or alphabet, padding, a non-`str`, empty);
+the kid (`unknown_kid`: 0, or no valid `k_edge`); the tag, compared before any decryption
+(`bad_tag`); `k_tok` (missing or malformed: `unknown_kid`); the decryption (`bad_ciphertext`).
+A valid token gives `DecodedToken(kid, addr_hash, issued_at)`. A Credential Manager failure
+raises `AdapterError` (so the poll retries); it is never called an invalid token. Decoding needs
+no database. `TokenCodec(secrets, *, nonce=os.urandom)` reads its keys at each call and never
+keeps one.
+
+**Issuing a token.** `Compliance(clock, codec=TokenCodec(secrets)).issue_unsub_token(om)` is an
+owner command (Story 5.2 calls it when it enqueues each OutboundMessage, in that transaction):
+
+```python
+token = compliance.issue_unsub_token(om)   # om.id: a ULID; om.to_address: the To address
+```
+
+A second call for the same `om.id` raises `TokenAlreadyIssued` before any keyring read. The kid
+is the `unsub_active_kid` setting, `issued_at` the clock's second. A missing or malformed key
+raises `AdapterError(False, "unsub_key_missing", ...)` naming the keyring entry, and the whole
+enqueue rolls back, so no message goes out without a working link. Nothing is logged and no
+`events` row is written.
+
+**The table** (`unsub_tokens`, owner `compliance`, migration `0024_3_8_unsub_tokens`): `id`,
+`token_hash` (unique, 64 lowercase hex characters), `om_id` (unique, no foreign key), `kid` (1
+to 255) and `issued_at` (whole seconds); every column is PII class `none`. Triggers refuse any
+`DELETE`, any `UPDATE`, and an `INSERT` whose `id`, `token_hash` or `om_id` exists, so the
+records are permanent and the 2-year key rule can't be defeated by deleting rows.
+`queries.compliance.newest_unsub_token(kid)` and `newest_unsub_tokens()` give each kid's newest
+token time.
+
+**The keys.** Each kid has two 32-byte keys in Credential Manager, entered on the Credentials
+page under **Unsubscribe token keys** as canonical base64url text (43 characters; 44 ending in
+`=` is accepted and stored without it):
+
+| Key | Label | Keyring name | Where it lives |
+|---|---|---|---|
+| `k_tok` | Token encryption key (k_tok) | `unsub/k_tok/<kid>` | this PC only, plus Mac's escrow copy |
+| `k_edge` | Worker tag key (k_edge) | `unsub/k_edge/<kid>` | this PC and the Worker, as `K_EDGE_<kid>` |
+
+Make each key with `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`; the
+two must differ (Cloudflare holds `k_edge`): the page refuses a key equal to its kid's other
+one, and issuing refuses two equal keys with `unsub_key_missing`. **Escrow every `k_tok`** (a password manager or a sealed printout, off this PC):
+without it the links already sent under its kid can't be read again. The page lists the active
+kid, the next one (active + 1) and every kid with tokens, each with its role (`active`, `next`,
+`in use` while it has a token under 2 years old, `retired`) and its newest token's time, and a
+write-only row per key like a credential row (`POST /credentials/unsub/save` and
+`/credentials/unsub/remove`, `kid` 1 to 255 and `key` `k_tok` or `k_edge`; anything else is 400).
+A key value is never shown, echoed or logged; the logs carry only `unsub_key_saved`,
+`unsub_key_removed`, `unsub_key_store_failed` or `unsub_key_read_failed` with the key and kid.
+
+**Keys stay valid for 2 years.** While a kid has a token under 731 days old, its keys can't be
+removed, and a valid stored key can't be replaced (a new value breaks those tokens just the
+same): the row says "Key <kid> still has tokens under 2 years old". A key that isn't set (one
+restored from escrow) or isn't a valid key can always be entered. The check reads the newest
+token in a read-only unit of work before any keyring write, so no token can be issued between
+the check and the write.
+
+**Rotating the keys:**
+
+1. On the Credentials page, enter the `next` kid's `k_tok` and `k_edge` (say kid 2) and escrow
+   the new `k_tok`.
+2. Add the new `k_edge` to the Worker as `K_EDGE_2` (`wrangler secret put K_EDGE_2`) and keep
+   `K_EDGE_1`, then deploy it.
+3. Set **Unsubscribe token key id** (Settings, Sending) to 2. New tokens use kid 2; links sent
+   under kid 1 keep working, because its keys stay where they are.
+4. Keep kid 1's keys (and `K_EDGE_1`) at least until the page shows kid 1 as `retired`, 2 years
+   after its newest token. Only then can they be removed.
+
+`nextron doctor`'s `unsub_token_keys` check fails while the active kid's keys are missing,
+malformed or equal, so step 3 can't silently break new links. It reads the setting first and
+then the two keyring entries, the one check that reads Credential Manager after the database
+(their names depend on the setting); it runs last.
+
 ## Sending Inboxes
 
 A Sending Inbox (FR-32, AD-21, Story 4.7) is a mailbox cold email is sent from; every new
@@ -1548,7 +1670,9 @@ api_key = read_credential(self._secrets, CredentialKey.HUNTER)   # in the call, 
 ```
 
 It returns the value, or raises `AdapterError(False, "credential_not_set", "credential hunter is
-not set")` when there is none. `tests/app/test_credential_secrecy.py` saves a planted value on
+not set")` when there is none. The unsubscribe token keys, a per-kid family beside this table,
+are read with `read_unsub_key(secrets, key, kid)` instead (see [Unsubscribe
+tokens](#unsubscribe-tokens)). `tests/app/test_credential_secrecy.py` saves a planted value on
 the page, has a fake adapter send it as a bearer header to a failing transport, sends refused
 requests that carry it, removes it, and then finds it in no HTTP response, log record (checked
 before redaction), database column or file.
@@ -1709,6 +1833,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0021_4_2_campaigns` | `offers` (unique `key`, `ck_offers_version`), `campaigns` (foreign keys to `segments`, `markets`, `offers` and `sequences` with no cascade; unique `key` and (`segment_id`, `market_id`); status, LIA-pair and version checks; two triggers refusing a non-draft GB Campaign without its assessment) and `variants` (a foreign key to `campaigns`; unique per Campaign by name; a status check; a trigger refusing a third Variant) (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)) | `setup` |
 | `0022_3_3_suppression_entries` | `suppression_entries`: the Suppression List (six checks, the partial unique index `uq_suppression_entries_active_key` for one `active` row per key, and four triggers refusing a delete, a replace, a non-`active` insert and any change but one void) (see [The Suppression List](#the-suppression-list)) | `compliance` |
 | `0023_4_11_footer_snapshots` | `footer_snapshots`: each distinct footer text of a Market (a foreign key to `markets` with no cascade; unique on `market_id` and `sha256`; checks that `sha256` is 64 lowercase hex characters and `text` isn't empty) (see [The footer](#the-footer)) | `drafting` |
+| `0024_3_8_unsub_tokens` | `unsub_tokens`: one row per issued unsubscribe token, holding only its hash (three checks, the unique indexes `uq_unsub_tokens_token_hash` and `uq_unsub_tokens_om_id`, `ix_unsub_tokens_kid_issued_at`, and three triggers refusing a delete, any update and a reused id, hash or message) (see [Unsubscribe tokens](#unsubscribe-tokens)) | `compliance` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -3249,7 +3374,7 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
 8. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
-   the same twelve ids in the same order, with "<n> ok, <n> warn, <n> fail".
+   the same thirteen ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
 (`GET /health/panel/live`, the panel alone) while the page is open. Every answer is
@@ -3363,7 +3488,9 @@ uv run lint-imports                      # the import contracts on their own
   `ScriptedLlm` for `LlmPort` (it makes the gateway's caller checks, then answers each `run`
   with the next scripted result or error),
   `InMemoryMail` for `MailPort`, `InMemoryBackupTarget` for `BackupTargetPort` (it stores
-  plaintext and can be scripted to fail any call), and in `tests/fakes/google_oauth.py`
+  plaintext and can be scripted to fail any call), `FakeTokenCodec` for `TokenCodecPort` (it
+  encodes under the kids it is given, kid 1 by default, and decodes only what it encoded), and
+  in `tests/fakes/google_oauth.py`
   `FakeGoogleOAuth` for
   `GoogleOAuthPort`, `FakeConsentListener` for `ConsentListener` and `FakeClientFiles` for
   `ClientFilePort`, with `id_token(...)`, an unsigned ID token builder), plus `FakeUnits`, which
@@ -3371,7 +3498,7 @@ uv run lint-imports                      # the import contracts on their own
   each unit opened. `tests/dashboard.py`'s `Dashboard` builds `GoogleAccess` on these fakes with
   a recording browser and an `allowlist` field, and keeps each consent flow's job in `jobs`
   until a test calls `run_jobs()`. Its `EngineHealth` (`health`) reads the real health-issue
-  registry and a fixed `readiness` list (all twelve doctor checks `ok`) unless a test passes
+  registry and a fixed `readiness` list (all thirteen doctor checks `ok`) unless a test passes
   its own. Its `Backups` (`backups`) queues the panel's "Back up now"; its snapshot takes no
   copy unless a test passes one (`snapshot=`), and its off-PC copies go to an
   `InMemoryBackupTarget` (`offpc_target`).

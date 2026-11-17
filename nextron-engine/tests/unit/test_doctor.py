@@ -58,6 +58,7 @@ CHECKS = [
     "offpc_backup",
     "required_settings",
     "database_revision",
+    "unsub_token_keys",
 ]
 ALL_OK = dict.fromkeys(CHECKS, "ok")
 
@@ -67,9 +68,13 @@ PLANTED_CLIENT_SECRET = "GOCSPX-QZXPLANTEDCLIENTSECRET"
 PLANTED_ACCOUNT = "qzxplanted.account@nextronai.com"
 PLANTED_ACCESS = "ya29.QZXPLANTEDACCESS"
 PLANTED_PASSPHRASE = "QZXPLANTEDBACKUPPASSPHRASE"
+PLANTED_K_TOK = "QZXPLANTEDKTOK" + "A" * 28 + "Q"  # 43 base64url characters, a 32-byte key
+PLANTED_K_EDGE = "QZXPLANTEDKEDGE" + "A" * 27 + "Q"
 PLANTED = (
     PLANTED_CREDENTIAL,
     PLANTED_PASSPHRASE,
+    PLANTED_K_TOK,
+    PLANTED_K_EDGE,
     PLANTED_REFRESH,
     PLANTED_CLIENT_SECRET,
     PLANTED_ACCOUNT,
@@ -141,13 +146,15 @@ def make_database(
 
 
 def healthy_secrets() -> InMemorySecrets:
-    """Every required credential, the Backup passphrase, the Google client and the
-    ``internal_notify`` grant."""
+    """Every required credential, the Backup passphrase, kid 1's unsubscribe token keys, the
+    Google client and the ``internal_notify`` grant."""
     secrets = InMemorySecrets("dev")
     for found in credentials.declared():
         if found.required:
             secrets.write(found.secret_name, f"{PLANTED_CREDENTIAL}{found.key}")
     secrets.write("backup/passphrase", PLANTED_PASSPHRASE)
+    secrets.write("unsub/k_tok/1", PLANTED_K_TOK)
+    secrets.write("unsub/k_edge/1", PLANTED_K_EDGE)
     secrets.write(
         CLIENT_SECRET_NAME, encode_client_config(ClientConfig(CLIENT_ID, PLANTED_CLIENT_SECRET))
     )
@@ -208,7 +215,7 @@ def table_rows(out: str) -> list[tuple[str, str, str]]:
 # Row: All ok ------------------------------------------------------------------------------------
 
 
-def test_all_ok_prints_twelve_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
+def test_all_ok_prints_thirteen_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
     before = sha256(healthy)
     oauth = FakeGoogleOAuth()
 
@@ -221,8 +228,8 @@ def test_all_ok_prints_twelve_ok_rows_and_changes_no_database_byte(healthy: Path
     assert [(status, check) for status, check, _ in table_rows(out)] == [
         ("ok", check) for check in CHECKS
     ]
-    assert lines[-1] == "12 ok, 0 warn, 0 fail"
-    assert len(lines) == 14
+    assert lines[-1] == "13 ok, 0 warn, 0 fail"
+    assert len(lines) == 15
     assert out.endswith("\n") and not out.endswith("\n\n")
     assert sha256(healthy) == before
     assert stored_revisions(healthy) == [head_revision()]
@@ -338,11 +345,16 @@ def test_a_fresh_install_fails_on_what_it_lacks_and_creates_nothing(data_dir: Pa
         "offpc_backup": "warn",
         "required_settings": "fail",
         "database_revision": "warn",
+        "unsub_token_keys": "fail",
     }
     assert results["offpc_backup"][1] == (
         "off-PC backup not configured (OQ-A3): backups are local only; no off-PC backup folder "
         "is set; set Off-PC backup folder (backup_offpc_dir) on the Settings page; the Backup "
         "passphrase is not set; enter it on the Credentials page"
+    )
+    assert results["unsub_token_keys"][1] == (  # the schema default kid with no database file
+        "unsubscribe token keys of key id 1: unsub/k_tok/1 is not set; unsub/k_edge/1 is not "
+        "set; enter them in Unsubscribe token keys on the Credentials page"
     )
     assert results["required_settings"][1] == (
         "required settings not set or no longer valid: Sender's name (sender_name), Sender's "
@@ -354,6 +366,58 @@ def test_a_fresh_install_fails_on_what_it_lacks_and_creates_nothing(data_dir: Pa
     assert "not imported" in results["internal_notify_grant"][1]
     assert oauth.calls == []
     assert not data_dir.exists()
+
+
+# Row: Unsubscribe token keys (Story 3.8) -------------------------------------------------------
+
+UNSUB_FIX = "enter them in Unsubscribe token keys on the Credentials page"
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "problem"),
+    [
+        ("unsub/k_tok/1", None, "unsub/k_tok/1 is not set"),
+        ("unsub/k_tok/1", PLANTED_K_TOK[:-1], "unsub/k_tok/1 is not a 32-byte base64url key"),
+        ("unsub/k_edge/1", None, "unsub/k_edge/1 is not set"),
+        ("unsub/k_edge/1", "+" * 43, "unsub/k_edge/1 is not a 32-byte base64url key"),
+        (
+            "unsub/k_edge/1",
+            PLANTED_K_TOK,
+            "unsub/k_tok/1 and unsub/k_edge/1 are the same key; make a new k_edge",
+        ),
+    ],
+    ids=["k_tok_missing", "k_tok_malformed", "k_edge_missing", "k_edge_malformed", "equal"],
+)
+def test_a_missing_or_malformed_unsubscribe_key_fails_naming_its_entry(
+    healthy: Path, name: str, value: str | None, problem: str
+) -> None:
+    secrets = healthy_secrets()
+    if value is None:
+        secrets.delete(name)
+    else:
+        secrets.store[(secrets.service, name)] = value
+
+    code, results = run_doctor(secrets=secrets)
+
+    assert code == 1
+    assert statuses(results) == ALL_OK | {"unsub_token_keys": "fail"}
+    assert results["unsub_token_keys"][1] == (
+        f"unsubscribe token keys of key id 1: {problem}; {UNSUB_FIX}"
+    )
+    assert not any(planted in message for _, message in results.values() for planted in PLANTED)
+
+
+def test_the_active_kid_is_read_from_the_database(data_dir: Path) -> None:
+    make_database(data_dir, {**SETTINGS, "unsub_active_kid": "2"})
+
+    code, results = run_doctor()  # only kid 1's keys are stored
+
+    assert code == 1
+    assert results["unsub_token_keys"] == (
+        "fail",
+        "unsubscribe token keys of key id 2: unsub/k_tok/2 is not set; unsub/k_edge/2 is not "
+        f"set; {UNSUB_FIX}",
+    )
 
 
 # Row: Behind ------------------------------------------------------------------------------------

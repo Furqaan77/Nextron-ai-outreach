@@ -521,6 +521,7 @@ def test_the_sender_section_shows_the_sender_timezone_as_required(
         "Footer and booking",
         "Sender",
         "Alerts and recipients",
+        "Sending",
         "Budget and limits",
         "Engine",
     ]
@@ -544,6 +545,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "sender_name",
         "sender_timezone",
         "alert_chat_id",
+        "unsub_active_kid",
         "quota_hunter_credits",
         "quota_prospeo_credits",
         "quota_places_enterprise",
@@ -724,6 +726,26 @@ def test_bulk_threads_saves_2_and_refuses_0_and_3(
         field = SettingsHtml(refused.text).fields["bulk_threads"]
         assert (field.error, field.value) == (reason, refused_text)
         assert stored(units) == {"bulk_threads": "2"}
+
+
+def test_the_sending_section_shows_the_unsubscribe_token_key_id_and_saves_it(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    _, page = settings_page(dashboard, session[0])
+
+    shown = page.fields["unsub_active_kid"]
+    assert (shown.label, shown.value) == ("Unsubscribe token key id", "1")
+    assert shown.hint.endswith("already sent keep working.; default: 1; leave blank to use it")
+
+    saved = save(dashboard, session, real_body(session[1], unsub_active_kid="2"))
+
+    assert SettingsHtml(saved.text).notices == [("status", "Settings saved.")]
+    assert get_value(units, Key.UNSUB_ACTIVE_KID) == 2
+    for refused_text, reason in (("0", "must be at least 1"), ("256", "must be at most 255")):
+        refused = save(dashboard, session, real_body(session[1], unsub_active_kid=refused_text))
+        field = SettingsHtml(refused.text).fields["unsub_active_kid"]
+        assert (field.error, field.value) == (reason, refused_text)
+        assert stored(units) == {"unsub_active_kid": "2"}
 
 
 def test_the_budget_section_shows_each_limit_with_its_default(

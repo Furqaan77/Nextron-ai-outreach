@@ -42,11 +42,11 @@ from nextron.adapters.secrets import KeyringSecrets, service_name
 from nextron.app.ops.api import DashboardEntry
 from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
+from nextron.db.uow import UnitOfWorkFactory
 from tests.app.test_serve_process import fetch
 from tests.asgi import Reply, request
 from tests.dashboard import FORM, body_hx_headers, form
 from tests.fakes.clock import FrozenClock
-from tests.fakes.units import FakeUnits
 from tests.migration_chains import stored_revisions
 from tests.unit.test_credentials_page import Page
 
@@ -278,12 +278,17 @@ class Dashboard:
 
 
 def open_dashboard(
-    env: str, backend: RecordingKeyring, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    env: str,
+    backend: RecordingKeyring,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    units: UnitOfWorkFactory,
 ) -> Dashboard:
     monkeypatch.setenv("NEXTRON_ENV", env)
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / env))
     config = load_bootstrap()
-    dashboard = Dashboard(config, main.build_app(config, units=FakeUnits(), clock=FrozenClock(T)))
+    # real units of work: the Credentials page reads the unsubscribe key id and tokens
+    dashboard = Dashboard(config, main.build_app(config, units=units, clock=FrozenClock(T)))
     # nextron open, in its own process, writes the code through its own KeyringSecrets(env)
     code = DashboardEntry(KeyringSecrets(env, backend=backend), FrozenClock(T)).issue_code()
     entered = request(
@@ -302,7 +307,7 @@ def open_dashboard(
 
 
 def test_a_credential_saved_in_dev_is_not_set_in_test(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, units: UnitOfWorkFactory
 ) -> None:
     backend = RecordingKeyring()
     # build_app's own KeyringSecrets(<env>) runs for real; only its backend is the recorder
@@ -310,7 +315,7 @@ def test_a_credential_saved_in_dev_is_not_set_in_test(
     calls_by_env: dict[str, list[tuple[str, str, str]]] = {}
 
     start = len(backend.calls)
-    dev = open_dashboard("dev", backend, tmp_path, monkeypatch)
+    dev = open_dashboard("dev", backend, tmp_path, monkeypatch, units)
     body = form(csrf_token=dev.token, credential="hunter", value=PLANTED)
     saved = dev.post("/credentials/save", body)
     assert saved.status == 200, saved
@@ -318,7 +323,7 @@ def test_a_credential_saved_in_dev_is_not_set_in_test(
     calls_by_env["dev"] = backend.calls[start:]
 
     start = len(backend.calls)
-    test = open_dashboard("test", backend, tmp_path, monkeypatch)
+    test = open_dashboard("test", backend, tmp_path, monkeypatch, units)
     assert test.hunter_state() == "Not set"
     calls_by_env["test"] = backend.calls[start:]
 

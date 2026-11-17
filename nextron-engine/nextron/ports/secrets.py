@@ -23,12 +23,20 @@ are read with ``read_credential(secrets, key)``: it reads the credential's keyri
 returns the value, and raises ``AdapterError(False, "credential_not_set", "credential <key> is
 not set")`` when there is none (``UnknownCredential`` for an undeclared key; a failed read
 propagates). Every adapter reads its credential this way, at call time, and never keeps it.
+
+**Unsubscribe token keys** (Story 3.8; ``nextron.domain.credentials.UNSUB_KEYS``) are read with
+``read_unsub_key(secrets, key, kid)``: the 32 bytes of the ``unsub/<key>/<kid>`` entry when it
+holds a canonical base64url key (``nextron.domain.unsub_token.parse_key``), and ``None`` when
+the entry is missing or holds anything else. ``UnknownCredential`` for a key other than
+``k_tok`` or ``k_edge``; ``TypeError`` or ``ValueError`` for a kid outside 1 to 255; a failed
+read propagates. The token codec reads its keys this way, at call time, and never keeps them.
 """
 
 import re
 from typing import Final, Protocol, TypeGuard, runtime_checkable
 
-from nextron.domain.credentials import credential
+from nextron.domain.credentials import credential, unsub_key
+from nextron.domain.unsub_token import parse_key
 from nextron.ports.errors import AdapterError
 
 MAX_SECRET_LENGTH: Final = 1280
@@ -105,3 +113,12 @@ def read_credential(secrets: SecretsPort, key: str) -> str:
     if value is None:
         raise AdapterError(False, CREDENTIAL_NOT_SET, f"credential {found.key} is not set")
     return value
+
+
+def read_unsub_key(secrets: SecretsPort, key: str, kid: int) -> bytes | None:
+    """The 32 bytes of the unsubscribe-token key ``key`` (``k_tok`` or ``k_edge``) of ``kid``,
+    read from its keyring entry now; ``None`` when the entry is missing or isn't a canonical
+    base64url key. Raises ``UnknownCredential``, ``TypeError`` or ``ValueError`` for a bad
+    ``key`` or ``kid``, and whatever ``secrets.read`` raises. Don't keep the key."""
+    name = unsub_key(key).secret_name(kid)
+    return parse_key(secrets.read(name))

@@ -162,6 +162,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/credentials",
         "/credentials/save",
         "/credentials/remove",
+        "/credentials/unsub/save",
+        "/credentials/unsub/remove",
         "/credentials/google/client",
         "/credentials/google/grant",
         "/credentials/google/grant/{grant}",
@@ -619,6 +621,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "quotas.html",
         "settings.html",
         "settings_form.html",
+        "unsub_key_row.html",
     ]
     assert inline_code_problems(ENGINE_ROOT) == []
 

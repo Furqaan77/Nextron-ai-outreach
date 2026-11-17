@@ -526,6 +526,7 @@ def test_the_declared_keys_in_order() -> None:
         "us_solicitation_label",
         "crawl_max_pages",
         "ats_hosts",
+        "unsub_active_kid",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -551,6 +552,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.US_SOLICITATION_LABEL),
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
+        setting(Key.UNSUB_ACTIVE_KID),
     )
 
 
@@ -723,6 +725,42 @@ def test_the_https_url_rule(text: str, passes: bool) -> None:
         with pytest.raises(InvalidSettingValue) as raised:
             parse(found, text)
         assert (raised.value.rule, raised.value.reason) == ("https_url", "must be an https link")
+
+
+# Row: Setting (unsub_active_kid, Story 3.8) -----------------------------------------------------
+
+UNSUB_KID_UNIT = (
+    "1 to 255. New unsubscribe links are made with this key id's keys (Credentials page, "
+    "Unsubscribe token keys). Enter the next id's keys there and in the unsubscribe Worker "
+    "before you change it; links already sent keep working."
+)
+
+
+def test_unsub_active_kid_is_an_integer_from_1_to_255_in_the_sending_section() -> None:
+    found = setting(Key.UNSUB_ACTIVE_KID)
+
+    assert (found.key, found.type, found.section) == (
+        "unsub_active_kid",
+        SettingType.INTEGER,
+        Section.SENDING,
+    )
+    assert (found.label, found.unit) == ("Unsubscribe token key id", UNSUB_KID_UNIT)
+    assert found.default == 1 and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 1"),
+        ("maximum", "must be at most 255"),
+    ]
+    assert default_text(found) == "1"
+    assert parse(found, "255") == 255 and encode(found, 2) == "2"
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"), [("0", "minimum"), ("256", "maximum"), ("-1", "minimum"), ("x", "integer")]
+)
+def test_unsub_active_kid_refuses_anything_outside_1_to_255(text: str, rule: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.UNSUB_ACTIVE_KID), text)
+    assert raised.value.rule == rule
 
 
 # Row: Setting (sink_allowlist) ------------------------------------------------------------------
@@ -1249,7 +1287,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
             "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
-            "sender_timezone, sink_allowlist, us_solicitation_label"
+            "sender_timezone, sink_allowlist, unsub_active_kid, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

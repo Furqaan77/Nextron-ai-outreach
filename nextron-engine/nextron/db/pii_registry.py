@@ -313,6 +313,15 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text": PiiClass.REDACT,
         "created_at": PiiClass.NONE,
     },
+    # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
+    # the token is the only way to its address hash, and that needs k_tok.
+    "unsub_tokens": {
+        "id": PiiClass.NONE,
+        "token_hash": PiiClass.NONE,
+        "om_id": PiiClass.NONE,
+        "kid": PiiClass.NONE,
+        "issued_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

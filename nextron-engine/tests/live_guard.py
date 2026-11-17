@@ -137,7 +137,9 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "telegram": Guarded(("default_http_client",)),
     "clock": NoExternalSystem("reads the system clock; reaches no external system"),
     "crypto": NoExternalSystem(
-        "pure computation over the streams it is given; opens no file and reaches nothing"
+        "pure computation: the backup format over the streams it is given, and the "
+        "unsubscribe token codec (TokenCodec) over the keys it reads through the SecretsPort "
+        "it is given; opens no file and reaches nothing"
     ),
     "backup_target": NoExternalSystem(
         "encrypts and writes files in the folder it is given (a local or network folder the "
