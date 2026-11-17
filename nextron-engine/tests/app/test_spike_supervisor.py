@@ -5,7 +5,8 @@ One test per supervisor row of the spec's matrix. Nothing here calls a Task Sche
 starts ``uv``: the serve command is the fake run by this test's Python, and ``oq_a9.ps1`` runs
 with every state-changing ScheduledTasks command replaced by a tripwire. The assertions read the
 JSON-line logs, not the clock. Each test kills, in a ``finally``, the PowerShell it started with
-its whole tree and every Python pid the logs name.
+its whole tree and every Python pid the logs name, unless a newer process took the pid over
+(``tests/processes.py``).
 """
 
 import base64
@@ -17,10 +18,12 @@ import subprocess
 import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from tests.processes import gone, kill_python, kill_tree, still_running
 from tests.task_scheduler_guard import GET, shadow_lines
 
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +33,6 @@ OQ_A9 = SPIKE / "oq_a9.ps1"
 FAKE = SPIKE / "fake_serve.py"
 POWERSHELL = shutil.which("powershell.exe")
 RUN_TIMEOUT_S = 60
-GONE_TIMEOUT_S = 10
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" or POWERSHELL is None, reason="needs Windows PowerShell 5.1"
@@ -38,81 +40,6 @@ pytestmark = pytest.mark.skipif(
 
 # The oq_a9 tests shadow every ScheduledTasks command that changes or reads Task Scheduler's
 # state through tests/task_scheduler_guard.py (Story 1.21 moved the list and the shadows there).
-
-
-# --- Processes ------------------------------------------------------------------------------------
-
-SYNCHRONIZE = 0x00100000
-PROCESS_TERMINATE = 0x0001
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-WAIT_TIMEOUT = 0x102
-
-
-def _kernel32():  # type: ignore[no-untyped-def]
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    kernel32.TerminateProcess.restype = wintypes.BOOL
-    kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-    kernel32.QueryFullProcessImageNameW.argtypes = (
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.LPWSTR,
-        ctypes.POINTER(wintypes.DWORD),
-    )
-    return kernel32
-
-
-def gone(pid: int, timeout_s: float = GONE_TIMEOUT_S) -> bool:
-    """Whether process ``pid`` has ended, waiting up to ``timeout_s`` for it."""
-    kernel32 = _kernel32()
-    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-    if not handle:
-        return True
-    try:
-        return kernel32.WaitForSingleObject(handle, int(timeout_s * 1000)) != WAIT_TIMEOUT
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def kill_python(pid: int) -> None:
-    """Ends ``pid`` if it is still a running ``python.exe`` (a pid can be reused)."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = _kernel32()
-    access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
-    handle = kernel32.OpenProcess(access, False, pid)
-    if not handle:
-        return
-    try:
-        if kernel32.WaitForSingleObject(handle, 0) != WAIT_TIMEOUT:
-            return
-        buffer = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buffer))
-        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return
-        if Path(buffer.value).name.lower() in {"python.exe", "pythonw.exe"}:
-            kernel32.TerminateProcess(handle, 1)
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def kill_tree(pid: int) -> None:
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T", "/F"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
 
 
 # --- Running PowerShell ---------------------------------------------------------------------------
@@ -134,6 +61,29 @@ def read_lines(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in complete if line]
 
 
+def named_pids(
+    events: list[dict[str, object]], fake_events: list[dict[str, object]]
+) -> dict[int, datetime]:
+    """Every pid of every child tree the logs name, each with the latest stamp of a line that
+    names it: the supervisor's child (the venv launcher), the fake's interpreter and its parent,
+    and the grandchild's pids."""
+    lines: list[tuple[dict[str, object], list[int]]] = []
+    for event in events:
+        if event["event"] == "start":
+            lines.append((event, [int(event["pid"])]))  # type: ignore[call-overload]
+    for event in fake_events:
+        if event["event"] == "start":
+            pids = [int(event["pid"]), int(event["ppid"])]  # type: ignore[call-overload]
+            pids += [int(p) for p in event.get("grandchild_pids", [])]  # type: ignore[union-attr]
+            lines.append((event, pids))
+    named: dict[int, datetime] = {}
+    for event, pids in lines:
+        at = datetime.fromisoformat(str(event["ts"]))
+        for pid in pids:
+            named[pid] = max(at, named.get(pid, at))
+    return named
+
+
 @dataclass
 class Run:
     code: int
@@ -148,15 +98,9 @@ class Run:
     def of(self, name: str) -> list[dict[str, object]]:
         return [event for event in self.events if event["event"] == name]
 
-    def tree_pids(self) -> list[int]:
-        """Every pid of every child tree the logs name: the supervisor's child (the venv
-        launcher), the fake's interpreter and its parent, and the grandchild's pids."""
-        pids = [int(event["pid"]) for event in self.of("start")]  # type: ignore[call-overload]
-        for event in self.fake_events:
-            if event["event"] == "start":
-                pids += [int(event["pid"]), int(event["ppid"])]  # type: ignore[call-overload]
-                pids += [int(p) for p in event.get("grandchild_pids", [])]  # type: ignore[union-attr]
-        return sorted(set(pids))
+    def tree_pids(self) -> dict[int, datetime]:
+        """Every pid of every child tree the logs name, with when it was last named."""
+        return named_pids(self.events, self.fake_events)
 
 
 def run_powershell(script: str, tmp_path: Path, env: dict[str, str] | None = None) -> Run:
@@ -248,19 +192,11 @@ def spike(tmp_path: Path) -> Iterator[Spike]:
     try:
         yield spike
     finally:
-        pids = {pid for run in spike.runs for pid in run.tree_pids()}
-        for pid in pids | set(read_lines_pids(spike.fake_log)):
-            kill_python(pid)
-
-
-def read_lines_pids(path: Path) -> list[int]:
-    """Every pid the fake's log names, read again (the log may have grown since the run)."""
-    pids: list[int] = []
-    for event in read_lines(path):
-        if event["event"] == "start":
-            pids += [int(event["pid"]), int(event["ppid"])]  # type: ignore[call-overload]
-            pids += [int(p) for p in event.get("grandchild_pids", [])]  # type: ignore[union-attr]
-    return pids
+        events = [event for run in spike.runs for event in run.events]
+        fake_events = [event for run in spike.runs for event in run.fake_events]
+        fake_events += read_lines(spike.fake_log)  # read again: it may have grown since the run
+        for pid, at in named_pids(events, fake_events).items():
+            kill_python(pid, named_at=at)
 
 
 FAST = {"BackoffStartSeconds": 0.1, "BackoffMaxSeconds": 0.4, "PollSeconds": 0.1}
@@ -332,7 +268,7 @@ def test_a_stale_heartbeat_kills_the_whole_tree_and_restarts_it(spike: Spike) ->
     assert all(e.get("grandchild_pids") for e in starts)
     pids = run.tree_pids()
     assert len(pids) >= 4  # per child at least: the fake and its grandchild
-    assert [pid for pid in pids if not gone(pid)] == []
+    assert still_running(pids) == []
 
 
 # Stands in for uv.exe: a plain interpreter (no venv launcher, so no job object) that runs the
@@ -364,15 +300,10 @@ def test_when_taskkill_fails_the_supervisor_kills_every_descendant_then_the_chil
     assert (fallback["method"], fallback["ok"]) == ("process_kill", True)
     [start] = run.of("start")
     [fake_start] = [e for e in run.fake_events if e["event"] == "start"]
-    tree = {
-        int(start["pid"]),  # type: ignore[call-overload]
-        int(fake_start["pid"]),  # type: ignore[call-overload]
-        int(fake_start["ppid"]),  # type: ignore[call-overload]
-        *(int(p) for p in fake_start["grandchild_pids"]),  # type: ignore[attr-defined]
-    }
+    tree = named_pids([start], [fake_start])
     assert len(tree) == 3  # pass-through, fake, grandchild
-    assert tree <= set(fallback["pids"])  # type: ignore[arg-type]
-    assert [pid for pid in tree if not gone(pid)] == []
+    assert set(tree) <= set(fallback["pids"])  # type: ignore[arg-type]
+    assert still_running(tree) == []
 
 
 def test_a_beat_slower_than_the_poll_never_counts_as_stale(spike: Spike) -> None:
@@ -446,7 +377,7 @@ def test_a_start_with_no_beat_within_the_start_grace_is_killed_and_restarted(
         assert stale["before_first_beat"] is True
         assert stale["limit_s"] == pytest.approx(0.8)
         assert stale["quiet_s"] == pytest.approx(stale["limit_s"])
-    assert [pid for pid in run.tree_pids() if not gone(pid)] == []
+    assert still_running(run.tree_pids()) == []
 
 
 @pytest.mark.parametrize(
@@ -684,8 +615,8 @@ def running_fake(tmp_path: Path) -> Iterator[tuple[Path, subprocess.Popen[bytes]
         if process.poll() is None:
             kill_tree(process.pid)
             process.wait(timeout=30)
-        for pid in read_lines_pids(log):
-            kill_python(pid)
+        for pid, at in named_pids([], read_lines(log)).items():
+            kill_python(pid, named_at=at)
 
 
 def test_stall_reaches_the_running_fake(
@@ -725,7 +656,8 @@ def test_kill_ends_the_running_fakes_python(
     assert run.code == 0, run.stderr
     assert not marker.exists()
     assert f"Killed the fake's Python, pid {start['pid']}." in run.stdout
-    assert gone(int(start["pid"]))  # type: ignore[call-overload]
+    named_at = datetime.fromisoformat(str(start["ts"]))
+    assert gone(int(start["pid"]), named_at=named_at)  # type: ignore[call-overload]
     process.wait(timeout=RUN_TIMEOUT_S)
 
 

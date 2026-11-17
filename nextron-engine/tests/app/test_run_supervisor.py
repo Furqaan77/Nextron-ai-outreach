@@ -16,13 +16,14 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from tests.processes import kill_python, kill_tree, load_kernel32, still_running
 from tests.task_scheduler_guard import ps_array, ps_string
 
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
@@ -31,13 +32,6 @@ FAKE = ENGINE_ROOT / "tests" / "fake_serve.py"
 POWERSHELL = shutil.which("powershell.exe")
 RUN_TIMEOUT_S = 90
 WAIT_TIMEOUT_S = 60
-GONE_TIMEOUT_S = 15
-# Windows hands a freed pid to a new process soon, and other processes start all the time (the
-# suite's other workers, other checkouts' runs). A running process created more than this after a
-# log named its pid as ours is a newer process on the reused pid. The slack covers the log's
-# millisecond stamp and the coarser clocks behind it; an original process is always created
-# before the line that names it.
-PID_REUSE_SLACK = timedelta(seconds=1)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32" or POWERSHELL is None, reason="needs Windows PowerShell 5.1"
@@ -46,106 +40,7 @@ pytestmark = pytest.mark.skipif(
 FAST = {"BackoffStartSeconds": 0.1, "BackoffMaxSeconds": 0.4, "PollSeconds": 0.1}
 
 
-# --- Processes ------------------------------------------------------------------------------------
-
-SYNCHRONIZE = 0x00100000
-PROCESS_TERMINATE = 0x0001
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-WAIT_TIMEOUT = 0x102
-
-
-def _kernel32():  # type: ignore[no-untyped-def]
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    kernel32.TerminateProcess.restype = wintypes.BOOL
-    kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
-    kernel32.QueryFullProcessImageNameW.argtypes = (
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.LPWSTR,
-        ctypes.POINTER(wintypes.DWORD),
-    )
-    kernel32.GetProcessTimes.restype = wintypes.BOOL
-    filetime = ctypes.POINTER(wintypes.FILETIME)
-    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE, filetime, filetime, filetime, filetime)
-    return kernel32
-
-
-def _reused(kernel32, handle: int, named_at: datetime | None) -> bool:  # type: ignore[no-untyped-def]
-    """Whether the process behind ``handle`` was created more than ``PID_REUSE_SLACK`` after
-    ``named_at``, so it isn't the one a log named: Windows reused the pid. False when unknown."""
-    import ctypes
-    from ctypes import wintypes
-
-    if named_at is None:
-        return False
-    times = [wintypes.FILETIME() for _ in range(4)]
-    if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-        return False
-    ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime  # 100 ns since 1601, UTC
-    created = datetime(1601, 1, 1, tzinfo=UTC) + timedelta(microseconds=ticks // 10)
-    return created > named_at + PID_REUSE_SLACK
-
-
-def gone(
-    pid: int, timeout_s: float = GONE_TIMEOUT_S, *, named_at: datetime | None = None
-) -> bool:
-    """Whether process ``pid`` has ended, waiting up to ``timeout_s`` for it. With ``named_at``
-    (when a log named ``pid`` as ours), a process on a reused pid counts as ours having ended."""
-    kernel32 = _kernel32()
-    handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return True
-    try:
-        if _reused(kernel32, handle, named_at):
-            return True
-        return kernel32.WaitForSingleObject(handle, int(timeout_s * 1000)) != WAIT_TIMEOUT
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def kill_python(pid: int, *, named_at: datetime | None = None) -> None:
-    """Ends ``pid`` if it is still a running ``python.exe`` (a pid can be reused), and, with
-    ``named_at``, only if it isn't a newer process on a reused pid."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = _kernel32()
-    access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
-    handle = kernel32.OpenProcess(access, False, pid)
-    if not handle:
-        return
-    try:
-        if kernel32.WaitForSingleObject(handle, 0) != WAIT_TIMEOUT:
-            return
-        if _reused(kernel32, handle, named_at):
-            return
-        buffer = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buffer))
-        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return
-        if Path(buffer.value).name.lower() in {"python.exe", "pythonw.exe"}:
-            kernel32.TerminateProcess(handle, 1)
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def kill_tree(pid: int) -> None:
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/T", "/F"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+# --- Processes (the pid checks and kills are tests/processes.py's) --------------------------------
 
 
 def free_port() -> int:
@@ -201,11 +96,6 @@ def named_pids(
         for pid in pids:
             named[pid] = max(at, named.get(pid, at))
     return named
-
-
-def still_running(named: Mapping[int, datetime]) -> list[int]:
-    """The pids of ``named`` whose process hasn't ended (a reused pid isn't ours)."""
-    return sorted(pid for pid, at in named.items() if not gone(pid, named_at=at))
 
 
 @dataclass
@@ -786,7 +676,7 @@ def test_an_unanswered_request_times_out_with_exit_1_and_is_withdrawn(
     try:
         run = sup.request(switch, RequestTimeoutSeconds=0.5)
     finally:
-        _kernel32().CloseHandle(handle)
+        load_kernel32().CloseHandle(handle)
 
     assert run.code == 1
     [line] = run.stderr.splitlines()
