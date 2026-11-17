@@ -90,6 +90,14 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   again, with the Segment choices read in a read-only one: a refusal by its field, the summary
   above a fresh form, or a stopped import's summary above the form with the origin and default
   kept, always 200.
+- ``GET /inboxes`` (``inboxes_page``) and ``POST /inboxes`` (``inbox_register``), both
+  ``@personal_data(True)``: the Sending Inboxes panel (Story 4.7, FR-32, UX-DR26), linked from
+  the Settings page; see ``nextron.web.inboxes_page``. The GET lists
+  ``queries.sending.inboxes()``. The POST's fields, apart from ``csrf_token``, must be exactly
+  one ``address`` and one ``label`` (anything else is ``MalformedForm``, 400); it registers the
+  inbox through ``sending`` (``Sending.register_inbox``) in its own unit of work, then renders
+  the panel again in a read-only one, with "Inbox registered." or the ``InboxRefused`` message
+  and the typed values.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -142,7 +150,9 @@ from nextron.app.playbook.api import CompanyFacts
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import playbook as playbook_queries
+from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Credentials,
     CredentialStoreFailed,
@@ -157,11 +167,13 @@ from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.recovery import RECOVERY_BANNER
+from nextron.domain.sending_inbox import InboxRefused
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
 from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
+from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import templating
@@ -322,6 +334,7 @@ def create_app(
     backups: Backups,
     restore_tests: RestoreTests,
     lead_imports: LeadImports,
+    sending: Sending,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -334,7 +347,8 @@ def create_app(
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
     ``health`` gives the health panel its report and the notification area its error count;
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
-    ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import.
+    ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
+    ``sending`` registers the Sending Inboxes panel's inboxes.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -775,6 +789,48 @@ def create_app(
             )
             return import_answer(request, **context)
         return import_answer(request, **import_rows.form_context(summary=summary))
+
+    def inboxes_answer(
+        request: Request,
+        template: str,
+        *,
+        notice: credential_rows.Notice | None = None,
+        address: str = "",
+        label: str = "",
+    ) -> HTMLResponse:
+        context = inbox_rows.panel_context(
+            sending_queries.inboxes(), notice=notice, address=address, label=label
+        )
+        return page(request, template, **context)
+
+    @app.get("/inboxes", name="inboxes_page")
+    @personal_data(True)  # the panel shows inbox addresses
+    def inboxes_page(request: Request) -> HTMLResponse:
+        return inboxes_answer(request, inbox_rows.PAGE_TEMPLATE)
+
+    @app.post("/inboxes", name="inbox_register")
+    @personal_data(True)
+    def inbox_register(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        address, label = inbox_rows.submitted_inbox(fields)
+        try:
+            with units.open():
+                sending.register_inbox(address, label)
+        except InboxRefused as refused:
+            # 200, so HTMX swaps the panel in; nothing was stored, and the typed values stay
+            with units.open(read_only=True):
+                return inboxes_answer(
+                    request,
+                    inbox_rows.PANEL_TEMPLATE,
+                    notice=inbox_rows.refused(refused),
+                    address=address,
+                    label=label,
+                )
+        with units.open(read_only=True):
+            return inboxes_answer(
+                request, inbox_rows.PANEL_TEMPLATE, notice=inbox_rows.registered()
+            )
 
     require_declared(app)
     require_route_rules(app)

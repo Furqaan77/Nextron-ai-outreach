@@ -48,6 +48,11 @@ Its ``LeadImports`` (``lead_imports``, Story 2.3) uses the same clock, a ``Disco
 ``Research`` on it, and ``email_syntax`` (a ``FakeEmailSyntax`` unless a test passes another);
 the CSV import page runs it, so it needs real units of work too. ``upload(**texts, file=...)``
 builds a ``multipart/form-data`` body as a browser would, with its ``Content-Type``.
+
+Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
+registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
+saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
+work.
 """
 
 import json
@@ -77,6 +82,7 @@ from nextron.app.ops.api import (
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import CompanyFacts
 from nextron.app.research.api import Research
+from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.alert import Channel
@@ -259,6 +265,7 @@ class Dashboard:
     backups: Backups = field(init=False)
     restore_tests: RestoreTests = field(init=False)
     lead_imports: LeadImports = field(init=False)
+    sending: Sending = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -308,6 +315,7 @@ class Dashboard:
             notify=self.notify,
             queue=self.queue,
         )
+        self.sending = Sending(self.clock, env=self.env)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)
@@ -340,6 +348,7 @@ class Dashboard:
             backups=self.backups,
             restore_tests=self.restore_tests,
             lead_imports=self.lead_imports,
+            sending=self.sending,
             units=self.units,
             **extra,
         )

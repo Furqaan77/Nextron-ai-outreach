@@ -547,3 +547,33 @@ button.secondary {
   width: auto;
   margin-right: 0.35rem;
 }
+
+/* The Sending Inboxes panel: crowding warnings, the inbox table and the connecting note. */
+.inbox-warning {
+  max-width: 48rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--band);
+  border-left: 4px solid var(--refused);
+}
+
+.inbox-table {
+  margin: 1rem 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.inbox-table th,
+.inbox-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.inbox-table td {
+  overflow-wrap: anywhere;
+}
+
+.inbox-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+}

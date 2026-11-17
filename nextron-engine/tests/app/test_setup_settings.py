@@ -338,13 +338,25 @@ def test_required_unset_lists_every_required_key_in_declaration_order(
 ) -> None:
     required = [str(found.key) for found in settings_schema.declared() if found.required]
 
-    assert required_unset(units) == ("sender_timezone", "alert_chat_id") == tuple(required)
+    assert (
+        required_unset(units)
+        == ("sender_name", "sender_timezone", "alert_chat_id")
+        == tuple(required)
+    )
 
 
 def test_required_unset_is_empty_once_every_required_setting_is_set(
     units: UnitOfWorkFactory, setup: Setup
 ) -> None:
-    save(units, setup, {"sender_timezone": "Europe/London", "alert_chat_id": "-1001234567890"})
+    save(
+        units,
+        setup,
+        {
+            "sender_name": "Furqaan Ahmed",
+            "sender_timezone": "Europe/London",
+            "alert_chat_id": "-1001234567890",
+        },
+    )
 
     assert required_unset(units) == ()
 
@@ -352,7 +364,7 @@ def test_required_unset_is_empty_once_every_required_setting_is_set(
 def test_required_unset_counts_a_stored_text_that_no_longer_parses(
     units: UnitOfWorkFactory, setup: Setup, db_engine: Engine
 ) -> None:
-    save(units, setup, {"alert_chat_id": "-1001234567890"})
+    save(units, setup, {"sender_name": "Furqaan Ahmed", "alert_chat_id": "-1001234567890"})
     insert_row(db_engine, "sender_timezone", "Mars/Base")
 
     assert required_unset(units) == ("sender_timezone",)

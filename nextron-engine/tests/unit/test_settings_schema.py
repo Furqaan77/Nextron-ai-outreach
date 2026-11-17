@@ -503,6 +503,7 @@ def test_sender_timezone_is_declared_required_in_the_sender_section() -> None:
 
 def test_the_declared_keys_in_order() -> None:
     assert [key.value for key in Key] == [
+        "sender_name",
         "sender_timezone",
         "sink_allowlist",
         "bulk_threads",
@@ -520,6 +521,7 @@ def test_the_declared_keys_in_order() -> None:
         "us_solicitation_label",
     ]
     assert declared() == (
+        setting(Key.SENDER_NAME),
         setting(Key.SENDER_TIMEZONE),
         setting(Key.SINK_ALLOWLIST),
         setting(Key.BULK_THREADS),
@@ -603,7 +605,8 @@ def test_the_us_solicitation_label_is_a_blank_default_string_in_the_footer_secti
 
 SINK_UNIT = (
     "One email address or numeric Telegram chat id per line. Outside prod, email and alerts "
-    "reach only these; everything else is written to the sink folder."
+    "reach only these; everything else is written to the sink folder. Only these addresses "
+    "can be registered as Sending Inboxes there."
 )
 SINK_REASON = "each line must be an email address or a numeric Telegram chat id"
 
@@ -1052,8 +1055,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
-            "quota_places_pro, quota_prospeo_credits, sender_timezone, sink_allowlist, "
-            "us_solicitation_label"
+            "quota_places_pro, quota_prospeo_credits, sender_name, sender_timezone, "
+            "sink_allowlist, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

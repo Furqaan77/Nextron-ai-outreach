@@ -14,6 +14,7 @@ from nextron.db.models import (
     ops,
     playbook,
     research,
+    sending,
     setup,
 )
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
@@ -34,6 +35,7 @@ from nextron.db.models.playbook import (
     PromptSnapshotRecord,
 )
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
+from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
 from nextron.db.models.setup import (
     MarketRecord,
     SegmentRecord,
@@ -62,6 +64,8 @@ __all__ = [
     "RecoveryStateRecord",
     "RestoreTestRecord",
     "SegmentRecord",
+    "SendingDomainRecord",
+    "SendingInboxRecord",
     "SequenceRecord",
     "SettingRecord",
     "StepBriefRecord",
@@ -76,6 +80,7 @@ __all__ = [
     "ops",
     "playbook",
     "research",
+    "sending",
     "setup",
     "ulid_pk",
 ]

@@ -183,6 +183,7 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
         "/settings",
         form(
             csrf_token=token,
+            sender_name="",
             sender_timezone="",
             sink_allowlist="",
             bulk_threads="",
