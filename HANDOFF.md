@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.12 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`; sprint status `review`). **Next: Story 1.13.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.13 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`; sprint status `review`). **Next: Story 1.14.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -66,7 +66,9 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 **Story 1.12 result:** ops alerts by Telegram (adapter behind `AlertPort`, sink-wrapped outside prod) and in the dashboard. It adds the `alerts` and `notifications` tables (migration `0005_1_12_notify`), the first job type `send_alert`, a `job_dead` alert from an `ops` sweep, a new required setting `alert_chat_id` (numeric Telegram chat id), and a notification area with Dismiss. Nothing has been sent to a real Telegram chat yet. 3416 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 12 are done.
+**Story 1.13 result:** metering of every external call (`UsageMeterPort`; `api_usage` and `ai_usage` tables, migration `0006_1_13_metering`), budget rules (`nextron/domain/budget.py`, `allow()`), seven Budget-and-limits settings, a `DEFERRED` job result (re-queued in 1 h with the attempt given back), once-a-month dashboard notices at thresholds, and a Quotas and cost page at `/quotas`. Sending and replies are never blocked. 3641 tests, 29 contracts.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 13 are done.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -81,6 +83,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
   - every Telegram refusal is one code, so a bad token looks the same as a bad chat id;
   - each dead job gives two dashboard notices until `alert_chat_id` is set, and there is no "send a test alert";
   - an error notice stays until the page reloads.
+- **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **Never exercised against the real service:** nothing has talked to real Google, Telegram, Hunter or Claude yet. Every adapter is proven against fakes. Release 2 (Epics 8–9) is 20. Release 3 (Epics 10–11) is 17.
 
 ## 4. How to continue building (exact procedure)
