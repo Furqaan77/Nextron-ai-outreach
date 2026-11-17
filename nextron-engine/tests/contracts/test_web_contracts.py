@@ -162,6 +162,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/health/jobs/dismiss",
         "/health/backup",
         "/health/restore-test",
+        "/inboxes",
+        "/inboxes",
     ]
     assert async_route_handlers(app) == []
 
@@ -277,6 +279,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /quotas",
         "GET /health/panel",
         "GET /health/panel/live",
+        "GET /inboxes",
     ):
         assert route in str(caught.value)
     for route in (
@@ -288,6 +291,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /credentials/google/remove",
         "POST /health/jobs/dismiss",
         "POST /health/backup",
+        "POST /inboxes",
     ):
         assert route in str(caught.value)
 
@@ -458,6 +462,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /quotas",
         "GET /health/panel",
         "GET /health/panel/live",
+        "GET /inboxes",
     ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
     for route in (
@@ -468,6 +473,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "POST /credentials/google/grant",
         "POST /credentials/google/remove",
         "POST /health/jobs/dismiss",
+        "POST /inboxes",
     ):
         assert f"{route}: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
@@ -565,6 +571,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "health.html",
         "health_panel.html",
         "home.html",
+        "inboxes.html",
+        "inboxes_panel.html",
         "locked.html",
         "macros.html",
         "notifications.html",

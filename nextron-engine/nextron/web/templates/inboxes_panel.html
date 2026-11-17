@@ -1,0 +1,40 @@
+{#- The Sending Inboxes panel (nextron.web.inboxes_page): rendered inside inboxes.html, and alone
+    as the answer to POST /inboxes, which HTMX swaps in for this whole panel.
+    Every value is autoescaped; nothing here is marked safe. -#}
+<div id="inboxes-panel">
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
+{%- endif %}
+{%- for warning in warnings %}
+<p class="inbox-warning">{{ warning }}</p>
+{%- endfor %}
+<form method="post" hx-post="/inboxes" hx-target="#inboxes-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<div class="field">
+<label for="inbox-address">Address</label>
+<input type="text" id="inbox-address" name="address" value="{{ address }}" autocomplete="off" spellcheck="false" aria-describedby="inbox-address-hint">
+<p class="hint" id="inbox-address-hint">A personal address in the Sender's name, such as furqaan@yourdomain.com; never nextronai.com or a role address such as info@ or sales@. Outside prod, it must be on the Dev and test allowlist.</p>
+</div>
+<div class="field">
+<label for="inbox-label">Label</label>
+<input type="text" id="inbox-label" name="label" value="{{ label }}" autocomplete="off" aria-describedby="inbox-label-hint">
+<p class="hint" id="inbox-label-hint">1 to 80 characters on one line, such as Main inbox.</p>
+</div>
+<button type="submit">Add inbox</button>
+</form>
+{%- if rows %}
+<table class="inbox-table">
+<thead>
+<tr><th scope="col">Label</th><th scope="col">Address</th><th scope="col">Sending Domain</th><th scope="col">Status</th></tr>
+</thead>
+<tbody>
+{%- for row in rows %}
+<tr><td>{{ row.label }}</td><td>{{ row.address }}</td><td>{{ row.domain }}</td><td>{{ row.status }}
+{%- if row.note %}<p class="inbox-note">{{ row.note }}</p>{% endif %}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="inbox-empty">{{ no_inboxes }}</p>
+{%- endif %}
+</div>

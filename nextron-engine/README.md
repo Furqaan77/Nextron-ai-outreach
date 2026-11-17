@@ -70,7 +70,7 @@ has an id, a status (`ok`, `warn` or `fail`) and a one-line message:
 | `required_credentials` | the 5 required credentials (see [Credentials](#credentials)) are set, each 1,280 characters or fewer | | lists the labels that are not set, too long, or unreadable in Credential Manager |
 | `internal_notify_grant` | the Google `internal_notify` grant is stored and Google refreshed it | Google can't be reached: run doctor again later | the Desktop client is not imported, the grant is missing or needs re-consent, Credential Manager fails, or another error (by its code) |
 | `offpc_backup` | "Off-PC backup folder" (`backup_offpc_dir`) is set, on another drive than the data dir, and the Backup passphrase is set (see [Backups](#backups)) | `off-PC backup not configured (OQ-A3): backups are local only; ...`, listing every reason with its fix: the folder is blank, is the data dir or the backup dir (or inside either), or can't be read; the passphrase is not set, too long or unreadable. Or the folder is on the data dir's drive (a lost disk would take both) | |
-| `required_settings` | every required setting (`sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
+| `required_settings` | every required setting (`sender_name`, `sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
 | `database_revision` | the database is at the code's head revision | no database file, an empty one, or one behind head: "will migrate on next start" | a revision this code doesn't know ("newer than this code"), or not this engine's database |
 
 The table looks like this (some rows left out):
@@ -392,6 +392,15 @@ its rules (one tightened since it was saved) is marked the same way when the pag
 7. **Setting names have at most 31 characters,** because log redaction masks any longer run as
    `<key>`.
 
+**The Sender's name** (`sender_name`, "Sender's name", first in the Sender section; Story 4.7,
+FR-32) is the From name on every cold email: a required string of at most 100 characters that
+must read as a person's name (rule `display_name`: at least one letter, and only letters,
+combining marks, spaces, `'`, `’`, `-` and `.`; so `Furqaan Ahmed`, `O’Brien` and `J. Smith`
+pass, while `Nextron AI <sales@...>`, `Mac 2` or a no-break space are refused). It has no
+default: until it is set, `nextron doctor`'s `required_settings` check fails and registering a
+Sending Inbox is refused (see [Sending Inboxes](#sending-inboxes)), so no inbox carries a
+made-up From name.
+
 **The US solicitation label** (`us_solicitation_label`, "US solicitation label" in Footer and
 booking; Story 3.1, NFR-2, OQ-8) is a string of at most 200 characters, blank by default. The US
 footer template ends with a `{us_solicitation_label}` line: blank, the line is dropped; set
@@ -700,6 +709,95 @@ publicsuffix.org and record its SHA-256 and version in `tests/contracts/test_ven
 **Every `leads` column is PII class `none`**: they are organization data, so erasing a Contact
 never removes the firm's Lead. No column records the source: the creation `events` row does.
 
+## Sending Inboxes
+
+A Sending Inbox (FR-32, AD-21, Story 4.7) is a mailbox cold email is sent from; every new
+Sequence is bound to one for all its Steps (enrollment, Story 4.8). Each inbox belongs to a
+Sending Domain, its address's registrable domain. Owner `sending` keeps them in
+`sending_domains` and `sending_inboxes` (migration `0014_4_7_sending_inboxes`); every column is
+PII class `none`, because these are Nextron's own sender identity, never a data subject's.
+
+**Register one** on the Sending Inboxes panel (`/inboxes`, linked from the Settings page; it
+isn't in the navigation, whose sections UX-DR1 fixes), or from code with
+`Sending.register_inbox(address, label)` (`nextron/app/sending/api.py`), a use case:
+
+```python
+with units.open():
+    result = sending.register_inbox("Furqaan@Nextron-AI.com", "Main")
+# RegisteredInbox(inbox_id, sending_domain_id, domain="nextron-ai.com", domain_created=True)
+```
+
+1. **The address** goes through `nextron.domain.identity.normalize_email` (trimmed, lowercased,
+   the domain IDNA-encoded) and must be all ASCII, with a local part that is an RFC 5322
+   dot-atom: runs of letters, digits and ``!#$%&'*+/=?^_`{|}~-`` separated by single dots, with
+   no leading or trailing dot (so `"info"@`, `info(x)@`, `a,b@` and `a..b@` are refused). Its
+   Sending Domain is `identity.registrable_domain` of the part after `@`
+   (`mac@mail.firm.co.uk` sends from `firm.co.uk`). No other code normalises an address or a
+   domain.
+2. **The label** is stripped and must be 1 to 80 characters with no control, format, surrogate,
+   line or paragraph separator character.
+3. **Then one transaction**, in order: outside `prod`, the address must be on the
+   `sink_allowlist` setting (AD-14; any ASCII case; a stored list that no longer parses counts
+   as empty); the address must not be registered already, at any status (a `removed` inbox's
+   address stays taken); the `sender_name` setting is copied into `from_name`; the Sending
+   Domain row is found or created; the inbox is stored at `connecting`; and one `events` row is
+   appended (entity `sending_inboxes`, `None` to `connecting`, cause `registered`, actor
+   `operator`). Each inbox keeps the From name it was registered with: a later change to the
+   Sender's name doesn't change existing inboxes (Story 6.2 refreshes `from_name` when the
+   inbox connects).
+4. **Any refusal** stores nothing and raises `InboxRefused` (code `inbox_refused`) with its
+   `refusal`. The panel shows the message:
+
+   | Refusal | Message | When |
+   |---|---|---|
+   | `invalid_address` | Enter a valid email address, such as furqaan@yourdomain.com | not exactly one `@`, a public suffix (`a@co.uk`), a non-ASCII address (`ü@d.com`), a local part that isn't a dot-atom (`"info"@d.com`), and so on |
+   | `invalid_label` | Enter a label of 1 to 80 characters on one line | blank, over 80 characters, or a line break inside |
+   | `brand_domain` | Cold email never goes from nextronai.com | the Sending Domain is `nextronai.com`, so every subdomain too |
+   | `role_address` | Use a personal address in the Sender's name | the local part before any `+tag` is a role mailbox (below) |
+   | `not_allowlisted` | Outside prod, only allowlisted test inboxes can be registered | `dev` or `test`, and the address isn't on the allowlist |
+   | `already_registered` | Inbox already registered | the normalised address is stored, at any status |
+   | `sender_name_unset` | Set the Sender's name on the Settings page first | `sender_name` is unset or no longer valid |
+
+   The brand check comes before the role check, so `team@nextronai.com` is `brand_domain`. The
+   role mailboxes are `team`, `info`, `sales`, `contact`, `admin`, `office`, `hello`, `support`,
+   `abuse`, `billing`, `careers`, `enquiries`, `help`, `hostmaster`, `inquiries`, `jobs`,
+   `marketing`, `no-reply`, `noreply`, `postmaster`, `press` and `webmaster`; `info+cold@` is a
+   role address too. The `nextronai.com` rule is also a CHECK on both tables, as defence in
+   depth.
+5. **Logs** carry only IDs: `sending_inbox_registered` (`inbox_id`, `sending_domain_id`,
+   `domain_created`) or `sending_inbox_refused` (`refusal`), never the address or the label.
+
+**The panel** (`GET /inboxes`, `POST /inboxes`, both `@personal_data(True)`) shows, in order:
+the last POST's notice (`Inbox registered.` with the form cleared, or the refusal's message
+with the typed values kept); a warning for each Sending Domain with more than 3 inboxes ("More
+than 3 inboxes on <domain> raises deliverability risk"; the inbox is still stored); the Address
+and Label form; and a table of Label, Address, Sending Domain and Status, oldest first, where a
+`connecting` inbox reads "Gmail connection and warm-up not set up yet; nothing can be sent from
+it". With none it says "No Sending Inboxes registered yet." `removed` inboxes aren't listed or
+counted. The form posts exactly `address` and `label`; any other field, or a repeated one, gets
+400.
+
+**Reading the inboxes.** `queries.sending.inboxes()` lists every inbox that isn't `removed`, and
+`queries.sending.inboxes_for_binding()` only the `connecting` and `active` ones
+(`BINDABLE_STATUSES`), the ones a new Sequence may bind to; both return
+`SendingInboxView(id, address, label, sending_domain_id, domain, from_name, status,
+created_at)` tuples, by `created_at`, then `id`.
+
+**The SendingInbox machine** (`nextron/domain/sending_inbox.py`, AD-4) holds every status and
+move; Story 4.7 applies only the creation (`CREATION`: `connecting`, cause `registered`). The
+Gmail connection, warm-up, caps, authentication checks and the pause, resume and remove commands
+arrive with Epic 6 (Stories 6.2 to 6.4), which alters these tables and adds no status. The pause
+causes are `operator`, `bounce_rate`, `policy_bounce`, `blocklist` and `spam_rate`.
+
+| Event | From | To | Cause |
+|---|---|---|---|
+| `connect` | `connecting` | `active` | `connected` |
+| `pause_<cause>` (one per pause cause) | `active` | `paused` | the pause cause |
+| `resume` | `paused` | `active` | `resumed` |
+| `auth_fail` | `active`, `paused` | `auth_failed` | `invalid_grant` |
+| `reconsent` | `auth_failed` | `active` | `reconsented` |
+| `remove` | every status except `removed` | `removed` | `operator_removed` |
+
 ## Secrets
 
 Secrets live only in Windows Credential Manager, through `SecretsPort`
@@ -865,7 +963,9 @@ In `dev` and `test`, email and alerts reach only the people on the `sink_allowli
 - **The allowlist** is "Dev and test allowlist" in the Engine section of the Settings page: one
   email address or numeric Telegram chat id per line. A Telegram `@username` is refused, because
   a user name can be handed to someone else. It is empty by default, so nothing is delivered
-  until you list your own test inboxes and chats. Addresses match regardless of ASCII case
+  until you list your own test inboxes and chats. Outside `prod` it also limits the Sending
+  Inboxes: only an address on it can be registered (see [Sending Inboxes](#sending-inboxes)).
+  Addresses match regardless of ASCII case
   (`Mac@Example.com` matches `mac@example.com`); nothing else is normalised (no spaces are
   stripped, and `straße@x.com` never matches `strasse@x.com`).
 - **It is read on every send**, so a change on the Settings page applies to the next message. If
@@ -951,6 +1051,7 @@ the log line carries the copy's `file` name.
 | `0011_2_2_leads` | `leads` (unique `web_domain`, `ch_number` and `place_id`, four checks, two foreign keys) (see [Leads and identity](#leads-and-identity)) | `discovery` (identity group), `pipeline` (`pipeline_stage`) |
 | `0012_1_18_restore_tests` | `restore_tests`: one row per restore test, each check's outcome, its nine checks (`kind`, `result`, one per check, `ck_restore_tests_outcome`, `ck_restore_tests_counts`) and `ix_restore_tests_started_at` (see [The restore test](#the-restore-test)) | `ops` |
 | `0013_4_1_sequences` | `sequences` (unique `key`, `ck_sequences_version`) and `step_briefs` (a foreign key to `sequences.id` with no cascade; unique on `sequence_id` and `step`; three checks) (see [Sequences](#sequences)) | `setup` |
+| `0014_4_7_sending_inboxes` | `sending_domains` (unique `domain`, `ck_sending_domains_not_brand`) and `sending_inboxes` (unique `address`, a foreign key to `sending_domains.id` with no cascade, `status` default `connecting`, `ck_sending_inboxes_status` and `ck_sending_inboxes_not_brand`) (see [Sending Inboxes](#sending-inboxes)) | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

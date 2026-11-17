@@ -136,6 +136,7 @@ class Key(StrEnum):
     """Every declared setting's key. A story that needs a setting adds it here and to
     ``SCHEMA``; ``schema_problems`` fails when the two differ."""
 
+    SENDER_NAME = "sender_name"
     SENDER_TIMEZONE = "sender_timezone"
     SINK_ALLOWLIST = "sink_allowlist"
     BULK_THREADS = "bulk_threads"
@@ -821,6 +822,34 @@ TELEGRAM_CHAT_ID_RULE: Final = Rule(
     is_telegram_chat_id,
 )
 
+# The Sender's name (Story 4.7, FR-32, NFR-1): the From name of every cold email, so it must
+# read as a real person's name. Letters (category L*), combining marks (M*), the space, the
+# apostrophes ' and U+2019, the hyphen and the full stop; at least one letter.
+DISPLAY_NAME_PUNCTUATION: Final = frozenset(" '\u2019-.")
+
+
+def is_display_name(value: object) -> bool:
+    """Whether ``value`` is a ``str`` holding at least one letter and only letters, combining
+    marks, spaces, apostrophes, hyphens and full stops."""
+    if not isinstance(value, str):
+        return False
+    letters = 0
+    for character in value:
+        category = unicodedata.category(character)
+        if category.startswith("L"):
+            letters += 1
+        elif not (category.startswith("M") or character in DISPLAY_NAME_PUNCTUATION):
+            return False
+    return letters > 0
+
+
+DISPLAY_NAME_RULE: Final = Rule(
+    "display_name",
+    "must be a person's name: letters, spaces, apostrophes, hyphens and full stops, with at "
+    "least one letter",
+    is_display_name,
+)
+
 OFFPC_FOLDER_RULE: Final = Rule(
     "offpc_folder",
     "must be blank, or a full path to a folder on a drive or a network share, such as "
@@ -838,6 +867,21 @@ PLACES_PRO_FREE_MONTHLY: Final = 5_000
 MAX_AI_BUDGET: Final = 100 * MICROS_PER_DOLLAR  # the whole engine's monthly ceiling (SM-9)
 
 SCHEMA: Mapping[str, Setting] = _declare(
+    # The From name of every cold email (Story 4.7, FR-32). Required: until it is set,
+    # registering a Sending Inbox is refused and doctor's required_settings fails, so no inbox
+    # ever carries a made-up From name.
+    Setting(
+        key=Key.SENDER_NAME,
+        type=SettingType.STRING,
+        section=Section.SENDER,
+        label="Sender's name",
+        unit=(
+            "The From name on every cold email: your own name, such as Furqaan Ahmed. Letters, "
+            "spaces, apostrophes, hyphens and full stops; at most 100 characters."
+        ),
+        default=REQUIRED,
+        rules=(max_length(100), DISPLAY_NAME_RULE),
+    ),
     Setting(
         key=Key.SENDER_TIMEZONE,
         type=SettingType.TIMEZONE,
@@ -855,7 +899,8 @@ SCHEMA: Mapping[str, Setting] = _declare(
         label="Dev and test allowlist",
         unit=(
             "One email address or numeric Telegram chat id per line. Outside prod, email and "
-            "alerts reach only these; everything else is written to the sink folder."
+            "alerts reach only these; everything else is written to the sink folder. Only "
+            "these addresses can be registered as Sending Inboxes there."
         ),
         default=(),
         rules=(SINK_RECIPIENT_RULE,),

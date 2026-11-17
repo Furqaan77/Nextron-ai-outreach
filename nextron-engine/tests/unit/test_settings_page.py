@@ -536,6 +536,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
 
     assert list(page.fields) == [
         "us_solicitation_label",
+        "sender_name",
         "sender_timezone",
         "alert_chat_id",
         "quota_hunter_credits",
@@ -555,8 +556,8 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
     assert (shown.tag, shown.label, shown.value) == ("textarea", "Dev and test allowlist", "")
     assert shown.hint == (
         "One email address or numeric Telegram chat id per line. Outside prod, email and alerts "
-        "reach only these; everything else is written to the sink folder.; default: none; "
-        "leave blank to use it"
+        "reach only these; everything else is written to the sink folder. Only these addresses "
+        "can be registered as Sending Inboxes there.; default: none; leave blank to use it"
     )
 
 

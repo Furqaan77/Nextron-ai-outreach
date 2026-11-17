@@ -115,6 +115,22 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "pipeline_stage": PiiClass.NONE,
     },
+    # Story 4.7. Nextron's own sender identity (its Sending Domains, its inboxes' addresses,
+    # labels and From name), never a data subject's: erasing a Contact never rewrites it.
+    "sending_domains": {
+        "id": PiiClass.NONE,
+        "domain": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+    },
+    "sending_inboxes": {
+        "id": PiiClass.NONE,
+        "address": PiiClass.NONE,
+        "label": PiiClass.NONE,
+        "sending_domain_id": PiiClass.NONE,
+        "from_name": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

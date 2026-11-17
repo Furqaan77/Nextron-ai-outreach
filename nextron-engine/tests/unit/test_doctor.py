@@ -78,7 +78,11 @@ PLANTED = (
 )
 GRANTED_AT = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
 NOTIFY = grant_spec(GoogleGrant.INTERNAL_NOTIFY)
-SETTINGS = {"sender_timezone": "Europe/London", "alert_chat_id": "-1001234567890"}
+SETTINGS = {
+    "sender_name": "Furqaan Ahmed",
+    "sender_timezone": "Europe/London",
+    "alert_chat_id": "-1001234567890",
+}
 
 type Results = dict[str, tuple[str, str]]
 
@@ -333,8 +337,9 @@ def test_a_fresh_install_fails_on_what_it_lacks_and_creates_nothing(data_dir: Pa
         "passphrase is not set; enter it on the Credentials page"
     )
     assert results["required_settings"][1] == (
-        "required settings not set or no longer valid: Sender's timezone (sender_timezone), "
-        "Telegram alert chat id (alert_chat_id); set them on the Settings page"
+        "required settings not set or no longer valid: Sender's name (sender_name), Sender's "
+        "timezone (sender_timezone), Telegram alert chat id (alert_chat_id); set them on the "
+        "Settings page"
     )
     assert "will be created and migrated on next start" in results["database_revision"][1]
     assert "not imported" in results["internal_notify_grant"][1]
@@ -685,7 +690,7 @@ def test_an_off_pc_folder_in_the_data_dir_is_not_configured(data_dir: Path) -> N
 
 
 def test_an_unset_required_setting_fails_naming_it(data_dir: Path) -> None:
-    make_database(data_dir, {"sender_timezone": "Europe/London"})
+    make_database(data_dir, {"sender_name": "Furqaan Ahmed", "sender_timezone": "Europe/London"})
 
     code, results = run_doctor()
 
@@ -948,7 +953,7 @@ def test_the_doctor_database_never_creates_a_missing_file(tmp_path: Path) -> Non
     database = main.DoctorDatabase(path)
 
     assert not database.exists()
-    assert database.required_unset() == ("sender_timezone", "alert_chat_id")
+    assert database.required_unset() == ("sender_name", "sender_timezone", "alert_chat_id")
     assert not path.parent.exists()  # no engine was needed
     path.parent.mkdir()
     with pytest.raises(OperationalError, match="unable to open database file"):

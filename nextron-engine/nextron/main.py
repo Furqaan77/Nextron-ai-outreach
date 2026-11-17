@@ -154,6 +154,12 @@ thread and the keeper are alive, no running job has passed its ``max_runtime`` a
 scheduler's event loop answers its probe. The supervisor (``scripts/run.ps1``, Story 1.21)
 restarts the engine when the file is more than 5 minutes old.
 
+**Sending Inboxes (Story 4.7; AD-14, AD-21, FR-32).** ``build_app`` builds one
+``Sending(clock, env=config.env)`` (``nextron.app.sending.api``) and hands it to
+``create_app(..., sending=sending)``: the Sending Inboxes panel registers inboxes through it.
+Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
+external service.
+
 **The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer)`` to
 ``create_app``, so all three start when the server starts and stop when it stops, in whichever
 process serves the app (the reload worker included). Building the app starts nothing. Startup
@@ -352,6 +358,7 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Credentials,
     GoogleAccess,
@@ -538,7 +545,8 @@ def build_app(
     PC through ``backup_targets`` (``FolderBackupTarget`` with these secrets unless injected);
     ``RestoreTests`` fetches the newest off-PC copy back through the same targets and checks
     it (the ``restore_test`` job); the scheduler reads the daily times when it starts, never
-    when the app is built."""
+    when the app is built. ``Sending`` registers the Sending Inboxes panel's inboxes, for
+    ``config.env``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -612,6 +620,7 @@ def build_app(
         queue=queue,
         backups=backups,
         restore_tests=restore_tests,
+        sending=Sending(clock, env=config.env),
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )

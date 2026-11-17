@@ -43,6 +43,11 @@ Its ``OffpcBackups`` (``offpc``, Story 1.17) sends verified copies to ``offpc_ta
 Its ``RestoreTests`` (``restore_tests``, Story 1.18) uses the same clock, ``offpc``, ``notify``
 and ``queue``, that backup dir and ``inspect`` (``nextron.db.repos.ops.snapshot.inspect_copy``
 unless a test passes another). The panel's "Run restore test now" queues its job.
+
+Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
+registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
+saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
+work.
 """
 
 import json
@@ -67,6 +72,7 @@ from nextron.app.ops.api import (
     OffpcBackups,
     RestoreTests,
 )
+from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.alert import Channel
@@ -208,6 +214,7 @@ class Dashboard:
     offpc: OffpcBackups = field(init=False)
     backups: Backups = field(init=False)
     restore_tests: RestoreTests = field(init=False)
+    sending: Sending = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -255,6 +262,7 @@ class Dashboard:
             notify=self.notify,
             queue=self.queue,
         )
+        self.sending = Sending(self.clock, env=self.env)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)
@@ -279,6 +287,7 @@ class Dashboard:
             queue=self.queue,
             backups=self.backups,
             restore_tests=self.restore_tests,
+            sending=self.sending,
             units=self.units,
             **extra,
         )

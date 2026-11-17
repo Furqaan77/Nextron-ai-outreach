@@ -121,6 +121,20 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         ),
         "pipeline": ("pipeline_stage",),
     },
+    "sending_domains": {
+        "sending": ("id", "domain", "created_at"),
+    },
+    "sending_inboxes": {
+        "sending": (
+            "id",
+            "address",
+            "label",
+            "sending_domain_id",
+            "from_name",
+            "status",
+            "created_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",
