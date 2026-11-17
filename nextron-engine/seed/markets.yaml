@@ -1,0 +1,60 @@
+# The Markets (FR-2): the US and UK cold-email rules. Each Market names its country code and
+# country-code TLDs, whether cold email is allowed, the eligible legal forms (Companies House
+# company types; not_checked when a Market doesn't check them), whether free webmail is blocked,
+# the default timezone and the fallback for an unknown location (with the narrowed Send Window),
+# the English variant and the footer template, one item per line. Footer placeholders are
+# {sender_signature}, {legal_name}, {postal_address}, {optout_line}, {privacy_line} and
+# {us_solicitation_label}; a line left blank when the footer renders is dropped.
+#
+# The engine refuses a Market that loosens the compliance floor: cold email only to US and GB
+# Markets, and a GB Market always blocks free webmail, requires the privacy line and checks
+# legal forms, listing only the eight company types below (it may list fewer, never another).
+# A new Market (disabled until its rules are reviewed) needs no code change.
+#
+# `nextron seed sync` loads this file into the database together with segments.yaml (AD-12):
+# it creates each Market that is new, gives each changed one a new version, and leaves alone a
+# Market that is stored but no longer listed here. The engine must have been started once
+# (nextron serve), so the database exists and is migrated.
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py): mappings and
+# lists indented with spaces, one-line [a, b] lists, 'single' or "double" quoted text, plain
+# text, whole numbers and true/false. Anything else (tabs, anchors, {...}, multi-line text, or
+# a plain value such as yes, no, null, 1.5, a date or a time) is refused with its line number,
+# so the file is never misread. Write a value in quotes when it must stay text.
+
+markets:
+  - code: us
+    name: United States
+    enabled: true
+    country_code: US
+    cctlds: [us]
+    cold_email_allowed: true
+    eligible_legal_forms: not_checked
+    free_webmail_blocked: false
+    default_timezone: America/New_York
+    unknown_timezone: America/New_York
+    unknown_send_window: '11:00-17:00'  # Eastern, for a Contact with no known state
+    english_variant: en_us
+    footer_template: ['{sender_signature}', '{legal_name}', '{postal_address}', '{optout_line}', '{us_solicitation_label}']
+    privacy_line_required: false
+  - code: uk
+    name: United Kingdom
+    enabled: true
+    country_code: GB
+    cctlds: [uk]
+    cold_email_allowed: true
+    eligible_legal_forms:  # Companies House company_type values (PECR: corporate subscribers)
+      - ltd
+      - plc
+      - private-limited-guarant-nsc
+      - private-limited-guarant-nsc-limited-exemption
+      - private-limited-shares-section-30-exemption
+      - private-unlimited
+      - private-unlimited-nsc
+      - llp
+    free_webmail_blocked: true
+    default_timezone: Europe/London
+    unknown_timezone: Europe/London
+    english_variant: en_gb
+    footer_template: ['{sender_signature}', '{legal_name}', '{postal_address}', '{optout_line}', '{privacy_line}']
+    privacy_line_required: true

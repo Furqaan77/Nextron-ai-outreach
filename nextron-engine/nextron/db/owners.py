@@ -62,6 +62,28 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "segments": {
         "setup": ("id", "key", "definition", "version", "created_at", "updated_at"),
     },
+    "markets": {
+        "setup": (
+            "id",
+            "code",
+            "name",
+            "enabled",
+            "country_code",
+            "cctlds",
+            "cold_email_allowed",
+            "eligible_legal_forms",
+            "free_webmail_blocked",
+            "default_timezone",
+            "unknown_timezone",
+            "unknown_send_window",
+            "english_variant",
+            "footer_template",
+            "privacy_line_required",
+            "version",
+            "created_at",
+            "updated_at",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

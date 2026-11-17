@@ -150,6 +150,7 @@ class Key(StrEnum):
     QUOTA_JOB_AGGREGATOR = "quota_job_aggregator"
     AI_BUDGET_MONTHLY = "ai_budget_monthly"
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
+    US_SOLICITATION_LABEL = "us_solicitation_label"
 
 
 class _Required(Enum):
@@ -1022,6 +1023,21 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=80,
         rules=(minimum(1, "1"), maximum(MAX_PERCENT, "100")),
+    ),
+    # The US footer's solicitation label (Story 3.1, NFR-2, OQ-8). Blank by default: the US
+    # footer template's {us_solicitation_label} line is then dropped. Story 4.11 reads it with
+    # the other footer settings and must not declare it again.
+    Setting(
+        key=Key.US_SOLICITATION_LABEL,
+        type=SettingType.STRING,
+        section=Section.FOOTER_AND_BOOKING,
+        label="US solicitation label",
+        unit=(
+            "Blank by default. When set, every US email's footer shows this text on its own "
+            "line (CAN-SPAM; decided with counsel before the first US send, OQ-8)."
+        ),
+        default="",
+        rules=(max_length(200),),
     ),
 )
 

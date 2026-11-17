@@ -53,6 +53,33 @@ with the four counts: ``created_count``, ``changed_count``, ``unchanged_count`` 
 ``not_in_file_count`` (``created`` alone is a ``LogRecord`` attribute, which ``extra`` may not
 overwrite).
 
+``Setup.sync_markets(markets)`` (FR-2, AD-12, Story 3.1) does the same for the Markets of
+``seed/markets.yaml``, as ``nextron.domain.markets.MarketDef`` values, keyed by ``code`` into the
+``markets`` table. Before any transaction it refuses an item that isn't a ``MarketDef``
+(``TypeError``) or a repeated code (``ValueError``) and, when there is at least one, validates
+the definitions again as the file form (``validate_markets`` on each ``market_form``), so a
+hand-built ``MarketDef`` that breaks a rule raises ``InvalidMarkets``; the Markets it stores and
+compares are the ones that validation returns. It reads the clock once, then works in one
+transaction. Before any write it raises ``InvalidMarkets`` for the first input Market, in file
+order, whose ``country_code`` or a ccTLD a stored Market the input leaves out still uses,
+naming ``markets[<code>].country_code`` ("is also the country code of the stored Market
+<code>, which is no longer in the file: keep that Market's code") or ``markets[<code>].cctlds``
+("holds <tld>, a ccTLD of the stored Market <code>, which is no longer in the file: keep that
+Market's code"). Then, in input order: a code with no row is inserted at version 1 with one
+``events`` row (entity ``markets``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``); a
+row whose decoded ``MarketDef`` differs is updated to version n+1 with one ``events`` row
+``v<n>`` to ``v<n+1>``; anything else writes nothing. A stored Market missing from the input is
+never changed or deleted. Decoding a stored row that no longer validates raises
+``InvalidMarkets`` (nothing is written). It returns ``MarketSync(created, changed, unchanged,
+not_in_file)``, shaped like ``SegmentSync`` with codes, and after the commit logs
+``markets_synced`` (INFO) with the same four ``*_count`` fields.
+
+``Setup.sync_seed(segments, markets)`` is what ``nextron seed sync`` calls (a unit of work runs
+one use case): every pre-transaction check of both syncs (Segments first), the clock read once,
+then both syncs in **one** transaction, Segments first, so a failure anywhere changes nothing.
+After the commit it logs ``segments_synced``, then ``markets_synced``, and returns
+``SeedSync(segments, markets)``.
+
 ``Credentials`` (AD-12, FR-56, NFR-18) stores the external credentials declared in
 ``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. It touches
 no database, so its methods are not ``@use_case``s and need no unit of work; one
@@ -173,6 +200,7 @@ from secrets import token_urlsafe
 from typing import Final, NoReturn
 
 from nextron.db import eventlog
+from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import settings as settings_repo
 from nextron.db.uow import current, use_case
@@ -214,6 +242,12 @@ from nextron.domain.google_oauth import (
     parse_client_file,
     same_account,
     scope_granted,
+)
+from nextron.domain.markets import (
+    InvalidMarkets,
+    MarketDef,
+    market_form,
+    validate_markets,
 )
 from nextron.domain.segments import (
     InvalidSegments,
@@ -261,6 +295,8 @@ CREDENTIAL_STORE_FAILED: Final = "credential_store_failed"
 CREDENTIAL_READ_FAILED: Final = "credential_read_failed"
 SEGMENTS_SYNCED: Final = "segments_synced"
 SEGMENTS_ENTITY: Final = "segments"
+MARKETS_SYNCED: Final = "markets_synced"
+MARKETS_ENTITY: Final = "markets"
 SEED_SYNC_CAUSE: Final = "seed_sync"
 SEED_ACTOR: Final = "seed"
 SAVE: Final = "save"
@@ -283,6 +319,26 @@ class SegmentSync:
     not_in_file: tuple[tuple[str, int], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MarketSync:
+    """What ``sync_markets`` did: ``created`` as ``(code, version)``, ``changed`` as ``(code,
+    from_version, to_version)`` and ``unchanged`` codes, each in input order, and
+    ``not_in_file`` as ``(code, version)`` of each stored Market the input left out, by code."""
+
+    created: tuple[tuple[str, int], ...]
+    changed: tuple[tuple[str, int, int], ...]
+    unchanged: tuple[str, ...]
+    not_in_file: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SeedSync:
+    """What ``sync_seed`` did: the Segments' sync, then the Markets'."""
+
+    segments: SegmentSync
+    markets: MarketSync
+
+
 def _log_changed(keys: list[str]) -> None:
     if keys:
         log.info(SETTINGS_CHANGED, extra={"keys": ",".join(keys)})
@@ -290,7 +346,7 @@ def _log_changed(keys: list[str]) -> None:
 
 class Setup:
     """Operator settings, one typed value at a time or a whole Settings page at once, and the
-    Segments a seed sync loads."""
+    Segments and Markets a seed sync loads."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
@@ -357,50 +413,98 @@ class Setup:
     @use_case
     def sync_segments(self, segments: Sequence[SegmentDef]) -> SegmentSync:
         """Upsert ``segments`` by key; see the module docstring."""
-        chosen = tuple(segments)
-        for segment in chosen:
-            if not isinstance(segment, SegmentDef):
-                raise TypeError(f"sync_segments takes SegmentDefs, not {type(segment).__name__}")
-        counts = Counter(segment.key for segment in chosen)
-        repeated = sorted(key for key, count in counts.items() if count > 1)
-        if repeated:
-            raise ValueError(f"sync_segments got a key more than once: {', '.join(repeated)}")
-        texts = tuple(definition_text(segment) for segment in chosen)
-        if texts:  # the file form again: InvalidSegments for a SegmentDef that breaks a rule
-            validate_segments({"segments": [json.loads(text) for text in texts]})
+        chosen, texts = _segment_inputs(segments)
         now = self._clock.now()
-        created: list[tuple[str, int]] = []
-        changed: list[tuple[str, int, int]] = []
-        unchanged: list[str] = []
         with current().transaction():
-            keys = {segment.key for segment in chosen}
-            left_out = [row for row in segments_repo.all_segments() if row.key not in keys]
-            _refuse_shared_keys(chosen, left_out)  # before any write
-            for segment, text in zip(chosen, texts, strict=True):
-                stored = segments_repo.by_key(segment.key)
-                if stored is None:
-                    segment_id = segments_repo.insert(segment.key, text, now)
-                    _record_segment(segment_id, None, segments_repo.FIRST_VERSION, now)
-                    created.append((segment.key, segments_repo.FIRST_VERSION))
-                elif stored.definition != text:
-                    version = stored.version + 1
-                    segments_repo.update(stored.id, text, version, now)
-                    _record_segment(stored.id, stored.version, version, now)
-                    changed.append((segment.key, stored.version, version))
-                else:
-                    unchanged.append(segment.key)
-            not_in_file = tuple((row.key, row.version) for row in left_out)
-        result = SegmentSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
-        log.info(  # "created" itself is a LogRecord attribute, so each count is suffixed
-            SEGMENTS_SYNCED,
-            extra={
-                "created_count": len(result.created),
-                "changed_count": len(result.changed),
-                "unchanged_count": len(result.unchanged),
-                "not_in_file_count": len(result.not_in_file),
-            },
-        )
+            result = _sync_segments(chosen, texts, now)
+        _log_sync(SEGMENTS_SYNCED, result)
         return result
+
+    @use_case
+    def sync_markets(self, markets: Sequence[MarketDef]) -> MarketSync:
+        """Upsert ``markets`` by code; see the module docstring."""
+        chosen = _market_inputs(markets)
+        now = self._clock.now()
+        with current().transaction():
+            result = _sync_markets(chosen, now)
+        _log_sync(MARKETS_SYNCED, result)
+        return result
+
+    @use_case
+    def sync_seed(
+        self, segments: Sequence[SegmentDef], markets: Sequence[MarketDef]
+    ) -> SeedSync:
+        """Upsert ``segments`` and ``markets`` in one transaction; see the module docstring."""
+        chosen_segments, texts = _segment_inputs(segments)
+        chosen_markets = _market_inputs(markets)
+        now = self._clock.now()
+        with current().transaction():
+            segment_result = _sync_segments(chosen_segments, texts, now)
+            market_result = _sync_markets(chosen_markets, now)
+        _log_sync(SEGMENTS_SYNCED, segment_result)
+        _log_sync(MARKETS_SYNCED, market_result)
+        return SeedSync(segment_result, market_result)
+
+
+def _log_sync(event: str, result: SegmentSync | MarketSync) -> None:
+    log.info(  # "created" itself is a LogRecord attribute, so each count is suffixed
+        event,
+        extra={
+            "created_count": len(result.created),
+            "changed_count": len(result.changed),
+            "unchanged_count": len(result.unchanged),
+            "not_in_file_count": len(result.not_in_file),
+        },
+    )
+
+
+# Segments -----------------------------------------------------------------------------------------
+
+
+def _segment_inputs(
+    segments: Sequence[SegmentDef],
+) -> tuple[tuple[SegmentDef, ...], tuple[str, ...]]:
+    """``sync_segments``'s checks before any transaction: the Segments and their definition
+    texts, or ``TypeError``, ``ValueError`` or ``InvalidSegments``."""
+    chosen = tuple(segments)
+    for segment in chosen:
+        if not isinstance(segment, SegmentDef):
+            raise TypeError(f"sync_segments takes SegmentDefs, not {type(segment).__name__}")
+    counts = Counter(segment.key for segment in chosen)
+    repeated = sorted(key for key, count in counts.items() if count > 1)
+    if repeated:
+        raise ValueError(f"sync_segments got a key more than once: {', '.join(repeated)}")
+    texts = tuple(definition_text(segment) for segment in chosen)
+    if texts:  # the file form again: InvalidSegments for a SegmentDef that breaks a rule
+        validate_segments({"segments": [json.loads(text) for text in texts]})
+    return chosen, texts
+
+
+def _sync_segments(
+    chosen: tuple[SegmentDef, ...], texts: tuple[str, ...], now: datetime
+) -> SegmentSync:
+    """The Segments' upsert, inside the running use case's transaction."""
+    created: list[tuple[str, int]] = []
+    changed: list[tuple[str, int, int]] = []
+    unchanged: list[str] = []
+    keys = {segment.key for segment in chosen}
+    left_out = [row for row in segments_repo.all_segments() if row.key not in keys]
+    _refuse_shared_keys(chosen, left_out)  # before any write
+    for segment, text in zip(chosen, texts, strict=True):
+        stored = segments_repo.by_key(segment.key)
+        if stored is None:
+            segment_id = segments_repo.insert(segment.key, text, now)
+            _record_segment(segment_id, None, segments_repo.FIRST_VERSION, now)
+            created.append((segment.key, segments_repo.FIRST_VERSION))
+        elif stored.definition != text:
+            version = stored.version + 1
+            segments_repo.update(stored.id, text, version, now)
+            _record_segment(stored.id, stored.version, version, now)
+            changed.append((segment.key, stored.version, version))
+        else:
+            unchanged.append(segment.key)
+    not_in_file = tuple((row.key, row.version) for row in left_out)
+    return SegmentSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
 
 
 def _refuse_shared_keys(
@@ -439,6 +543,96 @@ def _record_segment(
     eventlog.append(
         entity=SEGMENTS_ENTITY,
         entity_id=segment_id,
+        from_status=None if from_version is None else _version_status(from_version),
+        to_status=_version_status(to_version),
+        cause=SEED_SYNC_CAUSE,
+        cause_ref=None,
+        actor=SEED_ACTOR,
+        at=at,
+    )
+
+
+# Markets ------------------------------------------------------------------------------------------
+
+
+def _market_inputs(markets: Sequence[MarketDef]) -> tuple[MarketDef, ...]:
+    """``sync_markets``'s checks before any transaction: the Markets as validation returns them
+    from their file form, or ``TypeError``, ``ValueError`` or ``InvalidMarkets``."""
+    chosen = tuple(markets)
+    for market in chosen:
+        if not isinstance(market, MarketDef):
+            raise TypeError(f"sync_markets takes MarketDefs, not {type(market).__name__}")
+    counts = Counter(market.code for market in chosen)
+    repeated = sorted(code for code, count in counts.items() if count > 1)
+    if repeated:
+        raise ValueError(f"sync_markets got a code more than once: {', '.join(repeated)}")
+    if not chosen:
+        return ()
+    return validate_markets({"markets": [market_form(market) for market in chosen]})
+
+
+def _sync_markets(chosen: tuple[MarketDef, ...], now: datetime) -> MarketSync:
+    """The Markets' upsert, inside the running use case's transaction."""
+    created: list[tuple[str, int]] = []
+    changed: list[tuple[str, int, int]] = []
+    unchanged: list[str] = []
+    stored_markets = {row.code: row for row in markets_repo.all_markets()}
+    codes = {market.code for market in chosen}
+    left_out = [row for code, row in stored_markets.items() if code not in codes]
+    _refuse_shared_markets(chosen, left_out)  # before any write
+    for market in chosen:
+        stored = stored_markets.get(market.code)
+        if stored is None:
+            market_id = markets_repo.insert(market, now)
+            _record_market(market_id, None, markets_repo.FIRST_VERSION, now)
+            created.append((market.code, markets_repo.FIRST_VERSION))
+        elif stored.market != market:
+            version = stored.version + 1
+            markets_repo.update(stored.id, market, version, now)
+            _record_market(stored.id, stored.version, version, now)
+            changed.append((market.code, stored.version, version))
+        else:
+            unchanged.append(market.code)
+    not_in_file = tuple((row.code, row.version) for row in left_out)
+    return MarketSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+
+
+def _refuse_shared_markets(
+    markets: Sequence[MarketDef], left_out: Sequence[markets_repo.StoredMarket]
+) -> None:
+    """Country codes and ccTLDs stay unique across every stored Market: raise
+    ``InvalidMarkets`` for the first input Market, in file order, whose country code or a ccTLD
+    a stored Market the input leaves out still uses (a Market renamed in the file, say)."""
+    countries: dict[str, str] = {}
+    cctlds: dict[str, str] = {}
+    for row in left_out:
+        countries.setdefault(row.market.country_code, row.code)
+        for cctld in row.market.cctlds:
+            cctlds.setdefault(cctld, row.code)
+    for market in markets:
+        owner = countries.get(market.country_code)
+        if owner is not None:
+            raise InvalidMarkets(
+                f"markets[{market.code}].country_code",
+                f"is also the country code of the stored Market {owner}, which is no longer in "
+                "the file: keep that Market's code",
+            )
+        for cctld in market.cctlds:
+            owner = cctlds.get(cctld)
+            if owner is not None:
+                raise InvalidMarkets(
+                    f"markets[{market.code}].cctlds",
+                    f"holds {cctld}, a ccTLD of the stored Market {owner}, which is no longer in "
+                    "the file: keep that Market's code",
+                )
+
+
+def _record_market(
+    market_id: str, from_version: int | None, to_version: int, at: datetime
+) -> None:
+    eventlog.append(
+        entity=MARKETS_ENTITY,
+        entity_id=market_id,
         from_status=None if from_version is None else _version_status(from_version),
         to_status=_version_status(to_version),
         cause=SEED_SYNC_CAUSE,

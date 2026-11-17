@@ -392,12 +392,20 @@ its rules (one tightened since it was saved) is marked the same way when the pag
 7. **Setting names have at most 31 characters,** because log redaction masks any longer run as
    `<key>`.
 
+**The US solicitation label** (`us_solicitation_label`, "US solicitation label" in Footer and
+booking; Story 3.1, NFR-2, OQ-8) is a string of at most 200 characters, blank by default. The US
+footer template ends with a `{us_solicitation_label}` line: blank, the line is dropped; set
+(say, to `Advertisement`), every US email's footer shows that text on its own line, with no code
+change. Whether US emails carry a label is decided with counsel before the first US send. It is
+declared once; Story 4.11's footer reads it with the other footer settings.
+
 ## Seeds
 
 The Segments (FR-1) come from `seed/segments.yaml` until the Slice 3 editing screens ship
 (AD-12): Law-PrivateAI and Ops-Automation, each with its industry keywords, size range, ranked
 decision-maker roles, disqualifiers, weighted Signal types (the PRD's FR-1 table, row for row)
-and discovery queries. Edit the file, then load it:
+and discovery queries. The Markets (FR-2) come from `seed/markets.yaml`: the US and UK
+cold-email rules (see [Markets](#markets)). Both files are required. Edit them, then load them:
 
 ```powershell
 uv run nextron seed sync                 # the environment NEXTRON_ENV names
@@ -408,26 +416,31 @@ uv run nextron seed sync --env prod      # another environment, for this run onl
 segments: 2 changed, 0 unchanged
   law_private_ai: created (version 1)
   ops_automation: created (version 1)
+markets: 2 changed, 0 unchanged
+  us: created (version 1)
+  uk: created (version 1)
 ```
 
-The first line counts the Segments created or changed, then the unchanged ones; a line follows
-for each Segment created, changed (`changed (version 1 -> 2)`) or stored but no longer in the
-file (`not in seed/segments.yaml, left as it is (version 1)`: a Segment is never deleted, since
-Leads point to it). Running it again on the same file prints `segments: 0 changed, 2
-unchanged` and writes nothing.
+Each block's first line counts the Segments (or Markets) created or changed, then the unchanged
+ones; a line follows for each one created, changed (`changed (version 1 -> 2)`) or stored but no
+longer in the file (`not in seed/segments.yaml, left as it is (version 1)`, or `not in
+seed/markets.yaml, ...`: a Segment or Market is never deleted, since Leads and snapshots point
+to it). Running it again on the same files prints `segments: 0 changed, 2 unchanged` and
+`markets: 0 changed, 2 unchanged` and writes nothing.
 
-**What a sync does.** It upserts each Segment by key into the `segments` table (owner `setup`):
-a new one is stored at version 1, a changed definition gets the next version, and each of
-those appends one `events` row (entity `segments`, `v1` or `v<n>` to `v<n+1>`, cause
-`seed_sync`, actor `seed`). Everything happens in one transaction, so a failure changes
-nothing. Signal-type and disqualifier keys stay unique across every stored Segment: if a
-Segment that is no longer in the file (one whose key you renamed, say) still uses a key the
-file uses, the sync is refused before anything is written, naming the file's field
-(`seed/segments.yaml: segments[law_private_ai].signal_types[law_hiring_legal_ops].key: is also
-a key of the stored Segment old_segment, which is no longer in the file: rename one of them`).
-**A sync never re-scores a Lead**: it enqueues no job, publishes no notification and
-touches no other table. A changed Segment applies to Leads discovered afterwards and to
-re-scoring Mac starts.
+**What a sync does.** It upserts each Segment by key into the `segments` table and then each
+Market by code into the `markets` table (both owner `setup`): a new one is stored at version 1,
+a changed definition gets the next version, and each of those appends one `events` row (entity
+`segments` or `markets`, `v1` or `v<n>` to `v<n+1>`, cause `seed_sync`, actor `seed`). Both
+files are read and validated before the database is touched, and both tables are written in one
+transaction, so a failure anywhere changes nothing in either. Signal-type and disqualifier keys
+stay unique across every stored Segment: if a Segment that is no longer in the file (one whose
+key you renamed, say) still uses a key the file uses, the sync is refused before anything is
+written, naming the file's field (`seed/segments.yaml:
+segments[law_private_ai].signal_types[law_hiring_legal_ops].key: is also a key of the stored
+Segment old_segment, which is no longer in the file: rename one of them`). **A sync never
+re-scores a Lead**: it enqueues no job, publishes no notification and touches no other table. A
+changed Segment applies to Leads discovered afterwards and to re-scoring Mac starts.
 
 **The database must exist and be at head.** `seed sync` never creates or migrates the
 database: only `serve` does, after its backup. Start the engine once (`nextron serve`) first;
@@ -462,11 +475,76 @@ problem exits 1 before the database is opened.
 | Exit code | Meaning |
 |---|---|
 | 0 | synced (or nothing to change) |
-| 1 | the file is missing, unreadable, over 1 MiB, not UTF-8 or invalid; the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
+| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:` or `seed/markets.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
 | 2 | `NEXTRON_ENV` (or another bootstrap variable) is unset or invalid; `--env` takes only `dev`, `test` or `prod` |
 
 Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
 `id`, `key`, `version` and decoded `SegmentDef`) and `queries.setup.segment(key)`.
+
+### Markets
+
+A Market (FR-2, Story 3.1) holds one country's cold-email rules. `seed/markets.yaml` ships two,
+`us` and `uk`; a new simple Market is a new entry in the file, with no code change (NFR-40). Each
+entry has exactly these fields (`unknown_send_window` may be left out):
+
+| Field | US | UK | Rule |
+|---|---|---|---|
+| `code` | `us` | `uk` | `[a-z][a-z0-9_]`, at most 16 characters, unique: the natural key |
+| `name` | United States | United Kingdom | a clean text of at most 100 characters |
+| `enabled` | `true` | `true` | a disabled Market is no Market: `market_for_country` returns `None` |
+| `country_code` | `US` | `GB` | two capitals, unique |
+| `cctlds` | `[us]` | `[uk]` | 1 to 10 two-letter TLDs of that country, none shared |
+| `cold_email_allowed` | `true` | `true` | |
+| `eligible_legal_forms` | `not_checked` | 8 Companies House types | `not_checked`, or 1 to 50 `[a-z][a-z0-9-]` forms (an empty list is refused) |
+| `free_webmail_blocked` | `false` | `true` | |
+| `default_timezone` | `America/New_York` | `Europe/London` | an IANA region name, as for a `timezone` setting |
+| `unknown_timezone` | `America/New_York` | `Europe/London` | the fallback for an unknown location |
+| `unknown_send_window` | `'11:00-17:00'` | (none) | `'HH:MM-HH:MM'`, start before end: the narrowed Send Window there |
+| `english_variant` | `en_us` | `en_gb` | `en_us` or `en_gb` |
+| `footer_template` | 5 lines | 5 lines | one item per footer line (below) |
+| `privacy_line_required` | `false` | `true` | |
+
+The UK's legal forms are `ltd`, `plc`, `private-limited-guarant-nsc`,
+`private-limited-guarant-nsc-limited-exemption`, `private-limited-shares-section-30-exemption`,
+`private-unlimited`, `private-unlimited-nsc` and `llp` (private and public limited companies,
+unlimited companies and LLPs; every other company type, such as `old-public-company` or a
+partnership, is not eligible).
+
+**The compliance floor.** A seed edit can't loosen these; each is refused naming its field: cold
+email is allowed only in a `US` or `GB` Market (NFR-5), and a `GB` Market always has
+`free_webmail_blocked: true`, `privacy_line_required: true` and a list of legal forms drawn only
+from the eight company types above (PECR). It may list fewer; any other type is refused naming
+its index (`markets[uk].eligible_legal_forms[8]: isn't a corporate-subscriber company type a GB
+Market may list (PECR)`).
+
+**The footer template** is a list of lines, each a clean text of at most 200 characters. A line
+may hold literal text and the placeholders `{sender_signature}`, `{legal_name}`,
+`{postal_address}`, `{optout_line}`, `{privacy_line}` and `{us_solicitation_label}`; any other
+`{` or `}` is refused, and each placeholder appears at most once. Every template holds the first
+four (FR-23); `{privacy_line}` appears if and only if `privacy_line_required` is true, and
+`{us_solicitation_label}` if and only if the Market is `US` (NFR-2). Those two stand alone on
+their line, because a line left blank when the footer renders is dropped: a blank
+`us_solicitation_label` setting drops the US label line. Story 4.11 fills the values in.
+
+**Validation** (`nextron/domain/markets.py`) names the first problem by its path, as for the
+Segments: `seed/markets.yaml: markets[uk].free_webmail_blocked: must be true for a GB Market
+(PECR: corporate subscribers only)`. A Market that is no longer in the file keeps its country
+code and ccTLDs: a file Market that reuses them is refused before anything is written
+(`seed/markets.yaml: markets[gb].country_code: is also the country code of the stored Market uk,
+which is no longer in the file: keep that Market's code`).
+
+**Reading the Markets.** Other code reads them through `queries.setup.markets()` (each
+`SeededMarket` with its `id`, `code`, `version` and decoded `MarketDef`) and
+`queries.setup.market(code)`; a stored row that no longer validates raises `InvalidMarkets`.
+Other tables point to a Market by its ULID `id` (`market_id`). A Lead's Market is never stored:
+it is derived from its country code with `nextron.domain.markets.market_for_country(code,
+markets)`. The same module answers `cctld_country(domain)` (`firm.co.uk` is `GB`, `firm.de` is
+`DE`, `firm.com` is `None`: any two-letter last label counts as a country, so `.eu` and `.io`
+too) and `is_free_webmail(domain)` (the vendored `FREE_WEBMAIL_DOMAINS`, subdomains included),
+and renders a template with `render_footer_template(template, values)`. No setting or
+dashboard route changes a Market rule (NFR-7): `tests/contracts/test_market_contracts.py` fails
+on a POST route that names a Market, a `nextron/web` module that names the sync, or a `leads`
+column that names a market.
 
 ## Secrets
 
@@ -715,6 +793,7 @@ the log line carries the copy's `file` name.
 | `0007_1_16_backups` | `backups`: one row per backup, its five checks and `ix_backups_started_at` (see [Backups](#backups)) | `ops` |
 | `0008_2_1_segments` | `segments` (unique `key`, `ck_segments_version`) (see [Seeds](#seeds)) | `setup` |
 | `0009_1_17_offpc` | six nullable off-PC columns on `backups` (`offpc_status`, `offpc_name`, `offpc_ledger`, `offpc_at`, `offpc_deleted_at`, `offpc_error`), added with `ALTER TABLE ... ADD COLUMN`, and their three checks (`ck_backups_offpc_status`, `ck_backups_offpc_ledger`, `ck_backups_offpc`) | `ops` |
+| `0010_3_1_markets` | `markets` (unique `code` and `country_code`, `ck_markets_version`) (see [Markets](#markets)) | `setup` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

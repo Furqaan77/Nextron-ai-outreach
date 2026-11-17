@@ -16,15 +16,17 @@ Commands:
   within 5 minutes (exit 0: opened; exit 1: the engine isn't running, or the code couldn't be
   stored or the browser opened; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is
   invalid).
-- ``seed sync [--env {dev,test,prod}]``: load ``seed/segments.yaml`` into the database: create
-  each new Segment, give each changed one a new version, and leave a stored Segment the file no
-  longer lists as it is; print ``segments: <n> changed, <m> unchanged`` and a line per Segment
-  created, changed or not in the file. ``--env`` syncs that environment instead of
-  ``NEXTRON_ENV``. The database must exist and be migrated: start the engine once first (exit
-  0: synced; exit 1: the file is missing, unreadable or invalid (the message names the line or
-  field), the database is missing, behind, ahead of the code ("newer than this code") or not
-  this engine's, or the sync failed, and nothing was changed; exit 2: ``NEXTRON_ENV`` or
-  another bootstrap setting is invalid, or the arguments are).
+- ``seed sync [--env {dev,test,prod}]``: load ``seed/segments.yaml`` and ``seed/markets.yaml``
+  into the database in one transaction: create each new Segment and Market, give each changed
+  one a new version, and leave a stored one the file no longer lists as it is; print
+  ``segments: <n> changed, <m> unchanged`` and a line per Segment created, changed or not in the
+  file, then ``markets: <n> changed, <m> unchanged`` and a line per Market. ``--env`` syncs that
+  environment instead of ``NEXTRON_ENV``. The database must exist and be migrated: start the
+  engine once first (exit 0: synced; exit 1: a file is missing, unreadable or invalid (the
+  message names the file and the line or field), the database is missing, behind, ahead of the
+  code ("newer than this code") or not this engine's, or the sync failed, and nothing was
+  changed; exit 2: ``NEXTRON_ENV`` or another bootstrap setting is invalid, or the arguments
+  are).
 
 A later story adds ``restore``.
 """
@@ -70,7 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     seed_commands = seed.add_subparsers(dest="seed_command", required=True, metavar="subcommand")
     sync = seed_commands.add_parser(
         "sync",
-        help="create or update the Segments from seed/segments.yaml (never re-scores a Lead)",
+        help=(
+            "create or update the Segments and Markets from seed/segments.yaml and "
+            "seed/markets.yaml (never re-scores a Lead)"
+        ),
     )
     sync.add_argument(
         "--env",

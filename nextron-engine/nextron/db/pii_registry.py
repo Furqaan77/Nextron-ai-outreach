@@ -51,6 +51,28 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 3.1. A Market's rules and footer template hold codes, flags and placeholders, never
+    # a person.
+    "markets": {
+        "id": PiiClass.NONE,
+        "code": PiiClass.NONE,
+        "name": PiiClass.NONE,
+        "enabled": PiiClass.NONE,
+        "country_code": PiiClass.NONE,
+        "cctlds": PiiClass.NONE,
+        "cold_email_allowed": PiiClass.NONE,
+        "eligible_legal_forms": PiiClass.NONE,
+        "free_webmail_blocked": PiiClass.NONE,
+        "default_timezone": PiiClass.NONE,
+        "unknown_timezone": PiiClass.NONE,
+        "unknown_send_window": PiiClass.NONE,
+        "english_variant": PiiClass.NONE,
+        "footer_template": PiiClass.NONE,
+        "privacy_line_required": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {
