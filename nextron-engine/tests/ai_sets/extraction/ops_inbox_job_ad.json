@@ -1,0 +1,24 @@
+{
+  "case": "ops_inbox_job_ad",
+  "route": "signal_inbox_parse",
+  "segment": "ops_automation",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "item",
+      "source": "signal_inbox",
+      "text": "Job ad: Accounts Payable Clerk at Halvorsen Logistics (halvorsen-logistics.test). Match supplier invoices to purchase orders and enter them into our accounting system. Posted 2 November 2026."
+    }
+  ],
+  "expect": {
+    "signals": [
+      {
+        "signal_type": "ops_hiring_manual_entry",
+        "block_id": "item",
+        "quote": "Accounts Payable Clerk at Halvorsen Logistics"
+      }
+    ],
+    "people": [],
+    "forbidden_signals": []
+  }
+}

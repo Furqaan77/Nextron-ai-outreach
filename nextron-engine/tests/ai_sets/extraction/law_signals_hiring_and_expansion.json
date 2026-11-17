@@ -1,0 +1,39 @@
+{
+  "case": "law_signals_hiring_and_expansion",
+  "route": "extract_signals",
+  "segment": "law_private_ai",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "p1",
+      "source": "website",
+      "text": "Ashby & Crane Solicitors\nWe are a firm of 14 lawyers in Leeds, handling conveyancing, probate and family law for clients across West Yorkshire.\nVisit us at 12 Park Row, Leeds, or online at ashbycrane.test."
+    },
+    {
+      "id": "p2",
+      "source": "website",
+      "text": "Careers at Ashby & Crane\nWe are hiring a Legal Operations Manager to run our case-management systems and improve how matters move through the firm. Send your CV through the form below."
+    },
+    {
+      "id": "p3",
+      "source": "website",
+      "text": "News\n3 March 2026: Ashby & Crane opens a new office in Harrogate, our second in Yorkshire."
+    }
+  ],
+  "expect": {
+    "signals": [
+      {
+        "signal_type": "law_hiring_legal_ops",
+        "block_id": "p2",
+        "quote": "We are hiring a Legal Operations Manager"
+      },
+      {
+        "signal_type": "law_expansion",
+        "block_id": "p3",
+        "quote": "Ashby & Crane opens a new office in Harrogate"
+      }
+    ],
+    "people": [],
+    "forbidden_signals": []
+  }
+}

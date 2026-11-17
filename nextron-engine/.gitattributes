@@ -2,3 +2,6 @@
 # their SHA-256, so git must never convert their line endings.
 nextron/web/static/** -text
 nextron/domain/psl/** -text
+# Prompt files are hash-locked (nextron/adapters/ai/prompts/manifest.lock). Their hash is taken
+# with universal newlines, but keep them byte-identical anyway.
+nextron/adapters/ai/prompts/** -text

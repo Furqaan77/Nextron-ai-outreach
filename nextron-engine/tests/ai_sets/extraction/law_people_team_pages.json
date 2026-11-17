@@ -1,0 +1,48 @@
+{
+  "case": "law_people_team_pages",
+  "route": "extract_people",
+  "segment": "law_private_ai",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "p1",
+      "source": "website",
+      "text": "Our team\nMargaret Ellison, Managing Partner, leads the firm's private client work.\nDaniel Okafor - Partner, Probate and Estates\nPriya Raman is our Office Manager.\nWe also thank Graham Pell for his kind review of our service."
+    },
+    {
+      "id": "p2",
+      "source": "website",
+      "text": "Contact Hollis Wade Solicitors at 4 Market Street, Lincoln (hollis-wade.test).\nThe firm's Owner, Stephen Hollis, answers every new enquiry personally."
+    }
+  ],
+  "expect": {
+    "signals": [],
+    "people": [
+      {
+        "name": "Margaret Ellison",
+        "role": "Managing Partner",
+        "block_id": "p1",
+        "quote": "Margaret Ellison, Managing Partner"
+      },
+      {
+        "name": "Daniel Okafor",
+        "role": "Partner, Probate and Estates",
+        "block_id": "p1",
+        "quote": "Daniel Okafor - Partner, Probate and Estates"
+      },
+      {
+        "name": "Priya Raman",
+        "role": "Office Manager",
+        "block_id": "p1",
+        "quote": "Priya Raman is our Office Manager"
+      },
+      {
+        "name": "Stephen Hollis",
+        "role": "Owner",
+        "block_id": "p2",
+        "quote": "The firm's Owner, Stephen Hollis"
+      }
+    ],
+    "forbidden_signals": []
+  }
+}

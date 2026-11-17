@@ -4,7 +4,9 @@ through ``ClaudeGateway``, with a typed result and metered usage.
 Import rule: ``nextron.ports``, ``nextron.domain`` and third-party SDKs. This is the only
 package that may import ``anthropic`` (contract 5). Its modules: ``routes`` (the route
 candidates as data), ``schemas`` (the output schemas), ``prompting`` (the request) and
-``pricing`` (the cost). Nothing here logs.
+``pricing`` (the cost), and the ``prompts`` folder (Story 2.8: each route's versioned system
+prompts and ``manifest.lock``; the gateway itself never reads them, it runs the text of the
+tuple it is given, which comes from the stored snapshot). Nothing here logs.
 
 **``ClaudeGateway(secrets, *, meter, http=None)``** implements ``LlmPort``. Without ``http`` it
 builds ``default_http_client()`` (the live constructor: an ``httpx2.Client`` with 10 s to

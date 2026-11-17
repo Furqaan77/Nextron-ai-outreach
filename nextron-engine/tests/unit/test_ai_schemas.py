@@ -103,7 +103,7 @@ def test_every_model_forbids_extra_keys_and_requires_every_field(schema: OutputS
 def test_the_walk_reaches_every_nested_model() -> None:
     titles = {node.get("title") for node in schema_nodes(wire_schema(EXTRACT_SIGNALS_V1))}
 
-    assert {"ExtractSignalsV1", "Signal", "ProfileFact", "SizeClue"} <= titles
+    assert {"ExtractSignalsV1", "Signal", "ProfileFact", "SizeClue", "JobPosting"} <= titles
 
 
 class _Probe(BaseModel):
@@ -226,7 +226,19 @@ def test_the_v1_schemas_have_the_specified_shapes() -> None:
     signals = json_schema(EXTRACT_SIGNALS_V1)
     definitions = signals["$defs"]
 
-    assert list(signals["properties"]) == ["signals", "profile_facts", "size_clues"]
+    assert list(signals["properties"]) == [
+        "signals",
+        "profile_facts",
+        "size_clues",
+        "job_postings",
+    ]
+    assert list(definitions["JobPosting"]["properties"]) == [
+        "title",
+        "url",
+        "posted_date",
+        "block_id",
+        "quote",
+    ]
     assert list(definitions["Signal"]["properties"]) == [
         "signal_type",
         "block_id",
@@ -280,7 +292,21 @@ SIGNALS: Final = {
         {"kind": " What_We_Do\n", "value": "Law", "block_id": "p1", "quote": "We do law"}
     ],
     "size_clues": [{"kind": " Staff", "number": 40, "block_id": "p2", "quote": "40 staff"}],
+    "job_postings": [
+        {
+            "title": "Intake Coordinator",
+            "url": "https://firm.example/careers/intake",
+            "posted_date": None,
+            "block_id": "p3",
+            "quote": "We are hiring an Intake Coordinator",
+        }
+    ],
 }
+
+
+def test_the_signals_document_validates_as_it_is() -> None:
+    """The probes below change one field each, so the base document must be valid."""
+    assert validate(EXTRACT_SIGNALS_V1, SIGNALS) is not None
 
 
 def test_case_normalisation_lowers_only_enum_strings() -> None:
@@ -301,6 +327,38 @@ def test_validate_returns_the_normalised_object_as_json_data() -> None:
     assert parsed["size_clues"][0]["kind"] == "staff"
     assert parsed["signals"][0]["event_date"] == "2026-11-03"
     assert parsed["signals"][0]["quote"] == " We are hiring "
+    assert parsed["job_postings"] == SIGNALS["job_postings"]
+
+
+def test_a_job_posting_takes_a_date_and_null_url() -> None:
+    posting = {**SIGNALS["job_postings"][0], "url": None, "posted_date": "2026-10-01"}
+
+    parsed = validate(EXTRACT_SIGNALS_V1, {**SIGNALS, "job_postings": [posting]})
+
+    assert parsed is not None
+    assert parsed["job_postings"][0]["url"] is None
+    assert parsed["job_postings"][0]["posted_date"] == "2026-10-01"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"posted_date": "last month"},
+        {"title": None},
+        {"url": 7},
+        {"salary": "40k"},
+    ],
+)
+def test_a_bad_job_posting_is_refused(change: dict[str, object]) -> None:
+    posting = {**SIGNALS["job_postings"][0], **change}
+
+    assert validate(EXTRACT_SIGNALS_V1, {**SIGNALS, "job_postings": [posting]}) is None
+
+
+def test_a_signals_document_without_job_postings_is_refused() -> None:
+    document = {key: value for key, value in SIGNALS.items() if key != "job_postings"}
+
+    assert validate(EXTRACT_SIGNALS_V1, document) is None
 
 
 def test_case_normalisation_follows_any_of_and_nested_lists() -> None:

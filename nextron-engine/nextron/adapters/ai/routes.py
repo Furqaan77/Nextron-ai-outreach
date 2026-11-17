@@ -23,14 +23,28 @@ and no request, carries ``fallbacks``: Haiku has no server-side fallback.
 ``extract_signals`` and ``extract_people`` are enrichment, ``signal_inbox_parse`` discovery;
 all three are ``blockable``.
 
+**A shipped candidate never changes or goes away** (Story 2.8): a stored activation may name its
+route, model, effort, prompt version and schema version, and the gateway refuses a tuple that no
+candidate matches (``llm_unknown_route``), so every call on that route would fail. To change a
+route, add a new candidate (a new default goes first). ``SHIPPED_CANDIDATES`` in
+``tests/contracts/test_prompt_manifest.py`` is the add-only list a contract test holds them to.
+
 **Lookups.** ``candidates(route)`` lists a route's candidates (empty for an unknown route),
 ``default_candidate(route)`` is its first (``None`` for an unknown route), and
 ``find(route_tuple)`` is the candidate whose name, model, effort, prompt version and schema
 version match the tuple's, or ``None``.
+
+**Prompts (Story 2.8).** ``PROMPTS_DIR`` is this package's ``prompts`` folder: each route's
+system prompts as ``<route>/<version>.md``, pinned by ``manifest.lock``
+(``nextron.domain.prompts``). ``default_specs()`` is each route's default candidate as a
+``nextron.domain.ai.RouteSpec`` (route, model, effort, prompt version and schema version), in
+``CANDIDATES`` order: what ``Playbook.sync_prompts`` activates for a route that has no active
+tuple. Only ``nextron.main.load_prompts`` reads them, inside ``serve``.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
@@ -40,11 +54,18 @@ from nextron.adapters.ai.schemas import (
     SIGNAL_INBOX_PARSE_V1,
     OutputSchema,
 )
-from nextron.domain.ai import Effort, RouteTuple, check_route_fields, check_token_limits
+from nextron.domain.ai import (
+    Effort,
+    RouteSpec,
+    RouteTuple,
+    check_route_fields,
+    check_token_limits,
+)
 from nextron.domain.budget import BudgetClass
 
 MAX_TOKENS_CEILING: Final = 16_000  # above it, the SDK wants a streaming request
 HAIKU: Final = "claude-haiku-5-5"
+PROMPTS_DIR: Final = Path(__file__).resolve().parent / "prompts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,3 +157,17 @@ def find(route_tuple: RouteTuple) -> Candidate | None:
         ):
             return candidate
     return None
+
+
+def default_specs() -> tuple[RouteSpec, ...]:
+    """Each route's default candidate as a ``RouteSpec``, in ``CANDIDATES`` order."""
+    return tuple(
+        RouteSpec(
+            route=default.name,
+            model=default.model,
+            effort=default.effort,
+            prompt_version=default.prompt_version,
+            schema_version=default.output_schema.version,
+        )
+        for default in (found[0] for found in CANDIDATES.values() if found)
+    )

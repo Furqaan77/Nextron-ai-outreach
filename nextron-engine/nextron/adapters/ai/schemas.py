@@ -15,7 +15,9 @@ would need a ``max_length`` of 200 or fewer (``tests/unit/test_ai_schemas.py`` c
   ``quote``, ``event_date``: a date or ``null``), ``profile_facts`` (``kind``: ``what_we_do``,
   ``location`` or ``technology``; ``value``; ``block_id``; ``quote``) and ``size_clues``
   (``kind``: ``lawyers_at_office``, ``lawyers_firm_wide``, ``staff``, ``group_staff`` or
-  ``locations``; ``number``, an integer; ``block_id``; ``quote``).
+  ``locations``; ``number``, an integer; ``block_id``; ``quote``) and, since Story 2.8,
+  ``job_postings`` (``title``; ``url`` and ``posted_date``, a date, each ``null`` when the page
+  doesn't give it; ``block_id``; ``quote``), which Story 2.11 reads.
 - ``EXTRACT_PEOPLE_V1`` (``ExtractPeopleV1``): ``people`` (``name``, ``role``, ``block_id``,
   ``quote``).
 - ``SIGNAL_INBOX_PARSE_V1`` (``SignalInboxParseV1``): ``segment``, ``signal_type``,
@@ -83,10 +85,19 @@ class SizeClue(_Strict):
     quote: str
 
 
+class JobPosting(_Strict):
+    title: str
+    url: str | None
+    posted_date: date | None
+    block_id: str
+    quote: str
+
+
 class ExtractSignalsV1(_Strict):
     signals: list[Signal]
     profile_facts: list[ProfileFact]
     size_clues: list[SizeClue]
+    job_postings: list[JobPosting]
 
 
 # extract_people ---------------------------------------------------------------------------------

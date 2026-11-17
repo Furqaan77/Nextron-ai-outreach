@@ -1,6 +1,7 @@
 """``python -m nextron`` as a real process: env refusal, the guarded health page, the database
-at head, the log file, the runner, scheduler and heartbeat started by the lifespan, the second
-instance, and ``nextron open`` with no engine running.
+at head, the log file, the prompts pinned at start (Story 2.8), the runner, scheduler and
+heartbeat started by the lifespan, the second instance, and ``nextron open`` with no engine
+running.
 
 Nothing here runs ``nextron open`` against a live engine or touches Credential Manager: entering
 the dashboard is covered in-process with fakes (``tests/unit/test_dashboard.py``)."""
@@ -121,6 +122,25 @@ def usage_counts(path: Path) -> tuple[int, int]:
         [(api,)] = reader.execute("SELECT COUNT(*) FROM api_usage").fetchall()
         [(ai,)] = reader.execute("SELECT COUNT(*) FROM ai_usage").fetchall()
         return int(api), int(ai)
+    finally:
+        reader.close()
+
+
+def prompt_counts(path: Path) -> tuple[int, int, int]:
+    """How many prompt snapshots, active bootstrap activations by ``seed`` with no test run,
+    and activation ``events`` rows the running engine's database holds."""
+    reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        [(snapshots,)] = reader.execute("SELECT COUNT(*) FROM prompt_snapshots").fetchall()
+        [(bootstrapped,)] = reader.execute(
+            "SELECT COUNT(*) FROM ai_route_activations WHERE bootstrap = 1 AND actor = 'seed' "
+            "AND test_run_id IS NULL AND deactivated_at IS NULL"
+        ).fetchall()
+        [(events,)] = reader.execute(
+            "SELECT COUNT(*) FROM events WHERE entity = 'ai_route_activations' "
+            "AND to_status = 'active' AND cause = 'bootstrap' AND actor = 'seed'"
+        ).fetchall()
+        return int(snapshots), int(bootstrapped), int(events)
     finally:
         reader.close()
 
@@ -262,9 +282,15 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0013_4_1_sequences"
+    assert HEAD == "0014_2_8_ai_routes"
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
+    # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
+    # bootstrap activation, by seed and with no test run, per route
+    assert prompt_counts(data_dir / "nextron.db") == (3, 3, 3)
+    [synced] = [line for line in lines if line["event"] == "prompts_synced"]
+    assert (synced["stored_count"], synced["activated_count"]) == (3, 3)
+    assert lines.index(synced) < lines.index(started)
     # no alert was raised or sent: nothing built the Telegram adapter or reached the sink
     assert not [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]
     assert not (data_dir / "sink").exists()

@@ -64,6 +64,14 @@ isn't JSON, raises ``InvalidSegments``.
 whether a text names ABA Formal Opinion 512 or the SRA notice; ``represents_market_fact(text)``
 is either. The Sequences (``nextron.domain.sequences``, Story 4.1) use the two to keep each
 regulation in its own Market's angle.
+
+**The ``signal_types`` block (Story 2.8).** ``signal_catalogue(segments)`` is the text of the
+``source="signal_types"`` block an extraction call sends with the untrusted pages, so a new
+Segment needs no new prompt version: per Segment, in order, a line ``segment <key>: <name>``,
+then a line ``- <signal type key>: <name>`` for each of its Signal types whose ``evidence``
+includes ``quote``, in file order. A rule-only type (``absence`` or ``count`` Evidence only) is
+left out, because the model can't quote it. No Segments give an empty text; anything but
+``SegmentDef``s raises ``TypeError``.
 """
 
 import json
@@ -702,3 +710,23 @@ def segment_from_text(text: str) -> SegmentDef:
     except (TypeError, ValueError, RecursionError):  # JSONDecodeError is a ValueError
         raise InvalidSegments("definition", "is not valid JSON") from None
     return _Validator().segment(data, 0)
+
+
+# The signal_types block (Story 2.8) --------------------------------------------------------------
+
+
+def signal_catalogue(segments: Iterable[SegmentDef]) -> str:
+    """The text of the ``signal_types`` block an extraction call sends; see the module
+    docstring."""
+    chosen = tuple(segments)
+    if not all(isinstance(segment, SegmentDef) for segment in chosen):
+        raise TypeError("signal_catalogue takes SegmentDefs")
+    lines: list[str] = []
+    for segment in chosen:
+        lines.append(f"segment {segment.key}: {segment.name}")
+        lines.extend(
+            f"- {signal_type.key}: {signal_type.name}"
+            for signal_type in segment.signal_types
+            if EvidenceType.QUOTE in signal_type.evidence
+        )
+    return "\n".join(lines)

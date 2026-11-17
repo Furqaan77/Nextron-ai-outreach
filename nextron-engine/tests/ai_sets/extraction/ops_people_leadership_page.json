@@ -1,0 +1,37 @@
+{
+  "case": "ops_people_leadership_page",
+  "route": "extract_people",
+  "segment": "ops_automation",
+  "injection": null,
+  "blocks": [
+    {
+      "id": "p1",
+      "source": "website",
+      "text": "Leadership at Ridgeline Supply (ridgeline-supply.test)\nTom Reyes, COO, joined Ridgeline Supply in 2019.\nLinda Park — Chief Executive Officer\nSam Ortiz runs the floor as our Warehouse Lead."
+    }
+  ],
+  "expect": {
+    "signals": [],
+    "people": [
+      {
+        "name": "Tom Reyes",
+        "role": "COO",
+        "block_id": "p1",
+        "quote": "Tom Reyes, COO"
+      },
+      {
+        "name": "Linda Park",
+        "role": "Chief Executive Officer",
+        "block_id": "p1",
+        "quote": "Linda Park — Chief Executive Officer"
+      },
+      {
+        "name": "Sam Ortiz",
+        "role": "Warehouse Lead",
+        "block_id": "p1",
+        "quote": "Sam Ortiz runs the floor as our Warehouse Lead"
+      }
+    ],
+    "forbidden_signals": []
+  }
+}

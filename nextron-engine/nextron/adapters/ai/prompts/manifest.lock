@@ -1,0 +1,9 @@
+# The hash lock of the AI routes' system prompts (FR-71, AD-8, Story 2.8).
+#
+# One line per prompt file: <route> <version> <sha256>. The SHA-256 is that of the file's
+# text: strict UTF-8 with universal newlines, so a CRLF checkout hashes the same. serve
+# refuses to start when a file and this lock disagree, or when a file isn't listed here.
+# A used prompt never changes: to change one, add <route>/v<n+1>.md and a line for it.
+extract_signals v1 c81de6975cea2236b6081b785201b4afc9dfa239bfc80426c7f9b72cb85a5928
+extract_people v1 456641456549cb064b4c18db6cb2dcde3f2ef6034110f557f7daa25866053103
+signal_inbox_parse v1 a94b85237ba2b55fec871641d284e5eec451fb122c31126f5b09a2cc793b2ef1
