@@ -315,6 +315,7 @@ def test_a_fresh_database_lists_the_footer_settings_after_the_older_required_one
         unset = setup_queries.required_unset()
 
     assert unset == (
+        "sender_name",  # Story 4.7
         "sender_timezone",
         "alert_chat_id",
         "sender_signature",
@@ -324,9 +325,9 @@ def test_a_fresh_database_lists_the_footer_settings_after_the_older_required_one
     )
     result = startup_checks.check_required_settings(lambda: unset)
     assert result.message == (
-        "required settings not set or no longer valid: Sender's timezone (sender_timezone), "
-        "Telegram alert chat id (alert_chat_id), Sender signature (sender_signature), "
-        "Legal name (legal_name), Postal address (postal_address), "
+        "required settings not set or no longer valid: Sender's name (sender_name), Sender's "
+        "timezone (sender_timezone), Telegram alert chat id (alert_chat_id), Sender signature "
+        "(sender_signature), Legal name (legal_name), Postal address (postal_address), "
         "Privacy notice URL (privacy_notice_url); set them on the Settings page"
     )
 
@@ -337,7 +338,11 @@ def test_set_footer_settings_leave_the_required_list(
     save(units, setup, FOOTER)
 
     with units.open(read_only=True):
-        assert setup_queries.required_unset() == ("sender_timezone", "alert_chat_id")
+        assert setup_queries.required_unset() == (
+            "sender_name",
+            "sender_timezone",
+            "alert_chat_id",
+        )
 
 
 # Row: Publish ------------------------------------------------------------------------------------
