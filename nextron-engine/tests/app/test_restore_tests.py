@@ -93,6 +93,15 @@ def no_recovery() -> Any:
     raise AssertionError("no check_recovery job runs in these tests")
 
 
+def suppression_row(n: int) -> str:
+    """An INSERT of the ``n``-th valid ``active`` Suppression List entry (Story 3.3's table)."""
+    return (
+        "INSERT INTO suppression_entries (id, kind, value_hash, status, source, created_at) "
+        f"VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0{n:02d}', 'address', '{n:064x}', 'active', "
+        "'operator', '2026-11-18T09:00:00.000000Z')"
+    )
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -329,10 +338,9 @@ def test_a_restore_test_of_a_good_copy_passes_and_leaves_nothing_behind(
     world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    world.query("CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)")
-    world.query("INSERT INTO suppression_entries DEFAULT VALUES")
-    world.query("INSERT INTO suppression_entries DEFAULT VALUES")
-    # provenance_records exists at head (Story 2.3), empty here
+    world.query(suppression_row(1))
+    world.query(suppression_row(2))
+    # both counted tables exist at head (Stories 2.3 and 3.3); provenance_records is empty
     backup_id = copied_backup(world)
     system_temp = world.tmp_path / "system-temp"
     system_temp.mkdir()
@@ -394,7 +402,8 @@ def test_a_restore_test_of_a_good_copy_passes_and_leaves_nothing_behind(
 
 
 def test_a_table_recorded_absent_is_skipped_and_the_test_still_passes(world: World) -> None:
-    # suppression_entries is absent until its story; provenance_records exists (Story 2.3)
+    # both counted tables exist at head (Stories 2.3 and 3.3): the live database loses one
+    world.query("DROP TABLE suppression_entries")
     backup_id = copied_backup(world)
 
     test_id = world.run()
@@ -766,9 +775,8 @@ def test_a_copy_with_fewer_rows_than_recorded_fails_both_counts_with_the_first_r
     world, fake = planted
     data = changed_copy(
         world,
-        "CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)",
-        "INSERT INTO suppression_entries DEFAULT VALUES",
-        # provenance_records exists at head (Story 2.3), empty here
+        suppression_row(1),
+        # both counted tables exist at head (Stories 2.3 and 3.3); provenance_records is empty
     )
     plant(world, fake, data, suppression=5, provenance=3)
 

@@ -226,6 +226,15 @@ def make_world(
     )
 
 
+def suppression_row(n: int) -> str:
+    """An INSERT of the ``n``-th valid ``active`` Suppression List entry (Story 3.3's table)."""
+    return (
+        "INSERT INTO suppression_entries (id, kind, value_hash, status, source, created_at) "
+        f"VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0{n:02d}', 'address', '{n:064x}', 'active', "
+        "'operator', '2026-11-18T09:00:00.000000Z')"
+    )
+
+
 def records(caplog: pytest.LogCaptureFixture, logger: str = OPS_LOGGER) -> list[logging.LogRecord]:
     return [record for record in caplog.records if record.name == logger]
 
@@ -255,8 +264,8 @@ def test_a_daily_backup_is_a_verified_copy_in_local(
     assert (row.kind, row.status, row.path) == ("daily", "verified", str(copy))
     assert (row.size_bytes, row.sha256) == (copy.stat().st_size, sha256(copy))
     assert row.db_revision == HEAD
-    # suppression_entries is absent until its story; provenance_records exists (Story 2.3)
-    assert (row.suppression_count, row.provenance_count) == (None, 0)
+    # both counted tables exist at head (Stories 2.3 and 3.3), empty here
+    assert (row.suppression_count, row.provenance_count) == (0, 0)
     assert (row.started_at, row.finished_at, row.error, row.local_deleted_at) == (
         T0,
         T0,
@@ -279,10 +288,9 @@ def test_a_daily_backup_is_a_verified_copy_in_local(
 def test_the_copy_counts_the_suppression_and_provenance_tables_when_they_exist(
     world: World,
 ) -> None:
-    world.query("CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)")
-    world.query("INSERT INTO suppression_entries DEFAULT VALUES")
-    world.query("INSERT INTO suppression_entries DEFAULT VALUES")
-    # provenance_records exists at head (Story 2.3), empty here
+    world.query(suppression_row(1))
+    world.query(suppression_row(2))
+    # both counted tables exist at head (Stories 2.3 and 3.3); provenance_records is empty
 
     backup_id = world.back_up()
 
@@ -549,7 +557,7 @@ def test_snapshot_describes_a_verified_copy(world: World) -> None:
 
     made = snapshot(world.db_file, target)
 
-    assert made == Snapshot(target, target.stat().st_size, sha256(target), HEAD, None, 0)
+    assert made == Snapshot(target, target.stat().st_size, sha256(target), HEAD, 0, 0)
 
 
 # Row: Record fails --------------------------------------------------------------------------------

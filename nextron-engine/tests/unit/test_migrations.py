@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0018_4_7_sending_inboxes"
+HEAD = "0019_3_3_suppression_entries"
 
 
 @pytest.fixture

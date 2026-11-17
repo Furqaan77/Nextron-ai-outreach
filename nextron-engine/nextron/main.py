@@ -74,7 +74,9 @@ that constructs ``Subscribers`` or registers a subscriber, frozen once filled. E
 adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
 the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
-Lead's Contacts move to the survivor), with ``SystemClock()`` when no clock is given.
+Lead's Contacts move to the survivor); ``SubjectSuppressed`` -> ``Pipeline(clock).close_suppressed``
+(Story 3.3: an opt-out closes the Lead ``lost``; AD-3's earlier subscribers go before it when their
+stories add them). Each uses ``SystemClock()`` when no clock is given.
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``LeadImports(clock,
 Discovery(clock, Pipeline(clock)), Research(clock), EmailValidatorSyntax())``
@@ -523,7 +525,7 @@ from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_f
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
-from nextron.domain.notifications import LeadsMerged
+from nextron.domain.notifications import LeadsMerged, SubjectSuppressed
 from nextron.domain.prompts import (
     MANIFEST_FILE_NAME,
     PROMPT_SUFFIX,
@@ -1177,6 +1179,7 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers = Subscribers()
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
+    subscribers.register_subscriber(SubjectSuppressed, Pipeline(chosen).close_suppressed)
     subscribers.freeze()
     return subscribers
 
