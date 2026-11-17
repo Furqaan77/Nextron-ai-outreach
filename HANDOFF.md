@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.13 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`; sprint status `review`). **Next: Story 1.14.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.14 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`; sprint status `review`). **Next: Story 1.15.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -68,7 +68,9 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 **Story 1.13 result:** metering of every external call (`UsageMeterPort`; `api_usage` and `ai_usage` tables, migration `0006_1_13_metering`), budget rules (`nextron/domain/budget.py`, `allow()`), seven Budget-and-limits settings, a `DEFERRED` job result (re-queued in 1 h with the attempt given back), once-a-month dashboard notices at thresholds, and a Quotas and cost page at `/quotas`. Sending and replies are never blocked. 3641 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 13 are done.
+**Story 1.14 result:** `nextron doctor` runs 11 readiness checks (`ok`/`warn`/`fail`, table or `--json`, `--env`), reading the database read-only and never taking the lock. With a stored Google grant it makes one real token refresh, metered in memory only. 3815 tests, 29 contracts.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 14 are done.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -84,6 +86,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
   - each dead job gives two dashboard notices until `alert_chat_id` is set, and there is no "send a test alert";
   - an error notice stays until the page reloads.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
+- **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
 - **Never exercised against the real service:** nothing has talked to real Google, Telegram, Hunter or Claude yet. Every adapter is proven against fakes. Release 2 (Epics 8–9) is 20. Release 3 (Epics 10–11) is 17.
 
 ## 4. How to continue building (exact procedure)
