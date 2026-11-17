@@ -1292,7 +1292,9 @@ missed firing:
 - The grace equals the period, so the catch-up normally runs. When the wake lands just before a
   slot, though, the catch-up can be past its grace by the time it runs: APScheduler logs it as
   missed (a WARNING) and the slot that has just come due fires at once instead.
-- This has not yet been observed on a real PC sleep; Story 1.20's spike on the PC checks it.
+- This has not yet been observed on a real PC sleep. Story 1.20's spike checks only the
+  supervisor across a sleep, with a fake engine (see [Logon task spike](#logon-task-spike-oq-a9)),
+  so this catch-up is still to be observed with the real engine.
 
 **The heartbeat** (AD-20, NFR-14) proves the engine is alive. The `nextron-job-heartbeat`
 thread beats once at startup and then every 30 s: it writes the `runner_heartbeat` row (owner
@@ -1316,6 +1318,11 @@ every lane, not just the hung one; the interrupted jobs run again (handlers are 
 after the wake. A job running across the sleep counts the sleep toward its `max_runtime`
 (the runner's clock counts sleep too), so the beat may stay withheld until that job returns.
 `run.ps1` must allow for a wake before it calls the file stale; that is left to Story 1.21.
+The spike's supervisor handles its own side of this. It counts stale time in its own polls, so
+time asleep never counts, and it gives a new child a start grace before its first beat (see
+[Logon task spike](#logon-task-spike-oq-a9)). That doesn't cover the engine's side: a job past
+its `max_runtime` after a wake still withholds the beat, and Story 1.21 needs an engine-side
+answer for that.
 
 Logs carry no personal data and are written only when the outcome changes:
 `heartbeat_withheld` (WARNING, `reason`), `heartbeat_failed` (ERROR, `code`, once per streak of
@@ -1326,6 +1333,74 @@ under 2 minutes old (see [Engine health](#engine-health)).
 ```powershell
 (Get-Item "$env:LOCALAPPDATA\Nextron\dev\heartbeat").LastWriteTime
 ```
+
+## Logon task spike (OQ-A9)
+
+Story 1.20 is a throwaway spike that tests AD-20's supervision on this PC before Story 1.21
+builds `scripts/run.ps1` and `scripts/install_logon_task.ps1`. Its decision record, with the
+evidence, the verdict, the parameter changes and the fallbacks, is
+[`docs/spikes/oq-a9-logon-task.md`](../docs/spikes/oq-a9-logon-task.md).
+
+The spike lives in `scripts/spike/`. It imports nothing from `nextron` and never opens a Nextron
+data dir.
+
+- `fake_serve.py` is a stdlib fake of `nextron serve`. It touches `<data dir>\heartbeat`, logs
+  JSON lines (`start`, `command`, `exit`) to `<data dir>\logs\fake_serve.log`, and obeys
+  one-shot commands in `<data dir>\spike-control` (`stall`, `exit <n>`).
+- `supervisor.ps1` is the throwaway supervisor loop, with the AD-20 timings as its defaults.
+  - It starts `uv run --frozen python scripts\spike\fake_serve.py`, with `NEXTRON_ENV`
+    (`-Env`, default `test`) set for the child only.
+  - It restarts the child after any exit with a backoff of 5 s doubling to 300 s, which resets
+    after 600 s up.
+  - The child's own exit 3 ends the loop, and the supervisor exits 3.
+  - When the heartbeat doesn't change for 300 s of its 15 s polls, it kills the child's whole
+    tree (`taskkill /T /F`; if that fails, each descendant, then the child) and restarts it.
+    Before the child's first beat, the limit is a start grace of 900 s.
+  - It logs JSON lines to `<data dir>\logs\supervisor.log`.
+- `oq_a9.ps1` registers, drives, inspects and removes the spike's task.
+  - It refuses (exit 2) to run elevated, or with `-TaskName` set to the production task's name.
+  - With no `-Action`, it prints the task it would register and registers nothing.
+
+Mac's steps, from this folder, in a **normal** (not "Run as administrator") PowerShell. The
+spike's data dir is `%LOCALAPPDATA%\Nextron\spike`.
+
+- Register, Status, Kill, Stall, Exit3 and Unregister also append what they print to
+  `oq-a9-evidence.txt` there. A refusal, or an error that stops an action, prints to the screen
+  only.
+- The spike's logs and the evidence headers are in UTC. Task Scheduler's own times are local.
+- Register and Unregister delete a leftover `spike-control` command, so the next fake doesn't
+  obey a stale one.
+- Unregister refuses a task of that name that this spike didn't register.
+
+```powershell
+$spike = "scripts\spike\oq_a9.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike                      # dry run
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike -Action Register     # 1. register
+# 2. sign out and sign in again, wait a minute
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike -Action Status       # running?
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike -Action Kill         # 3. a crash
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike -Action Stall        # 4. a hang (5 min)
+# 5. sleep the PC for 10 minutes or more, wake it, then run Status again
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike -Action Exit3        # 6. exit 3
+powershell -NoProfile -ExecutionPolicy Bypass -File $spike -Action Unregister   # 7. remove it
+```
+
+Run `-Action Status` after each step. The decision record's table "Mac's rows" says what to
+look for, and has a Result column for the evidence.
+
+`-Action Prove` is the contained proof. It takes about two minutes, and needs no sign-out.
+
+- It registers an on-demand task `NextronSpikeTest-<hex>` with no trigger, on a fresh temp
+  folder, and runs these cases through Task Scheduler: registration, start, a second start
+  (IgnoreNew), two crashes, a stall, exit 3 and `Stop-ScheduledTask`.
+- It writes `<temp folder>\results.json` and prints it.
+- It always stops and unregisters the task and kills its processes, then checks that no
+  `NextronSpikeTest*` task remains.
+
+`tests/app/test_spike_supervisor.py` drives `supervisor.ps1` with the fake on the test's Python.
+It also runs `oq_a9.ps1`'s dry run, refusals, Kill, Stall, Exit3 and Unregister, with every
+ScheduledTasks state command shadowed by a tripwire. It never calls a Task Scheduler command and
+never starts `uv`.
 
 ## Alerts and notifications
 
