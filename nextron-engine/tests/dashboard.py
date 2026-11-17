@@ -24,10 +24,17 @@ Dismiss go through it, on the dashboard's units of work.
 Its ``Budget`` (``budget``) reads ``meter``, an ``InMemoryUsageMeter`` on the dashboard's clock,
 and raises its notices through that ``Notify``; the Quotas and cost page reads it. The page
 reads the settings, so it needs real units of work (``Dashboard(units=units)``).
+
+Its ``EngineHealth`` (``health``) uses the same clock and job types, the real health-issue
+registry (``nextron.main.build_health_issues(budget=budget)``) and ``readiness``, a callable
+returning a fixed list (``READINESS``, the eleven doctor checks, all ``ok``) unless a test
+passes another; the health panel and the notification area's error count read it, and the
+panel's Dismiss goes through ``queue``. They read the database, so they need real units of
+work too.
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urlencode
@@ -37,10 +44,11 @@ from fastapi import FastAPI
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Budget, DashboardEntry
+from nextron.app.ops.api import Budget, DashboardEntry, EngineHealth
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.domain.alert import Channel
 from nextron.domain.job import JobTypes
+from nextron.domain.readiness import CheckResult, Status
 from nextron.ports.alert import AlertPort
 from nextron.ports.google_oauth import Query
 from nextron.web.app import create_app
@@ -56,6 +64,22 @@ from tests.fakes.usage_meter import InMemoryUsageMeter
 PORT = 8766  # matches tests.asgi.DEFAULT_HOST
 ORIGIN = b"http://" + DEFAULT_HOST
 FORM = b"application/x-www-form-urlencoded"
+READINESS = tuple(
+    CheckResult(check_id, Status.OK, f"{check_id} is fine")
+    for check_id in (
+        "python_version",
+        "sqlite_version",
+        "tzdata",
+        "prod_env_not_persistent",
+        "data_dir_outside_onedrive",
+        "backup_dir_separate",
+        "port_free",
+        "required_credentials",
+        "internal_notify_grant",
+        "required_settings",
+        "database_revision",
+    )
+)
 
 
 def form(**fields: str) -> bytes:
@@ -124,6 +148,7 @@ class Dashboard:
     jobs: list[Callable[[], None]] = field(default_factory=list)
     alert: AlertPort = field(default_factory=InMemoryAlert)
     meter: InMemoryUsageMeter | None = None  # on the dashboard's clock unless a test passes one
+    readiness: Callable[[], Sequence[CheckResult]] = lambda: READINESS
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -133,6 +158,7 @@ class Dashboard:
     queue: JobQueue = field(init=False)
     notify: Notify = field(init=False)
     budget: Budget = field(init=False)
+    health: EngineHealth = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -157,6 +183,12 @@ class Dashboard:
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)
+        self.health = EngineHealth(
+            self.clock,
+            self.job_types,
+            issues=main.build_health_issues(budget=self.budget),
+            readiness=self.readiness,
+        )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -168,6 +200,8 @@ class Dashboard:
             google=self.google,
             notify=self.notify,
             budget=self.budget,
+            health=self.health,
+            queue=self.queue,
             units=self.units,
             **extra,
         )

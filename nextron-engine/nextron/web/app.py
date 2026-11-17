@@ -35,17 +35,28 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   the flow's own listener, never by a dashboard route.
 - ``GET /notifications`` (``notifications_area``) and ``POST /notifications/dismiss``
   (``notification_dismiss``), both ``@personal_data(True)``: the notification area (UX-DR5),
-  which the base layout loads once per page view (``hx-trigger="load"``), and its Dismiss
-  button. The area (``notifications.html``) is empty when nothing is undismissed; otherwise it
-  shows "Notifications (<count>)", the newest ``AREA_LIMIT`` (5), each with its text
-  (``|plain``), its time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and "and <n> more" when
-  there are more. The POST's fields, apart from ``csrf_token``, must be exactly one
-  ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it dismisses
-  through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the area again
-  in a read-only one.
+  which the base layout loads once per page view (``hx-trigger="load"``; it isn't polled), and
+  its Dismiss button. The area (``notifications.html``) starts with "Engine health: <n> error
+  needs attention" (or "<n> errors need attention"), linked to the health panel, when
+  ``health.issue_count()`` is above 0. It is empty when nothing is undismissed and no error
+  needs attention; otherwise it shows "Notifications (<count>)", the newest ``AREA_LIMIT`` (5),
+  each with its text (``|plain``), its time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and
+  "and <n> more" when there are more. The POST's fields, apart from ``csrf_token``, must be
+  exactly one ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it
+  dismisses through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the
+  area again in a read-only one.
 - ``GET /quotas`` (``quotas_page``, ``@personal_data(False)``): the Quotas and cost page
   (UX-DR28), rendered from ``budget.status()`` (the ``ops`` service's ``Budget``) through
   ``nextron.web.quotas_page``, and linked from the Settings page; see that module.
+- ``GET /health/panel`` (``health_page``, the navigation's Health section), ``GET
+  /health/panel/live`` (``health_panel``, the panel alone, which HTMX re-fetches every 30 s) and
+  ``POST /health/jobs/dismiss`` (``health_job_dismiss``), all ``@personal_data(True)``: the
+  health panel (FR-58, UX-DR29), rendered from ``health.report()`` (the ``ops`` service's
+  ``EngineHealth``) through ``nextron.web.health_page``; see that module. The POST's fields,
+  apart from ``csrf_token``, must be exactly one ``job`` holding a ULID (anything else is
+  ``MalformedForm``, 400); it dismisses the dead job through ``queue`` (``JobQueue.dismiss``) in
+  its own unit of work, then renders the panel again in a read-only one. (``GET /health`` keeps
+  its JSON.)
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -90,8 +101,9 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Budget, DashboardEntry
+from nextron.app.ops.api import Budget, DashboardEntry, EngineHealth
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
@@ -108,6 +120,7 @@ from nextron.domain.open_code import CodeCheck
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.web import credentials_page as credential_rows
 from nextron.web import google_page as google_rows
+from nextron.web import health_page as health_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
@@ -183,13 +196,30 @@ class NotificationItem:
     time: str
 
 
-def area_context(found: notify_queries.OpenNotifications) -> dict[str, object]:
-    """What ``notifications.html`` renders: the count, the listed items and how many more."""
+def health_count_text(errors: int) -> str | None:
+    """The area's engine health line for ``errors`` errors, or ``None`` when there are none."""
+    if errors <= 0:
+        return None
+    if errors == 1:
+        return "Engine health: 1 error needs attention"
+    return f"Engine health: {errors:,} errors need attention"
+
+
+def area_context(
+    found: notify_queries.OpenNotifications, *, errors: int = 0
+) -> dict[str, object]:
+    """What ``notifications.html`` renders: the engine health line, the count, the listed items
+    and how many more."""
     items = [
         NotificationItem(row.id, row.text, f"{row.created_at:{TIME_FORMAT}}")
         for row in found.newest
     ]
-    return {"count": found.count, "items": items, "more": max(found.count - len(items), 0)}
+    return {
+        "health_text": health_count_text(errors),
+        "count": found.count,
+        "items": items,
+        "more": max(found.count - len(items), 0),
+    }
 
 
 def submitted_notification(fields: FormFields) -> str:
@@ -240,6 +270,8 @@ def create_app(
     google: GoogleAccess,
     notify: Notify,
     budget: Budget,
+    health: EngineHealth,
+    queue: JobQueue,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -248,13 +280,16 @@ def create_app(
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``credentials`` the external credentials
     and ``google`` the Google client and grants (both in Credential Manager, not the database);
-    ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures.
+    ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
+    ``health`` gives the health panel its report and the notification area its error count;
+    ``queue`` dismisses a dead job.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()
+    engine_health = health  # the name health is the GET /health handler's below
     templates = template_environment()
     sessions = SessionStore()
     assets = {name: (STATIC_DIR / name).read_bytes() for name in STATIC_TYPES}
@@ -480,7 +515,8 @@ def create_app(
 
     def notification_list(request: Request) -> HTMLResponse:
         found = notify_queries.open_notifications(AREA_LIMIT)
-        return page(request, NOTIFICATIONS_TEMPLATE, **area_context(found))
+        context = area_context(found, errors=engine_health.issue_count())
+        return page(request, NOTIFICATIONS_TEMPLATE, **context)
 
     @app.get("/notifications", name="notifications_area")
     @personal_data(True)
@@ -503,6 +539,30 @@ def create_app(
     def quotas_page(request: Request) -> HTMLResponse:
         context = quota_rows.page_context(budget.status())
         return page(request, quota_rows.PAGE_TEMPLATE, **context)
+
+    def health_answer(request: Request, template: str) -> HTMLResponse:
+        return page(request, template, **health_rows.panel_context(engine_health.report()))
+
+    @app.get("/health/panel", name="health_page")
+    @personal_data(True)  # a dead job's last error is free text
+    def health_page(request: Request) -> HTMLResponse:
+        return health_answer(request, health_rows.PAGE_TEMPLATE)
+
+    @app.get("/health/panel/live", name="health_panel")
+    @personal_data(True)
+    def health_panel(request: Request) -> HTMLResponse:
+        return health_answer(request, health_rows.PANEL_TEMPLATE)
+
+    @app.post("/health/jobs/dismiss", name="health_job_dismiss")
+    @personal_data(True)
+    def health_job_dismiss(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        job_id = health_rows.submitted_job(fields)
+        with units.open():
+            queue.dismiss(job_id)
+        with units.open(read_only=True):
+            return health_answer(request, health_rows.PANEL_TEMPLATE)
 
     require_declared(app)
     require_route_rules(app)

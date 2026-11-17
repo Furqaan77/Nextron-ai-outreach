@@ -322,3 +322,82 @@ button.secondary {
 .quota-table td.number {
   text-align: right;
 }
+
+/* The notification area's engine health line: the count of errors, linked to the panel. */
+.health-count {
+  margin: 0 0 0.25rem;
+  font-weight: 600;
+}
+
+.health-count a {
+  color: var(--refused);
+}
+
+/* The health panel (UX-DR29): the worker line, the errors with their Dismiss forms, and plain
+   tables for the last runs and the readiness list. */
+.health-worker {
+  max-width: 48rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--ink);
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}
+
+.health-worker-down {
+  border-left-color: var(--refused);
+}
+
+.health-issues {
+  max-width: 48rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.health-issue {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--refused);
+  border-radius: 4px;
+}
+
+.health-issue-text {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.health-issue-detail {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.health-issue form {
+  margin-top: 0.5rem;
+}
+
+.health-table {
+  margin: 0 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.health-table th,
+.health-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.health-table td {
+  overflow-wrap: anywhere;
+}
+
+.readiness-warn td:first-child,
+.readiness-fail td:first-child {
+  font-weight: 600;
+  color: var(--refused);
+}

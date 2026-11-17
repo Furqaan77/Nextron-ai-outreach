@@ -57,11 +57,17 @@ UTC time ``YYYY-MM-DDTHH:MM:SS[.ffffff]Z``, or a token fullmatching ``[a-z0-9_:.
 refusal's reason names the field, never its value.
 
 **Job types.** ``JobType(name, default_lane, lanes, priority, max_runtime, retry_limit,
-handler)`` is checked when it is built (``TypeError`` or ``ValueError``): ``name`` a
-``verb_noun`` name of at most 48 characters; ``lanes`` a non-empty ``frozenset`` of ``Lane``
-holding ``default_lane``; ``priority`` an int from 0 to 100 (higher runs first);
-``max_runtime`` a ``timedelta`` of whole seconds from 1 s to 24 h; ``retry_limit`` an int from
-0 to 20; ``handler`` callable. A ``bool`` is refused wherever an int is expected. ``JobTypes``
+handler, group=JobGroup.OTHER)`` is checked when it is built (``TypeError`` or
+``ValueError``): ``name`` a ``verb_noun`` name of at most 48 characters; ``lanes`` a non-empty
+``frozenset`` of ``Lane`` holding ``default_lane``; ``priority`` an int from 0 to 100 (higher
+runs first); ``max_runtime`` a ``timedelta`` of whole seconds from 1 s to 24 h;
+``retry_limit`` an int from 0 to 20; ``handler`` callable; ``group`` a ``JobGroup``, the
+health panel's group for the type (``discovery`` "Discovery", ``enrichment`` "Enrichment",
+``recheck`` "Re-check", ``sending`` "Sending", ``reply_check`` "Reply check",
+``unsubscribe_poll`` "Unsubscribe Endpoint poll", ``backup`` "Backup" or ``other`` "Other";
+``JobGroup.label`` is the heading). Every registration names its group
+(``tests/contracts/test_health_contracts.py``). A ``bool`` is refused wherever an int is
+expected. ``JobTypes``
 is the registry: ``register_job_type`` until ``freeze()``, then ``get(name)`` (raising
 ``UnknownJobType``) and ``names()``. Only ``nextron.main.build_job_types`` builds one.
 
@@ -136,6 +142,38 @@ class Lane(StrEnum):
     REALTIME = "realtime"
     INTERACTIVE = "interactive"
     BULK = "bulk"
+
+
+class JobGroup(StrEnum):
+    """The health panel's groups of job types (FR-58), in the order it shows them; ``label`` is
+    the group's heading."""
+
+    DISCOVERY = "discovery"
+    ENRICHMENT = "enrichment"
+    RECHECK = "recheck"
+    SENDING = "sending"
+    REPLY_CHECK = "reply_check"
+    UNSUBSCRIBE_POLL = "unsubscribe_poll"
+    BACKUP = "backup"
+    OTHER = "other"
+
+    @property
+    def label(self) -> str:
+        return _GROUP_LABELS[self]
+
+
+_GROUP_LABELS: Final[Mapping[JobGroup, str]] = MappingProxyType(
+    {
+        JobGroup.DISCOVERY: "Discovery",
+        JobGroup.ENRICHMENT: "Enrichment",
+        JobGroup.RECHECK: "Re-check",
+        JobGroup.SENDING: "Sending",
+        JobGroup.REPLY_CHECK: "Reply check",
+        JobGroup.UNSUBSCRIBE_POLL: "Unsubscribe Endpoint poll",
+        JobGroup.BACKUP: "Backup",
+        JobGroup.OTHER: "Other",
+    }
+)
 
 
 class JobStatus(StrEnum):
@@ -492,6 +530,7 @@ class JobType:
     max_runtime: timedelta
     retry_limit: int
     handler: Handler
+    group: JobGroup = JobGroup.OTHER
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
@@ -523,6 +562,8 @@ class JobType:
         _check_int("retry_limit", self.retry_limit, 0, MAX_RETRY_LIMIT)
         if not callable(self.handler):
             raise TypeError(f"job type {self.name}: handler must be callable")
+        if not isinstance(self.group, JobGroup):
+            raise TypeError(f"job type {self.name}: group must be a JobGroup")
 
 
 class JobTypes:

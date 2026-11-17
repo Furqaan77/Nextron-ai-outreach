@@ -17,6 +17,7 @@ import pytest
 
 from nextron import startup_checks as checks
 from nextron.domain import credentials
+from nextron.domain.health import HEARTBEAT_FRESH
 from nextron.ports.errors import AdapterError
 from nextron.startup_checks import CheckFailed, CheckResult, DoctorCheck, DoctorChecks, Status
 from tests.fakes.probes import PortProbe, fake_probes
@@ -225,6 +226,28 @@ def test_a_free_port_never_reads_the_heartbeat() -> None:
     )
 
     assert result == CheckResult("port_free", Status.OK, "127.0.0.1:8766 is free")
+
+
+def test_in_the_engine_the_port_check_probes_nothing_and_passes() -> None:
+    def never_probe(host: str, port: int) -> bool:
+        raise AssertionError("the engine serving the page holds the port")
+
+    def never_read(path: PurePath) -> float | None:
+        raise AssertionError("no heartbeat is read in the engine")
+
+    probes = fake_probes(port_is_free=never_probe, file_age=never_read)
+
+    result = checks.check_port_free(
+        "127.0.0.1", 8766, probes, heartbeat=HEARTBEAT, in_engine=True
+    )
+
+    assert result == CheckResult(
+        "port_free", Status.OK, "127.0.0.1:8766 is held by this engine, which serves this page"
+    )
+
+
+def test_the_heartbeat_threshold_is_the_health_panels() -> None:
+    assert HEARTBEAT_FRESH.total_seconds() == checks.HEARTBEAT_FRESH_S == 120.0
 
 
 # Row: Backup dir --------------------------------------------------------------------------------
@@ -684,6 +707,41 @@ def test_every_other_grant_error_fails_by_code(code: str, says: str) -> None:
     access_token, _ = grant(AdapterError(False, code, f"detail {TOKEN} mac@nextronai.com"))
 
     result = checks.check_internal_notify_grant(access_token)
+
+    assert result.status is Status.FAIL
+    assert says in result.message
+    assert TOKEN not in result.message and "mac@" not in result.message
+
+
+def test_without_refresh_a_stored_grant_passes_saying_the_panel_does_not_refresh_it() -> None:
+    def check_stored_grant(name: str) -> None:
+        asked.append(name)
+
+    asked: list[str] = []
+
+    result = checks.check_internal_notify_grant(check_stored_grant, refresh=False)
+
+    assert result == CheckResult(
+        "internal_notify_grant",
+        Status.OK,
+        "internal_notify is granted; the health panel doesn't refresh it (nextron doctor does)",
+    )
+    assert asked == ["internal_notify"]
+
+
+@pytest.mark.parametrize(
+    ("code", "says"),
+    [
+        ("google_client_not_imported", "the Google Desktop client is not imported"),
+        ("google_not_granted", "internal_notify is not granted"),
+        ("google_needs_reconsent", "internal_notify needs re-consent"),
+        ("keyring_failed", "Windows Credential Manager could not be read (keyring_failed)"),
+    ],
+)
+def test_without_refresh_each_stored_grant_problem_fails_by_code(code: str, says: str) -> None:
+    check_stored_grant, _ = grant(AdapterError(False, code, f"detail {TOKEN} mac@nextronai.com"))
+
+    result = checks.check_internal_notify_grant(check_stored_grant, refresh=False)
 
     assert result.status is Status.FAIL
     assert says in result.message

@@ -1,0 +1,65 @@
+{#- The health panel (nextron.web.health_page): rendered inside health.html, and alone as the
+    answer to GET /health/panel/live (which HTMX fetches every 30 seconds) and to
+    POST /health/jobs/dismiss, each swapped in for this whole panel. Issue texts are escaped
+    with |plain: a dead job's last error is free text. -#}
+<div id="health-panel" hx-get="/health/panel/live" hx-trigger="every 30s" hx-swap="outerHTML">
+<p class="health-checked">Checked at {{ checked_at }}; refreshes every 30 seconds.</p>
+<section aria-labelledby="health-worker-heading">
+<h2 id="health-worker-heading">Worker</h2>
+<p class="health-worker{% if not worker_running %} health-worker-down{% endif %}" role="status">{{ worker }}</p>
+</section>
+<section aria-labelledby="health-errors-heading">
+<h2 id="health-errors-heading">Errors needing attention ({{ issues|length }})</h2>
+{%- if issues %}
+<ul class="health-issues">
+{%- for issue in issues %}
+<li class="health-issue">
+<p class="health-issue-text">{{ issue.text|plain }}</p>
+{%- if issue.detail is not none %}
+<p class="health-issue-detail">{{ issue.detail|plain }}</p>
+{%- endif %}
+{%- if issue.job %}
+<form method="post" hx-post="/health/jobs/dismiss" hx-target="#health-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="job" value="{{ issue.job }}">
+<button type="submit" class="secondary" id="dismiss-{{ issue.job }}" aria-label="Dismiss dead job {{ issue.job }}">Dismiss</button>
+</form>
+{%- endif %}
+</li>
+{%- endfor %}
+</ul>
+{%- else %}
+<p class="health-no-errors">{{ no_errors }}</p>
+{%- endif %}
+</section>
+<section aria-labelledby="health-runs-heading">
+<h2 id="health-runs-heading">Last successful runs</h2>
+{%- for group in groups %}
+<h3>{{ group.label }}</h3>
+<table class="health-table">
+<thead>
+<tr><th scope="col">Job type</th><th scope="col">Last success</th></tr>
+</thead>
+<tbody>
+{%- for row in group.rows %}
+<tr><td>{{ row.job_type }}</td><td>{{ row.last_success }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endfor %}
+</section>
+<section aria-labelledby="health-readiness-heading">
+<h2 id="health-readiness-heading">Readiness (nextron doctor)</h2>
+<table class="health-table">
+<thead>
+<tr><th scope="col">Status</th><th scope="col">Check</th><th scope="col">Message</th></tr>
+</thead>
+<tbody>
+{%- for row in readiness %}
+<tr class="readiness-{{ row.status }}"><td>{{ row.status }}</td><td>{{ row.check }}</td><td>{{ row.message|plain }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+<p class="health-readiness-counts">{{ readiness_counts }}</p>
+</section>
+</div>

@@ -40,7 +40,7 @@ from nextron.db.models import Base
 from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
-from nextron.domain.job import Job, JobTypes, Lane
+from nextron.domain.job import Job, JobGroup, JobTypes, Lane
 from nextron.jobs.triggers import Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
@@ -291,7 +291,8 @@ def test_build_job_types_is_frozen_and_registers_send_alert() -> None:
         send_alert.priority,
         send_alert.max_runtime,
         send_alert.retry_limit,
-    ) == (Lane.REALTIME, frozenset({Lane.REALTIME}), 90, timedelta(minutes=3), 5)
+        send_alert.group,
+    ) == (Lane.REALTIME, frozenset({Lane.REALTIME}), 90, timedelta(minutes=3), 5, JobGroup.OTHER)
     assert calls == []  # building looks nothing up
     alert_id = "01JD0000000000000000000000"
     job = Job("01JD0000000000000000000001", "send_alert", Lane.REALTIME, {"alert_id": alert_id}, 1)

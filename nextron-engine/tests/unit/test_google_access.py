@@ -1013,6 +1013,62 @@ def test_no_client_or_no_grant_fails_without_calling_google(world: World) -> Non
     assert world.oauth.calls == []
 
 
+# check_stored_grant (the health panel: no call to Google) --------------------------------------
+
+
+def test_a_stored_grant_checks_out_without_calling_google(world: World) -> None:
+    world.import_client()
+    world.put_grant("internal_notify", "1//stored", MAC)
+    before = dict(world.secrets.store)
+
+    assert world.access.check_stored_grant("internal_notify") is None
+
+    assert world.oauth.calls == []
+    assert world.secrets.store == before
+    assert [operation for operation, _ in world.secrets.calls] == ["read"] * 3
+    assert world.access.grant_status("internal_notify").state is GrantState.GRANTED
+
+
+def test_check_stored_grant_raises_each_code_without_calling_google(world: World) -> None:
+    def code_of() -> tuple[str, bool]:
+        with pytest.raises(AdapterError) as caught:
+            world.access.check_stored_grant("internal_notify")
+        return caught.value.code, caught.value.retryable
+
+    assert code_of() == ("google_client_not_imported", False)
+    world.import_client()
+    assert code_of() == ("google_not_granted", False)
+    world.put("google/internal_notify", "1//stored")
+    world.put(
+        "meta/google/internal_notify",
+        encode_grant_meta(GrantMeta(MAC, NOW - timedelta(days=1), NOW - timedelta(hours=1))),
+    )
+    assert code_of() == ("google_needs_reconsent", False)
+    world.secrets.failing.add("read")
+    assert code_of() == ("keyring_failed", False)
+    assert world.oauth.calls == []
+
+
+def test_check_stored_grant_ignores_a_cached_token_and_caches_nothing(granted: World) -> None:
+    granted.put(
+        "meta/google/internal_notify",
+        encode_grant_meta(GrantMeta(MAC, NOW, NOW)),  # marked since the token was cached
+    )
+
+    with pytest.raises(AdapterError) as caught:
+        granted.access.check_stored_grant("internal_notify")
+
+    assert caught.value.code == "google_needs_reconsent"
+    assert granted.oauth.calls == []
+    # access_token is unchanged: it still answers from its cache while the token is valid
+    assert granted.access.access_token("internal_notify") == "ya29.first"
+
+
+def test_check_stored_grant_refuses_an_unknown_grant(world: World) -> None:
+    with pytest.raises(UnknownGrant):
+        world.access.check_stored_grant("calendar")
+
+
 def test_the_access_token_never_reaches_the_keyring(granted: World) -> None:
     granted.clock.advance(timedelta(hours=2))
     granted.oauth.refreshes.append(token_set("ya29.third"))

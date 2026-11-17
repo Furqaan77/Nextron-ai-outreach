@@ -341,9 +341,10 @@ def test_the_page_extends_the_layout_and_links_back_to_settings(
     assert [(a.attrs.get("href"), a.text) for a in page.find("a") if a.row is None] == [
         ("/", "Nextron"),
         ("/settings", "Settings"),
+        ("/health/panel", "Health"),
         ("/settings", "Back to Settings"),
     ]
-    assert page.texts("nav") == ["Settings"]
+    assert page.texts("nav") == ["Settings Health"]
     assert DECLINE in page.texts("p")  # browsers may still offer their password manager
 
 

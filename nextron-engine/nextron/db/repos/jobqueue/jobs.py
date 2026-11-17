@@ -20,14 +20,17 @@ applies the Job machine. Rows come back as ``JobRow``, a frozen copy of every co
 - ``expired(now, exclude)``: the ``running`` jobs whose lease ended by ``now``;
 - ``dead()``: every ``dead`` job, oldest change first;
 - ``purge_done(cutoff)``: deletes ``done`` rows last changed before ``cutoff``, except each
-  type's newest ``done`` row; returns how many it deleted.
+  type's newest ``done`` row; returns how many it deleted;
+- ``last_done()``: each type's latest ``done`` change (``MAX(updated_at)`` of its ``done``
+  rows), by type; a type with no ``done`` row is absent. ``ix_jobs_type_status`` covers it;
+- ``delete_dead(job_id)``: deletes the job only while it is ``dead``; returns its row count.
 """
 
 from collections.abc import Collection
 from dataclasses import dataclass, fields
 from datetime import datetime
 
-from sqlalchemy import Executable, and_, delete, exists, insert, or_, select, text, update
+from sqlalchemy import Executable, and_, delete, exists, func, insert, or_, select, text, update
 from sqlalchemy.orm import aliased
 
 from nextron.db.models.base import new_id
@@ -242,6 +245,28 @@ def purge_done(cutoff: datetime) -> int:
             JobRecord.updated_at < cutoff,
             has_newer,
         )
+        .execution_options(**_NO_SYNC)
+    )
+    return _count(statement)
+
+
+def last_done() -> dict[str, datetime]:
+    """Each job type's latest ``done`` change, by type; types with no ``done`` row are absent."""
+    statement = (
+        select(JobRecord.type, func.max(JobRecord.updated_at))
+        .where(JobRecord.status == str(JobStatus.DONE))
+        .group_by(JobRecord.type)
+    )
+    return {
+        job_type: updated_at for job_type, updated_at in current().session.execute(statement)
+    }
+
+
+def delete_dead(job_id: str) -> int:
+    """Delete the job ``job_id`` only while it is ``dead``; the row count (0 otherwise)."""
+    statement = (
+        delete(JobRecord)
+        .where(JobRecord.id == job_id, JobRecord.status == str(JobStatus.DEAD))
         .execution_options(**_NO_SYNC)
     )
     return _count(statement)

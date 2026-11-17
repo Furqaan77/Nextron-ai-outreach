@@ -710,9 +710,16 @@ job_types.register_job_type(
         max_runtime=timedelta(minutes=5),       # whole seconds, 1 s to 24 h
         retry_limit=3,                          # 0 to 20 retries after the first run
         handler=enrich_lead,                    # thin: one use case; None or DEFERRED
+        group=JobGroup.ENRICHMENT,              # its group on the health panel
     )
 )
 ```
+
+`group` is the health panel's group for the type: `discovery`, `enrichment`, `recheck`
+("Re-check"), `sending`, `reply_check` ("Reply check"), `unsubscribe_poll` ("Unsubscribe
+Endpoint poll"), `backup` or `other`. It defaults to `other`, but every registration names it
+(`tests/contracts/test_health_contracts.py`). `send_alert` is `other`: the panel's groups have
+none for alerts.
 
 **Handlers must be idempotent.** A run cut off by a crash or a shutdown is run again from the
 start unless it was the job's last attempt, and the cut-off run may already have committed its
@@ -765,7 +772,7 @@ has run `retry_limit + 1` times; then it is `dead` (`retries_exhausted`). Any ot
 makes it `dead` at once (`failed`), so a type with retry limit 0 never runs twice, except that
 it runs again after each `DEFERRED`. `last_error` holds `"<code>: <message>"` (or
 `"<exception type>: <text>"`), redacted and cut to 500 characters. `dead` jobs stay until the
-Operator dismisses them (Story 1.15).
+Operator dismisses them on the health panel (see [Engine health](#engine-health)).
 
 **Leases.** A claim sets `lease_until` to now + `max_runtime` + 60 s. Every 30 s the keeper
 renews the lease of every job this process is still running, then reaps the other `running`
@@ -797,8 +804,8 @@ actor `system:jobqueue`). Read a job with `nextron.app.queries.jobqueue.job(job_
 only `job_id`, `job_type`, `lane`, `attempts` and an error `code`: `job_runner_started` (with
 `bulk_threads`), `job_runner_stopped` (with `released`), `job_retry_scheduled`, `job_dead`,
 `job_claim_lost`, `job_lease_expired`, `job_lease_lost`, `job_released`, `job_overran`,
-`job_claim_failed`, `job_finish_failed`, `job_keeper_failed`, `job_deferred` and `jobs_purged`
-(with `count`).
+`job_claim_failed`, `job_finish_failed`, `job_keeper_failed`, `job_deferred`, `job_dismissed`
+and `jobs_purged` (with `count`).
 
 ### Deferring a job
 
@@ -910,8 +917,8 @@ after the wake. A job running across the sleep counts the sleep toward its `max_
 Logs carry no personal data and are written only when the outcome changes:
 `heartbeat_withheld` (WARNING, `reason`), `heartbeat_failed` (ERROR, `code`, once per streak of
 failures) and `heartbeat_resumed` (INFO, the first beat after either). The heartbeat writes no
-`events` rows. The health panel's "running" rule (a heartbeat under 2 minutes old) arrives in
-Story 1.15.
+`events` rows. The health panel shows the worker as running while the row's `beat_at` is
+under 2 minutes old (see [Engine health](#engine-health)).
 
 ```powershell
 (Get-Item "$env:LOCALAPPDATA\Nextron\dev\heartbeat").LastWriteTime
@@ -991,16 +998,20 @@ an unrunnable claim, a release at shutdown) is alerted once, even across a crash
 fails logs `dead_job_alerts_failed` and the runner goes on.
 
 **The notification area** sits under the navigation on every page. It loads once per page view
-(no polling) and shows "Notifications (<count>)", the newest 5 undismissed notices with their
-time in UTC, and "and <n> more" when there are more. Dismiss removes one (a CSRF-checked POST to
-`/notifications/dismiss`); it never comes back. With nothing undismissed the area is empty and
-takes no space.
+(no polling). It starts with "Engine health: <n> error(s) need(s) attention", linked to the
+health panel, when there are errors (see [Engine health](#engine-health)), then shows
+"Notifications (<count>)", the newest 5 undismissed notices with their time in UTC, and "and
+<n> more" when there are more. Dismiss removes one (a CSRF-checked POST to
+`/notifications/dismiss`); it never comes back. With nothing undismissed and no error the area
+is empty and takes no space.
 
 **Error notices.** When the dashboard refuses an action (a 403 security check, a 400 malformed
 form, a 500), HTMX shows the answer's text above the notifications, as plain text, until the
 page reloads. A request after the engine restarted (no session) shows "The dashboard is locked:
-run nextron open in a terminal to open it again." A request that gets no answer at all (the
-engine is down) shows nothing.
+run nextron open in a terminal to open it again." For an HTMX `GET` (the health panel's poll,
+say) the answer also carries `HX-Refresh: true`, so the page reloads and shows the locked page,
+leaving no stale data on screen; an HTMX `POST` keeps the page, so nothing typed is lost. A
+request that gets no answer at all (the engine is down) shows nothing.
 
 ## Metering, quotas and the AI budget
 
@@ -1078,6 +1089,72 @@ spend against the budget, with the warning, reached or off line; each quota's us
 limit (Hunter in credits, with halves) and its state (`OK`, `Reached: <work> stopped` or
 `Off (quota 0)`); and every provider, operation and SKU's calls, failed calls and units.
 
+## Engine health
+
+The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page
+whether the engine is healthy, so a stalled worker, a failing job type or a missing credential
+doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel is its own route.
+
+**What it shows**, in order:
+
+1. "Checked at <YYYY-MM-DD HH:MM:SS> UTC; refreshes every 30 seconds."
+2. **Worker**: "Running (last beat <time> UTC)" while the `runner_heartbeat` row's `beat_at` is
+   under 2 minutes old (in either direction: a beat 2 minutes or more in the future, the clock
+   was set back, isn't fresh either), "Not running: last beat <time> UTC" otherwise, or "Not
+   running: no heartbeat yet".
+3. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
+   attention." The errors are:
+   - each `dead` job, oldest first: "Job dead: <type> <ULID>, attempts: <n>", with "Last error:
+     <redacted last_error>" and a **Dismiss** button;
+   - AI spend at the warning percentage (`ai_budget_alert_pct`, 80% by default) or more, or the
+     AI budget reached (then only that one), and each quota reached; a limit of 0 (off) is never
+     an error. These are the same texts as the month's notices (see [Metering, quotas and the AI
+     budget](#metering-quotas-and-the-ai-budget)), and they last while the condition does;
+   - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
+     fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
+     traceback); the other sources still show.
+4. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
+   check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
+   latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
+5. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
+   the same eleven ids in the same order, with "<n> ok, <n> warn, <n> fail".
+
+**The poll.** The panel re-fetches itself every 30 seconds through HTMX
+(`GET /health/panel/live`, the panel alone) while the page is open. Every answer is
+`Cache-Control: no-store` (a dead job's last error is free text). After an engine restart the
+poll gets the locked answer with `HX-Refresh: true`, so the page reloads to the locked page.
+
+**Dismiss.** Dismissing a dead job deletes its `jobs` row (AD-10: `dead` rows stay until the
+Operator dismisses them), logs `job_dismissed`, and shows the panel again. Its history stays in
+`events`, and no `events` row is written (a dismissal is not a Job-machine transition, like the
+purge). The dead-job sweep reads only `dead` rows, so it never alerts the job again. The job's
+`job_dead` notification in the notification area is separate and has its own Dismiss.
+Dismissing a job that isn't `dead` (or is already gone) changes nothing.
+
+**Readiness in the engine.** The panel runs the doctor registry inside the engine, read-only,
+with two checks in a no-side-effect form, because a GET never changes anything:
+
+- `port_free` probes nothing and is `ok`: the engine serving the page holds the port.
+- `internal_notify_grant` checks only what Credential Manager stores (client imported, grant
+  present, not marked for re-consent) and never calls Google: a refresh would be a Google call,
+  an `api_usage` row and possibly a re-consent mark. It says "internal_notify is granted; the
+  health panel doesn't refresh it (nextron doctor does)". Run `nextron doctor` to prove the
+  grant still refreshes.
+
+The checks that read Credential Manager or the registry run before the panel's first database
+read, so they never hold the read transaction (AD-2: every read begins with `BEGIN IMMEDIATE`).
+Building the app runs no check.
+
+**The error count.** The notification area shows "Engine health: 1 error needs attention" (or
+"<n> errors need attention"), linked to the panel, whenever the panel's error list isn't empty.
+The worker state isn't counted (it is at the top of the panel). The count is read on each page
+view; the area isn't polled.
+
+**Adding a source of errors.** An owner adds `queries.<owner>.health_issues()`, returning
+`HealthIssue(kind, subject, text, detail=None)` values (`nextron/domain/health.py`), and
+registers it in `nextron.main.build_health_issues`, the only code that builds the registry
+(`tests/contracts/test_health_contracts.py`).
+
 ## Logs
 
 `serve` writes `<data dir>\logs\nextron.log`, for example
@@ -1140,7 +1217,9 @@ uv run lint-imports         # the import contracts on their own
   stands in for the unit-of-work factory in dashboard tests (`tests/dashboard.py`) and records
   each unit opened. `tests/dashboard.py`'s `Dashboard` builds `GoogleAccess` on these fakes with
   a recording browser and an `allowlist` field, and keeps each consent flow's job in `jobs`
-  until a test calls `run_jobs()`.
+  until a test calls `run_jobs()`. Its `EngineHealth` (`health`) reads the real health-issue
+  registry and a fixed `readiness` list (all eleven doctor checks `ok`) unless a test passes
+  its own.
   `tests/contracts/test_test_isolation.py` fails when a port has no fake there, or a fake
   doesn't match its port.
 - `tests/fixtures`: fixture files, such as the hostile-text page

@@ -38,11 +38,12 @@ adds a subscriber registers its owner command there, in the order AD-3 lists.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts)`` is the job type registry: the only code that
 constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's ``JobType``
-(lanes, priority, ``max_runtime``, retry limit and a thin handler from
-``nextron.jobs.handlers``), then freezes it. So far: ``send_alert`` (Story 1.12: the realtime
-lane only, priority 90, ``max_runtime`` 3 minutes, retry limit 5,
-``handlers.send_alert(alerts)``). ``build_app`` builds one ``JobQueue(clock, job_types)`` and one
-``Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
+(lanes, priority, ``max_runtime``, retry limit, a thin handler from ``nextron.jobs.handlers``
+and the health panel's ``JobGroup``, always named), then freezes it. So far: ``send_alert``
+(Story 1.12: the realtime lane only, priority 90, ``max_runtime`` 3 minutes, retry limit 5,
+``handlers.send_alert(alerts)``, group ``other``: the panel's groups have none for alerts).
+``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
+job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -117,6 +118,36 @@ writes no usage row; with no client or grant stored, or a grant already marked f
 nothing is sent to Google. Its browser always refuses and its allowlist is empty, because
 doctor never starts a consent flow.
 
+``DoctorContext.database`` is a ``ReadinessDatabase`` (``exists``, ``revision`` and
+``required_unset``): ``DoctorDatabase`` for ``doctor``, ``EngineDatabase`` in the engine.
+
+**Health (AD-10, AD-20, FR-58, OP-9).** ``build_health_issues(*, budget)`` is the health-issue
+registry: the only code that constructs ``HealthIssues`` or calls ``register_source``
+(``nextron.domain.health``; ``tests/contracts/test_health_contracts.py``). It registers
+``IssueSource("jobqueue", queries.jobqueue.health_issues)`` (each dead job), then
+``IssueSource("budget", budget.health_issues)`` (AI spend and quotas), then freezes it; each
+later owner registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
+``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget),
+readiness=functools.partial(run_checks, build_doctor_checks(), context))``
+(``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
+``create_app(..., health=health, queue=queue)``: the health panel (``GET /health/panel``)
+shows its report and the notification area its error count.
+
+**The doctor in the engine.** The panel's readiness list is the doctor registry itself, run on
+``DoctorContext(config, ENV_SOURCE_VARIABLE, probes, secrets, google,
+EngineDatabase(<data dir>\\nextron.db), in_engine=True)``, where ``probes`` is
+``build_app``'s ``probes`` (``Probes.system()`` unless injected). The ids and their order are
+doctor's; with ``in_engine`` only two checks change form: ``port_free`` probes nothing and is
+``ok`` (the engine serving the page holds the port), and ``internal_notify_grant`` calls
+``GoogleAccess.check_stored_grant`` with ``refresh=False``, which reads Credential Manager and
+never calls Google, so a GET makes no refresh, no ``api_usage`` row and no re-consent mark
+(``nextron doctor`` tests the refresh). ``EngineDatabase`` reads the revision
+(``nextron.db.migrations.current_revision_in_unit``) and the required settings
+(``queries.setup.required_unset``) in the caller's unit of work: the GET's read-only one; those
+two checks come last, so the Credential Manager and registry reads before them never hold the
+read transaction (``build_doctor_checks`` states the order rule). Building the app runs no
+check.
+
 ``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
 Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
 one-time code, its ``Credentials``, which store the external credentials, and its
@@ -179,7 +210,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, TextIO
+from typing import Final, Protocol, TextIO
 
 import uvicorn
 from fastapi import FastAPI
@@ -192,7 +223,8 @@ from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Budget, DashboardEntry, DeadJobAlerts, Heartbeat
+from nextron.app.ops.api import Budget, DashboardEntry, DeadJobAlerts, EngineHealth, Heartbeat
+from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.bootstrap import BootstrapConfig, BootstrapError, load_bootstrap
@@ -201,6 +233,7 @@ from nextron.db.metering import UsageMeter
 from nextron.db.migrations import (
     DatabaseStateError,
     current_revision,
+    current_revision_in_unit,
     ensure_current,
     head_revision,
     known_revisions,
@@ -209,7 +242,8 @@ from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain import settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
-from nextron.domain.job import JobType, JobTypes, Lane
+from nextron.domain.health import HealthIssues, IssueSource
+from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
 from nextron.jobs import handlers
@@ -320,6 +354,7 @@ def build_app(
     clock: Clock | None = None,
     google_oauth: GoogleOAuthPort | None = None,
     browser: Browser | None = None,
+    probes: Probes | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -329,7 +364,9 @@ def build_app(
     runner, the scheduler and the heartbeat writer are built here and started by the app's
     lifespan (``engine_lifespan``), never by building; ``Notify`` builds its Telegram adapter
     on the first send. The usage meter records each adapter's requests and, after each record,
-    runs the budget's threshold check (``check_usage``)."""
+    runs the budget's threshold check (``check_usage``). The health panel's ``EngineHealth``
+    runs the doctor registry in the engine on ``probes`` (``Probes.system()`` unless injected)
+    when the panel is read, never when the app is built."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -354,6 +391,21 @@ def build_app(
     scheduler = Scheduler(units, queue, build_triggers(job_types))
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
     writer = HeartbeatWriter(units, heartbeat, runner, scheduler)
+    context = DoctorContext(
+        config,
+        ENV_SOURCE_VARIABLE,
+        probes if probes is not None else Probes.system(),
+        secrets,
+        google,
+        EngineDatabase(config.data_dir / DB_FILE_NAME),
+        in_engine=True,
+    )
+    health = EngineHealth(
+        clock,
+        job_types,
+        issues=build_health_issues(budget=budget),
+        readiness=functools.partial(run_checks, build_doctor_checks(), context),
+    )
     return create_app(
         env=config.env,
         version=__version__,
@@ -364,6 +416,8 @@ def build_app(
         google=google,
         notify=notify,
         budget=budget,
+        health=health,
+        queue=queue,
         units=units,
         lifespan=engine_lifespan(runner, scheduler, writer),
     )
@@ -383,8 +437,8 @@ def check_usage(units: Units, budget: Budget) -> None:
 
 def build_job_types(*, alerts: Callable[[], handlers.AlertSending]) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
-    ``register_job_type(JobType(...))`` before ``freeze()``. ``alerts`` returns the ``notify``
-    service that ``send_alert`` jobs call."""
+    ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
+    returns the ``notify`` service that ``send_alert`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -395,10 +449,22 @@ def build_job_types(*, alerts: Callable[[], handlers.AlertSending]) -> JobTypes:
             max_runtime=timedelta(minutes=3),  # 10 s connect, 15 s per phase, database waits
             retry_limit=5,  # 30 s doubling: about 15 minutes of backoff
             handler=handlers.send_alert(alerts),
+            group=JobGroup.OTHER,  # the health panel's groups have none for alerts
         )
     )
     job_types.freeze()
     return job_types
+
+
+def build_health_issues(*, budget: Budget) -> HealthIssues:
+    """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
+    quotas. Each later owner registers its ``queries.<owner>.health_issues`` here, before
+    ``freeze()``."""
+    issues = HealthIssues()
+    issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
+    issues.register_source(IssueSource("budget", budget.health_issues))
+    issues.freeze()
+    return issues
 
 
 def build_triggers(job_types: JobTypes) -> Triggers:
@@ -702,6 +768,19 @@ class DoctorMeter:
         return Usage(month=month_of(now), api=(), ai_calls=0, ai_cost_micros=0)
 
 
+class ReadinessDatabase(Protocol):
+    """What the ``required_settings`` and ``database_revision`` checks read: whether the
+    database file exists, its revision (``None`` when empty; a database that isn't this
+    engine's raises ``CheckFailed``) and the required settings that are unset or no longer
+    valid."""
+
+    def exists(self) -> bool: ...
+
+    def revision(self) -> str | None: ...
+
+    def required_unset(self) -> tuple[str, ...]: ...
+
+
 class DoctorDatabase:
     """``doctor``'s read-only view of the database file at ``path``: it never creates,
     migrates or writes it. The read-only engine (``create_read_only_engine``) is built on first
@@ -750,23 +829,61 @@ class DoctorDatabase:
             units.engine.dispose()
 
 
+class EngineDatabase:
+    """The engine's view of its own database file at ``path``, for the health panel's
+    readiness list: the revision and the required settings are read in the caller's unit of
+    work (a dashboard GET's read-only one), never in one of their own."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def exists(self) -> bool:
+        """Whether the database file is there."""
+        return self._path.exists()
+
+    def revision(self) -> str | None:
+        """The database's revision, ``None`` for an empty one, read in the current unit of
+        work. A database that isn't this engine's raises ``CheckFailed`` with the reason."""
+        try:
+            return current_revision_in_unit()
+        except (DatabaseStateError, ConnectionSettingError) as exc:
+            raise CheckFailed(str(exc)) from None
+
+    def required_unset(self) -> tuple[str, ...]:
+        """The required settings that are unset or no longer valid, read in the current unit
+        of work."""
+        return setup_queries.required_unset()
+
+
 @dataclass(frozen=True, slots=True)
 class DoctorContext:
     """What the doctor checks read: the bootstrap config, where its environment came from
     (``--env`` or ``NEXTRON_ENV``), the machine probes, the environment's secrets, its Google
-    access and its database, read-only."""
+    access and its database, read-only. ``in_engine`` is set when the engine runs the checks
+    for its health panel: ``port_free`` then probes nothing and ``internal_notify_grant`` reads
+    only what is stored, never refreshing at Google."""
 
     config: BootstrapConfig
     env_source: str
     probes: Probes
     secrets: SecretsPort
     google: GoogleAccess
-    database: DoctorDatabase = field(repr=False)
+    database: ReadinessDatabase = field(repr=False)
+    in_engine: bool = False
 
 
 def build_doctor_checks() -> DoctorChecks[DoctorContext]:
     """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, in the order
-    doctor prints them. Later stories register their checks here, before ``freeze()``."""
+    doctor prints them (the health panel shows the same list). With ``DoctorContext.in_engine``,
+    ``port_free`` and ``internal_notify_grant`` take their no-probe, no-network forms. Later
+    stories register their checks here, before ``freeze()``.
+
+    The order rule: the health panel runs this registry inside a GET's read-only unit of work,
+    where ``required_settings`` and ``database_revision`` begin the read transaction (AD-2's
+    ``BEGIN IMMEDIATE``). Any check that reads Credential Manager, the registry or the network
+    goes before ``required_settings``, so it never runs while that lock is held. A check that
+    calls the network also needs an in-engine form (``c.in_engine``) that doesn't, because a GET
+    makes no network call."""
     checks: DoctorChecks[DoctorContext] = DoctorChecks()
     for check in (
         DoctorCheck(PYTHON_VERSION, lambda c: check_python_version(c.probes)),
@@ -787,13 +904,15 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
         DoctorCheck(
             PORT_FREE,
             lambda c: check_port_free(
-                HOST, c.config.port, c.probes, heartbeat=c.config.data_dir / HEARTBEAT_FILE_NAME
+                HOST,
+                c.config.port,
+                c.probes,
+                heartbeat=c.config.data_dir / HEARTBEAT_FILE_NAME,
+                in_engine=c.in_engine,
             ),
         ),
         DoctorCheck(REQUIRED_CREDENTIALS, lambda c: check_required_credentials(c.secrets.read)),
-        DoctorCheck(
-            INTERNAL_NOTIFY_GRANT, lambda c: check_internal_notify_grant(c.google.access_token)
-        ),
+        DoctorCheck(INTERNAL_NOTIFY_GRANT, _internal_notify_grant),
         DoctorCheck(
             REQUIRED_SETTINGS, lambda c: check_required_settings(c.database.required_unset)
         ),
@@ -810,6 +929,13 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
         checks.register_check(check)
     checks.freeze()
     return checks
+
+
+def _internal_notify_grant(c: DoctorContext) -> CheckResult:
+    """``doctor`` refreshes the grant at Google; the engine only reads what is stored."""
+    if c.in_engine:
+        return check_internal_notify_grant(c.google.check_stored_grant, refresh=False)
+    return check_internal_notify_grant(c.google.access_token)
 
 
 def _never_open_browser(url: str) -> bool:

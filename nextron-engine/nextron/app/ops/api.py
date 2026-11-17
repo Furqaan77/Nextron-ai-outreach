@@ -57,6 +57,32 @@ notices. ``nextron.main`` builds it and runs ``check`` right after each usage ro
   the AI budget reached, and each quota reached); raising a limit mid-month doesn't repeat it.
   It returns the thresholds that added a notification and, after the commit, logs
   ``usage_alert_raised`` (INFO, ``kind`` and ``subject``) for each. Dashboard only: no Telegram.
+- ``health_issues() -> tuple[HealthIssue, ...]`` is ``budget_issues(status())``, a plain read:
+  the health panel's ``budget`` issue source (AI spend at the warning percentage or more, the
+  AI budget reached, each quota reached; never a limit of 0). Usage is readable only through
+  ``UsageMeterPort``, so this source is ``ops``'s, not a ``queries`` module's.
+
+``EngineHealth(clock, job_types, *, issues, readiness)`` (AD-10, AD-20, FR-58, OP-9) assembles
+the health panel. ``issues`` is the frozen health-issue registry
+(``nextron.main.build_health_issues``) and ``readiness`` runs the ``nextron doctor`` checks in
+the engine (no Google refresh, no port probe). Its methods are plain reads, with no use case or
+transaction, for a dashboard GET's read-only unit of work:
+
+- ``issues() -> tuple[HealthIssue, ...]`` runs each registered source in order. A source that
+  raises, or yields anything but a ``HealthIssue``, gives instead the one issue
+  ``HealthIssue("health_check_failed", <source name>, "The <name> health check could not be
+  read (<ExceptionType>)")`` and logs ``health_check_failed`` (ERROR, ``source``, ``code`` and
+  the traceback); the other sources still run.
+- ``issue_count() -> int`` is ``len(issues())``: the notification area's error count.
+- ``report() -> HealthReport(checked_at, worker, groups, issues, readiness)`` reads the clock
+  once, then runs ``readiness()`` before its own database reads. Readiness ends with the
+  checks that read the database (``required_settings``, ``database_revision``), which begin the
+  read transaction; the checks that reach Credential Manager or the registry are registered
+  before them (``nextron.main.build_doctor_checks``), so they never hold its lock (AD-2's
+  ``BEGIN IMMEDIATE`` covers reads). ``worker`` is ``Worker(running, beat_at)`` from
+  ``queries.ops.heartbeat()`` and ``nextron.domain.health.worker_running`` (``beat_at`` is
+  ``None`` before the first beat); ``groups`` is ``job_group_runs`` of the registered job types
+  (by ``JobType.group``) and ``queries.jobqueue.last_successes()``.
 """
 
 import contextlib
@@ -64,26 +90,40 @@ import logging
 import os
 import secrets
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 
+from nextron.app.jobqueue.api import error_code
 from nextron.app.notify.api import Notify
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import notify as notify_queries
+from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.ops import heartbeat as heartbeat_repo
 from nextron.db.uow import current, use_case
 from nextron.domain.alert import JOB_DEAD, SEND_ALERT_JOB, Channel, job_dead_text
-from nextron.domain.budget import Assessment, Threshold, assess, thresholds
+from nextron.domain.budget import Assessment, Threshold, assess, budget_issues, thresholds
+from nextron.domain.health import (
+    GroupRuns,
+    HealthIssue,
+    HealthIssues,
+    IssueSource,
+    job_group_runs,
+    worker_running,
+)
+from nextron.domain.job import JobTypes
 from nextron.domain.open_code import CodeCheck, check, encode
+from nextron.domain.readiness import CheckResult
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
 
 OPEN_CODE_SECRET: Final = "session/open_code"
+HEALTH_CHECK_FAILED: Final = "health_check_failed"
 ALL_CHANNELS: Final = (Channel.TELEGRAM, Channel.DASHBOARD)
 DASHBOARD_ONLY: Final = (Channel.DASHBOARD,)  # a dead send_alert job: never Telegram again
 
@@ -215,3 +255,102 @@ class Budget:
                 "usage_alert_raised", extra={"kind": threshold.kind, "subject": threshold.subject}
             )
         return tuple(raised)
+
+    def health_issues(self) -> tuple[HealthIssue, ...]:
+        """This month's budget issues for the health panel, read in the current unit of work
+        (a read-only one included)."""
+        return budget_issues(self.status())
+
+
+@dataclass(frozen=True, slots=True)
+class Worker:
+    """The job runner as the heartbeat shows it: running (a beat under 2 minutes old), and the
+    last beat, ``None`` before the first one."""
+
+    running: bool
+    beat_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class HealthReport:
+    """What the health panel shows; see the module docstring."""
+
+    checked_at: datetime
+    worker: Worker
+    groups: tuple[GroupRuns, ...]
+    issues: tuple[HealthIssue, ...]
+    readiness: tuple[CheckResult, ...]
+
+
+def _source_failed(source: IssueSource, error: Exception) -> HealthIssue:
+    log.error(
+        HEALTH_CHECK_FAILED,
+        exc_info=error,
+        extra={"source": source.name, "code": error_code(error)},
+    )
+    return HealthIssue(
+        HEALTH_CHECK_FAILED,
+        source.name,
+        f"The {source.name} health check could not be read ({type(error).__name__})",
+    )
+
+
+def _read_source(source: IssueSource) -> tuple[HealthIssue, ...]:
+    """The source's issues, or the one ``health_check_failed`` issue when it can't be read."""
+    try:
+        found = tuple(source.read())
+        for issue in found:
+            if not isinstance(issue, HealthIssue):
+                raise TypeError(f"issue source {source.name} yielded something else")
+    except Exception as error:  # noqa: BLE001 - one broken source never hides the others
+        return (_source_failed(source, error),)
+    return found
+
+
+class EngineHealth:
+    """The health panel's report: the worker, each job type's last success, the errors needing
+    attention and the readiness list; see the module docstring."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        job_types: JobTypes,
+        *,
+        issues: HealthIssues,
+        readiness: Callable[[], Sequence[CheckResult]],
+    ) -> None:
+        if not isinstance(job_types, JobTypes):
+            raise TypeError("job_types must be a JobTypes registry")
+        if not isinstance(issues, HealthIssues):
+            raise TypeError("issues must be a HealthIssues registry")
+        if not issues.frozen:
+            raise RuntimeError("freeze the health-issue registry before reading it")
+        self._clock = clock
+        self._job_types = job_types
+        self._issues = issues
+        self._readiness = readiness
+
+    def issues(self) -> tuple[HealthIssue, ...]:
+        """Every source's issues, in registration order."""
+        found: list[HealthIssue] = []
+        for source in self._issues.sources:
+            found.extend(_read_source(source))
+        return tuple(found)
+
+    def issue_count(self) -> int:
+        """How many errors need attention."""
+        return len(self.issues())
+
+    def report(self) -> HealthReport:
+        """The whole panel, read in the current unit of work: the readiness checks first (their
+        Credential Manager and registry reads before their database ones), then the rest."""
+        now = self._clock.now()
+        readiness = tuple(self._readiness())  # its last checks begin the read transaction
+        beat = ops_queries.heartbeat()
+        worker = Worker(
+            beat is not None and worker_running(beat.beat_at, now),
+            None if beat is None else beat.beat_at,
+        )
+        pairs = [(name, self._job_types.get(name).group) for name in self._job_types.names()]
+        groups = job_group_runs(pairs, jobqueue_queries.last_successes())
+        return HealthReport(now, worker, groups, self.issues(), readiness)

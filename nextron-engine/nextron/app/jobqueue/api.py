@@ -49,6 +49,13 @@ status change follows the Job machine (``nextron.domain.job.transition``) and ap
   ``RELEASED_ERROR``. It returns the ids it changed.
 - ``@use_case purge_done() -> int``: deletes ``done`` rows last changed more than 30 days ago,
   except each type's newest ``done`` row; never a ``dead`` one. It returns the count.
+- ``@use_case dismiss(job_id) -> bool``: the Operator dismisses a ``dead`` job on the health
+  panel (AD-10: ``dead`` rows stay until then). In one transaction it reads the job and deletes
+  its row only while it is ``dead``. It returns ``True`` only when a ``dead`` row was deleted;
+  a missing job, or one that isn't ``dead``, is ``False`` and changes nothing. Like the purge,
+  a dismissal is no Job-machine transition, so it appends no ``events`` row (the job's history
+  stays there); it logs ``job_dismissed`` (INFO, the job's fields) after the commit. The ``ops``
+  dead-job sweep reads only ``dead`` rows, so it never alerts a dismissed job again.
 
 **The fence.** ``complete``, ``defer``, ``fail``, ``keep``'s renewal and ``release`` change a
 job only while it is ``running`` with the claim's ``attempts``. A run whose claim was lost
@@ -63,7 +70,8 @@ characters.
 or else its class name), never a payload value or ``last_error`` text, and are written after
 the transaction commits: ``job_retry_scheduled`` (WARNING), ``job_dead`` (ERROR, every move to
 ``dead``), ``job_claim_lost``, ``job_lease_expired`` and ``job_released`` (WARNING),
-``job_deferred`` (INFO) and ``jobs_purged`` (INFO, with ``count``, only when it is above 0).
+``job_deferred`` (INFO), ``job_dismissed`` (INFO) and ``jobs_purged`` (INFO, with ``count``,
+only when it is above 0).
 """
 
 import logging
@@ -124,6 +132,7 @@ JOB_LEASE_EXPIRED: Final = "job_lease_expired"
 JOB_RELEASED: Final = "job_released"
 JOB_DEFERRED: Final = "job_deferred"
 JOBS_PURGED: Final = "jobs_purged"
+JOB_DISMISSED: Final = "job_dismissed"
 
 log = logging.getLogger(__name__)
 
@@ -240,7 +249,7 @@ def _move_running(
 
 
 class JobQueue:
-    """Durable jobs: enqueue, claim, finish, keep leases, release and purge."""
+    """Durable jobs: enqueue, claim, finish, keep leases, release, purge and dismiss."""
 
     def __init__(self, clock: Clock, job_types: JobTypes) -> None:
         if not isinstance(job_types, JobTypes):
@@ -490,3 +499,16 @@ class JobQueue:
         if count > 0:
             log.info(JOBS_PURGED, extra={"count": count})
         return count
+
+    @use_case
+    def dismiss(self, job_id: str) -> bool:
+        """Delete the ``dead`` job ``job_id``; ``False`` (and nothing changed) when it is missing
+        or not ``dead``."""
+        with current().transaction():
+            row = jobs_repo.get(job_id)
+            if row is None or row.status != str(JobStatus.DEAD):
+                return False
+            if jobs_repo.delete_dead(job_id) != 1:
+                return False
+        log.info(JOB_DISMISSED, extra=_fields(row.id, row.type, row.lane, row.attempts))
+        return True

@@ -19,7 +19,8 @@ one), ``routing`` (the ``@personal_data`` declaration every route makes, and the
 that runs each GET in a read-only unit of work and gives each POST the CSRF check),
 ``settings_page`` (the Settings form, generated from the settings schema), ``credentials_page``
 (the write-only Credentials rows, generated from the credential registry), ``quotas_page`` (the
-Quotas and cost page, from the ``ops`` service's ``Budget.status()``), ``templating`` (the
+Quotas and cost page, from the ``ops`` service's ``Budget.status()``), ``health_page`` (the
+health panel, from the ``ops`` service's ``EngineHealth.report()``), ``templating`` (the
 ``plain``, ``safe_link`` and ``csrf_field`` helpers for untrusted text), ``templates/`` (Jinja2,
 autoescaping on, no inline script or style; ``macros.html`` holds ``untrusted_block``) and
 ``static/`` (the vendored HTMX build and ``app.css``). ``tests/contracts/test_web_contracts.py``

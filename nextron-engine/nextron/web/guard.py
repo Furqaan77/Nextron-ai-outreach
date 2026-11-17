@@ -9,7 +9,10 @@ For an ``http`` request, in this order:
 2. Session: any path other than exactly ``/enter`` needs a ``nextron_session`` cookie that
    names a live session; otherwise 401 with the locked page, GET included. An HTMX request
    (exactly one ``HX-Request: true`` header) gets the 401 as plain text instead,
-   ``LOCKED_TEXT``, which HTMX puts in the page's error notice. The CSRF token of the first
+   ``LOCKED_TEXT``, which HTMX puts in the page's error notice. An HTMX ``GET`` (a poll, such
+   as the health panel's, after the engine restarted) also gets ``HX-Refresh: true``, so HTMX
+   reloads the page, which then shows the locked page and no stale data; an HTMX ``POST``
+   doesn't, so typed input isn't lost. The CSRF token of the first
    live ``nextron_session`` value goes into ``scope["nextron.csrf_token"]``, where
    ``nextron.web.csrf.require_csrf`` and the page renderer read it.
 3. For any method other than ``GET`` and ``HEAD``, before routing (so unknown paths and wrong
@@ -72,6 +75,7 @@ LOCKED_TEXT: Final = (
 )
 LOCKED_TEXT_BODY: Final = LOCKED_TEXT.encode("ascii")
 HX_REQUEST: Final = b"hx-request"
+HX_REFRESH: Final = (b"hx-refresh", b"true")
 TEXT_PLAIN: Final = b"text/plain; charset=utf-8"
 TEXT_HTML: Final = b"text/html; charset=utf-8"
 POLICY_VIOLATION: Final = 1008  # WebSocket close code
@@ -166,7 +170,8 @@ class Guard:
             scope[CSRF_SCOPE_KEY] = csrf_token
         elif scope.get("path") != ENTER_PATH:
             if _header_values(scope, HX_REQUEST) == [b"true"]:
-                await _respond(send, 401, TEXT_PLAIN, LOCKED_TEXT_BODY)
+                refresh = [HX_REFRESH] if scope.get("method") == "GET" else []
+                await _respond(send, 401, TEXT_PLAIN, LOCKED_TEXT_BODY, extra=refresh)
             else:
                 await _respond(send, 401, TEXT_HTML, self.locked_page)
             return
@@ -203,11 +208,20 @@ class Guard:
             raise
 
 
-async def _respond(send: Send, status: int, content_type: bytes, body: bytes) -> None:
-    """Send a complete response from the guard itself, with every guard header."""
+async def _respond(
+    send: Send,
+    status: int,
+    content_type: bytes,
+    body: bytes,
+    *,
+    extra: Iterable[tuple[bytes, bytes]] = (),
+) -> None:
+    """Send a complete response from the guard itself, with ``extra`` headers and every guard
+    header."""
     headers = [
         (b"content-type", content_type),
         (b"content-length", str(len(body)).encode("ascii")),
+        *extra,
     ]
     await send(
         {

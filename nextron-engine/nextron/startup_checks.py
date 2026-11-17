@@ -9,9 +9,11 @@ Manager, database or network. ``Probes.system()`` builds the real probes. The po
 local socket and closes it.
 
 Each check returns a ``CheckResult(id, status, message)``: ``status`` is a ``Status`` (``ok``,
-``warn`` or ``fail``) and ``message`` one line, safe to print. No message holds a secret value,
-an account address or an exception's text: only the exception's type name, or the message of a
-``CheckFailed``, which a probe raises with text that is safe to print.
+``warn`` or ``fail``) and ``message`` one line, safe to print. Both types live in
+``nextron.domain.readiness`` (the health panel shows the same results) and are imported here,
+so ``from nextron.startup_checks import CheckResult, Status`` still works. No message holds a
+secret value, an account address or an exception's text: only the exception's type name, or
+the message of a ``CheckFailed``, which a probe raises with text that is safe to print.
 
 ``engine_is_running`` is the probe of ``nextron open``: it connects to the engine's port instead
 of binding it, because a bind probe could take the port from an engine that is starting.
@@ -58,14 +60,19 @@ The doctor checks here, in the order ``doctor`` runs them:
 - ``backup_dir_separate``: the backup dir is not the data dir, neither contains the other
   (case-insensitive path parts), and it is outside OneDrive (the data dir's rules).
 - ``port_free``: the port is free, or it is busy and ``<data dir>\\heartbeat`` is under 2 minutes
-  old (``HEARTBEAT_FRESH_S``), so this environment's running engine holds it. A ``file_age``
-  error counts as no heartbeat. A hung engine therefore shows as "in use".
+  old (``HEARTBEAT_FRESH_S``, which is ``nextron.domain.health.HEARTBEAT_FRESH`` in seconds), so
+  this environment's running engine holds it. A ``file_age`` error counts as no heartbeat. A
+  hung engine therefore shows as "in use". In the engine (``in_engine``, the health panel) it
+  probes nothing and is ``ok``: the engine serving the page holds the port.
 - ``required_credentials``: every required credential (``nextron.domain.credentials``) is set,
   with at most ``MAX_SECRET_LENGTH`` UTF-16 units; each value is read and dropped at once. It
   fails listing the labels that are not set, too long or unreadable.
 - ``internal_notify_grant``: ``access_token("internal_notify")`` returns. ``warn`` when Google
   can't be reached (a retryable ``AdapterError``); ``fail`` when the client is not imported, the
   grant is missing or needs re-consent, Credential Manager fails, or any other error (by code).
+  In the engine (``refresh=False``, the health panel) the callable is ``check_stored_grant``,
+  which reads only what is stored and calls no one, so a GET never refreshes the grant: its
+  ``ok`` says the panel doesn't refresh it (``nextron doctor`` does).
 - ``required_settings``: every required setting is set and parses; it fails listing
   ``<label> (<key>)`` for each one that isn't, or naming the error type when the settings can't
   be read.
@@ -85,12 +92,13 @@ import time
 import zoneinfo
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import PurePath
 from typing import Any, Final
 
 from nextron.domain import credentials
 from nextron.domain.google_oauth import GoogleGrant
+from nextron.domain.health import HEARTBEAT_FRESH
+from nextron.domain.readiness import CheckResult, Status, tally
 from nextron.domain.settings_schema import setting
 from nextron.domain.sink import PROD
 from nextron.ports.errors import AdapterError
@@ -106,7 +114,7 @@ MIN_PYTHON_VERSION: Final = (3, 14, 8)
 MIN_SQLITE_VERSION: Final = (3, 51, 3)
 REQUIRED_ZONE: Final = "Europe/London"
 ONEDRIVE_VARIABLES: Final = ("OneDrive", "OneDriveCommercial", "OneDriveConsumer")
-HEARTBEAT_FRESH_S: Final = 120.0  # the health panel's "running" threshold (AD-20)
+HEARTBEAT_FRESH_S: Final = HEARTBEAT_FRESH.total_seconds()  # the panel's "running" rule
 
 PYTHON_VERSION: Final = "python_version"
 SQLITE_VERSION: Final = "sqlite_version"
@@ -135,24 +143,6 @@ CHECK_CRASHED: Final = "the check crashed ({})"
 NO_RESULT: Final = "the check returned no result"
 WILL_MIGRATE: Final = "will migrate on next start"
 NEWER_THAN_CODE: Final = "is newer than this code"
-
-
-class Status(StrEnum):
-    """A check's outcome: ``ok``, ``warn`` (needs attention, doesn't stop the engine) or
-    ``fail``."""
-
-    OK = "ok"
-    WARN = "warn"
-    FAIL = "fail"
-
-
-@dataclass(frozen=True, slots=True)
-class CheckResult:
-    """The outcome of one check; ``message`` explains it in one line."""
-
-    id: str
-    status: Status
-    message: str
 
 
 class CheckFailed(Exception):
@@ -382,12 +372,22 @@ def check_backup_dir_separate(
 
 
 def check_port_free(
-    host: str, port: int, probes: Probes, *, heartbeat: PurePath | None = None
+    host: str,
+    port: int,
+    probes: Probes,
+    *,
+    heartbeat: PurePath | None = None,
+    in_engine: bool = False,
 ) -> CheckResult:
     """``ok`` when ``host:port`` is free. ``serve`` passes no ``heartbeat``, so a busy port
     fails. ``doctor`` passes ``<data dir>\\heartbeat``: a busy port is then ``ok`` when that file
     is under ``HEARTBEAT_FRESH_S`` seconds old (this environment's running engine holds it), and
-    a ``file_age`` error counts as no heartbeat."""
+    a ``file_age`` error counts as no heartbeat. The health panel passes ``in_engine``: the
+    engine serving the page holds the port, so nothing is probed and the result is ``ok``."""
+    if in_engine:
+        return CheckResult(
+            PORT_FREE, Status.OK, f"{host}:{port} is held by this engine, which serves this page"
+        )
     try:
         free = probes.port_is_free(host, port)
     except Exception as exc:  # noqa: BLE001 - any probe failure fails the check
@@ -503,13 +503,19 @@ def check_required_credentials(read: Callable[[str], str | None]) -> CheckResult
     )
 
 
-def check_internal_notify_grant(access_token: Callable[[str], str]) -> CheckResult:
-    """``ok`` when ``access_token("internal_notify")`` returns (the token is dropped at once);
-    ``warn`` when Google can't be reached; ``fail`` otherwise, by error code."""
+def check_internal_notify_grant(
+    access: Callable[[str], object], *, refresh: bool = True
+) -> CheckResult:
+    """``ok`` when ``access("internal_notify")`` returns (whatever it returns is dropped at
+    once); ``warn`` when Google can't be reached; ``fail`` otherwise, by error code.
+
+    ``doctor`` passes ``GoogleAccess.access_token``, which refreshes the grant at Google. The
+    health panel passes ``refresh=False`` with ``GoogleAccess.check_stored_grant``, which only
+    reads what is stored and calls no one, and its ``ok`` says so."""
     grant = str(GoogleGrant.INTERNAL_NOTIFY)
     on_page = "in the Google section of the Credentials page"
     try:
-        access_token(grant)
+        access(grant)
     except AdapterError as failed:
         code = failed.code
         if failed.retryable:
@@ -533,6 +539,12 @@ def check_internal_notify_grant(access_token: Callable[[str], str]) -> CheckResu
         else:
             message = f"{grant} could not be refreshed ({code})"
         return CheckResult(INTERNAL_NOTIFY_GRANT, Status.FAIL, message)
+    if not refresh:
+        return CheckResult(
+            INTERNAL_NOTIFY_GRANT,
+            Status.OK,
+            f"{grant} is granted; the health panel doesn't refresh it (nextron doctor does)",
+        )
     return CheckResult(
         INTERNAL_NOTIFY_GRANT,
         Status.OK,
@@ -696,11 +708,6 @@ def run_checks[C](checks: DoctorChecks[C], context: C) -> list[CheckResult]:
     return results
 
 
-def count(results: Collection[CheckResult], status: Status) -> int:
-    """How many of ``results`` have ``status``."""
-    return sum(1 for result in results if result.status is status)
-
-
 def format_table(results: Collection[CheckResult]) -> str:
     """The results as a table: a header, one row each and the counts; see the module
     docstring."""
@@ -712,10 +719,8 @@ def format_table(results: Collection[CheckResult]) -> str:
         f"{result.status.value:<{status_width}}  {result.id:<{width}}  {result.message}".rstrip()
         for result in results
     ]
-    lines.append(
-        f"{count(results, Status.OK)} ok, {count(results, Status.WARN)} warn, "
-        f"{count(results, Status.FAIL)} fail"
-    )
+    ok, warn, fail = tally(results)
+    lines.append(f"{ok} ok, {warn} warn, {fail} fail")
     return "\n".join(lines)
 
 

@@ -21,20 +21,24 @@ underscores only, at most 31 characters.
 ``head_revision()`` is the revision this code migrates to, ``known_revisions()`` every revision id
 in its chain, and ``current_revision(engine)`` the database's own (``None`` for an empty one;
 several revisions, or tables but no revision, raise ``DatabaseStateError``). ``nextron doctor``
-reads them on a read-only engine and never migrates.
+reads them on a read-only engine and never migrates. ``current_revision_in_unit()`` reads the
+revision with the same rules (one implementation) through the current unit of work's session,
+so the health panel's readiness list reads it inside its GET's read-only unit of work.
 
 The ``pre_migrate`` backup before an upgrade arrives in Story 1.16.
 """
 
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, Engine
+from sqlalchemy import Engine, text
 
 from nextron.db.engine import fk_off_connection
+from nextron.db.uow import current
 
 SCRIPT_LOCATION = Path(__file__).resolve().parent / "alembic"  # tests may point it elsewhere
 VERSION_TABLE: Final = "alembic_version"
@@ -80,11 +84,16 @@ def known_revisions(script_location: Path | None = None) -> frozenset[str]:
     return frozenset(revision.revision for revision in script.walk_revisions())
 
 
-def _stored_revision(connection: Connection) -> str | None:
-    """The database's one revision, or ``None`` for an empty database; refuses anything else."""
+# Runs one SELECT and returns its rows: a connection's exec_driver_sql, or a unit's session.
+type Rows = Callable[[str], Iterable[Sequence[Any]]]
+
+
+def _stored_revision(rows: Rows) -> str | None:
+    """The database's one revision, or ``None`` for an empty database; refuses anything else.
+    ``rows(sql)`` runs each ``SELECT``."""
     tables = {
         name
-        for (name,) in connection.exec_driver_sql(
+        for (name,) in rows(
             "SELECT name FROM sqlite_master "
             "WHERE type IN ('table', 'view') AND substr(name, 1, 7) != 'sqlite_'"
         )
@@ -92,8 +101,7 @@ def _stored_revision(connection: Connection) -> str | None:
     revisions: list[str] = []
     if VERSION_TABLE in tables:
         revisions = sorted(
-            str(version)
-            for (version,) in connection.exec_driver_sql(f"SELECT version_num FROM {VERSION_TABLE}")
+            str(version) for (version,) in rows(f"SELECT version_num FROM {VERSION_TABLE}")
         )
     if len(revisions) > 1:
         raise DatabaseStateError(
@@ -112,7 +120,18 @@ def _stored_revision(connection: Connection) -> str | None:
 def current_revision(engine: Engine) -> str | None:
     """The database's revision, ``None`` for an empty database."""
     with engine.connect() as connection:
-        return _stored_revision(connection)
+        return _stored_revision(connection.exec_driver_sql)
+
+
+def _session_rows(sql: str) -> Iterable[Sequence[Any]]:
+    return current().session.execute(text(sql))
+
+
+def current_revision_in_unit() -> str | None:
+    """The database's revision, read through the current unit of work's session (a read-only
+    one included), with ``current_revision``'s rules: ``None`` for an empty database, and
+    ``DatabaseStateError`` for several revisions, or tables but no revision."""
+    return _stored_revision(_session_rows)
 
 
 def ensure_current(
@@ -127,7 +146,7 @@ def ensure_current(
     script, head = _script(config)
     known = {revision.revision for revision in script.walk_revisions()}
     with fk_off_connection(engine) as connection, connection.begin():
-        before = _stored_revision(connection)
+        before = _stored_revision(connection.exec_driver_sql)
         if before is not None and before not in known:
             raise DatabaseAheadError(f"database revision {before} is newer than this code")
         if before == head:
@@ -140,7 +159,7 @@ def ensure_current(
             raise ForeignKeyCheckError(
                 f"the upgrade left {len(violations)} foreign key violations in {tables}"
             )
-        after = _stored_revision(connection)
+        after = _stored_revision(connection.exec_driver_sql)
         if after != head:
             raise RuntimeError(f"the upgrade stopped at {after}, not {head}")
     return before, head

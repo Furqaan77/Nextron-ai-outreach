@@ -397,6 +397,7 @@ def test_the_page_extends_the_layout_and_the_nav_shows_settings(
     reply, page = settings_page(dashboard, session[0])
 
     assert "<nav" in reply.text and 'href="/settings">Settings</a>' in reply.text
+    assert 'href="/health/panel">Health</a>' in reply.text
     assert page.tags.count("form") == 1 and "h1" in page.tags
     assert "<title>Nextron: Settings</title>" in reply.text
 

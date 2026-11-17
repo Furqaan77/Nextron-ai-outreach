@@ -7,6 +7,11 @@ and each part that started is stopped after a later start, a stop or the server 
 real database at head, driven through the ASGI lifespan by hand: startup starts the named
 threads, beats once (the ``runner_heartbeat`` row and ``<data dir>\\heartbeat``), shutdown
 stops them, and building the app starts none.
+
+The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
+``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the eleven
+doctor rows in order (``port_free`` ok without a probe, the grant ok without a refresh) and the
+dead job, and writes nothing; a wiring that ran doctor's own forms would be caught.
 """
 
 import asyncio
@@ -15,6 +20,7 @@ import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx2
@@ -23,22 +29,34 @@ from fastapi import FastAPI
 
 import nextron.adapters.telegram as telegram_adapter
 from nextron import main
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
 from nextron.db.metering import UsageMeter
-from nextron.db.uow import UnitOfWorkFactory, current, use_case
+from nextron.db.migrations import head_revision
+from nextron.db.uow import UnitOfWorkFactory, current, in_transaction, use_case
 from nextron.domain.alert import Channel
 from nextron.domain.budget import ApiCall
+from nextron.domain.google_oauth import (
+    CLIENT_SECRET_NAME,
+    ClientConfig,
+    GrantMeta,
+    encode_client_config,
+    encode_grant_meta,
+)
 from nextron.domain.job import Lane
 from nextron.domain.settings_schema import Key
 from nextron.jobs.runner import Runner
 from nextron.main import AdapterContext
 from nextron.ports.alert import AlertMessage
+from tests.asgi import request
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
+from tests.fakes.google_oauth import CLIENT_ID, FakeGoogleOAuth
+from tests.fakes.probes import PortProbe, fake_probes
 from tests.fakes.secrets import InMemorySecrets
 from tests.live_guard import allow_live_constructor
 
@@ -319,6 +337,269 @@ def test_building_the_app_records_nothing(units: UnitOfWorkFactory) -> None:
 
     assert raw_query(units, "SELECT COUNT(*) FROM api_usage") == [(0,)]
     assert raw_query(units, "SELECT COUNT(*) FROM ai_usage") == [(0,)]
+
+
+# The health panel wiring ------------------------------------------------------------------------
+
+REQUIRED_SECRETS = (
+    "anthropic/api_key",
+    "hunter/api_key",
+    "companies_house/api_key",
+    "telegram/bot_token",
+    "unsub/bearer",
+)
+DOCTOR_IDS = [
+    "python_version",
+    "sqlite_version",
+    "tzdata",
+    "prod_env_not_persistent",
+    "data_dir_outside_onedrive",
+    "backup_dir_separate",
+    "port_free",
+    "required_credentials",
+    "internal_notify_grant",
+    "required_settings",
+    "database_revision",
+]
+REFRESH_TOKEN = "1//stored-refresh-token"
+
+
+class Rows(HTMLParser):
+    """Every table row's cells, and every other non-blank text, of a page."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self.texts: list[str] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+        self.feed(html)
+        self.close()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._row = []
+        elif tag == "td":
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "td" and self._cell is not None and self._row is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+        elif data.strip():
+            self.texts.append(" ".join(data.split()))
+
+
+def database_dump(units: UnitOfWorkFactory) -> list[str]:
+    assert units.engine.url.database
+    connection = sqlite3.connect(units.engine.url.database, isolation_level=None)
+    try:
+        return list(connection.iterdump())
+    finally:
+        connection.close()
+
+
+def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> None:
+    probed: list[tuple[Any, ...]] = []
+
+    def probe(*args: Any) -> Any:
+        probed.append(args)  # run_checks would turn a raise into a failed row, so record
+        raise AssertionError("building the app runs no readiness check")
+
+    secrets = InMemorySecrets("test")
+    probes = fake_probes(
+        sqlite_version=probe,
+        python_version=probe,
+        load_zone=probe,
+        port_is_free=probe,
+        persistent_variable=probe,
+        file_age=probe,
+    )
+
+    main.build_app(
+        load_bootstrap(), units=units, secrets=secrets, clock=FrozenClock(T), probes=probes
+    )
+
+    assert probed == []
+    assert secrets.calls == []  # no credential or grant was read
+
+
+def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
+    """A ``send_alert`` job that died on its first run; its id."""
+    queue = JobQueue(clock, main.build_job_types(alerts=InMemoryAlert))  # never called
+
+    @use_case
+    def enqueue() -> str:
+        with current().transaction():
+            return queue.enqueue(
+                "send_alert", scope=JOB, discriminator="0", payload={"v": 1, "alert_id": JOB}
+            ).job_id
+
+    with units.open():
+        job_id = enqueue()
+    with units.open():
+        claim = queue.claim(Lane.REALTIME)
+    assert claim is not None and claim.job.id == job_id
+    with units.open():
+        queue.fail(claim, ValueError("broken"))
+    return job_id
+
+
+@pytest.mark.parametrize("wiring", ["real", "doctor-form"])
+def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
+    wiring: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_bootstrap()
+    config.data_dir.mkdir(parents=True)
+    units, _ = main.open_database(config)  # the engine's own database file, at head
+    try:
+        if wiring == "doctor-form":  # a broken wiring: doctor's own forms in the engine
+            real_context = main.DoctorContext
+
+            def doctor_context(*args: Any, **kwargs: Any) -> Any:
+                return real_context(*args, **{**kwargs, "in_engine": False})
+
+            monkeypatch.setattr(main, "DoctorContext", doctor_context)
+        clock, secrets = FrozenClock(T), InMemorySecrets("test")
+        oauth, port = FakeGoogleOAuth(), PortProbe()
+        for name in REQUIRED_SECRETS:
+            secrets.write(name, "x" * 40)
+        client = encode_client_config(ClientConfig(CLIENT_ID, "Cs4Vq8Lp2Xz6Nw1Rt5Hy"))
+        secrets.write(CLIENT_SECRET_NAME, client)
+        secrets.write("google/internal_notify", REFRESH_TOKEN)
+        secrets.write("meta/google/internal_notify", encode_grant_meta(GrantMeta(None, T)))
+        app = main.build_app(
+            config,
+            units=units,
+            secrets=secrets,
+            clock=clock,
+            google_oauth=oauth,
+            probes=fake_probes(port=port),
+        )
+        job_id = dead_send_alert(units, clock)
+        code = main.build_entry(config, secrets=secrets, clock=clock).issue_code()
+        host = f"127.0.0.1:{config.port}".encode()
+        entered = request(app, "/enter", query=b"t=" + code.encode(), headers=[(b"host", host)])
+        cookie = entered.header(b"set-cookie")
+        assert entered.status == 303 and cookie is not None
+        before = database_dump(units)
+        read_in_transaction: list[bool] = []
+        real_read = secrets.read
+
+        def recording_read(name: str) -> str | None:
+            read_in_transaction.append(in_transaction())
+            return real_read(name)
+
+        secrets.read = recording_read  # type: ignore[method-assign]
+
+        reply = request(
+            app, "/health/panel", headers=[(b"host", host), (b"cookie", cookie.split(b";")[0])]
+        )
+
+        assert reply.status == 200
+        assert reply.header(b"cache-control") == b"no-store"
+        page = Rows(reply.text)
+        readiness = [row for row in page.rows if len(row) == 3]
+        assert [row[1] for row in readiness] == DOCTOR_IDS
+        statuses = {row[1]: (row[0], row[2]) for row in readiness}
+        assert f"Job dead: send_alert {job_id}, attempts: 1" in page.texts
+        assert raw_query(units, "SELECT COUNT(*) FROM api_usage") == [(0,)]
+        if wiring == "real":
+            assert database_dump(units) == before  # the GET wrote nothing
+            assert statuses["port_free"] == (
+                "ok",
+                f"127.0.0.1:{config.port} is held by this engine, which serves this page",
+            )
+            assert statuses["internal_notify_grant"] == (
+                "ok",
+                "internal_notify is granted; the health panel doesn't refresh it "
+                "(nextron doctor does)",
+            )
+            assert oauth.calls == [] and port.calls == []  # no refresh and no port probe
+            # every Credential Manager read ran before the read transaction (and its lock)
+            assert read_in_transaction and not any(read_in_transaction)
+        else:  # the test sees the broken wiring
+            assert oauth.calls == [("refresh", REFRESH_TOKEN)]
+            assert port.calls == [("127.0.0.1", config.port)]
+        assert statuses["required_credentials"][0] == "ok"
+        assert statuses["required_settings"][0] == "fail"  # nothing is set yet
+        assert statuses["database_revision"] == (
+            "ok",
+            f"the database is at head ({head_revision()})",
+        )
+    finally:
+        units.engine.dispose()
+
+
+class BrokenEnviron(dict[str, str]):
+    """An environment whose every read raises, so a check that reads it crashes."""
+
+    def get(self, key: str, default: object = None) -> Any:
+        raise RuntimeError("the environment could not be read")
+
+
+@pytest.mark.parametrize(
+    ("grant", "status", "says"),
+    [
+        ("missing", "fail", "internal_notify is not granted"),
+        ("reconsent", "fail", "internal_notify needs re-consent"),
+    ],
+)
+def test_the_built_panel_shows_a_grant_problem_and_a_crashed_check_without_calling_google(
+    grant: str, status: str, says: str
+) -> None:
+    config = load_bootstrap()
+    config.data_dir.mkdir(parents=True)
+    units, _ = main.open_database(config)
+    try:
+        clock, secrets, oauth = FrozenClock(T), InMemorySecrets("test"), FakeGoogleOAuth()
+        secrets.write(
+            CLIENT_SECRET_NAME, encode_client_config(ClientConfig(CLIENT_ID, "Cs4Vq8Lp2Xz6"))
+        )
+        if grant == "reconsent":
+            secrets.write("google/internal_notify", REFRESH_TOKEN)
+            secrets.write(
+                "meta/google/internal_notify", encode_grant_meta(GrantMeta(None, T, T))
+            )
+        app = main.build_app(
+            config,
+            units=units,
+            secrets=secrets,
+            clock=clock,
+            google_oauth=oauth,
+            probes=fake_probes(environ=BrokenEnviron()),
+        )
+        code = main.build_entry(config, secrets=secrets, clock=clock).issue_code()
+        host = f"127.0.0.1:{config.port}".encode()
+        entered = request(app, "/enter", query=b"t=" + code.encode(), headers=[(b"host", host)])
+        cookie = entered.header(b"set-cookie")
+        assert cookie is not None
+
+        reply = request(
+            app, "/health/panel", headers=[(b"host", host), (b"cookie", cookie.split(b";")[0])]
+        )
+
+        assert reply.status == 200
+        readiness = [row for row in Rows(reply.text).rows if len(row) == 3]
+        assert [row[1] for row in readiness] == DOCTOR_IDS  # every row, the crashed one too
+        statuses = {row[1]: (row[0], row[2]) for row in readiness}
+        assert statuses["internal_notify_grant"][0] == status
+        assert says in statuses["internal_notify_grant"][1]
+        assert statuses["data_dir_outside_onedrive"] == (
+            "fail",
+            "the check crashed (RuntimeError)",
+        )
+        assert oauth.calls == []
+        assert raw_query(units, "SELECT COUNT(*) FROM api_usage") == [(0,)]
+    finally:
+        units.engine.dispose()
 
 
 def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_stops_them(

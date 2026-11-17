@@ -62,6 +62,10 @@ one per kind and subject; the subject names the month, so each comes once a mont
 - a quota ``reached``: ``quota_reached``, ``<quota name>:<month>``, "<label> quota reached:
   <stops> stopped (<used> of <limit> <unit> used in <month>)".
 
+**budget_issues(assessment)** is the health panel's share of the same list: each threshold as
+a ``HealthIssue(kind, subject, text)`` (``nextron.domain.health``), without the AI warning
+when the AI budget is reached. A limit of 0 (off) is never an issue.
+
 **Formatting.** ``dollars(micros)`` is ``$20`` for whole dollars, else dollars and cents with
 the cents truncated (``$16.05``). ``quantity(units, scale)`` is ``units ÷ scale`` with
 thousands separators; a half shows as ``.5``. ``display_scale(provider)`` is the scale the
@@ -78,6 +82,7 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.domain.errors import DomainError
+from nextron.domain.health import HealthIssue
 
 NAME_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")  # provider, operation, sku
 CODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")  # error codes and AI routes
@@ -538,6 +543,19 @@ def thresholds(assessment: Assessment) -> tuple[Threshold, ...]:
             )
         )
     return tuple(found)
+
+
+def budget_issues(assessment: Assessment) -> tuple[HealthIssue, ...]:
+    """The health panel's budget issues: each of ``thresholds(assessment)`` as a
+    ``HealthIssue(kind, subject, text)``, except that the AI warning is dropped when the AI
+    budget is reached (that issue says more)."""
+    found = thresholds(assessment)
+    reached = any(threshold.kind == AI_BUDGET_REACHED for threshold in found)
+    return tuple(
+        HealthIssue(threshold.kind, threshold.subject, threshold.text)
+        for threshold in found
+        if not (reached and threshold.kind == AI_BUDGET_WARNING)
+    )
 
 
 # Formatting -----------------------------------------------------------------------------------

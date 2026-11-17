@@ -121,6 +121,10 @@ over a revoke. When both are taken, the store lock comes first.
   stored token is still the one that failed), logs ``google_grant_needs_reconsent`` and raises
   ``google_needs_reconsent``; other port errors propagate as they are. A new access token is
   cached (only while its refresh token is still stored) and never written to the keyring.
+- ``check_stored_grant(grant) -> None``: raises exactly as ``access_token``'s checks do before
+  any refresh (the same helper): client not imported, not granted, needs re-consent, or a
+  Credential Manager ``AdapterError``. It never calls Google, so it refreshes, records and
+  marks nothing; the health panel's readiness list uses it (``nextron doctor`` refreshes).
 - ``grant_statuses()`` and ``grant_status(grant)`` give ``GrantStatus``: ``GrantState`` (``not
   granted``, ``granted``, ``needs re-consent``, or ``unknown`` when the keyring can't be read),
   the account and times from the meta, ``waiting_until`` while a flow waits, and the last
@@ -910,14 +914,11 @@ class GoogleAccess:
 
     # Access tokens ------------------------------------------------------------------------
 
-    def access_token(self, grant: str) -> str:
-        """A valid access token for ``grant``; see the module docstring."""
-        spec = grant_spec(grant)
-        now = self._clock.now()
-        with self._state_lock:
-            cached = self._tokens.get(spec.grant)
-        if cached is not None and cached.expires_at - TOKEN_MARGIN > now:
-            return cached.token
+    def _stored_grant(self, spec: GrantSpec) -> tuple[ClientConfig, str]:
+        """The stored client and refresh token of ``spec``'s grant, read without calling
+        Google; raises (each an ``AdapterError`` that isn't retryable) when the client isn't
+        imported, the grant isn't stored, or its meta says it needs re-consent, and passes on a
+        Credential Manager failure."""
         client = self._client()
         if client is None:
             raise AdapterError(
@@ -929,6 +930,24 @@ class GoogleAccess:
         meta = decode_grant_meta(self._secrets.read(spec.meta_name))
         if meta is not None and meta.needs_reconsent_at is not None:
             raise _needs_reconsent(spec)
+        return client, token
+
+    def check_stored_grant(self, grant: str) -> None:
+        """Raise as ``access_token`` would before any refresh (client not imported, not
+        granted, needs re-consent, or a Credential Manager failure); never calls Google, so
+        nothing is refreshed, recorded or marked. Returns ``None`` when the grant is stored and
+        usable as far as Credential Manager can tell."""
+        self._stored_grant(grant_spec(grant))
+
+    def access_token(self, grant: str) -> str:
+        """A valid access token for ``grant``; see the module docstring."""
+        spec = grant_spec(grant)
+        now = self._clock.now()
+        with self._state_lock:
+            cached = self._tokens.get(spec.grant)
+        if cached is not None and cached.expires_at - TOKEN_MARGIN > now:
+            return cached.token
+        client, token = self._stored_grant(spec)
         try:
             tokens = self._oauth.refresh(client, token)
         except AdapterError as failed:
