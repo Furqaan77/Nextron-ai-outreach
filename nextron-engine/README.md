@@ -1837,6 +1837,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0024_3_8_unsub_tokens` | `unsub_tokens`: one row per issued unsubscribe token, holding only its hash (three checks, the unique indexes `uq_unsub_tokens_token_hash` and `uq_unsub_tokens_om_id`, `ix_unsub_tokens_kid_issued_at`, and three triggers refusing a delete, any update and a reused id, hash or message) (see [Unsubscribe tokens](#unsubscribe-tokens)) | `compliance` |
 | `0025_2_9_signals_evidence` | `evidence` (shape checks and two triggers, `trg_evidence_no_delete` and `trg_evidence_immutable`), `signals`, `signal_evidence` (unique on `signal_id` and `evidence_id`) and `extraction_runs`, each with foreign keys and no cascade; adds `leads.hq_tz` and `leads.hq_evidence_id` in place (`add_column`) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
 | `0026_4_4_playbook_snapshots` | `playbook_snapshots` (unique `sha256`, version and hash checks), `ai_route_tuples` (foreign keys to `prompt_snapshots` and `playbook_snapshots`, two partial unique indexes, one row per tuple) and `playbook_checks` (trigger, problem and outcome checks); rebuilds `ai_route_activations` from 0014's exact table with a nullable `playbook_sha256` (a foreign key to `playbook_snapshots`, no cascade, and a check) (see [The Sales Playbook snapshot and the candidate tuples (Story 4.4)](#the-sales-playbook-snapshot-and-the-candidate-tuples-story-44)) | `playbook` |
+| `0027_2_6_contact_methods` | `page_contact_methods` (a foreign key to `crawled_pages` with no cascade, `ix_page_contact_methods_page_id`, unique on `page_id`, `method`, `signature` and `source`, method and source checks); adds `leads.contact_methods` in place (`add_column`) (see [Rendering and contact methods](#rendering-and-contact-methods)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -3414,9 +3415,12 @@ AD-18, NFR-24; Story 2.9). The rules are in `nextron/domain/extraction.py` and
 `nextron/app/research/extraction.py`.
 
 **The `extract_lead` job** (bulk lane by default, or interactive; priority 45; 15 minutes;
-retry limit 3; group Enrichment on the health panel). A crawl that stored at least one page
-queues it in its own transaction, keyed `extract_lead:<lead>:<n>` where `<n>` is the Lead's
-number of crawl runs (one job per run), one site at a time (`domain:<site>`). It:
+retry limit 3; group Enrichment on the health panel). Each crawl that stored at least one page
+queues it once: in the crawl's own transaction when no page needs rendering, else once
+`render_pages` has written the run's renders, so the Signals are read from the rendered text
+(see [Rendering and contact methods](#rendering-and-contact-methods)). It is keyed
+`extract_lead:<lead>:<n>` where `<n>` is the Lead's number of crawl runs (one job per run), one
+site at a time (`domain:<site>`). It:
 
 1. waits an hour when the month's AI budget is spent (deferred, never failed);
 2. skips an unknown or merged Lead (`extraction_skipped` in the log);
@@ -3491,8 +3495,81 @@ counts for 90 days; Attributes don't age.
 inside the function, so `doctor`, `open` and `seed sync` still never load the SDK). It builds no
 HTTP client until the first call, and the Claude API key is read from Credential Manager then.
 
-**Not yet:** "contact form only" (an Absence Signal, `extracted_by=rule`) needs Story 2.6's
-widget detection; the job postings `extract_signals` returns are read by Story 2.11.
+**Not yet:** "contact form only" (an Absence Signal, `extracted_by=rule`) isn't stored; it is
+to be built on Story 2.6's contact methods (below). The job postings `extract_signals` returns
+are read by Story 2.11.
+
+## Rendering and contact methods
+
+Some websites build their content with JavaScript, so the crawl stores almost no text for them,
+and chat or booking widgets that scripts add are invisible in the raw HTML. A missing chat
+widget must not become "contact form only" (Story 2.9) when a visitor would see one (FR-10,
+AD-9, AD-10, AD-18, NFR-34; Story 2.6).
+
+**One-time setup: install Chromium.** Playwright (pinned at 1.65.2) is installed with the engine,
+but its browser is a separate download. Run this once, from `nextron-engine`:
+
+```
+uv run playwright install chromium
+```
+
+Until then every render fails as `render_unavailable` and each page keeps its crawled text;
+nothing alerts on it (the run's `errors` count shows it).
+
+**Detection** (`nextron/domain/widgets.py`). Every stored page is checked for five contact
+methods: a **form**, **chat**, **booking**, a **phone** number and an **after-hours** line. It
+reads the page's raw HTML before any stripping, its script, iframe and link URLs, and its
+visible text:
+
+- chat widgets: Intercom, Drift, LiveChat, Tawk.to, Zendesk Chat, HubSpot chat, Tidio,
+  Smith.ai, Ngage, ApexChat, Intaker, Podium, Olark, Crisp, Freshchat, Zoho SalesIQ, LiveAgent
+  and JivoChat, by their script or iframe host, their loader code in the HTML, or their name in
+  the text;
+- booking: Calendly, Cal.com, Acuity, Clio Grow, LawTap, Microsoft Bookings, HubSpot meetings,
+  Setmore, SimplyBook.me, YouCanBook.me, Zoho Bookings and Google Calendar appointment pages, by
+  an embed or a link to them, or their name in the text;
+- forms: HubSpot, Typeform, Jotform, Wufoo, Formstack, Cognito, Microsoft and Google forms by
+  host, Gravity Forms, Contact Form 7 and WPForms by their markup, and any `<form>` with a text
+  area or a phone field;
+- phone: a `tel:` link, or a US or UK number in the text;
+- generic wording: "live chat", "chat with us", "book online", "24/7", "out of hours",
+  "emergency line" and the like.
+
+Each page's findings are stored in `page_contact_methods` (one row per method, signature and
+source, with what matched: a host, never a full URL, or the words as the page writes them; at
+most 200 characters, classed as personal data because it may be a phone number).
+
+**Rendering** (`nextron/adapters/renderer`, `PlaywrightRenderer`). When any page a crawl stored
+has under 500 characters of text, the crawl queues `render_pages` (bulk lane, priority 40, key
+`render_pages:<lead>:<date>`, one site at a time). That job, and only it, renders up to 3 of the
+run's near-empty pages (the homepage first, then by page kind and URL), each in a fresh headless
+Chromium:
+
+- the browser itself reaches nothing: it can't resolve a name, its proxy is a dead local port,
+  WebRTC can't send UDP, service workers are blocked and every WebSocket is closed;
+- every request it makes is intercepted and fetched by the crawler, through the same egress
+  filter and denylist, DNS pinning and redirect checks, metered as `web` / `render`. Only GET
+  requests for the page itself (on the Lead's site, at most 6 navigations), scripts,
+  stylesheets and JSON or text data are fetched; images, fonts, media, frames, popups and
+  everything else are refused. A render makes at most 100 requests and stops fetching once
+  20 MiB have been read (the body that crosses the mark is never handed to the page);
+- no cookie, referrer or origin is sent, no download is kept, and nothing is stored between
+  renders;
+- the page is read 20 s after navigation at the latest, with the crawler's hidden-content rules;
+  a rendered page over 5 MiB, or one left on Chromium's error page, is a failed render, and a
+  browser session that hangs (a script that never yields) is given up after a minute.
+
+The rendered text replaces the stored text when it isn't empty; what the render shows is added
+to the page's contact methods. A failed render keeps the crawled text, adds one to the run's
+`errors`, and is never retried. When the month's AI budget is spent, the job waits an hour.
+
+**The Lead's contact methods.** Once a crawl's pages are all checked (straight away when none
+needs rendering, else after `render_pages`), the Lead's `contact_methods` is set: every page
+checked, and for each of the five methods the pages it was found on
+(`queries.research.contact_methods`, for the Lead page and Story 2.9). The run's `extract_lead`
+job (see [Signals and Evidence](#signals-and-evidence)) is queued at the same moment. A crawl
+that stored no page leaves the previous value; a `render_pages` job for a run that is no longer
+the Lead's latest, or a Lead merged meanwhile, writes and queues nothing.
 
 ## Engine health
 

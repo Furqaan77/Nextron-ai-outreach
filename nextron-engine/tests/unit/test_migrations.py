@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0026_4_4_playbook_snapshots"
+HEAD = "0027_2_6_contact_methods"
 
 
 @pytest.fixture

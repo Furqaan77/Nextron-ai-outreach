@@ -116,6 +116,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "pipeline_stage": PiiClass.NONE,
         "hq_tz": PiiClass.NONE,  # Story 2.9: a zone and an Evidence id, firm data
         "hq_evidence_id": PiiClass.NONE,
+        # Story 2.6: the methods a firm's website offers and the URLs of its public pages
+        "contact_methods": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.
@@ -318,6 +320,17 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "tag": PiiClass.NONE,
         "first_seen_at": PiiClass.NONE,
         "last_seen_at": PiiClass.NONE,
+    },
+    # Story 2.6. What matched may be a phone number or a page's own words, so it is redacted;
+    # it is not purged with the page text. The rest are IDs, codes and times.
+    "page_contact_methods": {
+        "id": PiiClass.NONE,
+        "page_id": PiiClass.NONE,
+        "method": PiiClass.NONE,
+        "signature": PiiClass.NONE,
+        "source": PiiClass.NONE,
+        "matched": PiiClass.REDACT,
+        "detected_at": PiiClass.NONE,
     },
     # Story 3.3. The Suppression List keeps only a key's hash (kept after an erasure, so an
     # erased person stays suppressed) and, for a firm's domain, the domain itself; the void

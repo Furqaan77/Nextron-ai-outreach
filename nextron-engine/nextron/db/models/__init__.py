@@ -23,7 +23,12 @@ from nextron.db.models import (
 )
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
 from nextron.db.models.compliance import SuppressionEntryRecord, UnsubTokenRecord
-from nextron.db.models.crawl import AtsLinkRecord, CrawledPageRecord, CrawlRunRecord
+from nextron.db.models.crawl import (
+    AtsLinkRecord,
+    CrawledPageRecord,
+    CrawlRunRecord,
+    PageContactMethodRecord,
+)
 from nextron.db.models.drafting import FooterSnapshotRecord
 from nextron.db.models.events import EventRecord
 from nextron.db.models.jobqueue import JobRecord
@@ -87,6 +92,7 @@ __all__ = [
     "MarketRecord",
     "NotificationRecord",
     "OfferRecord",
+    "PageContactMethodRecord",
     "PlaybookCheckRecord",
     "PlaybookSnapshotRecord",
     "PromptSnapshotRecord",

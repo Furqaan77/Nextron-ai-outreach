@@ -48,12 +48,17 @@ boundary: the lines that fit are kept whole; when the first line alone is longer
 the cap. ``text_hash(text)`` is the SHA-256 hex digest of the text's UTF-8 bytes.
 
 **Jobs (AD-10).** ``ENRICH_LEAD_JOB`` (``enrich_lead``), ``CANONICALIZE_LEAD_JOB``
-(``canonicalize_lead``) and ``PURGE_PAGE_TEXT_JOB`` (``purge_page_text``) are the crawl's job
-types. A Lead's crawl jobs are keyed ``<type>:<lead ULID>:<UTC date>``: ``lead_job_keys(site,
-now)`` gives the discriminator (``now``'s UTC date) and the concurrency key
-(``domain:<site>``), so one site is crawled by one job at a time. Their payloads are
-``{"v": 1, "lead_id": ...}`` and ``{"v": 1, "lead_id": ..., "run_id": ...}``
-(``PAYLOAD_VERSION``, ``LEAD_ID_FIELD``, ``RUN_ID_FIELD``).
+(``canonicalize_lead``), ``PURGE_PAGE_TEXT_JOB`` (``purge_page_text``) and ``RENDER_PAGES_JOB``
+(``render_pages``) are the crawl's job types. A Lead's crawl jobs are keyed
+``<type>:<lead ULID>:<UTC date>``: ``lead_job_keys(site, now)`` gives the discriminator
+(``now``'s UTC date) and the concurrency key (``domain:<site>``), so one site is crawled by one
+job at a time. Their payloads are ``{"v": 1, "lead_id": ...}`` and ``{"v": 1, "lead_id": ...,
+"run_id": ...}`` (``PAYLOAD_VERSION``, ``LEAD_ID_FIELD``, ``RUN_ID_FIELD``).
+
+**Rendering (Story 2.6).** A stored page whose visible text is shorter than
+``RENDER_THRESHOLD`` (500 characters) ``needs_render``: it is probably built by JavaScript. The
+``render_pages`` job (``RENDER_PAGES_JOB``) renders at most ``MAX_RENDERS`` (3) such pages of a
+run, each within ``RENDER_TIMEOUT_S`` (20 s) from navigation.
 
 **Retries.** ``is_retryable(error_code)`` is true only for ``fetch_timeout`` and the
 ``http_5xx`` codes (``http_500`` to ``http_599``): a flaky site, worth another attempt. Any
@@ -87,6 +92,10 @@ HTML_MEDIA_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})  # p
 ENRICH_LEAD_JOB: Final = "enrich_lead"
 CANONICALIZE_LEAD_JOB: Final = "canonicalize_lead"
 PURGE_PAGE_TEXT_JOB: Final = "purge_page_text"
+RENDER_PAGES_JOB: Final = "render_pages"
+RENDER_THRESHOLD: Final = 500  # visible characters under which a page is rendered
+MAX_RENDERS: Final = 3  # pages rendered per run
+RENDER_TIMEOUT_S: Final = 20.0  # from navigation
 PAYLOAD_VERSION: Final = 1
 LEAD_ID_FIELD: Final = "lead_id"
 RUN_ID_FIELD: Final = "run_id"
@@ -262,6 +271,13 @@ def text_hash(text: str) -> str:
     if not isinstance(text, str):
         raise TypeError(f"text_hash takes a str, not {type(text).__name__}")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def needs_render(text: str) -> bool:
+    """Whether a page whose visible text is ``text`` is rendered (under ``RENDER_THRESHOLD``)."""
+    if not isinstance(text, str):
+        raise TypeError(f"needs_render takes a str, not {type(text).__name__}")
+    return len(text) < RENDER_THRESHOLD
 
 
 # Jobs -----------------------------------------------------------------------------------------

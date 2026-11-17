@@ -1,7 +1,8 @@
 """Story 2.9's extraction on a temporary database at head (FR-10, FR-11, FR-57, AD-7, AD-8, AD-11,
 AD-18): ``SignalExtractions.extract_lead`` through ``ScriptedLlm`` on pages a real
-``WebsiteCrawls`` stored from a ``ScriptedCrawler``, with the shipped Segments, Markets and
-prompts (``active_tuple``), a ``FrozenClock`` and the real job types.
+``WebsiteCrawls`` stored from a ``ScriptedCrawler`` (and rendered by a ``ScriptedRenderer`` as
+they were crawled, Story 2.6), with the shipped Segments, Markets and prompts
+(``active_tuple``), a ``FrozenClock`` and the real job types.
 
 Every row of the spec's matrix the service owns is here: the first extraction (the blocks sent,
 the Evidence, the Signal, the run, the headquarters zone), unknown types and quotes, size clues,
@@ -55,6 +56,7 @@ from nextron.ports.llm import (
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import ScriptedCrawler, html_page, robots_txt
 from tests.fakes.llm import ScriptedLlm
+from tests.fakes.renderer import ScriptedRenderer, rendered_page
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 T0 = datetime(2026, 11, 18, 9, 0, tzinfo=UTC)
@@ -135,6 +137,7 @@ class World:
     clock: FrozenClock
     meter: InMemoryUsageMeter
     crawler: ScriptedCrawler
+    renderer: ScriptedRenderer
     queue: JobQueue
     crawls: WebsiteCrawls
     discovery: Discovery
@@ -186,6 +189,10 @@ class World:
             self.crawler.pages[NEWS] = html_page(NEWS, news)
         else:
             self.crawler.pages[NEWS] = html_page(NEWS, status=404)
+        # every page here is near-empty (Story 2.6); a render shows what the crawl stored
+        for url, html in ((HOME, HOME_HTML), (TEAM, team), (ABOUT, about), (NEWS, news)):
+            if html is not None:
+                self.renderer.pages[url] = rendered_page(url, html)
 
     def crawl(self, lead_id: str) -> str:
         """Crawl the scripted site; the crawl run's id."""
@@ -194,6 +201,11 @@ class World:
         run = self.read(lambda: research_queries.latest_crawl_run(lead_id))
         assert run is not None
         return run.id
+
+    def render(self, lead_id: str, run_id: str) -> None:
+        """Run the crawl run's ``render_pages`` job (Story 2.6), which queues its extraction."""
+        with self.units.open():
+            assert self.crawls.render_pages(lead_id, run_id) is True
 
     def page_ids(self, lead_id: str) -> dict[str, str]:
         pages = self.read(lambda: research_queries.crawled_pages(lead_id))
@@ -287,6 +299,7 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
             Playbook(clock).sync_prompts(files, defaults, PLAYBOOK)
     meter = InMemoryUsageMeter(clock)
     crawler = ScriptedCrawler()
+    renderer = ScriptedRenderer()
     job_types = main.build_job_types(
         alerts=no_jobs,
         backups=no_jobs,
@@ -306,8 +319,9 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
         clock,
         meter,
         crawler,
+        renderer,
         queue,
-        WebsiteCrawls(clock, meter, crawler, queue),
+        WebsiteCrawls(clock, meter, crawler, renderer, queue),
         Discovery(clock, Pipeline(clock), queue),
         research,
         recorder,
@@ -1026,7 +1040,11 @@ def test_a_crawl_that_stored_pages_enqueues_extract_lead_once_per_run(world: Wor
     lead = world.lead()
     world.site()
     first = world.crawl(lead)
+    # the pages are near-empty, so the extraction waits for their render (Story 2.6)
+    assert world.jobs("extract_lead") == []
+    world.render(lead, first)
     second = recrawl(world, lead)
+    world.render(lead, second)
 
     assert world.jobs("extract_lead") == [
         (
@@ -1051,6 +1069,7 @@ def test_a_crawl_that_stored_nothing_enqueues_no_extraction(world: World) -> Non
 
 def test_the_extract_lead_job_runs_the_extraction(world: World) -> None:
     lead, run_id, pages = crawled(world)
+    world.render(lead, run_id)
     extractions = SignalExtractions(
         world.clock, world.meter, ScriptedLlm(first_answer(pages)), world.research
     )

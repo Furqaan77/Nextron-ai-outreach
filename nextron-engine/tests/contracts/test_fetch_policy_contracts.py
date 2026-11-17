@@ -2,11 +2,14 @@
 web obeys the denylist on its first URL and on every redirect.
 
 - **Every fetching adapter is listed.** ``FETCHING_ADAPTERS`` holds a driver for every built
-  adapter package among ``FETCHING_PACKAGES`` (``crawler`` today; ``renderer``, Story 2.6, and
-  ``ats``, Story 2.11, once they are built). A package is built once it has an
-  ``__init__.py``; the check fails until its driver is added here. A driver builds the adapter
-  on a ``Recorder`` (an ``httpx2.MockTransport`` and a resolver that record what they are asked)
-  and returns each of its fetching calls, by name.
+  adapter package among ``FETCHING_PACKAGES`` (``crawler`` and ``renderer`` today; ``ats``,
+  Story 2.11, once it is built). A package is built once it has an ``__init__.py``; the check
+  fails until its driver is added here. A driver builds the adapter on a ``Recorder`` (an
+  ``httpx2.MockTransport`` and a resolver that record what they are asked) and returns each of
+  its fetching calls, by name. The renderer's driver is a ``PlaywrightRenderer`` on the
+  recorder's ``HttpCrawler`` and the fake browser of ``tests/fakes/browser.py``: the page's
+  main document goes through the route handler, so its first URL and every redirect are
+  judged as the crawler's are.
 - **A denylisted first URL** (LinkedIn, Instagram, a Google Maps host or path, a job site) is
   refused with ``AdapterError`` code ``fetch_refused`` naming ``denylisted``, with no host name
   looked up and no request sent.
@@ -27,8 +30,10 @@ from typing import Final
 import httpx2
 
 from nextron.adapters.crawler import HttpCrawler
+from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.ports.errors import AdapterError
 from tests.contracts.support import PACKAGE
+from tests.fakes.browser import FakeBrowsers
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 FETCHING_PACKAGES: Final = ("crawler", "renderer", "ats")
@@ -90,22 +95,48 @@ type Fetch = Callable[[str], object]
 type Driver = Callable[[Recorder], Sequence[tuple[str, Fetch]]]
 
 
-def crawler_driver(recorder: Recorder) -> Sequence[tuple[str, Fetch]]:
-    crawler = HttpCrawler(
+def recorded_crawler(recorder: Recorder) -> HttpCrawler:
+    return HttpCrawler(
         meter=InMemoryUsageMeter(),
         http=recorder.client(),
         resolve=recorder.resolve,
         own_addresses=frozenset(),
         sleep=lambda seconds: None,
     )
+
+
+def crawler_driver(recorder: Recorder) -> Sequence[tuple[str, Fetch]]:
+    crawler = recorded_crawler(recorder)
     return (
         ("fetch_robots", lambda url: crawler.fetch_robots(url, min_interval_s=1.0)),
         ("fetch_page", lambda url: crawler.fetch_page(url, site=None, min_interval_s=1.0)),
+        (
+            "fetch_resource",
+            lambda url: crawler.fetch_resource(
+                url,
+                site=None,
+                accepts=lambda media_type: True,
+                accept_header="*/*",
+                operation="render",
+                deadline=None,
+                min_interval_s=None,
+            ),
+        ),
     )
 
 
+def renderer_driver(recorder: Recorder) -> Sequence[tuple[str, Fetch]]:
+    renderer = PlaywrightRenderer(
+        meter=InMemoryUsageMeter(), fetcher=recorded_crawler(recorder), browser=FakeBrowsers()
+    )
+    return (("render", lambda url: renderer.render(url, site=None, min_interval_s=1.0)),)
+
+
 # Every built fetching adapter package, with its driver.
-FETCHING_ADAPTERS: Final[dict[str, Driver]] = {"crawler": crawler_driver}
+FETCHING_ADAPTERS: Final[dict[str, Driver]] = {
+    "crawler": crawler_driver,
+    "renderer": renderer_driver,
+}
 
 
 # The checks -------------------------------------------------------------------------------------
@@ -188,7 +219,7 @@ def private_problems(driver: Driver) -> list[str]:
 
 
 def test_every_built_fetching_adapter_has_a_driver() -> None:
-    assert "crawler" in built_fetching_packages()
+    assert {"crawler", "renderer"} <= built_fetching_packages()
     assert set(FETCHING_ADAPTERS) == built_fetching_packages()
 
 

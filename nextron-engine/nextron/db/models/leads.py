@@ -1,7 +1,7 @@
 """The ``leads`` table (FR-9, AD-3, AD-4; migration ``0011_2_2_leads``): one row per
 organization.
 
-Two owners write it, column by column (``nextron.db.owners``):
+Three owners write it, column by column (``nextron.db.owners``):
 
 - the identity group, owner ``discovery`` (``nextron.db.repos.discovery.leads``): ``id``,
   ``name``, the three keys ``web_domain``, ``ch_number`` and ``place_id`` (each nullable and
@@ -12,21 +12,24 @@ Two owners write it, column by column (``nextron.db.owners``):
 - the pipeline group, owner ``pipeline`` (``nextron.db.repos.pipeline.stages``):
   ``pipeline_stage``, server default ``new``, one of the stages of
   ``nextron.domain.pipeline_stage`` (``ck_leads_pipeline_stage``);
-- the profile group, owner ``research`` (``nextron.db.repos.research.profile``; Story 2.9,
-  migration ``0025_2_9_signals_evidence``): ``hq_tz``, the IANA zone of the Lead's
-  headquarters, and ``hq_evidence_id``, the ``evidence`` row it comes from, both nullable and
-  kept NULL together by the code (no CHECK, because the columns were added in place). The
-  Evidence id has no foreign key: one would make a ``leads``/``evidence`` cycle.
+- the profile group, owner ``research`` (``nextron.db.repos.research.profile``): ``hq_tz``,
+  the IANA zone of the Lead's headquarters, and ``hq_evidence_id``, the ``evidence`` row it
+  comes from (Story 2.9, migration ``0025_2_9_signals_evidence``), both nullable and kept NULL
+  together by the code (no CHECK, because the columns were added in place; the Evidence id has
+  no foreign key: one would make a ``leads``/``evidence`` cycle); and ``contact_methods``
+  (Story 2.6, migration ``0027_2_6_contact_methods``), nullable, the canonical JSON of
+  ``nextron.domain.widgets.ContactMethods``: how the Lead's website lets a visitor get in
+  touch, and every page checked.
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
-cascades. There is no ``updated_at``, because two owners write the row. Every column is
+cascades. There is no ``updated_at``, because several owners write the row. Every column is
 organization data, PII class ``none``: erasing a Contact never touches the firm's Lead.
 """
 
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, String, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -79,3 +82,4 @@ class LeadRecord(Base):
     )
     hq_tz: Mapped[str | None] = mapped_column(String(HQ_TZ_LENGTH))
     hq_evidence_id: Mapped[str | None] = mapped_column(Ulid)
+    contact_methods: Mapped[str | None] = mapped_column(Text)

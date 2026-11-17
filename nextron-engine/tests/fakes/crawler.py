@@ -92,7 +92,9 @@ def html_page(
     )
 
 
-def _refused(url: str, site: str | None) -> str | None:
+def first_url_refusal(url: str, site: str | None) -> str | None:
+    """Why the real adapter would refuse ``url`` as a first URL pinned to ``site``, or
+    ``None``."""
     reason = url_refusal(url)
     if reason is not None or site is None:
         return reason
@@ -135,7 +137,7 @@ class ScriptedCrawler:
         min_interval_s: float,
     ) -> object:
         request_interval(min_interval_s)
-        reason = _refused(url, site)
+        reason = first_url_refusal(url, site)
         if reason is not None:
             raise AdapterError(False, FETCH_REFUSED, f"the fetch was refused ({reason})")
         self.calls.append(CrawlCall(kind, url, site, min_interval_s))

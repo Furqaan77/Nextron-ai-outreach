@@ -326,6 +326,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
             (
                 LastRun("enrich_lead", None),
                 LastRun("canonicalize_lead", None),
+                LastRun("render_pages", None),
                 LastRun("extract_lead", None),
             ),
         ),

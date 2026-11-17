@@ -56,6 +56,19 @@ robots.txt is decoded as ``utf-8-sig`` (a byte-order mark breaks protego) with r
 parsed by protego; ``allows(url)`` is protego's ``can_fetch(url, ROBOTS_TOKEN)`` (``False``
 when protego raises) and ``crawl_delay_s`` its ``crawl_delay(ROBOTS_TOKEN)``.
 
+**``fetch_resource(url, *, site, accepts, accept_header, operation, deadline, min_interval_s)
+-> Resource(final_url, status, media_type, charset, headers, body)``** (Story 2.6, for the
+renderer) runs the same hops as a page fetch, every check, the pinned address, the redirects and
+``MAX_PAGE_BYTES`` included, with one ``ApiCall`` per request metered as ``("web",
+operation)``. ``min_interval_s=None`` means unpaced (no slot is taken); ``deadline`` (on
+``monotonic``, or ``None``) caps the fetch's own 30 s deadline and is checked before the first
+hop too; a 2xx media type must satisfy ``accepts`` (a predicate), else
+``fetch_unsupported_type``; ``accept_header`` is sent as ``Accept``. The answer's body is
+returned undecoded (a non-2xx answer's is empty, as for a page), and ``headers`` holds only
+``access-control-allow-origin`` and ``access-control-allow-credentials`` (``CORS_HEADERS``) of
+the final answer. ``check_target(url, site)`` is step 1 of a hop on its own: the ``FetchTarget``
+when the egress rules and the ``site`` pin accept ``url``, else ``fetch_refused``.
+
 **Errors.** A timeout (``httpx2.TimeoutException`` or the deadline) is retryable
 ``fetch_timeout``; ``httpx2.ConnectError`` (refused, unreachable, a TLS failure) is
 ``fetch_connect_failed``; anything else the request raises is ``fetch_failed``. Every error is
@@ -69,9 +82,10 @@ import socket
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.cookiejar import Cookie, CookieJar, DefaultCookiePolicy
+from types import MappingProxyType
 from typing import Final
 from urllib.request import Request
 
@@ -125,6 +139,8 @@ ROBOTS_ACCEPT: Final = "text/plain,*/*;q=0.1"
 DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 PACE_PRUNE_SIZE: Final = 1024  # past this many sites, slots long gone are forgotten
 PACE_MEMORY_S: Final = 60.0
+# The answer headers fetch_resource returns (a renderer passes them on to the browser)
+CORS_HEADERS: Final = ("access-control-allow-origin", "access-control-allow-credentials")
 
 type Resolver = Callable[[str, int], Sequence[str]]
 
@@ -201,6 +217,19 @@ class _Answer:
     media_type: str
     charset: str | None
     body: bytes = field(repr=False)
+    headers: tuple[tuple[str, str], ...] = ()  # the CORS_HEADERS the answer carried
+
+
+@dataclass(frozen=True, slots=True)
+class Resource:
+    """One answer of ``fetch_resource``; its body never shows in the ``repr``."""
+
+    final_url: str
+    status: int
+    media_type: str
+    charset: str | None
+    headers: Mapping[str, str]
+    body: bytes = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +271,18 @@ def _allows(parser: Protego, url: str) -> bool:
 
 ROBOTS_KIND: Final = _Kind(ROBOTS, MAX_ROBOTS_BYTES, _is_text, ROBOTS_ACCEPT)
 PAGE_KIND: Final = _Kind(PAGE, MAX_PAGE_BYTES, _is_page, PAGE_ACCEPT)
+
+
+def check_target(url: str, site: str | None) -> FetchTarget:
+    """Step 1 of a hop: ``url`` once the egress rules and the ``site`` pin accept it, else
+    ``AdapterError`` ``fetch_refused`` naming the reason."""
+    reason = url_refusal(url)
+    if reason is not None:
+        raise AdapterError(False, FETCH_REFUSED, f"the fetch was refused ({reason})")
+    target = check_url(url)
+    if site is not None and not _in_site(target.host, site):
+        raise AdapterError(False, FETCH_REFUSED, f"the fetch was refused ({OFF_SITE})")
+    return target
 
 
 class HttpCrawler:
@@ -289,7 +330,8 @@ class HttpCrawler:
     # The port -----------------------------------------------------------------------------------
 
     def fetch_robots(self, url: str, *, min_interval_s: float) -> Robots:
-        answer = self._fetch(url, site=None, min_interval_s=min_interval_s, kind=ROBOTS_KIND)
+        interval = request_interval(min_interval_s)
+        answer = self._fetch(url, site=None, interval=interval, kind=ROBOTS_KIND)
         if not 200 <= answer.status < 300:
             return Robots(final_url=answer.final_url, status=answer.status)
         text = answer.body.decode("utf-8-sig", errors="replace")
@@ -306,7 +348,8 @@ class HttpCrawler:
         )
 
     def fetch_page(self, url: str, *, site: str | None, min_interval_s: float) -> FetchedPage:
-        answer = self._fetch(url, site=site, min_interval_s=min_interval_s, kind=PAGE_KIND)
+        interval = request_interval(min_interval_s)
+        answer = self._fetch(url, site=site, interval=interval, kind=PAGE_KIND)
         if not 200 <= answer.status < 300:
             return FetchedPage(
                 url=url, final_url=answer.final_url, status=answer.status, media_type=""
@@ -334,6 +377,32 @@ class HttpCrawler:
             html=document,
         )
 
+    # For the renderer -----------------------------------------------------------------------------
+
+    def fetch_resource(
+        self,
+        url: str,
+        *,
+        site: str | None,
+        accepts: Callable[[str], bool],
+        accept_header: str,
+        operation: str,
+        deadline: float | None,
+        min_interval_s: float | None,
+    ) -> Resource:
+        """One resource inside the egress filter; see the module docstring."""
+        interval = None if min_interval_s is None else request_interval(min_interval_s)
+        kind = _Kind(operation, MAX_PAGE_BYTES, accepts, accept_header)
+        answer = self._fetch(url, site=site, interval=interval, kind=kind, limit=deadline)
+        return Resource(
+            final_url=answer.final_url,
+            status=answer.status,
+            media_type=answer.media_type,
+            charset=answer.charset,
+            headers=MappingProxyType(dict(answer.headers)),
+            body=answer.body,
+        )
+
     # The hops -----------------------------------------------------------------------------------
 
     def _fetch(
@@ -341,10 +410,12 @@ class HttpCrawler:
         url: str,
         *,
         site: str | None,
-        min_interval_s: float,
+        interval: float | None,
         kind: _Kind,
+        limit: float | None = None,
     ) -> _Answer:
-        interval = request_interval(min_interval_s)
+        """The hops of one fetch: paced at ``interval`` (``None``: unpaced), within the 30 s
+        deadline and ``limit`` (a ``monotonic`` time, or ``None``)."""
         target = self._target(url, site)  # before any live part is built
         http = self._client()
         resolve = self._resolver()
@@ -352,11 +423,14 @@ class HttpCrawler:
         redirects = 0
         deadline: float | None = None  # set when the first request goes; covers every hop
         while True:
-            self._check_deadline(deadline)
+            self._check_deadline(limit if deadline is None else deadline)
             address = self._address(target.host, target.port, resolve, own)
-            self._pace(target.host, interval)
+            if interval is not None:
+                self._pace(target.host, interval)
             if deadline is None:
                 deadline = self._monotonic() + REQUEST_DEADLINE_S
+                if limit is not None:
+                    deadline = min(deadline, limit)
             self._check_deadline(deadline)
             with Metered(self._meter, PROVIDER, kind.operation):
                 outcome = self._request(http, target, address, kind, deadline)
@@ -383,13 +457,7 @@ class HttpCrawler:
     @staticmethod
     def _target(url: str, site: str | None) -> FetchTarget:
         """Step 1 of a hop: ``url`` once the egress rules and the ``site`` pin accept it."""
-        reason = url_refusal(url)
-        if reason is not None:
-            raise AdapterError(False, FETCH_REFUSED, f"the fetch was refused ({reason})")
-        target = check_url(url)
-        if site is not None and not _in_site(target.host, site):
-            raise AdapterError(False, FETCH_REFUSED, f"the fetch was refused ({OFF_SITE})")
-        return target
+        return check_target(url, site)
 
     def _address(
         self, host: str, port: int, resolve: Resolver, own: frozenset[IpAddress]
@@ -488,8 +556,13 @@ class HttpCrawler:
         location = response.headers.get("location")
         if status in REDIRECT_STATUSES and location:
             return _Redirect(location)
+        headers = tuple(
+            (name, value)
+            for name in CORS_HEADERS
+            if (value := response.headers.get(name)) is not None
+        )
         if not 200 <= status < 300:
-            return _Answer(logical_url, status, "", None, b"")
+            return _Answer(logical_url, status, "", None, b"", headers)
         media_type, charset = content_type(response.headers.get("content-type"))
         if not kind.accepts(media_type):
             return _Failure(False, FETCH_UNSUPPORTED_TYPE, "the answer's media type isn't taken")
@@ -505,4 +578,4 @@ class HttpCrawler:
                 return _Failure(False, FETCH_TOO_LARGE, f"the answer is over {kind.limit} bytes")
             if self._monotonic() > deadline:
                 return _Failure(True, FETCH_TIMEOUT, "the request timed out")
-        return _Answer(logical_url, status, media_type, charset, bytes(body))
+        return _Answer(logical_url, status, media_type, charset, bytes(body), headers)

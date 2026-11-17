@@ -20,6 +20,12 @@ current unit of work, read-only ones included.
 - ``crawled_pages(lead_id)``: the Lead's stored pages, by URL, each a ``StoredPage`` (whose
   ``text`` is ``None`` once purged).
 - ``ats_links(lead_id)``: the ATS board links found on the Lead's website, by URL.
+- ``contact_methods(lead_id)`` (Story 2.6): the Lead's profile value, a
+  ``nextron.domain.widgets.ContactMethods`` (every page checked, and each method's pages), or
+  ``None`` before any run set it (or for an unknown Lead).
+- ``page_contact_methods(lead_id)``: the contact methods detected on each of the Lead's pages,
+  as ``StoredContactMethod`` rows (``matched`` hidden from the ``repr``), by page URL, then
+  method, signature and source.
 
 Story 2.9 adds the Signals and their Evidence (a text that isn't a ULID reads as an unknown
 Lead: empty, or ``None``):
@@ -50,12 +56,18 @@ from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.contacts import StoredContact
-from nextron.db.repos.research.crawl import StoredAtsLink, StoredCrawlRun, StoredPage
+from nextron.db.repos.research.crawl import (
+    StoredAtsLink,
+    StoredContactMethod,
+    StoredCrawlRun,
+    StoredPage,
+)
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.ids import is_ulid
 from nextron.domain.segments import SignalClass
 from nextron.domain.signals import age_days, is_live
+from nextron.domain.widgets import ContactMethods, decode
 
 __all__ = [
     "EvidenceSupport",
@@ -63,6 +75,7 @@ __all__ = [
     "SignalStatus",
     "StoredAtsLink",
     "StoredContact",
+    "StoredContactMethod",
     "StoredCrawlRun",
     "StoredEvidence",
     "StoredExtractionRun",
@@ -71,6 +84,7 @@ __all__ = [
     "StoredSignal",
     "ats_links",
     "contact",
+    "contact_methods",
     "contacts",
     "crawl_run",
     "crawled_pages",
@@ -81,6 +95,7 @@ __all__ = [
     "latest_crawl_run",
     "lead_provenance",
     "lead_signals",
+    "page_contact_methods",
     "provenance",
     "signals",
 ]
@@ -164,6 +179,19 @@ def crawled_pages(lead_id: str) -> tuple[StoredPage, ...]:
 def ats_links(lead_id: str) -> tuple[StoredAtsLink, ...]:
     """The Lead's ATS board links, by URL."""
     return crawl_repo.ats_links(lead_id) if is_ulid(lead_id) else ()
+
+
+def contact_methods(lead_id: str) -> ContactMethods | None:
+    """The Lead's ``contact_methods`` profile value, or ``None``."""
+    if not is_ulid(lead_id):
+        return None
+    value = profile_repo.contact_methods(lead_id)
+    return None if value is None else decode(value)
+
+
+def page_contact_methods(lead_id: str) -> tuple[StoredContactMethod, ...]:
+    """The contact methods detected on the Lead's pages, by page URL."""
+    return crawl_repo.contact_methods_of(lead_id) if is_ulid(lead_id) else ()
 
 
 def signals(lead_id: str) -> tuple[StoredSignal, ...]:

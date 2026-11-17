@@ -16,7 +16,10 @@ a real external system to raise ``LiveAdapterInTests``:
   (the Claude API), so a ``ClaudeGateway`` without an injected ``http`` raises on its first
   ``run``, and ``nextron.adapters.crawler``'s ``default_http_client``, ``default_resolver`` and
   ``default_own_addresses`` (the web, DNS and this PC's addresses), so an ``HttpCrawler``
-  without an injected ``http``, ``resolve`` or ``own_addresses`` raises on its first fetch;
+  without an injected ``http``, ``resolve`` or ``own_addresses`` raises on its first fetch, and
+  ``nextron.adapters.renderer.default_browser`` (Playwright's Chromium), so a
+  ``PlaywrightRenderer`` without an injected ``browser`` launches nothing: its render fails as
+  ``render_unavailable``;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
 
@@ -92,6 +95,7 @@ LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.crawler", "default_http_client"),
     ("nextron.adapters.crawler", "default_resolver"),
     ("nextron.adapters.crawler", "default_own_addresses"),
+    ("nextron.adapters.renderer", "default_browser"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -153,6 +157,7 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
         "checks an address's syntax with email-validator, deliverability off; no DNS or network"
     ),
     "crawler": Guarded(("default_http_client", "default_resolver", "default_own_addresses")),
+    "renderer": Guarded(("default_browser",)),
 }
 
 

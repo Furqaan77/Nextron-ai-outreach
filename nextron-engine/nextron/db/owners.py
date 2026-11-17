@@ -120,7 +120,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "created_at",
         ),
         "pipeline": ("pipeline_stage",),
-        "research": ("hq_tz", "hq_evidence_id"),  # the profile group (Story 2.9)
+        # the profile group (Stories 2.9 and 2.6)
+        "research": ("hq_tz", "hq_evidence_id", "contact_methods"),
     },
     "prompt_snapshots": {
         "playbook": ("id", "route", "prompt_version", "sha256", "text", "created_at"),
@@ -306,6 +307,17 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "tag",
             "first_seen_at",
             "last_seen_at",
+        ),
+    },
+    "page_contact_methods": {
+        "research": (
+            "id",
+            "page_id",
+            "method",
+            "signature",
+            "source",
+            "matched",
+            "detected_at",
         ),
     },
     "suppression_entries": {

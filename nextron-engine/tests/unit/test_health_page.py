@@ -282,6 +282,7 @@ NEVER_RUN = [
         ["Job type", "Last success"],
         ["enrich_lead", "never"],
         ["canonicalize_lead", "never"],
+        ["render_pages", "never"],
         ["extract_lead", "never"],
     ],
     [

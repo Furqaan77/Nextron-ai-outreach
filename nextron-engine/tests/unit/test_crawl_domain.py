@@ -298,3 +298,18 @@ def test_lead_job_keys_are_the_utc_date_and_the_domain() -> None:
     assert lead_job_keys("a.com", datetime(2026, 1, 2, tzinfo=UTC))[0] == "2026-01-02"
     with pytest.raises(TypeError):
         lead_job_keys("a.com", datetime(2026, 1, 2))  # naive
+
+
+# Rendering (Story 2.6) --------------------------------------------------------------------------
+
+
+def test_a_page_under_500_characters_needs_a_render() -> None:
+    from nextron.domain import crawl  # noqa: PLC0415
+
+    assert (crawl.RENDER_THRESHOLD, crawl.MAX_RENDERS, crawl.RENDER_TIMEOUT_S) == (500, 3, 20.0)
+    assert crawl.RENDER_PAGES_JOB == "render_pages"
+    assert crawl.needs_render("")
+    assert crawl.needs_render("x" * 499)
+    assert not crawl.needs_render("x" * 500)
+    with pytest.raises(TypeError):
+        crawl.needs_render(None)  # type: ignore[arg-type]

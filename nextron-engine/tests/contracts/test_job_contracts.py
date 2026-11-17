@@ -6,7 +6,8 @@
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
-  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, and ``extract_lead``, Story 2.9,
+  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6, and
+  ``extract_lead``, Story 2.9,
   with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
@@ -325,14 +326,19 @@ class RecordingContactMarkets:
 
 class RecordingCrawls:
     """Stands in for the ``research`` service's ``WebsiteCrawls``; ``allowed`` is what
-    ``enrich_lead`` returns (``False``: the budget refused)."""
+    ``enrich_lead`` and ``render_pages`` return (``False``: the budget refused)."""
 
     def __init__(self, allowed: bool = True) -> None:
         self.allowed = allowed
         self.calls: list[tuple[str, bool]] = []
+        self.renders: list[tuple[str, str]] = []
 
     def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool:
         self.calls.append((lead_id, may_retry))
+        return self.allowed
+
+    def render_pages(self, lead_id: str, run_id: str) -> bool:
+        self.renders.append((lead_id, run_id))
         return self.allowed
 
 
@@ -434,6 +440,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "resolve_contact_markets",
         "enrich_lead",
         "canonicalize_lead",
+        "render_pages",
         "purge_page_text",
         "extract_lead",
     )
@@ -534,7 +541,13 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             found.retry_limit,
             found.group,
         )
-        for name in ("enrich_lead", "canonicalize_lead", "purge_page_text", "extract_lead")
+        for name in (
+            "enrich_lead",
+            "canonicalize_lead",
+            "render_pages",
+            "purge_page_text",
+            "extract_lead",
+        )
         for found in [job_types.get(name)]
     }
 
@@ -543,6 +556,14 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
         "enrich_lead": (Lane.BULK, both, 40, timedelta(minutes=20), 3, JobGroup.ENRICHMENT),
         "canonicalize_lead": (Lane.BULK, both, 45, timedelta(minutes=2), 2, JobGroup.ENRICHMENT),
         "extract_lead": (Lane.BULK, both, 45, timedelta(minutes=15), 3, JobGroup.ENRICHMENT),
+        "render_pages": (  # Story 2.6: bulk only, at the enrich_lead chain's priority
+            Lane.BULK,
+            frozenset({Lane.BULK}),
+            40,
+            timedelta(minutes=5),
+            2,
+            JobGroup.ENRICHMENT,
+        ),
         "purge_page_text": (
             Lane.BULK,
             frozenset({Lane.BULK}),
@@ -624,6 +645,9 @@ def test_an_extract_lead_job_without_its_ids_is_invalid(payload: dict[str, objec
         ("enrich_lead", {"v": 1, "lead_id": "not-a-ulid"}),
         ("canonicalize_lead", {"v": 1, "lead_id": LEAD}),
         ("canonicalize_lead", {"v": 1, "run_id": RUN}),
+        ("render_pages", {"v": 1, "lead_id": LEAD}),
+        ("render_pages", {"v": 1, "run_id": RUN}),
+        ("render_pages", {"v": 1, "lead_id": LEAD, "run_id": "not-a-ulid"}),
     ],
 )
 def test_a_crawl_job_without_its_ids_is_invalid(name: str, payload: dict[str, object]) -> None:
@@ -632,7 +656,19 @@ def test_a_crawl_job_without_its_ids_is_invalid(name: str, payload: dict[str, ob
 
     with pytest.raises(InvalidJob, match="must be a ULID"):
         job_types.get(name).handler(Job(RUN, name, Lane.BULK, payload, 1))
-    assert (crawls.calls, discovery.calls) == ([], [])
+    assert (crawls.calls, crawls.renders, discovery.calls) == ([], [], [])
+
+
+@pytest.mark.parametrize(("allowed", "result"), [(True, None), (False, DEFERRED)])
+def test_render_pages_calls_its_service_once_and_is_deferred_when_the_budget_refuses(
+    allowed: bool, result: object
+) -> None:
+    crawls = RecordingCrawls(allowed=allowed)
+    handler = registry(crawls=lambda: crawls).get("render_pages").handler
+    payload = {"v": 1, "lead_id": LEAD, "run_id": RUN}
+
+    assert handler(Job(RUN, "render_pages", Lane.BULK, payload, 1)) is result
+    assert (crawls.renders, crawls.calls) == ([(LEAD, RUN)], [])
 
 
 def test_build_triggers_registers_backup_restore_test_recovery_check_then_purge() -> None:

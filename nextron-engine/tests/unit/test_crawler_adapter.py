@@ -1096,3 +1096,176 @@ def test_pruning_the_pacing_table_keeps_recent_slots_and_drops_old_ones(
     assert "old-firm.com" not in slots
     assert set(slots) == {"recent-firm.com", SITE}
     assert world.ticks.slept == [1.0]  # the recent site still waited for its slot
+
+
+# fetch_resource (Story 2.6, for the renderer) -----------------------------------------------------
+
+BODY_LATIN1 = "var café = 1;".encode("latin-1")  # returned as it came, never decoded
+
+
+def resource(world: World, url: str = HOME, **options: object) -> adapter.Resource:
+    values: dict[str, object] = {
+        "site": None,
+        "accepts": lambda media_type: True,
+        "accept_header": "*/*",
+        "operation": "render",
+        "deadline": None,
+        "min_interval_s": None,
+    }
+    values.update(options)
+    return world.crawler.fetch_resource(url, **values)  # type: ignore[arg-type]
+
+
+def test_fetch_resource_returns_the_body_undecoded_with_only_the_cors_headers(
+    world: World,
+) -> None:
+    world.web.on(SITE, "/app.js", redirect("/v2/app.js"))
+    world.web.on(
+        SITE,
+        "/v2/app.js",
+        httpx2.Response(
+            200,
+            headers={
+                "content-type": "Application/JavaScript; charset=latin-1",
+                "access-control-allow-origin": "https://smith-law.co.uk",
+                "access-control-allow-credentials": "true",
+                "set-cookie": f"session={LEAK}",
+                "x-secret": LEAK,
+            },
+            content=BODY_LATIN1,
+        ),
+    )
+
+    found = resource(world, f"https://{SITE}/app.js", accept_header="application/javascript")
+
+    assert (found.final_url, found.status, found.media_type, found.charset) == (
+        f"https://{SITE}/v2/app.js",
+        200,
+        "application/javascript",
+        "latin-1",
+    )
+    assert found.body == BODY_LATIN1
+    assert dict(found.headers) == {
+        "access-control-allow-origin": "https://smith-law.co.uk",
+        "access-control-allow-credentials": "true",
+    }
+    assert "caf" not in repr(found)
+    assert [request.headers["accept"] for request in world.web.requests] == [
+        "application/javascript",
+        "application/javascript",
+    ]
+    assert [(call.provider, call.operation, call.ok) for call in world.meter.calls] == [
+        ("web", "render", True),
+        ("web", "render", True),
+    ]
+
+
+def test_fetch_resource_returns_a_non_2xx_answer_without_its_body(world: World) -> None:
+    world.web.on(
+        SITE,
+        "/gone",
+        httpx2.Response(404, headers={"access-control-allow-origin": "*"}, text=LEAK),
+    )
+
+    found = resource(world, f"https://{SITE}/gone", accepts=lambda media_type: False)
+
+    assert (found.status, found.media_type, found.body) == (404, "", b"")
+    assert dict(found.headers) == {"access-control-allow-origin": "*"}
+
+
+def test_a_2xx_media_type_must_satisfy_accepts(world: World) -> None:
+    world.web.on(SITE, "/x", page("<p>x</p>"))
+    seen: list[str] = []
+
+    def accepts(media_type: str) -> bool:
+        seen.append(media_type)
+        return media_type == "text/css"
+
+    with pytest.raises(AdapterError) as error:
+        resource(world, f"https://{SITE}/x", accepts=accepts)
+
+    assert error.value.code == "fetch_unsupported_type"
+    assert seen == ["text/html"]
+
+
+def test_fetch_resource_unpaced_takes_no_slot_and_paced_waits(world: World) -> None:
+    world.web.on(SITE, "/", page())
+    world.web.on(SITE, "/a.js", page(ctype="application/javascript"))
+
+    resource(world, HOME)
+    resource(world, f"https://{SITE}/a.js")
+    world.crawler.fetch_page(HOME, site=None, min_interval_s=1.0)  # no unpaced fetch took a slot
+    assert world.ticks.slept == []
+
+    resource(world, HOME, min_interval_s=1.0)
+    resource(world, HOME, min_interval_s=2.0)
+
+    assert world.ticks.slept == [1.0, 2.0]
+
+
+def test_fetch_resource_keeps_the_site_pin_on_every_hop(world: World) -> None:
+    world.web.on(SITE, "/", redirect("https://other-firm.com/"))
+
+    with pytest.raises(AdapterError) as error:
+        resource(world, HOME, site=SITE)
+
+    refused(error, "off_site")
+    assert len(world.web.requests) == 1
+
+
+def test_a_deadline_caps_the_fetchs_own_and_each_requests_timeout(world: World) -> None:
+    world.web.on(SITE, "/", page())
+
+    resource(world, HOME, deadline=world.ticks.now + 4.0)
+
+    [request] = world.web.requests
+    assert request.extensions["timeout"] == {
+        "connect": 4.0,
+        "read": 4.0,
+        "write": 4.0,
+        "pool": 4.0,
+    }
+
+
+def test_a_deadline_already_past_sends_nothing_and_looks_nothing_up(world: World) -> None:
+    with pytest.raises(AdapterError) as error:
+        resource(world, HOME, deadline=world.ticks.now)
+
+    assert (error.value.code, error.value.retryable) == ("fetch_timeout", True)
+    assert (world.web.requests, world.resolver.lookups, world.meter.calls) == ([], [], [])
+
+
+def test_a_deadline_passed_while_reading_is_a_timeout(world: World) -> None:
+    def slow(request: httpx2.Request) -> httpx2.Response:
+        world.ticks.now += 5.0
+        return page()
+
+    world.web.on(SITE, "/", slow)
+
+    with pytest.raises(AdapterError) as error:
+        resource(world, HOME, deadline=world.ticks.now + 3.0)
+
+    assert (error.value.code, error.value.retryable) == ("fetch_timeout", True)
+    assert [call.error_code for call in world.meter.calls] == ["fetch_timeout"]
+
+
+def test_a_later_deadline_never_extends_the_fetchs_own_30_seconds(world: World) -> None:
+    world.web.on(SITE, "/", page())
+
+    resource(world, HOME, deadline=world.ticks.now + 600.0)
+
+    [request] = world.web.requests
+    assert request.extensions["timeout"]["read"] == 30.0
+
+
+def test_fetch_resource_refuses_what_fetch_page_refuses(world: World) -> None:
+    world.resolver.addresses[SITE] = ("10.0.0.5",)
+
+    with pytest.raises(AdapterError) as private:
+        resource(world, HOME)
+    with pytest.raises(AdapterError) as denied:
+        resource(world, "https://www.linkedin.com/x.js")
+
+    refused(private, "private")
+    refused(denied, "denylisted")
+    assert world.web.requests == []
