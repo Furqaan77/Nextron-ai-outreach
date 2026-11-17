@@ -301,6 +301,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "void_reason",
         ),
     },
+    "footer_snapshots": {
+        "drafting": ("id", "market_id", "sha256", "text", "created_at"),
+    },
     "jobs": {
         "jobqueue": (
             "id",

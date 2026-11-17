@@ -28,6 +28,20 @@ that reads the clock once and opens one ``uow.transaction()``.
 Both log ``settings_changed`` with ``keys``, the changed key names comma-joined, when at least
 one key changed; never a value.
 
+**``FooterChanged``** (FR-23, AD-3, Story 4.11). Inside the same transaction, after the writes,
+``set`` and ``save`` publish one ``FooterChanged(market_id=<markets.id>)`` per stored Market, in
+code order, whose footer template uses the placeholder (``nextron.domain.render.PLACEHOLDER_OF``)
+of a footer setting (``FOOTER_SETTING_KEYS``) whose effective text changed: for ``save``, a key
+in its changed list, a delete counting only when the deleted text isn't the default text; for
+``set``, a canonical text that differs from the stored one, or from the default text when the
+key has no row (``set`` still upserts as before). The templates come from
+``markets_repo.footer_templates()``; a template that isn't a JSON list of lines, or that lacks
+one of ``nextron.domain.markets.REQUIRED_PLACEHOLDERS``, counts as using every placeholder, so
+a bad row is over-notified, never skipped. No Market, or no changed footer key, publishes
+nothing. A subscriber that raises rolls the whole save back. Story 4.12 registers
+``drafting.recompose_ready``; until then nothing subscribes. A seed sync that changes a Market's
+template publishes nothing (Story 3.1).
+
 ``Setup.sync_segments(segments)`` (FR-1, AD-12, Story 2.1; ``nextron seed sync``) upserts the
 Segments of ``seed/segments.yaml``, as ``nextron.domain.segments.SegmentDef``s, by key into
 the ``segments`` table. Before any transaction it refuses an item that isn't a ``SegmentDef``
@@ -383,12 +397,16 @@ from nextron.domain.google_oauth import (
 )
 from nextron.domain.machines import IllegalTransition, Transition
 from nextron.domain.markets import (
+    REQUIRED_PLACEHOLDERS,
     InvalidMarkets,
     MarketDef,
     market_form,
+    placeholders,
     validate_markets,
 )
+from nextron.domain.notifications import FooterChanged
 from nextron.domain.offers import OfferDef, offer_form, validate_offers
+from nextron.domain.render import FOOTER_SETTING_KEYS, PLACEHOLDER_OF
 from nextron.domain.segments import (
     InvalidSegments,
     SegmentDef,
@@ -616,6 +634,22 @@ def _log_changed(keys: list[str]) -> None:
         log.info(SETTINGS_CHANGED, extra={"keys": ",".join(keys)})
 
 
+def _publish_footer_changes(changed: Iterable[str]) -> None:
+    """In the running transaction, publish ``FooterChanged`` for each stored Market, by code,
+    whose footer template uses the placeholder of a changed footer key (Story 4.11). A template
+    that isn't a JSON list of lines, or that lacks a ``REQUIRED_PLACEHOLDERS`` placeholder,
+    counts as using every placeholder."""
+    used = {PLACEHOLDER_OF[key].value for key in changed if key in FOOTER_SETTING_KEYS}
+    if not used:
+        return
+    uow = current()
+    for market_id, template in markets_repo.footer_templates():
+        found = None if template is None else placeholders(template)
+        bad = found is None or any(need.value not in found for need in REQUIRED_PLACEHOLDERS)
+        if bad or not used.isdisjoint(found or ()):
+            uow.publish(FooterChanged(market_id=market_id))
+
+
 class Setup:
     """Operator settings, one typed value at a time or a whole Settings page at once, and the
     Segments, Markets, Sequences, Offers and Campaigns a seed sync loads."""
@@ -631,7 +665,12 @@ class Setup:
         text = settings_schema.encode(found, value)
         name = str(found.key)
         with current().transaction():
+            before = settings_repo.stored_text(name)
+            # an unset key compares with its default text (None for a required one)
+            effective = before if before is not None else settings_schema.default_text(found)
             settings_repo.upsert(name, text, now)
+            if text != effective:
+                _publish_footer_changes([name])
         _log_changed([name])
 
     @use_case
@@ -646,6 +685,7 @@ class Setup:
             writes: dict[str, str] = {}
             deletes: list[str] = []
             changed: list[str] = []  # in submission order
+            same_as_default: set[str] = set()  # deleted, but the stored text was the default
             for key, raw in texts.items():
                 found = chosen[key]
                 name = str(found.key)
@@ -659,6 +699,8 @@ class Setup:
                         if before is not None:
                             deletes.append(name)
                             changed.append(name)
+                            if before == settings_schema.default_text(found):
+                                same_as_default.add(name)
                     elif before is not None:
                         problems[name] = InvalidSettingValue(name, REQUIRED_RULE, CANNOT_CLEAR)
                     continue
@@ -678,6 +720,7 @@ class Setup:
                 settings_repo.delete(name)
             for name, canonical in writes.items():
                 settings_repo.upsert(name, canonical, now)
+            _publish_footer_changes([name for name in changed if name not in same_as_default])
             after = settings_repo.stored_texts()
         _log_changed(changed)
         return after

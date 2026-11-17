@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0022_3_3_suppression_entries"
+HEAD = "0023_4_11_footer_snapshots"
 
 
 @pytest.fixture

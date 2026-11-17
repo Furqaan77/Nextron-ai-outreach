@@ -518,6 +518,11 @@ def test_the_declared_keys_in_order() -> None:
         "quota_job_aggregator",
         "ai_budget_monthly",
         "ai_budget_alert_pct",
+        "sender_signature",
+        "legal_name",
+        "postal_address",
+        "optout_line",
+        "privacy_notice_url",
         "us_solicitation_label",
         "crawl_max_pages",
         "ats_hosts",
@@ -538,6 +543,11 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.QUOTA_JOB_AGGREGATOR),
         setting(Key.AI_BUDGET_MONTHLY),
         setting(Key.AI_BUDGET_ALERT_PCT),
+        setting(Key.SENDER_SIGNATURE),
+        setting(Key.LEGAL_NAME),
+        setting(Key.POSTAL_ADDRESS),
+        setting(Key.OPTOUT_LINE),
+        setting(Key.PRIVACY_NOTICE_URL),
         setting(Key.US_SOLICITATION_LABEL),
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
@@ -597,12 +607,122 @@ def test_the_us_solicitation_label_is_a_blank_default_string_in_the_footer_secti
     assert (found.label, found.unit) == ("US solicitation label", US_LABEL_UNIT)
     assert found.default == "" and not found.required and found.timezone_key is None
     assert [(rule.name, rule.message) for rule in found.rules] == [
-        ("max_length", "must have a length of at most 200")
+        ("max_length", "must have a length of at most 200"),
+        ("no_price", "must not name a price"),  # Story 4.11
     ]
     assert parse(found, "a" * 200) == "a" * 200
     with pytest.raises(InvalidSettingValue) as raised:
         parse(found, "a" * 201)
     assert raised.value.rule == "max_length"
+
+
+# Row: Setting (the footer, Story 4.11) -----------------------------------------------------------
+
+FOOTER_DECLARATIONS = [
+    ("sender_signature", "Sender signature", REQUIRED, ["max_length", "no_price"]),
+    ("legal_name", "Legal name", REQUIRED, ["max_length", "no_price"]),
+    ("postal_address", "Postal address", REQUIRED, ["max_length", "no_price"]),
+    (
+        "optout_line",
+        "Opt-out line",
+        "Not relevant? Reply 'no' and I won't contact you again.",
+        ["max_length", "no_price", "optout_reply"],
+    ),
+    ("privacy_notice_url", "Privacy notice URL", REQUIRED, ["max_length", "https_url"]),
+]
+
+
+@pytest.mark.parametrize(
+    ("key", "label", "default", "rules"), FOOTER_DECLARATIONS, ids=lambda x: str(x)[:20]
+)
+def test_each_footer_setting_is_a_string_in_the_footer_section(
+    key: str, label: str, default: object, rules: list[str]
+) -> None:
+    found = setting(key)
+
+    assert (found.type, found.section, found.label) == (
+        SettingType.STRING,
+        Section.FOOTER_AND_BOOKING,
+        label,
+    )
+    assert found.default == default and found.timezone_key is None
+    assert [rule.name for rule in found.rules] == rules
+    assert "footer" in found.unit
+    if found.required:
+        assert "is sent while it is blank" in found.unit
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Audit from $500",
+        "£2k",
+        "€ 300",
+        "300 USD",
+        "fee: gbp-400",
+        "Eur 5",
+    ],
+)
+def test_the_no_price_rule_refuses_a_currency(text: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.LEGAL_NAME), text)
+
+    assert (raised.value.rule, raised.value.reason) == ("no_price", "must not name a price")
+
+
+@pytest.mark.parametrize("text", ["Nextron AI Ltd", "Europa House", "Busd Road", "1 Eurostar Way"])
+def test_the_no_price_rule_passes_words_that_only_contain_a_currency(text: str) -> None:
+    assert parse(setting(Key.POSTAL_ADDRESS), text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "passes"),
+    [
+        ("Reply 'no' to stop.", True),
+        ("Not for you? Just REPLY.", True),
+        ("reply-stop", True),
+        ("Thanks", False),
+        ("Replying helps", False),
+        ("Unreply", False),
+    ],
+)
+def test_the_optout_reply_rule_needs_reply_as_a_word(text: str, passes: bool) -> None:
+    found = setting(Key.OPTOUT_LINE)
+
+    if passes:
+        assert parse(found, text) == text
+    else:
+        with pytest.raises(InvalidSettingValue) as raised:
+            parse(found, text)
+        assert raised.value.rule == "optout_reply"
+
+
+@pytest.mark.parametrize(
+    ("text", "passes"),
+    [
+        ("https://nextronai.com/privacy", True),
+        ("HTTPS://nextronai.com/privacy?x=1#y", True),
+        ("https://nextronai.com:8443/privacy", True),
+        ("http://nextronai.com/privacy", False),
+        ("ftp://nextronai.com", False),
+        ("https://user@nextronai.com", False),
+        ("https://user:pass@nextronai.com", False),
+        ("https://", False),
+        ("https://nextronai.com:port", False),
+        ("https://nextronai.com\\privacy", False),
+        ("nextronai.com/privacy", False),
+        ("javascript:alert(1)", False),
+    ],
+)
+def test_the_https_url_rule(text: str, passes: bool) -> None:
+    found = setting(Key.PRIVACY_NOTICE_URL)
+
+    if passes:
+        assert parse(found, text) == text
+    else:
+        with pytest.raises(InvalidSettingValue) as raised:
+            parse(found, text)
+        assert (raised.value.rule, raised.value.reason) == ("https_url", "must be an https link")
 
 
 # Row: Setting (sink_allowlist) ------------------------------------------------------------------
@@ -1126,10 +1246,10 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
-            "crawl_max_pages, quota_hunter_credits, quota_job_aggregator, "
-            "quota_places_enterprise, quota_places_pro, quota_prospeo_credits, sender_name, "
-            "sender_timezone, "
-            "sink_allowlist, us_solicitation_label"
+            "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
+            "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
+            "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
+            "sender_timezone, sink_allowlist, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

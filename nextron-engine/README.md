@@ -385,8 +385,8 @@ Campaign's legitimate-interests assessment (see
 
 1. **Blank fields.** A blank field with a default resets the setting to its default (its row is
    deleted). A blank required field that was never set stays unset and isn't an error, so you
-   can save other settings before you have every value (the footer postal address is still
-   pending). A required value that has been set can't be cleared.
+   can save other settings before you have every value (say, before the footer postal address
+   is settled). A required value that has been set can't be cleared.
 2. **An unset required setting fails closed.** `get` raises `SettingNotSet` instead of
    returning `None`, so nothing can run on a missing value by accident.
 3. **Durations have no years or months,** because those have no fixed length. A setting counted
@@ -417,7 +417,91 @@ booking; Story 3.1, NFR-2, OQ-8) is a string of at most 200 characters, blank by
 footer template ends with a `{us_solicitation_label}` line: blank, the line is dropped; set
 (say, to `Advertisement`), every US email's footer shows that text on its own line, with no code
 change. Whether US emails carry a label is decided with counsel before the first US send. It is
-declared once; Story 4.11's footer reads it with the other footer settings.
+declared once; Story 4.11's footer reads it with the other footer settings, and it may not name
+a price.
+
+**The footer settings** (Story 4.11, FR-23; CAN-SPAM, PECR, UK GDPR Art. 14) are the first
+section of the page, in the order the footer prints them. All are one-line strings:
+
+| Key | Label | Default | Rules |
+|---|---|---|---|
+| `sender_signature` | Sender signature | required | at most 200 characters, no price |
+| `legal_name` | Legal name | required | at most 200 characters, no price |
+| `postal_address` | Postal address | required | one line of at most 300 characters, no price |
+| `optout_line` | Opt-out line | `Not relevant? Reply 'no' and I won't contact you again.` | at most 200 characters, no price, holds the word "reply" |
+| `privacy_notice_url` | Privacy notice URL | required | at most 500 characters, an `https` link |
+| `us_solicitation_label` | US solicitation label | blank | at most 200 characters, no price |
+
+- **No price** (rule `no_price`): no currency sign (`$`, `£`, `€`) and no word `usd`, `gbp` or
+  `eur`: the same check as a Campaign's angle note (`nextron.domain.prices.names_price`).
+- **Holds "reply"** (rule `optout_reply`): opt-out handling is reply-based, so the opt-out line
+  must tell the reader to reply ("Reply" as a word, any case).
+- **An `https` link** (rule `https_url`): the Approved Company Facts' link rule
+  (`company_facts.is_link`: no user name, password, space or backslash) with the `https` scheme.
+- **Required.** Until the four required ones are set, `nextron doctor`'s `required_settings`
+  check (and the health panel's readiness list) fails naming them, after `sender_timezone` and
+  `alert_chat_id`. Once set, none can be cleared; a blank opt-out line means its default. No
+  email is sent while a footer value it needs is blank (the send gate comes with Story 6.9);
+  drafting goes on with the incomplete footer.
+- **No off switch** (NFR-7): no setting or dashboard control hides, shortens or reorders a footer
+  line; `tests/contracts/test_footer_contracts.py` fails otherwise.
+- **`FooterChanged`.** A save (or `Setup.set`) that changes a footer setting's effective text
+  publishes `FooterChanged(market_id)` in the same transaction, once per stored Market whose
+  footer template uses that value, in code order: `legal_name` reaches every Market,
+  `us_solicitation_label` only the US and `privacy_notice_url` only the UK. Resetting a value
+  whose stored text was already its default publishes nothing. A template that can't be read, or
+  that lacks one of the four required placeholders, counts as using every value. Story 4.12
+  subscribes `drafting.recompose_ready`; until then nothing listens. A seed sync that changes a
+  Market's template publishes nothing.
+
+### The footer
+
+`nextron/domain/render.py` (the spine's `domain.render`, Story 4.11) builds each email's footer
+from the Market's footer template and the footer settings, read with
+`queries.setup.footer_settings()` (a setting that is unset or no longer parses reads `""`):
+
+- `footer(settings, market, provenance_source)` fills the template. A line left blank after
+  substitution is dropped (the seeded templates hold one placeholder per line, so there a blank
+  value drops its line), and `footer_complete` still names the missing key. A value is never
+  scanned for placeholders again. A UK footer ends with the privacy line,
+  "Your details came from <source>. Privacy notice: <url>", or without the second sentence while
+  the URL is blank. The source is the Contact's Provenance source: `website` (your firm's
+  website), `registry` (Companies House), `signal_inbox` (a public post), `csv` (a business
+  list), `referral` (a colleague's referral) or `finder` (a business email directory). Any other
+  source raises `ValueError` rather than state a false one.
+- `footer_complete(settings, market)` lists what an email to that Market still needs: each blank
+  of the signature, legal name, postal address and opt-out line, and the privacy notice URL for
+  a UK Market. `incomplete_notice(check)` is the one text the Draft view, the approval card and
+  the send gate show: "Sending blocked: footer incomplete (Legal name, Postal address)". An
+  incomplete footer blocks sending, never drafting.
+- **Snapshots.** The `footer_snapshots` table (owner `drafting`) keeps each distinct footer
+  text per Market, keyed by its SHA-256 (`footer_sha256`). The repository's `ensure(market_id,
+  text, at)` reuses the row of identical content and `by_id(id)` reads one back; there is no
+  update or delete. The text holds the sender's name and Nextron's address, so erasure redacts
+  it.
+
+Golden footers, with the settings `Furqaan, Nextron AI`, `Nextron AI Ltd`, `1 Example Street,
+London EC1A 1AA`, the default opt-out line and `https://nextronai.com/privacy`:
+
+A UK email to a Contact found on the firm's website:
+
+```
+Furqaan, Nextron AI
+Nextron AI Ltd
+1 Example Street, London EC1A 1AA
+Not relevant? Reply 'no' and I won't contact you again.
+Your details came from your firm's website. Privacy notice: https://nextronai.com/privacy
+```
+
+A US email, with the solicitation label set to `Advertisement`:
+
+```
+Furqaan, Nextron AI
+Nextron AI Ltd
+1 Example Street, London EC1A 1AA
+Not relevant? Reply 'no' and I won't contact you again.
+Advertisement
+```
 
 ## Seeds
 
@@ -1615,6 +1699,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0020_2_5_crawl` | `crawl_runs` (`ix_crawl_runs_lead_id`, a foreign key to `leads`, `ck_crawl_runs_outcome` and `ck_crawl_runs_counts`), `crawled_pages` (unique on `lead_id` and `url`, foreign keys to `leads` and `crawl_runs`, `ck_crawled_pages_kind`) and `ats_links` (unique on `lead_id` and `url`, foreign keys to `leads`, `crawl_runs` and `crawled_pages`, `ck_ats_links_tag`); no foreign key cascades (see [Website crawling](#website-crawling)) | `research` |
 | `0021_4_2_campaigns` | `offers` (unique `key`, `ck_offers_version`), `campaigns` (foreign keys to `segments`, `markets`, `offers` and `sequences` with no cascade; unique `key` and (`segment_id`, `market_id`); status, LIA-pair and version checks; two triggers refusing a non-draft GB Campaign without its assessment) and `variants` (a foreign key to `campaigns`; unique per Campaign by name; a status check; a trigger refusing a third Variant) (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)) | `setup` |
 | `0022_3_3_suppression_entries` | `suppression_entries`: the Suppression List (six checks, the partial unique index `uq_suppression_entries_active_key` for one `active` row per key, and four triggers refusing a delete, a replace, a non-`active` insert and any change but one void) (see [The Suppression List](#the-suppression-list)) | `compliance` |
+| `0023_4_11_footer_snapshots` | `footer_snapshots`: each distinct footer text of a Market (a foreign key to `markets` with no cascade; unique on `market_id` and `sha256`; checks that `sha256` is 64 lowercase hex characters and `text` isn't empty) (see [The footer](#the-footer)) | `drafting` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

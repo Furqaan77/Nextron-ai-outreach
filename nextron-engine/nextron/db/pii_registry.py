@@ -304,6 +304,15 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "voided_at": PiiClass.NONE,
         "void_reason": PiiClass.REDACT,
     },
+    # Story 4.11. A footer's text holds the sender's name and Nextron's postal address, like
+    # settings.value, so erasure redacts it.
+    "footer_snapshots": {
+        "id": PiiClass.NONE,
+        "market_id": PiiClass.NONE,
+        "sha256": PiiClass.NONE,
+        "text": PiiClass.REDACT,
+        "created_at": PiiClass.NONE,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

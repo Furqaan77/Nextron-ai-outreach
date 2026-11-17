@@ -73,9 +73,10 @@ that order), then, per Variant and note, a ``step`` above the Sequence's Step co
 angle-note floor (decision 5): a note that names ABA Formal Opinion 512
 (``nextron.domain.segments.mentions_aba_512``) needs a US Market, one that names the SRA notice
 (``mentions_sra_notice``) a GB Market, and a note holding a currency sign (``$``, ``£``, ``€``)
-or the word ``usd``, ``gbp`` or ``eur`` is refused: ``PRICE_NOTE``. ``names_price(note)`` and
-``note_floor_problem(note, country_code)`` (the floor's reason, or ``None``) are those checks,
-shared with the command path.
+or the word ``usd``, ``gbp`` or ``eur`` is refused: ``PRICE_NOTE``. ``names_price(note)`` (the
+single definition in ``nextron.domain.prices``, imported here under the same name with
+``CURRENCY_SIGNS`` and ``CURRENCY_WORDS``) and ``note_floor_problem(note, country_code)`` (the
+floor's reason, or ``None``) are those checks, shared with the command path.
 
 **The file form back.** ``campaign_form(campaign)`` is the campaign's file mapping (statuses as
 their values, lists as lists, ``step_angles`` only when non-empty; a value of the wrong type is
@@ -103,6 +104,8 @@ from typing import Any, Final
 from nextron.domain.errors import DomainError
 from nextron.domain.machines import IllegalTransition, Transition
 from nextron.domain.markets import CODE_PATTERN, GB, US
+# the single price check (Story 4.11 moved it to the leaf ``prices``); kept under these names
+from nextron.domain.prices import CURRENCY_SIGNS, CURRENCY_WORDS, names_price  # noqa: F401
 from nextron.domain.segments import mentions_aba_512, mentions_sra_notice
 
 MACHINE: Final = "campaign"
@@ -112,7 +115,6 @@ VARIANT_ADDED_CAUSE: Final = "operator_add_variant"
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 DATE_PATTERN: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # matched with fullmatch
 _FIELD_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # an unknown field shown by name
-_NOT_WORD: Final = re.compile(r"[^a-z0-9]+")
 
 TOP_LEVEL: Final = "(top level)"  # the field path of a problem with the whole file
 FORM_FIELD: Final = "form"  # an Operator problem that belongs to no one field
@@ -130,8 +132,6 @@ MAX_STEP_ANGLES: Final = 6
 MIN_STEP: Final = 1
 MAX_STEP: Final = 6  # nextron.domain.sequences.MAX_STEPS
 REFUSED_TEXT_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
-CURRENCY_SIGNS: Final = frozenset("$£€")
-CURRENCY_WORDS: Final = frozenset({"usd", "gbp", "eur"})
 
 TOO_MANY_VARIANTS: Final = "A Campaign can have at most 2 Variants"
 NEEDS_ACTIVE_VARIANT: Final = "A Campaign needs an active Variant"
@@ -365,14 +365,6 @@ def lia_from_fields(ref_text: str, date_text: str, today: dt.date) -> Lia:
 
 
 # The angle-note floor ---------------------------------------------------------------------------
-
-
-def names_price(note: str) -> bool:
-    """Whether ``note`` names a price: a currency sign (``$``, ``£``, ``€``), or the word
-    ``usd``, ``gbp`` or ``eur`` (lowercased, every run of other characters a word break)."""
-    if any(sign in note for sign in CURRENCY_SIGNS):
-        return True
-    return not CURRENCY_WORDS.isdisjoint(_NOT_WORD.sub(" ", note.lower()).split())
 
 
 def note_floor_problem(note: str, country_code: str) -> str | None:
