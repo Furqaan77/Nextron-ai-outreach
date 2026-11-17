@@ -32,6 +32,7 @@ from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
 from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain import seed_yaml
+from nextron.domain.campaign import CampaignDef, validate_campaigns
 from nextron.domain.company_facts import (
     ABA_REASON,
     FactContent,
@@ -44,6 +45,7 @@ from nextron.domain.company_facts import (
     validate_company_facts,
 )
 from nextron.domain.markets import validate_markets
+from nextron.domain.offers import OfferDef, validate_offers
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
 from tests.fakes.clock import DEFAULT_NOW, FrozenClock
@@ -53,6 +55,9 @@ SEGMENTS_TEXT = (main.SEED_DIR / main.SEGMENTS_FILE_NAME).read_text(encoding="ut
 MARKETS_TEXT = (main.SEED_DIR / main.MARKETS_FILE_NAME).read_text(encoding="utf-8")
 SEQUENCES_TEXT = (main.SEED_DIR / main.SEQUENCES_FILE_NAME).read_text(encoding="utf-8")
 FACTS_TEXT = (main.SEED_DIR / main.COMPANY_FACTS_FILE_NAME).read_text(encoding="utf-8")
+OFFERS_TEXT = (main.SEED_DIR / main.OFFERS_FILE_NAME).read_text(encoding="utf-8")  # Story 4.2
+CAMPAIGNS_TEXT = (main.SEED_DIR / main.CAMPAIGNS_FILE_NAME).read_text(encoding="utf-8")
+CAMPAIGN_KEYS = ("law_private_ai_us", "law_private_ai_uk", "ops_automation_us", "ops_automation_uk")
 LATER = DEFAULT_NOW + timedelta(days=3)
 STAMP = "2026-11-16T09:00:00.000000Z"
 LATER_STAMP = "2026-11-19T09:00:00.000000Z"
@@ -85,6 +90,13 @@ FACTS_FIRST = "company_facts: 8 changed, 0 unchanged\n" + "".join(
     f"  {fact_id}: created (version 1)\n" for fact_id in FACT_IDS
 )
 FACTS_UNCHANGED = "company_facts: 0 changed, 8 unchanged\n"
+# Story 4.2: the offers and campaigns blocks follow the company_facts block
+OFFERS_CAMPAIGNS_FIRST = (
+    "offers: 1 changed, 0 unchanged\n  default: created (version 1)\n"
+    "campaigns: 4 changed, 0 unchanged\n"
+    + "".join(f"  {key}: created (version 1)\n" for key in CAMPAIGN_KEYS)
+)
+OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
 LEGAL_AI_WORDING = (
     "    wording: Built an AI legal assistant platform for research and document help for a "
     "legal-tech venture (Legal AI).\n"
@@ -150,6 +162,8 @@ def seed_dir(tmp_path: Path, facts: str | bytes | None, name: str = "seed") -> P
         (main.SEGMENTS_FILE_NAME, SEGMENTS_TEXT),
         (main.MARKETS_FILE_NAME, MARKETS_TEXT),
         (main.SEQUENCES_FILE_NAME, SEQUENCES_TEXT),
+        (main.OFFERS_FILE_NAME, OFFERS_TEXT),
+        (main.CAMPAIGNS_FILE_NAME, CAMPAIGNS_TEXT),
     ):
         (folder / file_name).write_text(text, encoding="utf-8", newline="")
     path = folder / main.COMPANY_FACTS_FILE_NAME
@@ -276,6 +290,14 @@ def shipped_inputs() -> tuple[Any, Any, Any, tuple[SeedFact, ...]]:
     )
 
 
+def shipped_offers_and_campaigns() -> tuple[tuple[OfferDef, ...], tuple[CampaignDef, ...]]:
+    """Story 4.2: sync_seed's fifth and sixth arguments."""
+    return (
+        validate_offers(seed_yaml.parse(OFFERS_TEXT)),
+        validate_campaigns(seed_yaml.parse(CAMPAIGNS_TEXT)),
+    )
+
+
 # The I/O matrix: first and second sync ------------------------------------------------------------
 
 
@@ -284,7 +306,9 @@ def test_the_first_sync_stores_eight_facts_at_version_1_with_their_events(
 ) -> None:
     run = sync()
 
-    assert (run.code, run.out, run.err) == (0, OTHERS_FIRST + FACTS_FIRST, "")
+    assert (run.code, run.out, run.err) == (
+        0, OTHERS_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST, ""
+    )
     rows = fact_rows(database)
     assert sorted(row[1] for row in rows) == sorted(FACT_IDS)
     assert {(row[2], row[12], row[13], row[14]) for row in rows} == {(1, "seed", STAMP, None)}
@@ -328,7 +352,9 @@ def test_a_second_sync_reports_8_unchanged_and_writes_nothing(database: Path) ->
 
     run = sync(clock=FrozenClock(LATER))
 
-    assert (run.code, run.out, run.err) == (0, OTHERS_UNCHANGED + FACTS_UNCHANGED, "")
+    assert (run.code, run.out, run.err) == (
+        0, OTHERS_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED, ""
+    )
     assert table_dump(database) == before
 
 
@@ -345,7 +371,7 @@ def test_a_seed_edit_adds_version_2_and_keeps_version_1(database: Path, tmp_path
     assert (run.code, run.err) == (0, "")
     assert run.out == OTHERS_UNCHANGED + (
         "company_facts: 1 changed, 7 unchanged\n  legal_ai: changed (version 1 -> 2)\n"
-    )
+    ) + OFFERS_CAMPAIGNS_UNCHANGED
     first, second = fact_rows(database, "legal_ai")
     assert first == v1
     assert second[2:5] == (
@@ -358,7 +384,7 @@ def test_a_seed_edit_adds_version_2_and_keeps_version_1(database: Path, tmp_path
         "company_facts", second[0], "v1", "v2", "seed_sync", None, "seed", LATER_STAMP
     )
     again = sync(seed_dir(tmp_path, edited(LEGAL_AI_WORDING, NEW_LEGAL_AI_WORDING), "again"))
-    assert again.out == OTHERS_UNCHANGED + FACTS_UNCHANGED
+    assert again.out == OTHERS_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
 
 
 def test_a_seed_change_after_the_operators_edit_is_a_conflict(
@@ -368,7 +394,8 @@ def test_a_seed_change_after_the_operators_edit_is_a_conflict(
     saved = operator_edit(units, "legal_ai", wording="Built a legal research assistant.")
     assert saved == FactSaved("legal_ai", 2, True)
     unchanged = sync(clock=FrozenClock(LATER))
-    assert unchanged.out == OTHERS_UNCHANGED + FACTS_UNCHANGED  # an unchanged seed: no conflict
+    # an unchanged seed: no conflict
+    assert unchanged.out == OTHERS_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     before = table_dump(database)
 
     run = sync(seed_dir(tmp_path, edited(LEGAL_AI_WORDING, NEW_LEGAL_AI_WORDING)),
@@ -379,7 +406,7 @@ def test_a_seed_change_after_the_operators_edit_is_a_conflict(
         "company_facts: 0 changed, 7 unchanged, 1 conflict\n"
         "  legal_ai: conflict, left as the Operator set it (version 2); "
         "seed/company_facts.yaml differs\n"
-    )
+    ) + OFFERS_CAMPAIGNS_UNCHANGED
     assert table_dump(database) == before  # no row and no event
 
 
@@ -412,12 +439,12 @@ def test_a_retracted_fact_stays_retracted_whatever_the_seed_says(
         clock=FrozenClock(LATER),
     )
 
-    assert unchanged.out == OTHERS_UNCHANGED + FACTS_UNCHANGED
+    assert unchanged.out == OTHERS_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     assert changed.out == OTHERS_UNCHANGED + (
         "company_facts: 0 changed, 7 unchanged, 1 conflict\n"
         "  wish_wheels: conflict, left as the Operator set it (version 1); "
         "seed/company_facts.yaml differs\n"
-    )
+    ) + OFFERS_CAMPAIGNS_UNCHANGED
     assert table_dump(database) == before  # never restored
     assert history(units, "wish_wheels").current is None
 
@@ -430,7 +457,7 @@ def test_a_seed_fact_equal_to_an_older_seed_version_after_an_edit_is_unchanged(
 
     run = sync(seed_dir(tmp_path, edited(LEGAL_AI_WORDING, NEW_LEGAL_AI_WORDING), "same"))
 
-    assert run.out == OTHERS_UNCHANGED + FACTS_UNCHANGED
+    assert run.out == OTHERS_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     assert [row[2] for row in fact_rows(database, "legal_ai")] == [1, 2]
 
 
@@ -446,12 +473,13 @@ def test_after_an_edit_the_seed_compares_with_its_highest_version(
     same = sync(seed_dir(tmp_path, new_wording, "same"), clock=FrozenClock(LATER))
     older = sync(clock=FrozenClock(LATER))  # the shipped file: v1's content, not v2's
 
-    assert same.out == OTHERS_UNCHANGED + FACTS_UNCHANGED  # equals the highest seed version
+    # equals the highest seed version
+    assert same.out == OTHERS_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     assert older.out == OTHERS_UNCHANGED + (
         "company_facts: 0 changed, 7 unchanged, 1 conflict\n"
         "  legal_ai: conflict, left as the Operator set it (version 3); "
         "seed/company_facts.yaml differs\n"
-    )
+    ) + OFFERS_CAMPAIGNS_UNCHANGED
     assert table_dump(database) == before  # no new row or event in either
     assert [(row[2], row[12]) for row in fact_rows(database, "legal_ai")] == [
         (1, "seed"),
@@ -505,7 +533,7 @@ def test_a_stored_fact_not_in_the_file_is_left_as_it_is(
 
     assert run.out == OTHERS_UNCHANGED + FACTS_UNCHANGED + (
         "  stat_x: not in seed/company_facts.yaml, left as it is (version 1)\n"
-    )
+    ) + OFFERS_CAMPAIGNS_UNCHANGED
     assert table_dump(database) == before
 
 
@@ -680,7 +708,9 @@ def test_seeds_reads_the_clock_once_and_runs_one_transaction(units: UnitOfWorkFa
             return real()
 
         uow.transaction = counted  # type: ignore[method-assign]
-        result = Seeds(CountingClock()).sync_seed(*shipped_inputs())
+        result = Seeds(CountingClock()).sync_seed(
+            *shipped_inputs(), *shipped_offers_and_campaigns()
+        )
 
     assert opened == ["clock", "transaction"]
     assert result.company_facts == CompanyFactSync(
@@ -739,7 +769,9 @@ def test_seeds_refuses_bad_facts_before_any_transaction(
     with units.open() as uow:
         monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(error, match=match):
-            Seeds(FrozenClock()).sync_seed(segments, markets, sequences, make(facts))
+            Seeds(FrozenClock()).sync_seed(
+                segments, markets, sequences, make(facts), *shipped_offers_and_campaigns()
+            )
 
     assert sha256(database) == before
 
@@ -766,7 +798,9 @@ def test_seeds_checks_the_facts_against_its_own_segments_and_markets(
     with units.open() as uow:
         monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(InvalidCompanyFacts) as caught:
-            Seeds(FrozenClock()).sync_seed(segments, us, no_uk_angle, facts)
+            Seeds(FrozenClock()).sync_seed(  # US only, so no Campaign (they name uk too)
+                segments, us, no_uk_angle, facts, shipped_offers_and_campaigns()[0], ()
+            )
 
     assert caught.value.field == "company_facts[nextron_team].markets[0]"
     assert caught.value.reason == "names uk, which isn't a Market of this sync"
@@ -777,10 +811,14 @@ def test_an_empty_facts_input_syncs_nothing_but_reports_the_stored_ones(
 ) -> None:
     segments, markets, sequences, facts = shipped_inputs()
     with units.open():
-        Seeds(FrozenClock()).sync_seed(segments, markets, sequences, facts)
+        Seeds(FrozenClock()).sync_seed(
+            segments, markets, sequences, facts, *shipped_offers_and_campaigns()
+        )
 
     with units.open():
-        result = Seeds(FrozenClock(LATER)).sync_seed(segments, markets, sequences, ())
+        result = Seeds(FrozenClock(LATER)).sync_seed(
+            segments, markets, sequences, (), *shipped_offers_and_campaigns()
+        )
 
     assert result.company_facts == CompanyFactSync(
         (), (), (), (), tuple(sorted((fact_id, 1) for fact_id in FACT_IDS))

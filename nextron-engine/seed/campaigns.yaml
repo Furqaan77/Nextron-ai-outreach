@@ -1,0 +1,74 @@
+# The Campaigns (FR-3): one per Segment and Market. A Campaign sends its Sequence to its
+# Segment's Leads in its Market, leading to its Offer, through 1 or 2 Variants. Each Campaign
+# names its key, its name, and the key of its Segment (segments.yaml), the code of its Market
+# (markets.yaml), the key of its Offer (offers.yaml) and the key of its Sequence
+# (sequences.yaml). Each Variant has a name, a status (active or inactive) and optional
+# step_angles: a note per Step of the Sequence giving that Variant's angle.
+#
+# The seed never sets a Campaign's status or its legitimate-interests assessment (LIA): a new
+# Campaign is stored as a draft, and only the Operator activates, pauses and resumes it on the
+# Settings page, where a UK Campaign's LIA reference and date are recorded before it can be
+# activated (PECR and UK GDPR).
+#
+# List every Variant of a Campaign here: at most 2, at least one active, names unique. A
+# Variant is never removed: to retire one, keep it and set its status to inactive. A stored
+# Variant left out of this file fails the sync. A Campaign keeps its Segment and Market: a
+# changed Segment or Market fails the sync.
+#
+# The engine refuses an angle note that names a price (a currency sign, or usd, gbp or eur),
+# names ABA Formal Opinion 512 outside a US Market or the SRA notice outside a UK (GB) Market,
+# or gives a Step the Campaign's Sequence doesn't have.
+#
+# `nextron seed sync` loads this file into the database together with segments.yaml,
+# markets.yaml, sequences.yaml, company_facts.yaml and offers.yaml (AD-12): it creates each
+# Campaign that is new, updates a changed one in place with a new version, and leaves alone a
+# Campaign that is stored but no longer listed here. The engine must have been started once
+# (nextron serve), so the database exists and is migrated.
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py): mappings and
+# lists indented with spaces, one-line [a, b] lists, 'single' or "double" quoted text, plain
+# text, whole numbers and true/false. Anything else (tabs, anchors, {...}, multi-line text, or
+# a plain value such as yes, no, null, 1.5, a date or a time) is refused with its line number,
+# so the file is never misread. Write a value in quotes when it holds ": " or starts with a
+# special character.
+
+campaigns:
+  - key: law_private_ai_us
+    name: Law-PrivateAI × US
+    segment: law_private_ai
+    market: us
+    offer: default
+    sequence: default
+    variants:
+      - name: A
+        status: active
+
+  - key: law_private_ai_uk
+    name: Law-PrivateAI × UK
+    segment: law_private_ai
+    market: uk
+    offer: default
+    sequence: default
+    variants:
+      - name: A
+        status: active
+
+  - key: ops_automation_us
+    name: Ops-Automation × US
+    segment: ops_automation
+    market: us
+    offer: default
+    sequence: default
+    variants:
+      - name: A
+        status: active
+
+  - key: ops_automation_uk
+    name: Ops-Automation × UK
+    segment: ops_automation
+    market: uk
+    offer: default
+    sequence: default
+    variants:
+      - name: A
+        status: active

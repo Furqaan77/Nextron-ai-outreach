@@ -354,7 +354,10 @@ fieldset per section, each field with its unit and either "required" or its defa
 showing the stored value, else the default, else blank. Saving checks every field on the server
 and stores all or nothing: an invalid field shows its reason beside it, marked
 `aria-invalid="true"`, and the page says nothing was saved. A stored value that no longer passes
-its rules (one tightened since it was saved) is marked the same way when the page opens.
+its rules (one tightened since it was saved) is marked the same way when the page opens. Below
+the settings, the Campaigns section activates, pauses and resumes each Campaign and records a UK
+Campaign's legitimate-interests assessment (see
+[Campaigns, Offers and Variants](#campaigns-offers-and-variants)).
 
 **How blank fields, missing values and formats work:**
 
@@ -395,8 +398,10 @@ cold-email rules (see [Markets](#markets)). The Sequences (FR-4) come from
 `seed/sequences.yaml`: the default four-Step Sequence and its Step briefs (see
 [Sequences](#sequences)). The Approved Company Facts (FR-72) come from
 `seed/company_facts.yaml`: the claims a Draft may make about Nextron (see
-[Approved Company Facts](#approved-company-facts)). All four files are required. Edit them, then
-load them:
+[Approved Company Facts](#approved-company-facts)). The Offers and Campaigns (FR-3) come from
+`seed/offers.yaml` and `seed/campaigns.yaml`: the commercial ladder and one Campaign per Segment
+and Market (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)). All six files
+are required. Edit them, then load them:
 
 ```powershell
 uv run nextron seed sync                 # the environment NEXTRON_ENV names
@@ -416,28 +421,38 @@ company_facts: 8 changed, 0 unchanged
   nextron_team: created (version 1)
   ...
   sra_ai_notice: created (version 1)
+offers: 1 changed, 0 unchanged
+  default: created (version 1)
+campaigns: 4 changed, 0 unchanged
+  law_private_ai_us: created (version 1)
+  law_private_ai_uk: created (version 1)
+  ops_automation_us: created (version 1)
+  ops_automation_uk: created (version 1)
 ```
 
-Each block's first line counts the Segments (or Markets, Sequences or facts) created or changed,
-then the unchanged ones; a line follows for each one created, changed (`changed (version 1 ->
-2)`) or stored but no longer in the file (`not in seed/segments.yaml, left as it is (version
-1)`, or `not in seed/markets.yaml, ...`, `not in seed/sequences.yaml, ...` or `not in
-seed/company_facts.yaml, ...`: nothing is ever deleted, since Leads, Campaigns, snapshots and
-Draft revisions point to it). The facts' block also counts conflicts (`company_facts: 0 changed,
+The six blocks come in that order, each story's block after the earlier ones. Each block's
+first line counts the Segments (or Markets, Sequences, facts, Offers or Campaigns) created or
+changed, then the unchanged ones; a line follows for each one created, changed (`changed
+(version 1 -> 2)`) or stored but no longer in the file (`not in seed/segments.yaml, left as it
+is (version 1)`, or the same naming `seed/markets.yaml`, `seed/sequences.yaml`,
+`seed/company_facts.yaml`, `seed/offers.yaml` or `seed/campaigns.yaml`: nothing is ever
+deleted, since Leads, Campaigns, snapshots and Draft revisions point to it). The facts' block also counts conflicts (`company_facts: 0 changed,
 7 unchanged, 1 conflict`), with a line for each: `legal_ai: conflict, left as the Operator set it
 (version 2); seed/company_facts.yaml differs`. Running it again on the same files prints
 `segments: 0 changed, 2 unchanged`, `markets: 0 changed, 2 unchanged`, `sequences: 0 changed, 1
-unchanged` and `company_facts: 0 changed, 8 unchanged` and writes nothing.
+unchanged`, `company_facts: 0 changed, 8 unchanged`, `offers: 0 changed, 1 unchanged` and
+`campaigns: 0 changed, 4 unchanged` and writes nothing.
 
 **What a sync does.** It upserts each Segment by key into the `segments` table, then each
 Market by code into the `markets` table, then each Sequence by key into the `sequences` and
-`step_briefs` tables (all owner `setup`): a new one is stored at version 1, a changed definition
-gets the next version, and each of those appends one `events` row (entity `segments`, `markets`
-or `sequences`, `v1` or `v<n>` to `v<n+1>`, cause `seed_sync`, actor `seed`). Then it loads each
-Approved Company Fact into the `company_facts` table (owner `playbook`; see
-[Approved Company Facts](#approved-company-facts)). All four files are read and validated before
-the database is touched, and all the tables are written in one transaction, so a failure
-anywhere changes nothing in any of them. `setup` and `playbook` sit in the same layer of the app
+`step_briefs` tables, then each Offer by key into `offers`, then each Campaign by key into
+`campaigns` and `variants` (all owner `setup`): a new one is stored at version 1, a changed
+definition gets the next version, and each of those appends one `events` row (entity
+`segments`, `markets`, `sequences`, `offers` or `campaigns`, `v1` or `v<n>` to `v<n+1>`, cause
+`seed_sync`, actor `seed`). Then it loads each Approved Company Fact into the `company_facts`
+table (owner `playbook`; see [Approved Company Facts](#approved-company-facts)). All six files
+are read and validated before the database is touched, and all the tables are written in one
+transaction, so a failure anywhere changes nothing in any of them. `setup` and `playbook` sit in the same layer of the app
 DAG and may not call each other, so the use case lives in `ops`: `Seeds(clock).sync_seed`
 (`nextron/app/ops/api.py`) runs `setup`'s `seed_sync` command and `playbook`'s `seed_facts`
 command in its one transaction. Signal-type and disqualifier keys
@@ -482,7 +497,7 @@ problem exits 1 before the database is opened.
 | Exit code | Meaning |
 |---|---|
 | 0 | synced (or nothing to change) |
-| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:`, `seed/markets.yaml:`, `seed/sequences.yaml:` or `seed/company_facts.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
+| 1 | a file is missing, unreadable, over 1 MiB, not UTF-8 or invalid (the message starts with `seed/segments.yaml:`, `seed/markets.yaml:`, `seed/sequences.yaml:`, `seed/company_facts.yaml:`, `seed/offers.yaml:` or `seed/campaigns.yaml:`); the database is missing, behind, ahead or not this engine's; or the sync failed (`seed sync failed (<type>); nothing was changed`) |
 | 2 | `NEXTRON_ENV` (or another bootstrap variable) is unset or invalid; `--env` takes only `dev`, `test` or `prod` |
 
 Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
@@ -679,6 +694,99 @@ Opinion 512 only in US Drafts and the SRA notice only in UK Drafts. Only
 
 **Mac should check before the first send:** the ABA 512 and SRA notice wordings against their
 sources, and the Offer's source URL. The Offer names no price until prices are validated (FR-69).
+
+### Campaigns, Offers and Variants
+
+A Campaign (FR-3, Story 4.2) sends one Sequence to one Segment in one Market, leading to one
+Offer, through 1 or 2 Variants. `seed/offers.yaml` ships one Offer and `seed/campaigns.yaml` the
+four Campaigns, one per Segment and Market; `nextron seed sync` loads them, and the Operator runs
+them from the Settings page.
+
+**An Offer** is commercial configuration for the Operator and later call prep, never Draft
+wording: no Step names a price, and a Draft cites only the `audit_offer` Approved Company Fact,
+which names no price. It has exactly `key` (`[a-z][a-z0-9_]`, at most 31 characters, unique),
+`name` (at most 100 characters) and `ladder`: 1 to 5 rungs, each a `kind` (`reply`, `audit` or
+`build`, each at most once) and a `name`, plus optional `price_usd_min` and `price_usd_max`
+(whole US dollars, 1 to 1,000,000) and `terms` (at most 200 characters). The first rung is a
+`reply` (FR-4: the first ask is only a reply) with no price; an `audit` or `build` rung has both
+prices, the lower first. The shipped `default` Offer is a reply, then the Private AI & Workflow
+Audit ($2,500 to $3,500, a fixed fee credited in full toward a build), then a build ($10,000 to
+$30,000): the Glossary's assumed prices, to be validated on the first 10 held calls (FR-69).
+
+**A Campaign** has exactly `key`, `name` (at most 100 characters), `segment` (a Segment key),
+`market` (a Market code), `offer` (an Offer key), `sequence` (a Sequence key) and `variants`: 1 or
+2, names unique case-insensitively (at most 40 characters), at least one `active`. A Variant has
+`name`, `status` (`active` or `inactive`) and optional `step_angles`: 0 to 6 notes, each a `step`
+of the Campaign's Sequence (1 to 6, once each) and a `note` (at most 200 characters). Every
+reference must be in the same sync's files, and there is one Campaign per Segment and Market. The
+angle-note floor refuses a note that names a price (a currency sign, or `usd`, `gbp` or `eur`),
+ABA Formal Opinion 512 outside a US Market, or the SRA notice outside a GB one. Each problem is
+refused naming its field, such as `seed/campaigns.yaml:
+campaigns[law_private_ai_uk].variants[A].step_angles[0].note: An angle note can't name a price
+(FR-4)`.
+
+**The seed rules.** A new Campaign is stored at `draft`, with no legitimate-interests
+assessment, and its Variants. A stored one keeps its Segment and Market (a change is refused:
+"can't change: a Campaign keeps its Segment and Market"), so a US Campaign can never become a UK
+one and skip the assessment. The file lists every Variant: a third (in the file, or stored and
+in the file together) is refused ("A Campaign can have at most 2 Variants"), and a stored
+Variant left out is refused ("keep it, and set its status to inactive to retire it"), since
+Variants are never deleted. A changed name, Offer or Sequence, or a Variant added or changed,
+updates the Campaign in place at the next version (its version and event cover its Variants).
+The seed never writes a Campaign's status or assessment. A stored Campaign left out of the file
+stays as it is and is reported; a file Campaign that takes its Segment and Market is refused
+("keep that Campaign's key").
+
+**The machine (AD-4).** A Campaign is `draft`, `active` or `paused`: `draft` to `active`
+(Activate), `active` to `paused` (Pause) and `paused` to `active` (Resume), nothing else. Each
+transition appends an `events` row (entity `campaigns`, cause `operator_activate`,
+`operator_pause` or `operator_resume`, actor `operator`). A control from a stale page is refused,
+never repeated: "This Campaign is paused, so it can't be paused".
+
+**The UK assessment (NFR-3, PECR, UK GDPR).** A Campaign whose Market's country is `GB` can't
+run without a recorded legitimate-interests assessment: Activate takes its reference (at most 200
+characters) and its date (a real `YYYY-MM-DD` date, not later than today in the
+`sender_timezone` setting, or in UTC while it is unset), and refuses a blank one ("Record the
+legitimate-interests assessment reference and date first"). "Save the LIA" edits it once the
+Campaign is active or paused; both values are always required, so it can't be cleared, and an
+unchanged save changes nothing ("Nothing changed: the assessment already has these values.").
+An assessment save appends an event from the status to itself (cause `operator_record_lia`);
+`events` never hold the values. Resume re-checks the assessment, and two database triggers
+(`trg_campaigns_lia_insert` and `trg_campaigns_lia_update`) refuse any non-`draft` GB row without
+one. No setting or route can turn the rule off (NFR-7,
+`tests/contracts/test_campaign_contracts.py`).
+
+**May this Campaign run?** `queries.setup.campaign_active(campaign_id)` is the single answer
+(AD-5's `campaign_active`): true only for an `active` Campaign, with its assessment when its
+Market is GB. It reads the Market's country live, so a Market whose country becomes GB stops an
+assessment-less Campaign at once (record the assessment to restart it; until then Pause is
+refused too, since the triggers refuse any write to that row), and an unknown id is false.
+Enrollment (4.8) and the send gate (6.9) ask it; a paused Campaign enrolls nothing and adds
+nothing to the Approval Queue.
+
+**Variants by command.** `Campaigns.add_variant(campaign_id, name, step_angles)` adds an `active`
+Variant (no screen until Epic 11) with the same rules as the file, a third refused, and gives the
+Campaign its next version (cause `operator_add_variant`). Add that Variant to
+`seed/campaigns.yaml` before the next seed sync: the file lists every Variant, so until then the
+sync refuses with "leaves out the stored Variant <name>" (decision 4). A database trigger
+(`trg_variants_at_most_two`) refuses inserting a third Variant.
+
+**The panel.** The Settings page's Campaigns section lists each Campaign with its status,
+Segment, Market, Offer, Sequence and Variants ("A (active)"), and for a UK Campaign its
+assessment ("Legitimate-interests assessment: LIA-2026-01 dated 2026-11-16", or "not
+recorded"). A `draft` shows Activate (a UK one with the reference and date fields), `active`
+Pause and `paused` Resume; a UK Campaign that isn't a draft also shows "Save the LIA". Each posts
+to `/settings/campaigns/activate`, `/pause`, `/resume` or `/lia` (CSRF-checked; only the
+`campaign` id and the assessment fields its form has) and swaps the section in with a notice; a
+refused one says "Nothing was changed for <name>." and keeps the submitted assessment beside its
+problems. A stored row the section reads that no longer validates shows "The Campaigns can't be
+shown: <field>: <reason>" in its place, and the rest of the Settings page still works.
+
+**Reading them.** Other code reads them through `queries.setup`: `offers()` and `offer(key)`
+(`SeededOffer`), and `campaigns()` (by key) and `campaign(campaign_id)` (`SeededCampaign` with
+its ids, status, assessment and Variants by name). Only `nextron/app/setup/api.py` writes the
+three tables, and only its `_move` writes a Campaign's status
+(`tests/contracts/test_campaign_contracts.py`).
 
 ## Secrets
 
@@ -929,6 +1037,7 @@ the log line carries the copy's `file` name.
 | `0009_3_1_markets` | `markets` (unique `code` and `country_code`, `ck_markets_version`) (see [Markets](#markets)) | `setup` |
 | `0010_4_1_sequences` | `sequences` (unique `key`, `ck_sequences_version`) and `step_briefs` (the first foreign key, to `sequences.id` with no cascade; unique on `sequence_id` and `step`; three checks) (see [Sequences](#sequences)) | `setup` |
 | `0011_4_3_company_facts` | `company_facts`: append-only fact versions (unique on `fact_id` and `version`; three checks; three triggers refusing a delete, a reused id or version, and any change but one retraction) (see [Approved Company Facts](#approved-company-facts)) | `playbook` |
+| `0012_4_2_campaigns` | `offers` (unique `key`, `ck_offers_version`), `campaigns` (foreign keys to `segments`, `markets`, `offers` and `sequences` with no cascade; unique `key` and (`segment_id`, `market_id`); status, LIA-pair and version checks; two triggers refusing a non-draft GB Campaign without its assessment) and `variants` (a foreign key to `campaigns`; unique per Campaign by name; a status check; a trigger refusing a third Variant) (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)) | `setup` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

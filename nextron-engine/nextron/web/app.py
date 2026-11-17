@@ -19,7 +19,19 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   the app is built; any other name is 404.
 - ``GET /settings`` (``settings_page``) and ``POST /settings`` (``settings_save``): the Settings
   page and its save, both ``@personal_data(True)``; see ``nextron.web.settings_page``. The POST
-  saves through ``setup`` (``Setup.save``) in its own unit of work.
+  saves through ``setup`` (``Setup.save``) in its own unit of work. The page also includes the
+  Campaigns section (``campaigns_panel.html``, Story 4.2), built from ``queries.setup`` in the
+  GET's read-only unit of work; see ``nextron.web.campaigns_page``. A stored row it reads that no
+  longer decodes (``InvalidCampaigns``, ``InvalidOffers``, ``InvalidSequences``,
+  ``InvalidSegments`` or ``InvalidMarkets``) shows "The Campaigns can't be shown: <field>:
+  <reason>" in that section instead, and the settings form still renders.
+- ``POST /settings/campaigns/activate`` (``campaign_activate``), ``POST
+  /settings/campaigns/pause`` (``campaign_pause``), ``POST /settings/campaigns/resume``
+  (``campaign_resume``) and ``POST /settings/campaigns/lia`` (``campaign_lia``), all
+  ``@personal_data(False)``: the Campaigns section's controls. Each runs its use case through
+  ``campaigns`` (``Campaigns``, the ``setup`` service) in its own unit of work, then renders the
+  panel alone in a read-only one; a refused one (``CampaignRefused``) answers 200 with the
+  refusal re-rendered and nothing changed.
 - ``GET /credentials`` (``credentials_page``, ``@personal_data(True)``, because its Google
   section shows each grant's account address), ``POST /credentials/save`` (``credential_save``)
   and ``POST /credentials/remove`` (``credential_remove``): the write-only Credentials page and
@@ -123,18 +135,25 @@ from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
+    Campaigns,
     Credentials,
     CredentialStoreFailed,
     GoogleAccess,
     GrantStatus,
     Setup,
 )
+from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.company_facts import InvalidFact
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
+from nextron.domain.markets import InvalidMarkets
+from nextron.domain.offers import InvalidOffers
 from nextron.domain.open_code import CodeCheck
+from nextron.domain.segments import InvalidSegments
+from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
+from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
@@ -192,6 +211,14 @@ AREA_LIMIT: Final = 5  # the newest notifications the area lists
 NOTIFICATION_FIELD: Final = "notification"
 CSRF_FIELD_NAME: Final = "csrf_token"
 TIME_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
+# What a stored row the Campaigns panel reads raises when it no longer decodes.
+STORED_ROW_REFUSED: Final = (
+    InvalidCampaigns,
+    InvalidOffers,
+    InvalidSequences,
+    InvalidSegments,
+    InvalidMarkets,
+)
 
 # An async context manager factory taking the app: what FastAPI(lifespan=...) accepts.
 type Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
@@ -284,6 +311,7 @@ def create_app(
     port: int,
     entry: DashboardEntry,
     setup: Setup,
+    campaigns: Campaigns,
     facts: CompanyFacts,
     credentials: Credentials,
     google: GoogleAccess,
@@ -298,7 +326,8 @@ def create_app(
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
-    ``units.open()``. ``setup`` stores the settings, ``facts`` the Approved Company Facts,
+    ``units.open()``. ``setup`` stores the settings, ``campaigns`` runs the Settings page's
+    Campaign controls (activate, pause, resume, save the LIA), ``facts`` the Approved Company Facts,
     ``credentials`` the external credentials and ``google`` the Google client and grants (both
     in Credential Manager, not the database);
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
@@ -377,12 +406,31 @@ def create_app(
             return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
         return Response(content, media_type=STATIC_TYPES[name])
 
+    def campaigns_context(
+        *,
+        outcome: campaign_rows.Outcome | None = None,
+        refusal: campaign_rows.Refusal | None = None,
+    ) -> dict[str, object]:
+        return campaign_rows.panel_context(
+            setup_queries.campaigns(),
+            setup_queries.segments(),
+            setup_queries.markets(),
+            setup_queries.offers(),
+            setup_queries.sequences(),
+            outcome=outcome,
+            refusal=refusal,
+        )
+
     @app.get("/settings", name="settings_page")
     @personal_data(True)
     def settings_page(request: Request) -> HTMLResponse:
         stored = setup_queries.stored_texts()
         context = form_context(shown_values(stored), problems=stored_problems(stored))
-        return page(request, PAGE_TEMPLATE, **context)
+        try:
+            panel = campaigns_context()
+        except STORED_ROW_REFUSED as refused:  # the settings stay reachable
+            panel = campaign_rows.unavailable_context(refused.message)
+        return page(request, PAGE_TEMPLATE, **context, **panel)
 
     @app.post("/settings", name="settings_save")
     @personal_data(True)
@@ -398,6 +446,86 @@ def create_app(
             context = form_context(texts, problems=refused.problems, refused=True)
             return page(request, FORM_TEMPLATE, **context)
         return page(request, FORM_TEMPLATE, **form_context(shown_values(stored), saved=True))
+
+    def campaigns_answer(
+        request: Request,
+        run: Callable[[], object],
+        outcome: Callable[[object], campaign_rows.Outcome],
+        refusal: Callable[[CampaignRefused], campaign_rows.Refusal],
+    ) -> HTMLResponse:
+        """Run a Campaign use case in its own unit of work, then render the panel alone in a
+        read-only one: with the outcome's notice, or, refused, with the refusal (200, so HTMX
+        swaps the panel in; nothing was changed)."""
+        try:
+            with units.open():
+                result = run()
+        except CampaignRefused as refused:
+            with units.open(read_only=True):
+                context = campaigns_context(refusal=refusal(refused))
+                return page(request, campaign_rows.PANEL_TEMPLATE, **context)
+        with units.open(read_only=True):
+            context = campaigns_context(outcome=outcome(result))
+            return page(request, campaign_rows.PANEL_TEMPLATE, **context)
+
+    @app.post("/settings/campaigns/activate", name="campaign_activate")
+    @personal_data(False)  # Campaigns and the LIA reference are configuration, not a person
+    def campaign_activate(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        campaign_id, lia_ref, lia_date = campaign_rows.submitted_activate(fields)
+        return campaigns_answer(
+            request,
+            lambda: campaigns.activate(campaign_id, lia_ref, lia_date),
+            lambda _: campaign_rows.Outcome(campaign_rows.ACTIVATED, campaign_id),
+            lambda refused: campaign_rows.Refusal(
+                campaign_rows.ACTIVATE, campaign_id, refused.problems, lia_ref, lia_date
+            ),
+        )
+
+    @app.post("/settings/campaigns/pause", name="campaign_pause")
+    @personal_data(False)
+    def campaign_pause(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        campaign_id = campaign_rows.submitted_campaign(fields)
+        return campaigns_answer(
+            request,
+            lambda: campaigns.pause(campaign_id),
+            lambda _: campaign_rows.Outcome(campaign_rows.PAUSED, campaign_id),
+            lambda refused: campaign_rows.Refusal(
+                campaign_rows.PAUSE, campaign_id, refused.problems
+            ),
+        )
+
+    @app.post("/settings/campaigns/resume", name="campaign_resume")
+    @personal_data(False)
+    def campaign_resume(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        campaign_id = campaign_rows.submitted_campaign(fields)
+        return campaigns_answer(
+            request,
+            lambda: campaigns.resume(campaign_id),
+            lambda _: campaign_rows.Outcome(campaign_rows.RESUMED, campaign_id),
+            lambda refused: campaign_rows.Refusal(
+                campaign_rows.RESUME, campaign_id, refused.problems
+            ),
+        )
+
+    @app.post("/settings/campaigns/lia", name="campaign_lia")
+    @personal_data(False)
+    def campaign_lia(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        campaign_id, lia_ref, lia_date = campaign_rows.submitted_lia(fields)
+        return campaigns_answer(
+            request,
+            lambda: campaigns.record_lia(campaign_id, lia_ref, lia_date),
+            lambda saved: campaign_rows.lia_outcome(saved, campaign_id),
+            lambda refused: campaign_rows.Refusal(
+                campaign_rows.SAVE_LIA, campaign_id, refused.problems, lia_ref, lia_date
+            ),
+        )
 
     def facts_answer(
         request: Request,

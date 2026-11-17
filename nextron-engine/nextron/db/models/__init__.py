@@ -14,11 +14,14 @@ from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import BackupRecord, HeartbeatRecord
 from nextron.db.models.playbook import CompanyFactRecord
 from nextron.db.models.setup import (
+    CampaignRecord,
     MarketRecord,
+    OfferRecord,
     SegmentRecord,
     SequenceRecord,
     SettingRecord,
     StepBriefRecord,
+    VariantRecord,
 )
 
 __all__ = [
@@ -27,18 +30,21 @@ __all__ = [
     "ApiUsageRecord",
     "BackupRecord",
     "Base",
+    "CampaignRecord",
     "CompanyFactRecord",
     "EventRecord",
     "HeartbeatRecord",
     "JobRecord",
     "MarketRecord",
     "NotificationRecord",
+    "OfferRecord",
     "SegmentRecord",
     "SequenceRecord",
     "SettingRecord",
     "StepBriefRecord",
     "Ulid",
     "UtcDateTime",
+    "VariantRecord",
     "events",
     "jobqueue",
     "metering",

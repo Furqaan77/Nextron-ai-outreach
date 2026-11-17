@@ -86,21 +86,23 @@ transaction, for a dashboard GET's read-only unit of work:
   ``queries.ops.last_backup()``, the newest backup of any kind and status, read after
   readiness (``None`` before the first one).
 
-**The seed sync (FR-1, FR-2, FR-4, FR-72, AD-3, AD-12; Stories 2.1, 3.1, 4.1 and 4.3).**
-``Seeds(clock)`` is what ``nextron seed sync`` calls. ``setup`` (the Segments, Markets and
-Sequences) and ``playbook`` (the Approved Company Facts) sit in the same app-DAG layer, so
-neither may call the other; this use case in a higher layer calls each owner's command in one
-transaction (decision 1).
+**The seed sync (FR-1, FR-2, FR-3, FR-4, FR-72, AD-3, AD-12; Stories 2.1, 3.1, 4.1, 4.2 and
+4.3).** ``Seeds(clock)`` is what ``nextron seed sync`` calls. ``setup`` (the Segments, Markets,
+Sequences, Offers and Campaigns) and ``playbook`` (the Approved Company Facts) sit in the same
+app-DAG layer, so neither may call the other; this use case in a higher layer calls each
+owner's command in one transaction (decision 1).
 
-- ``@use_case sync_seed(segments, markets, sequences, company_facts) -> SeedSync(segments,
-  markets, sequences, company_facts)``: (1) reads the clock once; (2) runs
-  ``setup.api.check_seed``, then ``playbook.api.check_seed_facts`` against that sync's Segment
-  keys and Market countries, with ``latest`` the UTC date of now plus one day; (3) in **one**
-  transaction runs ``Setup(clock).seed_sync(...)``, then ``CompanyFacts(clock).seed_facts(...)``,
-  so a failure anywhere changes nothing in any seeded table; (4) after the commit runs
-  ``log_seed_sync``, then ``log_fact_sync``, and returns ``SeedSync``. A check that fails raises
-  before any transaction (``TypeError``, ``ValueError``, ``InvalidSegments``,
-  ``InvalidMarkets``, ``InvalidSequences`` or ``InvalidCompanyFacts``).
+- ``@use_case sync_seed(segments, markets, sequences, company_facts, offers, campaigns) ->
+  SeedSync(segments, markets, sequences, company_facts, offers, campaigns)`` (each story's
+  arguments and results after the earlier ones): (1) reads the clock once; (2) runs
+  ``setup.api.check_seed`` (the Segments, Markets, Sequences, Offers and Campaigns), then
+  ``playbook.api.check_seed_facts`` against that sync's Segment keys and Market countries, with
+  ``latest`` the UTC date of now plus one day; (3) in **one** transaction runs
+  ``Setup(clock).seed_sync(...)``, then ``CompanyFacts(clock).seed_facts(...)``, so a failure
+  anywhere changes nothing in any seeded table; (4) after the commit runs ``log_seed_sync``,
+  then ``log_fact_sync``, and returns ``SeedSync``. A check that fails raises before any
+  transaction (``TypeError``, ``ValueError``, ``InvalidSegments``, ``InvalidMarkets``,
+  ``InvalidSequences``, ``InvalidOffers``, ``InvalidCampaigns`` or ``InvalidCompanyFacts``).
 
 **Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5, OP-6, NFR-16).** Every copy is made with
 SQLite's backup API (``nextron.db.repos.ops.snapshot``), verified and recorded in ``backups``,
@@ -196,7 +198,9 @@ from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
+    CampaignSync,
     MarketSync,
+    OfferSync,
     SegmentSync,
     SequenceSync,
     Setup,
@@ -224,6 +228,7 @@ from nextron.domain.backup import (
     missed_daily,
 )
 from nextron.domain.budget import Assessment, Threshold, assess, budget_issues, thresholds
+from nextron.domain.campaign import CampaignDef
 from nextron.domain.company_facts import SeedFact
 from nextron.domain.health import (
     GroupRuns,
@@ -235,6 +240,7 @@ from nextron.domain.health import (
 )
 from nextron.domain.job import GLOBAL_SCOPE, JobTypes
 from nextron.domain.markets import MarketDef
+from nextron.domain.offers import OfferDef
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.domain.readiness import CheckResult
 from nextron.domain.segments import SegmentDef
@@ -356,17 +362,19 @@ class DeadJobAlerts:
 
 @dataclass(frozen=True, slots=True)
 class SeedSync:
-    """What ``Seeds.sync_seed`` did: the Segments' sync, the Markets', the Sequences', then the
-    Approved Company Facts'."""
+    """What ``Seeds.sync_seed`` did: the Segments' sync, the Markets', the Sequences', the
+    Approved Company Facts', the Offers' and the Campaigns'."""
 
     segments: SegmentSync
     markets: MarketSync
     sequences: SequenceSync
     company_facts: CompanyFactSync
+    offers: OfferSync
+    campaigns: CampaignSync
 
 
 class Seeds:
-    """``nextron seed sync``'s use case: the four seed files in one transaction; see the module
+    """``nextron seed sync``'s use case: the six seed files in one transaction; see the module
     docstring."""
 
     def __init__(self, clock: Clock) -> None:
@@ -379,11 +387,13 @@ class Seeds:
         markets: Sequence[MarketDef],
         sequences: Sequence[SequenceDef],
         company_facts: Sequence[SeedFact],
+        offers: Sequence[OfferDef],
+        campaigns: Sequence[CampaignDef],
     ) -> SeedSync:
-        """Load the Segments, Markets, Sequences and Approved Company Facts in one
-        transaction."""
+        """Load the Segments, Markets, Sequences, Approved Company Facts, Offers and Campaigns
+        in one transaction."""
         now = self._clock.now()
-        checked = check_seed(segments, markets, sequences)
+        checked = check_seed(segments, markets, sequences, offers, campaigns)
         checked_facts = check_seed_facts(
             company_facts, checked.segment_keys, checked.market_countries, latest_allowed(now)
         )
@@ -393,7 +403,12 @@ class Seeds:
         log_seed_sync(setup_result)
         log_fact_sync(fact_result)
         return SeedSync(
-            setup_result.segments, setup_result.markets, setup_result.sequences, fact_result
+            setup_result.segments,
+            setup_result.markets,
+            setup_result.sequences,
+            fact_result,
+            setup_result.offers,
+            setup_result.campaigns,
         )
 
 

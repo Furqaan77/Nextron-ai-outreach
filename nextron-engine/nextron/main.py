@@ -192,9 +192,11 @@ check.
 Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
 one-time code, its ``Credentials``, which store the external credentials, and its
 ``GoogleAccess``, which holds the Google client and grants; its ``Setup`` stores the settings,
-and its ``CompanyFacts`` (``nextron.app.playbook.api``) the Approved Company Facts the facts page
-edits (``create_app(..., facts=...)``); all of them share one ``SystemClock``; and its handlers
-open their units of work through ``units``. Tests inject the secrets and the clock.
+its ``Campaigns`` (``nextron.app.setup.api``) runs the Settings page's Campaign controls
+(``create_app(..., campaigns=...)``), and its ``CompanyFacts`` (``nextron.app.playbook.api``)
+the Approved Company Facts the facts page edits (``create_app(..., facts=...)``); all of them
+share one ``SystemClock``; and its handlers open their units of work through ``units``. Tests
+inject the secrets and the clock.
 
 **Google OAuth (AD-12, AD-14).** ``GoogleAccess`` gets ``GoogleOAuthClient(meter=meter)``, which
 builds its HTTP client only on its first call to Google; ``LoopbackListener``, the class, which
@@ -225,24 +227,28 @@ its caller's unit of work, between that unit's transactions, and a second ``unit
 the same context would raise. The read-only unit takes ``BEGIN IMMEDIATE`` on its first read,
 so it must never run while the caller holds a transaction open.
 
-**Seed sync (FR-1, FR-2, FR-4, FR-72, AD-12, Stories 2.1, 3.1, 4.1 and 4.3).**
+**Seed sync (FR-1, FR-2, FR-3, FR-4, FR-72, AD-12, Stories 2.1, 3.1, 4.1, 4.2 and 4.3).**
 ``seed_sync(env=..., seed_dir=...)`` (``nextron seed sync``) loads
-``<seed_dir>\\segments.yaml``, ``<seed_dir>\\markets.yaml``, ``<seed_dir>\\sequences.yaml`` and
-``<seed_dir>\\company_facts.yaml`` (``SEED_DIR``, the engine's ``seed`` folder, unless given)
-into the ``segments``, ``markets``, ``sequences``, ``step_briefs`` and ``company_facts`` tables,
-stopping at the first failure:
+``<seed_dir>\\segments.yaml``, ``<seed_dir>\\markets.yaml``, ``<seed_dir>\\sequences.yaml``,
+``<seed_dir>\\company_facts.yaml``, ``<seed_dir>\\offers.yaml`` and
+``<seed_dir>\\campaigns.yaml`` (``SEED_DIR``, the engine's ``seed`` folder, unless given) into
+the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``, ``offers``,
+``campaigns`` and ``variants`` tables, stopping at the first failure:
 
 1. Bootstrap config (``--env`` overrides ``NEXTRON_ENV``): exit 2.
-2. ``segments.yaml``, then ``markets.yaml``, then ``sequences.yaml``, then
-   ``company_facts.yaml``, each read as UTF-8, at most 1 MiB, then
+2. ``segments.yaml``, then ``markets.yaml``, ``sequences.yaml``, ``company_facts.yaml``,
+   ``offers.yaml`` and ``campaigns.yaml``, each read as UTF-8, at most 1 MiB, then
    ``nextron.domain.seed_yaml.parse`` and its validation (``validate_segments``,
    ``nextron.domain.markets.validate_markets``, ``nextron.domain.sequences.validate_sequences``,
-   then ``nextron.domain.company_facts.validate_company_facts``). All four files are required. A
-   missing, unreadable, larger or not UTF-8 file prints ``<label>: <reason>``, and a
-   ``SeedSyntaxError``, ``InvalidSegments``, ``InvalidMarkets``, ``InvalidSequences`` or
-   ``InvalidCompanyFacts`` prints ``<label>: <message>`` (the label is ``seed/segments.yaml``,
-   ``seed/markets.yaml``, ``seed/sequences.yaml`` or ``seed/company_facts.yaml``); either exits
-   1 before any database access.
+   ``nextron.domain.company_facts.validate_company_facts``,
+   ``nextron.domain.offers.validate_offers``, then
+   ``nextron.domain.campaign.validate_campaigns``). All six files are required. A missing,
+   unreadable, larger or not UTF-8 file prints ``<label>: <reason>``, and a
+   ``SeedSyntaxError``, ``InvalidSegments``, ``InvalidMarkets``, ``InvalidSequences``,
+   ``InvalidCompanyFacts``, ``InvalidOffers`` or ``InvalidCampaigns`` prints ``<label>:
+   <message>`` (the label is ``seed/segments.yaml``, ``seed/markets.yaml``,
+   ``seed/sequences.yaml``, ``seed/company_facts.yaml``, ``seed/offers.yaml`` or
+   ``seed/campaigns.yaml``); either exits 1 before any database access.
 3. ``<data dir>\\nextron.db`` must exist and be at ``head_revision()``, read with
    ``current_revision`` on ``create_read_only_engine`` (disposed at once), as doctor does. A
    missing or empty database, one behind or ahead of head, or one that isn't this engine's
@@ -250,7 +256,8 @@ stopping at the first failure:
    migrates the database (only ``serve`` does, after its backup).
 4. ``connect_database`` (never ``open_database``) and one unit of work running
    ``Seeds(clock).sync_seed`` (``nextron.app.ops.api``): the Segments, the Markets, the
-   Sequences, then the Approved Company Facts, in one transaction. Its ``InvalidSegments`` (a
+   Sequences, the Offers, the Campaigns, then the Approved Company Facts, in one transaction.
+   Its ``InvalidSegments`` (a
    signal-type or disqualifier key of the file that a stored Segment no longer in the file
    still uses) prints ``seed/segments.yaml: <message>``; its ``InvalidMarkets`` (a country code
    or ccTLD of the file that a stored Market no longer in the file still uses, or a stored
@@ -260,7 +267,12 @@ stopping at the first failure:
    validates) prints ``seed/sequences.yaml: <message>``; and its ``InvalidCompanyFacts`` (a
    fact naming a Segment or Market that isn't in this sync's files, a regulation outside its
    Market's country, a date in the future, or a stored fact that no longer validates) prints
-   ``seed/company_facts.yaml: <message>``; each exits 1. Any other exception prints ``seed
+   ``seed/company_facts.yaml: <message>``; its ``InvalidOffers`` (a stored Offer that no longer
+   validates) prints ``seed/offers.yaml: <message>``; and its ``InvalidCampaigns`` (a reference
+   that isn't in this sync's files, a Step beyond its Sequence, an angle note below the floor,
+   a changed Segment or Market, a third Variant, a stored Variant left out, a Segment and Market
+   a stored Campaign no longer in the file holds, or a stored Campaign that no longer validates)
+   prints ``seed/campaigns.yaml: <message>``; each exits 1. Any other exception prints ``seed
    sync failed (<type>); nothing was changed`` and exits 1. Either way the transaction rolled
    back, so no table changed.
 5. The summary on ``out`` (``format_seed_sync``) and exit 0: ``segments: <n> changed, <m>
@@ -271,7 +283,9 @@ stopping at the first failure:
    changed, <m> unchanged`` (plus ``, <c> conflict`` or ``conflicts`` when there are any), a
    line per created and changed fact, ``  <fact_id>: conflict, left as the Operator set it
    (version <n>); seed/company_facts.yaml differs`` per conflict, and a line per fact not in
-   the file.
+   the file; then the Offers' block (``offers: <n> changed, <m> unchanged`` and a line per Offer
+   key) and the Campaigns' block (``campaigns: <n> changed, <m> unchanged`` and a line per
+   Campaign key), shaped like the Segments'. The seed never sets a Campaign's status or LIA.
 
 It takes no lock, configures no logging, reads no Credential Manager entry and builds no app,
 runner or scheduler; the engine is disposed in a ``finally``. A sync never re-scores a Lead.
@@ -332,9 +346,12 @@ from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import (
+    Campaigns,
+    CampaignSync,
     Credentials,
     GoogleAccess,
     MarketSync,
+    OfferSync,
     SegmentSync,
     SequenceSync,
     Setup,
@@ -361,10 +378,12 @@ from nextron.domain.backup import (
     BackupKind,
 )
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
+from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.markets import InvalidMarkets, validate_markets
+from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.seed_yaml import SeedSyntaxError
 from nextron.domain.segments import InvalidSegments, validate_segments
 from nextron.domain.sequences import InvalidSequences, validate_sequences
@@ -452,6 +471,10 @@ SEQUENCES_FILE_NAME: Final = "sequences.yaml"
 SEQUENCES_FILE_LABEL: Final = "seed/sequences.yaml"
 COMPANY_FACTS_FILE_NAME: Final = "company_facts.yaml"
 COMPANY_FACTS_FILE_LABEL: Final = "seed/company_facts.yaml"
+OFFERS_FILE_NAME: Final = "offers.yaml"
+OFFERS_FILE_LABEL: Final = "seed/offers.yaml"
+CAMPAIGNS_FILE_NAME: Final = "campaigns.yaml"
+CAMPAIGNS_FILE_LABEL: Final = "seed/campaigns.yaml"
 MAX_SEED_FILE_BYTES: Final = 1024 * 1024
 SEED_DATABASE_MISSING: Final = (
     "the database doesn't exist yet: start the engine once (nextron serve), "
@@ -561,6 +584,7 @@ def build_app(
         port=config.port,
         entry=build_entry(config, secrets=secrets, clock=clock),
         setup=Setup(clock),
+        campaigns=Campaigns(clock),
         facts=CompanyFacts(clock),
         credentials=Credentials(secrets, clock),
         google=google,
@@ -1350,7 +1374,9 @@ def _seed_database_problem(path: Path) -> str | None:
 
 
 def _sync_block(
-    name: str, file_label: str, result: SegmentSync | MarketSync | SequenceSync
+    name: str,
+    file_label: str,
+    result: SegmentSync | MarketSync | SequenceSync | OfferSync | CampaignSync,
 ) -> list[str]:
     """One table's summary lines: the counts, then a line per created, changed and not-in-file
     item."""
@@ -1396,12 +1422,14 @@ def _facts_block(result: CompanyFactSync) -> list[str]:
 
 
 def format_seed_sync(result: SeedSync) -> str:
-    """``seed sync``'s summary: the Segments' block, then the Markets', the Sequences' and the
-    Approved Company Facts'."""
+    """``seed sync``'s summary: the Segments' block, then the Markets', the Sequences', the
+    Approved Company Facts', the Offers' and the Campaigns'."""
     lines = _sync_block("segments", SEGMENTS_FILE_LABEL, result.segments)
     lines += _sync_block("markets", MARKETS_FILE_LABEL, result.markets)
     lines += _sync_block("sequences", SEQUENCES_FILE_LABEL, result.sequences)
     lines += _facts_block(result.company_facts)
+    lines += _sync_block("offers", OFFERS_FILE_LABEL, result.offers)
+    lines += _sync_block("campaigns", CAMPAIGNS_FILE_LABEL, result.campaigns)
     return "\n".join(lines)
 
 
@@ -1420,6 +1448,8 @@ def _load_seed[T](folder: Path, name: str, label: str, validate: Callable[[objec
         InvalidMarkets,
         InvalidSequences,
         InvalidCompanyFacts,
+        InvalidOffers,
+        InvalidCampaigns,
     ) as exc:
         raise _SeedFileProblem(f"{label}: {exc.message}") from None
 
@@ -1433,9 +1463,11 @@ def seed_sync(
     err: TextIO | None = None,
 ) -> int:
     """Load ``<seed_dir>\\segments.yaml``, ``<seed_dir>\\markets.yaml``,
-    ``<seed_dir>\\sequences.yaml`` and ``<seed_dir>\\company_facts.yaml`` into the ``segments``,
-    ``markets``, ``sequences``, ``step_briefs`` and ``company_facts`` tables for ``env``
-    (``NEXTRON_ENV`` unless given); return the exit code. See the module docstring."""
+    ``<seed_dir>\\sequences.yaml``, ``<seed_dir>\\company_facts.yaml``,
+    ``<seed_dir>\\offers.yaml`` and ``<seed_dir>\\campaigns.yaml`` into the ``segments``,
+    ``markets``, ``sequences``, ``step_briefs``, ``company_facts``, ``offers``, ``campaigns`` and
+    ``variants`` tables for ``env`` (``NEXTRON_ENV`` unless given); return the exit code. See
+    the module docstring."""
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     try:
@@ -1453,6 +1485,10 @@ def seed_sync(
         company_facts = _load_seed(
             folder, COMPANY_FACTS_FILE_NAME, COMPANY_FACTS_FILE_LABEL, validate_company_facts
         )
+        offers = _load_seed(folder, OFFERS_FILE_NAME, OFFERS_FILE_LABEL, validate_offers)
+        campaigns = _load_seed(
+            folder, CAMPAIGNS_FILE_NAME, CAMPAIGNS_FILE_LABEL, validate_campaigns
+        )
     except _SeedFileProblem as exc:
         print(exc, file=err)
         return EXIT_SEED_FAILED
@@ -1465,7 +1501,9 @@ def seed_sync(
     try:
         units = connect_database(config)
         with units.open():
-            result = seeds.sync_seed(segments, markets, sequences, company_facts)
+            result = seeds.sync_seed(
+                segments, markets, sequences, company_facts, offers, campaigns
+            )
     except InvalidSegments as exc:  # a key a stored Segment left out of the file still uses
         print(f"{SEGMENTS_FILE_LABEL}: {exc.message}", file=err)
         return EXIT_SEED_FAILED
@@ -1477,6 +1515,12 @@ def seed_sync(
         return EXIT_SEED_FAILED
     except InvalidCompanyFacts as exc:  # a reference, the floor, a date, or a stored fact
         print(f"{COMPANY_FACTS_FILE_LABEL}: {exc.message}", file=err)
+        return EXIT_SEED_FAILED
+    except InvalidOffers as exc:  # a stored Offer that no longer validates
+        print(f"{OFFERS_FILE_LABEL}: {exc.message}", file=err)
+        return EXIT_SEED_FAILED
+    except InvalidCampaigns as exc:  # a reference, the floor, a stored Campaign's rules
+        print(f"{CAMPAIGNS_FILE_LABEL}: {exc.message}", file=err)
         return EXIT_SEED_FAILED
     except Exception as exc:  # noqa: BLE001 - the transaction rolled back
         print(_seed_failed(exc), file=err)
