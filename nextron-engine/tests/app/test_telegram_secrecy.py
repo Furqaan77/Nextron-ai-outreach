@@ -188,6 +188,7 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             bulk_threads="",
             backup_time="",
             backup_rotation_days="",
+            backup_offpc_dir="",
             alert_chat_id=CHAT,
             quota_hunter_credits="",
             quota_prospeo_credits="",

@@ -83,6 +83,14 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "provenance_count": PiiClass.NONE,
         "error": PiiClass.REDACT,
         "local_deleted_at": PiiClass.NONE,
+        # Story 1.17. The off-PC outcome, the copy's file name and times; offpc_error is free
+        # text like error.
+        "offpc_status": PiiClass.NONE,
+        "offpc_name": PiiClass.NONE,
+        "offpc_ledger": PiiClass.NONE,
+        "offpc_at": PiiClass.NONE,
+        "offpc_deleted_at": PiiClass.NONE,
+        "offpc_error": PiiClass.REDACT,
     },
     # Story 1.12. Ops alert text carries IDs and counts only, but later kinds (Hot Lead,
     # LinkedIn) are free text that may name a person; every other column is an ID, a code or a

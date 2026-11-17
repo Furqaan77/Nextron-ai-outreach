@@ -14,12 +14,14 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.ports.alert import AlertPort
+from nextron.ports.backup_target import BackupTargetPort
 from nextron.ports.clock import Clock
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
 from nextron.ports.mail import MailPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
 from tests.fakes.alert import InMemoryAlert
+from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.mail import InMemoryMail
@@ -36,5 +38,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         ConsentListener: FakeConsentListener,
         ClientFilePort: FakeClientFiles,
         UsageMeterPort: InMemoryUsageMeter,
+        BackupTargetPort: InMemoryBackupTarget,
     }
 )

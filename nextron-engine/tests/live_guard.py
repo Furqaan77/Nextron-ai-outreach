@@ -120,6 +120,13 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "google_oauth": Guarded(("default_http_client",)),
     "telegram": Guarded(("default_http_client",)),
     "clock": NoExternalSystem("reads the system clock; reaches no external system"),
+    "crypto": NoExternalSystem(
+        "pure computation over the streams it is given; opens no file and reaches nothing"
+    ),
+    "backup_target": NoExternalSystem(
+        "encrypts and writes files in the folder it is given (a local or network folder the "
+        "Operator chose; tests pass a temporary one); calls no service"
+    ),
     "sink": NoExternalSystem(
         "writes JSON lines under the data dir and only calls the adapter it wraps"
     ),

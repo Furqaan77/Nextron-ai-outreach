@@ -76,9 +76,11 @@ transaction, for a dashboard GET's read-only unit of work:
 - ``issue_count() -> int`` is ``len(issues())``: the notification area's error count.
 - ``report() -> HealthReport(checked_at, worker, groups, issues, readiness, backup)`` reads
   the clock once, then runs ``readiness()`` before its own database reads. Readiness ends with the
-  checks that read the database (``required_settings``, ``database_revision``), which begin the
-  read transaction; the checks that reach Credential Manager or the registry are registered
-  before them (``nextron.main.build_doctor_checks``), so they never hold its lock (AD-2's
+  checks that read the database (``offpc_backup``'s setting, ``required_settings``,
+  ``database_revision``), which begin the read transaction; the checks that reach Credential
+  Manager or the registry are registered before them, and ``offpc_backup`` reads the Backup
+  passphrase before its setting (``nextron.main.build_doctor_checks``), so they never hold its
+  lock (AD-2's
   ``BEGIN IMMEDIATE`` covers reads). ``worker`` is ``Worker(running, beat_at)`` from
   ``queries.ops.heartbeat()`` and ``nextron.domain.health.worker_running`` (``beat_at`` is
   ``None`` before the first beat); ``groups`` is ``job_group_runs`` of the registered job types
@@ -126,8 +128,34 @@ both.
   (``ValueError`` for anything else) after ``serve``'s upgrade succeeded: one transaction, then
   ``backup_completed``, then the guarded ``rotate()``; it returns the row's ULID.
 
-``Backups(clock, local, *, notify, queue)`` is the ``backup_db`` job's service and the health
-panel's "Back up now":
+**Off-PC copies (Story 1.17; AD-9, AD-17, AD-20, OP-6, NFR-17).** ``OffpcBackups(clock, *,
+env, data_dir, backup_dir, targets)`` sends a verified daily or manual copy off the PC through
+``targets(folder)``, a ``BackupTargetPort`` (``nextron.main`` binds it to the encrypting
+``FolderBackupTarget``). A ``pre_migrate`` copy stays local.
+
+- ``destination() -> Path | str`` runs inside the caller's transaction: it reads
+  ``backup_offpc_dir`` and returns the folder, or ``offpc_problem``'s reason
+  (``folder_not_set``, ``folder_in_data_dir`` or ``folder_in_backup_dir``).
+  ``InvalidSettingValue`` (a stored folder that no longer parses) propagates.
+- ``send(taken, folder) -> OffpcOutcome`` makes no database access and never raises an
+  ``Exception``: it ``put``s the copy as ``offpc_names(env, started_at)[0]`` and compares the
+  plaintext SHA-256 the target computed with the verified backup's; a mismatch deletes the copy
+  (best effort) and fails with ``OffpcCopyMismatch``. When ``<backup dir>\\erasure-ledger.jsonl``
+  is a file it ``put``s it as the ledger name too (``copied``), else the ledger is ``absent``.
+  ``credential_not_set`` (no Backup passphrase) is ``not_configured`` (reason
+  ``passphrase_not_set``); any other error is ``failed`` (``error_text`` and ``error_code``).
+- ``@command record(backup_id, outcome) -> int`` writes the outcome on the backup's row, with
+  the clock's time, once.
+- ``rotate(folder, backup_id) -> int`` runs from a running use case, outside any transaction:
+  it lists the folder and deletes each name ``offpc_rotation(env, names, now, 35)`` selects
+  (this environment's copies, ledgers and stale ``.part`` files older than 35 days, never the
+  newest complete copy or its ledger, so copies with no row go too); a delete that fails is
+  skipped. In one transaction it then marks the deleted copies' rows (``offpc_deleted_at``),
+  logs ``offpc_backups_rotated`` (INFO, ``backup_id``, ``count``) when it deleted any, and
+  raises the first failed delete's error, if any. It returns the count.
+
+``Backups(clock, local, *, notify, queue, offpc)`` is the ``backup_db`` job's service and the
+health panel's "Back up now":
 
 - ``@use_case back_up(kind) -> str`` takes a ``JOB_KINDS`` kind only (``ValueError``
   otherwise). Under one ``threading.Lock``, so two backups never copy at once, it calls
@@ -139,10 +167,29 @@ panel's "Back up now":
   code="backup_not_recorded")`` from the error, so jobqueue retries the job (retry limit 2; a
   retry takes a new copy). After the commit it logs
   ``backup_completed`` (INFO: ``backup_id``, ``kind``, ``size_bytes``, ``file``) or
-  ``backup_failed`` (ERROR: ``backup_id``, ``kind``, ``code``); a verified backup then rotates
-  (guarded: a failed rotation is logged and the backup's id is still returned).
+  ``backup_failed`` (ERROR: ``backup_id``, ``kind``, ``code``). A verified backup then runs the
+  off-PC step and rotates the local copies (guarded: a failed rotation is logged and the
+  backup's id is still returned).
   A failed copy never raises, so the job never retries it: the ``failed`` row, the alert and
   the health panel report it, and the next daily time or "Back up now" tries again.
+
+  **The off-PC step** never fails the backup: ``back_up`` still returns the id and the job
+  ends ``done``.
+
+  1. A transaction reads ``destination()``; a problem records ``not_configured`` in it.
+  2. ``send``, outside any transaction (a network share may be slow).
+  3. A transaction ``record``s the outcome; for ``failed`` it also raises the ``backup_failed``
+     ops alert ``offpc_failed_text(kind, id)`` ("Off-PC backup copy failed: <kind> <ULID>",
+     Telegram and the dashboard). An ``InvalidSettingValue`` in step 1 is ``failed`` too.
+  4. After the commit it logs ``offpc_backup_copied`` (INFO: ``backup_id``, ``file``,
+     ``ledger``), ``offpc_backup_failed`` (ERROR: ``backup_id``, ``code``) or
+     ``offpc_backup_skipped`` (INFO: ``backup_id``, ``reason``).
+  5. A ``copied`` outcome then runs ``rotate``, guarded: its failure logs
+     ``offpc_rotation_failed`` (ERROR: ``backup_id``, ``code``, the traceback).
+
+  Any exception in step 1 or 3 logs ``offpc_record_failed`` (ERROR: ``backup_id``, ``code``,
+  the traceback) and ends the step. A failed off-PC copy isn't retried automatically: the next
+  daily time or "Back up now" tries again.
 - ``@use_case request_backup() -> Enqueued`` enqueues the ``backup_db`` job (scope ``global``,
   discriminator the UTC date, payload ``{"v": 1, "kind": "manual"}``) in one transaction, so a
   click while a manual backup is queued or running is absorbed (``created=False``). After the
@@ -152,7 +199,8 @@ panel's "Back up now":
   ``missed`` is ``missed_daily`` of the newest ``daily`` row's ``started_at``. ``nextron.main``
   reads it once, when the scheduler starts.
 
-Logs carry IDs, kinds, codes, counts and file names only, never a full path or an error's text.
+Logs carry IDs, kinds, codes, counts and file names only, never a full path (the off-PC
+folder included) or an error's text.
 """
 
 import contextlib
@@ -181,16 +229,26 @@ from nextron.domain.alert import JOB_DEAD, SEND_ALERT_JOB, Channel, job_dead_tex
 from nextron.domain.backup import (
     BACKUP_DB_JOB,
     BACKUP_FAILED,
+    ERASURE_LEDGER_FILE,
     JOB_KINDS,
     KIND_FIELD,
+    OFFPC_ROTATION_DAYS,
+    OFFPC_SUFFIX,
     BackupKind,
     BackupSchedule,
     BackupStatus,
+    LedgerStatus,
+    OffpcCopyMismatch,
+    OffpcStatus,
     backup_failed_text,
     copy_name,
     is_copy_name,
     is_env_name,
     missed_daily,
+    offpc_failed_text,
+    offpc_names,
+    offpc_problem,
+    offpc_rotation,
 )
 from nextron.domain.budget import Assessment, Threshold, assess, budget_issues, thresholds
 from nextron.domain.health import (
@@ -205,9 +263,10 @@ from nextron.domain.job import GLOBAL_SCOPE, JobTypes
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.domain.readiness import CheckResult
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
+from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
-from nextron.ports.secrets import SecretsPort
+from nextron.ports.secrets import CREDENTIAL_NOT_SET, SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
 
 OPEN_CODE_SECRET: Final = "session/open_code"
@@ -221,6 +280,14 @@ BACKUP_ROTATION_SKIPPED: Final = "backup_rotation_skipped"
 BACKUP_RECORD_FAILED: Final = "backup_record_failed"
 BACKUP_ROTATION_FAILED: Final = "backup_rotation_failed"
 BACKUP_NOT_RECORDED: Final = "backup_not_recorded"  # the retryable AdapterError's code
+OFFPC_BACKUP_COPIED: Final = "offpc_backup_copied"
+OFFPC_BACKUP_FAILED: Final = "offpc_backup_failed"
+OFFPC_BACKUP_SKIPPED: Final = "offpc_backup_skipped"
+OFFPC_RECORD_FAILED: Final = "offpc_record_failed"
+OFFPC_ROTATION_FAILED: Final = "offpc_rotation_failed"
+OFFPC_BACKUPS_ROTATED: Final = "offpc_backups_rotated"
+PASSPHRASE_NOT_SET: Final = "passphrase_not_set"  # a not_configured reason
+OFFPC_DB_SUFFIX: Final = ".db" + OFFPC_SUFFIX  # an encrypted copy's name ends so
 
 log = logging.getLogger(__name__)
 
@@ -625,18 +692,154 @@ class LocalBackups:
         return backup_id
 
 
+@dataclass(frozen=True, slots=True)
+class OffpcOutcome:
+    """What the off-PC step came to: ``copied`` (with the copy's ``name`` and ``ledger``),
+    ``failed`` (with ``error`` and ``code``) or ``not_configured`` (with the ``reason``)."""
+
+    status: OffpcStatus
+    name: str | None = None
+    ledger: LedgerStatus | None = None
+    error: str | None = None
+    code: str | None = None
+    reason: str | None = None
+
+
+def _offpc_failed(error: Exception) -> OffpcOutcome:
+    return OffpcOutcome(OffpcStatus.FAILED, error=error_text(error), code=error_code(error))
+
+
+class OffpcBackups:
+    """The encrypted off-PC copies of verified backups; see the module docstring."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        env: str,
+        data_dir: Path,
+        backup_dir: Path,
+        targets: BackupTargets,
+    ) -> None:
+        if not is_env_name(env):
+            raise ValueError("env must be an environment name such as dev, test or prod")
+        if not (isinstance(data_dir, Path) and isinstance(backup_dir, Path)):
+            raise TypeError("data_dir and backup_dir must be pathlib.Paths")
+        if not callable(targets):
+            raise TypeError("targets must be callable")
+        self._clock = clock
+        self._env = env
+        self._data_dir = data_dir
+        self._backup_dir = backup_dir
+        self._targets = targets
+
+    def destination(self) -> Path | str:
+        """The off-PC folder, or why there is none (``offpc_problem``), read in the caller's
+        transaction; ``InvalidSettingValue`` propagates."""
+        folder = str(setup_queries.get(Key.BACKUP_OFFPC_DIR))
+        problem = offpc_problem(folder, self._data_dir, self._backup_dir)
+        return problem if problem is not None else Path(folder)
+
+    def send(self, taken: TakenBackup, folder: Path) -> OffpcOutcome:
+        """Copy the verified backup ``taken`` (and the erasure ledger, if any) into ``folder``;
+        no database access, and never raises an ``Exception``."""
+        try:
+            if taken.snapshot is None:
+                raise ValueError("only a verified backup goes off the PC")
+            target = self._targets(folder)
+            db_name, ledger_name = offpc_names(self._env, taken.started_at)
+            stored = target.put(taken.path, db_name)
+            if stored.plain_sha256 != taken.snapshot.sha256:
+                with contextlib.suppress(Exception):
+                    target.delete(db_name)
+                raise OffpcCopyMismatch(
+                    "the off-PC copy's SHA-256 differs from the verified backup's"
+                )
+            ledger = self._backup_dir / ERASURE_LEDGER_FILE
+            if ledger.is_file():
+                target.put(ledger, ledger_name)
+                return OffpcOutcome(OffpcStatus.COPIED, name=db_name, ledger=LedgerStatus.COPIED)
+            return OffpcOutcome(OffpcStatus.COPIED, name=db_name, ledger=LedgerStatus.ABSENT)
+        except AdapterError as exc:
+            if exc.code == CREDENTIAL_NOT_SET:
+                return OffpcOutcome(OffpcStatus.NOT_CONFIGURED, reason=PASSPHRASE_NOT_SET)
+            return _offpc_failed(exc)
+        except Exception as exc:  # noqa: BLE001 - a failed copy is recorded, never raised
+            return _offpc_failed(exc)
+
+    @command
+    def record(self, backup_id: str, outcome: OffpcOutcome) -> int:
+        """Write ``outcome`` on the backup's row in the caller's transaction, once; the row
+        count."""
+        return backups_repo.set_offpc(
+            backup_id,
+            status=str(outcome.status),
+            name=outcome.name,
+            ledger=None if outcome.ledger is None else str(outcome.ledger),
+            at=self._clock.now(),
+            error=outcome.error,
+        )
+
+    def rotate(self, folder: Path, backup_id: str) -> int:
+        """Delete this environment's off-PC copies, ledgers and stale parts older than 35 days
+        from ``folder``, keeping the newest copy; how many were deleted. Called from a running
+        use case, outside any transaction."""
+        target = self._targets(folder)
+        now = self._clock.now()
+        chosen = offpc_rotation(self._env, target.list(), now, OFFPC_ROTATION_DAYS)
+        deleted: list[str] = []
+        failure: Exception | None = None
+        for name in chosen:
+            try:
+                target.delete(name)
+            except Exception as exc:  # noqa: BLE001 - the others still go; raised below
+                failure = failure if failure is not None else exc
+                continue
+            deleted.append(name)
+        copies = [name for name in deleted if name.endswith(OFFPC_DB_SUFFIX)]
+        if copies:
+            with current().transaction():
+                backups_repo.mark_offpc_deleted(copies, now)
+        if deleted:
+            log.info(OFFPC_BACKUPS_ROTATED, extra={"backup_id": backup_id, "count": len(deleted)})
+        if failure is not None:
+            raise failure
+        return len(deleted)
+
+
+def _offpc_logged(backup_id: str, outcome: OffpcOutcome) -> None:
+    if outcome.status is OffpcStatus.COPIED:
+        log.info(
+            OFFPC_BACKUP_COPIED,
+            extra={"backup_id": backup_id, "file": outcome.name, "ledger": outcome.ledger},
+        )
+    elif outcome.status is OffpcStatus.FAILED:
+        log.error(OFFPC_BACKUP_FAILED, extra={"backup_id": backup_id, "code": outcome.code})
+    else:
+        log.info(OFFPC_BACKUP_SKIPPED, extra={"backup_id": backup_id, "reason": outcome.reason})
+
+
 class Backups:
     """Daily and manual backups and the daily schedule; see the module docstring."""
 
     def __init__(
-        self, clock: Clock, local: LocalBackups, *, notify: Notify, queue: JobQueue
+        self,
+        clock: Clock,
+        local: LocalBackups,
+        *,
+        notify: Notify,
+        queue: JobQueue,
+        offpc: OffpcBackups,
     ) -> None:
         if not isinstance(local, LocalBackups):
             raise TypeError("local must be a LocalBackups")
+        if not isinstance(offpc, OffpcBackups):
+            raise TypeError("offpc must be an OffpcBackups")
         self._clock = clock
         self._local = local
         self._notify = notify
         self._queue = queue
+        self._offpc = offpc
         self._lock = threading.Lock()  # one backup at a time
 
     @use_case
@@ -678,8 +881,56 @@ class Backups:
                 )
                 return backup_id
             _backup_completed(backup_id, taken)
+            self._copy_off_pc(backup_id, taken)  # never raises an Exception; logs its outcome
             _rotate_after(self._local, backup_id)
             return backup_id
+
+    def _copy_off_pc(self, backup_id: str, taken: TakenBackup) -> None:
+        """The off-PC step of the recorded, verified backup ``backup_id``; see the module
+        docstring. Inside the running use case, outside any transaction."""
+        uow = current()
+        offpc = self._offpc
+        try:
+            with uow.transaction():  # step 1
+                found = self._destination(backup_id)
+            folder = found if isinstance(found, Path) else None
+            outcome = offpc.send(taken, found) if isinstance(found, Path) else found  # step 2
+            if folder is not None or outcome.status is OffpcStatus.FAILED:
+                with uow.transaction():  # step 3: not yet recorded
+                    offpc.record(backup_id, outcome)
+                    if outcome.status is OffpcStatus.FAILED:
+                        self._notify.alert(
+                            BACKUP_FAILED,
+                            backup_id,
+                            offpc_failed_text(taken.kind, backup_id),
+                            ALL_CHANNELS,
+                        )
+        except Exception as exc:  # noqa: BLE001 - the backup itself is recorded and verified
+            log.exception(
+                OFFPC_RECORD_FAILED, extra={"backup_id": backup_id, "code": error_code(exc)}
+            )
+            return
+        _offpc_logged(backup_id, outcome)
+        if folder is not None and outcome.status is OffpcStatus.COPIED:
+            try:
+                offpc.rotate(folder, backup_id)
+            except Exception as exc:  # noqa: BLE001 - the copy is made; the next one rotates
+                log.exception(
+                    OFFPC_ROTATION_FAILED, extra={"backup_id": backup_id, "code": error_code(exc)}
+                )
+
+    def _destination(self, backup_id: str) -> Path | OffpcOutcome:
+        """Step 1, in the caller's transaction: the off-PC folder; else the outcome, with a
+        ``not_configured`` one recorded here, and an unreadable setting ``failed``."""
+        try:
+            found = self._offpc.destination()
+        except InvalidSettingValue as exc:
+            return _offpc_failed(exc)
+        if isinstance(found, Path):
+            return found
+        outcome = OffpcOutcome(OffpcStatus.NOT_CONFIGURED, reason=found)
+        self._offpc.record(backup_id, outcome)
+        return outcome
 
     @use_case
     def request_backup(self) -> Enqueued:

@@ -39,12 +39,51 @@ out of backups within the 35-day rotation. ``DEFAULT_ROTATION_DAYS`` is 35.
 **Errors and text.** ``BackupNotVerified`` (code ``backup_not_verified``) is a copy that failed
 its verification; its message is the reason. ``backup_failed_text(kind, backup_id)`` is exactly
 ``"Backup failed: <kind> <ULID>"``: ops alert text carries IDs and codes only.
+
+**Off-PC copies (Story 1.17; AD-9, AD-17, AD-20, OP-6, NFR-17).** After each verified daily or
+manual backup, ``ops`` sends an encrypted copy (and the erasure ledger, when there is one) to the
+``backup_offpc_dir`` folder; a ``pre_migrate`` copy stays local.
+
+- ``ERASURE_LEDGER_FILE`` (``erasure-ledger.jsonl``) is the erasure ledger in the backup dir
+  (Story 4.x writes it). ``OFFPC_SUFFIX`` is ``.enc``. ``OFFPC_ROTATION_DAYS`` (35, equal to
+  ``MAX_ROTATION_DAYS``) is how long off-PC copies are kept: the disaster copy follows AD-17's
+  window, not the local ``backup_rotation_days``.
+- ``OffpcStatus`` is ``copied``, ``failed`` or ``not_configured``; ``.label`` is "copied off
+  the PC", "off-PC copy failed" or "off-PC not configured". ``LedgerStatus`` is ``copied`` or
+  ``absent`` (there was no ledger to copy).
+- ``offpc_names(env, at)`` is ``(db_name, ledger_name)``: ``copy_name(env, at) + ".enc"`` and
+  ``nextron-<env>-<stamp>.ledger.jsonl.enc``. ``offpc_stamp(env, name)`` is the UTC stamp of
+  either shape, with or without a trailing ``.part`` (a copy cut off while it was written), or
+  ``None`` for any other name (another environment's, or a file that isn't a backup).
+- ``offpc_rotation(env, names, now, days)`` is the names to delete: those with a stamp older
+  than ``now - days``, sorted. It never selects the newest complete ``.db.enc`` copy, nor the
+  ledger with the same stamp, however old they are.
+- ``offpc_problem(folder, data_dir, backup_dir)`` is why ``folder`` can't hold off-PC copies:
+  ``folder_not_set`` (blank), ``folder_in_data_dir`` (the data dir or inside it) or
+  ``folder_in_backup_dir`` (the backup dir or inside it), else ``None``. It compares
+  casefolded ``PureWindowsPath`` parts and touches no file.
+- ``same_volume(folder, data_dir)`` is whether both are on the same drive (a drive letter or a
+  ``\\\\server\\share``), compared casefolded, with no I/O: a folder on a volume mounted under
+  ``C:\\`` isn't detected.
+- ``is_offpc_folder(text)`` is the ``backup_offpc_dir`` setting's rule: blank, or an absolute
+  Windows path, which is a drive path (``E:\\Backups``) or a UNC share (``\\\\nas\\backups``),
+  with no ``..`` part and not a ``\\\\?\\`` or ``\\\\.\\`` device path. No name after the drive
+  (the UNC server and share included) holds any of ``<>"|?*`` or a ``:`` (an NTFS stream),
+  is a reserved device name (``CON``, ``PRN``, ``AUX``, ``NUL``, ``COM1``-``COM9``,
+  ``LPT1``-``LPT9``, any case, with or without an extension), or ends in ``.`` or a space
+  (Windows drops those, so ``<data dir>.`` would be the data dir itself).
+- ``offpc_failed_text(kind, backup_id)`` is exactly ``"Off-PC backup copy failed: <kind>
+  <ULID>"``, the ``backup_failed`` alert of a failed off-PC copy.
+- ``OffpcCopyMismatch`` (code ``offpc_copy_mismatch``): the plaintext SHA-256 computed while
+  the copy was encrypted differs from the verified backup's.
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
+from pathlib import PurePath, PureWindowsPath
 from types import MappingProxyType
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -62,8 +101,28 @@ MIN_ROTATION_DAYS: Final = 7
 MAX_ROTATION_DAYS: Final = 35  # AD-17: erased data ages out of backups within 35 days
 DEFAULT_ROTATION_DAYS: Final = 35
 
+ERASURE_LEDGER_FILE: Final = "erasure-ledger.jsonl"  # in the backup dir; Story 4.x writes it
+OFFPC_SUFFIX: Final = ".enc"
+OFFPC_ROTATION_DAYS: Final = MAX_ROTATION_DAYS  # the off-PC copy follows AD-17's window
+FOLDER_NOT_SET: Final = "folder_not_set"
+FOLDER_IN_DATA_DIR: Final = "folder_in_data_dir"
+FOLDER_IN_BACKUP_DIR: Final = "folder_in_backup_dir"
+
 ENV_PATTERN: Final = re.compile(r"[a-z][a-z0-9]{0,15}")  # matched with fullmatch
 _STAMP: Final = r"\d{8}T\d{6}\.\d{3}Z"
+_STAMP_FORMAT: Final = "%Y%m%dT%H%M%S.%fZ"
+_DB_SHAPE: Final = ".db"
+_LEDGER_SHAPE: Final = ".ledger.jsonl"
+_PART_SUFFIX: Final = ".part"
+_DRIVE_LETTER: Final = re.compile(r"[A-Za-z]:")  # matched with fullmatch
+_UNC_SHARE: Final = re.compile(r"\\\\([^\\]+)\\([^\\]+)")  # matched with fullmatch
+_DEVICE_SERVERS: Final = frozenset({"?", "."})  # \\?\ and \\.\ are device paths
+_REFUSED_NAME_CHARACTERS: Final = frozenset('<>"|?*:')  # ':' after the drive is an NTFS stream
+_RESERVED_NAMES: Final = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{digit}" for digit in range(1, 10)}
+    | {f"lpt{digit}" for digit in range(1, 10)}
+)
 
 
 class BackupKind(StrEnum):
@@ -96,10 +155,45 @@ class BackupStatus(StrEnum):
     FAILED = "failed"
 
 
+class OffpcStatus(StrEnum):
+    """What happened to a verified backup's off-PC copy, written once; ``label`` is how the
+    health panel names it."""
+
+    COPIED = "copied"
+    FAILED = "failed"
+    NOT_CONFIGURED = "not_configured"
+
+    @property
+    def label(self) -> str:
+        return _OFFPC_LABELS[self]
+
+
+_OFFPC_LABELS: Final = MappingProxyType(
+    {
+        OffpcStatus.COPIED: "copied off the PC",
+        OffpcStatus.FAILED: "off-PC copy failed",
+        OffpcStatus.NOT_CONFIGURED: "off-PC not configured",
+    }
+)
+
+
+class LedgerStatus(StrEnum):
+    """Whether the erasure ledger went off the PC with a copied backup."""
+
+    COPIED = "copied"
+    ABSENT = "absent"
+
+
 class BackupNotVerified(DomainError):
     """The copy failed its verification; the message is the reason."""
 
     code = "backup_not_verified"
+
+
+class OffpcCopyMismatch(DomainError):
+    """The off-PC copy's plaintext SHA-256 differs from the verified backup's."""
+
+    code = "offpc_copy_mismatch"
 
 
 # Copy names -------------------------------------------------------------------------------------
@@ -126,11 +220,15 @@ def _check_aware(name: str, value: object) -> datetime:
     return value
 
 
+def _stamp_text(at: datetime) -> str:
+    moment = _check_aware("at", at).astimezone(UTC)
+    return f"{moment:%Y%m%dT%H%M%S}.{moment.microsecond // 1000:03d}Z"
+
+
 def copy_name(env: str, at: datetime) -> str:
     """``nextron-<env>-<YYYYMMDDTHHMMSS.mmm>Z.db`` for the UTC time of ``at``."""
     _check_env(env)
-    moment = _check_aware("at", at).astimezone(UTC)
-    return f"nextron-{env}-{moment:%Y%m%dT%H%M%S}.{moment.microsecond // 1000:03d}Z.db"
+    return f"nextron-{env}-{_stamp_text(at)}{_DB_SHAPE}"
 
 
 def is_copy_name(env: str, name: str) -> bool:
@@ -176,6 +274,134 @@ class BackupSchedule:
     missed: bool
 
 
+# Off-PC copies ----------------------------------------------------------------------------------
+
+
+def offpc_names(env: str, at: datetime) -> tuple[str, str]:
+    """The off-PC names of the backup that started at ``at``: the encrypted copy
+    (``nextron-<env>-<stamp>.db.enc``) and the erasure ledger
+    (``nextron-<env>-<stamp>.ledger.jsonl.enc``)."""
+    _check_env(env)
+    stem = f"nextron-{env}-{_stamp_text(at)}"
+    return f"{stem}{_DB_SHAPE}{OFFPC_SUFFIX}", f"{stem}{_LEDGER_SHAPE}{OFFPC_SUFFIX}"
+
+
+def _offpc_match(env: str, name: object) -> re.Match[str] | None:
+    if not (is_env_name(env) and isinstance(name, str)):
+        return None
+    shapes = f"(?P<shape>{re.escape(_DB_SHAPE)}|{re.escape(_LEDGER_SHAPE)})"
+    return re.fullmatch(
+        rf"nextron-{re.escape(env)}-(?P<stamp>{_STAMP}){shapes}{re.escape(OFFPC_SUFFIX)}"
+        rf"(?P<part>{re.escape(_PART_SUFFIX)})?",
+        name,
+    )
+
+
+def offpc_stamp(env: str, name: str) -> datetime | None:
+    """The UTC stamp of an off-PC copy or ledger name of ``env``'s (a trailing ``.part``
+    allowed), or ``None`` for any other name."""
+    match = _offpc_match(env, name)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match["stamp"], _STAMP_FORMAT).replace(tzinfo=UTC)
+    except ValueError:  # the shape of a stamp, but no real time (month 13, say)
+        return None
+
+
+def offpc_rotation(env: str, names: Iterable[str], now: datetime, days: int) -> tuple[str, ...]:
+    """The off-PC names to delete, sorted: ``env``'s copies, ledgers and stale ``.part`` files
+    whose stamp is older than ``now - days``, never the newest complete copy nor its ledger."""
+    _check_aware("now", now)
+    if isinstance(days, bool) or not isinstance(days, int):
+        raise TypeError("days must be an int")
+    stamped: list[tuple[str, datetime, re.Match[str]]] = []
+    for name in names:
+        match = _offpc_match(env, name)
+        stamp = offpc_stamp(env, name)
+        if match is not None and stamp is not None:
+            stamped.append((name, stamp, match))
+    complete = [
+        (stamp, name)
+        for name, stamp, match in stamped
+        if match["shape"] == _DB_SHAPE and match["part"] is None
+    ]
+    kept: set[str] = set()
+    if complete:
+        newest_stamp, newest_name = max(complete)
+        kept = {newest_name, offpc_names(env, newest_stamp)[1]}
+    cutoff = now - timedelta(days=days)
+    return tuple(
+        sorted(name for name, stamp, _ in stamped if stamp < cutoff and name not in kept)
+    )
+
+
+def _parts(path: str | PurePath) -> list[str]:
+    return [part.casefold().rstrip("\\/") for part in PureWindowsPath(str(path)).parts]
+
+
+def _is_within(path: str | PurePath, folder: str | PurePath) -> bool:
+    """Whether ``path`` is ``folder`` or inside it, comparing casefolded path parts."""
+    inner, outer = _parts(path), _parts(folder)
+    return len(outer) > 0 and inner[: len(outer)] == outer
+
+
+def offpc_problem(
+    folder: str, data_dir: str | PurePath, backup_dir: str | PurePath
+) -> str | None:
+    """Why ``folder`` can't hold the off-PC copies (``folder_not_set``, ``folder_in_data_dir``
+    or ``folder_in_backup_dir``), or ``None`` when it can. No I/O."""
+    if not isinstance(folder, str) or not folder.strip():
+        return FOLDER_NOT_SET
+    if _is_within(folder, data_dir):
+        return FOLDER_IN_DATA_DIR
+    if _is_within(folder, backup_dir):
+        return FOLDER_IN_BACKUP_DIR
+    return None
+
+
+def drive_of(path: str | PurePath) -> str:
+    """The drive of ``path``: ``C:`` or ``\\\\server\\share`` (empty for none), as written."""
+    return PureWindowsPath(str(path)).drive
+
+
+def same_volume(folder: str | PurePath, data_dir: str | PurePath) -> bool:
+    """Whether ``folder`` and ``data_dir`` are on the same drive (a drive letter or a
+    ``\\\\server\\share``), casefolded. No I/O."""
+    left = drive_of(folder).casefold()
+    right = drive_of(data_dir).casefold()
+    return bool(left) and left == right
+
+
+def is_offpc_folder(text: object) -> bool:
+    """Blank, or an absolute Windows folder path: a drive path or a UNC share, with no ``..``
+    part, and not a ``\\\\?\\`` or ``\\\\.\\`` device path."""
+    if not isinstance(text, str):
+        return False
+    if not text.strip():
+        return True
+    path = PureWindowsPath(text)
+    if path.root != "\\" or ".." in path.parts:
+        return False
+    names = list(path.parts[1:])
+    if not _DRIVE_LETTER.fullmatch(path.drive):
+        share = _UNC_SHARE.fullmatch(path.drive)
+        if share is None or share[1] in _DEVICE_SERVERS:
+            return False
+        names += [share[1], share[2]]
+    return all(_is_plain_name(name) for name in names)
+
+
+def _is_plain_name(name: str) -> bool:
+    """Whether Windows reads the path component ``name`` as written: no refused character, not a
+    reserved device name, and no trailing dot or space (Windows drops them)."""
+    if any(char in _REFUSED_NAME_CHARACTERS for char in name):
+        return False
+    if name.endswith((".", " ")):
+        return False
+    return name.split(".", 1)[0].rstrip(" ").casefold() not in _RESERVED_NAMES
+
+
 # Text -------------------------------------------------------------------------------------------
 
 
@@ -184,3 +410,10 @@ def backup_failed_text(kind: str, backup_id: str) -> str:
     if not is_ulid(backup_id):
         raise ValueError("backup_id must be a ULID")
     return f"Backup failed: {BackupKind(kind).value} {backup_id}"
+
+
+def offpc_failed_text(kind: str, backup_id: str) -> str:
+    """The ops alert text of a failed off-PC copy: its kind and its ULID, nothing else."""
+    if not is_ulid(backup_id):
+        raise ValueError("backup_id must be a ULID")
+    return f"Off-PC backup copy failed: {BackupKind(kind).value} {backup_id}"

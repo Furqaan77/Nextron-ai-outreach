@@ -27,7 +27,7 @@ reads the settings, so it needs real units of work (``Dashboard(units=units)``).
 
 Its ``EngineHealth`` (``health``) uses the same clock and job types, the real health-issue
 registry (``nextron.main.build_health_issues(budget=budget)``) and ``readiness``, a callable
-returning a fixed list (``READINESS``, the eleven doctor checks, all ``ok``) unless a test
+returning a fixed list (``READINESS``, the twelve doctor checks, all ``ok``) unless a test
 passes another; the health panel and the notification area's error count read it, and the
 panel's Dismiss goes through ``queue``. They read the database, so they need real units of
 work too.
@@ -37,6 +37,9 @@ Its ``Backups`` (``backups``, Story 1.16) uses the same clock, ``notify`` and ``
 test's temporary folder) whose ``snapshot`` is ``snapshot`` (a test passes
 ``functools.partial(nextron.db.repos.ops.snapshot.snapshot, <db file>)`` to take real copies;
 by default a copy fails with ``RuntimeError``). The panel's "Back up now" queues its job.
+Its ``OffpcBackups`` (``offpc``, Story 1.17) sends verified copies to ``offpc_target``, an
+``InMemoryBackupTarget`` whatever the folder, with the data dir
+``<%LOCALAPPDATA%>\\Nextron\\test`` and the backup dir that holds ``local_dir``.
 """
 
 import json
@@ -52,7 +55,14 @@ from fastapi import FastAPI
 from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
-from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, LocalBackups
+from nextron.app.ops.api import (
+    Backups,
+    Budget,
+    DashboardEntry,
+    EngineHealth,
+    LocalBackups,
+    OffpcBackups,
+)
 from nextron.app.setup.api import Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.domain.alert import Channel
@@ -64,6 +74,7 @@ from nextron.web.app import create_app
 from nextron.web.routing import Units
 from tests.asgi import DEFAULT_HOST, Headers, Reply, request
 from tests.fakes.alert import InMemoryAlert
+from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.secrets import InMemorySecrets
@@ -85,6 +96,7 @@ READINESS = tuple(
         "port_free",
         "required_credentials",
         "internal_notify_grant",
+        "offpc_backup",
         "required_settings",
         "database_revision",
     )
@@ -94,6 +106,11 @@ READINESS = tuple(
 def no_copies(target: Path) -> Snapshot:
     """The dashboard's default snapshot: it takes no copies."""
     raise RuntimeError("this dashboard takes no copies")
+
+
+def default_data_dir() -> Path:
+    """``<%LOCALAPPDATA%>\\Nextron\\test``: under the test's temporary folder."""
+    return Path(os.environ["LOCALAPPDATA"]) / "Nextron" / "test"
 
 
 def default_local_dir() -> Path:
@@ -171,6 +188,7 @@ class Dashboard:
     readiness: Callable[[], Sequence[CheckResult]] = lambda: READINESS
     snapshot: Callable[[Path], Snapshot] = no_copies
     local_dir: Path = field(default_factory=default_local_dir)
+    offpc_target: InMemoryBackupTarget = field(default_factory=InMemoryBackupTarget)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -182,6 +200,7 @@ class Dashboard:
     budget: Budget = field(init=False)
     health: EngineHealth = field(init=False)
     local: LocalBackups = field(init=False)
+    offpc: OffpcBackups = field(init=False)
     backups: Backups = field(init=False)
 
     def __post_init__(self) -> None:
@@ -209,7 +228,16 @@ class Dashboard:
         self.local = LocalBackups(
             self.clock, env="test", local_dir=self.local_dir, snapshot=self.snapshot
         )
-        self.backups = Backups(self.clock, self.local, notify=self.notify, queue=self.queue)
+        self.offpc = OffpcBackups(
+            self.clock,
+            env="test",
+            data_dir=default_data_dir(),
+            backup_dir=self.local_dir.parent,
+            targets=lambda folder: self.offpc_target,
+        )
+        self.backups = Backups(
+            self.clock, self.local, notify=self.notify, queue=self.queue, offpc=self.offpc
+        )
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)

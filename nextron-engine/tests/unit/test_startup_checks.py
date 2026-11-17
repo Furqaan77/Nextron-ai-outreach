@@ -756,6 +756,171 @@ def test_a_grant_check_that_raises_something_else_propagates() -> None:
         checks.check_internal_notify_grant(broken)
 
 
+# Row: Off-PC backup (Story 1.17) ------------------------------------------------------------------
+
+OFFPC_BACKUPS_DIR = PureWindowsPath(r"C:\Users\mac\AppData\Local\Nextron\backups\dev")
+PASSPHRASE_NAME = "backup/passphrase"
+NOT_CONFIGURED = "off-PC backup not configured (OQ-A3): backups are local only; "
+FOLDER_FIX = (
+    "choose a folder on another drive or a network share in Off-PC backup folder "
+    "(backup_offpc_dir) on the Settings page"
+)
+
+
+class Calls:
+    """A ``SecretsPort.read`` and an ``offpc_dir`` that record the order they are called in."""
+
+    def __init__(
+        self, passphrase: str | None | Exception = "QZXPLANTEDPASS", folder: str | Exception = ""
+    ) -> None:
+        self.order: list[str] = []
+        self._passphrase = passphrase
+        self._folder = folder
+
+    def read(self, name: str) -> str | None:
+        self.order.append(f"read {name}")
+        if isinstance(self._passphrase, Exception):
+            raise self._passphrase
+        return self._passphrase
+
+    def offpc_dir(self) -> str:
+        self.order.append("offpc_dir")
+        if isinstance(self._folder, Exception):
+            raise self._folder
+        return self._folder
+
+
+def offpc_check(calls: Calls) -> CheckResult:
+    return checks.check_offpc_backup(calls.read, calls.offpc_dir, DATA_DIR, OFFPC_BACKUPS_DIR)
+
+
+def test_an_off_pc_folder_on_another_drive_with_a_passphrase_is_ok() -> None:
+    calls = Calls(folder=r"E:\NextronBackups")
+
+    result = offpc_check(calls)
+
+    assert result == CheckResult(
+        "offpc_backup",
+        Status.OK,
+        r"off-PC backup folder E:\NextronBackups is set and the Backup passphrase is set; each "
+        "daily and manual backup is encrypted and copied there",
+    )
+    assert calls.order == [f"read {PASSPHRASE_NAME}", "offpc_dir"]  # the passphrase first
+
+
+def test_a_network_share_with_a_passphrase_is_ok() -> None:
+    assert offpc_check(Calls(folder=r"\\nas\backups\nextron")).status is Status.OK
+
+
+@pytest.mark.parametrize(
+    ("folder", "reason"),
+    [
+        (
+            "",
+            "no off-PC backup folder is set; set Off-PC backup folder (backup_offpc_dir) on the "
+            "Settings page",
+        ),
+        (
+            str(OFFPC_BACKUPS_DIR),
+            f"the off-PC backup folder {OFFPC_BACKUPS_DIR} is in the backup dir "
+            f"{OFFPC_BACKUPS_DIR}; {FOLDER_FIX}",
+        ),
+        (
+            rf"{str(DATA_DIR).upper()}\offpc",
+            rf"the off-PC backup folder {str(DATA_DIR).upper()}\offpc is in the data dir "
+            f"{DATA_DIR}; {FOLDER_FIX}",
+        ),
+    ],
+    ids=["unset", "the backup dir", "inside the data dir"],
+)
+def test_a_folder_that_is_not_set_or_not_separate_warns(folder: str, reason: str) -> None:
+    result = offpc_check(Calls(folder=folder))
+
+    assert result == CheckResult("offpc_backup", Status.WARN, NOT_CONFIGURED + reason)
+
+
+@pytest.mark.parametrize(
+    ("passphrase", "reason"),
+    [
+        (None, "the Backup passphrase is not set; enter it on the Credentials page"),
+        ("", "the Backup passphrase is not set; enter it on the Credentials page"),
+        (
+            "x" * 1281,
+            "the Backup passphrase is over 1,280 characters; enter it on the Credentials page",
+        ),
+        (
+            AdapterError(False, "keyring_failed", "QZXPLANTEDKEYRINGTEXT"),
+            "the Backup passphrase could not be read (Windows Credential Manager failed); run "
+            "doctor again, or enter it again on the Credentials page",
+        ),
+    ],
+    ids=["not set", "blank", "too long", "unreadable"],
+)
+def test_a_passphrase_that_is_not_usable_warns(
+    passphrase: str | None | Exception, reason: str
+) -> None:
+    result = offpc_check(Calls(passphrase=passphrase, folder=r"E:\NextronBackups"))
+
+    assert result == CheckResult("offpc_backup", Status.WARN, NOT_CONFIGURED + reason)
+    assert "QZXPLANTED" not in result.message
+
+
+def test_every_reason_is_listed_with_its_fix() -> None:
+    result = offpc_check(Calls(passphrase=None, folder=""))
+
+    assert result.status is Status.WARN
+    assert result.message == (
+        NOT_CONFIGURED
+        + "no off-PC backup folder is set; set Off-PC backup folder (backup_offpc_dir) on the "
+        "Settings page; the Backup passphrase is not set; enter it on the Credentials page"
+    )
+
+
+def test_a_folder_setting_that_cannot_be_read_warns_naming_only_its_type() -> None:
+    calls = Calls(folder=RuntimeError("QZXPLANTEDDATABASETEXT"))
+
+    result = offpc_check(calls)
+
+    assert result == CheckResult(
+        "offpc_backup",
+        Status.WARN,
+        NOT_CONFIGURED + "the off-PC backup folder setting could not be read (RuntimeError); "
+        "set Off-PC backup folder (backup_offpc_dir) on the Settings page",
+    )
+    assert calls.order == [f"read {PASSPHRASE_NAME}", "offpc_dir"]
+
+
+@pytest.mark.parametrize(
+    ("folder", "data_dir", "drive"),
+    [
+        (r"c:\NextronBackups", DATA_DIR, "C:"),
+        (r"\\NAS\Backups\offpc", PureWindowsPath(r"\\nas\backups\nextron\dev"), r"\\nas\backups"),
+    ],
+)
+def test_a_folder_on_the_data_dirs_drive_warns(
+    folder: str, data_dir: PureWindowsPath, drive: str
+) -> None:
+    calls = Calls(folder=folder)
+
+    result = checks.check_offpc_backup(calls.read, calls.offpc_dir, data_dir, OFFPC_BACKUPS_DIR)
+
+    assert result == CheckResult(
+        "offpc_backup",
+        Status.WARN,
+        f"off-PC backup folder {folder} is on the same drive as the data dir ({drive}); a "
+        f"failed or lost disk would take both, so {FOLDER_FIX}",
+    )
+
+
+def test_the_off_pc_check_touches_no_folder(tmp_path: Path) -> None:
+    missing = tmp_path / "unplugged" / "backups"
+
+    result = offpc_check(Calls(folder=str(missing)))
+
+    assert result.status in (Status.OK, Status.WARN)  # the same drive as tmp, or not
+    assert not (tmp_path / "unplugged").exists()
+
+
 # Row: Settings ----------------------------------------------------------------------------------
 
 

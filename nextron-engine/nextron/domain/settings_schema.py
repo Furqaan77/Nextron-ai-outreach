@@ -84,6 +84,8 @@ from nextron.domain.backup import (
     DEFAULT_ROTATION_DAYS,
     MAX_ROTATION_DAYS,
     MIN_ROTATION_DAYS,
+    OFFPC_ROTATION_DAYS,
+    is_offpc_folder,
 )
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.errors import DomainError
@@ -139,6 +141,7 @@ class Key(StrEnum):
     BULK_THREADS = "bulk_threads"
     BACKUP_TIME = "backup_time"
     BACKUP_ROTATION_DAYS = "backup_rotation_days"
+    BACKUP_OFFPC_DIR = "backup_offpc_dir"
     ALERT_CHAT_ID = "alert_chat_id"
     QUOTA_HUNTER_CREDITS = "quota_hunter_credits"
     QUOTA_PROSPEO_CREDITS = "quota_prospeo_credits"
@@ -817,6 +820,13 @@ TELEGRAM_CHAT_ID_RULE: Final = Rule(
     is_telegram_chat_id,
 )
 
+OFFPC_FOLDER_RULE: Final = Rule(
+    "offpc_folder",
+    "must be blank, or a full path to a folder on a drive or a network share, such as "
+    r"E:\NextronBackups or \\nas\backups\nextron",
+    is_offpc_folder,
+)
+
 # Budget and limits (Story 1.13, FR-57, NFR-12). Each quota counts the UTC calendar month; at
 # the quota, only the work it names stops, never sending, replies or unsubscribe polling. The
 # Places maximums are Google's free monthly allowance (March 2025 Maps pricing), so no value
@@ -894,6 +904,22 @@ SCHEMA: Mapping[str, Setting] = _declare(
             minimum(MIN_ROTATION_DAYS, str(MIN_ROTATION_DAYS)),
             maximum(MAX_ROTATION_DAYS, str(MAX_ROTATION_DAYS)),
         ),
+    ),
+    # Where the encrypted off-PC copies go (Story 1.17, AD-17, OP-6, OQ-A3), read on every
+    # backup. Blank (the default) keeps backups on this PC only, and doctor warns.
+    Setting(
+        key=Key.BACKUP_OFFPC_DIR,
+        type=SettingType.STRING,
+        section=Section.ENGINE,
+        label="Off-PC backup folder",
+        unit=(
+            r"A folder on another drive or a network share, such as E:\NextronBackups or "
+            r"\\nas\backups\nextron. Each daily and manual backup is encrypted with the "
+            "Backup passphrase (Credentials page) and copied there; copies older than "
+            f"{OFFPC_ROTATION_DAYS} days are deleted. Blank keeps backups on this PC only."
+        ),
+        default="",
+        rules=(OFFPC_FOLDER_RULE,),
     ),
     # The Telegram chat that receives ops alerts (AD-15, Story 1.12), read when each alert is
     # sent. Numeric only: a @name can be handed to someone else.

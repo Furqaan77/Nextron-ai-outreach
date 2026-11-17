@@ -5,6 +5,7 @@ The real chain has one revision, so "behind" and "a migration fails" use tempora
 (which checkpoints the WAL into the file) before a SHA-256 is taken.
 """
 
+import shutil
 import sqlite3
 import warnings
 from pathlib import Path
@@ -35,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0007_1_16_backups"
+HEAD = "0008_1_17_offpc"
 
 
 @pytest.fixture
@@ -109,6 +110,66 @@ def test_a_database_behind_is_upgraded_in_one_go(tmp_path: Path) -> None:
 
     assert {"a", "b", "c"} <= tables(path)
     assert stored_revisions(path) == ["0003_c"]
+
+
+# Story 1.17: 0008 on a 0007 database that already holds backups
+BACKUP_COLUMNS = (
+    "id, kind, status, started_at, finished_at, path, size_bytes, sha256, db_revision, "
+    "suppression_count, provenance_count, error, local_deleted_at"
+)
+OFFPC_COLUMNS = (
+    "offpc_status, offpc_name, offpc_ledger, offpc_at, offpc_deleted_at, offpc_error"
+)
+VERIFIED_DAILY = "01JD3QZ8X5V9K2M7N4P6R8T0A1"
+FAILED_MANUAL = "01JD3QZ8X5V9K2M7N4P6R8T0A2"
+PRE_MIGRATE = "01JD3QZ8X5V9K2M7N4P6R8T0A3"
+
+
+def backup_rows(path: Path, columns: str) -> list[tuple[object, ...]]:
+    reader = sqlite3.connect(path)
+    try:
+        return reader.execute(f"SELECT {columns} FROM backups ORDER BY id").fetchall()
+    finally:
+        reader.close()
+
+
+def test_0008_keeps_every_0007_backup_row_with_no_off_pc_outcome(tmp_path: Path) -> None:
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0007_1_16_backups":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0007_1_16_backups")
+    digest, at = "a" * 64, "2026-11-17T09:00:00.000000Z"
+    run_sql(
+        path,
+        f"INSERT INTO backups ({BACKUP_COLUMNS}) VALUES ('{VERIFIED_DAILY}', 'daily', "
+        f"'verified', '{at}', '{at}', 'C:/b/local/d.db', 4096, '{digest}', '0007_1_16_backups', "
+        f"3, 5, NULL, '{at}')",
+        f"INSERT INTO backups ({BACKUP_COLUMNS}) VALUES ('{FAILED_MANUAL}', 'manual', 'failed', "
+        f"'{at}', '{at}', 'C:/b/local/m.db', NULL, NULL, NULL, NULL, NULL, "
+        "'OSError: disk full', NULL)",
+        f"INSERT INTO backups ({BACKUP_COLUMNS}) VALUES ('{PRE_MIGRATE}', 'pre_migrate', "
+        f"'verified', '{at}', '{at}', 'C:/b/local/p.db', 8192, '{digest}', '0006_1_13_metering', "
+        "NULL, NULL, NULL, NULL)",
+    )
+    before = backup_rows(path, BACKUP_COLUMNS)
+    assert len(before) == 3
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0007_1_16_backups", HEAD)
+
+    assert backup_rows(path, BACKUP_COLUMNS) == before  # every row unchanged
+    assert backup_rows(path, OFFPC_COLUMNS) == [(None,) * 6] * 3
+    copied = (
+        "UPDATE backups SET offpc_status = 'copied', offpc_name = 'x.db.enc', "
+        f"offpc_ledger = 'absent', offpc_at = '{at}' WHERE id = '{{}}'"
+    )
+    run_sql(path, copied.format(VERIFIED_DAILY))  # a valid outcome on a verified row
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_backups_offpc$"):
+        run_sql(path, copied.format(FAILED_MANUAL))  # never on a failed backup
+    assert [row[0] for row in backup_rows(path, OFFPC_COLUMNS)] == ["copied", None, None]
 
 
 # Row: DB ahead
