@@ -80,9 +80,14 @@ def test_dev_dependencies_are_pinned_and_locked() -> None:
     pins = _pins(pyproject()["dependency-groups"]["dev"])
     lock = _lock()
 
-    assert pins == {"import-linter": ("==", "2.16"), "pytest": ("==", "9.2.0")}
+    assert pins == {
+        "import-linter": ("==", "2.16"),
+        "pytest": ("==", "9.2.0"),
+        "pytest-xdist": ("==", "3.8.0"),
+    }
     assert lock["import-linter"]["version"] == "2.16"
     assert lock["pytest"]["version"] == "9.2.0"
+    assert lock["pytest-xdist"]["version"] == "3.8.0"
 
 
 @pytest.mark.parametrize("banned", ["ulid-py", "aiosqlite"])
