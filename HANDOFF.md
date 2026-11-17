@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`). The build now runs in parallel tracks (§4): Story 1.17 is next on track A, and Story 2.1 is in progress on track B. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`) and **Story 2.1** (merge `cb63e02`). The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -86,9 +86,25 @@ The notification area shows "Engine health: N errors need attention". New error 
 
 4161 tests, 29 contracts.
 
+**Story 2.1 result:** `nextron seed sync` loads the Law-PrivateAI and Ops-Automation Segments, with their Signal types, weights, disqualifiers and decision-maker roles, from `seed/segments.yaml` into a new `segments` table (migration `0008_2_1_segments`, renumbered at merge).
+- The file is read by a strict stdlib YAML-subset reader.
+- A second run reports "0 changed".
+- An invalid file changes nothing and names the failing field.
+
+4560 tests on its branch.
+
+**Story 1.17 result:** each daily or manual backup is encrypted (scrypt key from the `backup/passphrase` Credential Manager entry, AES-256-GCM in 64 KiB chunks) and written to the `backup_offpc_dir` folder.
+- Each copy is verified by its plaintext SHA-256.
+- Off-PC copies older than 35 days are rotated out, but the newest is never deleted.
+- A failed copy alerts and shows on the health panel.
+- Doctor now has 12 checks: `offpc_backup` warns while the folder or the passphrase is missing.
+- Migration `0009_1_17_offpc`.
+
+Main after both merges: 5017 tests, 29 contracts.
+
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 16 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 18 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -115,6 +131,15 @@ The notification area shows "Engine health: N errors need attention". New error 
   - nothing alerts when backups simply stop running;
   - there is no free-space check, and the default backup dir is on the same disk;
   - a failed `pre_migrate` copy prints and exits 2 but sends no Telegram alert, because the engine isn't running yet.
+- **Off-PC backups (Story 1.17):** set the "Off-PC backup folder" setting, on another drive or a share, and store a strong passphrase in Credential Manager as `backup/passphrase`. **Escrow that passphrase somewhere safe off the PC:** without it the encrypted copies can't be read. Until both are set, backups stay local only and doctor warns.
+- **Story 1.17 items rejected only because they'd change the approved spec:**
+  - old off-PC copies are deleted only after a successful copy;
+  - if the ledger copy fails, the database copy stays;
+  - no alert fires when off-PC copying stops because it became "not configured".
+- **Story 2.1:**
+  - no YAML library was added (a strict stdlib subset reader instead); PyYAML would need your OK;
+  - a Segment removed from the seed file is kept and can't be retired;
+  - the ABA/SRA check misses forms like `aba512` and `S.R.A.`.
 - **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
