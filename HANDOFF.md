@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`; sprint status `review`). **Next: Story 1.16.** Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`). The build now runs in parallel tracks (§4): Story 1.17 is next on track A, and Story 2.1 is in progress on track B. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -78,7 +78,17 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 
 The notification area shows "Engine health: N errors need attention". New error sources register in `main.build_health_issues`. 3968 tests, 29 contracts.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 15 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story 1.16 result:** in-process database backups (SQLite backup API, never a file copy). Each copy is checked for integrity, then its SHA-256, revision and the row counts of the protected tables are recorded in a new `backups` table (migration `0007_1_16_backups`).
+- A `backup_db` job runs daily at `backup_time` (10:00 in `sender_timezone`) and from the health panel's "Back up now".
+- `serve` takes a `pre_migrate` copy before any migration.
+- A failure raises a `backup_failed` alert and appears on the health panel.
+- Copies older than `backup_rotation_days` (35) are rotated out, but the newest verified copy is always kept.
+
+4161 tests, 29 contracts.
+
+**Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
+
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 16 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -98,6 +108,14 @@ The notification area shows "Engine health: N errors need attention". New error 
   - after a Dismiss, the notification area's error count lags until the next page view;
   - dead jobs show no time of death;
   - AI spend at 80% counts as an error for the rest of the month, with no acknowledge.
+- **Story 1.16 items rejected only because they'd change the approved spec:**
+  - a backup copy that has no row is never deleted (from a crash mid-copy, or the `pre_migrate` copy of a failed migration), which works against AD-17's 35-day age-out;
+  - rotation runs only after a successful backup;
+  - while backups keep failing, the newest verified copy can outlive 35 days;
+  - nothing alerts when backups simply stop running;
+  - there is no free-space check, and the default backup dir is on the same disk;
+  - a failed `pre_migrate` copy prints and exits 2 but sends no Telegram alert, because the engine isn't running yet.
+- **Spine tool table:** add pytest-xdist 3.8.0, the dev-only parallel test runner added for build speed on 2026-11-17.
 - **Check the Google Places free allowances** in Story 1.13's quota caps (Enterprise 1,000 and Pro 5,000 per month, from March 2025 pricing) against your Google billing account.
 - **`doctor` on a database that is behind head** (for example after an upgrade, before `serve` has migrated it) shows `required_settings: the settings could not be read (OperationalError)`. It clears after one `serve`. Review rejected a clearer message because it would change the spec.
 - **Never exercised against the real service:** nothing has talked to real Google, Telegram, Hunter or Claude yet. Every adapter is proven against fakes.
@@ -116,7 +134,21 @@ The notification area shows "Engine health: N errors need attention". New error 
    - triages every finding into the spec's Review Triage Log;
    - patches, re-verifies, marks the spec done and the story `review`;
    - commits locally.
-4. Repeat story by story, in order. **Don't run stories in parallel**: they share files and one linear Alembic migration chain.
+4. Repeat story by story.
+
+**Parallel tracks (Mac approved them for speed on 2026-11-17):**
+- **Worktrees.** Each track builds in its own git worktree and branch:
+  - track A, the rest of Epic 1: `e:\Nextron-epic1`, branch `epic-1`;
+  - track B, Epic 2: `e:\Nextron-epic2`, branch `epic-2`;
+  - track C, the Epic 3–4 stories that need only Epic 1 and the merged Epic 2 work: `e:\Nextron-track3`, branch `track-3`.
+- **`main` is the integration branch.** `e:\Nextron AI outreach` is only for merging.
+- **After each story:**
+  1. merge the track's branch into `main`;
+  2. if two tracks took the same migration number, renumber and re-chain the incoming migrations after `main`'s head (file names `NNNN_<story>` must match revision ids, per `test_persistence_contracts`);
+  3. run the full suite and commit;
+  4. fast-forward the track's branch to `main` before its next story.
+- **One full suite at a time.** Every full suite runs through a lock, so only one full suite runs at a time on the PC.
+- **Without the worktrees,** build one story at a time, in order: stories share files and one linear Alembic chain.
 5. Optional: `/bmad-sprint-planning` with "show sprint status" at any time.
 
 **Conventions established in Story 1.1 (keep them):**
