@@ -138,6 +138,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "Clock",
         "ConsentListener",
         "GoogleOAuthPort",
+        "LlmPort",
         "MailPort",
         "SecretsPort",
         "UsageMeterPort",
@@ -416,13 +417,24 @@ def test_every_adapter_package_is_classified_once() -> None:
     assert classification_problems(packages, ADAPTER_PACKAGES, LIVE_CONSTRUCTORS) == []
 
 
-def test_the_ai_package_is_not_built_yet_and_defines_nothing() -> None:
+def test_the_ai_package_is_guarded_and_a_gateway_reaches_no_claude_api() -> None:
     import nextron.adapters.ai as ai  # noqa: PLC0415
+    from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency  # noqa: PLC0415
 
-    assert ADAPTER_PACKAGES["ai"] == NotYetBuilt()
-    assert _public_names(ai) == []
-    assert package_modules("nextron.adapters.ai") == [ai]
-    assert _contents(ADAPTERS / "ai") == ["__init__.py"]
+    assert ADAPTER_PACKAGES["ai"] == Guarded(("default_http_client",))
+    assert ("nextron.adapters.ai", "default_http_client") in LIVE_CONSTRUCTORS
+    with pytest.raises(LiveAdapterInTests):
+        ai.default_http_client()
+    secrets, meter = InMemorySecrets("test"), InMemoryUsageMeter()
+    secrets.write("anthropic/api_key", "sk-ant-test-key")
+    gateway = ai.ClaudeGateway(secrets, meter=meter)  # builds no client
+    route = RouteTuple("extract_people", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1, "Find.")
+    block = UntrustedBlock("lead:01JD3QZ8X5V9K2M7N4P6R8T0WY", "page", "p1", "text")
+
+    with pytest.raises(LiveAdapterInTests):
+        gateway.run(route, [block], Urgency.BULK)  # its first run looks the client up
+
+    assert meter.calls == []
 
 
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
@@ -444,14 +456,16 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
     }
     classified = {
         **ADAPTER_PACKAGES,
+        "ai": NotYetBuilt(),  # as a package the spine reserves would be
         "clock": NoExternalSystem(" "),
         "secrets": Guarded(("default_backend", "missing_constructor")),
     }
+    live = [entry for entry in LIVE_CONSTRUCTORS if entry[0] != "nextron.adapters.ai"]
 
     problems = classification_problems(
         adapter_packages(tmp_path),
         classified,
-        [*LIVE_CONSTRUCTORS, ("nextron.adapters.gmail_api", "default_service")],
+        [*live, ("nextron.adapters.gmail_api", "default_service")],
         modules_of=modules.__getitem__,
         folder=tmp_path,
     )

@@ -3,7 +3,8 @@ transport raises or answers, only ``AdapterError`` comes out of a port call, and
 secret is in the error.
 
 - **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__``
-  takes an ``http`` client (``TelegramAlert`` and ``GoogleOAuthClient`` today) has a driver in
+  takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient`` and ``ClaudeGateway``
+  today) has a driver in
   ``DRIVERS``: it builds the adapter on a client whose transport is the probe's, with secrets
   planted where the adapter reads them, and makes each of its port calls. The coverage check
   fails for a new such class until it gets one.
@@ -15,9 +16,13 @@ secret is in the error.
   or its formatted traceback (its ``__cause__`` and ``__context__`` chain included, as logging
   would print it).
 - **Every request is metered (FR-57).** Each such class takes a required keyword-only
-  ``meter`` (the coverage check), and each attempted request records exactly one ``ApiCall``
-  on the driver's ``InMemoryUsageMeter``, whatever the probe did: ``ok`` when the call returned,
-  else ``ok=False`` with the ``AdapterError``'s code, recorded before it was raised.
+  ``meter`` (the coverage check), and each attempted request records exactly one call on the
+  driver's ``InMemoryUsageMeter``, whatever the probe did, before the call returned or raised.
+  An ``ApiCall`` is ``ok`` when the call returned, else ``ok=False`` with the
+  ``AdapterError``'s code. The AI gateway records an ``AiCall`` instead (``RECORDS``): its
+  ``error_code`` is the raised error's code, or the code of the result it returned
+  (``LlmFailed``'s own, ``llm_invalid`` or ``llm_truncated``; none for ``LlmOk`` or
+  ``LlmRefused``).
 
 The proofs run the same checks on probe adapters that break each rule.
 """
@@ -35,12 +40,15 @@ import httpx2
 import pytest
 
 import nextron.adapters
+from nextron.adapters.ai import LLM_INVALID, LLM_TRUNCATED, ClaudeGateway
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.adapters.telegram import TelegramAlert
-from nextron.domain.budget import ApiCall
+from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.budget import AiCall, ApiCall
 from nextron.domain.google_oauth import ClientConfig
 from nextron.ports.alert import AlertMessage
 from nextron.ports.errors import AdapterError
+from nextron.ports.llm import LlmFailed, LlmInvalid, LlmTruncated
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
@@ -51,6 +59,7 @@ CLIENT_SECRET: Final = "Cs4Vq8Lp2Xz6Nw1Rt5Hy"
 AUTH_CODE: Final = "Ac7Wm3Kq9Jz2Pv5Tx8Ns"
 REFRESH_TOKEN: Final = "Rt8Gh2Mc5Vb9Xq3Nz7Lp"
 REVOKED_TOKEN: Final = "Rv3Jd7Ks1Wq5Pz9Lm2Xc"
+CLAUDE_KEY: Final = "Ck5Wn9Qx2Lr6Tz3Hv8Mb"
 PLANTED: Final = (
     BOT_TOKEN,
     BOT_TOKEN.split(":")[1],
@@ -58,9 +67,12 @@ PLANTED: Final = (
     AUTH_CODE,
     REFRESH_TOKEN,
     REVOKED_TOKEN,
+    CLAUDE_KEY,
 )
 CHAT: Final = "-1001234567890"
 ALERT_TEXT: Final = "Job dead: send_alert 01JD3QZ8X5V9K2M7N4P6R8T0WY, attempts: 6"
+SYSTEM_PROMPT: Final = "Find the named decision-makers in the untrusted blocks."
+PAGE_TEXT: Final = "Ann Smith, Managing Partner, leads the firm."
 LEAK: Final = " ".join(PLANTED)  # what every transport error and response body carries
 
 type Transport = Callable[[httpx2.Request], httpx2.Response]
@@ -167,11 +179,23 @@ def google_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tup
     yield "revoke", lambda: adapter.revoke(REVOKED_TOKEN)
 
 
+def claude_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    secrets = InMemorySecrets()
+    secrets.write("anthropic/api_key", CLAUDE_KEY)
+    adapter = ClaudeGateway(secrets, meter=meter, http=http)
+    route = RouteTuple("extract_people", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1, SYSTEM_PROMPT)
+    block = UntrustedBlock("lead:01JD3QZ8X5V9K2M7N4P6R8T0WY", "page", "p1", PAGE_TEXT)
+    yield "run", lambda: adapter.run(route, [block], Urgency.BULK)
+
+
 # Every adapter class whose __init__ takes an http client, with its driver.
 DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
     GoogleOAuthClient: google_calls,
+    ClaudeGateway: claude_calls,
 }
+# What each adapter records per request: an ApiCall, unless it is listed here.
+RECORDS: Final[dict[type, type]] = {ClaudeGateway: AiCall}
 
 
 # The checks -------------------------------------------------------------------------------------
@@ -241,9 +265,34 @@ def boundary_problems(driver: Driver, planted: Iterable[str] = PLANTED) -> list[
     return problems
 
 
-def metering_problems(driver: Driver) -> list[str]:
-    """Each probe and call that didn't record exactly one ``ApiCall`` for its one request, or
-    recorded the wrong outcome: ``ok`` when it returned, else the raised error's code."""
+def ai_result_code(result: object) -> str | None:
+    """The ``AiCall`` error code of an AI call that returned ``result``."""
+    if isinstance(result, LlmFailed):
+        return result.code
+    if isinstance(result, LlmInvalid):
+        return LLM_INVALID
+    if isinstance(result, LlmTruncated):
+        return LLM_TRUNCATED
+    return None  # LlmOk, LlmRefused
+
+
+def _outcome(recorded: ApiCall | AiCall) -> object:
+    if isinstance(recorded, ApiCall):
+        return recorded.ok, recorded.error_code
+    return recorded.error_code
+
+
+def _expected(record: type, result: object, raised: AdapterError | None) -> object:
+    if record is ApiCall:
+        return (True, None) if raised is None else (False, raised.code)
+    return ai_result_code(result) if raised is None else raised.code
+
+
+def metering_problems(driver: Driver, record: type = ApiCall) -> list[str]:
+    """Each probe and call that didn't record exactly one ``record`` (an ``ApiCall`` or an
+    ``AiCall``) for its one request, or recorded the wrong outcome: for an ``ApiCall``, ``ok``
+    when the call returned, else the raised error's code; for an ``AiCall``, the code of the
+    result it returned (``ai_result_code``) or of the error it raised."""
     problems = []
     for probe in probes():
         requests: list[httpx2.Request] = []
@@ -256,19 +305,20 @@ def metering_problems(driver: Driver) -> list[str]:
         for name, call in driver(client_on(transport), meter):
             before, sent = len(meter.records), len(requests)
             try:
-                call()
-                expected: tuple[bool, str | None] = (True, None)
+                result, raised = call(), None
             except AdapterError as error:
-                expected = (False, error.code)
+                result, raised = None, error
             except BaseException:  # noqa: BLE001 - boundary_problems reports these
                 continue
             recorded = meter.calls[before:]
             label = f"{name}, {probe.label}"
             if len(requests) - sent != 1:
                 problems.append(f"{label}: {len(requests) - sent} requests were made")
-            if len(recorded) != 1 or not isinstance(recorded[0], ApiCall):
+            if len(recorded) != 1:
                 problems.append(f"{label}: {len(recorded)} calls were recorded")
-            elif (recorded[0].ok, recorded[0].error_code) != expected:
+            elif not isinstance(recorded[0], record):
+                problems.append(f"{label}: an {type(recorded[0]).__name__} was recorded")
+            elif _outcome(recorded[0]) != _expected(record, result, raised):
                 problems.append(f"{label}: the recorded outcome is not the call's")
     return problems
 
@@ -286,8 +336,8 @@ def test_only_adapter_errors_without_a_secret_come_out(adapter: type) -> None:
 
 
 @pytest.mark.parametrize("adapter", list(DRIVERS), ids=lambda cls: cls.__name__)
-def test_every_attempted_request_records_exactly_one_api_call(adapter: type) -> None:
-    assert metering_problems(DRIVERS[adapter]) == []
+def test_every_attempted_request_records_exactly_one_call(adapter: type) -> None:
+    assert metering_problems(DRIVERS[adapter], RECORDS.get(adapter, ApiCall)) == []
 
 
 def test_the_probes_cover_the_specified_failures_and_answers() -> None:

@@ -1315,9 +1315,10 @@ polling are never blocked.**
 - `api_usage`: one row per HTTP request an adapter attempted, whatever its outcome: `provider`,
   `operation`, `sku` (Places Pro and Enterprise are separate SKUs), integer `units`, `ok`,
   `error_code` and `at`.
-- `ai_usage`: one row per AI call (Story 2.7 starts writing them): `route`, `route_tuple`,
-  `served_model`, the input, output, cache-read and cache-write tokens, `iterations`, `batch`,
-  `cost_micros` (micro-dollars), `refused`, `error_code` and `at`.
+- `ai_usage`: one row per HTTP request to Claude (written by the Claude gateway; see [The
+  Claude gateway](#the-claude-gateway)): `route`, `route_tuple`, `served_model`, the input,
+  output, cache-read and cache-write tokens, `iterations`, `batch`, `cost_micros`
+  (micro-dollars), `refused`, `error_code` and `at`.
 
 Neither table holds personal data: `nextron/domain/budget.py` refuses any field value with `@`
 or a space (`ApiCall` and `AiCall` are checked when they are built), and the meter writes no
@@ -1335,7 +1336,8 @@ never runs inside a transaction).
 exactly one `ApiCall`: `ok`, or the `AdapterError`'s code. A call refused before any request (no
 token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_message`) and Google
 OAuth (`google_oauth`/`code_exchange`, `token_refresh` and `token_revocation`; a revoke answered
-`invalid_token` is `ok`). `tests/contracts/test_adapter_boundary.py` checks every such adapter.
+`invalid_token` is `ok`). The Claude gateway records an `AiCall` per request instead.
+`tests/contracts/test_adapter_boundary.py` checks every such adapter.
 
 **Quotas and the budget** are settings (Settings, Budget and limits), each counted over the UTC
 calendar month:
@@ -1377,6 +1379,133 @@ UTC month: the note that sending, reply handling and unsubscribe polling are nev
 spend against the budget, with the warning, reached or off line; each quota's use against its
 limit (Hunter in credits, with halves) and its state (`OK`, `Reached: <work> stopped` or
 `Off (quota 0)`); and every provider, operation and SKU's calls, failed calls and units.
+
+## The Claude gateway
+
+Every call to Claude goes through one gateway, `ClaudeGateway` in `nextron/adapters/ai` (FR-57,
+AD-8, AD-17, AD-18, INT-7). It returns a typed result instead of crashing on a refusal, a cut-off
+answer or bad output, and it meters every request. Only this package imports the `anthropic`
+SDK (import contract 5). Nothing calls it yet: Story 2.9 adds the first caller, so `serve`
+builds no AI or HTTP client.
+
+**The call.** `LlmPort.run(route_tuple, inputs, urgency)` (`nextron/ports/llm.py`) takes:
+
+- a `RouteTuple(route, model, effort, prompt_version, schema_version, system_prompt)`
+  (`nextron/domain/ai.py`). Its `key`, `<model>:<effort>:<prompt_version>:s<schema>:<first 12 hex
+  of the prompt's SHA-256>`, is what `ai_usage.route_tuple` stores. The hash comes from the text,
+  so the two can't disagree. No `repr` shows the prompt;
+- the untrusted `inputs`, each an `UntrustedBlock(subject, source, block_id, text)`. A call holds
+  the blocks of one subject: the Lead (`lead:<id>`), or a Signal Inbox item with no Lead yet
+  (`signal_item:<id>`);
+- an `Urgency` (`interactive`, `soon` or `bulk`). In Epic 2 it changes nothing: every call is one
+  direct Messages request.
+
+It returns exactly one of `LlmOk(parsed)`, `LlmRefused(category)`, `LlmTruncated()`,
+`LlmInvalid()` or `LlmFailed(retryable, code, status)`. Each carries the served `model` and an
+`LlmUsage` that sums every request the call made. Tests use `ScriptedLlm` (`tests/fakes/llm.py`).
+It first makes the gateway's caller checks, in the gateway's order: an unknown tuple, the
+urgency, then the blocks. Then it answers with the next scripted result or error. Unlike the
+gateway, it meters nothing.
+
+`RouteTuple` refuses a system prompt that is blank (empty or only whitespace), because the API
+answers 400 to a blank text block.
+
+**The routes** are data, in `nextron/adapters/ai/routes.py`. The first candidate of a route is its
+default, and `find(route_tuple)` returns the candidate the tuple names:
+
+| Route | Model | Effort | Prompt | Output schema | Batchable | `max_tokens` / cap | Budget class |
+|---|---|---|---|---|---|---|---|
+| `extract_signals` | `claude-haiku-5-5` | `medium` | `v1` | `ExtractSignalsV1` (1) | yes | 8,000 / 16,000 | blockable (enrichment) |
+| `extract_people` | `claude-haiku-5-5` | `medium` | `v1` | `ExtractPeopleV1` (1) | yes | 4,000 / 16,000 | blockable (enrichment) |
+| `signal_inbox_parse` | `claude-haiku-5-5` | `medium` | `v1` | `SignalInboxParseV1` (1) | no | 2,000 / 8,000 | blockable (discovery) |
+
+A candidate is refused unless `0 < max_tokens <= cap <= 16,000`, which keeps every request under
+the SDK's non-streaming limit. No candidate or request carries `fallbacks`, because Haiku has no
+server-side fallback. **The gateway never checks the budget.** The calling service asks
+`domain.budget.allow(candidate.budget_class, ...)` first, and returns `deferred` when refused.
+
+**The request.**
+
+- The system prompt is the cached, stable prefix (`cache_control: ephemeral`).
+- The user turn holds only the untrusted blocks, each as `<untrusted source="..."
+  id="...">\n<text>\n</untrusted>`, separated by blank lines.
+- Inside the text, a delimiter look-alike has its bracket replaced by `&lt;`. A look-alike is `<`
+  or a bracket that looks like it (`＜`, `﹤`, `‹`, `〈`, `⟨` or `〈`), then optional whitespace
+  and `/`, then `untrusted` in any case, in ASCII or fullwidth letters. Nothing else in the text
+  changes.
+- Blocks of two subjects, no blocks, or a repeated `block_id` raise `ValueError` before any
+  request.
+- The output schema goes in `output_config.format` (from `anthropic.transform_schema`, with
+  `additionalProperties: false` on every object), never in the system text. Effort goes in
+  `output_config.effort`.
+- The request never sets `thinking`, sampling parameters, tools, stop sequences, `fallbacks` or
+  betas, and has no assistant prefill.
+
+**The schemas** (`nextron/adapters/ai/schemas.py`) check shape only. Quote length, the substring
+check and Segment keys belong to Stories 2.9, 2.10 and 2.16. Enum values are lowercase
+`snake_case`. Before validation (pydantic, strict), every string whose schema has an enum is
+stripped and lowercased, so `" Staff"` becomes `"staff"`. No property may be named like
+`reasoning`, `chain_of_thought` or `thought`; `tests/unit/test_ai_schemas.py` checks this.
+
+**Outcomes**, by the answer's `stop_reason`:
+
+| Answer | Result | `ai_usage` row |
+|---|---|---|
+| `end_turn`, one text block that parses as a JSON object and validates | `LlmOk(parsed)` | no error code |
+| any other stop reason, no text block, a `tool_use` block, text that isn't JSON, or a schema failure | `LlmInvalid` | `llm_invalid` |
+| `refusal` | `LlmRefused(category)`, and no second request | `refused` |
+| `max_tokens`, the first time, when doubling still raises `max_tokens` within the cap | one retry at `min(2 × max_tokens, cap)` | `llm_truncated` |
+| `max_tokens` otherwise | `LlmTruncated` | `llm_truncated` |
+| HTTP 429, any 5xx, or no connection (timeouts included) | raises `AdapterError(True, "llm_unavailable")` | `llm_unavailable` |
+| any other 4xx (408 and 409 included) | `LlmFailed(False, "llm_rejected", status)` | `llm_rejected` |
+| anything else the SDK raises (a 3xx included) | `LlmFailed(False, "llm_unexpected", None)` | `llm_unexpected` |
+
+Two cases raise before any request and record nothing: a tuple no candidate matches
+(`AdapterError(False, "llm_unknown_route")`, a deployment mismatch) and an unset key
+(`credential_not_set`). The SDK runs with `max_retries=0`, so the job runner owns every retry.
+
+**Metering and prices.**
+
+- **One row per request.** Each HTTP request attempted writes one `ai_usage` row through
+  `UsageMeterPort` before `run` returns or raises, so a `max_tokens` retry writes two rows. The
+  row holds the four token counts, `iterations` (the API's own `usage.iterations` count, else 1)
+  and the served model (the response's `model`, else the tuple's).
+- **A request with no response** records zero tokens, zero iterations and cost 0.
+- **Cost.** `nextron/adapters/ai/pricing.py` prices each request in micro-dollars, rounded up:
+
+  | Model | Input | Output | Cache read | 5-minute write | 1-hour write |
+  |---|---|---|---|---|---|
+  | Haiku 5.5, prompt of 100K tokens or fewer | $0.10 | $0.50 | $0.01 | $0.125 | $0.20 |
+  | Haiku 5.5, prompt over 100K tokens | $0.50 | $2.50 | $0.05 | $0.625 | $1.00 |
+  | Opus 5.5 | $4 | $20 | $0.20 | $5 | $8 |
+
+  The prices are per million tokens, and they come from the Claude API pricing reference
+  (cached 2026-11-03). **Check them against Anthropic's pricing page.**
+- **Unlisted models.** A model that isn't listed is priced at the dearest card, field by field,
+  so the budget errs toward stopping early.
+- **Cache writes.** They are split into 5-minute and 1-hour writes by `usage.cache_creation`
+  when the response gives it. Otherwise every write is priced at the 5-minute rate.
+
+**Secrets and text.**
+
+- The API key (`anthropic/api_key`, "Claude API key" on the Credentials page) is read on every
+  call and never kept. The SDK sends it as a bearer credential.
+- Prompt, block and response text never reaches an error, an `ai_usage` row, a result's `repr`
+  or a log record.
+- The gateway itself never logs. It keeps the `anthropic` logger at WARNING, because at DEBUG
+  that logger writes whole request bodies.
+
+**What comes later.**
+
+- **Story 2.8** versions the prompts (`prompts/<route>/v1.md`, `manifest.lock`,
+  `prompt_snapshots`) and activates one tuple per route. The system prompt text then comes from
+  the snapshot the activation names.
+- **Epic 4** adds:
+  - the Opus drafting, `classify_reply` and `call_prep` routes, with server-side `fallbacks`;
+  - `grounding_check`;
+  - Message Batches;
+  - `submit_batch`, `fetch_batch` and `delete_batch` on the port;
+  - the per-route effort and cost sizing.
 
 ## Engine health
 
@@ -1520,6 +1649,8 @@ uv run lint-imports                      # the import contracts on their own
 - `tests/fakes`: one in-memory fake per port, listed in `tests.fakes.PORT_FAKES` (`FrozenClock`
   for `Clock`, `InMemorySecrets` for `SecretsPort`, `InMemoryAlert` for `AlertPort`,
   `InMemoryUsageMeter` for `UsageMeterPort` (every HTTP adapter takes a `meter`),
+  `ScriptedLlm` for `LlmPort` (it makes the gateway's caller checks, then answers each `run`
+  with the next scripted result or error),
   `InMemoryMail` for `MailPort`, `InMemoryBackupTarget` for `BackupTargetPort` (it stores
   plaintext and can be scripted to fail any call), and in `tests/fakes/google_oauth.py`
   `FakeGoogleOAuth` for
@@ -1547,8 +1678,9 @@ uv run lint-imports                      # the import contracts on their own
 - **No live adapter can be built.** `nextron.adapters.secrets.default_backend` (Credential
   Manager), `nextron.adapters.google_oauth.default_http_client` (Google's OAuth endpoints, built
   on a `GoogleOAuthClient`'s first call), `nextron.adapters.telegram.default_http_client` (the
-  Telegram Bot API, built on a `TelegramAlert`'s first send) and the `build` of every
-  `ROLE_ADAPTERS` entry raise
+  Telegram Bot API, built on a `TelegramAlert`'s first send),
+  `nextron.adapters.ai.default_http_client` (the Claude API, built on a `ClaudeGateway`'s first
+  `run`) and the `build` of every `ROLE_ADAPTERS` entry raise
   `LiveAdapterInTests`, so `KeyringSecrets("test")`, or `main.build_app` without injected
   secrets, fails. Inject a fake
   (or patch `main.KeyringSecrets`). A test that has neutralised what a constructor reaches may
