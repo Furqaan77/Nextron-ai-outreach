@@ -885,6 +885,13 @@ and records it in `events` (cause `leads_merged`, `cause_ref` the merged Lead):
 - otherwise the later stage wins, with Not Now ranked just after `replied`;
 - a tie keeps the survivor's stage. The merged Lead keeps its own stage.
 
+**Closing a Lead.** `Pipeline.close(lead_id, stage, cause_ref)` (an owner command) closes a
+Lead at `lost` or `disqualified` (any other stage raises `ValueError`) from any open or parked
+stage, with one `events` row (cause `closed_lost` or `closed_disqualified`), and returns `True`;
+an already closed Lead is left as it is and gives `False`, and an unknown Lead raises
+`LookupError`. Story 3.3 calls it for opt-outs (see [The Suppression
+List](#the-suppression-list)); Story 4.8 adds stopping the Lead's Enrollments.
+
 Read a Lead with `queries.discovery.lead(lead_id)` (its identity group, merged or not, or
 `None`) and its stage with `queries.pipeline.stage(lead_id)` (a `PipelineStage`, or `None`).
 
@@ -1093,6 +1100,105 @@ Contacts resolve from the Lead's country; Story 2.10 passes office locations fro
 implemented by `nextron.adapters.email_syntax.EmailValidatorSyntax` over email-validator with
 deliverability checks off: no DNS lookup, so it is free and unmetered, and test and special-use
 domains (`.test`, `.local`) fail. The MX and disposable-domain checks come with Story 2.14.
+
+## The Suppression List
+
+The Suppression List (FR-50, FR-63, AD-16, Story 3.3) records everyone who said no, and every
+"do not contact" instruction, as permanent entries that hold **hashes, never a plain address,
+name or profile URL**. A person who opted out is matched however their details are written when
+they reappear, and stays matched after an erasure. Entries never expire and are never deleted.
+
+**Keys** (`nextron/domain/contactability.py`). An entry suppresses one key: its `kind` and
+`value_hash`, the lowercase hex SHA-256 of `<kind>:<normalised value>`, where the value is
+normalised only by `nextron.domain.identity` (`key_hash(kind, value)`):
+
+| Kind | Value | Normalised |
+|---|---|---|
+| `address` | an email address | `normalize_email`: trimmed and lowercased, **no plus-tag or dot stripping** (`jane.doe+x@firm.com` is another key than `jane.doe@firm.com`) |
+| `domain` | a domain, website or URL | `registrable_domain` (`www.firm.co.uk` and `firm.co.uk` are one key) |
+| `person` | a (full name, web domain) pair | `normalize_name(full name) + "\|" + registrable_domain(web domain)` |
+| `profile` | a LinkedIn profile URL | `normalize_linkedin_url` |
+
+An unknown kind raises `ValueError`, a wrong value type `TypeError` (a text for `person`, a pair
+for any other kind) and a value the normaliser refuses its `IdentityError`. Story 3.8's
+`addr_hash` is `bytes.fromhex(key_hash("address", address))`. A domain entry also keeps its
+domain as `domain_plain` (a firm's domain isn't personal data, and the Suppression List panel
+shows it); no other kind does.
+
+**Suppressing a Contact.** `Compliance(clock).suppress(subject, scope, source, cause_ref)`
+(`nextron/app/compliance/api.py`) is the only code that writes the list, an owner command that
+joins the caller's transaction:
+
+```python
+result = compliance.suppress(
+    ContactSubject(contact_id), SuppressionScope.PERSON, SuppressionSource.ONE_CLICK, token_id
+)
+# SuppressResult(written=(<new entry ids>...), existing=(<ids of keys already active>...))
+```
+
+1. **Arguments.** `subject` must be a `ContactSubject` (a stored Contact's ULID), `scope` a
+   `SuppressionScope` (`person`, or `firm` for "remove us") and `source` a `SuppressionSource`
+   (`TypeError` otherwise); `cause_ref` is `None` or the ULID of what caused it (`ValueError`
+   otherwise). An unknown Contact raises `LookupError`; no message holds an id or a value.
+2. **Keys.** Every key known for the person at that moment, in order: the address (when the
+   Contact has an email), the person key (when it has a name and its Lead a web domain) and the
+   profile key (when it has a LinkedIn URL). Scope `firm` adds `domain` keys: the registrable
+   domain of the address's domain part, then the Lead's web domain when it differs. **A free
+   webmail domain (`nextron.domain.markets.is_free_webmail`) is never a key**, so `jane@gmail.com`
+   at `firm.co.uk` adds only `firm.co.uk`. The list includes the common UK and US ISP mailbox
+   domains (`btinternet.com`, `comcast.net`, `rr.com` and its subdomains, and so on). A stored value that can't be normalised is no key:
+   a Contact with no known key gives an empty result and nothing is written or published.
+3. **Writes.** A key that already has an `active` entry gets no second row and raises no error
+   (its id is in `existing`). Each other key gets one `active` row and one `events` row
+   (entity `suppression_entries`, `None` to `active`, cause the source, the `cause_ref`; actor
+   `operator` for the `operator`, `import` and `dsr` sources, `system:compliance` for the
+   opt-outs). `events` holds IDs and codes only, and nothing is logged.
+4. **Publish.** With at least one key, `SubjectSuppressed(suppression_entry_id, source,
+   contact_id, lead_id)` is published, even when every key was already `active`, and its
+   subscribers run before commit: an exception in any of them rolls the entries back too. The
+   one subscriber so far is `Pipeline.close_suppressed`: for the **opt-out sources**
+   (`reply_rule`, `reply_class`, `one_click`, `mailto`) it closes the Lead `lost`
+   (`Pipeline.close`, cause `closed_lost`, `cause_ref` the entry); `operator`, `import` and `dsr`
+   leave the Pipeline Stage unchanged, and an already closed Lead stays as it is.
+
+**The table** (`suppression_entries`, owner `compliance`, migration
+`0022_3_3_suppression_entries`): `id`, `kind`, `value_hash` (64 lowercase hex characters),
+`domain_plain` (domain kind only), `status` (`active` or `voided`), `source` (`reply_rule`,
+`reply_class`, `one_click`, `mailto`, `operator`, `import` or `dsr`), `cause_ref`, `created_at`,
+and `voided_at` and `void_reason` (set together exactly when an entry is `voided`). A partial
+unique index allows one `active` row per (`kind`, `value_hash`). `value_hash` is PII class
+`keep_hash`, `void_reason` `redact` and the rest `none`. **Database triggers make it
+permanent, even against raw SQL:** any `DELETE` is refused; an `INSERT` must be `active`, and
+one whose id, or whose active key, exists is refused (so `INSERT OR REPLACE` can't replace an
+entry); an `UPDATE` may not change `id`, `kind`, `value_hash`, `domain_plain`, `source`,
+`cause_ref` or `created_at`, leave `voided`, void an entry whose source isn't `reply_rule`, or
+change a set `voided_at`. Only `void_reason` may change once an entry is voided (Story 3.13
+redacts it).
+
+**The SuppressionEntry machine** (`nextron/domain/suppression_entry.py`, AD-4): every entry is
+created `active` (`CREATION[source]`, cause the source); the only move is `void`, `active` to
+`voided`, cause `operator_reversal`, and `voided` is terminal (anything else raises
+`IllegalTransition`). Only a `reply_rule` entry can be voided (`VOIDABLE_SOURCES`); the command
+that does it, the Operator's `reverse_optout`, comes with the Suppression List panel (Story 3.5).
+
+**Contract tests** (`tests/contracts/test_suppression_contracts.py`): the repository's writer
+(`nextron/db/repos/compliance/suppression_entries.py`: readers `get` and `active_for`, writer
+`insert`) is used only in `nextron/app/compliance/api.py`; `SuppressionEntryRecord` is named only
+under `nextron/db/models` and `nextron/db/repos/compliance`; no string outside the migrations
+holds SQL that inserts, updates, deletes or replaces `suppression_entries`; no string (outside
+docstrings) names the table at all except in its homes: `db/models/compliance.py`, the
+migrations, `db/repos/compliance`, `app/compliance`, `app/queries/compliance.py`,
+`domain/backup.py`, `db/owners.py` and `db/pii_registry.py`. This catches f-strings,
+`sa.table(...)` and `metadata.tables[...]`. Finally, the compliance repository, API and queries,
+`domain/contactability.py` and `domain/suppression_entry.py` hold none of the following:
+- a delete, remove, purge, expire, expiry, TTL, prune, evict, truncate or drop function or call;
+- an SQL `DELETE`, or an SQL date modifier;
+- a `timedelta` or `relativedelta`;
+- a comparison with `created_at` or `voided_at`.
+
+Entries can't age out.
+
+Read one Contact with `queries.research.contact(contact_id)` (a `StoredContact`, or `None`).
 
 ## Sending Inboxes
 
@@ -1508,6 +1614,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0019_3_2_contact_markets` | rebuilds `contacts` (from 0015's exact table, which 0016 to 0018 leave unchanged, every row, check, foreign key and index kept) with four nullable columns after `market_id`: `market_basis`, `tz_basis`, `office_country` and `office_region`, and six checks (`ck_contacts_market_basis`, `ck_contacts_tz_basis`, `ck_contacts_resolved`, `ck_contacts_market_tz`, `ck_contacts_office_country`, `ck_contacts_office_region`) (see [Contact Markets and timezones](#contact-markets-and-timezones)) | `research` |
 | `0020_2_5_crawl` | `crawl_runs` (`ix_crawl_runs_lead_id`, a foreign key to `leads`, `ck_crawl_runs_outcome` and `ck_crawl_runs_counts`), `crawled_pages` (unique on `lead_id` and `url`, foreign keys to `leads` and `crawl_runs`, `ck_crawled_pages_kind`) and `ats_links` (unique on `lead_id` and `url`, foreign keys to `leads`, `crawl_runs` and `crawled_pages`, `ck_ats_links_tag`); no foreign key cascades (see [Website crawling](#website-crawling)) | `research` |
 | `0021_4_2_campaigns` | `offers` (unique `key`, `ck_offers_version`), `campaigns` (foreign keys to `segments`, `markets`, `offers` and `sequences` with no cascade; unique `key` and (`segment_id`, `market_id`); status, LIA-pair and version checks; two triggers refusing a non-draft GB Campaign without its assessment) and `variants` (a foreign key to `campaigns`; unique per Campaign by name; a status check; a trigger refusing a third Variant) (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)) | `setup` |
+| `0022_3_3_suppression_entries` | `suppression_entries`: the Suppression List (six checks, the partial unique index `uq_suppression_entries_active_key` for one `active` row per key, and four triggers refusing a delete, a replace, a non-`active` insert and any change but one void) (see [The Suppression List](#the-suppression-list)) | `compliance` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

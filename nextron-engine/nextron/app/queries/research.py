@@ -3,6 +3,8 @@
 Import rule: ``nextron.domain`` and ``nextron.db.repos.research`` only. All read through the
 current unit of work, read-only ones included.
 
+- ``contact(contact_id)``: the Contact as a ``StoredContact``, or ``None`` when no Contact has
+  that id (a text that isn't a ULID included).
 - ``contacts(lead_id)``: the Lead's Contacts as ``StoredContact`` rows, oldest first (by
   ``created_at``, then ``id``); empty for an unknown Lead (a text that isn't a ULID included).
 - ``provenance(contact_id)``: the Contact's Provenance Records as ``StoredProvenance`` rows, by
@@ -35,6 +37,7 @@ __all__ = [
     "StoredPage",
     "StoredProvenance",
     "ats_links",
+    "contact",
     "contacts",
     "crawl_run",
     "crawled_pages",
@@ -42,6 +45,13 @@ __all__ = [
     "lead_provenance",
     "provenance",
 ]
+
+
+def contact(contact_id: str) -> StoredContact | None:
+    """The Contact ``contact_id``, or ``None``."""
+    if not is_ulid(contact_id):
+        return None
+    return contacts_repo.get(contact_id)
 
 
 def contacts(lead_id: str) -> tuple[StoredContact, ...]:

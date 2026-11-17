@@ -44,6 +44,15 @@ def copy_of(engine: Engine, tmp_path: Path, *statements: str) -> Path:
     return target
 
 
+def suppression_row(n: int) -> str:
+    """An INSERT of the ``n``-th valid ``active`` Suppression List entry (Story 3.3's table)."""
+    return (
+        "INSERT INTO suppression_entries (id, kind, value_hash, status, source, created_at) "
+        f"VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0{n:02d}', 'address', '{n:064x}', 'active', "
+        "'operator', '2026-11-18T09:00:00.000000Z')"
+    )
+
+
 @contextmanager
 def unchanged(path: Path) -> Iterator[None]:
     """The file's bytes are the same afterwards, and nothing was created beside it."""
@@ -62,8 +71,8 @@ def test_a_good_copy_at_head_counts_the_counted_tables_it_has(
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    # suppression_entries is absent until its story; provenance_records exists (Story 2.3)
-    assert found == CopyInspection("ok", HEAD, HEAD, True, None, 0)
+    # both counted tables exist at head (Stories 2.3 and 3.3), empty here
+    assert found == CopyInspection("ok", HEAD, HEAD, True, 0, 0)
 
 
 def test_a_good_copy_counts_the_suppression_and_provenance_rows(
@@ -72,11 +81,10 @@ def test_a_good_copy_counts_the_suppression_and_provenance_rows(
     copy = copy_of(
         db_engine,
         tmp_path,
-        "CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)",
-        "INSERT INTO suppression_entries DEFAULT VALUES",
-        "INSERT INTO suppression_entries DEFAULT VALUES",
-        "INSERT INTO suppression_entries DEFAULT VALUES",
-        # provenance_records exists at head (Story 2.3), empty here
+        suppression_row(1),
+        suppression_row(2),
+        suppression_row(3),
+        # both counted tables exist at head (Stories 2.3 and 3.3); provenance_records is empty
     )
 
     with unchanged(copy):
@@ -85,19 +93,24 @@ def test_a_good_copy_counts_the_suppression_and_provenance_rows(
     assert found == CopyInspection("ok", HEAD, HEAD, True, 3, 0)
 
 
-def test_a_copy_with_one_counted_table_absent(db_engine: Engine, tmp_path: Path) -> None:
-    copy = copy_of(
-        db_engine,
-        tmp_path,
-        "CREATE TABLE suppression_entries (id INTEGER PRIMARY KEY)",
-        "INSERT INTO suppression_entries DEFAULT VALUES",
-        "DROP TABLE provenance_records",  # it exists at head (Story 2.3)
-    )
+@pytest.mark.parametrize(
+    ("statements", "counts"),
+    [
+        ((suppression_row(1), "DROP TABLE provenance_records"), (1, None)),
+        (("DROP TABLE suppression_entries",), (None, 0)),
+    ],
+    ids=["provenance_records", "suppression_entries"],
+)
+def test_a_copy_with_one_counted_table_absent(
+    db_engine: Engine, tmp_path: Path, statements: tuple[str, ...], counts: tuple[int | None, ...]
+) -> None:
+    # both tables exist at head (Stories 2.3 and 3.3): the copy lost one
+    copy = copy_of(db_engine, tmp_path, *statements)
 
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    assert (found.suppression_count, found.provenance_count) == (1, None)
+    assert (found.suppression_count, found.provenance_count) == counts
 
 
 def test_a_file_that_is_not_a_database_is_an_integrity_error(tmp_path: Path) -> None:
@@ -131,8 +144,8 @@ def test_a_copy_at_another_revision_reports_it_and_whether_it_is_known(
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    # provenance_records exists at head (Story 2.3), empty here
-    assert found == CopyInspection("ok", revision, HEAD, known, None, 0)
+    # both counted tables exist at head (Stories 2.3 and 3.3), empty here
+    assert found == CopyInspection("ok", revision, HEAD, known, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -148,8 +161,8 @@ def test_a_copy_whose_revision_cannot_be_read_has_none(
     with unchanged(copy):
         found = inspect_copy(copy)
 
-    # provenance_records exists at head (Story 2.3), empty here
-    assert found == CopyInspection("ok", None, HEAD, False, None, 0)
+    # both counted tables exist at head (Stories 2.3 and 3.3), empty here
+    assert found == CopyInspection("ok", None, HEAD, False, 0, 0)
 
 
 def test_a_corrupted_copy_reports_the_first_integrity_line_and_reads_nothing_else(
@@ -158,9 +171,9 @@ def test_a_corrupted_copy_reports_the_first_integrity_line_and_reads_nothing_els
     copy = copy_of(
         db_engine,
         tmp_path,
-        "CREATE TABLE suppression_entries (value TEXT)",
-        "CREATE INDEX ix_suppression_value ON suppression_entries (value)",
-        "INSERT INTO suppression_entries VALUES ('QZXMARKERVALUE')",
+        "CREATE TABLE probe_rows (value TEXT)",
+        "CREATE INDEX ix_probe_value ON probe_rows (value)",
+        "INSERT INTO probe_rows VALUES ('QZXMARKERVALUE')",
     )
     data = copy.read_bytes()
     at = data.rindex(b"QZXMARKERVALUE")
@@ -170,8 +183,8 @@ def test_a_corrupted_copy_reports_the_first_integrity_line_and_reads_nothing_els
         found = inspect_copy(copy)
 
     assert found.integrity in (
-        "row 1 missing from index ix_suppression_value",
-        "wrong # of entries in index ix_suppression_value",
+        "row 1 missing from index ix_probe_value",
+        "wrong # of entries in index ix_probe_value",
     )
     assert found == CopyInspection(found.integrity, None, HEAD, False, None, None)
 

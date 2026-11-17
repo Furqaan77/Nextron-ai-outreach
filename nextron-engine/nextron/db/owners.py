@@ -287,6 +287,20 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "last_seen_at",
         ),
     },
+    "suppression_entries": {
+        "compliance": (
+            "id",
+            "kind",
+            "value_hash",
+            "domain_plain",
+            "status",
+            "source",
+            "cause_ref",
+            "created_at",
+            "voided_at",
+            "void_reason",
+        ),
+    },
     "jobs": {
         "jobqueue": (
             "id",

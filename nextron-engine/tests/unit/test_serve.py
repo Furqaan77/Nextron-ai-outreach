@@ -27,7 +27,7 @@ from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, is_command
 from nextron.domain.backup import BackupKind, BackupNotVerified
 from nextron.domain.ai import RouteSpec
-from nextron.domain.notifications import NOTIFICATIONS, LeadsMerged
+from nextron.domain.notifications import NOTIFICATIONS, LeadsMerged, SubjectSuppressed
 from nextron.domain.prompts import PromptFile
 from nextron.lock import InstanceLock, LockHeldError
 from nextron.startup_checks import Probes
@@ -689,7 +689,7 @@ def test_the_database_engine_is_disposed_when_a_migration_fails(
     assert_disposed(engine, dev / "nextron.db")
 
 
-def test_build_subscribers_registers_reparent_lead_for_leads_merged_only() -> None:
+def test_build_subscribers_registers_reparent_lead_and_close_suppressed_only() -> None:
     subscribers = main.build_subscribers()
 
     assert subscribers.frozen
@@ -698,17 +698,25 @@ def test_build_subscribers_registers_reparent_lead_for_leads_merged_only() -> No
     assert [subscriber.__name__ for subscriber in found] == ["reparent_lead", "reparent_lead"]
     owners = [type(getattr(subscriber, "__self__", None)) for subscriber in found]
     assert owners == [Pipeline, Research]  # pipeline first, then research
-    others = [kind for kind in NOTIFICATIONS if kind is not LeadsMerged]
+    [suppressed] = subscribers.subscribers_of(SubjectSuppressed)  # Story 3.3
+    assert is_command(suppressed)
+    assert suppressed.__name__ == "close_suppressed"
+    assert type(getattr(suppressed, "__self__", None)) is Pipeline
+    others = [kind for kind in NOTIFICATIONS if kind not in (LeadsMerged, SubjectSuppressed)]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
 
 
 def test_build_subscribers_gives_its_services_the_clock() -> None:
     clock = FrozenClock()
 
-    found = main.build_subscribers(clock=clock).subscribers_of(LeadsMerged)
+    subscribers = main.build_subscribers(clock=clock)
+    found = [
+        *subscribers.subscribers_of(LeadsMerged),
+        *subscribers.subscribers_of(SubjectSuppressed),
+    ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock, clock]
+    assert clocks == [clock, clock, clock]
 
 
 def test_cli_dispatches_serve(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -759,7 +767,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0022_more", create_table("more")))
+    extend(location, ("0023_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -773,7 +781,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0022_more"
+    assert spy.calls[0]["db_revision"] == "0023_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade

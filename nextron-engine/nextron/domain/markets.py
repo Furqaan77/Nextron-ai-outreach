@@ -170,8 +170,9 @@ _PLACEHOLDER_NAMES: Final = frozenset(member.value for member in FooterPlacehold
 _PLACEHOLDERS_LISTED: Final = ", ".join(f"{{{member.value}}}" for member in FooterPlaceholder)
 
 # Free webmail providers (Story 3.1 Design Notes, extended in review with more UK ISP and free
-# providers): a domain, or any subdomain of one, is free webmail. A UK Market never emails one
-# (PECR: corporate subscribers only).
+# providers, and in Story 3.3's review with the common US ISP mailbox domains): a domain, or any
+# subdomain of one, is free webmail. A UK Market never emails one (PECR: corporate subscribers
+# only), and the Suppression List never suppresses one whole (Story 3.3, firm scope).
 FREE_WEBMAIL_DOMAINS: Final = frozenset(
     {
         # Google
@@ -226,6 +227,27 @@ FREE_WEBMAIL_DOMAINS: Final = frozenset(
         "wanadoo.co.uk",
         "plus.com",
         "freeserve.co.uk",
+        # US providers
+        "comcast.net",
+        "att.net",
+        "sbcglobal.net",
+        "bellsouth.net",
+        "verizon.net",
+        "cox.net",
+        "charter.net",
+        "earthlink.net",
+        "optonline.net",
+        "optimum.net",
+        "rr.com",
+        "roadrunner.com",
+        "windstream.net",
+        "centurylink.net",
+        "embarqmail.com",
+        "frontiernet.net",
+        "juno.com",
+        "netzero.net",
+        "netzero.com",
+        "mindspring.com",
         # Tuta
         "tutanota.com",
         "tutanota.de",

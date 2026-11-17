@@ -289,6 +289,21 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "first_seen_at": PiiClass.NONE,
         "last_seen_at": PiiClass.NONE,
     },
+    # Story 3.3. The Suppression List keeps only a key's hash (kept after an erasure, so an
+    # erased person stays suppressed) and, for a firm's domain, the domain itself; the void
+    # reason is the Operator's free text.
+    "suppression_entries": {
+        "id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "value_hash": PiiClass.KEEP_HASH,
+        "domain_plain": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "source": PiiClass.NONE,
+        "cause_ref": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "voided_at": PiiClass.NONE,
+        "void_reason": PiiClass.REDACT,
+    },
     # Payloads and keys hold IDs and scalars only (AD-10, AD-17). last_error is free text: an
     # exception's message is redacted and cut to 500 characters, but could still name a person.
     "jobs": {

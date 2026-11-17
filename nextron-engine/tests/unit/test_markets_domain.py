@@ -937,15 +937,23 @@ REVIEW_WEBMAIL = {  # added in review (P1): more UK ISP and free providers
     *("tuta.io", "tuta.com", "tutanota.de"),
     *("zoho.com", "zohomail.com"),
 }
+US_ISP_WEBMAIL = {  # added in Story 3.3's review: the common US ISP mailbox domains
+    *("comcast.net", "att.net", "sbcglobal.net", "bellsouth.net", "verizon.net"),
+    *("cox.net", "charter.net", "earthlink.net", "optonline.net", "optimum.net"),
+    *("rr.com", "roadrunner.com", "windstream.net", "centurylink.net", "embarqmail.com"),
+    *("frontiernet.net", "juno.com", "netzero.net", "netzero.com", "mindspring.com"),
+}
 
 
 def test_the_vendored_list_holds_the_acs_twelve_and_the_design_notes_list() -> None:
     assert set(AC_WEBMAIL) <= FREE_WEBMAIL_DOMAINS
-    assert FREE_WEBMAIL_DOMAINS == DESIGN_NOTES_WEBMAIL | REVIEW_WEBMAIL
+    assert FREE_WEBMAIL_DOMAINS == DESIGN_NOTES_WEBMAIL | REVIEW_WEBMAIL | US_ISP_WEBMAIL
     assert isinstance(FREE_WEBMAIL_DOMAINS, frozenset)
 
 
-@pytest.mark.parametrize("domain", sorted(DESIGN_NOTES_WEBMAIL | REVIEW_WEBMAIL))
+@pytest.mark.parametrize(
+    "domain", sorted(DESIGN_NOTES_WEBMAIL | REVIEW_WEBMAIL | US_ISP_WEBMAIL)
+)
 def test_every_listed_domain_is_free_webmail(domain: str) -> None:
     assert is_free_webmail(domain)
     assert is_free_webmail(f"someone@{domain.upper()}")
