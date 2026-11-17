@@ -145,6 +145,8 @@ FILES = [
     "nextron/web/static/app.css",
     "workers/unsubscribe/.gitkeep",
     "scripts/gen_owner_contracts.py",
+    "scripts/run.ps1",
+    "scripts/install_logon_task.ps1",
     "scripts/spike/fake_serve.py",
     "scripts/spike/oq_a9.ps1",
     "scripts/spike/supervisor.ps1",
@@ -158,6 +160,8 @@ FILES = [
     "tests/fakes/units.py",
     "tests/fakes/usage_meter.py",
     "tests/live_guard.py",
+    "tests/task_scheduler_guard.py",
+    "tests/fake_serve.py",
     "tests/contracts/safe_allowlist.txt",
 ]
 FOLDERS = [

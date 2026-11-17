@@ -52,6 +52,18 @@ database, the notification subscriber registry and Uvicorn.
 
 Any other error is logged as ``engine_crashed`` and ends with exit 1.
 
+**Stopping (Story 1.21).** The supervisor stops the engine gracefully with CTRL_BREAK, sent to the
+engine's own process group (``run.ps1 -Stop`` or ``-Restart``). Uvicorn 0.54 catches SIGBREAK,
+shuts down (the lifespan stops the runner, the scheduler and the heartbeat), restores the handler
+it found and then raises the signal again to it. On Windows ``serve`` therefore installs a
+SIGBREAK handler that raises ``SystemExit(0)`` just before ``run_server`` (``_stop_on_ctrl_break``)
+and puts the previous one back afterwards. The CTRL_BREAK Uvicorn raises again after its graceful
+shutdown lands there, and so does one that arrives before Uvicorn takes the signal over (while the
+app is built and Uvicorn sets up, before anything has started). Either way ``run_server`` ends with
+``SystemExit(0)``, ``engine_stopped`` is logged and the exit code is 0. A CTRL_BREAK that comes
+before ``run_server`` (during a migration, say) or after ``serve`` has returned ends the process
+at once, as before; a migration then rolls back and runs again at the next start.
+
 ``build_subscribers`` is the notification subscriber registry (AD-3): the only code that
 constructs ``Subscribers`` or registers a subscriber. It ships empty and frozen; each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists.
@@ -220,7 +232,8 @@ file)`` (``nextron.app.ops.api``), whose file is ``<data dir>\\heartbeat``
 30 s, writing the ``runner_heartbeat`` row and then touching the file, but only while every lane
 thread and the keeper are alive, no running job has passed its ``max_runtime`` and the
 scheduler's event loop answers its probe. The supervisor (``scripts/run.ps1``, Story 1.21)
-restarts the engine when the file is more than 5 minutes old.
+restarts the engine when the file stays unchanged for 300 s of its own polls (900 s before the
+first beat).
 
 **The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer,
 recovery_runner.startup)`` to ``create_app``, so all three start when the server starts and stop
@@ -347,15 +360,17 @@ import contextvars
 import functools
 import logging
 import os
+import signal
 import sys
 import tempfile
+import threading
 import webbrowser
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from types import MappingProxyType
+from types import FrameType, MappingProxyType
 from typing import Final, Protocol, TextIO
 
 import uvicorn
@@ -1105,6 +1120,33 @@ def run_uvicorn(config: BootstrapConfig, reload: bool, units: UnitOfWorkFactory)
         )
 
 
+def _exit_on_ctrl_break(signum: int, frame: FrameType | None) -> None:
+    """The SIGBREAK handler ``serve`` installs while the server runs: a clean stop, exit 0."""
+    raise SystemExit(0)
+
+
+@contextlib.contextmanager
+def _stop_on_ctrl_break() -> Iterator[None]:
+    """On Windows, a SIGBREAK handler that raises ``SystemExit(0)`` while the server runs, then
+    the previous one back.
+
+    Uvicorn saves this handler, catches CTRL_BREAK itself, shuts down gracefully, restores the
+    handler and raises the signal again to it. A CTRL_BREAK before Uvicorn takes the signal over
+    lands here directly. Either way ``run_server`` ends with ``SystemExit(0)`` and ``serve``
+    exits 0. Elsewhere, or off the main thread (where ``signal.signal`` can't be called), it
+    changes nothing.
+    """
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(sigbreak, _exit_on_ctrl_break)
+    try:
+        yield
+    finally:
+        signal.signal(sigbreak, previous if previous is not None else signal.SIG_DFL)
+
+
 def _report_failures(results: list[CheckResult], err: TextIO) -> bool:
     failures = [result for result in results if result.status is Status.FAIL]
     for result in failures:
@@ -1192,7 +1234,8 @@ def serve(
             log.info("engine_started", extra={**identity, "db_revision": db_revision})
             exit_code = EXIT_CRASHED
             try:
-                run_server(config, reload, units)
+                with _stop_on_ctrl_break():
+                    run_server(config, reload, units)
                 exit_code = EXIT_OK
             except SystemExit as exc:
                 if exc.code in (None, 0):

@@ -155,13 +155,22 @@ that cross-origin POST gets 403 `Request refused: security check failed` instead
 
 | Exit code | Meaning |
 |---|---|
-| 0 | stopped normally |
+| 0 | stopped normally, CTRL_BREAK included |
 | 1 | unexpected error (a Python traceback) |
 | 2 | `NEXTRON_ENV` unset or invalid, another invalid setting, a failed startup check (the message names it, `database_revision` and `pre_migrate_backup` included), a data dir that can't be created, a failed database migration, or a server that failed to start |
 | 3 | another instance is running for this environment |
 
-The supervisor (`scripts/run.ps1`, a later story) restarts the engine on any exit except 3.
-It watches the heartbeat file, not `/health`.
+**Stopping.** Ctrl+C in the terminal stops `serve` gracefully, and so does CTRL_BREAK, which is
+how the supervisor stops it. Uvicorn shuts down (the runner, the scheduler and the heartbeat
+stop), then `serve` logs `engine_stopped` and exits 0. While the server runs, `serve` answers
+CTRL_BREAK with `SystemExit(0)`: so does a CTRL_BREAK that arrives while the app is being built
+and Uvicorn sets up, before anything has started. One that comes earlier, while the database is
+opened (during a migration, say), ends the engine at once, like a kill: a migration then rolls
+back and runs again at the next start.
+
+The supervisor (`scripts/run.ps1`, see [Start at logon and
+supervision](#start-at-logon-and-supervision)) restarts the engine on any exit except 3, and
+stops after five exits with code 2 in a row. It watches the heartbeat file, not `/health`.
 
 ## Open the dashboard
 
@@ -1125,8 +1134,11 @@ uv run nextron restore "E:\NextronBackups\nextron-prod-20261116T100000.000Z.db.e
 uv run nextron restore "$env:LOCALAPPDATA\Nextron\backups\dev\local\nextron-dev-20261116T100000.000Z.db" --yes
 ```
 
-**Before you restore**, stop the engine, and stop its supervisor first (`scripts/run.ps1`,
-Story 1.21) so it doesn't start the engine again in the middle: while the engine holds
+**Before you restore**, stop the engine together with its supervisor, so nothing starts the
+engine again in the middle: `powershell -NoProfile -ExecutionPolicy Bypass -File
+scripts\run.ps1 -Env prod -Stop` (see [Start at logon and
+supervision](#start-at-logon-and-supervision)). After the restore, start it again with
+`Start-ScheduledTask -TaskName 'Nextron Engine (prod)'`. While the engine holds
 `<data dir>\nextron.lock`, `restore` prints `stop the engine before restoring` and exits 1
 without changing or logging anything. **On a new PC**, an encrypted `.db.enc` copy needs the
 Backup passphrase in Credential Manager first: start the engine once, enter it on the
@@ -1308,21 +1320,22 @@ failing also leaves the file stale. The beat is **withheld** while:
    alive, so this is what catches it);
 3. `scheduler_down`: the scheduler stopped, or the event loop doesn't answer within 10 s.
 
-The supervisor (`scripts/run.ps1`, Story 1.21) restarts the engine when the file is more than
-5 minutes old. A dead thread or a stuck event loop therefore restarts the engine about 5
-minutes later. A hung handler stops the beat only once its job passes its `max_runtime`, so the
-engine restarts about `max_runtime` + 5 minutes after that job started. The restart interrupts
-every lane, not just the hung one; the interrupted jobs run again (handlers are idempotent).
+The supervisor (`scripts/run.ps1`, Story 1.21) restarts the engine when the file stays
+unchanged for 5 minutes of its own polls (15 minutes before the first beat). A dead thread or a
+stuck event loop therefore restarts the engine about 5 minutes later. A hung handler stops the
+beat only once its job passes its `max_runtime`, so the engine restarts about `max_runtime` + 5
+minutes after that job started. The restart interrupts every lane, not just the hung one; the
+interrupted jobs run again (handlers are idempotent).
 
 **After a PC sleep** the heartbeat file is as old as the sleep until the next beat, up to 30 s
 after the wake. A job running across the sleep counts the sleep toward its `max_runtime`
 (the runner's clock counts sleep too), so the beat may stay withheld until that job returns.
-`run.ps1` must allow for a wake before it calls the file stale; that is left to Story 1.21.
-The spike's supervisor handles its own side of this. It counts stale time in its own polls, so
-time asleep never counts, and it gives a new child a start grace before its first beat (see
-[Logon task spike](#logon-task-spike-oq-a9)). That doesn't cover the engine's side: a job past
-its `max_runtime` after a wake still withholds the beat, and Story 1.21 needs an engine-side
-answer for that.
+`run.ps1` handles its own side of this: it counts stale time in its own polls, so time asleep
+never counts, and it gives a new child a start grace before its first beat (see [Start at logon
+and supervision](#start-at-logon-and-supervision)). That doesn't cover the engine's side: a job
+past its `max_runtime` after a wake still withholds the beat, and `run.ps1` then restarts the
+engine 5 minutes of polls later. The engine-side answer is deferred (`deferred-work.md`, Story
+1.21 entry).
 
 Logs carry no personal data and are written only when the outcome changes:
 `heartbeat_withheld` (WARNING, `reason`), `heartbeat_failed` (ERROR, `code`, once per streak of
@@ -1399,8 +1412,200 @@ look for, and has a Result column for the evidence.
 
 `tests/app/test_spike_supervisor.py` drives `supervisor.ps1` with the fake on the test's Python.
 It also runs `oq_a9.ps1`'s dry run, refusals, Kill, Stall, Exit3 and Unregister, with every
-ScheduledTasks state command shadowed by a tripwire. It never calls a Task Scheduler command and
-never starts `uv`.
+ScheduledTasks state command shadowed by a tripwire (`tests/task_scheduler_guard.py`, shared
+with Story 1.21's tests). It never calls a Task Scheduler command and never starts `uv`.
+
+## Start at logon and supervision
+
+Story 1.21 (AD-20, OP-3 to OP-5, NFR-14, NFR-42) starts the engine at logon and keeps it running.
+Both scripts are for Windows PowerShell 5.1 and live in `scripts\`:
+
+- `run.ps1 -Env <env>` is the supervisor. It runs `nextron serve` for one environment, restarts
+  it after a crash or a hang, and stops or restarts it when you ask.
+- `install_logon_task.ps1` registers the logon task "Nextron Engine (prod)", which runs
+  `run.ps1 -Env prod` each time you sign in.
+
+**Before the first `prod` install**, two things must be in place: the spike's rows 1, 2, 5 and 7
+must pass (see [Logon task spike](#logon-task-spike-oq-a9)), and each data dir must be bound to
+its environment (the Story 1.8 entry in `deferred-work.md`).
+
+**Run `prod` from a checkout of its own.** Every automatic restart runs whatever code is on disk
+at that moment, and a migration can't be undone. So the task must run from a dedicated, clean
+checkout at a released commit: a separate clone, or a `git worktree` of one (for example
+`git worktree add ..\nextron-prod <released commit>`). Change it only through the upgrade steps
+below. Never point the task at the checkout you develop in or merge into.
+
+### Install, check and remove the task
+
+From the `prod` checkout's `nextron-engine` folder, in a **normal** (not "Run as administrator")
+PowerShell:
+
+```powershell
+cd "<your prod checkout>\nextron-engine"
+uv sync --frozen
+$install = "scripts\install_logon_task.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File $install              # dry run: prints the task
+powershell -NoProfile -ExecutionPolicy Bypass -File $install -Register    # registers it
+Start-ScheduledTask -TaskName 'Nextron Engine (prod)'                       # start it now, or sign in again
+Get-ScheduledTask -TaskName 'Nextron Engine (prod)' | Get-ScheduledTaskInfo   # LastTaskResult, read-only
+powershell -NoProfile -ExecutionPolicy Bypass -File $install -Uninstall   # stops it, then removes it
+```
+
+- With no switch it prints the task and registers nothing.
+- The dry run and `-Register` also print the `uv.exe` they find on PATH, or `uv.exe : not found
+  on PATH; run.ps1 cannot start the engine`. That is a warning, not a refusal: without `uv.exe`,
+  `run.ps1` logs `start_failed` and retries forever.
+- `-Register` registers the task for you, replacing one of that name (`-Force`), then prints
+  `Get-ScheduledTask` and `Get-ScheduledTaskInfo`. If that read-back fails, it says so in one
+  line and still exits 0: the task is registered. The task starts at your next sign-in.
+- `-Uninstall` stops the task when it runs, which ends `run.ps1` and the engine at once, then
+  removes it. With no such task it says there is nothing to remove. If the stop fails it removes
+  nothing and exits 1, so `run.ps1` is never left running without its task. For a graceful
+  stop, run `run.ps1 -Env prod -Stop` first.
+- Every call names the root task folder (`-TaskPath \`), so a task of the same name in another
+  folder is never read or changed.
+- It refuses (one line, exit 2, nothing called) to run elevated, `-Register` with `-Uninstall`,
+  and, under `NEXTRON_ENV=test`, any Task Scheduler command that comes from a module: the tests
+  run it only with every such command replaced by a fake.
+
+The task is the one the OQ-A9 spike proved:
+
+- trigger: at logon of the current user;
+- principal: Interactive, Limited (not elevated);
+- settings: no time limit (PT0S), runs and keeps running on batteries, starts when available
+  after a missed start, and a second start while it runs is ignored (IgnoreNew);
+- action: `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden
+  -File "<checkout>\nextron-engine\scripts\run.ps1" -Env prod`, in `nextron-engine`.
+
+Its priority stays Task Scheduler's default, 7 (below normal). Nothing restarts a supervisor that
+died or alerts on a crash loop or a stop, and the window is meant to stay hidden (Mac checks it).
+Mac decides each of these.
+
+### What run.ps1 does
+
+`run.ps1` runs `uv run --frozen python -m nextron serve` in `nextron-engine`, with `NEXTRON_ENV`
+and `NEXTRON_DATA_DIR` set for that child only. The data dir is the engine's own:
+`NEXTRON_DATA_DIR` (with `%VAR%` and a leading `~` expanded, and a relative path taken against
+`nextron-engine`), or else `%LOCALAPPDATA%\Nextron\<env>`. If you set `NEXTRON_DATA_DIR` for the
+task, write any variable in it as `%VAR%`: `run.ps1` doesn't expand `$VAR` or `${VAR}`, though
+the engine would.
+
+- **A job object per child.** Each child starts suspended, in a new process group, inside a
+  kill-on-close job of its own, and runs only once it is in the job. A kill ends uv, the venv
+  launcher and Python together, and ending `run.ps1` (`Stop-ScheduledTask`, or "End" in Task
+  Scheduler) ends the engine with it.
+- **Crashes.** Any exit restarts the child after a backoff of 5 s, doubling to 5 minutes. A child
+  that ran 10 minutes since its first heartbeat resets the backoff to 5 s, so a start that hangs
+  never does.
+- **Exit 3** (another engine holds the lock) ends the loop, and `run.ps1` exits 3.
+- **Exit 2 five times in a row** (a failing startup check or migration) ends the loop, and
+  `run.ps1` exits 2. Any other outcome resets the count.
+  - The count includes `uv`'s own failures, which also exit 2: for example, `uv run --frozen`
+    failing to sync while offline after a quick `git pull` and `-Restart`. When the dependencies
+    change, use AD-20's upgrade route (`uv sync --frozen` before the start; see Upgrade below).
+  - Each start of a migration that fails with exit 2 takes a new `pre_migrate` copy, so this caps
+    those copies at five per task start. A start that hangs instead (no beat within the
+    15-minute grace) is killed and retried without end, each time with a new copy.
+- **Hangs.** Every 5 s `run.ps1` checks `<data dir>\heartbeat`. Each check that finds it unchanged
+  adds 5 s, and a change resets the count. At 5 minutes after the child's first beat, or 15
+  minutes before it (a slow migration or recovery pass), the job is killed and the child
+  restarted. The count is of `run.ps1`'s own checks, so a PC sleep never counts as a hang.
+- **Orphans.** If the child ends but its job still holds a process (uv gone, Python still
+  running), the job is killed before the restart.
+- **One supervisor per data dir.** `run.ps1` holds `<data dir>\supervisor.lock` open for its whole
+  run. A second one prints one line and exits 3, and starts nothing.
+
+| `run.ps1` exit code | Meaning (Task Scheduler shows it as the last result) |
+|---|---|
+| 0 | stopped by `-Stop` |
+| 1 | `run.ps1` itself failed (`supervisor_error` in its log) |
+| 2 | five exit 2s in a row, or more than one of `-Stop`, `-Restart` and `-Status` |
+| 3 | the engine's own exit 3, or another `run.ps1` already supervises this data dir |
+
+### Stop, restart and status
+
+From a second PowerShell, in this folder:
+
+```powershell
+$run = "scripts\run.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File $run -Env prod -Status    # running? heartbeat age, last 15 log lines
+powershell -NoProfile -ExecutionPolicy Bypass -File $run -Env prod -Restart   # stop the engine gracefully, start it again
+powershell -NoProfile -ExecutionPolicy Bypass -File $run -Env prod -Stop      # stop the engine and the supervisor
+```
+
+- `-Stop` and `-Restart` leave a one-shot request in `<data dir>\supervisor-request`. Within 5 s
+  `run.ps1` sends CTRL_BREAK to the engine, which shuts down cleanly (`engine_stopped`, exit 0,
+  in `nextron.log`). After 60 s it kills the job instead. A request that comes during a backoff
+  is answered within 5 s too, without waiting for the backoff to end.
+- `-Stop` waits until `run.ps1` has ended and prints `stopped: ...`.
+- `-Restart` waits until `run.ps1` has started a new engine process (its `start` event), then
+  prints `restarted: ...` with that process's pid. That the process started doesn't yet mean the
+  engine serves: `-Status` shows when its heartbeat moves.
+- Each exits 0, or 1 after 120 s without an answer (the unanswered request is withdrawn).
+- With no `run.ps1` running, both print one line and exit 1, and write nothing.
+- After `-Stop` the task shows Ready. Start it again with `Start-ScheduledTask -TaskName
+  'Nextron Engine (prod)'`, or sign out and in.
+
+**Restore.** Stop with `-Stop`, run `nextron restore` (see [Restore and recovery
+mode](#restore-and-recovery-mode)), then `Start-ScheduledTask -TaskName 'Nextron Engine (prod)'`.
+
+**Upgrade.** Either route takes the new code's `pre_migrate` copy and migrates before the runner
+starts (see [Database](#database)):
+
+1. AD-20's order, which also picks up a change to `run.ps1` itself: `-Stop`, `git pull`,
+   `uv sync --frozen`, then `Start-ScheduledTask -TaskName 'Nextron Engine (prod)'`. Use this
+   one whenever the dependencies (`uv.lock`) change.
+2. The quick route: `git pull`, then `-Restart`. `uv run --frozen` syncs the packages while the
+   engine is stopped; if that sync fails (offline, say), `uv` exits 2 and five failures in a row
+   stop `run.ps1`. `run.ps1` keeps running its old code until the task next starts.
+
+Both run in the `prod` checkout, at a released commit.
+
+### The supervisor log
+
+`<data dir>\logs\supervisor.log` holds JSON lines (UTF-8, no BOM, UTC times), each with `ts`,
+`event` and `supervisor_pid`. It rotates at 1 MiB, keeping `supervisor.log.1` to `.3`.
+
+- `supervisor_start`: every setting, the data dir and the command; `request_discarded`: a request
+  written before this `run.ps1` took its lock was deleted unread (one written since is answered).
+- `start` (`attempt`, `pid`); `start_failed` (`attempt`, `error`).
+- `exit`: `pid`, `code`, `uptime_s`, `up_s` (since the first beat, or null), `killed`,
+  `requested`. A child stopped on request through uv shows uv's own code, -1073741510
+  (0xC000013A, ended by CTRL_BREAK); the engine's code is in `engine_stopped`.
+- `stale` (`pid`, `quiet_s`, `limit_s`, `before_first_beat`); `kill` (`reason`: `stale`,
+  `orphans`, `stop_timeout` or `ctrl_break_failed`; `method`: `job`, or `process_kill` when the
+  job was not empty 10 s later; `ok`, `pids`).
+- `request` (`text`, `accepted`, `id`); `backoff` (`wait_s`); `stop` (`code`, `reason`:
+  `requested`, `lock_held` or `repeated_exit_2`); `max_restarts` (tests only).
+- `supervisor_refused` (another `run.ps1` holds the lock); `supervisor_error` (`error`).
+
+**Not covered yet:** the engine's side of a PC wake (a job that ran across a sleep can pass its
+`max_runtime` and withhold the beat; `deferred-work.md`).
+
+### Mac's checks
+
+The build never touches Task Scheduler, so these checks are Mac's: the real registration, the
+start at sign-in, `Stop-ScheduledTask` ending the whole tree, a sleep and wake, no visible window,
+`-Stop` and `-Restart` under the task, `-Uninstall`, and an elevated `-Register` refused with
+exit 2. Run them from the `prod` checkout. The steps and a Result column are in
+[`docs/spikes/oq-a9-logon-task.md`](../docs/spikes/oq-a9-logon-task.md), "Story 1.21 rows".
+
+### Tests
+
+- `tests/app/test_run_supervisor.py` drives `run.ps1` with the stdlib fake `tests/fake_serve.py`
+  on the test's Python: a test per matrix row. One test runs the real `python -m nextron serve`
+  on a database one revision behind, then restarts and stops it by request. The tests-only
+  switch `-FailJobKillOnce` makes the first kill skip `TerminateJobObject`, so the one-by-one
+  fallback is tested too.
+- `tests/app/test_install_logon_task.py` runs the install script's dry run, `-Register`,
+  `-Uninstall` (its failures included) and refusals with every Task Scheduler command replaced
+  by a tripwire or a recording stand-in.
+- `tests/task_scheduler_guard.py` builds those replacements.
+- `tests/contracts/test_task_scheduler_contracts.py` scans `tests/`, `nextron/` and `scripts/`.
+  Only the guard, `scripts/install_logon_task.ps1` and the spike's `oq_a9.ps1` may name a way to
+  change Task Scheduler's state: a task or scheduled-job command, the scheduler's CIM class, a
+  module-qualified ScheduledTasks command, `schtasks` with a writing switch or the COM object. It
+  also checks that `run.ps1` names none of them and that both scripts are ASCII.
 
 ## Alerts and notifications
 

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.task_scheduler_guard import GET, shadow_lines
+
 ENGINE_ROOT = Path(__file__).resolve().parents[2]
 SPIKE = ENGINE_ROOT / "scripts" / "spike"
 SUPERVISOR = SPIKE / "supervisor.ps1"
@@ -34,20 +36,8 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "win32" or POWERSHELL is None, reason="needs Windows PowerShell 5.1"
 )
 
-# The ScheduledTasks commands that change or read Task Scheduler's state. The oq_a9 tests import
-# the module first (a later import would replace these functions) and then shadow each one.
-STATEFUL_TASK_COMMANDS = (
-    "Register-ScheduledTask",
-    "Unregister-ScheduledTask",
-    "Start-ScheduledTask",
-    "Stop-ScheduledTask",
-    "Set-ScheduledTask",
-    "Enable-ScheduledTask",
-    "Disable-ScheduledTask",
-    "Get-ScheduledTask",
-    "Get-ScheduledTaskInfo",
-    "Export-ScheduledTask",
-)
+# The oq_a9 tests shadow every ScheduledTasks command that changes or reads Task Scheduler's
+# state through tests/task_scheduler_guard.py (Story 1.21 moved the list and the shadows there).
 
 
 # --- Processes ------------------------------------------------------------------------------------
@@ -605,26 +595,13 @@ def test_the_fake_obeys_each_control_command_once(tmp_path: Path) -> None:
 def run_oq_a9(
     tmp_path: Path, *arguments: str, overrides: dict[str, str] | None = None
 ) -> tuple[Run, Path]:
-    """Runs oq_a9.ps1 with every stateful ScheduledTasks command replaced by a tripwire that
-    records its name in a marker file and throws. ``overrides`` gives some of them another
-    body instead (still a function, never the module's command)."""
+    """Runs oq_a9.ps1 under ``tests/task_scheduler_guard.py``'s shadows: every stateful
+    ScheduledTasks command is a tripwire that records its name in a marker file and throws.
+    ``overrides`` gives some of them another body instead (still a function, never the
+    module's command)."""
     marker = tmp_path / "task-scheduler-called.txt"
-    lines = [
-        "$ErrorActionPreference = 'Stop'",
-        "$ProgressPreference = 'SilentlyContinue'",
-        "Import-Module ScheduledTasks",
-    ]
-    for name in STATEFUL_TASK_COMMANDS:
-        body = (overrides or {}).get(
-            name,
-            f"Add-Content -LiteralPath {ps_string(marker)} -Value {ps_string(name)}; "
-            f"throw 'tripwire: {name}'",
-        )
-        lines.append(f"function global:{name} {{ {body} }}")
+    lines = shadow_lines(marker, overrides)
     lines += [
-        f"foreach ($n in {ps_array(STATEFUL_TASK_COMMANDS)}) {{",
-        "  if ((Get-Command $n).Module) { throw \"$n is not shadowed\" }",
-        "}",
         f"& {ps_string(OQ_A9)} {' '.join(arguments)}",
         "exit $LASTEXITCODE",
     ]
@@ -752,8 +729,8 @@ def test_kill_ends_the_running_fakes_python(
     process.wait(timeout=RUN_TIMEOUT_S)
 
 
-# Unregister under the tripwires: Get-ScheduledTask answers from a stand-in function, so the real
-# one is never called, and Stop- and Unregister-ScheduledTask stay tripwires.
+# Unregister under the tripwires: the task lookup answers from a stand-in function, so the real
+# one is never called, and the commands that stop and remove a task stay tripwires.
 
 
 def test_unregister_refuses_a_task_this_spike_did_not_register(tmp_path: Path) -> None:
@@ -766,7 +743,7 @@ def test_unregister_refuses_a_task_this_spike_did_not_register(tmp_path: Path) -
         tmp_path,
         "-Action Unregister",
         f"-DataDir {ps_string(data_dir)}",
-        overrides={"Get-ScheduledTask": someone_elses},
+        overrides={GET: someone_elses},
     )
 
     assert run.code == 2
@@ -785,7 +762,7 @@ def test_unregister_deletes_a_leftover_command(tmp_path: Path) -> None:
         tmp_path,
         "-Action Unregister",
         f"-DataDir {ps_string(data_dir)}",
-        overrides={"Get-ScheduledTask": ""},  # no task registered
+        overrides={GET: ""},  # no task registered
     )
 
     assert run.code == 0, run.stderr

@@ -222,7 +222,46 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\spike\oq_a9.ps1 -Act
 | 6 | Exit 3 | `-Action Exit3`, then `-Action Status` after 1 minute | `stop`; LastTaskResult 3; State Ready; no spike process | |
 | 7 | Remove it | `-Action Unregister` | "Checked: no task named 'Nextron Spike OQ-A9' remains" | |
 
+## Story 1.21 rows
+
+Story 1.21 built `scripts\run.ps1` and `scripts\install_logon_task.ps1`. The build never changes
+Task Scheduler's state, so these live checks are Mac's.
+
+**Run them only when** all of these hold, because the rows install the real `prod` task:
+
+- the spike's rows 1, 2, 5 and 7 above have passed;
+- each data dir is bound to its environment (the Story 1.8 entry in `deferred-work.md`);
+- the task will run from a **dedicated, clean `prod` checkout** at a released commit (a separate
+  clone, or a `git worktree` of one), changed only through the README's upgrade steps. Never use
+  the development or merge checkout: every automatic restart runs whatever code is on disk, and a
+  migration can't be undone.
+
+Run each command from that checkout's `nextron-engine` folder in a **normal** PowerShell (row 9
+alone needs an elevated one).
+
+- `install` is short for `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_logon_task.ps1`.
+- `run` is short for `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run.ps1 -Env prod`.
+- The supervisor log is `%LOCALAPPDATA%\Nextron\prod\logs\supervisor.log` and the engine's is
+  `nextron.log` beside it. `run -Status` prints the supervisor log's last 15 lines.
+- Redact `<PC>` and `<user>` before pasting, as for Mac's rows.
+
+| # | Step | Command | Expect | Result |
+|---|---|---|---|---|
+| 1 | Register | `install` (the dry run), then `install -Register` | the dry run registers nothing, and its `uv.exe` line names a path (not "not found on PATH"); then "Registered 'Nextron Engine (prod)' without elevation", with `Get-ScheduledTask` showing TaskPath `\`, Interactive, Limited, PT0S, IgnoreNew and the action `run.ps1 -Env prod` in the `prod` checkout | |
+| 2 | Start at sign-in | sign out and in, wait 1 minute, then `run -Status` | "Supervisor : running for prod"; heartbeat under 45 s old; `supervisor_start` and `start` just after the sign-in | |
+| 3 | No visible window | watch the screen after row 2's sign-in, and after row 4's restart | no console window appears. If one does, don't close it (that ends the engine): note it here | |
+| 4 | Restart under the task | `run -Restart`, then `run -Status` | "restarted: ..."; `request` (`restart`), `exit` (`requested` true), then `start` with no `backoff`; in `nextron.log`, `engine_stopped` with `exit_code` 0 | |
+| 5 | Stop under the task | `run -Stop`, then `Get-ScheduledTask -TaskName 'Nextron Engine (prod)' \| Get-ScheduledTaskInfo` | "stopped: ..."; `stop` (`requested`); `engine_stopped` with `exit_code` 0; LastTaskResult 0; no `uv.exe` or engine `python.exe` left. Then `Start-ScheduledTask -TaskName 'Nextron Engine (prod)'` | |
+| 6 | `Stop-ScheduledTask` ends the whole tree | `run -Status` (note the `start` pid), `Stop-ScheduledTask -TaskName 'Nextron Engine (prod)'`, wait 10 s, then `Get-CimInstance Win32_Process \| ? CommandLine -match 'nextron'` | the supervisor's PowerShell, `uv.exe`, the venv launcher and the engine's Python are all gone (the job object). Then `Start-ScheduledTask` again | |
+| 7 | Sleep and wake | `run -Status`, sleep the PC for 10 minutes or more, wake it, wait 1 minute, `run -Status` | no new `start`, `exit` or `stale` event after the wake; heartbeat under 45 s old. If a job was running across the sleep, a `stale` 5 minutes after the wake is the deferred engine-side gap: note it | |
+| 8 | Remove it | `install -Uninstall` | "Removed 'Nextron Engine (prod)'. Checked: no task of that name remains."; no engine process left | |
+| 9 | Refused when elevated | open a "Run as administrator" PowerShell, run `install -Register` there and note `$LASTEXITCODE`, then close that window; back in a normal one, `Get-ScheduledTask -TaskName 'Nextron Engine (prod)'` | one line "install_logon_task: refused: this PowerShell is elevated; ...", exit code 2, and no task registered | |
+
 ## Parameter changes for Story 1.21
+
+Story 1.21 applied changes 1, 3 and 4 as written, with a 5 s poll instead of 15 s, so requests
+are answered quickly. A job object replaced changes 2 and 5 (see [What Story 1.21 must
+do](#what-story-121-must-do)).
 
 AD-20's trigger, principal and settings stay as written, pending row 1. These change:
 
@@ -276,16 +315,23 @@ For Mac to decide, only if row 1 fails:
 
 ## What Story 1.21 must do
 
+Each item ends with its status after Story 1.21: **done**, **deferred** (in `deferred-work.md`),
+**Mac decides** or **Mac's row** (see [Story 1.21 rows](#story-121-rows)).
+
 - **Build `scripts/run.ps1` from `supervisor.ps1`** with the changes above, without the fake and
   the test-only parameters.
   - It loops `uv run --frozen python -m nextron serve`.
   - It logs to `<data dir>\logs\supervisor.log`, with the data dir resolved as the engine does:
     `NEXTRON_DATA_DIR`, else `%LOCALAPPDATA%\Nextron\<env>`.
   - It rotates or caps that log, which the spike lets grow.
+  - **Done.** The data dir rule also expands `%VAR%` and a leading `~` and takes a relative path
+    against `nextron-engine`, as the engine does. The log rotates at 1 MiB, keeping 3 old files.
 - **Build `scripts/install_logon_task.ps1` from `oq_a9.ps1`'s parts builder** (trigger,
   principal, settings and action built once).
   - It refuses to run elevated.
   - It replaces an existing task of that name, and `-Uninstall` removes it.
+  - **Done.** With no switch it is a dry run; `-Register` registers (`-Force`), in the root task
+    folder only. Mac's rows 1, 8 and 9.
 - **Handle `Stop-ScheduledTask`, or "End" in the Task Scheduler window, leaving the engine
   running.**
   - At the next start the new supervisor's engine exits 3 (the lock is held), the loop ends, and
@@ -303,30 +349,48 @@ For Mac to decide, only if row 1 fails:
     process group and a CTRL_BREAK before a tree kill.
     - `ProcessStartInfo` can't set `CREATE_NEW_PROCESS_GROUP`, so this needs `CreateProcess`.
     - Whether CTRL_BREAK passes through `uv.exe` and the venv launcher to Python is untested.
+  - **Done.** Each child starts suspended, in a new process group, and joins a kill-on-close job
+    of its own before it resumes; a kill is `TerminateJobObject`. A probe on this PC showed
+    Python gets the CTRL_BREAK, `uv.exe` dies at once (0xC000013A) and the venv launcher waits
+    for Python, so the supervisor waits for the whole job to empty. While the server runs,
+    `serve` answers CTRL_BREAK (the one Uvicorn raises again after its shutdown included) with
+    `SystemExit(0)`, so it logs `engine_stopped` and exits 0 (this closes the Story 1.1
+    clean-stop item). Mac's row 6 checks `Stop-ScheduledTask`.
 - **Upgrades: restart only the child.** After `git pull`, stop only the child tree, so `run.ps1`
   restarts it. Running `uv sync --frozen` while the engine holds its `.pyd` files open can fail
   on Windows, and `uv run --frozen` syncs at each start anyway.
+  - **Done.** `run.ps1 -Restart` stops the child gracefully and starts the code on disk at once.
+    The README gives this route and AD-20's (`-Stop`, `git pull`, `uv sync --frozen`, start).
 - **Stop a loop of exit 2.** Exit 2 restarts forever. A migration that keeps failing takes a new
   `pre_migrate` copy at every start, and those copies are never rotated. At the 5-minute backoff
   cap that is about 288 copies a day, enough to fill the disk. Story 1.21 should cap or stop on
   repeated exit 2, and make it visible.
+  - **Done.** Five exits with code 2 in a row end the loop (`stop`, `repeated_exit_2`), and
+    `run.ps1` exits 2, which Task Scheduler shows.
 - **Nothing alerts on the supervisor.** The task has no restart-on-failure setting. A dead
   supervisor, a crash loop or a stop after exit 3 raises no alert, because alerts come from the
   running engine. Mac decides any setting beyond AD-20.
+  - **Mac decides.** Nothing was built.
 - **Measure the start grace, and fix the reset.** The 900 s grace hasn't been measured against a
   real startup (the `pre_migrate` copy, a migration, the recovery pass). Also, since 900 s is
   more than the 600 s reset, a hung start resets the backoff every time. Basing the reset on the
   time since the child's first beat avoids that.
+  - **Reset done:** "up 10 minutes" counts from the child's first beat. **Grace not measured** on
+    a large database: on the build's small one the first beat came about 2.6 s after the start
+    through `uv`. The 900 s grace stays.
 - **Check the window really stays hidden.** On Windows 11 with Windows Terminal as the default
   terminal, `-WindowStyle Hidden` may leave a visible window, and closing it kills the
   supervisor and the engine. A possible remedy is `conhost.exe --headless` (unverified). Mac's
   rows 2 and 3 watch for a window.
+  - **Mac's row 3.** The task keeps `-WindowStyle Hidden`.
 - **Decide the task priority.** The default 7 runs the engine below normal priority;
   `New-ScheduledTaskSettingsSet -Priority` can set it.
+  - **Mac decides.** It stays 7.
 - **Expect a slow first start now and then.** In the early run, about 42 s passed between
   `Start-ScheduledTask` and the supervisor's first log line; in the second run it was 1.4 s. The
   delay comes before the supervisor runs, so the start grace plays no part. It only delays the
   engine's start at logon.
+  - Nothing to build.
 - **Write down the stop procedure for a restore.** `nextron restore` holds `nextron.lock` for its
   whole run. A `serve` started meanwhile exits 3, and exit 3 ends the loop.
   1. Stop the task and its whole tree (with the job object above, `Stop-ScheduledTask` is
@@ -335,6 +399,10 @@ For Mac to decide, only if row 1 fails:
   3. Run `Start-ScheduledTask` again.
 
   The deferred "clean stop on Windows" item (Story 1.1) belongs here too.
+  - **Done.** The README's restore steps use `run.ps1 -Env prod -Stop`, then
+    `Start-ScheduledTask`.
 - **Observe the trigger catch-up after a real sleep.** This spike checks only the supervisor
   across a sleep. The trigger catch-up in the engine README ("After the PC sleeps") is still
   unobserved on a real sleep.
+  - **Mac's row 7.** The engine-side wake allowance (a job past its `max_runtime` after a sleep
+    withholds the beat) is **deferred**.
