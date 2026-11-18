@@ -360,9 +360,13 @@ def plant(world: World) -> Planted:
     )
     assert contact_id is not None
     world.sql("UPDATE provenance_records SET notes = ? WHERE contact_id = ?", (NOTES, contact_id))
+    # Story 9.1: the Operator's notes on the Lead (pipeline's hook redacts them)
+    world.sql("UPDATE leads SET notes = ? WHERE id = ?", (f"Deal notes. {NOTES}", lead_id))
     world.contact(lead_id, "Bob's own export", name="Bob Other", email="bob@firm.co.uk")
     merged_lead_id = world.lead("firm-old.co.uk", "Firm Old LLP")
     world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (lead_id, merged_lead_id))
+    # Story 9.1 review: notes left on a Lead merged into hers are redacted too
+    world.sql("UPDATE leads SET notes = ? WHERE id = ?", (f"Old notes. {NOTES}", merged_lead_id))
     pages = (
         world.page(lead_id, "https://firm.co.uk/team"),
         world.page(merged_lead_id, "https://firm.co.uk/team"),  # stayed on the merged Lead
@@ -484,8 +488,15 @@ def test_a_dsr_erasure_tombstones_every_personal_column_and_keeps_the_keys(
     assert world.requests() == [
         (request_id, planted.contact_id, "erase", "completed", REF, STAMP, STAMP, None)
     ]
-    # the Lead and Bob unchanged
+    # the Lead and Bob unchanged, except the Lead's notes (Story 9.1: pipeline redacts them)
     assert world.sql("SELECT * FROM contacts WHERE name = 'Bob Other'") == bob_before
+    assert world.sql(
+        "SELECT notes FROM leads WHERE id IN (?, ?)", (planted.lead_id, planted.merged_lead_id)
+    ) == [(REDACTED,), (REDACTED,)]
+    world.sql("UPDATE leads SET notes = ? WHERE id = ?", (f"Deal notes. {NOTES}", planted.lead_id))
+    world.sql(
+        "UPDATE leads SET notes = ? WHERE id = ?", (f"Old notes. {NOTES}", planted.merged_lead_id)
+    )
     assert world.sql("SELECT * FROM leads ORDER BY id") == lead_before
     # no row deleted, no DELETE run; only the request, its entries and events were added
     after = world.counts()
@@ -563,6 +574,7 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("ai_test_cases", "input"),  # Story 4.6: playbook's hook erases it
         ("job_postings", "title"),  # Story 2.11
         ("job_postings", "description"),
+        ("leads", "notes"),  # Story 9.1
     }
     not_planted = {
         (table, column)

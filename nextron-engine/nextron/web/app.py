@@ -190,7 +190,24 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``queries.setup.markets``, or none when one no longer decodes: ``InvalidMarkets``), which name
   each Contact's Market (Story 3.7), and ``queries.compliance.completed_erasures``
   (``lead_erasures``, Story 3.13: an erased Contact's tombstone line names its request),
-  with one "Export data (JSON)" form per Contact (``export_page.lead_forms``, Story 3.15).
+  with one "Export data (JSON)" form per Contact (``export_page.lead_forms``, Story 3.15), and
+  the Pipeline panel (Story 9.1, ``lead_pipeline.panel_context``) from
+  ``queries.pipeline.lead_pipeline`` and, for its opt-out line, the suppression entry its latest
+  close names (``queries.compliance.entries``).
+- ``POST /leads/{lead_id}/stage`` (``lead_stage``), ``POST /leads/{lead_id}/call``
+  (``lead_call``) and ``POST /leads/{lead_id}/deal`` (``lead_deal``), Story 9.1, all
+  ``@personal_data(True)``: the Pipeline panel's forms; see ``nextron.web.lead_pipeline``. Each
+  parses its form first (a missing, unknown or repeated field, or an unknown ``move``, is
+  ``MalformedForm``, 400), then answers 404 with the plain text "That Lead doesn't exist." (never
+  echoing the id) for a Lead that isn't a live survivor (``queries.discovery.survivor_of``). The
+  stage form runs ``pipeline.operator_move``; the call form first reads the Contact in a
+  read-only unit of work (``lead_pipeline.call_details``: its zone when none is typed), then runs
+  ``pipeline.operator_book_call``; the deal form parses the value and notes
+  (``manual_stages.parse_deal_value`` and ``clean_notes``), then runs
+  ``pipeline.operator_save_deal``. Each runs in its own unit of work; a ``StageRefused`` (nothing
+  written) becomes the panel's alert, and a refused call or deal form renders back what was
+  typed. Then it answers 200 with the panel
+  (``lead_pipeline.html``, read in a read-only unit of work), so HTMX swaps it in.
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
   ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
   ``contact_id`` (``leads_page.submitted_contact``). It runs
@@ -279,6 +296,7 @@ from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
+from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import (
     ActivationRefused,
     ActivationTrigger,
@@ -315,6 +333,7 @@ from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
+from nextron.domain.manual_stages import StageRefused, clean_notes, parse_deal_value
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.offers import InvalidOffers
 from nextron.domain.open_code import CodeCheck
@@ -348,11 +367,13 @@ from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
 from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
+from nextron.web import lead_pipeline as pipeline_rows
 from nextron.web import leads_page as lead_rows
 from nextron.web import pipeline_page as board_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
+from nextron.web.credentials_page import Notice
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
 from nextron.web.forms import (
     REPEATED_FIELD,
@@ -526,6 +547,7 @@ def create_app(
     lead_signals: LeadSignals,
     compliance: Compliance,
     primary_contacts: PrimaryContacts,
+    pipeline: Pipeline,
     erasures: Erasures,
     domain_checks: DomainChecks,
     units: Units,
@@ -546,7 +568,8 @@ def create_app(
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, and ``primary_contacts`` runs its "Make
-    primary"; ``compliance`` runs the Suppression List panel's add, import and Reverse, and
+    primary"; ``pipeline`` runs its Pipeline panel's moves, bookings and deal saves (Story
+    9.1); ``compliance`` runs the Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
     subject access export; ``domain_checks`` reads the Sending Domain authentication section
@@ -1634,8 +1657,135 @@ def create_app(
             request,
             lead_rows.LEAD_TEMPLATE,
             **context,
+            **pipeline_context(found.id, contacts),
             export_forms=export_rows.lead_forms(contacts),
         )
+
+    def pipeline_context(
+        lead_id: str,
+        contacts: Iterable[research_queries.StoredContact],
+        notice: Notice | None = None,
+        *,
+        typed_call: pipeline_rows.CallForm | None = None,
+        typed_deal: pipeline_rows.DealForm | None = None,
+    ) -> dict[str, object]:
+        """The Pipeline panel's context (Story 9.1), read in the open unit of work."""
+        found = pipeline_queries.lead_pipeline(lead_id)
+        if found is None:  # the Lead was checked first
+            raise LookupError("the Lead is unknown")
+        close_entries = (
+            compliance_queries.entries([found.close_ref]) if found.close_ref is not None else ()
+        )
+        return pipeline_rows.panel_context(
+            lead_id,
+            found,
+            contacts,
+            close_entries,
+            notice,
+            typed_call=typed_call,
+            typed_deal=typed_deal,
+        )
+
+    def live_lead(lead_id: str) -> bool:
+        """Whether ``lead_id`` is a Lead that isn't merged, read in a read-only unit of work."""
+        with units.open(read_only=True):
+            found = discovery_queries.survivor_of(lead_id)
+        return found is not None and found.id == lead_id
+
+    def pipeline_answer(
+        request: Request,
+        lead_id: str,
+        notice: Notice,
+        *,
+        typed_call: pipeline_rows.CallForm | None = None,
+        typed_deal: pipeline_rows.DealForm | None = None,
+    ) -> HTMLResponse:
+        """The Pipeline panel alone, with ``notice``: 200, so HTMX swaps it in. A refused form
+        passes what was typed, so it renders back into the form."""
+        with units.open(read_only=True):
+            context = pipeline_context(
+                lead_id,
+                research_queries.contacts(lead_id),
+                notice,
+                typed_call=typed_call,
+                typed_deal=typed_deal,
+            )
+            return page(request, pipeline_rows.PANEL_TEMPLATE, **context)
+
+    def lead_gone() -> PlainTextResponse:
+        """404 for a POST to a Lead that doesn't exist (never echoing the id)."""
+        text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
+        return PlainTextResponse(text, status_code=404, headers=NO_STORE)
+
+    @app.post(pipeline_rows.STAGE_ROUTE, name="lead_stage")
+    @personal_data(True)  # the panel names the Lead's Contacts and shows the notes
+    def lead_stage(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        move = pipeline_rows.submitted_move(fields)
+        if not live_lead(lead_id):
+            return lead_gone()
+        try:
+            with units.open():
+                stage = pipeline.operator_move(lead_id, move)
+        except StageRefused as refused:  # nothing was written
+            notice = pipeline_rows.refused(refused.reason)
+        except LookupError:
+            return lead_gone()
+        else:
+            notice = (
+                pipeline_rows.reopened(stage)
+                if move == pipeline_rows.REOPEN
+                else pipeline_rows.moved(stage)
+            )
+        return pipeline_answer(request, lead_id, notice)
+
+    @app.post(pipeline_rows.CALL_ROUTE, name="lead_call")
+    @personal_data(True)
+    def lead_call(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        form = pipeline_rows.submitted_call(fields)
+        if not live_lead(lead_id):
+            return lead_gone()
+        try:
+            with units.open(read_only=True):
+                contact = research_queries.contact(form.contact_id) if form.contact_id else None
+            if contact is not None and contact.lead_id != lead_id:
+                contact = None
+            scheduled_at, zone = pipeline_rows.call_details(form, contact)
+            with units.open():
+                rebooked = pipeline.operator_book_call(
+                    lead_id, form.contact_id, scheduled_at, zone
+                )
+        except StageRefused as refused:  # nothing was written; the form keeps what was typed
+            notice = pipeline_rows.refused(refused.reason)
+            return pipeline_answer(request, lead_id, notice, typed_call=form)
+        except LookupError:
+            return lead_gone()
+        notice = pipeline_rows.booked(rebooked=rebooked)
+        return pipeline_answer(request, lead_id, notice)
+
+    @app.post(pipeline_rows.DEAL_ROUTE, name="lead_deal")
+    @personal_data(True)
+    def lead_deal(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        form = pipeline_rows.submitted_deal(fields)
+        if not live_lead(lead_id):
+            return lead_gone()
+        try:
+            deal_value = parse_deal_value(form.deal_value)
+            notes = clean_notes(form.notes)
+            with units.open():
+                pipeline.operator_save_deal(lead_id, deal_value, notes)
+        except StageRefused as refused:  # nothing was written; the form keeps what was typed
+            notice = pipeline_rows.refused(refused.reason)
+            return pipeline_answer(request, lead_id, notice, typed_deal=form)
+        except LookupError:
+            return lead_gone()
+        notice = pipeline_rows.deal_saved()
+        return pipeline_answer(request, lead_id, notice)
 
     @app.post("/leads/{lead_id}/primary", name="lead_make_primary")
     @personal_data(True)  # the panel shows Contacts, who are people

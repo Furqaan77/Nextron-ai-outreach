@@ -15,11 +15,14 @@ Market (``EXISTS`` on ``contacts``; Leads have no Market); ``entered_from`` and
 ``entered_before`` (aware UTC, the second exclusive) keep the Leads whose **entry time** falls in
 ``[entered_from, entered_before)``. A Lead's entry time is the latest ``events.at`` with
 ``entity = 'leads'``, ``entity_id`` the Lead and ``to_status`` its current stage (a correlated
-``MAX``); a Lead with no such row has none, so either date bound leaves it out. Merged Leads
-(``merged_into`` set) are always left out.
+``MAX``), counting only rows that changed the stage (``from_status`` NULL or different from
+``to_status``; Story 9.1: a deal save's same-stage row never resets it); a Lead with no such row
+has none, so either date bound leaves it out. Merged Leads (``merged_into`` set) are always left
+out.
 
-- ``stage_counts(where)``: each stage's count of matching Leads, in one ``GROUP BY`` (a stage
-  with none is absent);
+- ``stage_counts(where)``: each stage's ``StageTotal`` of matching Leads, in one ``GROUP BY`` (a
+  stage with none is absent): its ``count`` and its ``deal_value``, the sum of the Leads'
+  ``leads.deal_value`` in micro-dollars (Story 9.1), ``None`` when none of them has one;
 - ``stage_rows(stage, where, *, limit, offset)``: at most ``limit`` matching Leads at ``stage``,
   newest first (``created_at DESC, id DESC``), after skipping ``offset``, each a ``BoardLead``
   with its entry time (``None`` without one).
@@ -28,12 +31,13 @@ Market (``EXISTS`` on ``contacts``; Leads have no Market); ``entered_from`` and
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, ScalarSelect, exists, func, select
+from sqlalchemy import ColumnElement, ScalarSelect, exists, func, or_, select
 
 from nextron.db.models.events import EventRecord
 from nextron.db.models.leads import LeadRecord
 from nextron.db.models.research import ContactRecord
 from nextron.db.uow import current
+from nextron.domain.manual_stages import MICROS_PER_DOLLAR
 
 LEADS_ENTITY = "leads"
 
@@ -46,6 +50,14 @@ class BoardFilter:
     market_id: str | None = None
     entered_from: datetime | None = None
     entered_before: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StageTotal:
+    """One stage's count of matching Leads and their deal-value total (``None`` without one)."""
+
+    count: int
+    deal_value: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +79,10 @@ def _entered_at() -> ScalarSelect[datetime]:
             EventRecord.entity == LEADS_ENTITY,
             EventRecord.entity_id == LeadRecord.id,
             EventRecord.to_status == LeadRecord.pipeline_stage,
+            or_(
+                EventRecord.from_status.is_(None),
+                EventRecord.from_status != EventRecord.to_status,
+            ),
         )
         .correlate(LeadRecord)
         .scalar_subquery()
@@ -95,14 +111,23 @@ def _where(where: BoardFilter) -> list[ColumnElement[bool]]:
     return conditions
 
 
-def stage_counts(where: BoardFilter) -> dict[str, int]:
-    """How many matching Leads each stored stage holds; a stage with none is absent."""
+def stage_counts(where: BoardFilter) -> dict[str, StageTotal]:
+    """How many matching Leads each stored stage holds, with their deal-value total; a stage
+    with none is absent."""
     statement = (
-        select(LeadRecord.pipeline_stage, func.count())
+        select(
+            LeadRecord.pipeline_stage,
+            func.count(),
+            # summed in whole dollars (every value is one), so SQLite's 64-bit sum can't overflow
+            func.sum(LeadRecord.deal_value // MICROS_PER_DOLLAR),
+        )
         .where(*_where(where))
         .group_by(LeadRecord.pipeline_stage)
     )
-    return {stage: int(count) for stage, count in current().session.execute(statement)}
+    return {
+        stage: StageTotal(int(count), None if total is None else int(total) * MICROS_PER_DOLLAR)
+        for stage, count, total in current().session.execute(statement)
+    }
 
 
 def stage_rows(

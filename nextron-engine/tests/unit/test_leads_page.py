@@ -648,6 +648,7 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     assert page.find("main").find("a", href="/leads").text == "All Leads"
     assert [h2.text for h2 in page.find_all("h2")] == [
         "UK legal form",  # a GB Lead (Story 2.12)
+        "Pipeline",  # Story 9.1's panel
         "Signals",
         "Evidence",
         "Contacts",

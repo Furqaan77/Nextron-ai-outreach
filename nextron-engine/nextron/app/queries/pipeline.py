@@ -11,8 +11,9 @@ current unit of work, read-only ones included.
   ``total`` of matching Leads that aren't merged, the ``page`` shown, the number of ``pages``
   (``max(1, ceil(total / 50))``), at most ``BOARD_PAGE_SIZE`` (50) ``BoardLead`` rows (newest
   first, by ``created_at`` then ``id``, each with its ``entered_at``: when it entered its
-  current stage, or ``None``) and ``deal_value``, always ``None`` until Story 9.1 adds
-  ``leads.deal_value``. ``segment_id`` keeps the Leads in that Segment; ``market_id`` those with
+  current stage, or ``None``; a same-stage ``events`` row never counts) and ``deal_value``, the
+  total of the matching Leads' deal values in micro-dollars, or ``None`` when none has one
+  (Story 9.1). ``segment_id`` keeps the Leads in that Segment; ``market_id`` those with
   at least one Contact in that Market; ``entered_from`` and ``entered_to`` (UTC days, both
   inclusive) those whose entry time falls in that range (a Lead without one is left out while
   either is set). ``pages`` maps a stage to the page asked for (1 when absent); a page past the
@@ -21,26 +22,44 @@ current unit of work, read-only ones included.
   isn't a ``date`` (a ``datetime`` included), or a ``pages`` that isn't a mapping of
   ``PipelineStage`` to ``int`` (a ``bool`` included) raises ``TypeError``; a page below 1, or
   ``entered_from`` after ``entered_to``, raises ``ValueError``.
+- ``lead_pipeline(lead_id)`` (Story 9.1): the Lead page's Pipeline panel as a ``LeadPipeline``:
+  its ``stage``, ``deal_value`` (micro-dollars) and ``notes`` (each ``None`` when unset), its
+  ``booking`` (the newest pending ``call_outcomes`` row, a ``StoredBooking``, or ``None``), its
+  ``moves`` (``operator_moves(stage)``) and ``close_ref``, the ``cause_ref`` of its latest close
+  ``events`` row (``stages.last_close``), whether it is still closed or reopened since, or
+  ``None``. ``None`` for an unknown Lead (a text that isn't a ULID included).
+- ``export_pii(contact_id, lead_ids, terms) -> {section: tuple[dict, ...]}`` (Story 9.1, the
+  subject access export): ``call_bookings``, every ``call_outcomes`` row of the Contact (all
+  its columns); ``lead_notes``, one row ``{"lead_id", "notes_excerpts"}`` for each of
+  ``lead_ids`` (the Contact's Lead and every Lead merged into it) whose notes mention one of
+  the Contact's ``terms`` (``contact_export.excerpts``: only the lines that mention them).
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from math import ceil
 from typing import Final
 
 from nextron.db.repos.pipeline import board as board_repo
+from nextron.db.repos.pipeline import bookings as bookings_repo
 from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.repos.pipeline.board import BoardLead
+from nextron.db.repos.pipeline.bookings import StoredBooking
+from nextron.domain.contact_export import MentionTerm, excerpts
 from nextron.domain.ids import is_ulid
-from nextron.domain.pipeline_stage import PipelineStage
+from nextron.domain.pipeline_stage import PipelineStage, operator_moves
 
 __all__ = [
     "BOARD_PAGE_SIZE",
     "BoardLead",
+    "LeadPipeline",
     "PipelineBoard",
     "StageGroup",
+    "StoredBooking",
     "board",
+    "export_pii",
+    "lead_pipeline",
     "stage",
 ]
 
@@ -50,7 +69,7 @@ BOARD_PAGE_SIZE: Final = 50
 @dataclass(frozen=True, slots=True)
 class StageGroup:
     """One stage's group on the board: its count, the page shown, the number of pages, its
-    rows and its deal-value total (``None`` until Story 9.1 stores deal values)."""
+    rows and its deal-value total in micro-dollars (``None`` when no Lead has one)."""
 
     stage: PipelineStage
     total: int
@@ -58,6 +77,18 @@ class StageGroup:
     pages: int
     leads: tuple[BoardLead, ...]
     deal_value: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LeadPipeline:
+    """The Lead page's Pipeline panel; see the module docstring."""
+
+    stage: PipelineStage
+    deal_value: int | None
+    notes: str | None
+    booking: StoredBooking | None
+    moves: tuple[str, ...]
+    close_ref: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +104,37 @@ def stage(lead_id: str) -> PipelineStage | None:
         return None
     stored = stages_repo.stage(lead_id)
     return None if stored is None else PipelineStage(stored)
+
+
+def lead_pipeline(lead_id: str) -> LeadPipeline | None:
+    """The Lead's Pipeline panel facts, or ``None``; see the module docstring."""
+    current = stage(lead_id)
+    deal = stages_repo.deal(lead_id) if current is not None else None
+    if current is None or deal is None:
+        return None
+    pending = bookings_repo.pending(lead_id)
+    closing = stages_repo.last_close(lead_id)
+    return LeadPipeline(
+        stage=current,
+        deal_value=deal.deal_value,
+        notes=deal.notes,
+        booking=pending[-1] if pending else None,
+        moves=operator_moves(current),
+        close_ref=None if closing is None else closing.cause_ref,
+    )
+
+
+def export_pii(
+    contact_id: str, lead_ids: Sequence[str], terms: Sequence[MentionTerm]
+) -> dict[str, tuple[dict[str, object], ...]]:
+    """The Contact's bookings and the lines of its Leads' notes that mention it."""
+    notes: list[dict[str, object]] = []
+    for lead_id in lead_ids:
+        deal = stages_repo.deal(lead_id) if is_ulid(lead_id) else None
+        lines = () if deal is None else excerpts(deal.notes, terms)
+        if lines:
+            notes.append({"lead_id": lead_id, "notes_excerpts": list(lines)})
+    return {"call_bookings": bookings_repo.about(contact_id), "lead_notes": tuple(notes)}
 
 
 def _day_start(day: date) -> datetime:
@@ -131,7 +193,8 @@ def board(
     counts = board_repo.stage_counts(where)
     groups = []
     for each in PipelineStage:
-        total = counts.get(each.value, 0)
+        found = counts.get(each.value)
+        total = 0 if found is None else found.count
         last = max(1, ceil(total / BOARD_PAGE_SIZE))
         shown = min(asked.get(each, 1), last)
         rows = (
@@ -144,5 +207,14 @@ def board(
             if total
             else ()
         )
-        groups.append(StageGroup(stage=each, total=total, page=shown, pages=last, leads=rows))
+        groups.append(
+            StageGroup(
+                stage=each,
+                total=total,
+                page=shown,
+                pages=last,
+                leads=rows,
+                deal_value=None if found is None else found.deal_value,
+            )
+        )
     return PipelineBoard(groups=tuple(groups))

@@ -892,3 +892,15 @@ button.secondary {
 .ai-cases td {
   overflow-wrap: anywhere;
 }
+
+/* Story 9.1: the Lead page's Pipeline panel */
+.pipeline-moves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.notes-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

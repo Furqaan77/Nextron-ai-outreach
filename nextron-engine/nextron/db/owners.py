@@ -119,7 +119,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "merged_into",
             "created_at",
         ),
-        "pipeline": ("pipeline_stage",),
+        # the pipeline group (Stories 2.2 and 9.1)
+        "pipeline": ("pipeline_stage", "deal_value", "notes"),
         # the profile group (Stories 2.9, 2.6, 2.10 and 2.12)
         "research": (
             "hq_tz",
@@ -131,6 +132,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "legal_form_status",
             "legal_form_site_evidence_id",
             "legal_form_registry_evidence_id",
+        ),
+    },
+    "call_outcomes": {  # Story 9.1
+        "pipeline": (
+            "id",
+            "lead_id",
+            "contact_id",
+            "scheduled_at",
+            "prospect_tz",
+            "booked_at",
+            "booked_by",
+            "superseded_at",
         ),
     },
     "prompt_snapshots": {

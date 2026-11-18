@@ -1,0 +1,73 @@
+{#- The Lead page's Pipeline panel (nextron.web.lead_pipeline, Story 9.1): rendered inside
+    lead.html, and alone as the answer to POST /leads/{lead_id}/stage, /call and /deal, which
+    HTMX swaps in for this whole panel. It offers only the Operator's legal moves (never an
+    automatic stage), the call form while a booking is possible, and the deal value and notes
+    form. The notes and Contact names are typed or imported text: they render only through
+    |plain, inside an element carrying hx-disable; every form sits outside those elements (the
+    notes' textarea sits in an hx-disable wrapper inside its form, and HTMX still posts it). -#}
+<section class="lead-pipeline" id="lead-pipeline" aria-labelledby="pipeline-heading">
+<h2 id="pipeline-heading">Pipeline</h2>
+{%- if pipeline_notice %}
+<p class="notice{% if pipeline_notice.role == 'alert' %} notice-refused{% endif %}" role="{{ pipeline_notice.role }}">{{ pipeline_notice.text }}</p>
+{%- endif %}
+<p class="pipeline-stage">Stage: {{ pipeline_stage }}</p>
+{%- if opted_out %}
+<p class="notice notice-refused opted-out" role="status">{{ opted_out }}</p>
+{%- endif %}
+{%- if pipeline_moves %}
+<div class="pipeline-moves">
+{%- for move in pipeline_moves %}
+<form method="post" action="/leads/{{ pipeline_lead_id }}/stage" hx-post="/leads/{{ pipeline_lead_id }}/stage" hx-target="#lead-pipeline" hx-swap="outerHTML" hx-sync="this:drop"{% if move.confirm %} hx-confirm="{{ move.confirm }}"{% endif %}>{{ csrf_field() }}<input type="hidden" name="move" value="{{ move.value }}"><button type="submit" class="secondary">{{ move.label }}</button></form>
+{%- endfor %}
+</div>
+{%- endif %}
+{%- if booking_line %}
+<p class="booking-line">{{ booking_line }}</p>
+{%- endif %}
+{%- if show_booking %}
+<form class="booking-form" method="post" action="/leads/{{ pipeline_lead_id }}/call" hx-post="/leads/{{ pipeline_lead_id }}/call" hx-target="#lead-pipeline" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}
+<div class="field" hx-disable>
+<label for="call-contact">Contact</label>
+<select id="call-contact" name="contact_id" required>
+<option value=""{% if not contact_options|selectattr("selected")|list %} selected{% endif %}>Choose a Contact</option>
+{%- for option in contact_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label|plain }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="call-date">Date</label>
+<input type="date" id="call-date" name="date" required value="{{ call_date }}">
+</div>
+<div class="field">
+<label for="call-time">Time</label>
+<input type="time" id="call-time" name="time" required value="{{ call_time }}">
+</div>
+<div class="field">
+<label for="call-timezone">Timezone</label>
+<input type="text" id="call-timezone" name="timezone" maxlength="64" placeholder="The Contact's timezone" value="{{ call_timezone }}">
+</div>
+<button type="submit">{{ booking_label }}</button>
+</form>
+{%- endif %}
+<p class="deal-line">{{ deal_line }}</p>
+<div class="lead-notes" hx-disable>
+{%- if notes %}
+<p class="notes-text">{{ notes|plain }}</p>
+{%- else %}
+<p>{{ no_notes }}</p>
+{%- endif %}
+</div>
+<form class="deal-form" method="post" action="/leads/{{ pipeline_lead_id }}/deal" hx-post="/leads/{{ pipeline_lead_id }}/deal" hx-target="#lead-pipeline" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}
+<div class="field">
+<label for="deal-value">Deal value (whole US dollars)</label>
+<input type="text" id="deal-value" name="deal_value" inputmode="numeric" maxlength="13" value="{{ deal_input }}">
+</div>
+<div class="field" hx-disable>
+<label for="deal-notes">Notes</label>
+<textarea id="deal-notes" name="notes" rows="5" maxlength="5000">
+{{ notes_input|plain }}</textarea>
+</div>
+<button type="submit">Save deal details</button>
+</form>
+</section>

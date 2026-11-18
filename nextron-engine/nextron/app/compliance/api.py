@@ -123,7 +123,10 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
   ``queries.compliance.export_pii(contact_id, export_hashes(...))`` with the hashes of every
   key held for the Contact (its stored values, its Lead's ``web_domain`` through
   ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii``,
-  ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6) and
+  ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6),
+  ``queries.pipeline.export_pii`` (Story 9.1: the Contact's booked calls, and the lines of the
+  notes of its Lead and of every Lead merged into it, ``queries.discovery.merged_lead_ids``,
+  that mention it, by ``mention_terms(name, email)``) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -224,6 +227,7 @@ from nextron.domain.contact_export import (
     assemble,
     export_hashes,
     filename,
+    mention_terms,
     render,
 )
 from nextron.domain.contactability import (
@@ -625,6 +629,11 @@ class Compliance:
                 "compliance": compliance_queries.export_pii(contact_id, hashes),
                 "notify": notify_queries.export_pii(contact_id),
                 "playbook": playbook_queries.export_pii(contact_id),
+                "pipeline": pipeline_queries.export_pii(
+                    contact_id,
+                    (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id)),
+                    mention_terms(contact.name, contact.email),
+                ),
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )

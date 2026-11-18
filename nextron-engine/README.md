@@ -2135,10 +2135,11 @@ Stage** above the Leads list. The board shows every Lead that wasn't merged into
 under each Pipeline Stage in machine order: New, Queued, Contacted, Replied, Interested, Call
 booked, Call held, Audit proposed, Audit won, Build proposed, Won, then Not Now, Lost and
 Disqualified. Every group shows, an empty one included, with its count ("12 Leads", "1 Lead",
-"0 Leads" and "No Leads at this stage."), "Deal value: —" (Story 9.1 adds deal values) and up to
+"0 Leads" and "No Leads at this stage."), its deal-value total (Story 9.1: "Deal value:
+$1,012,000" in whole US dollars, "Deal value: —" when no Lead in the group has one) and up to
 50 Leads, newest first (by created date, then id): the name (linked to the Lead page), the Segment
 and "In stage since", the UTC day of the Lead's latest `events` row moving it to its current
-stage ("—" without one). A Not Now Lead also shows "Re-contact: —" (Story 8.8 adds the date). A
+stage ("—" without one; a row from a stage to itself, such as a deal save, never counts). A Not Now Lead also shows "Re-contact: —" (Story 8.8 adds the date). A
 group with more than 50 Leads gets its own "Page 1 of 3" with **Previous** and **Next**; each
 link keeps the filters and the other groups' pages and returns to the group (`#stage-<stage>`),
 and a page past the end shows the last.
@@ -2163,6 +2164,45 @@ reads each non-empty group's page in one statement (`nextron/db/repos/pipeline/b
 only); 5,000 Leads render in under a second. It is personal data (a Lead's name can be a
 sole trader's name), so it sends `Cache-Control: no-store`, and each name renders through `|plain`
 inside `hx-disable`.
+
+**The Pipeline panel (Lead page, Story 9.1, FR-45, FR-37, FR-63).** Under the Lead's header,
+**Pipeline** shows its stage and moves it by hand. The engine alone sets New, Queued, Contacted,
+Replied, Interested and Not Now, and a Call Outcome (Story 9.4) sets Call held, so the panel
+offers only the legal Operator moves from the current stage: **Audit proposed**, **Audit won**,
+**Build proposed** and **Won** (from Call held onwards), **Close lost** and **Close
+disqualified** (from any open or Not Now stage) and **Reopen** (on a Lost or Disqualified Lead:
+it goes back to the stage it had before it was closed, and its suppression entries stay; a Lead
+an opt-out closed shows "Opted out: no outreach on any channel" even after it is reopened, and
+the contactability gate still blocks it). A forged request for an automatic stage gets "This
+stage is set automatically", and a move the stage doesn't allow "That move isn't available at
+this stage"; neither changes anything.
+
+From Replied, Interested or Not Now, **Book call** books the discovery call: choose the Contact
+(one of the Lead's, not erased), the date, the time and the timezone (an IANA zone such as
+`Europe/London`; blank uses the Contact's timezone). The call is stored in UTC in
+`call_outcomes` with the zone it was given in, and the Lead moves to Call booked. At Call booked
+the form says **Rebook call**: the pending booking is superseded and a new one stored, and the
+stage stays. A missing Contact, date or time, or a time the zone skips (a clock change), gets
+"Enter the call's date, time and Contact"; a bad zone "Enter a valid timezone, such as
+Europe/London".
+
+**Deal value** (whole US dollars, digits only, 0 to 1,000,000,000) and **Notes** (plain text, at
+most 5,000 characters) are saved together with **Save deal details**; a blank field clears it.
+The deal value is stored in integer micro-dollars and shows as "Deal value: $12,000"; the notes
+render as plain text. A bad value gets "Enter the deal value in whole US dollars", long notes
+"Notes can be at most 5,000 characters", and nothing is saved.
+
+Each change is one transaction through `Pipeline` (`nextron/app/pipeline/api.py`) that appends its
+`events` rows with actor `operator`: a stage move from the old stage to the new one (cause
+`operator_move`, `closed_lost`, `closed_disqualified` or `reopened`), a booking `None` to
+`booked` on `call_outcomes` (and `booked` to `superseded`, cause `rebooked`, on a rebooking), a
+deal save from the stage to itself (cause `deal_details_saved`). The rows never hold an amount, a
+note, a date or a timezone. The notes are personal data (PII class `redact`): erasing a Contact
+sets its Lead's notes to `[erased]`, and a subject access export lists the lines of the notes
+that name the Contact and the Contact's booked calls. Migration `0037_9_1_manual_stages` adds
+`leads.deal_value`, `leads.notes` and `call_outcomes`. Enrollments and Drafts aren't in this tree
+yet: closing a Lead doesn't stop them here (see `deferred-work.md`), and the contactability gate
+already blocks a closed Lead.
 
 **The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
 to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created

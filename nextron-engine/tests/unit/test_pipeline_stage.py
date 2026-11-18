@@ -94,6 +94,8 @@ def test_the_events_and_causes_are_the_closed_lists() -> None:
         *(f"created_from_{source}" for source in LeadSource),
         "reopened",
         "leads_merged",
+        "deal_details_saved",  # Story 9.1: a same-stage row
+        "rebooked",  # Story 9.1: a call_outcomes row
     }
 
 

@@ -113,14 +113,15 @@ at once, as before; a migration then rolls back and runs again at the next start
 that constructs ``Subscribers`` or registers a subscriber, frozen once filled. Each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
-the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
-Lead's Contacts move to the survivor; Story 2.5: so do its crawl runs, and its pages and ATS
-links the survivor lacks); ``SubjectSuppressed`` -> ``Pipeline(clock).close_suppressed``
+the more advanced Pipeline Stage; Story 9.1: and the merged Lead's booked calls), then
+``Research(clock).reparent_lead`` (Story 2.3: the merged Lead's Contacts move to the survivor;
+Story 2.5: so do its crawl runs, and its pages and ATS links the survivor lacks); ``SubjectSuppressed`` -> ``Pipeline(clock).close_suppressed``
 (Story 3.3: an opt-out closes the Lead ``lost``; AD-3's earlier subscribers go before it when their
 stories add them); ``ContactErased`` -> each owner's ``erase_pii`` hook (Story 3.13, AD-17):
 compliance's first (``Erasures(clock, Compliance(clock)).erase_pii``, which reads the Contact
 while it still holds its values), then research's (``Research(clock).erase_pii``, which
-tombstones the Contact last), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
+tombstones the Contact last), then pipeline's (``Pipeline(clock).erase_pii``, Story 9.1: the
+Contact's Lead's notes become ``[erased]``), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
 erases the Contact's override cases, ``erase_override_cases``), then the no-op hooks of
 ``setup``, ``drafting``, ``jobqueue``, ``ops`` and ``notify``, whose tables never hold a
 Contact's data. Each uses ``SystemClock()`` when no clock is given.
@@ -1164,6 +1165,7 @@ def build_app(
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,
+        pipeline=Pipeline(clock),  # Story 9.1: the Lead page's Pipeline panel
         erasures=Erasures(clock, compliance),  # Story 3.13: on the same Compliance
         domain_checks=domain_checks,
         units=units,
@@ -1805,6 +1807,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     erasures = Erasures(chosen, Compliance(chosen))
     subscribers.register_subscriber(ContactErased, erasures.erase_pii)
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)
+    # Story 9.1: the erased Contact's Lead's notes
+    subscribers.register_subscriber(ContactErased, Pipeline(chosen).erase_pii)
     # Story 4.6: the Operator's override cases of the Contact (ai_test_cases.input)
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
     for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):

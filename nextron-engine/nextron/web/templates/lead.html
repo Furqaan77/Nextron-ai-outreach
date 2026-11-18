@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {#- The Lead page (nextron.web.leads_page): the header facts, a GB Lead's legal form
-    (lead_legal_form.html, Story 2.12), the Signals, the live Evidence, then the Contacts panel
+    (lead_legal_form.html, Story 2.12), the Pipeline panel (lead_pipeline.html, Story 9.1: the
+    Operator's moves, the call booking and the deal value and notes), the Signals, the live Evidence, then the Contacts panel
     (lead_contacts.html: the Primary Contact and each Contact with its live Eligibility,
     evaluated on this render and never stored, and its recorded bases, then its Market and
     timezone facts, its Provenance Records and its erase link (Story 3.13), or, for an erased
@@ -34,6 +35,7 @@
 {% include "lead_legal_form.html" %}
 {%- endif %}
 <p><a href="/leads">All Leads</a></p>
+{% include "lead_pipeline.html" %}
 <section class="lead-signals" aria-labelledby="signals-heading" hx-disable>
 <h2 id="signals-heading">Signals</h2>
 {%- if not signals %}

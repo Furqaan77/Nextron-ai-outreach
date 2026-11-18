@@ -328,6 +328,55 @@ def test_the_entry_time_comes_from_the_real_pipeline_service(world: World) -> No
     assert all(not each.leads for each in world.board(entered_from=before, entered_to=before).groups)
 
 
+def test_a_same_stage_row_never_resets_the_entry_time(world: World) -> None:
+    """Story 9.1 (decision 4): a deal save appends a row from a stage to itself."""
+    lead = world.lead("Held", stage=PipelineStage.CALL_HELD)
+    world.entered(lead, PipelineStage.CALL_HELD, T + timedelta(days=1))
+    world.sql(
+        "INSERT INTO events (id, entity, entity_id, from_status, to_status, cause, cause_ref, "
+        "actor, at) VALUES (?, 'leads', ?, 'call_held', 'call_held', 'deal_details_saved', "
+        "NULL, 'operator', ?)",
+        (new_id(), lead, utc_text(T + timedelta(days=5))),
+    )
+
+    [held] = group(world.board(), PipelineStage.CALL_HELD).leads
+
+    assert held.entered_at == T + timedelta(days=1)
+    later = (T + timedelta(days=5)).date()
+    assert names(world.board(entered_from=later), PipelineStage.CALL_HELD) == []
+
+
+def test_each_group_totals_its_deal_values(world: World) -> None:
+    """Story 9.1: each group's total, in micro-dollars, ``None`` when no Lead has one."""
+    for name, stage, dollars in (
+        ("A", PipelineStage.AUDIT_WON, 12_000),
+        ("B", PipelineStage.AUDIT_WON, 1_000_000_000),
+        ("C", PipelineStage.AUDIT_WON, None),
+        ("D", PipelineStage.WON, 0),
+        ("E", PipelineStage.NEW, None),
+    ):
+        lead = world.lead(name, stage=stage)
+        if dollars is not None:
+            world.sql(
+                "UPDATE leads SET deal_value = ? WHERE id = ?", (dollars * 1_000_000, lead)
+            )
+    merged = world.lead("M", stage=PipelineStage.AUDIT_WON)
+    world.sql("UPDATE leads SET deal_value = 5000000 WHERE id = ?", (merged,))
+    world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (world.lead("S"), merged))
+
+    board = world.board()
+
+    assert group(board, PipelineStage.AUDIT_WON).deal_value == 1_000_012_000 * 1_000_000
+    assert group(board, PipelineStage.WON).deal_value == 0
+    assert group(board, PipelineStage.NEW).deal_value is None
+    page = world.page()
+    assert summary(section(page, PipelineStage.AUDIT_WON)) == (
+        "3 Leads Deal value: $1,000,012,000"
+    )
+    assert summary(section(page, PipelineStage.WON)) == "1 Lead Deal value: $0"
+    assert summary(section(page, PipelineStage.NEW)) == "2 Leads Deal value: —"
+
+
 # The page ---------------------------------------------------------------------------------------
 
 

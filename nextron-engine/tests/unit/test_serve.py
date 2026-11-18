@@ -790,9 +790,10 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
     assert all(is_command(subscriber) for subscriber in erased)
     assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
-    compliance, research, playbook, *rest = erased
+    compliance, research, pipeline, playbook, *rest = erased
     assert type(getattr(compliance, "__self__", None)) is Erasures  # compliance first
     assert type(getattr(research, "__self__", None)) is Research  # then research
+    assert type(getattr(pipeline, "__self__", None)) is Pipeline  # Story 9.1: the Lead's notes
     assert type(getattr(playbook, "__self__", None)) is Playbook  # Story 4.6's override cases
     assert rest == [
         setup_api.erase_pii,
@@ -813,11 +814,11 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     found = [
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
-        *subscribers.subscribers_of(ContactErased)[:3],  # the rest are module functions
+        *subscribers.subscribers_of(ContactErased)[:4],  # the rest are module functions
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 6
+    assert clocks == [clock] * 7
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 
