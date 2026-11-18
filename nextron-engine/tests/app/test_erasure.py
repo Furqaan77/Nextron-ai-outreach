@@ -605,6 +605,8 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("draft_revisions", "body"),
         ("draft_revisions", "instruction"),
         ("draft_revisions", "text_hash"),
+        # Story 4.13: nor grounding results; tests/app/test_draft_grounding_rules.py erases them
+        ("grounding_results", "flags"),
     }
     assert world.sql(
         "SELECT office_country FROM contacts WHERE id = ?", (planted.contact_id,)

@@ -560,6 +560,19 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text_hash": PiiClass.KEEP_HASH,
         "created_at": PiiClass.NONE,
     },
+    # Story 4.13. A flag's span quotes Draft text, so erasure redacts flags (each span becomes
+    # [erased]; the rule, explanation and status stay); the rest are IDs, codes and times.
+    "grounding_results": {
+        "id": PiiClass.NONE,
+        "draft_id": PiiClass.NONE,
+        "rev": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "flags": PiiClass.REDACT,
+        "rules_version": PiiClass.NONE,
+        "route_tuple_id": PiiClass.NONE,
+        "served_model": PiiClass.NONE,
+        "checked_at": PiiClass.NONE,
+    },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.
     "unsub_tokens": {

@@ -47,6 +47,17 @@ revision 1 is exactly the ``generated`` one, the AI's original text); ``text_has
 refuse a ``DELETE``, a replacing ``INSERT`` and any ``UPDATE`` except the erasure tombstone of
 ``subject``, ``body`` and ``instruction`` (to ``[erased]``). Those three are classed
 ``redact``; ``text_hash`` is ``keep_hash`` (already a hash); the rest hold no personal data.
+
+``grounding_results`` (FR-21, AD-6, AD-18, Story 4.13; migration ``0046_4_13_grounding_results``)
+holds one grounding result per revision, written only by
+``nextron.db.repos.drafting.grounding_results``: a ULID ``id``; ``draft_id`` and ``rev``, unique
+as a pair and a foreign key to that revision; ``status``
+(``nextron.domain.grounding_rules.GroundingStatus``); ``flags`` (a JSON array of ``{rule, span,
+explanation}``; ``fail`` exactly when it holds one); ``rules_version``; the nullable
+``route_tuple_id`` and ``served_model`` (the AI check's, Story 4.14) and ``checked_at``. A
+flag's ``span`` quotes Draft text, so ``flags`` is classed ``redact``: the erasure turns each
+span into ``[erased]`` and keeps the rule, explanation and status. The rest hold no personal
+data.
 """
 
 from collections.abc import Iterable
@@ -69,6 +80,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.draft import DraftKind, DraftStatus, RevisionOrigin
+from nextron.domain.grounding_rules import GroundingStatus
 
 SHA256_LENGTH: Final = 64  # lowercase hex SHA-256
 SHA256_CHECK: Final = "length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'"
@@ -222,3 +234,39 @@ class DraftRevisionRecord(Base):
     instruction: Mapped[str | None] = mapped_column(Text)
     text_hash: Mapped[str] = mapped_column(String(SHA256_LENGTH))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+# Story 4.13 ---------------------------------------------------------------------------------------
+
+GROUNDING_STATUS_LENGTH: Final = 16
+SERVED_MODEL_LENGTH: Final = 64
+GROUNDING_STATUS_CHECK: Final = _one_of("status", GroundingStatus)
+GROUNDING_FLAGS_CHECK: Final = _json_list("flags")
+GROUNDING_FAIL_CHECK: Final = "(status = 'fail') = (json_array_length(flags) > 0)"
+RULES_VERSION_CHECK: Final = "rules_version >= 1"
+
+
+class GroundingResultRecord(Base):
+    """The grounding result of one Draft revision."""
+
+    __tablename__ = "grounding_results"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "rev"),
+        ForeignKeyConstraint(
+            ["draft_id", "rev"], ["draft_revisions.draft_id", "draft_revisions.rev"]
+        ),
+        CheckConstraint(GROUNDING_STATUS_CHECK, name="status"),
+        CheckConstraint(GROUNDING_FLAGS_CHECK, name="flags"),
+        CheckConstraint(GROUNDING_FAIL_CHECK, name="fail"),
+        CheckConstraint(RULES_VERSION_CHECK, name="rules_version"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    draft_id: Mapped[str] = mapped_column(Ulid)
+    rev: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(GROUNDING_STATUS_LENGTH))
+    flags: Mapped[str] = mapped_column(Text)
+    rules_version: Mapped[int] = mapped_column(Integer)
+    route_tuple_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("ai_route_tuples.id"))
+    served_model: Mapped[str | None] = mapped_column(String(SERVED_MODEL_LENGTH))
+    checked_at: Mapped[datetime] = mapped_column(UtcDateTime)

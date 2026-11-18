@@ -2601,8 +2601,8 @@ the same transaction.
 - `Drafting.revise(draft_id, subject, body)` is your edit (Epic 5's approval card calls it): a
   `ready` Draft with text, a one-line subject of 1 to 200 characters (stored stripped) and a
   body of at most 10,000 characters (empty allowed). It appends an `operator_edit` revision with
-  the previous traceability and returns the new revision number. Grounding (Stories 4.13 and
-  4.14) is not run yet.
+  the previous traceability and returns the new revision number. Its grounding rules run as for
+  every revision (Story 4.13, below); the AI check is Story 4.14.
 - `Drafting.recompose_ready` subscribes to `FooterChanged`: saving a footer setting, or a
   `nextron seed sync` that changes a Market's footer template or `privacy_line_required`, gives
   each `ready` Draft with text in that Market a `footer_change` revision (same subject and body,
@@ -2617,6 +2617,47 @@ Step, status, due time (or "after Step N is sent"), the current composed message
 prospect would receive it (escaped, inside `hx-disable`), "Sending blocked: footer incomplete
 (…)" while the Market's footer is incomplete, the Playbook version and the revision history
 (revision, origin, time and the first 12 characters of the hash), or "No text yet".
+
+## Grounding rules
+
+Story 4.13 (FR-4, FR-21, FR-23, AD-7, AD-18) checks every Draft revision with code before any
+AI judgement, so a rule break is caught every time.
+
+**The rules** (`nextron/domain/grounding_rules.py`, the single definition; `RULES_VERSION` is
+bumped whenever a rule or list changes). `check(revision, brief, context)` returns the flags, each
+a rule id, the matched span of the subject or body (empty for a rule about the whole revision)
+and an explanation of at most 200 characters written by code, never quoting the Draft. The 14
+rules:
+
+- text rules, always: `word_limit` (the Step brief's limit: Step 1 under 80 words, Steps 2 and 3
+  at most 70, Step 4 at most 50), `subject_rule` (Step 1: under 7 words, never starting "Re:",
+  "Fw:" or "Fwd:"), `link_in_step1` (any URL in a Step 1 body, even an approved one),
+  `unapproved_contact_detail` (a URL, email address or phone number that isn't in the
+  `sender_signature` or the `privacy_notice_url` setting), `banned_phrase` (the Sales Playbook
+  §2 and §4 and FR-21 list, such as "circling back", "just following up" and "last chance",
+  ignoring case and punctuation), `attachment` ("attached", "see the PDF"),
+  `price_or_audit_in_step` (a currency amount or the audit, in any Step) and `multiple_ctas`
+  (more than one question in a Step 1 body);
+- claim rules, only when the drafting output gives a claims array (an Operator edit has none
+  until Story 4.14's AI check supplies its claims): `citation_outside_set` (Evidence or a fact
+  version outside the revision's set, or a fact not allowed for the Campaign's Segment and
+  Market), `unhedged_absence` (a claim on Absence Evidence, live or not, without "it looks
+  like", "couldn't see", "doesn't seem to", "might" or a similar hedge in the claim or in the
+  sentence holding it), `signal_count` and `wrong_signal` (Step 1 cites exactly one Signal, the
+  strongest live Event by `domain.signals.strongest_event`, whether it is the cited Signal or
+  the one Signal the claims cite), `score_only_cited` and `repeated_angle` (a follow-up reusing
+  an earlier Step's fact or cited Signal, by its cited Signal or a claim on that Signal's
+  Evidence).
+
+**Results.** The `grounding_results` table (owner `drafting`) holds exactly one row per revision,
+written in the same transaction as the revision (generated, Operator edit or footer change):
+`fail` with its flags when any rule flags, else `pending` with none, the rules version and the
+check time; the AI check's route tuple and served model stay empty until Story 4.14, which alone
+can set `pass`. A Draft whose context can't be built (no Step brief, an unknown Campaign,
+Sequence or Segment) is refused before anything is written. Erasing a Contact turns every
+non-empty flag span into `[erased]` (an empty span stays empty; the rule, explanation and status
+stay), and the subject access export lists the
+results under `drafting.grounding_results`.
 
 ## Leads list and Lead page
 

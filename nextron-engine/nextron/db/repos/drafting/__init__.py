@@ -8,4 +8,6 @@ group 7).
 - ``drafts`` (Story 4.9): the Draft slots' content group.
 - ``revisions`` (Story 4.12): each Draft's immutable text revisions; ``insert`` and reads, and
   only the erasure's ``tombstone`` besides.
+- ``grounding_results`` (Story 4.13): one grounding result per revision; ``insert``, reads and
+  the erasure's ``tombstone``.
 """

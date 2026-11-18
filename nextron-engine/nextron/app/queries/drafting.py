@@ -24,6 +24,15 @@ Story 4.12 (a Draft's text):
 - ``export_pii(contact_id) -> {"draft_revisions": tuple[dict, ...]}`` (Story 3.15's subject
   access exporter, added at the merge of Story 4.12): every column of each revision of the
   Drafts of the Contact's Enrollments, oldest first (``()`` for a text that isn't a ULID).
+  Since Story 4.13 it also holds ``"grounding_results"``: every column of each grounding result
+  of those Drafts, oldest first.
+
+Story 4.13 (grounding):
+
+- ``GroundingResultView``: one revision's grounding result (``status`` a
+  ``GroundingStatus``; ``flags`` a tuple of ``StoredFlag(rule, span, explanation)``, in the
+  stored order); ``grounding_result(draft_id, rev)``: the result of that revision, or ``None``
+  (a text that isn't a ULID included).
 """
 
 from collections.abc import Mapping
@@ -33,11 +42,14 @@ from types import MappingProxyType
 
 from nextron.db.repos.drafting import drafts as drafts_repo
 from nextron.db.repos.drafting import footer_snapshots as footer_snapshots_repo
+from nextron.db.repos.drafting import grounding_results as grounding_results_repo
 from nextron.db.repos.drafting import revisions as revisions_repo
 from nextron.db.repos.drafting.drafts import StoredDraft
 from nextron.db.repos.drafting.footer_snapshots import StoredFooterSnapshot
+from nextron.db.repos.drafting.grounding_results import StoredFlag
 from nextron.db.repos.drafting.revisions import StoredRevision
 from nextron.domain.draft import DraftKind, DraftStatus, RevisionOrigin
+from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.ids import is_ulid
 
 
@@ -190,6 +202,49 @@ def footer_snapshot(snapshot_id: str) -> StoredFooterSnapshot | None:
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
-    """Every revision of the Contact's Drafts, every column; see the module docstring."""
-    rows = revisions_repo.for_export(contact_id) if is_ulid(contact_id) else ()
-    return {"draft_revisions": rows}
+    """Every revision of the Contact's Drafts and every grounding result, every column; see the
+    module docstring."""
+    if not is_ulid(contact_id):
+        return {"draft_revisions": (), "grounding_results": ()}
+    return {
+        "draft_revisions": revisions_repo.for_export(contact_id),
+        "grounding_results": grounding_results_repo.for_export(contact_id),
+    }
+
+
+# A revision's grounding (Story 4.13) -------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingResultView:
+    """One revision's grounding result."""
+
+    id: str
+    draft_id: str
+    rev: int
+    status: GroundingStatus
+    flags: tuple[StoredFlag, ...]
+    rules_version: int
+    route_tuple_id: str | None
+    served_model: str | None
+    checked_at: datetime
+
+
+def grounding_result(draft_id: str, rev: int) -> GroundingResultView | None:
+    """The grounding result of the revision ``rev`` of the Draft ``draft_id``, or ``None``."""
+    if not is_ulid(draft_id):
+        return None
+    stored = grounding_results_repo.of_revision(draft_id, rev)
+    if stored is None:
+        return None
+    return GroundingResultView(
+        id=stored.id,
+        draft_id=stored.draft_id,
+        rev=stored.rev,
+        status=GroundingStatus(stored.status),
+        flags=stored.flags,
+        rules_version=stored.rules_version,
+        route_tuple_id=stored.route_tuple_id,
+        served_model=stored.served_model,
+        checked_at=stored.checked_at,
+    )

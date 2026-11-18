@@ -532,6 +532,20 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "created_at",
         ),
     },
+    # Story 4.13: one grounding result per Draft revision
+    "grounding_results": {
+        "drafting": (
+            "id",
+            "draft_id",
+            "rev",
+            "status",
+            "flags",
+            "rules_version",
+            "route_tuple_id",
+            "served_model",
+            "checked_at",
+        ),
+    },
     "unsub_tokens": {
         "compliance": (
             "id",

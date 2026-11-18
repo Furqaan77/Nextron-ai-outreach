@@ -32,6 +32,8 @@ Table                      Owner        Exported as / why not
                                         but each row references the Contact)
 ``draft_revisions``        drafting     ``draft_revisions`` (Story 4.12: the revisions of the
                                         Drafts of the Contact's Enrollments)
+``grounding_results``      drafting     ``grounding_results`` (Story 4.13: each revision's
+                                        grounding result; its flags quote Draft text)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``jobs``                   jobqueue     never linked to a Contact
@@ -180,6 +182,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "ai_test_cases": Exported("playbook", "override_cases"),
         "enrollments": Exported("sequencing", "enrollments"),
         "draft_revisions": Exported("drafting", "draft_revisions"),  # Story 4.12
+        "grounding_results": Exported("drafting", "grounding_results"),  # Story 4.13
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),
