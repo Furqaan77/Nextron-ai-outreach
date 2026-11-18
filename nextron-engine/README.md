@@ -1132,12 +1132,47 @@ every address an `address` record: the source kind (`csv`, `website`, `signal_in
 `referral`, `replier`, `operator`, `pattern`, `finder` or `eligibility_basis`), the detail (for
 a CSV, the list's origin), the retrieval time and, on an `address` record, the address and its
 class at the time. A later source that fills a name, role, LinkedIn URL or office location adds
-one more `contact` record. The Contact's first `contact` record holds the notes of its Market
-and timezone (Story 3.2; see below). The eligibility-basis fields (`basis_rule`,
-`basis_campaign_id`, `lia_ref`, `lia_date`, `basis_recorded_at`) stay NULL until Epic 3. Read
-them with
+one more `contact` record. The Contact's first `contact` record that isn't an
+`eligibility_basis` record holds the notes of its Market and timezone (Story 3.2; see below).
+The eligibility-basis fields (`basis_rule`, `basis_campaign_id`, `lia_ref`, `lia_date`,
+`basis_recorded_at`) are set only on an `eligibility_basis` record (below). Read them with
 `queries.research.provenance(contact_id)`. A row without a Contact records its origin only
 through the Lead's creation event (`created_from_csv`).
+
+**The Eligibility basis (FR-51, AD-7, Story 3.7).** `Research.record_eligibility_basis(contact_id,
+decision, campaign_id, lia_ref, lia_date, at)` records why a Contact may be emailed in a
+Campaign: it inserts one `eligibility_basis` Provenance Record (subject `contact`, its detail and
+`basis_rule` the Decision's basis rule, `basis_campaign_id` the Campaign, `lia_ref` and `lia_date`
+as given, `retrieved_at` and `basis_recorded_at` both `at`; no address, class or notes) and
+returns its id. It is the recorder Story 4.8's `enroll` calls, in the same unit of work as the
+Decision it gets from `compliance.evaluate_eligibility`:
+
+```python
+decision = compliance.evaluate_eligibility(contact_id)  # enroll refuses when it isn't eligible
+campaign = queries.setup.campaign(campaign_id)
+lia = campaign.lia  # None outside the UK
+research.record_eligibility_basis(
+    contact_id, decision, campaign.id,
+    lia.ref if lia else None, lia.date if lia else None, now,
+)
+```
+
+It trusts the Decision but refuses, before writing anything, whatever would make a false audit
+record: a `decision` that isn't a `Decision`, ids that aren't text, an `lia_ref` that isn't text
+or `None`, an `lia_date` that isn't a `date` or `None` (a `datetime` included) or an `at` that
+isn't an aware `datetime` (`TypeError`); a Decision that isn't eligible (`ValueError`); an
+unknown Contact or Campaign (`LookupError`); and (`ValueError`) a Contact whose Market isn't the
+Campaign's, a basis for another country than the Campaign's Market (`US: ...` in a UK Campaign),
+a UK basis without the Campaign's recorded LIA or with another reference or date, and an LIA on
+a Campaign outside the UK. A stored Market that no longer decodes raises its `InvalidMarkets`;
+nothing is written. Every call adds a new record and no command updates or removes one, so a
+basis recorded before **Save the LIA** (`Campaigns.record_lia`) changed a Campaign's assessment
+keeps the one it was recorded with. Nothing is logged. A UK basis is 71 to 108 characters (113
+with an unlabelled 64-character legal-form code), so migration `0031_3_7_basis_rule_width`
+widened `basis_rule` to 128 characters, and a `Decision` refuses a longer rule.
+
+`Research.add_contact` refuses `source=eligibility_basis` (`ValueError`, before the gate and any
+write): a basis says why a Contact may be emailed, not where it came from.
 
 **Personal data.** A Contact's name and role and a record's detail and notes are `redact`; the
 email and a record's address are `keep_hash`, so suppression and dedupe still match after an
@@ -1627,8 +1662,10 @@ renders it) and inside a caller's transaction alike, and it writes, caches and l
 reads the Contact (`queries.research.contact`; an unknown or non-ULID id raises
 `LookupError`), its Lead and stage, calls `assert_contactable(ContactSubject(contact_id),
 "email", "cold")` (a merged Lead raises its `ValueError`) and reads the Markets
-(`queries.setup.markets()`; a stored Market that no longer decodes fails closed). Every
-consumer calls it: the Lead page now, Enrollment (Story 4.8) and the send gate (6.9) later.
+(`queries.setup.markets()`; a stored Market that no longer decodes fails closed) and the
+Contact's Provenance Records (`queries.research.provenance`, checked by
+`nextron.domain.contacts.provenance_recorded`, Story 3.7). Every consumer calls it: the Lead
+page now, Enrollment (Story 4.8) and the send gate (6.9) later.
 
 **The pure core** is `nextron.domain.eligibility.evaluate(contact, lead, market_rules, now)`,
 standard library only and tested with a fixed `now`. It runs every check and collects every
@@ -1642,6 +1679,7 @@ failing reason; the Contact is eligible only with none. The reasons, a closed en
 | `uk_legal_form_unconfirmed` | no legal form, or one no FR-12 Evidence confirms | "The Lead's legal form isn't confirmed: no Evidence links the Lead to its Companies House record" |
 | `uk_free_webmail` | a free-webmail address where the Market blocks it (always for `GB`) | "The address is on a free-webmail domain; the United Kingdom Market allows corporate addresses only" |
 | `address_not_sendable` | no email, or an Address Class other than Published or Verified | "The address is Guessed; only Published or Verified addresses can be emailed" |
+| `provenance_missing` | Story 3.7, FR-51: no `contact` Provenance Record from a source (an `eligibility_basis` record doesn't count), or an email with no `address` record for that exact address (a data error) | "Provenance missing: no Provenance Record shows where this Contact or its email address came from" |
 | `address_or_domain_suppressed` | the gate's `address_suppressed`, `address_domain_suppressed` or `lead_domain_suppressed` | "The address or its domain is on the Suppression List" |
 | `asked_not_to_be_contacted` | the gate's `person_suppressed` or `profile_suppressed` | "This person asked not to be contacted (Suppression List)" |
 | `recontact_not_allowed` | FR-63: an earlier Sequence ended without a Reply less than 90 days after its last Step, or no Event was first seen after it ended | "An earlier Sequence ended without a Reply: re-contact needs 90 days since its last Step and an Event first seen after it ended" |
@@ -1666,8 +1704,9 @@ blocked when its country's Market is enabled later, until something re-resolves 
 so `evaluate_eligibility` passes none: **no UK Contact is eligible** until Story 2.12 confirms
 the legal form (each fails with `uk_legal_form_unconfirmed`), every `not_now` Lead fails with
 `not_now_undated` until Epic 7 records the date, and the FR-63 history is empty until Story 4.8
-(Enrollments) and 2.9 (Events) pass it. A UK basis can be longer than 64 characters, so Story
-3.7 widens `provenance_records.basis_rule` before recording it.
+(Enrollments) and 2.9 (Events) pass it. Story 3.7 widened `provenance_records.basis_rule` to 128
+characters for the UK basis; `basis_country(rule)` names the country a basis rule is for (`US`,
+`GB` or `None`), which `Research.record_eligibility_basis` checks against the Campaign's Market.
 
 **Contract tests** (`tests/contracts/test_eligibility_contracts.py`), each with probes: no POST
 route names `eligib` in its path, name or endpoint; `eligib` is a protected settings stem and no
@@ -1806,27 +1845,49 @@ Contact, its live [Eligibility](#eligibility) (Story 3.6, UX-DR17), evaluated th
 `compliance.evaluate_eligibility` on every render and stored nowhere: "Eligible: <basis>" (such
 as "Eligible: US: cold email allowed (CAN-SPAM)") or "Not eligible", then every reason's text,
 each list item carrying its code as `data-reason` (`address_not_sendable`,
-`not_now_until_2027-01-15`). Then its Provenance Records (FR-51): the record ("Contact", or
-"Address" and the address), the source (CSV import, Website, Signal Inbox (manual), Referral,
-Replier, Entered by Mac, Email pattern, Email finder or Eligibility basis), the detail (for a
-CSV, the list's origin), the retrieval date and the Address Class at the time; or "No
-Provenance Record.". The header's **HQ timezone**, and the **Signals** and **Evidence**
-sections above Contacts, are Story 2.9's (see [Signals and Evidence](#signals-and-evidence)),
-and the Primary Contact line and the **Make primary** buttons Story 2.10's (see
-[Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)). Market,
-Tier, scores, job postings, the timeline, stage actions and the data-subject actions come with
-their stories (3.2 and 3.7, 2.11, 2.15, Epics 5 and 9, 3.13 onwards).
+`not_now_until_2027-01-15`). Next to the Decision, its recorded Eligibility bases (Story 3.7):
+"Basis not yet recorded (recorded at enrollment)" until Story 4.8 enrolls it, then each basis,
+oldest first, as "Basis: <rule>, recorded <YYYY-MM-DD HH:MM> UTC" and, for a UK basis,
+"Legitimate interests: LIA <reference> dated <YYYY-MM-DD>, recorded <YYYY-MM-DD HH:MM> UTC"
+(the page doesn't name the Campaign; the export, Story 3.15, does).
+
+Then its Provenance (FR-51, Story 3.7):
+
+- **Market**: "<name> (<basis>)", such as "United States (from the Lead's country; office
+  location unknown)"; "No Market (<basis>)", such as "No Market (the email is on a
+  country-code domain outside the enabled Markets)"; "Unknown Market (<basis>)" when the
+  Markets can't be read; or "Not resolved yet".
+- **Timezone**: "<zone> (<basis>)", such as "America/New_York (US state unknown: Eastern
+  fallback with a narrowed Send Window)"; "None (no Market)"; or "Not resolved yet".
+- **Notes**: each line of the records' notes (the Market and timezone fallbacks), or "—".
+- **"Provenance missing"** in red when no record shows where the Contact came from, or the email
+  address has no record of its own (a data error; Eligibility then gives `provenance_missing`).
+- **The records** (the source records; a basis record shows only in the bases above): the record
+  ("Contact", or "Address" and the address), the source (CSV import, Website, Signal Inbox
+  (manual), Referral, Replier, Manual (entered by Mac), Email pattern or Email finder), the
+  detail (for a CSV, the list's origin; a web address is a link with `rel="noopener noreferrer"`,
+  anything else plain text), the retrieval date and the Address Class at the time. An address's
+  records, in time order, are its Address Class history.
+
+The header's **HQ timezone**, and the **Signals** and **Evidence** sections above Contacts, are
+Story 2.9's (see [Signals and Evidence](#signals-and-evidence)), and the Primary Contact line
+and the **Make primary** buttons Story 2.10's (see [Decision-makers and the Primary
+Contact](#decision-makers-and-the-primary-contact)). Tier, scores, job postings, the timeline,
+stage actions and the data-subject actions come with their stories (2.11, 2.15, Epics 5 and 9,
+3.13 onwards).
 
 A merged Lead's URL redirects (303) straight to the Lead at the end of its merge chain, following
 at most 32 merges; an id that isn't a ULID, an unknown id or a broken chain gets 404 "Lead not
 found", which never repeats the id. Both pages show personal data (a Lead's name can be a sole
 trader's name), so both send `Cache-Control: no-store`. Every Lead, Contact and Provenance text
-is imported or crawled, so it renders escaped (`|plain`, or `safe_link` for the two links)
-inside an element carrying `hx-disable`.
+is imported or crawled, so it renders escaped (`|plain`, or `safe_link` for the links) inside an
+element carrying `hx-disable`; the page has no HTMX action.
 
 **Reads.** The pages read only through `nextron.app.queries`, except the Lead page's
 Eligibility, which comes from `Compliance.evaluate_eligibility` (a read-only call;
-`nextron/web/leads_page.py` itself still imports only `nextron.app.queries.*` from the app):
+`nextron/web/leads_page.py` itself still imports only `nextron.app.queries.*` from the app). The
+Lead page also reads `queries.setup.markets()` to name each Contact's Market (none when a stored
+Market no longer decodes):
 
 - `queries.discovery.lead_list(stage=, segment_id=, search=, page=)` returns a `LeadListPage`
   (`leads`, `total`, `page`, `pages`); a `page` that isn't an `int` raises `TypeError`, one below
@@ -2110,6 +2171,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0028_2_10_primary_contact` | `contacts.primary_set_by` (nullable, `system` or `operator`) and `leads.no_decision_maker` (nullable Boolean), both added in place with no check, and the partial unique index `uq_contacts_one_primary` on `contacts (lead_id)` where `is_primary = 1` (see [Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)) | `research` |
 | `0029_2_9_tag_managers` | adds `crawled_pages.tag_managers` in place (`add_column`, nullable text: the tag managers a page loads as a JSON array of keys, `[]` for none, NULL for a page never checked) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
 | `0030_4_5_ai_test_runs` | `ai_test_cases` (a test-set check, a SHA-256 check and the partial unique index `uq_ai_test_cases_live_key` on `test_set` and `case_key` where `retired_at` is NULL) and `ai_test_runs` (a foreign key to `ai_route_tuples` with no cascade, test-set, outcome, error and count checks, `ix_ai_test_runs_tuple_id_test_set`); rebuilds `ai_route_activations` from 0026's exact table (which 0027 to 0029 leave unchanged) with the foreign key `fk_ai_route_activations_test_run_id_ai_test_runs` from `test_run_id` to `ai_test_runs`, no cascade, every row, check and index kept (see [The AI test gate (Story 4.5)](#the-ai-test-gate-story-45)) | `playbook` |
+| `0031_3_7_basis_rule_width` | rebuilds `provenance_records` (from 0015's exact table, which 0016 to 0030 leave unchanged; every row, its four checks, the foreign key to `contacts` and `ix_provenance_records_contact_id` kept) with `basis_rule` widened from 64 to 128 characters, so a UK eligibility basis fits; nothing is added (see [CSV import, Contacts and Provenance](#csv-import-contacts-and-provenance)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

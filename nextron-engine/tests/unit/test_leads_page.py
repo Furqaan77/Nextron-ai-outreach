@@ -7,7 +7,8 @@ Contact's live Eligibility row (Story 3.6: eligible and ineligible Contacts, eve
 its ``data-reason``, recomputed on every render, nothing stored, inside ``hx-disable``),
 ``no-store``, the lock without a session, the route order, the nav link, the label tables and
 the queries-only import rule. Story 2.9 adds the headquarters zone and the Signals and Evidence
-sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped)."""
+sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped). Story
+3.7's Provenance facts, links and bases are in ``tests/unit/test_lead_provenance_page.py``."""
 
 import ast
 from collections.abc import Callable, Iterator
@@ -684,13 +685,18 @@ def test_the_empty_cases(world: World) -> None:
     assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primary"]
     assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No", "Make primary"]
     rows = page.find_all("tr", class_="provenance-row")
-    assert rows[0].text == "No Provenance Record."
+    # Story 3.7: a Contact with no source record shows "Provenance missing" in its place
+    assert rows[0].find("p", class_="provenance-missing").text == "Provenance missing"
+    assert not rows[0].find_all("table", class_="provenance-table")
+    assert not rows[1].find_all("p", class_="provenance-missing")
     assert rows[1].find_all("table", class_="provenance-table")
 
 
 def test_the_primary_flag_and_every_source_label(world: World) -> None:
     lead = world.lead("Smith Law", "smith-law.co.uk")
-    for n, source in enumerate(ProvenanceSource):
+    # add_contact refuses eligibility_basis (Story 3.7); test_lead_provenance_page shows its label
+    sources = [s for s in ProvenanceSource if s is not ProvenanceSource.ELIGIBILITY_BASIS]
+    for n, source in enumerate(sources):
         candidate = ContactCandidate(name=f"Person {n}")
         world.add(lead, candidate, source=source, detail=f"from {n}", seconds=n)
     world.sql("UPDATE contacts SET is_primary = 1 WHERE name = 'Person 0'")
@@ -698,11 +704,11 @@ def test_the_primary_flag_and_every_source_label(world: World) -> None:
     page = world.page(f"/leads/{lead}")
 
     primaries = [cells(row)[5] for row in page.find_all("tr", class_="contact-row")]
-    assert primaries == ["Yes"] + ["No"] * (len(ProvenanceSource) - 1)
-    sources = [
+    assert primaries == ["Yes"] + ["No"] * (len(sources) - 1)
+    shown = [
         table_rows(table)[1][1] for table in page.find_all("table", class_="provenance-table")
     ]
-    assert sources == [SOURCE_LABELS[source] for source in ProvenanceSource]
+    assert shown == [SOURCE_LABELS[source] for source in sources]
 
 
 def test_a_merged_lead_redirects_to_the_end_of_its_chain(world: World) -> None:
@@ -1243,7 +1249,8 @@ def test_a_market_name_in_a_reason_is_escaped_inside_hx_disable(world: World) ->
     assert "&lt;i&gt;Britain&lt;/i&gt;" in reply.text
     page = Tree(reply.text)
     assert not page.find_all("i")
-    assert page.disabled("Britain") == [True]
+    # the reason, then (Story 3.7) the Market fact and the timezone note
+    assert page.disabled("Britain") == [True, True, True]
     [row] = page.find_all("tr", class_="eligibility-row")
     assert [code for code, _ in eligibility(row)[1]] == [
         "uk_legal_form_unconfirmed",
@@ -1340,7 +1347,7 @@ def test_every_stage_and_source_has_a_label() -> None:
     assert list(STAGE_LABELS) == list(PipelineStage)
     assert list(SOURCE_LABELS) == list(ProvenanceSource)
     assert STAGE_LABELS[PipelineStage.CALL_BOOKED] == "Call booked"
-    assert SOURCE_LABELS[ProvenanceSource.OPERATOR] == "Entered by Mac"
+    assert SOURCE_LABELS[ProvenanceSource.OPERATOR] == "Manual (entered by Mac)"  # Story 3.7
     assert leads_page.stage_label("retired") == "retired"  # an unknown stored value
     assert leads_page.source_label("carrier_pigeon") == "carrier_pigeon"
 

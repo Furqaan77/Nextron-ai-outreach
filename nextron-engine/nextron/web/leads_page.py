@@ -1,7 +1,8 @@
 """The Leads list and the Lead page (FR-51, FR-13, UX-DR17, UX-DR18, AD-3, AD-13, AD-18): views
 for ``create_app``'s two routes, which stay thin. Both are GETs declaring
 ``@personal_data(True)`` (a Lead's name can be a sole trader's name, and a Contact is a person),
-so both send ``Cache-Control: no-store``. This module reads and evaluates nothing itself, and
+so both send ``Cache-Control: no-store``. This module reads nothing and evaluates no Eligibility
+itself (it only applies the pure ``provenance_recorded`` check to the records it is given), and
 imports from ``nextron.app`` only ``nextron.app.queries.*``.
 
 **The Leads list** (``GET /leads``, route ``pipeline_page``, the navigation's Leads/Pipeline
@@ -32,15 +33,37 @@ section) renders ``leads.html`` from ``queries.discovery.lead_list`` and
 ``lead_context``: a ``LeadHeader`` (the name, the website as a ``safe_link`` to
 ``https://<domain>/`` or "No website on record", the Segment, the country, the Pipeline Stage's
 label and the created date) and one ``ContactRow`` per Contact, oldest first (name, role,
-email, Address Class, LinkedIn URL, Primary ``Yes`` or ``No``; a blank shows "—"), each with
-its live Eligibility (Story 3.6: an ``EligibilityRow`` from the ``Decision`` the route got from
-``compliance.evaluate_eligibility`` on this render: "Eligible: <basis>" or "Not eligible", then
-a ``ReasonRow`` per reason, its ``code`` the item's ``data-reason``; a Contact without a
-Decision raises ``KeyError``) and its ``ProvenanceRow`` records (the record, "Contact" or
-"Address" and its address; the source's label; the detail; the retrieval date; the Address
-Class or "—"). A merged Lead's URL
-answers 303 to its survivor's; a text that isn't a ULID, an unknown id or a broken merge chain
-answers 404 with ``lead_missing.html``, which never echoes the id.
+email, Address Class, LinkedIn URL, Primary ``Yes`` or ``No``; a blank shows "—"). Under each
+Contact:
+
+- **Its live Eligibility** (``eligibility-row``; Story 3.6): an ``EligibilityRow`` from the
+  ``Decision`` the route got from ``compliance.evaluate_eligibility`` on this render ("Eligible:
+  <basis>" or "Not eligible", then a ``ReasonRow`` per reason, its ``code`` the item's
+  ``data-reason``; a Contact without a Decision raises ``KeyError``), then its recorded bases
+  (Story 3.7, FR-51): with no ``eligibility_basis`` record, "Basis not yet recorded (recorded at
+  enrollment)"; otherwise one ``BasisRow`` per basis record, oldest first: "Basis: <rule>,
+  recorded <time>" ("—" for a NULL rule) and, when the record holds an LIA reference and date,
+  "Legitimate interests: LIA <ref> dated <YYYY-MM-DD>, recorded <time>", ``<time>`` being
+  ``YYYY-MM-DD HH:MM UTC`` of ``basis_recorded_at`` (else ``retrieved_at``). The Campaign of a
+  basis isn't shown (Story 3.15's export shows ``basis_campaign_id``).
+- **Its Provenance** (``provenance-row``; FR-51, Story 3.7): ``MarketFacts`` (``market_facts``)
+  and the ``ProvenanceRow`` records (the source records only: an ``eligibility_basis`` record
+  shows in the bases above, never as a row). The Market: "<name> (<basis label>)", "No Market
+  (<basis label>)" without one, "Unknown Market (<basis label>)" for a ``market_id`` no stored Market
+  names, or "Not resolved yet" without a ``market_basis``. The timezone: "<tz> (<basis
+  label>)", "None (<basis label>)" without one, or "Not resolved yet" without a ``tz_basis``.
+  ``MARKET_BASIS_LABELS`` and ``TZ_BASIS_LABELS`` give the labels (an unknown stored basis
+  renders as its own text). The notes: each line of every record's ``notes``, in record order,
+  or "—". "Provenance missing" (red) shows when
+  ``nextron.domain.contacts.provenance_recorded(email, records)`` is false (no source record of
+  the Contact, or none for its email address), in place of 2.4's "No Provenance Record.". Each
+  record shows "Contact", or "Address" and its address; the source's label; the detail (through
+  ``safe_link``, so an ``http``/``https`` URL is a link with ``rel="noopener noreferrer"`` and
+  anything else plain text); the retrieval date; and the Address Class at the time or "—". An
+  address's ``address`` records, in time order, are its Address Class history.
+
+A merged Lead's URL answers 303 to its survivor's; a text that isn't a ULID, an unknown id or a
+broken merge chain answers 404 with ``lead_missing.html``, which never echoes the id.
 
 **Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
 ``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
@@ -63,9 +86,10 @@ Neither section holds an HTMX action.
 **Decision-makers and the Primary Contact (Story 2.10).** The Contacts section is its own panel,
 ``lead_contacts.html`` (``<section id="lead-contacts">``), rendered inside ``lead.html`` and
 alone as the answer to ``POST /leads/{lead_id}/primary``, which HTMX swaps in for the whole
-panel. ``contacts_context(lead_id, contacts, provenance, decisions, no_decision_maker,
-notice=None)`` gives (``decisions``: each Contact's live Eligibility ``Decision``, Story 3.6, so
-the panel the POST answers with shows it too):
+panel. ``contacts_context(lead_id, contacts, provenance, decisions, markets,
+no_decision_maker, notice=None)`` gives (``decisions``: each Contact's live Eligibility
+``Decision``, Story 3.6, and ``markets``: the stored Markets that name each Contact's Market,
+Story 3.7, so the panel the POST answers with shows them too):
 
 - the Primary line: "Primary Contact: <name> (chosen by you)" for the operator's Primary,
   "Primary Contact: <name> (chosen by the engine)" for the engine's (the name, else the email,
@@ -85,18 +109,18 @@ Every untrusted text (the Primary line's name, each Contact and Provenance cell)
 element carrying ``hx-disable``; the forms sit outside them. A person Evidence row (its
 ``person_contact_id`` set) reads "Contact: <name>" under Supports.
 
-``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source,
-``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every Signal class, Evidence type
-and fact kind; a stored value none knows renders as its own text. Every Lead, Contact,
-Provenance, Signal and Evidence text renders through ``|plain`` or ``safe_link`` inside an
-element carrying ``hx-disable``.
+``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source (``operator`` is
+"Manual (entered by Mac)"), ``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every
+Signal class, Evidence type and fact kind; a stored value none knows renders as its own text.
+Every Lead, Contact, Provenance, Signal and Evidence text renders through ``|plain`` or
+``safe_link`` inside an element carrying ``hx-disable``.
 """
 
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlencode
@@ -109,7 +133,8 @@ from nextron.app.queries.research import (
     StoredContact,
     StoredProvenance,
 )
-from nextron.app.queries.setup import SeededSegment
+from nextron.app.queries.setup import SeededMarket, SeededSegment
+from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import (
     INVALID_ADDRESS,
     PrimaryRefusal,
@@ -117,6 +142,7 @@ from nextron.domain.contacts import (
     PrimarySetBy,
     ProvenanceSource,
     ProvenanceSubject,
+    provenance_recorded,
 )
 from nextron.domain.eligibility import Decision
 from nextron.domain.extraction import FactKind
@@ -172,6 +198,16 @@ SUPPORTS_SEPARATOR: Final = "; "
 ELIGIBLE: Final = "Eligible: {basis}"
 NOT_ELIGIBLE: Final = "Not eligible"
 CONTACT_SUPPORT: Final = "Contact: "
+# Story 3.7: the Provenance facts and the recorded bases
+NOT_RESOLVED: Final = "Not resolved yet"
+MARKET_FACT: Final = "{name} ({basis})"
+NO_MARKET_FACT: Final = "No Market ({basis})"
+UNKNOWN_MARKET_FACT: Final = "Unknown Market ({basis})"
+TZ_FACT: Final = "{tz} ({basis})"
+NO_TZ_FACT: Final = "None ({basis})"
+BASIS_LINE: Final = "Basis: {rule}, recorded {at}"
+LIA_LINE: Final = "Legitimate interests: LIA {ref} dated {date}, recorded {at}"
+TIME_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -198,7 +234,7 @@ SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
         ProvenanceSource.SIGNAL_INBOX: "Signal Inbox (manual)",
         ProvenanceSource.REFERRAL: "Referral",
         ProvenanceSource.REPLIER: "Replier",
-        ProvenanceSource.OPERATOR: "Entered by Mac",
+        ProvenanceSource.OPERATOR: "Manual (entered by Mac)",
         ProvenanceSource.PATTERN: "Email pattern",
         ProvenanceSource.FINDER: "Email finder",
         ProvenanceSource.ELIGIBILITY_BASIS: "Eligibility basis",
@@ -223,6 +259,29 @@ FACT_LABELS: Final[Mapping[str, str]] = MappingProxyType(
         FactKind.STAFF: "Staff",
         FactKind.GROUP_STAFF: "Group staff",
         FactKind.LOCATIONS: "Locations",
+    }
+)
+MARKET_BASIS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        MarketBasis.OFFICE_LOCATION: "from the office location",
+        MarketBasis.LEAD_COUNTRY: "from the Lead's country; office location unknown",
+        MarketBasis.CONFLICT_STRICTER: "the stricter of two conflicting Markets",
+        MarketBasis.CCTLD_OUTSIDE_MARKETS: (
+            "the email is on a country-code domain outside the enabled Markets"
+        ),
+        MarketBasis.LOCATION_OUTSIDE_MARKETS: "the location is outside the enabled Markets",
+        MarketBasis.LOCATION_UNKNOWN: "the location is unknown",
+    }
+)
+TZ_BASIS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        TzBasis.OFFICE_LOCATION: "from the office location",
+        TzBasis.LEAD_HQ: "from the Lead's headquarters",
+        TzBasis.MARKET_DEFAULT: "the Market's default",
+        TzBasis.US_UNKNOWN_FALLBACK: (
+            "US state unknown: Eastern fallback with a narrowed Send Window"
+        ),
+        TzBasis.NO_MARKET: "no Market",
     }
 )
 
@@ -470,8 +529,8 @@ class LeadHeader:
 @dataclass(frozen=True, slots=True)
 class ProvenanceRow:
     """One Provenance Record as the Lead page shows it: the record ("Contact" or "Address"),
-    the address of an ``address`` record, the source's label, the detail, the retrieval date
-    and the Address Class at the time."""
+    the address of an ``address`` record, the source's label, the detail (rendered through
+    ``safe_link``), the retrieval date and the Address Class at the time."""
 
     record: str
     address: str | None
@@ -501,9 +560,28 @@ class EligibilityRow:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketFacts:
+    """A Contact's Market and timezone, each with its basis, and its Provenance notes, as the
+    Lead page shows them (Story 3.7)."""
+
+    market: str
+    timezone: str
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BasisRow:
+    """One recorded Eligibility basis as the Lead page shows it: the basis line and, when the
+    record holds an LIA, the legitimate-interests line (Story 3.7)."""
+
+    basis: str
+    lia: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ContactRow:
-    """One Contact as the Lead page shows it, with its live Eligibility, its Provenance Records
-    and whether it gets a "Make primary" form."""
+    """One Contact as the Lead page shows it, with its live Eligibility, its recorded bases,
+    its Market facts, its Provenance Records and whether it gets a "Make primary" form."""
 
     contact_id: str
     name: str | None
@@ -513,6 +591,9 @@ class ContactRow:
     linkedin_url: str | None
     primary: str
     eligibility: EligibilityRow
+    bases: tuple[BasisRow, ...]
+    facts: MarketFacts
+    provenance_missing: bool
     records: tuple[ProvenanceRow, ...]
     can_make_primary: bool = True
 
@@ -668,10 +749,87 @@ def _operators_primary(contact: StoredContact) -> bool:
     return contact.is_primary and contact.primary_set_by == PrimarySetBy.OPERATOR
 
 
+def market_basis_label(basis: str) -> str:
+    """The label of the Market basis ``basis``; its own text when unknown."""
+    return MARKET_BASIS_LABELS.get(basis, basis)
+
+
+def tz_basis_label(basis: str) -> str:
+    """The label of the timezone basis ``basis``; its own text when unknown."""
+    return TZ_BASIS_LABELS.get(basis, basis)
+
+
+def market_names(markets: Iterable[SeededMarket]) -> dict[str, str]:
+    """Each stored Market's name, by its id."""
+    return {market.id: market.definition.name for market in markets}
+
+
+def market_facts(
+    contact: StoredContact, records: Iterable[StoredProvenance], names: Mapping[str, str]
+) -> MarketFacts:
+    """The Contact's Market and timezone with their bases, and every line of its records'
+    notes, in record order."""
+    if contact.market_basis is None:
+        market = NOT_RESOLVED
+    else:
+        basis = market_basis_label(contact.market_basis)
+        if contact.market_id is None:
+            market = NO_MARKET_FACT.format(basis=basis)
+        elif contact.market_id in names:
+            market = MARKET_FACT.format(name=names[contact.market_id], basis=basis)
+        else:
+            market = UNKNOWN_MARKET_FACT.format(basis=basis)
+    if contact.tz_basis is None:
+        timezone = NOT_RESOLVED
+    elif contact.tz is None:
+        timezone = NO_TZ_FACT.format(basis=tz_basis_label(contact.tz_basis))
+    else:
+        timezone = TZ_FACT.format(tz=contact.tz, basis=tz_basis_label(contact.tz_basis))
+    notes = tuple(
+        line
+        for record in records
+        if record.notes is not None
+        for line in record.notes.splitlines()
+        if line.strip()
+    )
+    return MarketFacts(market=market, timezone=timezone, notes=notes)
+
+
+def moment(at: datetime) -> str:
+    """``at`` as ``YYYY-MM-DD HH:MM UTC``."""
+    return format(at.astimezone(UTC), TIME_FORMAT)
+
+
+def basis_row(record: StoredProvenance) -> BasisRow:
+    """One ``eligibility_basis`` record as the Lead page shows it."""
+    at = moment(record.basis_recorded_at or record.retrieved_at)
+    lia = None
+    if record.lia_ref is not None and record.lia_date is not None:
+        lia = LIA_LINE.format(ref=record.lia_ref, date=record.lia_date.isoformat(), at=at)
+    return BasisRow(basis=BASIS_LINE.format(rule=record.basis_rule or NO_VALUE, at=at), lia=lia)
+
+
+def basis_rows(records: Iterable[StoredProvenance]) -> tuple[BasisRow, ...]:
+    """The Contact's ``eligibility_basis`` records, oldest first."""
+    bases = sorted(
+        (record for record in records if record.source_kind == ProvenanceSource.ELIGIBILITY_BASIS),
+        key=lambda record: (record.basis_recorded_at or record.retrieved_at, record.id),
+    )
+    return tuple(basis_row(record) for record in bases)
+
+
 def contact_row(
-    contact: StoredContact, records: Iterable[StoredProvenance], decision: Decision
+    contact: StoredContact,
+    records: Iterable[StoredProvenance],
+    decision: Decision,
+    names: Mapping[str, str],
 ) -> ContactRow:
-    """One Contact as the Lead page shows it."""
+    """One Contact as the Lead page shows it; ``names`` are the stored Markets' names by
+    id. The records table holds the source records only; a basis record is in ``bases``."""
+    found = tuple(records)
+    sources = tuple(
+        record for record in found if record.source_kind != ProvenanceSource.ELIGIBILITY_BASIS
+    )
     return ContactRow(
         contact_id=contact.id,
         name=contact.name,
@@ -681,7 +839,10 @@ def contact_row(
         linkedin_url=contact.linkedin_url,
         primary=YES if contact.is_primary else NO,
         eligibility=eligibility_row(decision),
-        records=tuple(provenance_row(record) for record in records),
+        bases=basis_rows(found),
+        facts=market_facts(contact, found, names),
+        provenance_missing=not provenance_recorded(contact.email, found),
+        records=tuple(provenance_row(record) for record in sources),
         can_make_primary=not _operators_primary(contact)
         and contact.address_class != INVALID_ADDRESS,
     )
@@ -722,20 +883,22 @@ def contacts_context(
     contacts: Iterable[StoredContact],
     provenance: Mapping[str, Iterable[StoredProvenance]],
     decisions: Mapping[str, Decision],
+    markets: Iterable[SeededMarket],
     no_decision_maker: bool | None,
     notice: Notice | None = None,
 ) -> dict[str, object]:
     """What ``lead_contacts.html`` renders: the Lead's id (for the forms' path), the Primary
     line, the Contacts (in the order given, oldest first), each with its live Eligibility from
-    ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id), and the
-    POST's notice. A Contact without a Decision raises ``KeyError``: the panel never shows a
-    Contact whose Eligibility wasn't evaluated."""
+    ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id) and its
+    Market named from ``markets``, and the POST's notice. A Contact without a Decision raises
+    ``KeyError``: the panel never shows a Contact whose Eligibility wasn't evaluated."""
     found = tuple(contacts)
+    names = market_names(markets)
     return {
         "lead_id": lead_id,
         "primary": primary_line(found, no_decision_maker),
         "contacts": tuple(
-            contact_row(contact, provenance.get(contact.id, ()), decisions[contact.id])
+            contact_row(contact, provenance.get(contact.id, ()), decisions[contact.id], names)
             for contact in found
         ),
         "notice": notice,
@@ -750,16 +913,18 @@ def lead_context(
     provenance: Mapping[str, Iterable[StoredProvenance]],
     signals: LeadSignalsView,
     decisions: Mapping[str, Decision],
+    markets: Iterable[SeededMarket],
     no_decision_maker: bool | None = None,
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
     given), and the Contacts panel (``contacts_context``), each Contact with its live
-    Eligibility from ``decisions`` (by Contact id)."""
+    Eligibility from ``decisions`` (by Contact id) and its Market named from ``markets`` (the
+    route passes ``()`` when the Markets can't be read)."""
     found = tuple(contacts)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
         "evidence": tuple(evidence_row(row, names) for row in signals.evidence),
-        **contacts_context(lead.id, found, provenance, decisions, no_decision_maker),
+        **contacts_context(lead.id, found, provenance, decisions, markets, no_decision_maker),
     }

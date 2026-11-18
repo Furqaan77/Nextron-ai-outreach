@@ -4,7 +4,9 @@ passing US case, one passing UK case and several reasons together; every ``no_en
 cause and its text; the Market rules (cold email, legal forms, free webmail, the GB defence in
 depth); the address; every ``BlockReason`` mapped; the FR-63 predicate (the four AC cases and
 the 90-day boundary); the Not Now date boundary; ``Reason``, ``Decision`` and fact validation;
-no text holding the address; and every GB corporate form labelled."""
+no text holding the address; and every GB corporate form labelled. Story 3.7: the
+``provenance_missing`` case, the required ``provenance_recorded`` fact, the 128-character
+``basis_rule`` boundary, ``basis_country`` and every label's basis within it."""
 
 import dataclasses
 from collections.abc import Callable
@@ -24,6 +26,7 @@ from nextron.domain.eligibility import (
     CLOSED_STAGE_LABELS,
     LEGAL_FORM_LABELS,
     LEGAL_FORM_UNCONFIRMED_TEXT,
+    MAX_BASIS_RULE_LENGTH,
     NO_ADDRESS_CLASS_TEXT,
     NO_EMAIL_TEXT,
     NO_MARKET_BASIS_TEXTS,
@@ -34,6 +37,7 @@ from nextron.domain.eligibility import (
     NO_MARKET_STALE_TEXT,
     NO_MARKET_UNRESOLVED_TEXT,
     NOT_NOW_UNDATED_TEXT,
+    PROVENANCE_MISSING_TEXT,
     RECONTACT_TEXT,
     RECONTACT_WAIT,
     SUPPRESSED_TEXT,
@@ -45,6 +49,7 @@ from nextron.domain.eligibility import (
     EndedSequence,
     Reason,
     ReasonKind,
+    basis_country,
     evaluate,
     recontact_allowed,
 )
@@ -85,6 +90,7 @@ def us_contact(**changes: Any) -> EligibilityContact:
         "office_country": None,
         "office_region": None,
         "contactable": Allowed(),
+        "provenance_recorded": True,
     }
     fields.update(changes)
     return EligibilityContact(**fields)
@@ -191,6 +197,13 @@ ONE_REASON: list[tuple[str, Callable[[], Decision], ReasonKind, str]] = [
         lambda: decide(us_contact(address_class="guessed"), us_lead()),
         ReasonKind.ADDRESS_NOT_SENDABLE,
         "The address is Guessed; only Published or Verified addresses can be emailed",
+    ),
+    (
+        "provenance_missing",
+        lambda: decide(us_contact(provenance_recorded=False), us_lead()),
+        ReasonKind.PROVENANCE_MISSING,
+        "Provenance missing: no Provenance Record shows where this Contact or its email address "
+        "came from",
     ),
     (
         "address_or_domain_suppressed",
@@ -794,6 +807,9 @@ def test_the_dataclasses_are_frozen_and_slotted() -> None:
         (lambda: us_contact(office_region=1), TypeError),
         (lambda: us_contact(history=[]), TypeError),
         (lambda: us_contact(history=("x",)), TypeError),
+        (lambda: us_contact(provenance_recorded=None), TypeError),
+        (lambda: us_contact(provenance_recorded="yes"), TypeError),
+        (lambda: us_contact(provenance_recorded=1), TypeError),
         (lambda: EndedSequence(datetime(2026, 1, 1), NOW, False), ValueError),
         (lambda: EndedSequence(NOW, datetime(2026, 1, 1), False), ValueError),
         (lambda: EndedSequence(NOW, NOW, 0), TypeError),
@@ -877,3 +893,118 @@ def test_each_listed_uk_form_passes_with_its_label(form: str) -> None:
     decision = decide(uk_contact(), uk_lead(legal_form=form))
 
     assert decision.basis_rule == UK_BASIS.format(label=LEGAL_FORM_LABELS[form])
+
+
+# Story 3.7: Provenance and the basis width ------------------------------------------------------
+
+
+def test_the_provenance_fact_is_required() -> None:
+    fields = {
+        "email": US_EMAIL,
+        "address_class": "published",
+        "market_id": US_ID,
+        "market_basis": "lead_country",
+        "office_country": None,
+        "office_region": None,
+        "contactable": Allowed(),
+    }
+
+    with pytest.raises(TypeError):
+        EligibilityContact(**fields)  # type: ignore[call-arg]
+    assert EligibilityContact(**fields, provenance_recorded=True).history == ()
+    names = [field.name for field in dataclasses.fields(EligibilityContact)]
+    assert names[names.index("contactable") + 1] == "provenance_recorded"
+
+
+def test_provenance_missing_sits_after_address_not_sendable() -> None:
+    kinds = list(ReasonKind)
+
+    assert kinds.index(ReasonKind.PROVENANCE_MISSING) == (
+        kinds.index(ReasonKind.ADDRESS_NOT_SENDABLE) + 1
+    )
+    assert ReasonKind.PROVENANCE_MISSING.value == "provenance_missing"
+    assert PROVENANCE_MISSING_TEXT == (
+        "Provenance missing: no Provenance Record shows where this Contact or its email address "
+        "came from"
+    )
+
+
+def test_provenance_missing_is_listed_with_the_other_reasons_in_order() -> None:
+    decision = decide(
+        us_contact(
+            address_class="guessed",
+            provenance_recorded=False,
+            contactable=Blocked((BlockReason.ADDRESS_SUPPRESSED,)),
+        ),
+        us_lead(),
+    )
+
+    assert decision.kinds == (
+        ReasonKind.ADDRESS_NOT_SENDABLE,
+        ReasonKind.PROVENANCE_MISSING,
+        ReasonKind.ADDRESS_OR_DOMAIN_SUPPRESSED,
+    )
+    assert_no_personal_data(decision)
+
+
+def test_a_uk_contact_with_missing_provenance_is_not_eligible() -> None:
+    decision = decide(uk_contact(provenance_recorded=False), uk_lead())
+
+    assert decision == Decision(
+        False, None, (Reason(ReasonKind.PROVENANCE_MISSING, PROVENANCE_MISSING_TEXT),)
+    )
+
+
+def test_the_basis_rule_width_boundary() -> None:
+    assert MAX_BASIS_RULE_LENGTH == 128
+    assert Decision(True, "x" * 128, ()).basis_rule == "x" * 128
+    with pytest.raises(ValueError) as raised:
+        Decision(True, "secretbasis" + "x" * 118, ())
+    assert "secretbasis" not in str(raised.value)
+    assert "128" in str(raised.value)
+
+
+def test_every_labelled_basis_and_the_longest_code_fit_the_width() -> None:
+    labelled = [UK_BASIS.format(label=label) for label in LEGAL_FORM_LABELS.values()]
+    longest_code = "a" + "b" * 63  # LEGAL_FORM_PATTERN's longest code, which has no label
+    listed = dataclasses.replace(UK, eligible_legal_forms=(longest_code,))
+
+    decision = decide(uk_contact(), uk_lead(legal_form=longest_code), {**RULES, UK_ID: listed})
+
+    assert max(len(rule) for rule in labelled) == 108
+    assert min(len(rule) for rule in labelled) == 71
+    assert len(US_BASIS) <= MAX_BASIS_RULE_LENGTH
+    assert decision.basis_rule == UK_BASIS.format(label=longest_code)
+    assert len(decision.basis_rule) == 113
+
+
+@pytest.mark.parametrize(
+    ("rule", "country"),
+    [
+        (US_BASIS, "US"),
+        (UK_BASIS.format(label="private limited company"), "GB"),
+        (UK_BASIS.format(label="widget-co"), "GB"),
+        (UK_BASIS.format(label="x"), "GB"),
+        (UK_BASIS.format(label=""), None),
+        (UK_BASIS.format(label="   "), None),
+        ("UK: corporate subscriber (ltd), legitimate interest", None),
+        ("uk: corporate subscriber (ltd), legitimate interests", None),
+        ("US: cold email allowed (CAN-SPAM) ", None),
+        ("US: cold email allowed", None),
+        ("", None),
+        (None, None),
+        (7, None),
+        (b"US: cold email allowed (CAN-SPAM)", None),
+    ],
+)
+def test_basis_country(rule: object, country: str | None) -> None:
+    assert basis_country(rule) == country
+
+
+@pytest.mark.parametrize("form", sorted(LEGAL_FORM_LABELS))
+def test_every_basis_evaluate_gives_names_its_country(form: str) -> None:
+    uk = decide(uk_contact(), uk_lead(legal_form=form))
+    us = decide(us_contact(), us_lead())
+
+    assert basis_country(uk.basis_rule) == "GB"
+    assert basis_country(us.basis_rule) == "US"

@@ -169,13 +169,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
   Evidence and the headquarters zone), ``queries.research.no_decision_maker`` (Story 2.10), and
   each Contact's live Eligibility from ``compliance.evaluate_eligibility`` (Story 3.6), evaluated
-  on every render and never stored.
+  on every render and never stored, and the stored Markets (``lead_markets``:
+  ``queries.setup.markets``, or none when one no longer decodes: ``InvalidMarkets``), which name
+  each Contact's Market (Story 3.7).
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
   ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
   ``contact_id`` (``leads_page.submitted_contact``). It runs
   ``primary_contacts.make_primary(lead_id, contact_id)`` in its own unit of work, then answers
   200 with the Contacts panel (``lead_contacts.html``, read in a read-only unit of work, each
-  Contact's live Eligibility evaluated there too) and the notice "Primary Contact set.", or,
+  Contact's live Eligibility evaluated and the Markets read there too) and the notice "Primary
+  Contact set.", or,
   when it was refused (nothing written), the refusal's notice. An unknown Lead (a text that
   isn't a ULID included) answers 404 with the plain text "That Lead doesn't exist.", which
   never echoes the id.
@@ -1338,6 +1341,13 @@ def create_app(
         context = lead_rows.list_context(filters, found, segments)
         return page(request, lead_rows.LIST_TEMPLATE, **context)
 
+    def lead_markets() -> tuple[setup_queries.SeededMarket, ...]:
+        """The stored Markets that name each Contact's Market on the Lead page (Story 3.7)."""
+        try:
+            return setup_queries.markets()
+        except InvalidMarkets:  # unreadable: each stored Market shows as "Unknown Market"
+            return ()
+
     # after /leads/import, so that path stays the import page
     @app.get("/leads/{lead_id}", name="lead_page")
     @personal_data(True)
@@ -1360,6 +1370,7 @@ def create_app(
             research_queries.lead_provenance(found.id),
             lead_signals.view(found.id),
             decisions,
+            lead_markets(),
             research_queries.no_decision_maker(found.id),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
@@ -1388,6 +1399,7 @@ def create_app(
                 contacts,
                 research_queries.lead_provenance(lead_id),
                 decisions,
+                lead_markets(),
                 research_queries.no_decision_maker(lead_id),
                 notice,
             )

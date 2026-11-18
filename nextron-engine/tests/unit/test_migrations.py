@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0030_4_5_ai_test_runs"
+HEAD = "0031_3_7_basis_rule_width"
 
 
 @pytest.fixture

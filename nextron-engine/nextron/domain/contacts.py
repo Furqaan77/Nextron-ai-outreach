@@ -78,6 +78,20 @@ engine's choice is ``set_by`` ``system``. ``INVALID_ADDRESS`` restates
 ``PrimaryRefused(reason)`` (code ``primary_refused``) is why the operator can't make a Contact
 Primary: a ``PrimaryRefusal``, ``unknown_lead``, ``merged_lead``, ``not_on_lead`` or
 ``address_invalid``. Its message holds the reason's code only.
+
+**``provenance_recorded(email, records) -> bool``** (FR-51, Story 3.7) answers "where did you
+get my details?" for a stored Contact. ``records`` are the Contact's Provenance Records, any
+objects with ``subject``, ``source_kind`` and ``address`` (``ProvenanceFacts``). It is true
+when both hold:
+
+- some record is a ``contact`` record whose source kind isn't ``eligibility_basis`` (a basis
+  record says why the Contact may be emailed, not where it came from);
+- ``email`` is ``None``, or some ``address`` record whose source kind isn't
+  ``eligibility_basis`` has ``address == email``: the address we would email has its own
+  source.
+
+So it fails closed: no record, only basis records, or an email without an ``address`` record for
+that exact address all give false (Eligibility's ``provenance_missing``).
 """
 
 import re
@@ -87,7 +101,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Protocol
 
 from nextron.domain.errors import DomainError
 from nextron.domain.geo import Location
@@ -119,6 +133,33 @@ class ProvenanceSource(StrEnum):
 class ProvenanceSubject(StrEnum):
     CONTACT = "contact"
     ADDRESS = "address"
+
+
+class ProvenanceFacts(Protocol):
+    """What ``provenance_recorded`` reads of one Provenance Record (a stored row fits)."""
+
+    @property
+    def subject(self) -> str: ...
+
+    @property
+    def source_kind(self) -> str: ...
+
+    @property
+    def address(self) -> str | None: ...
+
+
+def provenance_recorded(email: str | None, records: Iterable[ProvenanceFacts]) -> bool:
+    """Whether ``records`` show where the Contact, and its ``email`` when it has one, came
+    from; see the module docstring."""
+    sources = [
+        record for record in records if record.source_kind != ProvenanceSource.ELIGIBILITY_BASIS
+    ]
+    contact = any(record.subject == ProvenanceSubject.CONTACT for record in sources)
+    address = email is None or any(
+        record.subject == ProvenanceSubject.ADDRESS and record.address == email
+        for record in sources
+    )
+    return contact and address
 
 
 class InvalidContact(DomainError):

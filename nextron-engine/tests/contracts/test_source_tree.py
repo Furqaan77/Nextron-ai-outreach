@@ -156,6 +156,7 @@ FILES = [
     "nextron/db/alembic/versions/0028_2_10_primary_contact.py",
     "nextron/db/alembic/versions/0029_2_9_tag_managers.py",
     "nextron/db/alembic/versions/0030_4_5_ai_test_runs.py",
+    "nextron/db/alembic/versions/0031_3_7_basis_rule_width.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",

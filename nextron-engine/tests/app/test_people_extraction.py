@@ -23,6 +23,7 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron.app.compliance.api import Compliance
+from nextron.app.queries import research as research_queries
 from nextron.app.research.extraction import SignalExtractions
 from nextron.app.research import people as people_module
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
@@ -30,7 +31,8 @@ from nextron.db.repos.research import signals as signals_repo
 from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import AiCall
 from nextron.domain.contactability import ContactSubject, SuppressionScope
-from nextron.domain.contacts import ContactCandidate, ProvenanceSource
+from nextron.domain.contacts import ContactCandidate, ProvenanceSource, provenance_recorded
+from nextron.domain.eligibility import ReasonKind
 from nextron.domain.notifications import EvidenceChanged
 from nextron.domain.suppression_entry import SuppressionSource
 from nextron.ports.errors import AdapterError
@@ -245,6 +247,22 @@ def test_a_law_leads_decision_maker_becomes_a_contact_with_evidence_and_a_lawyer
     assert world.sql("SELECT COUNT(*) FROM contacts WHERE name IN ('Alex Poe', 'Pat Moe')") == [
         (0,)
     ]
+
+
+def test_a_decision_maker_found_on_the_website_has_its_provenance(world: World) -> None:
+    """Story 3.7 met Story 2.10 at the merge: a Contact the people step stores has its
+    ``website`` contact record (and no email that would need an address record), so it is
+    never ``provenance_missing``."""
+    lead, run_id, pages = law_lead(world)
+    world.extract(lead, run_id, ok(), people=[law_people(pages)])
+    [jane] = contacts(world, lead)
+
+    records = world.read(lambda: research_queries.provenance(jane["id"]))
+    decision = world.read(lambda: Compliance(world.clock).evaluate_eligibility(jane["id"]))
+
+    assert [(r.subject, r.source_kind) for r in records] == [("contact", "website")]
+    assert provenance_recorded(jane["email"], records) is True
+    assert ReasonKind.PROVENANCE_MISSING not in decision.kinds
 
 
 def test_a_person_already_on_the_lead_is_filled_not_duplicated(world: World) -> None:

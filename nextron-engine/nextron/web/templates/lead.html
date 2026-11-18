@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {#- The Lead page (nextron.web.leads_page): the header facts, the Signals, the live Evidence,
     then the Contacts panel (lead_contacts.html: the Primary Contact and each Contact with its
-    live Eligibility, evaluated on this render and never stored, and its Provenance Records).
-    Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
-    it renders only through |plain or safe_link, inside an element carrying hx-disable. The
-    Signals and Evidence sections hold no HTMX action. -#}
+    live Eligibility, evaluated on this render and never stored, and its recorded bases, then its
+    Market and timezone facts and its Provenance Records). Every Lead, Signal, Evidence, Contact
+    and Provenance text is imported, crawled or extracted: it renders only through |plain or
+    safe_link, inside an element carrying hx-disable. The Signals and Evidence sections hold no
+    HTMX action. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}

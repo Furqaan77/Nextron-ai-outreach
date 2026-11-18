@@ -635,9 +635,39 @@ button.secondary {
   font-weight: 700;
 }
 
-.eligibility-reasons {
+.eligibility-reasons,
+.eligibility-bases {
   margin: 0.25rem 0 0;
   padding-left: 1.5rem;
+}
+
+.eligibility-basis {
+  margin: 0.25rem 0 0;
+}
+
+/* Story 3.7: a Contact's Market and timezone facts, and a red "Provenance missing". */
+.provenance-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+}
+
+.provenance-facts dt {
+  grid-column: 1;
+  font-weight: 600;
+}
+
+.provenance-facts dd {
+  grid-column: 2;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.provenance-missing {
+  color: var(--refused);
+  font-weight: 700;
 }
 
 .pager {
