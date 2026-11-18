@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`), **Story 1.21** (merge `932cd0a`), **Story 3.8** (merge `f29d1f6`), **Story 2.9** (merge `c5781f1`), **Story 4.4** (merge `f437364`), **Story 2.6** (merge `1e53e10`) and **Story 3.4** (merge `6826855`). **Epic 1 is complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`), **Story 1.21** (merge `932cd0a`), **Story 3.8** (merge `f29d1f6`), **Story 2.9** (merge `c5781f1`), **Story 4.4** (merge `f437364`), **Story 2.6** (merge `1e53e10`), **Story 3.4** (merge `6826855`), **Story 3.5** (merge `0236df2`), **Story 3.6** (merge `f7a1dbb`), **Story 2.10** (merge `da145d0`) and the 2.9 follow-up **2.9a** (merge `8f190c3`). **Epic 1 is complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -228,11 +228,27 @@ The User-Agent is `NextronBot/1.0`. It has never fetched a real website; it is t
 - **Blocked:** suppressed keys, and Lost or Disqualified Leads.
 - **Contract:** `test_ad16_callers.py` lists every AD-16 caller in the spine. It fails any future caller (email finder, enroll, draft, approve, send) that doesn't wire the gate.
 
-Main now: **12469 tests, 29 contracts.**
+**Story 3.5 result:** a Suppression List page at `/suppression`, under Settings, with add, import, exact search and reverse.
+- Add or import an address or a firm domain; free webmail and shared platforms are refused.
+- Reverse works only on `reply_rule` entries, with a reason.
+- Entries can't be deleted, and raw addresses are never shown.
+
+**Story 3.6 result:** live Eligibility per Contact on the Lead page: "Eligible: <basis>" or "Not eligible" with reasons.
+- It is recomputed on every view, never stored, and fails closed.
+- **No UK Contact is eligible until Story 2.12 confirms legal form via Companies House.**
+
+**Story 2.10 result:** `extract_people` finds named decision-makers on team, about and contact pages. A quote must contain the person's name and role.
+- **Selection:** a `select_primary_contact` job picks the Primary Contact: the strongest Event's preferred roles first, then rank. A pick by you is kept.
+- **No decision-maker:** the Lead page then says "no decision-maker found".
+- **Gated:** suppressed people never become Contacts, and blocked Contacts are never Primary.
+
+**Story 2.9a (follow-up):** the Law "contact form only" Signal comes from detected contact methods by rule, with no AI call. It is withdrawn whenever it can't be verified (a page that still needs rendering, or a tag manager present).
+
+Main now: **13407 tests, 29 contracts.**
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 41 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 44 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -299,6 +315,15 @@ Main now: **12469 tests, 29 contracts.**
 - **Story 1.19:**
   - the environment guard on restore reads file names only, so a renamed prod copy would be accepted in dev;
   - `pre_restore` safety copies are never rotated.
+- **Story 3.6 decisions:**
+  - a Market disabled or changed blocks at once;
+  - Contacts blocked when no Market was enabled stay blocked after one is enabled;
+  - Leads at `replied`/`interested`/`won` show "Eligible" (FR-18 has no stage reason for them).
+- **Story 2.10:**
+  - Primary selection runs only after website extraction, so Leads with only CSV Contacts never get a Primary until a crawl;
+  - a stale CSV role is never replaced by the website's;
+  - add UK titles ("Managing Director", "Operations Director") to `seed/segments.yaml` if you want them matched.
+- **Story 2.9a:** some script loaders (e.g. HubSpot's chat loader) aren't recognised, so such sites can get a false "contact form only" (it only affects the score).
 - **Install Chromium once for page rendering (Story 2.6):** run `uv run playwright install chromium` from `nextron-engine`. Until you do, near-empty pages aren't rendered, and nothing alerts.
 - **Unsubscribe token keys (Story 3.8):** set them on the Credentials page before sending. A key re-entered from escrow isn't checked against the original (needs your OK to add a key-check value).
 - **Footer contract exception:** the setting label "Unsubscribe token key id" trips the rule against footer words outside the footer section. The merge added a narrow typed exception instead of renaming the label. Say if you'd rather rename it.
