@@ -187,6 +187,8 @@ Lead that isn't ``confirmed`` stays on the Leads list and is researched like any
 ``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source (``operator`` is
 "Manual (entered by Mac)"), ``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every
 Signal class, Evidence type and fact kind; a stored value none knows renders as its own text.
+Story 2.16: each Evidence row also names its source (``EVIDENCE_SOURCE_LABELS``; ``signal_inbox``
+is "Signal Inbox (manual)") in its Source cell, before the source link.
 Every Lead, Contact, Provenance, Signal and Evidence text renders through ``|plain`` or
 ``safe_link`` inside an element carrying ``hx-disable``.
 """
@@ -382,6 +384,18 @@ SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
         ProvenanceSource.PATTERN: "Email pattern",
         ProvenanceSource.FINDER: "Email finder",
         ProvenanceSource.ELIGIBILITY_BASIS: "Eligibility basis",
+    }
+)
+# Story 2.16: where each Evidence row came from
+EVIDENCE_SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        EvidenceSource.WEBSITE: "Website",
+        EvidenceSource.ATS: "ATS board",
+        EvidenceSource.REGISTRY: "Companies House",
+        EvidenceSource.SIGNAL_INBOX: "Signal Inbox (manual)",
+        EvidenceSource.CSV: "CSV import",
+        EvidenceSource.REFERRAL: "Referral",
+        EvidenceSource.OPERATOR: "Manual (entered by Mac)",
     }
 )
 RECORD_LABELS: Final[Mapping[str, str]] = MappingProxyType(
@@ -828,6 +842,7 @@ class EvidenceRow:
     retrieved: str
     extraction: str
     evidence_id: str = ""
+    source: str = ""  # Story 2.16: the source's label (EVIDENCE_SOURCE_LABELS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -977,6 +992,7 @@ def evidence_row(
         retrieved=moment(evidence.retrieved_at),
         extraction=AI_EXTRACTED if evidence.extracted_by.startswith(AI_ACTOR_PREFIX) else NO_VALUE,
         evidence_id=evidence.id,
+        source=EVIDENCE_SOURCE_LABELS.get(evidence.source, evidence.source),
     )
 
 

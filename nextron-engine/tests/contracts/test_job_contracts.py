@@ -10,8 +10,8 @@
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, ``run_ai_test_sets``,
   Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
   2.11, ``check_legal_form``, Story 2.12, ``erase_external``, Story 3.14,
-  ``find_contact_email``, Story 2.13, and ``score_lead`` and ``recompute_tiers``, Story 2.15,
-  with their settings); the triggers are exactly ``backup_db``'s and ``restore_test``'s daily
+  ``find_contact_email``, Story 2.13, ``score_lead`` and ``recompute_tiers``, Story 2.15, and
+  ``process_signal_item``, Story 2.16, with their settings); the triggers are exactly ``backup_db``'s and ``restore_test``'s daily
   schedules, ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s daily
   ``Every`` at startup, ``check_domains``'s daily schedule and ``recompute_tiers``' daily
   ``Every`` at startup: the one-off ``resolve_contact_markets`` has no trigger.
@@ -336,13 +336,16 @@ class RecordingCrawls:
         self.allowed = allowed
         self.calls: list[tuple[str, bool]] = []
         self.renders: list[tuple[str, str]] = []
+        self.lanes: list[Lane | None] = []  # Story 2.16: each call's lane, in order
 
-    def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool:
+    def enrich_lead(self, lead_id: str, *, may_retry: bool, lane: Lane | None = None) -> bool:
         self.calls.append((lead_id, may_retry))
+        self.lanes.append(lane)
         return self.allowed
 
-    def render_pages(self, lead_id: str, run_id: str) -> bool:
+    def render_pages(self, lead_id: str, run_id: str, *, chain_lane: Lane | None = None) -> bool:
         self.renders.append((lead_id, run_id))
+        self.lanes.append(chain_lane)
         return self.allowed
 
 
@@ -390,9 +393,11 @@ class RecordingExtractions:
     def __init__(self, allowed: bool = True) -> None:
         self.allowed = allowed
         self.calls: list[tuple[str, str]] = []
+        self.lanes: list[Lane | None] = []
 
-    def extract_lead(self, lead_id: str, run_id: str) -> bool:
+    def extract_lead(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
         self.calls.append((lead_id, run_id))
+        self.lanes.append(lane)
         return self.allowed
 
 
@@ -401,9 +406,11 @@ class RecordingPrimary:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.lanes: list[Lane | None] = []
 
-    def select_primary_contact(self, lead_id: str) -> None:
+    def select_primary_contact(self, lead_id: str, *, lane: Lane | None = None) -> None:
         self.calls.append(lead_id)
+        self.lanes.append(lane)
 
 
 class RecordingTestRuns:
@@ -427,9 +434,11 @@ class RecordingJobBoards:
         self.allowed = allowed
         self.checks: list[tuple[str, str]] = []
         self.rechecks: list[str] = []
+        self.lanes: list[Lane | None] = []
 
-    def check_job_boards(self, lead_id: str, run_id: str) -> bool:
+    def check_job_boards(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
         self.checks.append((lead_id, run_id))
+        self.lanes.append(lane)
         return self.allowed
 
     def recheck_event(self, signal_id: str) -> None:
@@ -443,9 +452,11 @@ class RecordingLegalForms:
     def __init__(self, allowed: bool = True) -> None:
         self.allowed = allowed
         self.calls: list[str] = []
+        self.lanes: list[Lane | None] = []
 
-    def check_legal_form(self, lead_id: str) -> bool:
+    def check_legal_form(self, lead_id: str, *, lane: Lane | None = None) -> bool:
         self.calls.append(lead_id)
+        self.lanes.append(lane)
         return self.allowed
 
 
@@ -459,6 +470,21 @@ class RecordingFinding:
     def find_contact_email(self, lead_id: str, contact_id: str) -> str | None:
         self.calls.append((lead_id, contact_id))
         return self.answer
+
+
+class RecordingSignalInbox:
+    """Stands in for the ``discovery`` service's ``SignalInbox`` (Story 2.16); ``allowed`` is
+    what ``process_signal_item`` returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.items: list[str] = []
+        self.last_attempts: list[bool] = []
+
+    def process_signal_item(self, item_id: str, *, last_attempt: bool = False) -> bool:
+        self.items.append(item_id)
+        self.last_attempts.append(last_attempt)
+        return self.allowed
 
 
 class RecordingScores:
@@ -495,6 +521,7 @@ def registry(**overrides: object) -> JobTypes:
         "legal_forms": RecordingLegalForms,
         "finding": RecordingFinding,
         "scores": RecordingScores,
+        "signal_inbox": RecordingSignalInbox,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -581,6 +608,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "find_contact_email",
         "score_lead",
         "recompute_tiers",
+        "process_signal_item",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -1625,3 +1653,141 @@ def test_a_score_lead_job_without_its_lead_is_invalid(payload: dict[str, object]
     with pytest.raises(InvalidJob, match="must be a ULID"):
         handler(Job(RUN, "score_lead", Lane.BULK, payload, 1))
     assert scores.scored == []
+
+
+# Story 2.16 -------------------------------------------------------------------------------------
+
+
+def test_process_signal_item_is_registered_as_specified() -> None:
+    """Interactive only, priority 60, 5 minutes, retry limit 3, group Discovery."""
+    found = registry().get("process_signal_item")
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (
+        Lane.INTERACTIVE,
+        frozenset({Lane.INTERACTIVE}),
+        60,
+        timedelta(minutes=5),
+        3,
+        JobGroup.DISCOVERY,
+    )
+
+
+def test_process_signal_item_calls_the_inbox_once_and_defers_on_a_budget_refusal() -> None:
+    inbox = RecordingSignalInbox()
+    refused = RecordingSignalInbox(allowed=False)
+    payload = {"v": 1, "item_id": LEAD}
+
+    ran = registry(signal_inbox=lambda: inbox).get("process_signal_item").handler(
+        Job(RUN, "process_signal_item", Lane.INTERACTIVE, payload, 1)
+    )
+    deferred = registry(signal_inbox=lambda: refused).get("process_signal_item").handler(
+        Job(RUN, "process_signal_item", Lane.INTERACTIVE, payload, 1)
+    )
+
+    assert (ran, deferred) == (None, DEFERRED)
+    assert (inbox.items, refused.items) == ([LEAD], [LEAD])
+    assert handlers.PROCESS_SIGNAL_ITEM_RETRIES == 3
+
+
+@pytest.mark.parametrize(("attempts", "last"), [(1, False), (3, False), (4, True), (5, True)])
+def test_process_signal_item_flags_the_last_attempt(attempts: int, last: bool) -> None:
+    inbox = RecordingSignalInbox()
+    handler = registry(signal_inbox=lambda: inbox).get("process_signal_item").handler
+    payload = {"v": 1, "item_id": LEAD}
+
+    handler(Job(RUN, "process_signal_item", Lane.INTERACTIVE, payload, attempts))
+
+    assert inbox.last_attempts == [last]
+
+
+@pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "item_id": "not-a-ulid"}])
+def test_a_process_signal_item_job_without_its_item_is_invalid(
+    payload: dict[str, object],
+) -> None:
+    inbox = RecordingSignalInbox()
+    handler = registry(signal_inbox=lambda: inbox).get("process_signal_item").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "process_signal_item", Lane.INTERACTIVE, payload, 1))
+    assert inbox.items == []
+
+
+def test_a_registry_without_a_signal_inbox_fails_the_job() -> None:
+    services = {**_services(), "scores": RecordingScores}
+    services.pop("signal_inbox", None)
+    handler = main.build_job_types(**services).get("process_signal_item").handler  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="SignalInbox"):
+        handler(Job(RUN, "process_signal_item", Lane.INTERACTIVE, {"v": 1, "item_id": LEAD}, 1))
+
+
+@pytest.mark.parametrize("lane", [Lane.BULK, Lane.INTERACTIVE])
+def test_the_chain_handlers_pass_their_jobs_lane(lane: Lane) -> None:
+    crawls = RecordingCrawls()
+    extractions = RecordingExtractions()
+    boards = RecordingJobBoards()
+    legal_forms = RecordingLegalForms()
+    primary = RecordingPrimary()
+    job_types = registry(
+        crawls=lambda: crawls,
+        extractions=lambda: extractions,
+        job_boards=lambda: boards,
+        legal_forms=lambda: legal_forms,
+        primary=lambda: primary,
+    )
+    lead = {"v": 1, "lead_id": LEAD}
+    run = {"v": 1, "lead_id": LEAD, "run_id": RUN}
+
+    for name, payload in (
+        ("enrich_lead", lead),
+        ("extract_lead", run),
+        ("check_job_boards", run),
+        ("check_legal_form", lead),
+        ("select_primary_contact", lead),
+    ):
+        job_types.get(name).handler(Job(RUN, name, lane, payload, 1))
+
+    assert crawls.lanes == [lane]
+    assert (extractions.lanes, boards.lanes, legal_forms.lanes, primary.lanes) == (
+        [lane],
+        [lane],
+        [lane],
+        [lane],
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "chain_lane"),
+    [({}, None), ({"chain_lane": "interactive"}, Lane.INTERACTIVE)],
+)
+def test_render_pages_passes_its_payloads_chain_lane(
+    extra: dict[str, object], chain_lane: Lane | None
+) -> None:
+    crawls = RecordingCrawls()
+    handler = registry(crawls=lambda: crawls).get("render_pages").handler
+
+    handler(Job(RUN, "render_pages", Lane.BULK, {"v": 1, "lead_id": LEAD, "run_id": RUN, **extra}, 1))
+
+    assert (crawls.renders, crawls.lanes) == ([(LEAD, RUN)], [chain_lane])
+
+
+@pytest.mark.parametrize("value", ["fast", 3, None])
+def test_a_render_pages_chain_lane_that_isnt_a_lane_is_invalid(value: object) -> None:
+    crawls = RecordingCrawls()
+    handler = registry(crawls=lambda: crawls).get("render_pages").handler
+    payload = {"v": 1, "lead_id": LEAD, "run_id": RUN, "chain_lane": value}
+
+    if value is None:  # JSON null is the field left out
+        handler(Job(RUN, "render_pages", Lane.BULK, payload, 1))
+        assert crawls.lanes == [None]
+        return
+    with pytest.raises(InvalidJob, match="chain_lane"):
+        handler(Job(RUN, "render_pages", Lane.BULK, payload, 1))
+    assert crawls.renders == []

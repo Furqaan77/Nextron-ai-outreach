@@ -87,6 +87,28 @@ normaliser).
   A ``ch_number`` that came from a CSV is never Evidence: only this command, called by the
   legal-form check, links a number to a Lead from its website.
 
+**The Signal Inbox (Story 2.16).** ``discovery`` owns ``signal_inbox_items``
+(``nextron.db.repos.discovery.signal_inbox``); ``SignalInbox`` (``nextron.app.discovery
+.signal_inbox``) runs the items.
+
+- ``@command submit_signal_items(items) -> tuple[str, ...]``: each ``SubmittedItem`` is stored
+  ``pending`` with the clock's now as its submission time, with its creation ``events`` row
+  (entity ``signal_inbox_items``, cause ``submitted``, actor ``operator``), and its
+  ``process_signal_item`` job is enqueued on the interactive lane (scope the item,
+  discriminator ``tick``, payload ``{v: 1, item_id}``), all in the caller's transaction; the
+  ids, in order. A non-``SubmittedItem`` raises ``TypeError``, no item ``ValueError``.
+- ``@command enqueue_enrich(lead_id, *, lane) -> bool``: the Lead's ``enrich_lead`` job (the
+  CSV import's keys) on ``lane``; ``False`` (nothing enqueued) for an unknown Lead or one
+  without a website.
+- ``SignalInboxRows(clock).reparent_lead(n: LeadsMerged)`` moves a merged Lead's items to its
+  survivor (registered after sequencing's), and the module-level ``erase_pii(n:
+  ContactErased)`` tombstones each of ``queries.discovery.contact_items`` of the erased
+  Contact (their name, email and Provenance addresses): every item of their Lead and of the
+  Leads merged into it, and every item with no Lead that mentions them or whose parsed website
+  is one of those Leads' (``ERASURE``: the URL, text, author, company, the parsed author and
+  the quote become ``[erased]``). It reads the Contact before research tombstones it, so it is
+  registered second, after compliance's hook.
+
 **The legal form (Story 2.12, FR-12).** ``LegalFormChecks`` (``nextron.app.discovery
 .legal_form``) runs the ``check_legal_form`` jobs: it links a GB Lead to its Companies House
 record through ``set_ch_number`` and records the finding through ``research.record_legal_form``.
@@ -132,18 +154,23 @@ rows are ``nextron.domain.lead_import``'s.
 """
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Final
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
+from nextron.db import eventlog
 from nextron.db.repos.discovery import leads as leads_repo
+from nextron.db.repos.discovery import signal_inbox as signal_inbox_repo
 from nextron.db.repos.discovery.leads import StoredLead
 from nextron.db.uow import command, current, use_case
 from nextron.domain.contactability import (
@@ -156,8 +183,9 @@ from nextron.domain.contactability import (
 )
 from nextron.domain.contacts import ProvenanceSource
 from nextron.domain.crawl import ENRICH_LEAD_JOB, LEAD_ID_FIELD, PAYLOAD_VERSION, lead_job_keys
+from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import VERSION_FIELD
+from nextron.domain.job import TICK, VERSION_FIELD, Lane
 from nextron.domain.lead_import import (
     DEFAULT_SEGMENT_UNKNOWN,
     FIELD_DEFAULT_SEGMENT,
@@ -181,7 +209,16 @@ from nextron.domain.leads import (
     is_shared_platform,
 )
 from nextron.domain.legal_form import COMPANY_NUMBER_PATTERN
-from nextron.domain.notifications import LeadsMerged
+from nextron.domain.notifications import ContactErased, LeadsMerged
+from nextron.domain.signal_inbox_item import (
+    CREATION,
+    ENTITY,
+    ITEM_ID_FIELD,
+    OPERATOR,
+    PROCESS_SIGNAL_ITEM_JOB,
+    SubmittedItem,
+)
+from nextron.domain.signal_inbox_item import PAYLOAD_VERSION as ITEM_PAYLOAD_VERSION
 from nextron.ports.clock import Clock
 from nextron.ports.email_syntax import EmailSyntaxPort
 
@@ -195,6 +232,19 @@ NOTHING: Final = "nothing"
 KEPT: Final = "kept"
 MOVED: Final = "moved"
 MERGED: Final = "merged"
+
+# Story 2.16 (with Story 3.13's rules): what discovery's erase_pii does to its tables.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "signal_inbox_items": TableErasure(
+            Coverage.TOMBSTONED,
+            "every Signal Inbox item of the Contact's Lead and of the Leads merged into it "
+            "(fail-safe, like their pages), and every item with no Lead that mentions the "
+            "Contact or names one of those Leads' websites: the URL, text, author, company, "
+            "the parsed author and the quote [erased]",
+        ),
+    }
+)
 
 _LOOKUPS: Final = {
     "web_domain": leads_repo.by_web_domain,
@@ -281,7 +331,7 @@ class Discovery:
             )
             self._pipeline.record_created(lead_id, source)
             if source is LeadSource.CSV and identity.web_domain is not None:
-                self._enqueue_crawl(lead_id, identity.web_domain)
+                self._enqueue_crawl(lead_id, identity.web_domain, None)
             return UpsertedLead(lead_id, True, ())
         keep, *others = sorted(survivors.values(), key=_age)
         for other in others:
@@ -297,16 +347,68 @@ class Discovery:
         leads_repo.set_keys(kept.id, **attach)
         return UpsertedLead(kept.id, False, tuple(other.id for other in others))
 
-    def _enqueue_crawl(self, lead_id: str, web_domain: str) -> None:
-        """Enqueue the new Lead's ``enrich_lead`` job in the caller's transaction."""
+    def _enqueue_crawl(self, lead_id: str, web_domain: str, lane: Lane | None) -> None:
+        """Enqueue the Lead's ``enrich_lead`` job on ``lane`` (``None``: its default) in the
+        caller's transaction."""
         discriminator, concurrency_key = lead_job_keys(web_domain, self._clock.now())
         self._queue.enqueue(
             ENRICH_LEAD_JOB,
             scope=lead_id,
             discriminator=discriminator,
             payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id},
+            lane=lane,
             concurrency_key=concurrency_key,
         )
+
+    @command
+    def enqueue_enrich(self, lead_id: str, *, lane: Lane) -> bool:
+        """Enqueue the Lead's ``enrich_lead`` job on ``lane`` (Story 2.16: the Signal Inbox's
+        interactive chain), in the caller's transaction; ``False`` when the Lead is unknown or
+        has no website (a crawl would skip it)."""
+        lead = leads_repo.get(lead_id) if isinstance(lead_id, str) and is_ulid(lead_id) else None
+        if lead is None or lead.web_domain is None:
+            return False
+        self._enqueue_crawl(lead.id, lead.web_domain, lane)
+        return True
+
+    @command
+    def submit_signal_items(self, items: Sequence[SubmittedItem]) -> tuple[str, ...]:
+        """Store each pasted item ``pending`` and enqueue its ``process_signal_item`` job on the
+        interactive lane, in the caller's transaction; the items' ids, in order (Story 2.16)."""
+        if not all(isinstance(item, SubmittedItem) for item in items):
+            raise TypeError("submit_signal_items takes SubmittedItems")
+        if not items:
+            raise ValueError("submit_signal_items takes at least one item")
+        now = self._clock.now()
+        ids: list[str] = []
+        for item in items:
+            item_id = signal_inbox_repo.insert(
+                url=item.url,
+                text=item.text,
+                author=item.author,
+                company=item.company,
+                status=str(CREATION.to),
+                submitted_at=now,
+            )
+            eventlog.append(
+                entity=ENTITY,
+                entity_id=item_id,
+                from_status=None,
+                to_status=str(CREATION.to),
+                cause=str(CREATION.cause),
+                cause_ref=None,
+                actor=OPERATOR,
+                at=now,
+            )
+            self._queue.enqueue(
+                PROCESS_SIGNAL_ITEM_JOB,
+                scope=item_id,
+                discriminator=TICK,
+                payload={VERSION_FIELD: ITEM_PAYLOAD_VERSION, ITEM_ID_FIELD: item_id},
+                lane=Lane.INTERACTIVE,
+            )
+            ids.append(item_id)
+        return tuple(ids)
 
     @use_case
     def canonicalize_lead(self, lead_id: str, run_id: str) -> str:
@@ -411,6 +513,42 @@ class Discovery:
         leads_repo.mark_merged(loser.id, survivor.id, tuple(moved))
         leads_repo.set_keys(survivor.id, **moved)
         current().publish(LeadsMerged(survivor_lead_id=survivor.id, merged_lead_id=loser.id))
+
+
+# Lead-scoped rows and erasure (Story 2.16) ------------------------------------------------------
+
+
+class SignalInboxRows:
+    """``discovery``'s subscribers for its Lead-scoped ``signal_inbox_items`` rows; see the
+    module docstring."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    @command
+    def reparent_lead(self, n: LeadsMerged) -> None:
+        """Move the merged Lead's Signal Inbox items to its survivor (``LeadsMerged``)."""
+        signal_inbox_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``discovery``'s ``ContactErased`` subscriber (Story 2.16, AD-17): tombstone every Signal
+    Inbox item that may hold the erased Contact's data (``queries.discovery.contact_items``,
+    ``ERASURE``). It runs before research tombstones the Contact, so it reads their plaintext."""
+    contact = research_queries.contact(n.contact_id)
+    if contact is None:
+        raise LookupError("erase_pii: the Contact is unknown")
+    emails = [
+        address
+        for address in (
+            contact.email,
+            *(record.address for record in research_queries.provenance(contact.id)),
+        )
+        if address is not None
+    ]
+    items = discovery_queries.contact_items(contact.lead_id, contact.name, emails)
+    signal_inbox_repo.tombstone([str(item["id"]) for item in items])
 
 
 # The CSV import ---------------------------------------------------------------------------------

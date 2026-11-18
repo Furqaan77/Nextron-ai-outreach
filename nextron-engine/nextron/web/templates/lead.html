@@ -68,7 +68,7 @@
 {%- if row.quote %}<q>{{ row.quote|plain }}</q>{% endif %}
 {%- if row.sought %}{{ row.sought|plain }}{% endif %}
 {%- if row.pages_checked %}<ul class="pages-checked">{% for url in row.pages_checked %}<li>{{ safe_link(url) }}</li>{% endfor %}</ul>{% endif -%}
-</td><td>{{ row.supports|plain }}</td><td>{% if row.source_url %}{{ safe_link(row.source_url) }}{% else %}—{% endif %}</td><td>{{ row.retrieved }}</td><td>{{ row.extraction }}</td></tr>
+</td><td>{{ row.supports|plain }}</td><td>{% if row.source %}<span class="evidence-source">{{ row.source|plain }}</span>{% if row.source_url %} {{ safe_link(row.source_url) }}{% endif %}{% elif row.source_url %}{{ safe_link(row.source_url) }}{% else %}—{% endif %}</td><td>{{ row.retrieved }}</td><td>{{ row.extraction }}</td></tr>
 {%- endfor %}
 </tbody>
 </table>

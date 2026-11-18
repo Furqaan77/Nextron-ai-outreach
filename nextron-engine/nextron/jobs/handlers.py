@@ -84,6 +84,18 @@ handler runs in.
   ``scoring`` service's ``LeadScores``) and returns ``None``.
 - ``recompute_tiers(scores)`` (Story 2.15): calls ``scores().recompute_tiers()`` once and returns
   ``None``; the payload is a trigger's tick, ``{"v": 1}``.
+- ``process_signal_item(inbox)`` (Story 2.16): calls ``inbox().process_signal_item(item_id,
+  last_attempt=job.attempts > PROCESS_SIGNAL_ITEM_RETRIES)`` once (the ``discovery`` service's
+  ``SignalInbox``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused the
+  parse). A retryable ``AdapterError`` it raises is retried by the runner; on the last allowed
+  attempt the use case flags the item ``parse_failed`` instead, so no item stays ``pending``.
+
+**The chain's lane (Story 2.16).** ``enrich_lead``, ``extract_lead``, ``check_job_boards``,
+``check_legal_form`` and ``select_primary_contact`` pass ``lane=job.lane`` to their use case,
+which enqueues the chain's next stage on that lane (a Signal Inbox chain runs on the interactive
+lane, a CSV import's on the bulk lane, as before). ``render_pages`` runs on the bulk lane only;
+it passes its payload's optional ``chain_lane`` (``CHAIN_LANE_FIELD``; a lane name, else
+``InvalidJob``) as ``chain_lane=``, so the ``extract_lead`` it enqueues goes back to that lane.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -93,18 +105,31 @@ from typing import Final, Protocol
 
 from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
-from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
+from nextron.domain.crawl import CHAIN_LANE_FIELD, LEAD_ID_FIELD, RUN_ID_FIELD
 from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
 from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, STORE_FIELD
 from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
+from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job, Lane
 from nextron.domain.restore_test import RestoreTestKind
+from nextron.domain.signal_inbox_item import ITEM_ID_FIELD
 
 ALERT_ID_FIELD: Final = "alert_id"
 ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
 ERASE_EXTERNAL_RETRIES: Final = 5  # the erase_external job type's retry limit (nextron.main)
+PROCESS_SIGNAL_ITEM_RETRIES: Final = 3  # the process_signal_item job type's (nextron.main)
+
+
+def _chain_lane(job: Job) -> Lane | None:
+    """``render_pages``' optional ``chain_lane`` (Story 2.16): a lane name, else ``InvalidJob``."""
+    value = job.payload.get(CHAIN_LANE_FIELD)
+    if value is None:
+        return None
+    lane = next((lane for lane in Lane if lane.value == value), None)
+    if lane is None:
+        raise InvalidJob(f"{job.type}: the {CHAIN_LANE_FIELD} field must be a lane")
+    return lane
 
 
 def _ulid_field(job: Job, name: str) -> str:
@@ -206,9 +231,10 @@ class Crawling(Protocol):
     """What ``enrich_lead`` and ``render_pages`` need of the ``research`` service's
     ``WebsiteCrawls``."""
 
-    def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool: ...
+    def enrich_lead(self, lead_id: str, *, may_retry: bool, lane: Lane | None = None) -> bool: ...
 
-    def render_pages(self, lead_id: str, run_id: str) -> bool: ...
+    def render_pages(self, lead_id: str, run_id: str, *, chain_lane: Lane | None = None) -> bool:
+        ...
 
 
 def enrich_lead(crawls: Callable[[], Crawling]) -> Handler:
@@ -216,7 +242,8 @@ def enrich_lead(crawls: Callable[[], Crawling]) -> Handler:
 
     def handle_enrich_lead(job: Job) -> HandlerResult | None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
-        if not crawls().enrich_lead(lead_id, may_retry=job.attempts <= ENRICH_LEAD_RETRIES):
+        may_retry = job.attempts <= ENRICH_LEAD_RETRIES
+        if not crawls().enrich_lead(lead_id, may_retry=may_retry, lane=job.lane):
             return DEFERRED
         return None
 
@@ -230,7 +257,7 @@ def render_pages(crawls: Callable[[], Crawling]) -> Handler:
     def handle_render_pages(job: Job) -> HandlerResult | None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
         run_id = _ulid_field(job, RUN_ID_FIELD)
-        if not crawls().render_pages(lead_id, run_id):
+        if not crawls().render_pages(lead_id, run_id, chain_lane=_chain_lane(job)):
             return DEFERRED
         return None
 
@@ -273,13 +300,13 @@ def purge_page_text(research: Callable[[], PurgingPageText]) -> Handler:
 class Extracting(Protocol):
     """What ``extract_lead`` needs of the ``research`` service's ``SignalExtractions``."""
 
-    def extract_lead(self, lead_id: str, run_id: str) -> bool: ...
+    def extract_lead(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool: ...
 
 
 class SelectingPrimary(Protocol):
     """What ``select_primary_contact`` needs of the ``research`` service's ``PrimaryContacts``."""
 
-    def select_primary_contact(self, lead_id: str) -> object: ...
+    def select_primary_contact(self, lead_id: str, *, lane: Lane | None = None) -> object: ...
 
 
 def select_primary_contact(primary: Callable[[], SelectingPrimary]) -> Handler:
@@ -288,7 +315,7 @@ def select_primary_contact(primary: Callable[[], SelectingPrimary]) -> Handler:
 
     def handle_select_primary_contact(job: Job) -> None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
-        primary().select_primary_contact(lead_id)
+        primary().select_primary_contact(lead_id, lane=job.lane)
 
     return handle_select_primary_contact
 
@@ -296,7 +323,7 @@ def select_primary_contact(primary: Callable[[], SelectingPrimary]) -> Handler:
 class CheckingLegalForm(Protocol):
     """What ``check_legal_form`` needs of the ``discovery`` service's ``LegalFormChecks``."""
 
-    def check_legal_form(self, lead_id: str) -> bool: ...
+    def check_legal_form(self, lead_id: str, *, lane: Lane | None = None) -> bool: ...
 
 
 def check_legal_form(legal_forms: Callable[[], CheckingLegalForm]) -> Handler:
@@ -305,7 +332,7 @@ def check_legal_form(legal_forms: Callable[[], CheckingLegalForm]) -> Handler:
 
     def handle_check_legal_form(job: Job) -> HandlerResult | None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
-        if not legal_forms().check_legal_form(lead_id):
+        if not legal_forms().check_legal_form(lead_id, lane=job.lane):
             return DEFERRED
         return None
 
@@ -339,11 +366,13 @@ def extract_lead(extractions: Callable[[], Extracting]) -> Handler:
     def handle_extract_lead(job: Job) -> HandlerResult | None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
         run_id = _ulid_field(job, RUN_ID_FIELD)
-        if not extractions().extract_lead(lead_id, run_id):
+        if not extractions().extract_lead(lead_id, run_id, lane=job.lane):
             return DEFERRED
         return None
 
     return handle_extract_lead
+
+
 class AiTestRunning(Protocol):
     """What ``run_ai_test_sets`` needs of the ``playbook`` service's ``AiTestRuns``."""
 
@@ -391,7 +420,8 @@ class CheckingJobBoards(Protocol):
     """What ``check_job_boards`` and ``recheck_event`` need of the ``research`` service's
     ``JobBoards``."""
 
-    def check_job_boards(self, lead_id: str, run_id: str) -> bool: ...
+    def check_job_boards(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
+        ...
 
     def recheck_event(self, signal_id: str) -> None: ...
 
@@ -403,7 +433,7 @@ def check_job_boards(job_boards: Callable[[], CheckingJobBoards]) -> Handler:
     def handle_check_job_boards(job: Job) -> HandlerResult | None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
         run_id = _ulid_field(job, RUN_ID_FIELD)
-        if not job_boards().check_job_boards(lead_id, run_id):
+        if not job_boards().check_job_boards(lead_id, run_id, lane=job.lane):
             return DEFERRED
         return None
 
@@ -467,3 +497,23 @@ def recompute_tiers(scores: Callable[[], ScoringLeads]) -> Handler:
         scores().recompute_tiers()
 
     return handle_recompute_tiers
+
+
+class ProcessingSignalItems(Protocol):
+    """What ``process_signal_item`` needs of the ``discovery`` service's ``SignalInbox``."""
+
+    def process_signal_item(self, item_id: str, *, last_attempt: bool = False) -> bool: ...
+
+
+def process_signal_item(inbox: Callable[[], ProcessingSignalItems]) -> Handler:
+    """The ``process_signal_item`` job's handler: parse and apply the payload's Signal Inbox item
+    through ``inbox()``."""
+
+    def handle_process_signal_item(job: Job) -> HandlerResult | None:
+        item_id = _ulid_field(job, ITEM_ID_FIELD)
+        last_attempt = job.attempts > PROCESS_SIGNAL_ITEM_RETRIES
+        if not inbox().process_signal_item(item_id, last_attempt=last_attempt):
+            return DEFERRED
+        return None
+
+    return handle_process_signal_item

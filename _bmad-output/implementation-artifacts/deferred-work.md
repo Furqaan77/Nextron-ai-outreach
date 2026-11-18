@@ -371,3 +371,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-9-create-a-sequence-s-draft-slots-due-times-and-lifecycle-commands.md`
   summary: In Epic 5 (approval and `sending.cancel`), extend `Approval.cancel_pending` (and `cancel_pending_suppressed`) so a stop or suppression also moves each `approved` Draft of the stopped Enrollments to `cancelled` after `sending.cancel(om)` (AD-6 un-approve), so no approved message reaches a suppressed or stopped Contact.
   evidence: Review pass 1 of Story 4.9 (BH, medium, deferred). 4.9 cancels only `ready` Drafts (its spec's Never); nothing can be approved before Epic 5, so no approved Draft exists yet.
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-16-turn-pasted-signals-into-researched-leads-through-the-signal-inbox.md`
+  summary: Give the Signal Inbox list paging or a "flagged" filter that shows every flagged item, so an item flagged before the newest 100 keeps its reprocess form.
+  evidence: Story 2.16 review pass 1 (entry P, BH7 and EC9, medium). `queries.discovery.signal_items(limit=SIGNAL_ITEMS_SHOWN)` lists only the newest 100 items, and nothing else shows the older ones.
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-16-turn-pasted-signals-into-researched-leads-through-the-signal-inbox.md`
+  summary: Decide how erasure treats a pasted post URL copied into Evidence `source_url` (and `pages_checked`) and into a Contact Provenance `detail`. A social post URL such as `linkedin.com/posts/<person-slug>-…` carries the person's name, but both columns are classed `none`.
+  evidence: Story 2.16 review pass 1 (entry E, BH5 and EC11, medium). 2.16 classes `signal_inbox_items.url` as `redact`. The Evidence and Provenance columns are pre-existing classes that the Website and CSV paths share; changing them affects the erasure contracts for every source.

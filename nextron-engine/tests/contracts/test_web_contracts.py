@@ -181,6 +181,9 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/health/restore-test",
         "/leads/import",
         "/leads/import",
+        "/signals",  # Story 2.16
+        "/signals",
+        "/signals/{item_id}/reprocess",
         "/inboxes",
         "/inboxes",
         "/inboxes/warmup",
@@ -679,6 +682,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "quotas.html",
         "settings.html",
         "settings_form.html",
+        "signal_inbox.html",  # Story 2.16
+        "signal_inbox_panel.html",
         "suppression.html",
         "suppression_panel.html",
         "unsub_key_row.html",

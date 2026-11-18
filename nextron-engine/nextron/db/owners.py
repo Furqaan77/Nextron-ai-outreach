@@ -460,6 +460,28 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "last_seen_at",
         ),
     },
+    "signal_inbox_items": {  # Story 2.16
+        "discovery": (
+            "id",
+            "url",
+            "text",
+            "author",
+            "company",
+            "status",
+            "flag_reason",
+            "submitted_at",
+            "processed_at",
+            "lead_id",
+            "parsed_segment",
+            "parsed_signal_type",
+            "parsed_website",
+            "parsed_author_name",
+            "parsed_author_role",
+            "parsed_event_date",
+            "parsed_quote",
+            "extracted_by",
+        ),
+    },
     "job_postings": {  # Story 2.11
         "research": (
             "id",

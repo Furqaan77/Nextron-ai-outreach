@@ -72,6 +72,7 @@ from enum import StrEnum
 from typing import Final
 
 from nextron.domain.budget import CODE_PATTERN
+from nextron.domain.job import Lane
 from nextron.domain.playbook import SHORT_SHA_LENGTH, PlaybookSnapshot
 
 MODEL_NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
@@ -90,6 +91,12 @@ class Urgency(StrEnum):
     INTERACTIVE = "interactive"
     SOON = "soon"
     BULK = "bulk"
+
+
+def chain_urgency(lane: str | None) -> Urgency:
+    """The urgency of a research chain's AI call made by a job on ``lane`` (Story 2.16): ``soon``
+    on the interactive lane (a Signal Inbox chain), ``bulk`` on any other lane or none."""
+    return Urgency.SOON if lane == Lane.INTERACTIVE else Urgency.BULK
 
 
 class Effort(StrEnum):

@@ -129,6 +129,13 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   again, with the Segment choices read in a read-only one: a refusal by its field, the summary
   above a fresh form, or a stopped import's summary above the form with the origin and default
   kept, always 200.
+- ``GET /signals`` (``signal_inbox_page``), ``POST /signals`` (``signal_inbox_submit``) and
+  ``POST /signals/{item_id}/reprocess`` (``signal_inbox_reprocess``), all
+  ``@personal_data(True)``: the Signal Inbox (Story 2.16, the nav's "Signal Inbox"); see
+  ``nextron.web.signal_inbox_page``. The submit POST checks the fieldsets
+  (``check_items``) and runs ``signal_inbox.submit`` in its own unit of work; the reprocess POST
+  runs ``signal_inbox.reprocess`` (an ``item_id`` that isn't a ULID is a malformed form). Both
+  answer 200 with the panel, read in a read-only unit of work.
 - ``GET /inboxes`` (``inboxes_page``) and ``POST /inboxes`` (``inbox_register``), both
   ``@personal_data(True)``: the Sending Inboxes panel (Story 4.7, FR-32, UX-DR26), linked from
   the Settings page; see ``nextron.web.inboxes_page``. The GET lists
@@ -301,6 +308,7 @@ from starlette.routing import BaseRoute
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
+from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -352,6 +360,7 @@ from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
+from nextron.domain.signal_inbox_item import ItemsRefused, check_items
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.domain.suppression_list import (
     ADDED,
@@ -378,6 +387,7 @@ from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import leads_page as lead_rows
 from nextron.web import quotas_page as quota_rows
+from nextron.web import signal_inbox_page as inbox_page_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
@@ -556,6 +566,7 @@ def create_app(
     erasures: Erasures,
     domain_checks: DomainChecks,
     lead_scores: LeadScores,
+    signal_inbox: SignalInbox,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -576,7 +587,8 @@ def create_app(
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
-    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``compliance`` runs the
+    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``signal_inbox`` stores the
+    Signal Inbox's pasted items and reprocesses a flagged one (Story 2.16); ``compliance`` runs the
     Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
@@ -1243,6 +1255,59 @@ def create_app(
             )
             return import_answer(request, **context)
         return import_answer(request, **import_rows.form_context(summary=summary))
+
+    def signal_inbox_answer(
+        request: Request, template: str, **context: object
+    ) -> HTMLResponse:
+        found = inbox_page_rows.panel_context(
+            discovery_queries.signal_items(), setup_queries.segments(), **context
+        )
+        return page(request, template, **found)
+
+    @app.get("/signals", name="signal_inbox_page")
+    @personal_data(True)  # pasted text and the names in it
+    def signal_inbox_page(request: Request) -> HTMLResponse:
+        return signal_inbox_answer(request, inbox_page_rows.PAGE_TEMPLATE)
+
+    @app.post("/signals", name="signal_inbox_submit")
+    @personal_data(True)
+    def signal_inbox_submit(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        rows = inbox_page_rows.submitted_rows(fields)
+        try:
+            items = check_items(rows)
+        except ItemsRefused as refused:
+            # 200, so HTMX swaps the panel in; nothing was stored, and the typed values stay
+            with units.open(read_only=True):
+                return signal_inbox_answer(
+                    request, inbox_page_rows.PANEL_TEMPLATE, rows=rows, errors=refused.errors
+                )
+        with units.open():
+            signal_inbox.submit(items)
+        with units.open(read_only=True):
+            return signal_inbox_answer(
+                request,
+                inbox_page_rows.PANEL_TEMPLATE,
+                notice=inbox_page_rows.Notice("status", inbox_page_rows.SUBMITTED),
+            )
+
+    @app.post("/signals/{item_id}/reprocess", name="signal_inbox_reprocess")
+    @personal_data(True)
+    def signal_inbox_reprocess(
+        request: Request, item_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        choice = inbox_page_rows.submitted_reprocess(fields)
+        if not is_ulid(item_id):
+            raise MalformedForm(WRONG_FIELDS)
+        with units.open():
+            outcome = signal_inbox.reprocess(item_id, choice)
+        with units.open(read_only=True):
+            return signal_inbox_answer(
+                request,
+                inbox_page_rows.PANEL_TEMPLATE,
+                notice=inbox_page_rows.REPROCESS_NOTICES[outcome],
+            )
 
     def inboxes_answer(
         request: Request,

@@ -35,6 +35,7 @@ from nextron.domain.budget import AiCall
 from nextron.domain.contactability import ContactSubject, SuppressionScope
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource, provenance_recorded
 from nextron.domain.eligibility import ReasonKind
+from nextron.domain.job import Lane
 from nextron.domain.notifications import ContactErased, EvidenceChanged
 from nextron.domain.suppression_entry import SuppressionSource
 from nextron.ports.errors import AdapterError
@@ -1023,3 +1024,34 @@ def test_the_chain_runs_people_then_job_boards_then_legal_form_then_the_selectio
         f"domain:{SITE}",
         {"v": 1, "lead_id": lead},
     )
+
+
+# The chain's lane (Story 2.16) ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lane", [Lane.BULK, Lane.INTERACTIVE])
+@pytest.mark.parametrize("path", ["no_activation", "no_pages", "refused"])
+def test_the_people_step_enqueues_the_next_stage_on_the_jobs_lane(
+    db_engine: Engine, lane: Lane, path: str
+) -> None:
+    world = build_world(db_engine, prompts=path != "no_activation")
+    lead, run_id, pages = law_lead(world)
+    if path == "no_pages":
+        world.extract(lead, run_id, ok(), people=[law_people(pages)])
+        world.clock.advance(timedelta(hours=1))
+        world.sql("DELETE FROM jobs WHERE type = 'check_job_boards'")
+        world.sql(
+            "UPDATE crawled_pages SET changed_at = ? WHERE url = ?",
+            (utc(T0 + timedelta(minutes=30)), HOME),
+        )
+    answers: list[LlmResult] = []
+    if path == "refused":
+        answers = [LlmRefused("cyber", model=HAIKU, usage=USAGE)]
+
+    script = () if path == "no_activation" else (ok(),)
+
+    assert world.extract(lead, run_id, *script, people=answers, lane=lane) is True
+
+    assert people_runs(world, lead)[-1][0] == path
+    [(_, _, _, queued_lane)] = next_jobs(world)
+    assert queued_lane == str(lane)

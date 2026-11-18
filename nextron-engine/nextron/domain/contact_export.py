@@ -21,6 +21,9 @@ Table                      Owner        Exported as / why not
 ``page_contact_methods``   research     ``contact_methods``
 ``job_postings``           research     ``job_postings`` (Story 2.11: title or description
                                         mentions the Contact)
+``signal_inbox_items``     discovery    ``signal_inbox_items`` (Story 2.16: an item of the
+                                        Contact's Lead, or with no Lead, that mentions the
+                                        Contact; ``text`` shown as ``text_excerpts``)
 ``suppression_entries``    compliance   ``suppression`` (``value_hash`` withheld)
 ``data_subject_requests``  compliance   ``requests``
 ``erasure_receipts``       compliance   ``erasure_receipts`` (Story 3.14: with their store
@@ -177,6 +180,12 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "notifications": Exported("notify", "notifications"),
         "ai_test_cases": Exported("playbook", "override_cases"),
         "enrollments": Exported("sequencing", "enrollments"),
+        # Story 2.16: the pasted items that mention the Contact, their text as excerpts
+        "signal_inbox_items": Exported(
+            "discovery",
+            "signal_inbox_items",
+            shown_as=MappingProxyType({"text": "text_excerpts"}),
+        ),
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

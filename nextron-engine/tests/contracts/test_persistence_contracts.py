@@ -53,6 +53,7 @@ from sqlalchemy import (
 from sqlalchemy.types import TypeDecorator
 
 from nextron import main
+from nextron.app.discovery.api import SignalInboxRows
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import Research
 from nextron.app.sequencing.api import Sequencing
@@ -79,7 +80,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0042_4_9_drafts"
+HEAD = "0043_2_16_signal_inbox"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -543,13 +544,14 @@ def test_every_owner_of_a_lead_scoped_row_reparents_it_on_a_merge() -> None:
         "crawled_pages.lead_id",
         "ats_links.lead_id",
         "job_postings.lead_id",  # Story 2.11
+        "signal_inbox_items.lead_id",  # Story 2.16
         "contacts.lead_id",  # Story 2.3
         "enrollments.lead_id",  # Story 4.8
         "evidence.lead_id",  # Story 2.9
         "signals.lead_id",
         "extraction_runs.lead_id",
     ]
-    assert reparenting_owners(subscribers) == {"pipeline", "research", "sequencing"}
+    assert reparenting_owners(subscribers) == {"pipeline", "research", "sequencing", "discovery"}
     assert reparent_problems(Base.metadata, subscribers) == []
 
 
@@ -577,6 +579,7 @@ def test_the_reparent_check_names_a_missing_registration() -> None:
         Pipeline(clock).reparent_lead,
         Research(clock).add_contact,
         Sequencing(clock).reparent_lead,
+        SignalInboxRows(clock).reparent_lead,  # Story 2.16
     ]
 
     assert reparent_problems(Base.metadata, subscribers) == [
@@ -809,19 +812,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0043_next"}], None),
-        ([{"revision": "0043-next"}], "the chain does not load"),
-        ([{"revision": "0043_Next"}], "the id does not match"),
+        ([{"revision": "0044_next"}], None),
+        ([{"revision": "0044-next"}], "the chain does not load"),
+        ([{"revision": "0044_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0044_next"}], "the id starts 0044, but it is revision 43"),
-        ([{"revision": "0043_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0043_next", "file": "0043_other"}], "the id is not its file name"),
-        ([{"revision": "0043_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0043_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0043_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0043_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0045_next"}], "the id starts 0045, but it is revision 44"),
+        ([{"revision": "0044_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0044_next", "file": "0044_other"}], "the id is not its file name"),
+        ([{"revision": "0044_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0044_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0044_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0044_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0043_a"}, {"revision": "0044_b", "down": HEAD}],
+            [{"revision": "0044_a"}, {"revision": "0045_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],

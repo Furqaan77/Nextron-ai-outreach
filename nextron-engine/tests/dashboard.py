@@ -95,6 +95,7 @@ from nextron import main
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -344,6 +345,7 @@ class Dashboard:
     erasures: Erasures = field(init=False)
     email_finding: EmailFinding = field(init=False)
     lead_scores: LeadScores = field(init=False)
+    signal_inbox: SignalInbox = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -379,6 +381,7 @@ class Dashboard:
             job_boards=no_crawl_jobs,
             legal_forms=no_crawl_jobs,
             scores=lambda: self.lead_scores,
+            signal_inbox=lambda: self.signal_inbox,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -441,6 +444,14 @@ class Dashboard:
             self.email_syntax,
         )
         self.erasures = Erasures(self.clock, Compliance(self.clock), queue=self.queue)
+        self.signal_inbox = SignalInbox(
+            self.clock,
+            meter,
+            self.llm,
+            Discovery(self.clock, Pipeline(self.clock), self.queue),
+            self.research,
+            self.queue,
+        )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -470,6 +481,7 @@ class Dashboard:
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
+            signal_inbox=self.signal_inbox,
             units=self.units,
             **extra,
         )

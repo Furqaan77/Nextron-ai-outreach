@@ -148,6 +148,8 @@ The two reapply writers (their caller is ``nextron.app.compliance.ledger.Erasure
   key held for the Contact (its stored values, its Lead's ``web_domain`` through
   ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii``,
   ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6),
+  ``queries.discovery.export_pii`` (the Signal Inbox items that mention the Contact, Story
+  2.16),
   ``queries.sequencing.export_pii`` (the Contact's Enrollments, Story 4.8) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
@@ -743,6 +745,22 @@ class Compliance:
                 "notify": notify_queries.export_pii(contact_id),
                 "playbook": playbook_queries.export_pii(contact_id),
                 "sequencing": sequencing_queries.export_pii(contact_id),
+                # Story 2.16: the Signal Inbox items of the Contact's Lead that mention them
+                "discovery": discovery_queries.export_pii(
+                    contact.lead_id,
+                    contact.name,
+                    [
+                        address
+                        for address in (
+                            contact.email,
+                            *(
+                                record.address
+                                for record in research_queries.provenance(contact_id)
+                            ),
+                        )
+                        if address is not None
+                    ],
+                ),
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )

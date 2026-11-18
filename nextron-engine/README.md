@@ -5226,6 +5226,65 @@ interactive lane and answers "Re-score queued.". **The Leads list** shows Tier a
 columns ("—" until scored); the Tier heading sorts by Tier (A to C, unscored last), then Lead
 Score, keeping the filters. "Re-score" on a merged or closed Lead queues nothing and says so.
 
+## The Signal Inbox
+
+A post or job ad Mac finds by hand goes into the **Signal Inbox** (`/signals`, the nav's "Signal
+Inbox"; FR-8, FR-9, FR-11, FR-49, AD-4, AD-8, AD-10, AD-18; Story 2.16). The rules are in
+`nextron/domain/signal_inbox_item.py` (pure); the service is
+`nextron/app/discovery/signal_inbox.py` (`SignalInbox`); `signal_inbox_items` (migration
+`0043_2_16_signal_inbox`, owner `discovery`) is written only by
+`nextron/db/repos/discovery/signal_inbox.py`.
+
+**The form** has five item fieldsets: URL (required, an absolute `http`/`https` URL of at most
+2,048 characters), text (required, at most 10,000 characters), and an optional author and company
+(at most 200 characters each, with no control or format character). Blank fieldsets are ignored; any invalid item refuses the whole
+submission, with each reason by its field and what was typed kept. Each item is stored `pending`
+with its submission time, and its `process_signal_item` job is queued on the interactive lane in
+the same transaction. **A pasted URL is stored as a source only: no job ever fetches it**; a URL on
+the FR-49 denylist (LinkedIn, Instagram, job sites, Google Maps) says "stored as a source only;
+never fetched".
+
+**The job** (`process_signal_item`: interactive only, priority 60, 5 minutes, retry limit 3, group
+Discovery; keyed `process_signal_item:<item>:tick`; payload `{v, item_id}`) checks the budget as
+discovery (a refusal defers it; the item stays `pending`), then makes one `signal_inbox_parse`
+call at urgency `soon` with every Segment's Signal types and the item (text, then `Author:` and
+`Company:` lines) as untrusted blocks. It keeps only: a seeded Segment key, a Signal type of that
+Segment whose sources include `signal_inbox`, a website whose registrable domain appears in the
+text or company field as whole labels (`www.acme.com` names `acme.com`; `acme.co` and `me.com`
+don't) and isn't denylisted or a shared platform, an author name and role that
+appear in the text or author field, an event date stated in the text (not in the future), and a
+quote that is an exact substring of the text. The accepted fields are stored on the item.
+
+- **Applied:** `discovery.upsert_lead` returns the existing Lead (any stage; its Segment
+  unchanged) or creates one (named after the company field, else the domain).
+  `research.ingest_signal_item` stores the quote as Evidence (`source=signal_inbox`, shown on the
+  Lead page as "Signal Inbox (manual)"), the Signal when its type is the Lead's Segment's (an Event
+  dated by the stated date, else the submission date, first seen at the submission time), and the
+  author as a Contact (Provenance `signal_inbox`) when their role is a decision-maker title. The
+  item becomes `processed` with the Lead, and `enrich_lead` is queued on the interactive lane.
+- **Flagged:** no website (`organization_unknown`), no Segment (`segment_unknown`), a refused,
+  invalid, truncated or failed parse, or a retryable failure still failing on the job's last
+  attempt (`parse_failed`), or a new Lead on a suppressed domain
+  (`organization_suppressed`; nothing else is written). The list shows what is missing and a
+  reprocess form: an existing Lead (its id or Lead page link; a merged Lead goes to its survivor)
+  or a website and a Segment. A reprocess applies the stored parse at once, without a second AI
+  call; an error leaves the item flagged and unchanged.
+
+**The interactive chain.** Every stage of the research chain now enqueues the next on the lane
+its own job ran on, and its AI calls use urgency `soon` on the interactive lane (`bulk`
+otherwise): `enrich_lead` → `extract_lead` → `check_job_boards` → `check_legal_form` →
+`select_primary_contact` → `find_contact_email` and `score_lead`. `render_pages` stays on the bulk
+lane; its payload carries `chain_lane` so the `extract_lead` it queues goes back to the
+interactive lane. A CSV import's chain stays on the bulk lane at urgency `bulk`, as before.
+
+Each status change appends an `events` row (entity `signal_inbox_items`, IDs only). The pasted
+URL, text, author, company, parsed author and quote are personal data: an erasure tombstones every
+item of the Contact's Lead (and of Leads merged into it), and every item with no Lead yet
+(pending or flagged) that mentions the Contact by name or address or names one of those Leads'
+websites; a subject access export lists those items that mention the Contact (their text as
+excerpts). Discovery's erasure hook runs second, after compliance's, so it can match the
+Contact's name and addresses before research tombstones them.
+
 ## Engine health
 
 The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page

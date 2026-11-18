@@ -1016,20 +1016,20 @@ def test_the_evidence_section_shows_each_live_row(world: World) -> None:
         "Quote",
         HOSTILE_QUOTE,
         hiring,
-        "https://smith-law.co.uk/team",
+        "Website https://smith-law.co.uk/team",  # Story 2.16: the source's label first
         "2026-10-17 09:00 UTC",
         "AI-extracted",
     ]
     assert rows[2][2:] == [
         "New office, merger, or practice-area expansion",
-        "https://smith-law.co.uk/team",
+        "Website https://smith-law.co.uk/team",
         "2026-11-17 09:00 UTC",
         "AI-extracted",
     ]
     assert rows[3][0] == "Absence"
     assert rows[3][2:] == [
         "Contact form only (no chat, booking, or after-hours line)",
-        "—",
+        "Website",  # Story 2.16: its source, without a link
         "2026-11-17 09:00 UTC",
         "—",
     ]
@@ -1040,7 +1040,7 @@ def test_the_evidence_section_shows_each_live_row(world: World) -> None:
     assert cells(count_row)[0] == "Count"
     counted = "Counted: matters listed on the practice pages: 1,250"
     assert cells(count_row)[1].startswith(counted)  # then the pages checked, as a list
-    assert cells(count_row)[2:] == ["—", "—", "2026-11-17 09:00 UTC", "—"]
+    assert cells(count_row)[2:] == ["—", "Website", "2026-11-17 09:00 UTC", "—"]
     assert not count_row.find_all("q")
     count_links = count_row.find("ul", class_="pages-checked").find_all("a")
     assert [(a.attrs["href"], a.text) for a in count_links] == [
@@ -1377,6 +1377,7 @@ def test_the_nav_links_the_leads_list(world: World) -> None:
     nav = page.find("nav", **{"aria-label": "Sections"})
     links = [(a.attrs["href"], a.text) for a in nav.find_all("a")]
     assert links == [
+        ("/signals", "Signal Inbox"),  # Story 2.16
         ("/leads", "Leads/Pipeline"),
         ("/settings", "Settings"),
         ("/health/panel", "Health"),

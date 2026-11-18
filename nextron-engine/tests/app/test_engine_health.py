@@ -331,6 +331,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
     report = world.read(health.report)
 
     assert report.groups == (
+        GroupRuns(JobGroup.DISCOVERY, (LastRun("process_signal_item", None),)),  # Story 2.16
         GroupRuns(
             JobGroup.ENRICHMENT,
             (

@@ -148,6 +148,24 @@ cause ``selection`` with actor ``system:research``, or cause and actor ``operato
 ``PeopleExtractions`` and ``PrimaryContacts`` (``nextron.app.research.people``) find the
 decision-makers and run the selection.
 
+**The Signal Inbox (Story 2.16).** ``@command ingest_signal_item(lead_id,
+SignalItemFacts(item_id, url, text, submitted_at, extracted_by, signal_type, event_date, quote,
+author_name, author_role)) -> IngestedSignal(evidence_id, signal_id, contact_id,
+contact_blocked)``: an unknown Lead raises ``LookupError``, a merged one ``ValueError``.
+
+- With a quote (which must be 1 to 300 characters and an exact substring of the item text, else
+  ``ValueError``: a quote not in the text is never stored), one Quote Evidence row: ``source``
+  ``signal_inbox``, ``source_url`` and ``pages_checked`` the item URL, ``retrieved_at`` the
+  submission time, ``extracted_by`` the parse's actor. When ``signal_type`` is a type of the
+  Lead's Segment whose sources include ``signal_inbox``, the row is linked to the Lead's current
+  Signal of that type (for an Event, of that date: the stated date, else the submission time's
+  UTC date), or a new Signal is created with its class, Tier and ``score_only`` from the
+  Segment and ``first_seen_at`` the submission time. No quote: no Evidence and no Signal.
+- With an author name and role, when ``role_match(role, segment)`` finds a decision-maker
+  title, ``add_contact(lead_id, ContactCandidate(name, role), source=signal_inbox,
+  detail=<item URL>, retrieved_at=<submission time>)``: no email and no LinkedIn URL, ever. A
+  name the Contact rules refuse is skipped.
+
 **The legal form (Story 2.12, FR-12).** ``Research`` is the only writer of the Lead's
 ``legal_form``, ``company_status``, ``legal_form_status``, ``legal_form_site_evidence_id`` and
 ``legal_form_registry_evidence_id`` (through ``db.repos.research.profile``), and of their
@@ -376,7 +394,7 @@ import logging
 import urllib.parse
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from types import MappingProxyType
 from typing import Final
 
@@ -415,6 +433,7 @@ from nextron.domain.contactability import (
 from nextron.domain.contacts import (
     NO_PRIMARY,
     ContactCandidate,
+    InvalidContact,
     PrimaryCandidate,
     PrimaryChoice,
     PrimaryRefusal,
@@ -423,9 +442,11 @@ from nextron.domain.contacts import (
     ProvenanceSource,
     ProvenanceSubject,
     choose_primary,
+    role_match,
 )
 from nextron.domain.crawl import (
     CANONICALIZE_LEAD_JOB,
+    CHAIN_LANE_FIELD,
     HTML_MEDIA_TYPES,
     LEAD_ID_FIELD,
     MAX_DEPTH,
@@ -448,19 +469,24 @@ from nextron.domain.crawl import (
 )
 from nextron.domain.eligibility import Decision, basis_country
 from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
-from nextron.domain.extraction import EXTRACT_LEAD_JOB, EXTRACTED_BY_RULE, EvidenceSource
+from nextron.domain.extraction import (
+    EXTRACT_LEAD_JOB,
+    EXTRACTED_BY_RULE,
+    MAX_QUOTE,
+    EvidenceSource,
+)
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
 from nextron.domain.geo import Location
 from nextron.domain.identity import IdentityError, normalize_name, registrable_domain
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import VERSION_FIELD
+from nextron.domain.job import VERSION_FIELD, Lane
 from nextron.domain.leads import is_shared_platform
 from nextron.domain.machines import Transition
 from nextron.domain.legal_form import LegalFormFinding, company_page_url
 from nextron.domain.notifications import ContactErased, EvidenceChanged, LeadsMerged
 from nextron.domain.people import ROUTE as PEOPLE_ROUTE
 from nextron.domain.quotes import quote_in
-from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass
+from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass, SignalSource
 from nextron.domain.settings_schema import Key
 from nextron.domain.signals import EventSignal, preferred_roles, strongest_event
 from nextron.domain.widgets import Detection, detect, encode, summarize, tag_managers
@@ -558,6 +584,35 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
 
 type Assignment = Transition[AddressClass, AddressCause]
 type RobotsRule = Callable[[str], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class SignalItemFacts:
+    """What a Signal Inbox item gives its Lead (Story 2.16): the item's id, URL, text and
+    submission time, and its accepted parse."""
+
+    item_id: str
+    url: str
+    text: str = field(repr=False)
+    submitted_at: datetime
+    extracted_by: str
+    signal_type: str | None = None
+    event_date: date | None = None
+    quote: str | None = field(default=None, repr=False)
+    author_name: str | None = field(default=None, repr=False)
+    author_role: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class IngestedSignal:
+    """What ``ingest_signal_item`` stored: the Quote Evidence, the Signal it supports, the
+    author Contact (``None`` for each it didn't store), and whether the contactability gate
+    blocked the author."""
+
+    evidence_id: str | None
+    signal_id: str | None
+    contact_id: str | None
+    contact_blocked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1201,6 +1256,120 @@ class Research:
             at=at,
         )
 
+    # The Signal Inbox (Story 2.16) -------------------------------------------------------------
+
+    @command
+    def ingest_signal_item(self, lead_id: str, item: SignalItemFacts) -> IngestedSignal:
+        """Store a Signal Inbox item's Quote Evidence, its Signal and its author Contact on the
+        Lead; see the module docstring."""
+        if not isinstance(item, SignalItemFacts):
+            raise TypeError(f"ingest_signal_item takes SignalItemFacts, not {type(item).__name__}")
+        lead = discovery_queries.lead(lead_id) if isinstance(lead_id, str) else None
+        if lead is None:
+            raise LookupError("ingest_signal_item: the Lead is unknown")
+        if lead.merged_into is not None:
+            raise ValueError("ingest_signal_item: the Lead was merged into another Lead")
+        seeded = setup_queries.segment_by_id(lead.segment_id)
+        if seeded is None:  # leads.segment_id is a foreign key
+            raise RuntimeError(f"Lead {lead.id}'s Segment has no row")
+        segment = seeded.definition
+        now = self._clock.now()
+        evidence_id: str | None = None
+        signal_id: str | None = None
+        if item.quote is not None:
+            if not 1 <= len(item.quote) <= MAX_QUOTE or not quote_in(item.quote, item.text):
+                raise ValueError("ingest_signal_item: the quote isn't in the item's text")
+            evidence_id = signals_repo.insert_evidence(
+                lead_id=lead.id,
+                evidence_type=str(EvidenceType.QUOTE),
+                quote=item.quote,
+                sought=None,
+                number=None,
+                fact=None,
+                value=None,
+                pages_checked=(item.url,),
+                source=str(EvidenceSource.SIGNAL_INBOX),
+                source_url=item.url,
+                retrieved_at=item.submitted_at,
+                extracted_by=item.extracted_by,
+                person_contact_id=None,
+                at=now,
+            )
+            signal_id = self._inbox_signal(lead.id, segment, item, evidence_id)
+        contact_id, blocked = self._inbox_author(lead.id, segment, item)
+        return IngestedSignal(evidence_id, signal_id, contact_id, blocked)
+
+    @staticmethod
+    def _inbox_signal(
+        lead_id: str, segment: SegmentDef, item: SignalItemFacts, evidence_id: str
+    ) -> str | None:
+        """Link the item's Evidence to the Lead's current Signal of its type (and, for an
+        Event, its date), creating it when there is none; ``None`` when the type isn't one of
+        the Lead's Segment's inbox types."""
+        signal_type = next(
+            (
+                each
+                for each in segment.signal_types
+                if each.key == item.signal_type and SignalSource.SIGNAL_INBOX in each.sources
+            ),
+            None,
+        )
+        if signal_type is None:
+            return None
+        is_event = signal_type.signal_class is SignalClass.EVENT
+        event_date = None
+        if is_event:
+            event_date = (
+                item.event_date
+                if item.event_date is not None
+                else item.submitted_at.astimezone(UTC).date()
+            )
+        found = next(
+            (
+                signal
+                for signal in signals_repo.signals(lead_id, current_only=True)
+                if signal.signal_type == signal_type.key
+                and (not is_event or signal.event_date == event_date)
+            ),
+            None,
+        )
+        if found is not None:
+            signals_repo.link(found.id, evidence_id)
+            return found.id
+        return signals_repo.insert_signal(
+            lead_id=lead_id,
+            signal_type=signal_type.key,
+            signal_class=str(signal_type.signal_class),
+            tier=signal_type.tier,
+            score_only=signal_type.score_only,
+            event_date=event_date,
+            first_seen_at=item.submitted_at,
+            evidence_ids=[evidence_id],
+        )
+
+    def _inbox_author(
+        self, lead_id: str, segment: SegmentDef, item: SignalItemFacts
+    ) -> tuple[str | None, bool]:
+        """Add the item's author as a Contact when their role is a decision-maker's in the
+        Lead's Segment: the Contact's id (``None`` when none was stored) and whether the gate
+        blocked it."""
+        if item.author_name is None or item.author_role is None:
+            return None, False
+        if role_match(item.author_role, segment) is None:
+            return None, False
+        try:
+            candidate = ContactCandidate(name=item.author_name, role=item.author_role)
+        except InvalidContact:
+            return None, False
+        added = self.add_contact(
+            lead_id,
+            candidate,
+            source=ProvenanceSource.SIGNAL_INBOX,
+            detail=item.url,
+            retrieved_at=item.submitted_at,
+        )
+        return added.contact_id, added.blocked is not None
+
     # The legal form (Story 2.12) ---------------------------------------------------------------
 
     @command
@@ -1527,8 +1696,9 @@ class WebsiteCrawls:
         self._queue = queue
 
     @use_case
-    def enrich_lead(self, lead_id: str, *, may_retry: bool) -> bool:
-        """Crawl the Lead's website and store what it shows; see the module docstring."""
+    def enrich_lead(self, lead_id: str, *, may_retry: bool, lane: Lane | None = None) -> bool:
+        """Crawl the Lead's website and store what it shows; see the module docstring. ``lane``
+        is the lane the job ran on: the chain's next stages are enqueued on it (Story 2.16)."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
@@ -1556,7 +1726,7 @@ class WebsiteCrawls:
         run = _Run(lead_id=lead_id, site=site, started_at=started_at)
         self._crawl(run, max_pages)
         with uow.transaction():
-            run_id = self._apply(run, ats_hosts)
+            run_id = self._apply(run, ats_hosts, lane)
         log.info(
             CRAWL_FINISHED,
             extra={
@@ -1746,7 +1916,7 @@ class WebsiteCrawls:
 
     # The apply transaction ---------------------------------------------------------------------
 
-    def _apply(self, run: _Run, ats_hosts: Collection[str]) -> str:
+    def _apply(self, run: _Run, ats_hosts: Collection[str], lane: Lane | None) -> str:
         """Step 5, in the caller's transaction: the run's id."""
         now = self._clock.now()
         lead = discovery_queries.lead(run.lead_id)
@@ -1789,21 +1959,26 @@ class WebsiteCrawls:
                 scope=run.lead_id,
                 discriminator=discriminator,
                 payload=payload,
+                lane=lane,
                 concurrency_key=concurrency_key,
             )
         if any(needs_render(page.text) for page in run.pages):
-            # the Signal extraction waits for the renders: render_pages' apply enqueues it
+            # the Signal extraction waits for the renders: render_pages' apply enqueues it.
+            # Renders run on the bulk lane only; an interactive chain's lane rides in the payload
+            render_payload = dict(payload)
+            if lane is Lane.INTERACTIVE:
+                render_payload[CHAIN_LANE_FIELD] = str(lane)
             self._queue.enqueue(
                 RENDER_PAGES_JOB,
                 scope=run.lead_id,
                 discriminator=discriminator,
-                payload=payload,
+                payload=render_payload,
                 concurrency_key=concurrency_key,
             )
             run.render_queued = True
         elif run.pages:
             run.absence = self._set_contact_methods(run.lead_id, lead.segment_id, run_id, now)
-            self._enqueue_extraction(run.lead_id, run_id, run.site, now)
+            self._enqueue_extraction(run.lead_id, run_id, run.site, now, lane)
         return run_id
 
     @staticmethod
@@ -1859,14 +2034,18 @@ class WebsiteCrawls:
         else:
             crawl_repo.touch_ats_link(stored.id, run_id=run_id, page_id=page_id, at=now)
 
-    def _enqueue_extraction(self, lead_id: str, run_id: str, site: str, now: datetime) -> None:
-        """Enqueue the run's ``extract_lead`` job (Story 2.9); see the module docstring."""
+    def _enqueue_extraction(
+        self, lead_id: str, run_id: str, site: str, now: datetime, lane: Lane | None
+    ) -> None:
+        """Enqueue the run's ``extract_lead`` job (Story 2.9) on ``lane`` (Story 2.16; ``None``:
+        its default); see the module docstring."""
         _, concurrency_key = lead_job_keys(site, now)
         self._queue.enqueue(
             EXTRACT_LEAD_JOB,
             scope=lead_id,
             discriminator=str(crawl_repo.run_count(lead_id)),
             payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id, RUN_ID_FIELD: run_id},
+            lane=lane,
             concurrency_key=concurrency_key,
         )
 
@@ -1896,9 +2075,10 @@ class WebsiteCrawls:
     # Rendering (Story 2.6) ---------------------------------------------------------------------
 
     @use_case
-    def render_pages(self, lead_id: str, run_id: str) -> bool:
+    def render_pages(self, lead_id: str, run_id: str, *, chain_lane: Lane | None = None) -> bool:
         """Render the run's near-empty pages and record what they show; see the module
-        docstring."""
+        docstring. ``chain_lane`` is the lane the chain's ``extract_lead`` is enqueued on (Story
+        2.16; ``None``: its default)."""
         uow = current()
         now = self._clock.now()
         with uow.transaction():
@@ -1913,7 +2093,7 @@ class WebsiteCrawls:
             return True
         results = [self._render(candidate, site) for candidate in candidates]
         with uow.transaction():
-            absence = self._apply_renders(lead_id, run_id, results)
+            absence = self._apply_renders(lead_id, run_id, results, chain_lane)
         log.info(
             RENDER_FINISHED,
             extra={
@@ -1977,7 +2157,7 @@ class WebsiteCrawls:
         )
 
     def _apply_renders(
-        self, lead_id: str, run_id: str, results: list[_Rendered]
+        self, lead_id: str, run_id: str, results: list[_Rendered], chain_lane: Lane | None
     ) -> AbsenceApplied | None:
         """Step 3 of ``render_pages``, in the caller's transaction: what the "contact form
         only" rule did, or ``None`` when nothing was written (the Lead was merged or a newer
@@ -2013,5 +2193,5 @@ class WebsiteCrawls:
         now = self._clock.now()
         absence = self._set_contact_methods(lead_id, lead.segment_id, run_id, now)
         # Story 2.9: the run's Signals are extracted once its renders are written
-        self._enqueue_extraction(lead_id, run_id, latest.site_domain, now)
+        self._enqueue_extraction(lead_id, run_id, latest.site_domain, now, chain_lane)
         return absence

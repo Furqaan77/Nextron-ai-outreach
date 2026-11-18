@@ -483,6 +483,26 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
     # Story 2.11. A posting's title or description may name a person (a hiring manager, a
     # recruiter to write to), so both are redacted; the URL is an organization's public posting,
     # and the rest are IDs, codes, dates and times.
+    "signal_inbox_items": {  # Story 2.16: the pasted item and what names its author
+        "id": PiiClass.NONE,
+        "url": PiiClass.REDACT,  # a post's URL often carries its author's name
+        "text": PiiClass.REDACT,
+        "author": PiiClass.REDACT,
+        "company": PiiClass.REDACT,
+        "status": PiiClass.NONE,
+        "flag_reason": PiiClass.NONE,
+        "submitted_at": PiiClass.NONE,
+        "processed_at": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "parsed_segment": PiiClass.NONE,
+        "parsed_signal_type": PiiClass.NONE,
+        "parsed_website": PiiClass.NONE,
+        "parsed_author_name": PiiClass.REDACT,
+        "parsed_author_role": PiiClass.REDACT,
+        "parsed_event_date": PiiClass.NONE,
+        "parsed_quote": PiiClass.REDACT,
+        "extracted_by": PiiClass.NONE,
+    },
     "job_postings": {
         "id": PiiClass.NONE,
         "lead_id": PiiClass.NONE,

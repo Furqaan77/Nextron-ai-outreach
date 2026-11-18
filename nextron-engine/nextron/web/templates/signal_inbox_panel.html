@@ -1,0 +1,82 @@
+{#- The Signal Inbox panel (nextron.web.signal_inbox_page): rendered inside signal_inbox.html,
+    and alone as the answer to POST /signals and POST /signals/<id>/reprocess, which HTMX swaps
+    in for this whole panel. Pasted text and URLs render only through untrusted_block. -#}
+{%- from "macros.html" import untrusted_block %}
+<div class="signal-inbox" id="signal-inbox">
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
+{%- endif %}
+<form method="post" hx-post="/signals" hx-target="#signal-inbox" hx-swap="outerHTML" hx-sync="this:drop" hx-disabled-elt="find button">
+{{ csrf_field() }}
+{%- if errors["items"] %}
+<p class="field-error" id="error-items" role="alert">{{ errors["items"] }}</p>
+{%- endif %}
+{%- for number, row in slots %}
+<fieldset class="signal-item">
+<legend>Item {{ number }}</legend>
+{%- for name, label, hint in [
+    ("url", "URL", "The post's or ad's address, such as https://… (required). Stored only; never fetched."),
+    ("text", "Text", "The pasted text, up to 10,000 characters (required)."),
+    ("author", "Author", "Optional: who wrote or posted it, as shown."),
+    ("company", "Company", "Optional: the organization's name or website."),
+] %}
+{%- set key = name ~ "_" ~ number %}
+<div class="field">
+<label for="signal-{{ key }}">{{ label }}</label>
+{%- if name == "text" %}
+<textarea id="signal-{{ key }}" name="{{ key }}" rows="5" maxlength="10000" aria-describedby="hint-{{ key }}{% if errors[key] %} error-{{ key }}{% endif %}"{% if errors[key] %} aria-invalid="true"{% endif %}>{{ row[name] }}</textarea>
+{%- else %}
+<input type="text" id="signal-{{ key }}" name="{{ key }}" value="{{ row[name] }}" autocomplete="off" spellcheck="false" aria-describedby="hint-{{ key }}{% if errors[key] %} error-{{ key }}{% endif %}"{% if errors[key] %} aria-invalid="true"{% endif %}>
+{%- endif %}
+<p class="hint" id="hint-{{ key }}">{{ hint }}</p>
+{%- if errors[key] %}
+<p class="field-error" id="error-{{ key }}">{{ errors[key] }}</p>
+{%- endif %}
+</div>
+{%- endfor %}
+</fieldset>
+{%- endfor %}
+<button type="submit">Submit items</button>
+</form>
+<h2>Items</h2>
+{%- if items %}
+<ul class="signal-items">
+{%- for item in items %}
+<li class="signal-item-row signal-{{ item.status }}" id="signal-item-{{ item.id }}">
+<p class="signal-meta"><span class="signal-status">{{ item.status_label }}</span> · submitted {{ item.submitted }}
+{%- if item.lead_id %} · <a href="/leads/{{ item.lead_id }}">Open Lead</a>{% endif %}</p>
+<div class="signal-url">URL: {{ untrusted_block(item.url) }}
+{%- if item.never_fetched %}<p class="signal-note">{{ never_fetched_note }}</p>{% endif %}</div>
+{{ untrusted_block(item.text) }}
+{%- if item.missing %}
+<p class="signal-missing" role="note">What is missing: {{ item.missing }}</p>
+<form method="post" hx-post="/signals/{{ item.id }}/reprocess" hx-target="#signal-inbox" hx-swap="outerHTML" hx-sync="this:drop" class="signal-reprocess">
+{{ csrf_field() }}
+<div class="field">
+<label for="reprocess-lead-{{ item.id }}">Existing Lead</label>
+<input type="text" id="reprocess-lead-{{ item.id }}" name="lead" value="" autocomplete="off" spellcheck="false" aria-describedby="reprocess-lead-hint-{{ item.id }}">
+<p class="hint" id="reprocess-lead-hint-{{ item.id }}">The Lead's id or its Lead page link. Or leave it blank and enter a website and a Segment.</p>
+</div>
+<div class="field">
+<label for="reprocess-website-{{ item.id }}">Website</label>
+<input type="text" id="reprocess-website-{{ item.id }}" name="website" value="" autocomplete="off" spellcheck="false">
+</div>
+<div class="field">
+<label for="reprocess-segment-{{ item.id }}">Segment</label>
+<select id="reprocess-segment-{{ item.id }}" name="segment">
+<option value="">Choose a Segment</option>
+{%- for option in segments %}
+<option value="{{ option.key }}">{{ option.name }}</option>
+{%- endfor %}
+</select>
+</div>
+<button type="submit">Reprocess</button>
+</form>
+{%- endif %}
+</li>
+{%- endfor %}
+</ul>
+{%- else %}
+<p>No items yet.</p>
+{%- endif %}
+</div>
