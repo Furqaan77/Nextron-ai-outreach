@@ -110,6 +110,7 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
+from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
@@ -132,6 +133,7 @@ from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
 from tests.fakes.dns import FakeDns
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
@@ -338,6 +340,7 @@ class Dashboard:
     primary_contacts: PrimaryContacts = field(init=False)
     test_runs: AiTestRuns = field(init=False)
     erasures: Erasures = field(init=False)
+    email_finding: EmailFinding = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -413,7 +416,16 @@ class Dashboard:
         )
         self.research = Research(self.clock)
         self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
-        self.primary_contacts = PrimaryContacts(self.clock, self.research)
+        self.primary_contacts = PrimaryContacts(self.clock, self.research, self.queue)
+        self.email_finding = EmailFinding(  # its paid ports answer nothing; tests replace them
+            self.clock,
+            meter,
+            self.research,
+            self.queue,
+            domain_search=ScriptedDomainSearch(),
+            hunter=ScriptedFinder(),
+            prospeo=ScriptedFinder(),
+        )
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.lead_imports = LeadImports(
             self.clock,
@@ -449,6 +461,7 @@ class Dashboard:
             primary_contacts=self.primary_contacts,
             erasures=self.erasures,
             domain_checks=self.domain_checks,
+            email_finding=self.email_finding,
             units=self.units,
             **extra,
         )

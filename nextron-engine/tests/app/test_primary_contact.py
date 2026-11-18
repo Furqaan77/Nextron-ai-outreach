@@ -63,7 +63,7 @@ def ops(world: World) -> None:
 
 
 def primary(world: World) -> PrimaryContacts:
-    return PrimaryContacts(world.clock, world.research)
+    return PrimaryContacts(world.clock, world.research, world.queue)
 
 
 def select(world: World, lead: str) -> PrimaryChoice | None:

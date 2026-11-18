@@ -4,8 +4,8 @@ secret is in the error.
 
 - **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__``
   takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway``,
-  ``HttpCrawler`` and ``CompaniesHouseRegistry`` today) has a driver in
-  ``DRIVERS``: it builds the adapter on a client whose transport is the probe's, with secrets
+  ``HttpCrawler``, ``CompaniesHouseRegistry``, ``HunterFinder`` and ``ProspeoFinder`` today) has
+  a driver in ``DRIVERS``: it builds the adapter on a client whose transport is the probe's, with secrets
   planted where the adapter reads them, and makes each of its port calls. The coverage check
   fails for a new such class until it gets one.
 - **Only AdapterError.** The transport raises each ``httpx2`` exception class, ``OSError``,
@@ -44,11 +44,14 @@ from nextron.adapters.ai import LLM_INVALID, LLM_TRUNCATED, ClaudeGateway
 from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.google_oauth import GoogleOAuthClient
+from nextron.adapters.hunter import HunterFinder
+from nextron.adapters.prospeo import ProspeoFinder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import AiCall, ApiCall
 from nextron.domain.google_oauth import ClientConfig
 from nextron.ports.alert import AlertMessage
+from nextron.ports.email_finder import FinderQuery
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import LlmFailed, LlmInvalid, LlmTruncated
 from tests.fakes.secrets import InMemorySecrets
@@ -63,6 +66,8 @@ REFRESH_TOKEN: Final = "Rt8Gh2Mc5Vb9Xq3Nz7Lp"
 REVOKED_TOKEN: Final = "Rv3Jd7Ks1Wq5Pz9Lm2Xc"
 CLAUDE_KEY: Final = "Ck5Wn9Qx2Lr6Tz3Hv8Mb"
 COMPANIES_HOUSE_KEY: Final = "Kh6Tp1Zc8Wm4Rq2Nx7Lv"
+HUNTER_KEY: Final = "Hk6Tb2Wq8Ln4Zr9Xv3Mp"
+PROSPEO_KEY: Final = "Pk9Rm3Vx7Lq2Tn6Wz4Hb"
 PLANTED: Final = (
     BOT_TOKEN,
     BOT_TOKEN.split(":")[1],
@@ -72,6 +77,8 @@ PLANTED: Final = (
     REVOKED_TOKEN,
     CLAUDE_KEY,
     COMPANIES_HOUSE_KEY,
+    HUNTER_KEY,
+    PROSPEO_KEY,
 )
 CHAT: Final = "-1001234567890"
 ALERT_TEXT: Final = "Job dead: send_alert 01JD3QZ8X5V9K2M7N4P6R8T0WY, attempts: 6"
@@ -227,6 +234,25 @@ def companies_house_calls(
     yield "company", lambda: adapter.company("01234567")
 
 
+def hunter_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    secrets = InMemorySecrets()
+    secrets.write("hunter/api_key", HUNTER_KEY)
+    adapter = HunterFinder(secrets, meter=meter, http=http)
+    yield "domain_search", lambda: adapter.domain_search("smith-law.example.com")
+    yield "find_email", lambda: adapter.find_email(
+        FinderQuery("smith-law.example.com", "Ann", "Smith")
+    )
+
+
+def prospeo_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    secrets = InMemorySecrets()
+    secrets.write("prospeo/api_key", PROSPEO_KEY)
+    adapter = ProspeoFinder(secrets, meter=meter, http=http)
+    yield "find_email", lambda: adapter.find_email(
+        FinderQuery("smith-law.example.com", "Ann", "Smith")
+    )
+
+
 # Every adapter class whose __init__ takes an http client, with its driver.
 DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
@@ -234,6 +260,8 @@ DRIVERS: Final[dict[type, Driver]] = {
     ClaudeGateway: claude_calls,
     HttpCrawler: crawler_calls,
     CompaniesHouseRegistry: companies_house_calls,
+    HunterFinder: hunter_calls,
+    ProspeoFinder: prospeo_calls,
 }
 # What each adapter records per request: an ApiCall, unless it is listed here.
 RECORDS: Final[dict[type, type]] = {ClaudeGateway: AiCall}

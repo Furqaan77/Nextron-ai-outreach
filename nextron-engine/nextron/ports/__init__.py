@@ -18,4 +18,8 @@ text; ``nextron.adapters.crawler`` implements it.
 registered name, company type, company status, registered office postcode);
 ``nextron.adapters.companies_house`` implements it over the Companies House API, metered and
 self rate-limited.
+
+``EmailFinderPort`` and ``DomainSearchPort`` (``email_finder``, Story 2.13) ask a paid finder
+for one person's address and Hunter's Domain Search for a domain's pattern and people;
+``nextron.adapters.hunter`` implements both and ``nextron.adapters.prospeo`` the first.
 """

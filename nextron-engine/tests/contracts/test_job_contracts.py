@@ -9,9 +9,9 @@
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, ``run_ai_test_sets``,
   Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
-  2.11, ``check_legal_form``, Story 2.12, and ``erase_external``, Story 3.14, with their
-  settings); the triggers are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
-  ``Every`` with ``active``, ``purge_page_text``'s daily ``Every`` at startup and
+  2.11, ``check_legal_form``, Story 2.12, ``erase_external``, Story 3.14, and
+  ``find_contact_email``, Story 2.13, with their settings); the triggers are exactly
+  ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s daily ``Every`` at startup and
   ``check_domains``'s daily schedule: the one-off ``resolve_contact_markets`` has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
@@ -447,6 +447,18 @@ class RecordingLegalForms:
         return self.allowed
 
 
+class RecordingFinding:
+    """Stands in for the ``research`` service's ``EmailFinding``."""
+
+    def __init__(self, answer: str | None = "found") -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, str]] = []
+
+    def find_contact_email(self, lead_id: str, contact_id: str) -> str | None:
+        self.calls.append((lead_id, contact_id))
+        return self.answer
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -464,9 +476,31 @@ def registry(**overrides: object) -> JobTypes:
         "job_boards": RecordingJobBoards,
         "domain_checks": RecordingDomainChecks,
         "legal_forms": RecordingLegalForms,
+        "finding": RecordingFinding,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
+
+
+def _services() -> dict[str, object]:
+    """The recording services ``registry`` passes, by keyword."""
+    return {
+        "alerts": RecordingAlerts,
+        "backups": RecordingBackups,
+        "restore_tests": RecordingRestoreTests,
+        "recovery": RecordingRecovery,
+        "contact_markets": RecordingContactMarkets,
+        "crawls": RecordingCrawls,
+        "discovery": RecordingDiscovery,
+        "research": RecordingResearch,
+        "extractions": RecordingExtractions,
+        "primary": RecordingPrimary,
+        "test_runs": RecordingTestRuns,
+        "job_boards": RecordingJobBoards,
+        "domain_checks": RecordingDomainChecks,
+        "legal_forms": RecordingLegalForms,
+        "finding": RecordingFinding,
+    }
 
 
 def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> None:
@@ -525,6 +559,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "check_job_boards",
         "recheck_event",
         "erase_external",
+        "find_contact_email",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -633,6 +668,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "select_primary_contact",
             "check_job_boards",
             "recheck_event",
+            "find_contact_email",
         )
         for found in [job_types.get(name)]
     }
@@ -666,6 +702,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             3,
             JobGroup.ENRICHMENT,
         ),
+        "find_contact_email": (Lane.BULK, both, 45, timedelta(minutes=5), 3, JobGroup.ENRICHMENT),
         "purge_page_text": (
             Lane.BULK,
             frozenset({Lane.BULK}),
@@ -843,6 +880,45 @@ def test_a_check_legal_form_job_without_its_lead_is_invalid(payload: dict[str, o
     with pytest.raises(InvalidJob, match="must be a ULID"):
         handler(Job(RUN, "check_legal_form", Lane.BULK, payload, 1))
     assert legal_forms.calls == []
+
+
+@pytest.mark.parametrize(("answer", "result"), [("found", None), ("quota_reached", DEFERRED)])
+def test_find_contact_email_calls_its_service_once_and_defers_on_a_quota(
+    answer: str, result: object
+) -> None:
+    finding = RecordingFinding(answer)
+    handler = registry(finding=lambda: finding).get("find_contact_email").handler
+    payload = {"v": 1, "lead_id": LEAD, "contact_id": RUN}
+
+    assert handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1)) == result
+    assert finding.calls == [(LEAD, RUN)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "contact_id": RUN},
+        {"v": 1, "lead_id": LEAD},
+        {"v": 1, "lead_id": LEAD, "contact_id": "not-a-ulid"},
+    ],
+)
+def test_a_find_contact_email_job_without_its_ids_is_invalid(payload: dict[str, object]) -> None:
+    finding = RecordingFinding()
+    handler = registry(finding=lambda: finding).get("find_contact_email").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1))
+    assert finding.calls == []
+
+
+def test_find_contact_email_without_a_finding_fails_when_it_runs() -> None:
+    handler = main.build_job_types(
+        **{k: v for k, v in _services().items() if k != "finding"}  # type: ignore[arg-type]
+    ).get("find_contact_email").handler
+    payload = {"v": 1, "lead_id": LEAD, "contact_id": RUN}
+
+    with pytest.raises(RuntimeError, match="no EmailFinding"):
+        handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1))
 
 
 @pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])

@@ -217,6 +217,7 @@ class World:
                 text=text,
                 text_purge_after=T0 + timedelta(days=30),
                 changed_at=T0,
+                mailto=(EMAIL,),  # Story 2.13: a published address, nulled with the text
             )
             detection = Detection(ContactMethod.PHONE, "tel", MatchSource.TEXT, matched)
             crawl_repo.add_contact_methods(page_id, [detection], T0)
@@ -569,6 +570,7 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("evidence", "quote"),
         ("evidence", "value"),
         ("crawled_pages", "text"),
+        ("crawled_pages", "mailto"),  # Story 2.13: a published address, nulled with the text
         ("page_contact_methods", "matched"),
         ("suppression_entries", "void_reason"),
         ("ai_test_cases", "input"),  # Story 4.6: playbook's hook erases it
@@ -1261,9 +1263,11 @@ def test_every_column_of_an_erased_contact_but_a_merges_is_fixed(world: World) -
     row = world.contact_row(planted.contact_id)
     fixed = [column for column in contact_columns(world) if column not in MERGE_COLUMNS]
     # a new contacts column must join trg_contacts_tombstone: 15 since the merge with Story
-    # 2.10's primary_set_by (fixed: a tombstone keeps it NULL and is never Primary again)
-    assert len(fixed) == 15
+    # 2.10's primary_set_by (fixed: a tombstone keeps it NULL and is never Primary again), 18
+    # since Story 2.13's email_search_tried, email_search_outcome and email_search_at (0040)
+    assert len(fixed) == 18
     assert "primary_set_by" in fixed
+    assert {"email_search_tried", "email_search_outcome", "email_search_at"} <= set(fixed)
 
     for column in fixed:
         # the trigger runs before any check, so any different value shows the refusal

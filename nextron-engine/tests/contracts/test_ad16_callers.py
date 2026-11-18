@@ -9,13 +9,14 @@ violation.
   defs included) fullmatches the ``qualname`` regex and, with ``calls``, it calls that attribute
   name. ``inserts`` are the guarded tables the caller may insert into. An entry is *built* when
   the AST finds such a def; the patterns are loose (``*find*email*``, ``*verify*email*``,
-  ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever. Not
-  built yet: ``find_contact_email``, ``verify_contact_email``, the Signal Inbox chain, replies,
-  ``drafting.request_*``, ``approval.approve``, the pipeline Tasks and call sheets and
-  ``compliance.assert_sendable``: their stories add a scenario here when they build them.
-  ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with Law-PrivateAI x US active
-  and one Sending Inbox: an eligible US Contact's two gate calls (``enroll``'s own and
-  ``evaluate_eligibility``'s) come before its first write, and ``Blocked`` writes nothing.
+  ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever.
+  ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method. Not built yet:
+  ``verify_contact_email``, the Signal Inbox chain, replies, ``drafting.request_*``,
+  ``approval.approve``, the pipeline Tasks and call sheets and ``compliance.assert_sendable``:
+  their stories add a scenario here when they build them. ``sequencing.enroll`` (Story 4.8)
+  runs on the shipped seeds with Law-PrivateAI x US active and one Sending Inbox: an eligible
+  US Contact's two gate calls (``enroll``'s own and ``evaluate_eligibility``'s) come before its
+  first write, and ``Blocked`` writes nothing.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -32,10 +33,20 @@ violation.
   through ``add_contact(source=website)``) runs the real ``PeopleExtractions.extract`` on Story
   2.9's research world (``tests.app.test_signal_extraction.build_world``) on the same engine;
   blocked, it still records its run, its lawyer count and its selection job, but no Contact
-  and no person Evidence.
+  and no person Evidence. Story 2.13's ``EmailFinding.find_contact_email`` (a use case) runs in a
+  unit of work, as the job runner runs it, on a named Contact without an address whose
+  Lead's crawled page publishes ``jane.doe@<domain>``: allowed, it gates the Contact, then the
+  found address; blocked, it writes only its ``email_search_blocked`` event and the Contact's
+  search outcome.
 - **Call sites.** Every use of ``upsert_lead`` or ``add_contact`` (a call or a reference) under
   ``nextron/`` sits lexically inside a manifest def, so a new caller (Epic 8 discovery, Epic 7
   replies) can't skip the manifest.
+- **Update scan** (Story 2.13; closes Story 3.4's deferred item E). Only the contacts
+  repository and manifest defs write ``contacts.email``: outside
+  ``db/repos/research/contacts.py`` and every manifest def, any use of that module's
+  ``set_address`` (a call or a reference, however the module or the function is imported), any
+  call of its ``fill`` with an ``email`` keyword or a ``**`` splat, and any reference to
+  ``fill`` that isn't the callee of a call (an alias could hide either) fails.
 - **Insert scan.** Each function under ``db/repos`` that inserts into a guarded table
   (``leads``, ``contacts``, ``enrollments``, ``drafts``, ``linkedin_tasks``, ``call_preps``,
   ``outbound_messages``, found by the models' ``__tablename__``) through ``insert(Model)``,
@@ -53,7 +64,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
 from types import MappingProxyType, ModuleType
@@ -69,12 +80,14 @@ from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, L
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import AddedContact, Research
+from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PeopleExtractions
 from nextron.app.sending.api import Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
+from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.address_class import ASSIGNMENT
@@ -87,6 +100,7 @@ from nextron.domain.contactability import (
     NewLeadSubject,
 )
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource
+from nextron.domain.crawl import CrawlOutcome, PageKind
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.campaign import validate_campaigns
 from nextron.domain.enrollment import EnrollmentOrigin
@@ -101,8 +115,10 @@ from tests.app.test_signal_extraction import build_world as research_world
 from tests.contracts.support import PACKAGE
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import html_page, robots_txt
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.llm import ScriptedLlm
+from tests.fakes.usage_meter import InMemoryUsageMeter
 
 GUARDED_TABLES: Final = frozenset(
     {
@@ -163,7 +179,12 @@ MANIFEST: Final = (
         r"PeopleExtractions\._contacts",
         calls="add_contact",
     ),
-    Caller("find_contact_email", ("app/",), ANY + r"\w*find\w*email\w*"),
+    # Story 2.13: the job's EmailFinding, every method of which may write contacts.email
+    Caller(
+        "find_contact_email",
+        ("app/",),
+        ANY + r"(?:\w*find\w*email\w*|EmailFinding\.\w+)",
+    ),
     Caller("verify_contact_email", ("app/",), ANY + r"\w*verify\w*email\w*"),
     Caller("signal_inbox", ("app/",), ANY + r"(?:process|ingest)_signal_item"),
     Caller("replies.add_contact", ("app/replies/",), ANY + r"\w+", calls="add_contact"),
@@ -624,6 +645,63 @@ def raw_sql_problems(index: Index) -> list[str]:
                 and (match := SQL_INSERT.search(node.value)) is not None
             ):
                 problems.append(f"{relative}:{node.lineno} holds INSERT INTO {match.group(1)}")
+    return sorted(set(problems))
+
+
+# The update scan --------------------------------------------------------------------------------
+
+CONTACTS_REPO: Final = "db/repos/research/contacts.py"
+SET_ADDRESS: Final = "set_address"
+FILL: Final = "fill"
+
+
+def _sets_email(call: ast.Call) -> bool:
+    """Whether a ``fill`` call names ``email`` or splats ``**`` keywords."""
+    return any(keyword.arg in (None, "email") for keyword in call.keywords)
+
+
+def update_problems(index: Index, manifest: Iterable[Caller] = MANIFEST) -> list[str]:
+    """Each use of the contacts repository's ``set_address``, ``fill`` call with ``email`` or
+    ``**``, or reference to ``fill`` that isn't a call's callee, outside that module and every
+    manifest def."""
+    allowed = _manifest_tables(index, manifest)
+    module = _module_name(CONTACTS_REPO)
+    uses_by_path: dict[str, list[tuple[int, str, tuple[str, ...], ast.expr]]] = {}
+    for path, line, name, chain, node in index.names:
+        uses_by_path.setdefault(path, []).append((line, name, chain, node))
+    problems = []
+    for relative, (path, tree) in index.trees.items():
+        if relative == CONTACTS_REPO:
+            continue
+        package = _package_of(path, index.root)
+        modules, bound = _bindings(tree, package, module, (SET_ADDRESS, FILL))
+        if not (modules or bound):
+            continue
+        calls = {id(node.func): node for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        for line, _, chain, node in uses_by_path.get(relative, []):
+            if isinstance(node, ast.Attribute) and node.attr in (SET_ADDRESS, FILL):
+                if _dotted(node.value) not in modules:
+                    continue
+                function = node.attr
+            elif isinstance(node, ast.Name) and node.id in bound:
+                function = bound[node.id]
+            else:
+                continue
+            if _inside(relative, chain, allowed):
+                continue
+            call = calls.get(id(node))
+            if function == SET_ADDRESS:
+                what = "uses set_address"
+            elif call is None:
+                what = "references fill outside a call"
+            elif _sets_email(call):
+                what = "calls fill with email or **"
+            else:
+                continue
+            scope = chain[-1] if chain else "<module>"
+            problems.append(
+                f"{relative}:{line} {scope} {what} of {CONTACTS_REPO} outside the AD-16 manifest"
+            )
     return sorted(set(problems))
 
 
@@ -1103,8 +1181,94 @@ def _enrolled(world: World) -> None:
         assert connection.exec_driver_sql("SELECT COUNT(*) FROM enrollments").scalar_one() == 1
 
 
+def _published_page(lead_id: str, domain: str, text: str) -> None:
+    """Store one crawl run of the Lead with one team page holding ``text``."""
+    run_id = crawl_repo.insert_run(
+        lead_id=lead_id,
+        site_domain=domain,
+        final_domain=domain,
+        started_at=T0,
+        ended_at=T0,
+        outcome=str(CrawlOutcome.OK),
+        error_code=None,
+        pages_fetched=1,
+        pages_skipped_robots=0,
+        renders=0,
+        errors=0,
+    )
+    url = f"https://{domain}/team"
+    crawl_repo.insert_page(
+        lead_id=lead_id,
+        run_id=run_id,
+        url=url,
+        final_url=url,
+        kind=str(PageKind.TEAM),
+        fetched_at=T0,
+        http_status=200,
+        content_hash="0" * 64,
+        text=text,
+        text_purge_after=T0 + timedelta(days=30),
+        changed_at=T0,
+        mailto=(),
+    )
+
+
+def _find(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 2.13's ``find_contact_email`` on a named Contact without an address whose Lead's
+    crawled team page publishes ``jane.doe@<domain>``: the Contact's gate call, then the found
+    address's. The finders are scripted fakes that a published address never reaches."""
+    domain = f"firm-{tag}.co.uk"
+    email = f"jane.doe@{domain}"
+    lead_id = world.lead(domain)
+    contact_id = world.contact(lead_id, ContactCandidate(name=NAME))
+    world.transact(lambda: _published_page(lead_id, domain, f"{NAME}, Managing Partner: {email}"))
+    clock = FrozenClock(T0)
+    finding = EmailFinding(
+        clock,
+        InMemoryUsageMeter(clock),
+        world.research,
+        queue_on(clock),
+        domain_search=ScriptedDomainSearch(),
+        hunter=ScriptedFinder(),
+        prospeo=ScriptedFinder(),
+    )
+
+    def action() -> object:  # as the job runner runs it: the use case in a unit of work
+        with world.units.open():
+            return finding.find_contact_email(lead_id, contact_id)
+
+    expected = (
+        _gate(ContactSubject(contact_id)),
+        _gate(NewContactSubject(lead_id, email=email, name=NAME)),
+    )
+    return action, lambda: expected
+
+
+def _email_search_blocked(world: World) -> None:
+    """A blocked search records its ``email_search_blocked`` event and gives no address."""
+    assert world.last_event() == (
+        "contacts",
+        None,
+        "email_search_blocked",
+        str(BLOCKED.reasons[0]),
+        "system:research",
+    )
+    with world.engine.connect() as connection:
+        addresses = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM contacts WHERE email LIKE 'jane.doe@%'"
+        ).scalar_one()
+    assert addresses == 1  # the allowed case's only
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
+        "find_contact_email": Scenario(
+            (_find,),
+            # what a blocked search still writes: its event and the Contact's search outcome
+            blocked_rows={"events": 1},
+            blocked_writes=frozenset({("INSERT", "events"), ("UPDATE", "contacts")}),
+            after_blocked=_email_search_blocked,
+        ),
         "discovery.upsert_lead": Scenario((_upsert,)),
         # Story 4.8: Blocked returns the refusal before any write, so nothing at all is added
         "sequencing.enroll": Scenario((_enroll,), after_blocked=_enrolled),
@@ -1205,7 +1369,11 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         *(f"research.add_contact[{source}]" for source in CONTACT_SOURCES),
         "research.people_extraction",
         "sequencing.enroll",  # Story 4.8
+        "find_contact_email",
     }
+    finding = {d.qualname for d in found["find_contact_email"]}
+    assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
+    assert all(name.startswith("EmailFinding.") for name in finding)
     assert scenario_problems(package_index(), SCENARIOS) == []
 
 
@@ -1253,6 +1421,9 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
                 "class Research:\n    def find_email_for_contact(self, contact_id):\n"
                 "        pass\n\n    def verify_address_email(self, contact_id):\n        pass\n"
             ),
+            "app/research/finding.py": (
+                "class EmailFinding:\n    def _write(self, contact_id):\n        pass\n"
+            ),
             "app/replies/api.py": (
                 "class Replies:\n    def intake(self, item):\n"
                 "        self._research.add_contact(item)\n\n"
@@ -1268,8 +1439,6 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
     # Story 4.8's real scenario left out, so the probe's enroll has none
     without_enroll = [name for name in SCENARIOS if name != "sequencing.enroll"]
     assert scenario_problems(index, without_enroll) == [
-        "find_contact_email is built (app/research/api.py Research.find_email_for_contact) but "
-        "has no scenario",
         "verify_contact_email is built (app/research/api.py Research.verify_address_email) but "
         "has no scenario",
         "replies.add_contact is built (app/replies/api.py Replies.intake) but has no scenario",
@@ -1285,7 +1454,17 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
         "Sequencing.enroll",
         "Sequencing.enroll_contact",
     ]
-    assert [d.qualname for d in found["find_contact_email"]] == ["Research.find_email_for_contact"]
+    assert [d.qualname for d in found["verify_contact_email"]] == [
+        "Research.verify_address_email"
+    ]
+    assert [d.qualname for d in found["find_contact_email"]] == [
+        "Research.find_email_for_contact",
+        "EmailFinding._write",
+    ]
+    assert scenario_problems(index, [n for n in NAMES if n != "verify_contact_email"]) == [
+        "verify_contact_email is built (app/research/api.py Research.verify_address_email) but "
+        "has no scenario"
+    ]
     assert scenario_problems(index, [*SCENARIOS, *NAMES]) == []
 
 
@@ -1515,6 +1694,119 @@ def test_the_raw_sql_check_allows_docstrings_migrations_and_other_tables(tmp_pat
     )
 
     assert raw_sql_problems(index) == []
+
+
+CONTACTS_REPO_FILE: Final = (
+    "def fill(contact_id, updated_at, **fields):\n    pass\n\n\n"
+    "def set_address(contact_id, *, email, address_class, at):\n    pass\n\n\n"
+    "def again(contact_id, at, **fields):\n"
+    "    fill(contact_id, at, **fields)\n    set_address(contact_id, email='a', "
+    "address_class='b', at=at)\n"
+)
+REPO_ALIAS: Final = "from nextron.db.repos.research import contacts as contacts_repo\n\n\n"
+
+
+@pytest.mark.parametrize(
+    ("source", "found"),
+    [
+        (  # a stray set_address call
+            REPO_ALIAS
+            + "def tidy(cid, at):\n    contacts_repo.set_address(cid, email='a', at=at)\n",
+            "app/ops/api.py:5 tidy uses set_address",
+        ),
+        (  # set_address imported by name, as a reference
+            "from nextron.db.repos.research.contacts import set_address as put\n\n\n"
+            "def tidy():\n    make = put\n    return make\n",
+            "app/ops/api.py:5 tidy uses set_address",
+        ),
+        (  # through the parent package, at module level
+            "from nextron.db.repos import research\n\nresearch.contacts.set_address('a')\n",
+            "app/ops/api.py:3 <module> uses set_address",
+        ),
+        (  # fill with an email keyword
+            REPO_ALIAS + "def tidy(cid, at):\n    contacts_repo.fill(cid, at, email='a')\n",
+            "app/ops/api.py:5 tidy calls fill with email or **",
+        ),
+        (  # fill with a ** splat, the module imported whole
+            "import nextron.db.repos.research.contacts\n\n\n"
+            "def tidy(cid, at, fields):\n"
+            "    nextron.db.repos.research.contacts.fill(cid, at, **fields)\n",
+            "app/ops/api.py:5 tidy calls fill with email or **",
+        ),
+        (  # fill imported by name, with a splat
+            "from nextron.db.repos.research.contacts import fill\n\n\n"
+            "def tidy(cid, at, fields):\n    fill(cid, at, **fields)\n",
+            "app/ops/api.py:5 tidy calls fill with email or **",
+        ),
+        (  # fill aliased, so its keywords can't be read
+            REPO_ALIAS + "def tidy(cid, at):\n    put = contacts_repo.fill\n    put(cid, at)\n",
+            "app/ops/api.py:5 tidy references fill outside a call",
+        ),
+    ],
+)
+def test_the_update_scan_names_a_stray_email_write(
+    source: str, found: str, tmp_path: Path
+) -> None:
+    index = probe_tree(
+        tmp_path, {"db/repos/research/contacts.py": CONTACTS_REPO_FILE, "app/ops/api.py": source}
+    )
+
+    assert update_problems(index) == [
+        f"{found} of db/repos/research/contacts.py outside the AD-16 manifest"
+    ]
+
+
+def test_the_update_scan_allows_the_owner_the_manifest_and_other_fills(tmp_path: Path) -> None:
+    index = probe_tree(
+        tmp_path,
+        {
+            "db/repos/research/contacts.py": CONTACTS_REPO_FILE,
+            "app/research/api.py": REPO_ALIAS
+            + (
+                "class Research:\n    def add_contact(self, cid, at, fills):\n"
+                "        contacts_repo.fill(cid, at, **fills)\n"
+                "        contacts_repo.fill(cid, at, email='a')\n\n"
+                "    def _resolve(self, cid, at, market):\n"
+                "        contacts_repo.fill(cid, at, market_id=market, market_basis=None)\n"
+            ),
+            "app/research/finding.py": REPO_ALIAS
+            + (
+                "class EmailFinding:\n    def _write(self, cid, at):\n"
+                "        contacts_repo.set_address(cid, email='a', address_class='b', at=at)\n"
+            ),
+            "app/ops/api.py": (  # another module's fill and set_address
+                "from nextron.app.forms import fill\n\n\n"
+                "def tidy(form, row, fields):\n    fill(form, email='a', **fields)\n"
+                "    row.set_address('a')\n    row.fill(email='a')\n"
+            ),
+        },
+    )
+
+    assert update_problems(index) == []
+    assert update_problems(index, manifest=()) == [  # the manifest is what allows them
+        "app/research/api.py:6 Research.add_contact calls fill with email or ** of "
+        "db/repos/research/contacts.py outside the AD-16 manifest",
+        "app/research/api.py:7 Research.add_contact calls fill with email or ** of "
+        "db/repos/research/contacts.py outside the AD-16 manifest",
+        "app/research/finding.py:6 EmailFinding._write uses set_address of "
+        "db/repos/research/contacts.py outside the AD-16 manifest",
+    ]
+
+
+def test_the_real_tree_writes_contact_addresses_only_through_the_manifest() -> None:
+    index = package_index()
+    uses = {
+        (path, chain[-1] if chain else "<module>")
+        for path, _, name, chain, _ in index.names
+        if name == SET_ADDRESS
+    }
+
+    assert update_problems(index) == []
+    assert ("app/research/finding.py", "EmailFinding._write") in uses  # not vacuous
+    stray = update_problems(index, manifest=())
+    assert any("Research.add_contact calls fill" in problem for problem in stray)
+    assert any("EmailFinding._write uses set_address" in problem for problem in stray)
+    assert not any("Research._resolve" in problem for problem in stray)
 
 
 def test_the_real_tree_has_no_stray_caller_or_insert() -> None:

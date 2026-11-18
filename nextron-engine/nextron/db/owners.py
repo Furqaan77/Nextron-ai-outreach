@@ -225,6 +225,22 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "updated_at",
             "primary_set_by",  # Story 2.10
             "erased_at",  # Story 3.13
+            "email_search_tried",  # Story 2.13
+            "email_search_outcome",
+            "email_search_at",
+        ),
+    },
+    "email_domains": {  # Story 2.13
+        "research": (
+            "id",
+            "domain",
+            "pattern",
+            "pattern_source",
+            "pattern_evidence_ids",
+            "pattern_learned_at",
+            "domain_search_at",
+            "created_at",
+            "updated_at",
         ),
     },
     "provenance_records": {
@@ -393,6 +409,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "text_purge_after",
             "changed_at",
             "tag_managers",
+            "mailto",  # Story 2.13
         ),
     },
     "ats_links": {

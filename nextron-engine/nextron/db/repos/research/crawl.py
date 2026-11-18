@@ -6,8 +6,8 @@ Every function runs explicit Core statements through the current unit of work's 
 the running use case's transaction. It stores and returns what it is given and checks nothing;
 ``nextron.app.research`` does.
 
-- ``StoredCrawlRun``, ``StoredPage`` (its ``text`` never shows in the ``repr``) and
-  ``StoredAtsLink``: one row of each table.
+- ``StoredCrawlRun``, ``StoredPage`` (its ``text`` and ``mailto`` never show in the ``repr``)
+  and ``StoredAtsLink``: one row of each table.
 - ``insert_run(...) -> id``; ``run(run_id)``; ``latest_run(lead_id)``: the Lead's run started
   last (then the greatest id), or ``None``; ``run_count(lead_id)``: how many runs the Lead
   holds (Story 2.9: the revision of its ``extract_lead`` job).
@@ -19,8 +19,8 @@ the running use case's transaction. It stores and returns what it is given and c
   named in ``POSTING_COUNTS`` (``careers_postings``, ``careers_events``, ``<source>_postings``
   and ``<source>_events`` for ``greenhouse``, ``lever`` and ``ashby``, and ``board_errors``);
   ``StoredCrawlRun`` carries them (``None`` while unwritten).
-- ``purge_text(now) -> int``: nulls ``text`` where ``text_purge_after <= now``, keeping the
-  hash; returns how many rows it changed.
+- ``purge_text(now) -> int``: nulls ``text`` and ``mailto`` where ``text_purge_after <= now``,
+  keeping the hash; returns how many rows it changed.
 - ``reparent(loser_id, survivor_id)``: moves every run of the Lead ``loser_id``, and each page
   and ATS link whose ``url`` the survivor doesn't already hold, to ``survivor_id``; a moved link
   whose page stayed with the loser then points at the survivor's page with the same URL. A
@@ -29,8 +29,8 @@ the running use case's transaction. It stores and returns what it is given and c
 Story 2.6:
 
 - ``run_pages(run_id)``: the pages the run last fetched, by URL; ``set_page_text(page_id,
-  text, content_hash, changed_at)``: a rendered page's text; ``add_render_counts(run_id,
-  renders, errors)``: adds to the run's two counts.
+  text, content_hash, changed_at, mailto)``: a rendered page's text (and its ``mailto``,
+  Story 2.13); ``add_render_counts(run_id, renders, errors)``: adds to the run's two counts.
 - ``StoredContactMethod`` (its ``matched`` never shows in the ``repr``): one
   ``page_contact_methods`` row. ``replace_contact_methods(page_id, detections, at)`` deletes the
   page's rows and inserts one per ``nextron.domain.widgets.Detection``;
@@ -49,19 +49,29 @@ repeats, no spaces; NULL for a page never checked):
   those pages that exists (``None`` for NULL), its keys sorted.
 
 Story 3.13: ``tombstone_pages(lead_ids) -> int`` replaces the personal-data columns of every page
-of those Leads (``text``, class ``null``: NULL; ``content_hash`` kept) and of every
+of those Leads (``text`` and, from Story 2.13, ``mailto``, class ``null``: NULL;
+``content_hash`` kept) and of every
 ``page_contact_methods`` row of those pages (``matched``, class ``redact``: ``[erased]``) with
 their tombstones (``nextron.db.erasure.tombstoned``), one statement per row that changes;
 returns how many pages it held.
+
+Story 2.13 (``crawled_pages.mailto``, the addresses of the page's visible ``mailto:`` links,
+stored as a JSON list in the order given; NULL when there are none):
+
+- ``insert_page``, ``update_page`` and ``set_page_text`` take ``mailto`` (a sequence of
+  addresses) and store it, replacing what the page held;
+- ``StoredPage.mailto`` is the stored list as a tuple (``()`` for NULL), never in the
+  ``repr``;
+- ``purge_text`` nulls ``mailto`` together with ``text``.
 """
 
 import json
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy import delete as delete_rows
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
@@ -112,7 +122,7 @@ class StoredCrawlRun:
 
 @dataclass(frozen=True, slots=True)
 class StoredPage:
-    """One ``crawled_pages`` row; its ``text`` never shows in the ``repr``."""
+    """One ``crawled_pages`` row; its ``text`` and ``mailto`` never show in the ``repr``."""
 
     id: str
     lead_id: str
@@ -126,6 +136,7 @@ class StoredPage:
     text: str | None = field(repr=False)
     text_purge_after: datetime
     changed_at: datetime
+    mailto: tuple[str, ...] = field(repr=False)  # Story 2.13: () for NULL
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +204,22 @@ _PAGE_COLUMNS = (
     CrawledPageRecord.text,
     CrawledPageRecord.text_purge_after,
     CrawledPageRecord.changed_at,
+    CrawledPageRecord.mailto,  # decoded by _page
 )
+
+
+def _mailto_text(addresses: Sequence[str]) -> str | None:
+    """``addresses`` as the stored JSON list, in order; ``None`` (NULL) when there are none."""
+    return json.dumps(list(addresses), separators=(",", ":")) if addresses else None
+
+
+def _page(row: Sequence[object]) -> StoredPage:
+    """A ``_PAGE_COLUMNS`` row as a ``StoredPage``, its ``mailto`` decoded."""
+    *columns, mailto = row
+    decoded = () if mailto is None else tuple(json.loads(str(mailto)))
+    return StoredPage(*columns, mailto=decoded)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True, slots=True)
 class StoredContactMethod:
     """One ``page_contact_methods`` row; its ``matched`` never shows in the ``repr``."""
@@ -317,7 +343,7 @@ def page(lead_id: str, url: str) -> StoredPage | None:
         CrawledPageRecord.lead_id == lead_id, CrawledPageRecord.url == url
     )
     row = current().session.execute(statement).one_or_none()
-    return None if row is None else StoredPage(*row)
+    return None if row is None else _page(row)
 
 
 def pages(lead_id: str) -> tuple[StoredPage, ...]:
@@ -327,7 +353,7 @@ def pages(lead_id: str) -> tuple[StoredPage, ...]:
         .where(CrawledPageRecord.lead_id == lead_id)
         .order_by(CrawledPageRecord.url)
     )
-    return tuple(StoredPage(*row) for row in current().session.execute(statement))
+    return tuple(_page(row) for row in current().session.execute(statement))
 
 
 def insert_page(
@@ -343,6 +369,7 @@ def insert_page(
     text: str,
     text_purge_after: datetime,
     changed_at: datetime,
+    mailto: Sequence[str],
 ) -> str:
     """Store a new page; return its new ULID."""
     page_id = new_id()
@@ -360,6 +387,7 @@ def insert_page(
             text=text,
             text_purge_after=text_purge_after,
             changed_at=changed_at,
+            mailto=_mailto_text(mailto),
         )
     )
     return page_id
@@ -377,6 +405,7 @@ def update_page(
     text: str,
     text_purge_after: datetime,
     changed_at: datetime,
+    mailto: Sequence[str],
 ) -> None:
     """Record a new fetch of the stored page ``page_id``."""
     current().session.execute(
@@ -392,6 +421,7 @@ def update_page(
             text=text,
             text_purge_after=text_purge_after,
             changed_at=changed_at,
+            mailto=_mailto_text(mailto),
         )
     )
 
@@ -403,15 +433,27 @@ def run_pages(run_id: str) -> tuple[StoredPage, ...]:
         .where(CrawledPageRecord.run_id == run_id)
         .order_by(CrawledPageRecord.url)
     )
-    return tuple(StoredPage(*row) for row in current().session.execute(statement))
+    return tuple(_page(row) for row in current().session.execute(statement))
 
 
-def set_page_text(page_id: str, *, text: str, content_hash: str, changed_at: datetime) -> None:
-    """Replace the page ``page_id``'s text (a render's) and its hash."""
+def set_page_text(
+    page_id: str,
+    *,
+    text: str,
+    content_hash: str,
+    changed_at: datetime,
+    mailto: Sequence[str],
+) -> None:
+    """Replace the page ``page_id``'s text (a render's), its hash and its ``mailto``."""
     current().session.execute(
         update_rows(CrawledPageRecord)
         .where(CrawledPageRecord.id == page_id)
-        .values(text=text, content_hash=content_hash, changed_at=changed_at)
+        .values(
+            text=text,
+            content_hash=content_hash,
+            changed_at=changed_at,
+            mailto=_mailto_text(mailto),
+        )
     )
 
 
@@ -428,14 +470,15 @@ def add_render_counts(run_id: str, *, renders: int, errors: int) -> None:
 
 
 def purge_text(now: datetime) -> int:
-    """Null every page text whose ``text_purge_after`` is ``now`` or earlier; the count."""
+    """Null every page text and ``mailto`` list whose ``text_purge_after`` is ``now`` or
+    earlier; the count."""
     result = current().session.execute(
         update_rows(CrawledPageRecord)
         .where(
-            CrawledPageRecord.text.is_not(None),
+            or_(CrawledPageRecord.text.is_not(None), CrawledPageRecord.mailto.is_not(None)),
             CrawledPageRecord.text_purge_after <= now,
         )
-        .values(text=None)
+        .values(text=None, mailto=None)
     )
     return int(result.rowcount)  # type: ignore[attr-defined]
 

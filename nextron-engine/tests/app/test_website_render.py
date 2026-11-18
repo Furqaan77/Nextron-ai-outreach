@@ -307,6 +307,71 @@ def test_an_unchanged_or_empty_render_keeps_changed_at_or_the_text(world: World)
     assert world.run(lead).renders == 2
 
 
+def test_a_render_replaces_the_mailto_addresses_with_its_text_and_the_purge_nulls_them(
+    world: World,
+) -> None:
+    """Story 2.13: a non-empty render's ``mailto`` list replaces the crawl's (NULL when it has
+    none); an empty render keeps both; the purge nulls the list with the text."""
+    careers = f"{ORIGIN}/careers"
+    lead = world.lead()
+    world.site(
+        {
+            HOME: html_page(
+                HOME,
+                f"{SHELL}<a href='/team'>Team</a><a href='/careers'>Careers</a>"
+                "<a href='mailto:office@smith-law.co.uk'>Email</a>",
+            ),
+            TEAM: html_page(TEAM, "<p>Team</p><a href='mailto:team@smith-law.co.uk'>Email</a>"),
+            careers: html_page(
+                careers, "<p>Jobs</p><a href='mailto:jobs@smith-law.co.uk'>Apply</a>"
+            ),
+        }
+    )
+    world.crawl(lead)
+    crawled = world.pages(lead)
+    assert [crawled[url].mailto for url in (HOME, TEAM, careers)] == [
+        ("office@smith-law.co.uk",),
+        ("team@smith-law.co.uk",),
+        ("jobs@smith-law.co.uk",),
+    ]
+    world.clock.advance(timedelta(minutes=3))
+    world.renderer.pages[HOME] = rendered_page(
+        HOME,
+        RENDERED_HOME.replace(
+            "</body>",
+            "<a href='mailto:Jane.Roe@Smith-Law.co.uk'>Jane</a>"
+            "<a hidden href='mailto:hidden@smith-law.co.uk'>x</a></body>",
+        ),
+    )
+    world.renderer.pages[TEAM] = rendered_page(TEAM, f"<p>{FILLER * 9}</p>")  # no mailto link
+    world.renderer.pages[careers] = rendered_page(  # no text: the crawl's text and list kept
+        careers, "<script src='https://embed.tawk.to/abc'></script>"
+    )
+
+    assert render(world, lead) is True
+
+    rendered = world.pages(lead)
+    assert [rendered[url].mailto for url in (HOME, TEAM, careers)] == [
+        ("jane.roe@smith-law.co.uk",),
+        (),
+        ("jobs@smith-law.co.uk",),
+    ]
+    assert rendered[HOME].content_hash == text_hash(rendered[HOME].text)
+    assert rendered[careers].text == crawled[careers].text
+    stored = dict(world.sql("SELECT url, mailto FROM crawled_pages WHERE lead_id = ?", (lead,)))
+    assert (stored[HOME], stored[TEAM]) == ('["jane.roe@smith-law.co.uk"]', None)
+
+    world.clock.set(T0 + timedelta(days=30))  # the crawl's purge time
+    with world.units.open():
+        assert world.research.purge_page_text() == 3
+
+    purged = world.pages(lead)
+    for url in (HOME, TEAM, careers):
+        assert (purged[url].text, purged[url].mailto) == (None, ())
+        assert purged[url].content_hash == rendered[url].content_hash
+    assert world.sql("SELECT COUNT(*) FROM crawled_pages WHERE mailto IS NOT NULL") == [(0,)]
+
+
 # Row: Render fails ------------------------------------------------------------------------------
 
 

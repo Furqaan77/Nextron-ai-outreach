@@ -1420,8 +1420,9 @@ if isinstance(answer, Blocked):
 **The contract** (`tests/contracts/test_ad16_callers.py`) keeps every path gated:
 
 - a **manifest** of every AD-16 caller: `upsert_lead`, the CSV import, `add_contact` for each
-  source, then (not built yet, skipped by name) `find_contact_email`, `verify_contact_email`,
-  the Signal Inbox chain, replies, `sequencing.enroll`, `drafting.request_*` and Call Prep,
+  source, Story 2.10's people step and Story 2.13's `find_contact_email` (every `EmailFinding`
+  method), then (not built yet, skipped by name) `verify_contact_email`, the Signal Inbox chain,
+  replies, `sequencing.enroll`, `drafting.request_*` and Call Prep,
   `approval.approve`, the pipeline Tasks and call sheets, and `compliance.assert_sendable`. A
   caller that exists without a scenario fails;
 - **scenarios** with a recording fake of the gate and a log of every write statement (a new
@@ -1430,13 +1431,17 @@ if isinstance(answer, Blocked):
   each insert into `leads`, `contacts`, `enrollments`, `drafts`, `linkedin_tasks`,
   `call_preps` or `outbound_messages`; with `Blocked`, no table gains a row, no job is queued
   and no `INSERT`, `UPDATE`, `DELETE` or `REPLACE` runs (except `add_contact`'s
-  `contact_blocked` event);
+  `contact_blocked` event, and `find_contact_email`'s `email_search_blocked` event and the
+  Contact's search outcome);
 - every use of `upsert_lead` or `add_contact` must sit inside a manifest caller;
 - a repository function that inserts into one of those tables (`insert(Model)` or
   `insert(Model.__table__)`, `Model(...)`, `Model.__table__.insert()`,
   `insert(table("leads"))`, or `bulk_insert_mappings`/`bulk_save_objects` of a model) may be
   used only by its own module or a manifest caller that lists the table, and no string outside
-  the migrations may hold `INSERT INTO` one of them (a quoted or bracketed schema included).
+  the migrations may hold `INSERT INTO` one of them (a quoted or bracketed schema included);
+- only a manifest caller writes `contacts.email` (Story 2.13): outside the contacts repository,
+  any use of its `set_address`, any call of its `fill` with an `email` keyword or a `**`
+  splat, and any reference to `fill` that isn't a call fails.
 
 ### The Suppression List panel
 
@@ -2829,6 +2834,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0037_3_14_erasure_receipts` | `erasure_receipts` (a foreign key to `contacts` with no cascade, `ix_erasure_receipts_contact_id`, reference, `dsr` reference, cause and outcome checks; `trg_erasure_receipts_no_delete` and `trg_erasure_receipts_immutable`), `erasure_receipt_stores` (a foreign key to `erasure_receipts` with no cascade, `ix_erasure_receipt_stores_receipt_id`, store, status, detail and no-`@` checks, unique on `receipt_id` and `store`; triggers: no delete, insert never replaces, update only from `pending` with the store and action unchanged) and `trg_data_subject_requests_receipt` (a request's `receipt_id` must name a receipt of its own Contact) (see [Erasure receipts and the stores outside the database](#erasure-receipts-and-the-stores-outside-the-database)) | `compliance` |
 | `0038_4_8_enrollments` | `enrollments` (foreign keys to `leads`, `contacts`, `campaigns`, `variants`, `sending_inboxes`, `sequences` and `offers` with no cascade; origin, status, cause, ended and version checks; the partial unique index `uq_enrollments_one_live_per_lead`; `ix_enrollments_contact_id`, `ix_enrollments_sending_inbox_id`; triggers `trg_enrollments_bound` (the bound Variant, inbox, Sequence and Offer never change) and `trg_enrollments_erased_insert`) and `variant_counters` (one per Campaign, `uq_variant_counters_campaign_id`) (see [Enrollments](#enrollments)) | `sequencing` |
 | `0039_6_4_inbox_warmup` | rebuilds `sending_inboxes` (from 0018's exact table, which 0019 to 0038 leave unchanged; every row, check, the foreign key to `sending_domains` and `uq_sending_inboxes_address` kept) with the nullable warm-up record `warmup_started_on` (date), `warmup_method` (40) and `warm_level`, and the ramp `warmup_tool_daily` (default 0), `ramp_step` (default 5) and `ramp_target` (default 30); `ck_sending_inboxes_warmup_record` (the record is all NULL or all set) and `ck_sending_inboxes_warmup_ranges` (see [Warm-up and Daily Caps](#warm-up-and-daily-caps)) | `sending` |
+| `0040_2_13_email_domains` | creates `email_domains` (one row per mail domain: its address `pattern`, `pattern_source`, the example Evidence ids and `pattern_learned_at`, and `domain_search_at`), adds `contacts.email_search_tried`, `email_search_outcome` and `email_search_at`, and `crawled_pages.mailto` (the page's visible `mailto:` addresses as a JSON list), all in place, and creates `trg_contacts_tombstone` again with the three `email_search_*` columns fixed on an erased Contact (see [Finding email addresses](#finding-email-addresses)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2917,8 +2923,9 @@ Evidence](#signals-and-evidence)), `check_legal_form` (see [Companies House lega
 form](#companies-house-legal-form)), `select_primary_contact` (see [Decision-makers and the
 Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` (see [The AI
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
-authentication](#sending-domain-authentication)), and `check_job_boards` and `recheck_event`
-(see [Hiring Signals and job postings](#hiring-signals-and-job-postings)); the stories that add
+authentication](#sending-domain-authentication)), `check_job_boards` and `recheck_event`
+(see [Hiring Signals and job postings](#hiring-signals-and-job-postings)), and
+`find_contact_email` (see [Finding email addresses](#finding-email-addresses)); the stories that add
 work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
@@ -3931,9 +3938,11 @@ never runs inside a transaction).
 exactly one `ApiCall`: `ok`, or the `AdapterError`'s code. A call refused before any request (no
 token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_message`), Google
 OAuth (`google_oauth`/`code_exchange`, `token_refresh` and `token_revocation`; a revoke answered
-`invalid_token` is `ok`) and Companies House (`companies_house`/`search_companies` and
+`invalid_token` is `ok`), Companies House (`companies_house`/`search_companies` and
 `get_company`; a lookup answered 404 is `ok`, and a request its own rate limit refuses records
-nothing). The Claude gateway records an `AiCall` per request instead.
+nothing), Hunter (`hunter`/`domain_search` and `find`, 2 units each) and Prospeo
+(`prospeo`/`find`), whose calls count 1 only when answered 2xx. The Claude gateway records an
+`AiCall` per request instead.
 `tests/contracts/test_adapter_boundary.py` checks every such adapter.
 
 **Quotas and the budget** are settings (Settings, Budget and limits), each counted over the UTC
@@ -4881,8 +4890,8 @@ address is Invalid; picking the engine's choice pins it. The button posts to
 ("This Lead was merged into another Lead.", "That Contact isn't on this Lead.", "That Contact's
 address is Invalid."). A person's Evidence reads "Contact: <name>" under Supports.
 
-**Not yet:** finding the Primary Contact's address (Story 2.13), scores (Story 2.15); folding
-duplicate Contacts after a merge is deferred.
+**Not yet:** scores (Story 2.15); folding duplicate Contacts after a merge is deferred. The
+Primary Contact's address is found next ([Finding email addresses](#finding-email-addresses)).
 
 ## Hiring Signals and job postings
 
@@ -5046,6 +5055,60 @@ Evidence rows read "Legal form" under Supports.
 
 **Not yet:** discovering Leads from the register by SIC code (S2), officers, accounts and the
 periodic re-checks (FR-61).
+
+## Finding email addresses
+
+Story 2.13 finds the Primary Contact's email address, cheapest source first, and records how
+each address was found. `nextron/domain/email_finding.py` holds the rules,
+`nextron/app/research/finding.py` (`EmailFinding`) runs them, and Hunter
+(`nextron/adapters/hunter`) and Prospeo (`nextron/adapters/prospeo`) answer the paid steps.
+
+**When it runs.** The `find_contact_email` job (bulk lane by default, or interactive; priority
+45; 5 minutes; retry limit 3; group Enrichment; keyed `find_contact_email:<contact>:tick`, one
+site at a time) is queued when the selection leaves a Primary Contact without a usable address
+(an email whose class isn't Invalid), when Mac clicks **Make primary** (interactive lane), and
+when Mac clicks **Find email** on any Contact without a usable address.
+
+**The steps, in order; the first address found wins:**
+
+1. **The contactability gate.** A Contact on the Suppression List, or on a Lost or Disqualified
+   Lead, isn't searched at all (outcome `suppressed` or `lead_closed`, one
+   `email_search_blocked` row in `events`).
+2. **A published address** (free): on the crawled pages, in their text or a `mailto:` link, an
+   address whose local part holds both the first and the last name (`jane.roe@`, `roejane@`), or
+   the only non-role address on the same line as the Contact's full name. A bare initial
+   (`jroe@`) is never taken as published. It is stored `published`, with Quote Evidence (the
+   line, or `mailto:<address>`) and a `website` Provenance Record naming the page.
+3. **A pattern** (free): the domain's stored pattern, or one learned when at least 2 of the
+   Lead's other Contacts have published addresses at the Lead's domain that fit the same one of
+   `first.last`, `flast`, `first`, `firstlast`, `first_last`, `last.first` or `f.last`, and it
+   fits more of them than any other. The pattern and its example Evidence are stored in
+   `email_domains`; the address is `guessed`, Provenance `pattern`.
+4. **Hunter Domain Search**, once per domain ever: its pattern (stored for the domain) or the
+   personal address of the person with the Contact's name. `guessed`, Provenance `finder`
+   ("Hunter Domain Search").
+5. **Hunter Email Finder, then Prospeo**, each once per Contact ever (`email_search_tried`).
+   `guessed`, Provenance `finder` ("Hunter Email Finder" or "Prospeo"). When Hunter says the
+   person claimed their address (HTTP 451), the search ends without Prospeo. Prospeo's key is
+   optional: without it, Prospeo is skipped.
+
+Role addresses (`info@`, `contact@`, `office@`, `admin@`, `team@`, `sales@`, `hello@`,
+`support@` and the like) are never assigned to a person or used to learn a pattern. An address
+another Contact on the Lead holds, or one this Contact had before, is skipped and the next
+source tried. A found address passes the gate before it is stored.
+
+**Credits.** Before each paid step the month's Hunter or Prospeo quota is checked (Hunter
+counts 2 units per find or Domain Search). When it is reached, no call is made, the job is
+deferred an hour, and the Lead page says "email not found yet: quota reached". A paid step is
+never skipped ahead of the order: while Hunter's quota is reached, Prospeo waits too.
+
+**The Lead page** shows, under a Contact's Email cell, "no email address found", "not
+searched: on the Suppression List" or "not searched: the Lead is Lost or Disqualified" after a
+search, and a **Find email** button on each Contact without a usable address, which answers
+"Looking for an email address. Reload the page in a minute."
+
+**Not yet:** verifying an address and changing its class (Story 2.14); obfuscated addresses
+("jane [at] firm") aren't read.
 
 ## Engine health
 

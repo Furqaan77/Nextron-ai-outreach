@@ -219,6 +219,7 @@ class World:
                 text="page text",
                 text_purge_after=T0 + timedelta(days=30),
                 changed_at=T0,
+                mailto=(),
             )
 
         return self.transact(store)

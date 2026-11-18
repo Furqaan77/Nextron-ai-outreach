@@ -84,8 +84,9 @@ Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
   - ``pages``: the Lead's crawled pages whose stored ``text`` mentions the Contact
     (``contact_export.mentions`` of the terms: ``mention_terms(name, email)``, then one
     ``email`` term, ``mention_terms(None, address)``, per other distinct ``address`` in the
-    Contact's Provenance, so a page naming only an earlier address is found): every column but
-    ``text``, plus ``mentions`` (``name``, ``email``, each once) and ``text_excerpts``
+    Contact's Provenance, so a page naming only an earlier address is found, or one of whose
+    ``mailto`` addresses does, Story 2.13): every column but ``text``, with ``mailto`` only the
+    addresses that mention the Contact (a list), plus ``mentions`` (``name``, ``email``, each once) and ``text_excerpts``
     (``contact_export.excerpts``); never a whole page, since the rest is the firm's and other
     people's data;
   - ``contact_methods``: the Lead's pages' contact methods whose ``matched`` text mentions the
@@ -395,6 +396,18 @@ def lead_signals(lead_id: str, now: datetime, type_names: Mapping[str, str]) -> 
 
 type ExportRows = tuple[dict[str, object], ...]
 PAGE_TEXT = "text"
+PAGE_MAILTO = "mailto"  # Story 2.13: a JSON list of the page's mailto addresses, or NULL
+
+
+def _mailto(value: object) -> list[str]:
+    """The stored ``mailto`` JSON list's addresses; ``[]`` for NULL or anything else."""
+    if not isinstance(value, str):
+        return []
+    try:
+        found = json.loads(value)
+    except ValueError:
+        return []
+    return [item for item in found if isinstance(item, str)] if isinstance(found, list) else []
 
 
 def _text_or_none(value: object) -> str | None:
@@ -423,9 +436,16 @@ def export_pii(contact_id: str) -> dict[str, ExportRows]:
     pages: list[dict[str, object]] = []
     for page in export_repo.lead_pages(lead_id):
         text = _text_or_none(page.get(PAGE_TEXT))
-        named = mentions(text, terms)
+        # Story 2.13: only the page's mailto addresses that mention the Contact; the rest are the
+        # firm's and other people's
+        addresses = [
+            address for address in _mailto(page.get(PAGE_MAILTO)) if mentions(address, terms)
+        ]
+        named = mentions("\n".join([text or "", *addresses]), terms)
         if named:
             shown = {key: value for key, value in page.items() if key != PAGE_TEXT}
+            if PAGE_MAILTO in shown:
+                shown[PAGE_MAILTO] = addresses
             pages.append(
                 {**shown, "mentions": list(named), "text_excerpts": list(excerpts(text, terms))}
             )

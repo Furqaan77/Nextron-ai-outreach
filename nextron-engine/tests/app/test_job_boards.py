@@ -220,7 +220,7 @@ def test_a_boards_postings_become_live_postings_and_a_hiring_event(world: World)
     add(world, lead, "Ann Fox", "COO")
     controller = add(world, lead, "Bo Day", "Controller", minutes=1)
     with world.units.open():
-        choice = PrimaryContacts(world.clock, world.research).select_primary_contact(lead)
+        choice = PrimaryContacts(world.clock, world.research, world.queue).select_primary_contact(lead)
     assert choice == PrimaryChoice(controller, PrimarySetBy.SYSTEM)
 
 

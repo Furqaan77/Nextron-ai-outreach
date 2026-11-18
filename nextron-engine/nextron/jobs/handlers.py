@@ -76,6 +76,10 @@ handler runs in.
   ``EXTERNAL_STORES`` (else ``InvalidJob``); it calls ``stores().run(contact_id, store,
   last_attempt=job.attempts > ERASE_EXTERNAL_RETRIES)`` once, so the last allowed attempt
   settles the store ``failed`` instead of leaving it ``pending``, and returns ``None``.
+- ``find_contact_email(finding)`` (Story 2.13): calls ``finding().find_contact_email(lead_id,
+  contact_id)`` once (the research service's ``EmailFinding``) and returns ``DEFERRED`` when it
+  returns ``quota_reached`` (a Hunter or Prospeo quota refused the paid step). A retryable
+  ``AdapterError`` it raises is retried by the runner; any other error fails the job.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -87,6 +91,7 @@ from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
 from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
+from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, STORE_FIELD
 from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
@@ -301,6 +306,26 @@ def check_legal_form(legal_forms: Callable[[], CheckingLegalForm]) -> Handler:
         return None
 
     return handle_check_legal_form
+
+
+class FindingEmail(Protocol):
+    """What ``find_contact_email`` needs of the ``research`` service's ``EmailFinding``."""
+
+    def find_contact_email(self, lead_id: str, contact_id: str) -> object: ...
+
+
+def find_contact_email(finding: Callable[[], FindingEmail]) -> Handler:
+    """The ``find_contact_email`` job's handler: find the payload's Contact's email address
+    through ``finding()``."""
+
+    def handle_find_contact_email(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        contact_id = _ulid_field(job, CONTACT_ID_FIELD)
+        if finding().find_contact_email(lead_id, contact_id) == EmailSearchOutcome.QUOTA_REACHED:
+            return DEFERRED
+        return None
+
+    return handle_find_contact_email
 
 
 def extract_lead(extractions: Callable[[], Extracting]) -> Handler:

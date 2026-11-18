@@ -25,13 +25,17 @@ under the per-kid keys it reads through the ``SecretsPort`` it is given),
 ``backup_target`` (``FolderBackupTarget``, the ``BackupTargetPort``: encrypted backup copies in
 the off-PC folder, through ``crypto``) and ``ai`` (the Claude gateway, ``ClaudeGateway``, the
 ``LlmPort`` over the ``anthropic`` SDK on ``httpx2``, with its route candidates, output schemas,
-request builder and prices; live constructor ``default_http_client``) and ``crawler``
+request builder and prices; live constructor ``default_http_client``), ``crawler``
 (``HttpCrawler``, the ``CrawlerPort``: robots.txt and pages inside the egress filter, over
 ``httpx2``, ``selectolax`` and ``protego``; live constructors ``default_http_client``,
-``default_resolver`` and ``default_own_addresses``) and ``companies_house``
+``default_resolver`` and ``default_own_addresses``), ``companies_house``
 (``CompaniesHouseRegistry``, the ``RegistryPort``: company search and lookup through the
 Companies House API over ``httpx2``, self rate-limited to 600 requests per 5 minutes; live
-constructor ``default_http_client``).
+constructor ``default_http_client``), ``hunter`` (``HunterFinder``, the ``EmailFinderPort`` and
+the ``DomainSearchPort``: Hunter's Email Finder and Domain Search over ``httpx2``; live
+constructor ``default_http_client``) and ``prospeo`` (``ProspeoFinder``, the
+``EmailFinderPort``: Prospeo's Enrich Person over ``httpx2``; live constructor
+``default_http_client``).
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
 port calls, whatever the transport raises or answers, and never carries a secret into an error.

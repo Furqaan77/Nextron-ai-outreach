@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0039_6_4_inbox_warmup"
+HEAD = "0040_2_13_email_domains"
 
 
 @pytest.fixture
@@ -562,7 +562,7 @@ def test_0029_leaves_every_existing_page_unchecked(tmp_path: Path) -> None:
     finally:
         reader.close()
     assert rows == [(page, "Smith Law LLP", None)]  # kept, and never checked
-    assert columns[-1] == "tag_managers"
+    assert columns[-2:] == ["tag_managers", "mailto"]  # 0030 adds mailto after it
 
 
 # Story 4.5: 0030 adds the test cases and runs, and rebuilds ai_route_activations again with the

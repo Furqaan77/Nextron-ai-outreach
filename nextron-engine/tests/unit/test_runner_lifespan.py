@@ -67,6 +67,7 @@ from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
+from nextron.app.research.finding import SearchQueued
 from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
 from nextron.db.metering import UsageMeter
@@ -103,6 +104,7 @@ from tests.asgi import request
 from tests.dashboard import body_hx_headers
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.google_oauth import CLIENT_ID, FakeGoogleOAuth
 from tests.fakes.probes import PortProbe, fake_probes
 from tests.fakes.secrets import InMemorySecrets
@@ -234,6 +236,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "check_job_boards",
         "recheck_event",
         "erase_external",
+        "find_contact_email",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -1786,3 +1789,47 @@ def test_a_recovery_state_that_cannot_be_read_stops_the_start(
 
     assert sent == ["lifespan.startup.failed"]
     assert job_threads() == []  # the runner never started
+
+
+def test_the_built_app_wires_the_email_search_to_its_job_and_to_find_email(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 2.13: ``build_app`` gives its ``EmailFinding`` (on the injected finders) to the
+    ``find_contact_email`` job and to the dashboard's "Find email"."""
+    findings = spy(monkeypatch, "EmailFinding")
+    registries = spy(monkeypatch, "build_job_types")
+    given: dict[str, Any] = {}
+    real_create_app = main.create_app
+
+    def create_app(**kwargs: Any) -> FastAPI:
+        given.update(kwargs)
+        return real_create_app(**kwargs)
+
+    monkeypatch.setattr(main, "create_app", create_app)
+    searched, hunted, prospected = ScriptedDomainSearch(), ScriptedFinder(), ScriptedFinder()
+    main.build_app(
+        load_bootstrap(),
+        units=units,
+        secrets=InMemorySecrets("test"),
+        clock=FrozenClock(T),
+        domain_search=searched,
+        hunter=hunted,
+        prospeo=prospected,
+    )
+    [finding], [job_types] = findings, registries
+    assert given["email_finding"] is finding  # "Find email" isn't the 503 answer
+    store_unresolved_contact(units)
+    [(lead_id, contact_id)] = raw_query(units, "SELECT lead_id, id FROM contacts")
+
+    with units.open():
+        assert given["email_finding"].queue_search(lead_id, contact_id) == SearchQueued.QUEUED
+    handler = job_types.get("find_contact_email").handler
+    payload = {"v": 1, "lead_id": lead_id, "contact_id": contact_id}
+    with units.open():
+        handler(Job("01JD3QZ8X5V9K2M7N4P6R8T0ZZ", "find_contact_email", Lane.BULK, payload, 1))
+
+    assert searched.calls == ["smith.co.uk"]
+    assert [query.domain for query in (*hunted.calls, *prospected.calls)] == [
+        "smith.co.uk",
+        "smith.co.uk",
+    ]

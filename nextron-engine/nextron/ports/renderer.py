@@ -5,13 +5,14 @@ request it makes fetched inside the egress filter.
 ``tests.fakes.renderer.ScriptedRenderer``.
 
 **``render(url, *, site, min_interval_s) -> RenderedPage(url, final_url, text, links,
-html)``** loads ``url`` in a fresh browser, lets its scripts run, and returns what the page then
-shows: always a 2xx HTML page. ``site`` is ``None`` or the registrable domain every main-frame
-navigation must stay on, as in ``CrawlerPort.fetch_page``; ``min_interval_s`` paces the page's
-own document as the crawler paces a page. ``final_url`` is where the document was fetched from
-after redirects; ``text`` is the rendered DOM's visible text and ``links`` its links (a tuple of
-``nextron.ports.crawler.PageLink``), both read as the crawler reads a page; ``html`` is the
-rendered DOM. Text, links and HTML never show in the ``repr``.
+html, mailto)``** loads ``url`` in a fresh browser, lets its scripts run, and returns what the
+page then shows: always a 2xx HTML page. ``site`` is ``None`` or the registrable domain every
+main-frame navigation must stay on, as in ``CrawlerPort.fetch_page``; ``min_interval_s`` paces
+the page's own document as the crawler paces a page. ``final_url`` is where the document was
+fetched from after redirects; ``text`` is the rendered DOM's visible text, ``links`` its links
+(a tuple of ``nextron.ports.crawler.PageLink``) and ``mailto`` (Story 2.13) the addresses of
+its visible ``mailto:`` links (a tuple of ``str``), all read as the crawler reads a page;
+``html`` is the rendered DOM. Text, links, HTML and ``mailto`` never show in the ``repr``.
 
 **Failures.** Every failure raises ``AdapterError`` with:
 
@@ -35,14 +36,15 @@ RENDER_CODES: Final = (RENDER_FAILED, RENDER_TIMEOUT, RENDER_UNAVAILABLE)
 
 @dataclass(frozen=True, slots=True)
 class RenderedPage:
-    """One rendered page; see the module docstring. Its text, links and HTML never show in the
-    ``repr``."""
+    """One rendered page; see the module docstring. Its text, links, HTML and ``mailto``
+    addresses never show in the ``repr``."""
 
     url: str
     final_url: str
     text: str = field(default="", repr=False)
     links: tuple[PageLink, ...] = field(default=(), repr=False)
     html: str = field(default="", repr=False)
+    mailto: tuple[str, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if not all(
@@ -53,6 +55,10 @@ class RenderedPage:
             isinstance(link, PageLink) for link in self.links
         ):
             raise TypeError("links must be a tuple of PageLink")
+        if not isinstance(self.mailto, tuple) or not all(
+            isinstance(address, str) for address in self.mailto
+        ):
+            raise TypeError("mailto must be a tuple of str")
 
 
 @runtime_checkable

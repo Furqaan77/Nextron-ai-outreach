@@ -339,6 +339,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("check_legal_form", None),
                 LastRun("select_primary_contact", None),
                 LastRun("check_job_boards", None),
+                LastRun("find_contact_email", None),
             ),
         ),
         GroupRuns(JobGroup.RECHECK, (LastRun("recheck_event", None),)),  # Story 2.11

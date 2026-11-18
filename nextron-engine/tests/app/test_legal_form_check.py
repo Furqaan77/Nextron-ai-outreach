@@ -764,7 +764,7 @@ def test_an_unconfirmed_gb_lead_is_still_selected_and_stays_on_the_leads_list(wo
     check(world, ScriptedRegistry(), lead)
     [(_, _, payload, _)] = selections(world)
     with world.units.open():
-        choice = PrimaryContacts(world.clock, world.research).select_primary_contact(
+        choice = PrimaryContacts(world.clock, world.research, world.queue).select_primary_contact(
             json.loads(payload)["lead_id"]
         )
 

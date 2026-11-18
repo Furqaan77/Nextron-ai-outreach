@@ -19,7 +19,7 @@ import pytest
 
 import nextron.adapters.crawler as adapter
 from nextron.adapters.crawler import HttpCrawler
-from nextron.adapters.crawler.parsing import content_type, decode, parse_html
+from nextron.adapters.crawler.parsing import MAX_MAILTO, content_type, decode, parse_html
 from nextron.domain.budget import ApiCall
 from nextron.domain.crawl import USER_AGENT
 from nextron.ports.crawler import CrawlerPort, FetchedPage, PageLink, Robots
@@ -878,6 +878,121 @@ def test_without_a_base_links_resolve_against_the_page_url() -> None:
     )
 
 
+# mailto: addresses (Story 2.13) -----------------------------------------------------------------
+
+
+def test_the_visible_mailto_link_gives_its_address_kept_out_of_the_repr() -> None:
+    parsed = parse_html(HIDDEN, "https://www.smith-law.co.uk/")
+
+    assert parsed.mailto == ("jane@smith-law.co.uk",)
+    assert "jane@" not in repr(parsed)
+    assert parse_html("<p>No links</p>", HOME).mailto == ()
+
+
+def test_mailto_links_change_neither_the_links_nor_the_text() -> None:
+    body = '<p>Talk to us</p><a href="/team">Team</a> <a{}>Email us</a> <a href="tel:0161">Call</a>'
+    without = parse_html(body.format(""), HOME)
+
+    parsed = parse_html(body.format(' href="mailto:jane@roe.law?subject=Hi"'), HOME)
+
+    assert (parsed.text, parsed.links) == (without.text, without.links)
+    assert parsed.text == "Talk to us\nTeam Email us Call"
+    assert parsed.links == (PageLink(f"{HOME}team", "Team", "a"),)
+    assert (parsed.mailto, without.mailto) == (("jane@roe.law",), ())
+
+
+HIDDEN_LINK = '<a href="mailto:hidden@roe.law">x</a>'
+
+
+@pytest.mark.parametrize(
+    "hidden",
+    [
+        '<a hidden href="mailto:hidden@roe.law">x</a>',
+        f"<div hidden><p>{HIDDEN_LINK}</p></div>",
+        '<a aria-hidden="True" href="mailto:hidden@roe.law">x</a>',
+        f'<div aria-hidden="true">{HIDDEN_LINK}</div>',
+        f'<p style="color: red; DISPLAY : None !important">{HIDDEN_LINK}</p>',
+        '<a style="visibility:hidden" href="mailto:hidden@roe.law">x</a>',
+        f'<p style="visibility: collapse">{HIDDEN_LINK}</p>',
+        f'<p style="display:/* x */none">{HIDDEN_LINK}</p>',
+        f'<p style="display:\\6e one">{HIDDEN_LINK}</p>',
+        f"<dialog>{HIDDEN_LINK}</dialog>",
+        f"<template>{HIDDEN_LINK}</template>",
+        f"<noscript>{HIDDEN_LINK}</noscript>",
+        f"<!-- {HIDDEN_LINK} -->",
+    ],
+)
+def test_a_hidden_mailto_link_never_counts(hidden: str) -> None:
+    parsed = parse_html(f'<a href="mailto:jane@roe.law">Jane</a>{hidden}', HOME)
+
+    assert parsed.mailto == ("jane@roe.law",)
+
+
+@pytest.mark.parametrize(
+    ("href", "addresses"),
+    [
+        ("mailto:jane@roe.law", ("jane@roe.law",)),
+        # the headers are ignored, a cc or bcc among them
+        ("mailto:jane@roe.law?subject=Hello%2C%20there&amp;cc=boss@roe.law", ("jane@roe.law",)),
+        ("mailto:?to=jane@roe.law", ()),
+        ("mailto:jane@roe.law,john@smith.com", ("jane@roe.law", "john@smith.com")),
+        ("mailto: jane@roe.law , john@smith.com ,", ("jane@roe.law", "john@smith.com")),
+        ("mailto:jane%40roe.law", ("jane@roe.law",)),
+        ("mailto:jane%40roe.law%2Cjohn%40smith.com", ("jane@roe.law", "john@smith.com")),
+        ("mailto:jane@roe.law%3Fsubject=x", ()),  # an escaped ? is part of the address
+        ("MAILTO:Jane.Roe@ROE.Law", ("jane.roe@roe.law",)),
+        ("MailTo:jane@roe.law", ("jane@roe.law",)),
+        ("  mailto:jane@roe.law\t", ("jane@roe.law",)),
+        ("mailto:jane@\nroe.law", ("jane@roe.law",)),  # tabs and newlines are removed
+        ("mailto:josé@café.fr", ("josé@xn--caf-dma.fr",)),
+        # parts normalize_email refuses are dropped, the others kept
+        ("mailto:jane@roe.law,not-an-address,john@smith.com", ("jane@roe.law", "john@smith.com")),
+        ("mailto:", ()),
+        ("mailto:jane", ()),
+        ("mailto:jane@localhost", ()),
+        ("mailto:a@b@roe.law", ()),
+        ("mailto:jane%20roe@roe.law", ()),
+        ("mailto:jane@roe..law", ()),
+        ("mailto:j%FFane@roe.law", ()),  # escapes that aren't UTF-8
+        ("tel:+441612345678", ()),
+        ("https://roe.law/mailto:jane@roe.law", ()),
+        ("/contact?to=mailto:jane@roe.law", ()),
+        ("mail to:jane@roe.law", ()),
+    ],
+)
+def test_a_mailto_href_is_read_before_its_headers_then_decoded_split_and_normalised(
+    href: str, addresses: tuple[str, ...]
+) -> None:
+    parsed = parse_html(f'<a href="{href}">Email</a>', HOME)
+
+    assert parsed.mailto == addresses
+    if addresses:
+        assert parsed.links == ()  # a mailto: link is never a web link
+
+
+def test_each_address_is_kept_once_in_document_order() -> None:
+    parsed = parse_html(
+        '<a href="mailto:john@smith.com">John</a><a href="mailto:JANE@roe.law">Jane</a>'
+        '<a href="mailto:jane@roe.law?subject=Again">Again</a>'
+        '<a href="mailto:john@smith.com,jane@roe.law,office@roe.law">All</a>',
+        HOME,
+    )
+
+    assert parsed.mailto == ("john@smith.com", "jane@roe.law", "office@roe.law")
+
+
+def test_at_most_20_distinct_addresses_are_kept() -> None:
+    first = "".join(f'<a href="mailto:p{n}@roe.law">{n}</a>' for n in range(19))
+    # a repeat doesn't use up the cap; the 20th distinct address is kept, the rest dropped
+    rest = '<a href="mailto:p0@roe.law,p19@roe.law,p20@roe.law">More</a>'
+    last = '<a href="mailto:p21@roe.law">Last</a>'
+
+    parsed = parse_html(f"{first}{rest}{last}", HOME)
+
+    assert MAX_MAILTO == 20
+    assert parsed.mailto == tuple(f"p{n}@roe.law" for n in range(20))
+
+
 def test_a_page_is_fetched_parsed_and_its_html_kept_out_of_the_repr(world: World) -> None:
     world.web.on(SITE, "/", page(HIDDEN))
 
@@ -887,6 +1002,45 @@ def test_a_page_is_fetched_parsed_and_its_html_kept_out_of_the_repr(world: World
     assert fetched.html.startswith("<!DOCTYPE html>")
     assert "IGNORE" not in repr(fetched) and "Smith Law LLP" not in repr(fetched)
     assert fetched.links[0].url == "https://www.smith-law.co.uk/en/team"
+    assert fetched.mailto == ("jane@smith-law.co.uk",)
+    assert "jane@" not in repr(fetched)
+
+
+def test_a_fetched_html_page_carries_its_mailto_addresses_and_no_other_answer_does(
+    world: World,
+) -> None:
+    world.web.on(
+        SITE,
+        "/",
+        page(
+            '<a href="MAILTO:Jane.Roe@Smith-Law.co.uk?subject=Hi">Email</a>'
+            '<a hidden href="mailto:hidden@smith-law.co.uk">x</a>'
+        ),
+    )
+    json_body = '{"x": "<a href=\\"mailto:jane@smith-law.co.uk\\">x</a>"}'
+    world.web.on(SITE, "/data.json", page(json_body, ctype="application/json"))
+    world.web.on(SITE, "/gone", page('<a href="mailto:jane@smith-law.co.uk">x</a>', status=410))
+
+    fetched = world.crawler.fetch_page(HOME, site=None, min_interval_s=1.0)
+    data = world.crawler.fetch_page(f"{HOME}data.json", site=None, min_interval_s=1.0)
+    gone = world.crawler.fetch_page(f"{HOME}gone", site=None, min_interval_s=1.0)
+
+    assert fetched.mailto == ("jane.roe@smith-law.co.uk",)
+    assert (data.mailto, gone.mailto) == ((), ())
+
+
+def test_a_fetched_page_checks_its_mailto() -> None:
+    fetched = FetchedPage(HOME, HOME, 200, "text/html", mailto=("jane@roe.law",))
+
+    assert fetched.mailto == ("jane@roe.law",)
+    assert "jane@" not in repr(fetched)
+    assert FetchedPage(HOME, HOME, 200, "text/html").mailto == ()
+    for bad in (["jane@roe.law"], "jane@roe.law", ("jane@roe.law", 1), None):
+        with pytest.raises(TypeError, match="mailto must be a tuple of str"):
+            FetchedPage(HOME, HOME, 200, "text/html", mailto=bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="isn't 2xx"):
+        FetchedPage(HOME, HOME, 404, "", mailto=("jane@roe.law",))
+    assert FetchedPage(HOME, HOME, 404, "").mailto == ()
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,10 @@ recording every call;
 name (``()`` for a name not scripted), raises the scripted ``AdapterError`` for a name in
 ``errors`` and records every query.
 
+``ScriptedFinder`` and ``ScriptedDomainSearch`` (``email_finder``) fake ``EmailFinderPort`` and
+``DomainSearchPort``: each answers with the next scripted answer or ``AdapterError``, and with
+nothing found once the script is exhausted, and records every call.
+
 ``PORT_FAKES`` maps every port Protocol in ``nextron/ports`` to its fake; each fake can be
 built with no arguments. ``tests/contracts/test_test_isolation.py`` fails when a port has no
 fake here, or a fake doesn't satisfy its port. Tests use these, never a live adapter
@@ -32,6 +36,7 @@ from nextron.ports.backup_target import BackupTargetPort
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
 from nextron.ports.dns import DnsPort
+from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort
 from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
 from nextron.ports.job_board import JobBoardPort
@@ -48,6 +53,7 @@ from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.dns import FakeDns
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.job_board import ScriptedJobBoards
@@ -80,5 +86,7 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         JobBoardPort: ScriptedJobBoards,
         RegistryPort: ScriptedRegistry,
         SinkFilesPort: InMemorySinkFiles,
+        EmailFinderPort: ScriptedFinder,
+        DomainSearchPort: ScriptedDomainSearch,
     }
 )

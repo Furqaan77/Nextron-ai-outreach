@@ -287,6 +287,7 @@ NEVER_RUN = [
         ["check_legal_form", "never"],
         ["select_primary_contact", "never"],
         ["check_job_boards", "never"],  # Story 2.11
+        ["find_contact_email", "never"],
     ],
     [
         ["Job type", "Last success"],

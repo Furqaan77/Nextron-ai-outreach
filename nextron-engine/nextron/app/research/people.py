@@ -90,7 +90,11 @@ selection sees the hiring Events and the legal form. Scope the Lead, discriminat
 ``extract_people``, recorded like Story 2.9's (``actor``, ``crawl_run_id``, ``pages_sent``,
 ``pages_truncated``, ``started_at`` phase 1's now, ``ended_at``).
 
-**``PrimaryContacts(clock, research)``** runs the Primary Contact's selection:
+**``PrimaryContacts(clock, research, queue)``** runs the Primary Contact's selection. Whenever
+the Primary it leaves has no usable address (an email whose class isn't ``invalid``), the same
+transaction enqueues its ``find_contact_email`` job (Story 2.13,
+``nextron.app.research.finding.enqueue_search``): on the job's default (bulk) lane after a
+selection, on the interactive lane after "Make primary".
 
 - ``@use_case select_primary_contact(lead_id) -> PrimaryChoice | None`` (the
   ``select_primary_contact`` job): in one transaction, ``research.select_primary(lead_id)``. An
@@ -116,7 +120,9 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.discovery import StoredLead
 from nextron.app.research.api import Research
 from nextron.app.research.extraction import RecordedRun, outcome_of, page_order
+from nextron.app.research.finding import enqueue_search, has_usable_address
 from nextron.db import eventlog
+from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.signals import StoredEvidence
@@ -141,7 +147,7 @@ from nextron.domain.extraction import (
     allot,
 )
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import TICK, VERSION_FIELD
+from nextron.domain.job import TICK, VERSION_FIELD, Lane
 from nextron.domain.notifications import EvidenceChanged
 from nextron.domain.people import (
     BUDGET_CLASS,
@@ -654,9 +660,10 @@ class PeopleExtractions:
 class PrimaryContacts:
     """The Primary Contact's selection and the operator's choice; see the module docstring."""
 
-    def __init__(self, clock: Clock, research: Research) -> None:
+    def __init__(self, clock: Clock, research: Research, queue: JobQueue) -> None:
         self._clock = clock
         self._research = research
+        self._queue = queue
 
     @use_case
     def select_primary_contact(self, lead_id: str) -> PrimaryChoice | None:
@@ -671,6 +678,7 @@ class PrimaryContacts:
                 skipped = MERGED_LEAD
             else:
                 choice = self._research.select_primary(lead.id)
+                self._search(lead, choice.contact_id, lane=None)
         if choice is None:
             log.info(PRIMARY_SELECTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return None
@@ -690,4 +698,14 @@ class PrimaryContacts:
         when it can't be."""
         with current().transaction():
             self._research.make_primary(lead_id, contact_id)
+            lead = discovery_queries.lead(lead_id)
+            assert lead is not None  # make_primary raised PrimaryRefused for an unknown Lead
+            self._search(lead, contact_id, lane=Lane.INTERACTIVE)
         log.info(PRIMARY_CONTACT_MADE, extra={"lead_id": lead_id, "contact_id": contact_id})
+
+    def _search(self, lead: StoredLead, contact_id: str | None, *, lane: Lane | None) -> None:
+        """Enqueue the Primary Contact's email search (Story 2.13) when it has no usable
+        address, in the caller's transaction."""
+        contact = None if contact_id is None else contacts_repo.get(contact_id)
+        if contact is not None and not has_usable_address(contact):
+            enqueue_search(self._queue, lead.id, contact.id, lead.web_domain, lane=lane)

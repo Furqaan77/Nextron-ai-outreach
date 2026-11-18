@@ -18,7 +18,9 @@ SHA-256 of the text, kept after the text is purged); ``text`` (the visible text,
 ``purge_page_text`` nulls it after ``text_purge_after``); ``changed_at``, when the hash
 last changed; and ``tag_managers`` (Story 2.9, migration ``0029_2_9_tag_managers``), a
 canonical JSON array of the tag manager keys the page loads (``[]`` when none), NULL for a page
-never checked for them.
+never checked for them; and ``mailto`` (Story 2.13, migration ``0030_2_13_email_domains``), a
+JSON list of the addresses of the page's visible ``mailto:`` links (NULL when it has none),
+nulled with ``text``.
 
 ``ats_links``: one row per Lead and ATS URL (``uq_ats_links_lead_id_url``): ``lead_id``,
 ``run_id`` and ``page_id`` (the run and page that last saw it), ``url``, ``host``, ``tag``
@@ -179,6 +181,7 @@ class CrawledPageRecord(Base):
     text_purge_after: Mapped[datetime] = mapped_column(UtcDateTime)
     changed_at: Mapped[datetime] = mapped_column(UtcDateTime)
     tag_managers: Mapped[str | None] = mapped_column(Text)
+    mailto: Mapped[str | None] = mapped_column(Text)  # Story 2.13
 
 
 class AtsLinkRecord(Base):
