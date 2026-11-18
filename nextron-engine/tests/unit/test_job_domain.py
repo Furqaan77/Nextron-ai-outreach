@@ -259,6 +259,7 @@ def test_after_interruption(attempts: int, limit: int, released: bool, event: Jo
         (ULID, "reply"),
         (ULID, "grounding"),
         (ULID, "drafting_smoke"),
+        (ULID, "current"),  # Story 11.5: score_lead with the current Segment definition
     ],
 )
 def test_a_key_is_type_scope_and_discriminator(scope: str, discriminator: str) -> None:
@@ -288,6 +289,7 @@ def test_a_key_is_type_scope_and_discriminator(scope: str, discriminator: str) -
         ("enrich_lead", ULID, "2026-02-30", "discriminator"),
         ("enrich_lead", ULID, "2026-11-17T09:00:00Z", "discriminator"),
         ("enrich_lead", ULID, "Tick", "discriminator"),
+        ("enrich_lead", ULID, "Current", "discriminator"),
         ("enrich_lead", ULID, "Extraction", "discriminator"),
         ("enrich_lead", ULID, "drafting", "discriminator"),
         ("enrich_lead", ULID, "", "discriminator"),

@@ -81,7 +81,9 @@ handler runs in.
   returns ``quota_reached`` (a Hunter or Prospeo quota refused the paid step). A retryable
   ``AdapterError`` it raises is retried by the runner; any other error fails the job.
 - ``score_lead(scores)`` (Story 2.15): calls ``scores().score_lead(lead_id)`` once (the
-  ``scoring`` service's ``LeadScores``) and returns ``None``.
+  ``scoring`` service's ``LeadScores``) and returns ``None``; a payload whose ``use_current``
+  is ``true`` (Story 11.5) calls ``score_lead(lead_id, use_current=True)`` instead, and a
+  ``use_current`` that isn't a ``bool`` raises ``InvalidJob``.
 - ``recompute_tiers(scores)`` (Story 2.15): calls ``scores().recompute_tiers()`` once and returns
   ``None``; the payload is a trigger's tick, ``{"v": 1}``.
 
@@ -101,6 +103,7 @@ from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
 from nextron.domain.restore_test import RestoreTestKind
+from nextron.domain.scoring import USE_CURRENT_FIELD
 
 ALERT_ID_FIELD: Final = "alert_id"
 ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
@@ -445,17 +448,24 @@ class ScoringLeads(Protocol):
     """What ``score_lead`` and ``recompute_tiers`` need of the ``scoring`` service's
     ``LeadScores``."""
 
-    def score_lead(self, lead_id: str) -> object: ...
+    def score_lead(self, lead_id: str, *, use_current: bool = False) -> object: ...
 
     def recompute_tiers(self) -> object: ...
 
 
 def score_lead(scores: Callable[[], ScoringLeads]) -> Handler:
-    """The ``score_lead`` job's handler: score the payload's Lead through ``scores()``."""
+    """The ``score_lead`` job's handler: score the payload's Lead through ``scores()``, with
+    the current Segment definition when the payload says ``use_current``."""
 
     def handle_score_lead(job: Job) -> None:
         lead_id = _ulid_field(job, LEAD_ID_FIELD)
-        scores().score_lead(lead_id)
+        use_current = job.payload.get(USE_CURRENT_FIELD, False)
+        if not isinstance(use_current, bool):
+            raise InvalidJob(f"{job.type}: the {USE_CURRENT_FIELD} field must be true or false")
+        if use_current:
+            scores().score_lead(lead_id, use_current=True)
+        else:
+            scores().score_lead(lead_id)
 
     return handle_score_lead
 

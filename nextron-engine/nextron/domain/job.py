@@ -41,8 +41,10 @@ returns ``DEFERRED`` only before its use case has done any work: the budget chec
 
 **Keys.** ``idempotency_key(job_type, scope, discriminator)`` is
 ``<type>:<scope>:<discriminator>``. The type is a ``verb_noun`` job-type name; the scope is a
-ULID, ``inbox:<ULID>`` or ``global``; the discriminator is ``tick``, a real ``YYYY-MM-DD`` date,
-a revision from ``0`` to ``999999999`` without leading zeros, or the value of an AI Test Set
+ULID, ``inbox:<ULID>`` or ``global``; the discriminator is ``tick``, ``current`` (Story 11.5:
+a ``score_lead`` that applies the current Segment definition, kept apart from a ``tick`` one
+that keeps the Lead's stored version), a real ``YYYY-MM-DD`` date, a revision from ``0`` to
+``999999999`` without leading zeros, or the value of an AI Test Set
 (``nextron.domain.ai_test_gate.TestSet``: ``reply``, ``grounding``, ``drafting_smoke`` or
 ``extraction``; Story 4.5's ``run_ai_test_sets:<tuple id>:<set>``), all as text.
 ``is_concurrency_key(value)`` accepts ``inbox:<ULID>`` and ``domain:<name>``, where the name is
@@ -119,6 +121,7 @@ INT64_MAX: Final = 2**63 - 1
 
 GLOBAL_SCOPE: Final = "global"
 TICK: Final = "tick"
+CURRENT: Final = "current"  # Story 11.5: score_lead with the current Segment definition
 INBOX_PREFIX: Final = "inbox:"
 DOMAIN_PREFIX: Final = "domain:"
 MAX_DOMAIN_NAME: Final = 253
@@ -367,7 +370,7 @@ def _is_discriminator(value: object) -> bool:
     if not isinstance(value, str):
         return False
     return (
-        value == TICK
+        value in (TICK, CURRENT)
         or is_iso_date(value)
         or REVISION_PATTERN.fullmatch(value) is not None
         or set_of(value) is not None
@@ -382,8 +385,8 @@ def idempotency_key(job_type: str, scope: str, discriminator: str) -> str:
         raise InvalidJob("the key's scope must be a ULID, inbox:<ULID> or global")
     if not _is_discriminator(discriminator):
         raise InvalidJob(
-            "the key's discriminator must be tick, a YYYY-MM-DD date, a revision from 0 to "
-            "999999999 or an AI Test Set"
+            "the key's discriminator must be tick, current, a YYYY-MM-DD date, a revision "
+            "from 0 to 999999999 or an AI Test Set"
         )
     return f"{job_type}:{scope}:{discriminator}"
 

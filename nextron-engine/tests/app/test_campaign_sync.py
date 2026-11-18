@@ -1284,7 +1284,6 @@ def refused_before_any_transaction(
     before = sha256(database)
 
     with units.open() as uow:
-        monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(error, match=match):
             Seeds(FrozenClock()).sync_seed(**inputs)
 

@@ -524,10 +524,11 @@ tokens](#unsubscribe-tokens) for how to change it.
 
 ## Seeds
 
-The Segments (FR-1) come from `seed/segments.yaml` until the Slice 3 editing screens ship
-(AD-12): Law-PrivateAI and Ops-Automation, each with its industry keywords, size range, ranked
+The Segments (FR-1) come from `seed/segments.yaml` only into a database that holds none (a fresh
+install): Law-PrivateAI and Ops-Automation, each with its industry keywords, size range, ranked
 decision-maker roles, disqualifiers, weighted Signal types (the PRD's FR-1 table, row for row)
-and discovery queries. The Markets (FR-2) come from `seed/markets.yaml`: the US and UK
+and discovery queries. Once any Segment is stored, the dashboard owns them (AD-12; see
+[Editing Segments](#editing-segments)). The Markets (FR-2) come from `seed/markets.yaml`: the US and UK
 cold-email rules (see [Markets](#markets)). The Sequences (FR-4) come from
 `seed/sequences.yaml`: the default four-Step Sequence and its Step briefs (see
 [Sequences](#sequences)). The Approved Company Facts (FR-72) come from
@@ -577,7 +578,22 @@ deleted, since Leads, Campaigns, snapshots and Draft revisions point to it). The
 unchanged`, `company_facts: 0 changed, 8 unchanged`, `offers: 0 changed, 1 unchanged` and
 `campaigns: 0 changed, 4 unchanged` and writes nothing.
 
-**What a sync does.** It upserts each Segment by key into the `segments` table, then each
+**Segments after the first sync (Story 11.5).** Once the database holds any Segment, a sync
+writes no Segment at all and prints, instead of the Segments' counts:
+
+```text
+segments: Segments are managed in the dashboard; seed/segments.yaml ignored
+  law_private_ai: differs in signal_types[law_contact_form_only].weight
+  new_segment: only in the file
+  accountants: only in the dashboard
+```
+
+A line per difference: a key only the file has, a key both have with the changed fields (the
+dashboard's version against the file's), and a key only the database has. The other files'
+references (Sequence angles, Campaigns, facts) are then checked against the **stored** Segment
+keys. Edit Segments on the Segments page instead.
+
+**What a sync does.** It inserts each Segment (into an empty `segments` table only), then each
 Market by code into the `markets` table, then each Sequence by key into the `sequences` and
 `step_briefs` tables, then each Offer by key into `offers`, then each Campaign by key into
 `campaigns` and `variants` (all owner `setup`): a new one is stored at version 1, a changed
@@ -589,14 +605,8 @@ are read and validated before the database is touched, and all the tables are wr
 transaction, so a failure anywhere changes nothing in any of them. `setup` and `playbook` sit in the same layer of the app
 DAG and may not call each other, so the use case lives in `ops`: `Seeds(clock).sync_seed`
 (`nextron/app/ops/api.py`) runs `setup`'s `seed_sync` command and `playbook`'s `seed_facts`
-command in its one transaction. Signal-type and disqualifier keys
-stay unique across every stored Segment: if a Segment that is no longer in the file (one whose
-key you renamed, say) still uses a key the file uses, the sync is refused before anything is
-written, naming the file's field (`seed/segments.yaml:
-segments[law_private_ai].signal_types[law_hiring_legal_ops].key: is also a key of the stored
-Segment old_segment, which is no longer in the file: rename one of them`). **A sync never
-re-scores a Lead**: it enqueues no job, publishes no notification and touches no other table. A
-changed Segment applies to Leads discovered afterwards and to re-scoring Mac starts.
+command in its one transaction. **A sync never re-scores a Lead**: it enqueues no job,
+publishes no notification and touches no other table.
 
 **The database must exist and be at head.** `seed sync` never creates or migrates the
 database: only `serve` does, after its backup. Start the engine once (`nextron serve`) first;
@@ -636,6 +646,48 @@ problem exits 1 before the database is opened.
 
 Other code reads the Segments through `queries.setup.segments()` (each `SeededSegment` with its
 `id`, `key`, `version` and decoded `SegmentDef`) and `queries.setup.segment(key)`.
+
+### Editing Segments
+
+Settings links the **Segments page** (`/segments`, Story 11.5). It lists each Segment with its
+version and how many Campaigns use it (`0 (inert)`: a new Segment does nothing until a Campaign
+uses it), a "Create a Segment" form, and per Segment an edit page (`/segments/<id>`) and its
+history (`/segments/<id>/versions`).
+
+**The form.** Lists are textareas, one item per line (blank lines ignored): industry keywords,
+Places queries, and the optional Companies House keywords, Companies House SIC codes (4 or 5
+digits each) and aggregator job titles. Decision-maker roles are one rank per line, best first,
+with equal titles on one line separated by ` | `. Disqualifiers and Signal types are numbered
+fieldsets, the stored ones plus 2 blank ones, each with a "Remove" box; the rule kind, size clue,
+Event or Attribute, Signal Tier, Evidence types and allowed sources are chosen from the code's
+lists. A Signal type's preferred roles are one entry per line: `term | term => role | role`.
+
+**Saving.** Every save runs the Story 2.1 validator over every stored Segment with this one
+substituted (or added), so keys stay unique across Segments and every rule and message above
+applies, plus two more: "A Segment needs a decision-maker role and at least one Tier 1 or 2
+Event", and no decision-maker title, preferred role or preferred-role term may contain `|` or
+`=>` (the form's separators): "can't contain | or =>". A refusal re-shows the form as you typed it, each problem beside its field, and saves
+nothing. The form carries the version it showed; if the Segment changed meanwhile the save is
+refused ("This Segment changed since you opened it"). A save identical to the stored definition
+writes nothing. Otherwise the Segment gets its next version, an immutable `segment_versions`
+row (migration `0043_11_5_segment_editing`, which also stored each existing Segment's current
+version, actor `seed`) and an `events` row (`v<n>` to `v<n+1>`, cause `operator_edit`, or
+`None` to `v1`, cause `operator_create`; actor `operator`). A Segment's key never changes, and
+nothing deletes a Segment.
+
+**Scoring keeps its version.** A Lead is scored with the Segment version it was first scored
+with (`score_segment_version`, read back from `segment_versions`); a new Lead gets the current
+version. No save re-scores anything. "Re-score" on the Lead page keeps the stored version; "Re-score
+with the current definition" (on the Lead page, or on the Segment's page for every open,
+unmerged Lead of the Segment) moves Leads to the current version. A Lead scored with a version
+older than the migration has no stored definition, so a plain re-score skips it
+(`segment_version_missing`); use the current-definition button. The Lead page shows
+"Segment version v<n> (current v<m>)", and names the score's factors and disqualifier rule
+from the version the score used.
+
+**History.** The versions page lists every stored version, oldest first, with who saved it,
+when, and each changed field with its value before and after. A Segment stored before this
+story starts at the version it had then, with the note "Versions before v<n> were not kept."
 
 ### Markets
 

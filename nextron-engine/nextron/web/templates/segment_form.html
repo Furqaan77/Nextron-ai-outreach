@@ -1,0 +1,124 @@
+{#- The fields of the Segment create and edit forms (nextron.web.segments_page, Story 11.5),
+    imported by segments_panel.html and segment_panel.html:
+    {% from "segment_form.html" import segment_fields %}. Field names are the editor's form
+    fields; each problem shows beside its field. Every value renders through |plain. -#}
+{%- macro element_id(form, name) -%}
+{{ form.prefix }}-{{ name|replace("[", "-")|replace("].", "-")|replace("]", "")|replace(".", "-") }}
+{%- endmacro %}
+{%- macro described(form, name) -%}
+id="{{ element_id(form, name) }}" name="{{ name }}"
+{%- if form.errors.get(name) %} aria-describedby="{{ element_id(form, name) }}-error" aria-invalid="true"{% endif %}
+{%- endmacro %}
+{%- macro field_error(form, name) -%}
+{%- if form.errors.get(name) %}
+<p class="field-error" id="{{ element_id(form, name) }}-error">{{ form.errors.get(name)|plain }}</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro text_field(form, name, label, value, hint=None) %}
+<div class="field">
+<label for="{{ element_id(form, name) }}">{{ label }}</label>
+<input type="text" {{ described(form, name) }} value="{{ value|plain }}">
+{%- if hint %}
+<p class="hint">{{ hint }}</p>
+{%- endif %}
+{{- field_error(form, name) }}
+</div>
+{%- endmacro %}
+{%- macro text_area(form, name, label, value, hint=None) %}
+<div class="field">
+<label for="{{ element_id(form, name) }}">{{ label }}</label>
+<textarea {{ described(form, name) }} rows="3">
+{{ value|plain }}</textarea>
+{%- if hint %}
+<p class="hint">{{ hint }}</p>
+{%- endif %}
+{{- field_error(form, name) }}
+</div>
+{%- endmacro %}
+{%- macro select_field(form, name, label, options) %}
+<div class="field">
+<label for="{{ element_id(form, name) }}">{{ label }}</label>
+<select {{ described(form, name) }}>
+<option value=""{% if not options|selectattr("selected")|list %} selected{% endif %}>Choose</option>
+{%- for option in options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+{{- field_error(form, name) }}
+</div>
+{%- endmacro %}
+{%- macro ticks(form, name, legend, options) %}
+<fieldset class="segment-ticks">
+<legend>{{ legend }}</legend>
+{%- for option in options %}
+<label><input type="checkbox" name="{{ name }}" value="{{ option.value }}" id="{{ element_id(form, name) }}-{{ option.value }}"
+{%- if option.selected %} checked{% endif %}
+{%- if form.errors.get(name) %} aria-describedby="{{ element_id(form, name) }}-error" aria-invalid="true"{% endif %}> {{ option.label }}</label>
+{%- endfor %}
+{{- field_error(form, name) }}
+</fieldset>
+{%- endmacro %}
+{%- macro tick(form, name, label, checked) %}
+<div class="field">
+<label><input type="checkbox" {{ described(form, name) }} value="on"{% if checked %} checked{% endif %}> {{ label }}</label>
+{{- field_error(form, name) }}
+</div>
+{%- endmacro %}
+{%- macro segment_fields(form, with_key) %}
+{%- if with_key %}
+{{- text_field(form, "key", "Key", form.values.get("key", ""), "Lowercase letters, digits and underscores, starting with a letter; at most 31 characters. It can't change later.") }}
+{%- endif %}
+{{- text_field(form, "name", "Name", form.values.get("name", ""), "At most 200 characters.") }}
+{{- text_area(form, "industry_keywords", "Industry keywords", form.values.get("industry_keywords", ""), "One per line.") }}
+<fieldset class="segment-size">
+<legend>Size range</legend>
+{{- text_field(form, "size_range.minimum", "Minimum", form.values.get("size_range.minimum", ""), "A whole number, 0 or more.") }}
+{{- text_field(form, "size_range.maximum", "Maximum", form.values.get("size_range.maximum", ""), "A whole number, at least the minimum.") }}
+{{- select_field(form, "size_range.unit", "Unit", form.units) }}
+</fieldset>
+{{- text_area(form, "decision_maker_roles", "Decision-maker roles", form.values.get("decision_maker_roles", ""), "One rank per line, best first; equal titles on one line separated by | .") }}
+<fieldset class="segment-rows">
+<legend>Disqualifiers</legend>
+{{- field_error(form, "disqualifiers") }}
+{%- for row in form.disqualifiers %}
+{%- set base = "disqualifiers[" ~ row.index ~ "]." %}
+<fieldset class="segment-row">
+<legend>Disqualifier {{ row.index + 1 }}</legend>
+{{- text_field(form, base ~ "key", "Key", row.values.get("key", "")) }}
+{{- select_field(form, base ~ "kind", "Rule", row.kinds) }}
+{{- select_field(form, base ~ "size_clue", "Size clue", row.clues) }}
+{{- text_field(form, base ~ "threshold", "Threshold", row.values.get("threshold", ""), "A whole number, at least 1.") }}
+{{- text_field(form, base ~ "description", "Description", row.values.get("description", "")) }}
+{{- tick(form, base ~ "remove", "Remove this disqualifier", row.removed) }}
+</fieldset>
+{%- endfor %}
+</fieldset>
+<fieldset class="segment-rows">
+<legend>Signal types</legend>
+{{- field_error(form, "signal_types") }}
+{%- for row in form.signal_types %}
+{%- set base = "signal_types[" ~ row.index ~ "]." %}
+<fieldset class="segment-row">
+<legend>Signal type {{ row.index + 1 }}</legend>
+{{- text_field(form, base ~ "key", "Key", row.values.get("key", "")) }}
+{{- text_field(form, base ~ "name", "Name", row.values.get("name", "")) }}
+{{- select_field(form, base ~ "class", "Event or Attribute", row.classes) }}
+{{- select_field(form, base ~ "tier", "Signal Tier", row.tiers) }}
+{{- ticks(form, base ~ "evidence", "Evidence type", row.evidence) }}
+{{- ticks(form, base ~ "sources", "Allowed sources", row.sources) }}
+{{- tick(form, base ~ "score_only", "Score only (Attributes only)", row.score_only) }}
+{{- text_field(form, base ~ "weight", "Weight", row.values.get("weight", ""), "1 to 100; every Tier 1 weight above every Tier 2 weight, every Tier 2 above every Tier 3.") }}
+{{- text_area(form, base ~ "match_terms", "Match terms", row.values.get("match_terms", ""), "One per line.") }}
+{{- text_area(form, base ~ "preferred_roles", "Preferred roles", row.values.get("preferred_roles", ""), "One per line: term | term => role | role.") }}
+{{- tick(form, base ~ "remove", "Remove this Signal type", row.removed) }}
+</fieldset>
+{%- endfor %}
+</fieldset>
+<fieldset class="segment-queries">
+<legend>Discovery queries</legend>
+{{- text_area(form, "discovery_queries.places", "Places queries", form.values.get("discovery_queries.places", ""), "One per line; at least one.") }}
+{{- text_area(form, "discovery_queries.registry.keywords", "Companies House keywords", form.values.get("discovery_queries.registry.keywords", ""), "Optional; one per line.") }}
+{{- text_area(form, "discovery_queries.registry.sic_codes", "Companies House SIC codes", form.values.get("discovery_queries.registry.sic_codes", ""), "Optional; one 4- or 5-digit code per line.") }}
+{{- text_area(form, "discovery_queries.job_titles", "Aggregator job titles", form.values.get("discovery_queries.job_titles", ""), "Optional; one per line.") }}
+</fieldset>
+{%- endmacro %}

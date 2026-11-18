@@ -62,6 +62,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "segments": {
         "setup": ("id", "key", "definition", "version", "created_at", "updated_at"),
     },
+    "segment_versions": {
+        "setup": ("id", "segment_id", "version", "definition", "created_at", "actor"),
+    },
     "markets": {
         "setup": (
             "id",

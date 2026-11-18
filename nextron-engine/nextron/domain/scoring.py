@@ -94,6 +94,7 @@ from nextron.domain.segments import (
 from nextron.domain.signals import age_days, is_live, weight_factor
 
 SCORE_LEAD_JOB: Final = "score_lead"
+USE_CURRENT_FIELD: Final = "use_current"  # its payload field: apply the current Segment (11.5)
 RECOMPUTE_TIERS_JOB: Final = "recompute_tiers"  # nextron.jobs.triggers.Trigger.RECOMPUTE_TIERS
 ACTOR: Final = "system:scoring"
 MAX_SCORE: Final = 100

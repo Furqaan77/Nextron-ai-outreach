@@ -10,12 +10,19 @@ pure and live in ``nextron.domain.scoring``; this module reads the Lead's rows t
 
 **``Scoring(clock, pipeline, research)``.**
 
-``@command rescore(lead_id) -> RescoreOutcome`` applies the Lead's current Segment:
+``@command rescore(lead_id, *, use_current=False) -> RescoreOutcome`` applies the Lead's
+Segment at one version (Story 11.5): a Lead never scored (no stored Segment version), or
+``use_current``, gets the Segment's current version; a Lead already scored keeps the version it
+was scored with, read from ``segment_versions`` (``queries.setup.segment_version``), so a
+Segment edit never re-scores an existing Lead silently. Only "Re-score with the current
+definition" (``use_current``) moves a Lead to the current version.
 
 - **Skips** (``RescoreOutcome(SKIPPED, reason)``, nothing written): ``unknown_lead`` (a text
   that isn't a ULID included), ``merged_lead``, ``lead_closed`` (``lost`` or ``disqualified``),
-  ``not_enriched`` (no ``ok`` signal extraction: ``queries.research.last_ok_extraction``) and
-  ``unknown_segment`` (the Lead's Segment has no row).
+  ``not_enriched`` (no ``ok`` signal extraction: ``queries.research.last_ok_extraction``),
+  ``unknown_segment`` (the Lead's Segment has no row) and ``segment_version_missing`` (the
+  Lead's stored version has no ``segment_versions`` row: a version older than Story 11.5's
+  backfill).
 - **The inputs.** Every current Signal (``queries.research.signals``) as a ``ScoringSignal``
   with its live Evidence ids (``signal_evidence_ids``); a Signal that is the Event of one or
   more job postings (``queries.research.job_postings``) is ``open`` only while one of them is
@@ -26,9 +33,9 @@ pure and live in ``nextron.domain.scoring``; this module reads the Lead's rows t
 - **Disqualified** (``domain.scoring.score`` gives a ``Disqualified``):
   ``pipeline.close(lead, disqualified, <the reading's Evidence id>,
   cause=segment_disqualifier, actor="system:scoring")``, then the score group stores the rule's
-  key and its Evidence ids, NULL scores, Tier and factors, the Segment's version and
+  key and its Evidence ids, NULL scores, Tier and factors, the version applied and
   ``tier_computed_at`` now: ``RescoreOutcome(DISQUALIFIED, evidence_id=...)``.
-- **Scored**: the four scores, the Tier, ``tier_computed_at`` now, the Segment's version and
+- **Scored**: the four scores, the Tier, ``tier_computed_at`` now, the version applied and
   the factors (``factors_text``), with the disqualifier columns NULL: ``RescoreOutcome(SCORED,
   tier=..., lead_score=..., factors=<how many>)``.
 
@@ -69,6 +76,7 @@ MERGED_LEAD: Final = "merged_lead"
 LEAD_CLOSED: Final = "lead_closed"
 NOT_ENRICHED: Final = "not_enriched"
 UNKNOWN_SEGMENT: Final = "unknown_segment"
+SEGMENT_VERSION_MISSING: Final = "segment_version_missing"
 
 
 class RescoreResult(StrEnum):
@@ -162,17 +170,26 @@ class Scoring:
         return None
 
     @command
-    def rescore(self, lead_id: str) -> RescoreOutcome:
-        """Score the Lead against its current Segment; see the module docstring."""
+    def rescore(self, lead_id: str, *, use_current: bool = False) -> RescoreOutcome:
+        """Score the Lead against its stored Segment version, or the current one for a Lead
+        never scored or with ``use_current``; see the module docstring."""
         skipped = self._skip_reason(lead_id)
         lead = discovery_queries.lead(lead_id)
         seeded = None if lead is None else setup_queries.segment_by_id(lead.segment_id)
         if skipped is not None or lead is None or seeded is None:
             return RescoreOutcome(RescoreResult.SKIPPED, reason=skipped)
+        definition, version = seeded.definition, seeded.version
+        row = scores_repo.stored_row(lead.id)
+        kept = None if row is None else row.score_segment_version
+        if not use_current and kept is not None and kept != seeded.version:
+            found_version = setup_queries.segment_version(seeded.id, kept)
+            if found_version is None:
+                return RescoreOutcome(RescoreResult.SKIPPED, reason=SEGMENT_VERSION_MISSING)
+            definition, version = found_version.definition, found_version.version
         now = self._clock.now()
         fit_weight, signal_weight = _weights()
         found = scoring.score(
-            seeded.definition,
+            definition,
             scoring_signals(lead.id),
             size_evidence(lead.id),
             fit_weight,
@@ -193,7 +210,7 @@ class Scoring:
                 rule=found.rule_key,
                 evidence=scoring.evidence_text(found.evidence_ids),
                 computed_at=now,
-                segment_version=seeded.version,
+                segment_version=version,
             )
             return RescoreOutcome(RescoreResult.DISQUALIFIED, evidence_id=evidence_id)
         scores_repo.write_score(
@@ -203,7 +220,7 @@ class Scoring:
             lead=found.lead,
             tier=str(found.tier),
             computed_at=now,
-            segment_version=seeded.version,
+            segment_version=version,
             factors=scoring.factors_text(found.fit_factors, found.signal_factors),
         )
         return RescoreOutcome(

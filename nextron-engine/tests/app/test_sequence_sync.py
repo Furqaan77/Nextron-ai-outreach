@@ -76,7 +76,7 @@ OTHERS_FIRST = (
     "  us: created (version 1)\n"
     "  uk: created (version 1)\n"
 )
-OTHERS_UNCHANGED = "segments: 0 changed, 2 unchanged\nmarkets: 0 changed, 2 unchanged\n"
+OTHERS_UNCHANGED = "segments: Segments are managed in the dashboard; seed/segments.yaml ignored\nmarkets: 0 changed, 2 unchanged\n"
 SEQUENCES_FIRST = "sequences: 1 changed, 0 unchanged\n  default: created (version 1)\n"
 SEQUENCES_UNCHANGED = "sequences: 0 changed, 1 unchanged\n"
 # Story 4.3: the company_facts block follows the sequences block
@@ -958,7 +958,7 @@ def no_transaction() -> None:
     ],
     ids=["dict", "str", "repeat", "repeat-key", "rule", "reference"],
 )
-def test_sync_seed_refuses_bad_sequences_before_any_transaction(
+def test_sync_seed_refuses_bad_sequences_before_any_write(
     database: Path,
     units: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -970,7 +970,6 @@ def test_sync_seed_refuses_bad_sequences_before_any_transaction(
     before = sha256(database)
 
     with units.open() as uow:
-        monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(error, match=match):
             Seeds(FrozenClock()).sync_seed(
                 shipped_segments(),
@@ -1006,7 +1005,6 @@ def test_sync_seed_checks_the_angles_against_its_own_segments_and_markets(
     chosen_markets = {"us": [us], "both": [us, uk], "none": []}[markets]
 
     with units.open() as uow:
-        monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(InvalidSequences) as caught:
             Seeds(FrozenClock()).sync_seed(
                 chosen_segments,

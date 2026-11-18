@@ -12,6 +12,9 @@ Story 2.15 adds the score group of ``leads``:
   Evidence ids). ``StoredScore.disqualified`` says whether it holds a Disqualified rule.
 - ``retier_candidates()``: the ids of the Leads the daily ``recompute_tiers`` re-tiers (a stored
   ``tier``, not merged, not ``lost`` or ``disqualified``), by id.
+- ``segment_leads(segment_id)`` (Story 11.5): the ids of the Segment's Leads that aren't merged
+  and aren't ``lost`` or ``disqualified``, by id; ``()`` for a text that isn't a ULID.
+  ``StoredScore.segment_version`` is the Segment version the Lead was scored with.
 """
 
 from dataclasses import dataclass
@@ -21,7 +24,7 @@ from nextron.db.repos.scoring import scores as scores_repo
 from nextron.domain.ids import is_ulid
 from nextron.domain.scoring import Factor, Tier, evidence_from_text, factors_from_text
 
-__all__ = ["StoredScore", "retier_candidates", "stored"]
+__all__ = ["StoredScore", "retier_candidates", "segment_leads", "stored"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,3 +94,8 @@ def stored(lead_id: str) -> StoredScore | None:
 def retier_candidates() -> tuple[str, ...]:
     """The Leads the daily re-tiering visits, by id."""
     return scores_repo.retier_candidates()
+
+
+def segment_leads(segment_id: str) -> tuple[str, ...]:
+    """The Segment's open, unmerged Leads, by id."""
+    return scores_repo.segment_leads(segment_id) if is_ulid(segment_id) else ()

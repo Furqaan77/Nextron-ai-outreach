@@ -1,0 +1,32 @@
+{#- One Segment's edit form and its "Re-score with the current definition" (nextron.web
+    .segments_page, Story 11.5): rendered inside segment.html, and alone as the answer to POST
+    /segments/{id}/edit and /segments/{id}/rescore-current, swapped in for this whole panel.
+    Stored text is escaped with |plain. -#}
+{%- from "segment_form.html" import segment_fields %}
+<div id="segment-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<dl class="segment-facts">
+<dt>Name</dt><dd>{{ segment.name|plain }}</dd>
+<dt>Current version</dt><dd>{{ segment.version }}</dd>
+<dt>Campaigns</dt><dd>{% if segment.campaigns %}{{ segment.campaigns }}{% else %}0 (inert){% endif %}</dd>
+</dl>
+<section class="segment-edit" aria-labelledby="segment-edit-heading">
+<h2 id="segment-edit-heading">Edit</h2>
+<form method="post" action="/segments/{{ segment.id }}/edit" hx-post="/segments/{{ segment.id }}/edit" hx-target="#segment-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="based_on" value="{{ based_on }}">
+{{- segment_fields(form, false) }}
+<button type="submit">Save a new version</button>
+</form>
+</section>
+<section class="segment-rescore" aria-labelledby="segment-rescore-heading">
+<h2 id="segment-rescore-heading">Re-score with the current definition</h2>
+<p>Moves every open Lead of this Segment ({{ open_leads }}) to version {{ segment.version }}. Nothing else re-scores a Lead with a newer version.</p>
+<form method="post" action="/segments/{{ segment.id }}/rescore-current" hx-post="/segments/{{ segment.id }}/rescore-current" hx-target="#segment-panel" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<button type="submit" class="secondary">Re-score with the current definition</button></form>
+</section>
+</div>

@@ -371,3 +371,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-9-create-a-sequence-s-draft-slots-due-times-and-lifecycle-commands.md`
   summary: In Epic 5 (approval and `sending.cancel`), extend `Approval.cancel_pending` (and `cancel_pending_suppressed`) so a stop or suppression also moves each `approved` Draft of the stopped Enrollments to `cancelled` after `sending.cancel(om)` (AD-6 un-approve), so no approved message reaches a suppressed or stopped Contact.
   evidence: Review pass 1 of Story 4.9 (BH, medium, deferred). 4.9 cancels only `ready` Drafts (its spec's Never); nothing can be approved before Epic 5, so no approved Draft exists yet.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-11-5-edit-segments-in-the-dashboard.md`
+  summary: A stored Segment or segment_versions row that no longer decodes (after a future validator change) makes /segments/{id}, its versions page and score_lead raise instead of degrading.
+  evidence: maybe-false, medium if true; only reachable when a later story tightens nextron.domain.segments' validator. Settle by adding such a rule and checking the pages and score_lead; fix with an "unreadable version" row and a skip reason.

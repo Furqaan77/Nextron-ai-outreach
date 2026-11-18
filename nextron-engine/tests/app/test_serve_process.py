@@ -365,7 +365,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0042_4_9_drafts"
+    assert HEAD == "0043_11_5_segment_editing"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]

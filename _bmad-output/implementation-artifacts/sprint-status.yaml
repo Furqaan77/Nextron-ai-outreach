@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-18-2026 18:40
+last_updated: 11-19-2026 10:00
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -203,12 +203,12 @@ development_status:
   10-9-prepare-a-call-sheet-for-a-hot-lead: backlog
   epic-10-retrospective: optional
 
-  epic-11: backlog
+  epic-11: in-progress
   11-1-see-funnel-counts-and-rates-per-contacted-contact: backlog
   11-2-break-the-funnel-down-and-guard-variant-comparisons: backlog
   11-3-show-the-supporting-measures-counter-metrics-and-checkpoints: backlog
   11-4-show-approval-metrics: backlog
-  11-5-edit-segments-in-the-dashboard: backlog
+  11-5-edit-segments-in-the-dashboard: review
   11-6-edit-markets-with-the-compliance-rules-locked: backlog
   11-7-edit-sequences-and-step-briefs: backlog
   11-8-create-and-edit-campaigns-and-variants: backlog

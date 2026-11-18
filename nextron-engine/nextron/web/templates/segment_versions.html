@@ -1,0 +1,36 @@
+{#- A Segment's version history (nextron.web.segments_page, Story 11.5): every stored version,
+    oldest first, with the fields it changed from the version before, and a note when the
+    earliest stored version is above 1. Values render through |plain. -#}
+{% extends "base.html" %}
+{% block title %}Nextron: Segment {{ segment.key|plain }} versions{% endblock %}
+{% block content %}
+<h1>Segment {{ segment.key|plain }}: versions</h1>
+<p>Back to <a href="/segments/{{ segment.id }}">the Segment</a> or <a href="/segments">all Segments</a>.</p>
+{%- if not_kept_before %}
+<p class="segment-versions-not-kept">Versions before v{{ not_kept_before }} were not kept.</p>
+{%- endif %}
+{%- for found in versions %}
+<section class="segment-version" aria-labelledby="segment-version-{{ found.version }}">
+<h2 id="segment-version-{{ found.version }}">Version {{ found.version }}{% if found.current %} (current){% endif %}</h2>
+<p class="segment-version-made">Saved by {{ found.made_by|plain }} on {{ found.made_at }}</p>
+{%- if found.first %}
+<p>First stored version.</p>
+{%- elif not found.changes %}
+<p>No field changed.</p>
+{%- else %}
+<table class="segment-changes">
+<thead>
+<tr><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th></tr>
+</thead>
+<tbody>
+{%- for change in found.changes %}
+<tr class="segment-change"><td>{{ change.path|plain }}</td><td>{{ change.old|plain }}</td><td>{{ change.new|plain }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>
+{%- else %}
+<p>No stored version.</p>
+{%- endfor %}
+{% endblock %}

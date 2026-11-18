@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Segment {{ segment.key|plain }}{% endblock %}
+{% block content %}
+<h1>Segment {{ segment.key|plain }}</h1>
+<p>Saving keeps the earlier versions (<a href="/segments/{{ segment.id }}/versions">see every version</a>). A Segment's key never changes. Back to <a href="/segments">all Segments</a>.</p>
+{% include "segment_panel.html" %}
+{% endblock %}

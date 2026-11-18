@@ -22,12 +22,12 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.scoring.api import RescoreOutcome, RescoreResult, Scoring
 from nextron.app.scoring.lead_scores import LeadScores, RescoreRequest
-from nextron.app.setup.api import Setup
+from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.domain import seed_yaml
 from nextron.domain.pipeline_stage import PipelineStage
-from nextron.domain.segments import validate_segments
+from nextron.domain.segments import file_form, validate_segments
 from tests.app.test_signal_extraction import SEGMENTS, SITE, T0, World, build_world
 
 TEAM_URL = f"https://{SITE}/team"
@@ -403,22 +403,24 @@ def test_the_segment_version_is_kept_until_the_lead_is_re_scored(world: World) -
     lead, _, _ = scored_law_lead(world)
     score(world, lead)
     shipped = validate_segments(seed_yaml.parse(SEGMENTS.read_text(encoding="utf-8")))
-    changed = [
-        replace(
-            segment,
-            signal_types=tuple(
-                replace(each, weight=20) if each.key == "law_contact_form_only" else each
-                for each in segment.signal_types
-            ),
-        )
-        for segment in shipped
-    ]
-    with world.units.open():
-        Setup(world.clock).sync_segments(changed)
+    [law] = [segment for segment in shipped if segment.key == "law_private_ai"]
+    changed = replace(
+        law,
+        signal_types=tuple(
+            replace(each, weight=20) if each.key == "law_contact_form_only" else each
+            for each in law.signal_types
+        ),
+    )
+    with world.units.open():  # Story 11.5: Segments change only through the editor
+        SegmentEditor(world.clock).edit(world.segment, 1, file_form(changed))
     assert world.sql("SELECT version FROM segments WHERE key = 'law_private_ai'") == [(2,)]
 
     recompute(world)
     assert scores(world, lead) == (65, 60, 63, "A", 1, None)  # the stored score stands
 
-    score(world, lead)  # "Re-score" applies the current Segment
+    score(world, lead)  # Story 11.5: a plain re-score keeps the stored version
+    assert scores(world, lead) == (65, 60, 63, "A", 1, None)
+
+    with world.units.open():  # "Re-score with the current definition" applies v2
+        lead_scores(world).score_lead(lead, use_current=True)
     assert scores(world, lead) == (70, 60, 65, "A", 2, None)
