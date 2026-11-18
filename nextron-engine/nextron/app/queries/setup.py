@@ -39,7 +39,9 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   ``sequences`` repository decodes through ``sequence_from_form``, which raises
   ``InvalidSequences`` for a stored Sequence that no longer validates. Campaigns (4.2), Draft
   slots and due times (4.9), the grounding rules (4.13) and drafting (4.15, 4.18) read the
-  Sequences only through these two.
+  Sequences only through these two and ``sequence_by_id(sequence_id)`` (Story 4.8: the Sequence
+  with that row id, or ``None``, a text that isn't a ULID included; a Campaign names its
+  Sequence by id, and Enrollment binds its version).
 - ``offers()``: every stored Offer as a ``SeededOffer(id, key, version, definition)``, by key;
   ``offer(key)``: one, or ``None``. ``definition`` is the ``nextron.domain.offers.OfferDef`` the
   ``offers`` repository decodes through ``offer_from_form``, which raises ``InvalidOffers`` for a
@@ -242,6 +244,14 @@ def sequences() -> tuple[SeededSequence, ...]:
 def sequence(key: str) -> SeededSequence | None:
     """The stored Sequence ``key``, or ``None``."""
     stored = sequences_repo.by_key(key)
+    return None if stored is None else _seeded_sequence(stored)
+
+
+def sequence_by_id(sequence_id: str) -> SeededSequence | None:
+    """The stored Sequence with the row id ``sequence_id``, or ``None``."""
+    if not is_ulid(sequence_id):
+        return None
+    stored = sequences_repo.by_id(sequence_id)
     return None if stored is None else _seeded_sequence(stored)
 
 

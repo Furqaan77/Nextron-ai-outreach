@@ -23,8 +23,21 @@ transaction: entity ``leads``, actor ``system:pipeline``, at the clock's now.
   ``close_disqualified``, sets the stage and appends a row from the old stage, cause
   ``closed_lost`` or ``closed_disqualified``, with the ``cause_ref``; it returns ``True``. A
   Lead already closed (``lost`` or ``disqualified``) is left as it is and gives ``False``; an
-  unknown Lead (a text that isn't a ULID included) raises ``LookupError``. Story 4.8 adds
-  stopping the Lead's Enrollments (AD-4).
+  unknown Lead (a text that isn't a ULID included) raises ``LookupError``. Before the
+  already-closed check it stops the Lead's live Enrollment (AD-4, Story 4.8):
+  ``Sequencing(clock).stop(lead_id=lead_id, cause=lead_closed, cause_ref=cause_ref)``, so a
+  Lead closed earlier still has nothing live.
+- ``@command advance_to_at_least(lead_id, stage, cause_ref=None) -> bool`` (Story 4.8): the only
+  automatic move (AD-4). ``advance(stored stage, stage)``
+  (``nextron.domain.pipeline_stage``): a ``Transition`` sets the stage and appends a row from
+  the old stage, with the move's cause and ``cause_ref``, and gives ``True``; ``None`` (the
+  Lead at or past ``stage``, closed or parked) is a no-op with no event and gives ``False``. A
+  ``stage`` with no automatic move raises ``ValueError`` (before anything is read), a
+  ``cause_ref`` that is neither ``None`` nor a ULID ``ValueError``, and an unknown Lead
+  ``LookupError``.
+- ``@command on_enrolled(n: Enrolled)``: the ``Enrolled`` subscriber; it calls
+  ``advance_to_at_least(n.lead_id, queued, n.enrollment_id)``, so a ``new`` Lead moves to
+  ``queued`` (cause ``enrolled``) and any later stage stays. A repeat is a no-op.
 - ``@command close_suppressed(n: SubjectSuppressed)``: the ``SubjectSuppressed`` subscriber
   (``nextron.main.build_subscribers``). For an opt-out source (``OPT_OUT_SOURCES``:
   ``reply_rule``, ``reply_class``, ``one_click``, ``mailto``) with a ``lead_id``, it calls
@@ -36,19 +49,23 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
+from nextron.app.sequencing.api import Sequencing
 from nextron.db import eventlog
 from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.uow import command
+from nextron.domain.enrollment import StopCause
 from nextron.domain.ids import is_ulid
 from nextron.domain.leads import LeadSource
 from nextron.domain.machines import IllegalTransition
-from nextron.domain.notifications import LeadsMerged, SubjectSuppressed
+from nextron.domain.notifications import Enrolled, LeadsMerged, SubjectSuppressed
 from nextron.domain.pipeline_stage import (
+    AUTOMATIC_EVENTS,
     CLOSED_STAGES,
     CREATION,
     MACHINE,
     PipelineStage,
     StageEvent,
+    advance,
     merged,
     transition,
 )
@@ -128,6 +145,9 @@ class Pipeline:
         stored = stages_repo.stage(lead_id) if is_ulid(lead_id) else None
         if stored is None:
             raise LookupError("close: the Lead is unknown")
+        Sequencing(self._clock).stop(
+            lead_id=lead_id, cause=StopCause.LEAD_CLOSED, cause_ref=cause_ref
+        )
         if stored in CLOSED_STAGES:
             return False
         change = transition(PipelineStage(stored), event)
@@ -150,3 +170,41 @@ class Pipeline:
         if n.lead_id is None or n.source not in OPT_OUT_SOURCES:
             return
         self.close(n.lead_id, PipelineStage.LOST, n.suppression_entry_id)
+
+    @command
+    def advance_to_at_least(
+        self, lead_id: str, stage: PipelineStage, cause_ref: str | None = None
+    ) -> bool:
+        """Move the Lead ``lead_id`` up to ``stage`` when it is behind it; ``False`` for a
+        no-op. See the module docstring."""
+        try:
+            automatic = stage in AUTOMATIC_EVENTS
+        except TypeError:  # an unhashable argument is no stage
+            automatic = False
+        if not automatic:
+            raise ValueError("advance_to_at_least: the stage has no automatic move")
+        if not (cause_ref is None or is_ulid(cause_ref)):
+            raise ValueError("advance_to_at_least: cause_ref must be None or a ULID")
+        stored = stages_repo.stage(lead_id) if is_ulid(lead_id) else None
+        if stored is None:
+            raise LookupError("advance_to_at_least: the Lead is unknown")
+        change = advance(PipelineStage(stored), PipelineStage(stage))
+        if change is None:
+            return False
+        stages_repo.set_stage(lead_id, str(change.to))
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=lead_id,
+            from_status=stored,
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=cause_ref,
+            actor=ACTOR,
+            at=self._clock.now(),
+        )
+        return True
+
+    @command
+    def on_enrolled(self, n: Enrolled) -> None:
+        """Move a newly enrolled Lead to ``queued``."""
+        self.advance_to_at_least(n.lead_id, PipelineStage.QUEUED, n.enrollment_id)

@@ -175,7 +175,8 @@ def test_every_owner_of_a_personal_data_table_registers_its_hook_in_order() -> N
     subscribers = main.build_subscribers().subscribers_of(ContactErased)
 
     assert hook_problems(PII, TABLES, subscribers) == []
-    assert len(subscribers) == len({owner for owner, _ in COVERAGE.values()})
+    # Story 4.8: sequencing's hook stops Enrollments; its tables hold no personal data
+    assert len(subscribers) == len({owner for owner, _ in COVERAGE.values()} | {"sequencing"})
 
 
 def test_the_declarations_are_the_coverage_row() -> None:
@@ -271,6 +272,7 @@ def test_the_hook_check_names_a_missing_hook_a_stranger_and_a_wrong_order() -> N
     assert hook_problems(PII, TABLES, [*real, research.reparent_lead]) == [
         "research's reparent_lead is registered for ContactErased"
     ]
+    # notify's hook (the last) left out
     assert hook_problems(PII, TABLES, real[:-1]) == [
         "notify registers no erase_pii for ContactErased"
     ]

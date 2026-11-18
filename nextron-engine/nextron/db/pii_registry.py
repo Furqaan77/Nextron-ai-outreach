@@ -344,6 +344,32 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "passed": PiiClass.NONE,
         "details": PiiClass.NONE,
     },
+    # Story 4.8. An Enrollment holds IDs, codes and times only: who it is lives in contacts.
+    "enrollments": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "campaign_id": PiiClass.NONE,
+        "variant_id": PiiClass.NONE,
+        "sending_inbox_id": PiiClass.NONE,
+        "sequence_id": PiiClass.NONE,
+        "sequence_version": PiiClass.NONE,
+        "offer_id": PiiClass.NONE,
+        "origin": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "pause_cause": PiiClass.NONE,
+        "stop_cause": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+        "last_step_sent_at": PiiClass.NONE,
+        "ended_at": PiiClass.NONE,
+    },
+    "variant_counters": {
+        "id": PiiClass.NONE,
+        "campaign_id": PiiClass.NONE,
+        "last_variant_id": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Story 2.5. A page's visible text may quote a person, so an erasure nulls it (Story 3.13);
     # the URLs are of an organization's public pages, and the rest are IDs, codes, counts,
     # hashes and times.

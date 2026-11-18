@@ -992,7 +992,8 @@ Lead at `lost` or `disqualified` (any other stage raises `ValueError`) from any 
 stage, with one `events` row (cause `closed_lost` or `closed_disqualified`), and returns `True`;
 an already closed Lead is left as it is and gives `False`, and an unknown Lead raises
 `LookupError`. Story 3.3 calls it for opt-outs (see [The Suppression
-List](#the-suppression-list)); Story 4.8 adds stopping the Lead's Enrollments.
+List](#the-suppression-list)). Before that check it stops the Lead's live Enrollment (Story 4.8,
+cause `lead_closed`), so a Lead closed earlier still has nothing live.
 
 Read a Lead with `queries.discovery.lead(lead_id)` (its identity group, merged or not, or
 `None`) and its stage with `queries.pipeline.stage(lead_id)` (a `PipelineStage`, or `None`).
@@ -1789,6 +1790,8 @@ is exported without code.
 - **`notify`:** `alerts` and `notifications` whose subject is the Contact's id.
 - **`playbook`:** `override_cases`, the Contact's Reply class override cases (Story 4.6: the
   pseudonymised Reply, live or retired, `[erased]` once the Contact is erased).
+- **`sequencing`:** `enrollments`, the Contact's Enrollments (Story 4.8: Campaign, Variant,
+  Sending Inbox, Sequence, Offer, origin, status, causes and dates; every column).
 - **`event_log`:** `contact_history`, the Contact's `events` rows (its Address Class changes).
 
 "Mentions" means the stored text holds the Contact's name, its email address or an earlier
@@ -1999,10 +2002,9 @@ corporate type passes, a `not_corporate` type gives `uk_legal_form_ineligible`, 
 else (a Lead never checked, no link, a record that isn't active) `uk_legal_form_unconfirmed`;
 see [Companies House legal form](#companies-house-legal-form).
 
-**Not yet.** No Event history, Enrollment history or re-contact date is recorded, so
-`evaluate_eligibility` passes none: every `not_now` Lead fails with `not_now_undated` until
-Epic 7 records the date, and the FR-63 history is empty until Story 4.8 (Enrollments) and 2.9
-(Events) pass it. Story 3.7 widened `provenance_records.basis_rule` to 128 characters for the
+**Not yet.** No Event history or re-contact date is passed, so every `not_now` Lead fails with
+`not_now_undated` until Epic 7 records the date. The FR-63 history is the Contact's ended
+Enrollments that sent a Step (Story 4.8, `queries.sequencing.ended_sequences`). Story 3.7 widened `provenance_records.basis_rule` to 128 characters for the
 UK basis; `basis_country(rule)` names the country a basis rule is for (`US`, `GB` or `None`),
 which `Research.record_eligibility_basis` checks against the Campaign's Market.
 
@@ -2175,6 +2177,65 @@ Sender's timezone), SPF, DKIM, DMARC and Alignment (each `Pass`,
 **Recheck** button. Recheck (`POST /inboxes/auth/recheck`, the one field `sending_domain_id`)
 queues the check and says "Recheck queued for <domain>; the result appears here when it
 lands."; a domain with no listed inbox gets "That Sending Domain has no inboxes to check.".
+
+## Enrollments
+
+An Enrollment (FR-3, FR-63, AD-4, AD-16, AD-21, Story 4.8) starts a Contact on a Campaign's
+Sequence. Owner `sequencing` keeps them in `enrollments` and keeps each Campaign's round-robin
+counter in `variant_counters` (migration `0038_4_8_enrollments`); every column is PII class
+`none` (IDs, codes and times), so `sequencing` declares no `ERASURE`.
+
+**Enroll** with `Sequencing(clock).enroll(contact_id, campaign_id, origin, steps)`
+(`nextron/app/sequencing/api.py`), a command that joins the caller's transaction. `origin` is
+one of `selection`, `operator_pick`, `referral`, `recontact`, `restart`; `steps` the Step
+numbers to draft (`(1,)`, ascending, inside the Campaign's Sequence). It returns
+`NewEnrollment(enrollment_id, lead_id, contact_id, campaign_id, variant_id, sending_inbox_id)`
+or an `EnrollRefusal(code, reasons, blocks)` that wrote nothing. The checks, in order:
+
+| Code | When |
+|---|---|
+| `blocked` | the contactability gate (`assert_contactable(Contact, email, cold)`) blocks the Contact; `blocks` are its reasons |
+| `campaign_not_active` | `queries.setup.campaign_active` is false (draft, paused, or a UK Campaign without its LIA) |
+| `missing_tz_or_market` | the Contact has no timezone or Market (AD-11) |
+| `not_eligible` | the live Eligibility Decision fails; `reasons` are its reasons (FR-63's `recontact_not_allowed` among them) |
+| `campaign_mismatch` | the Lead's Segment or the Contact's Market isn't the Campaign's |
+| `lead_already_replied` | the Lead's stage isn't `new`, `queued` or `contacted` |
+| `lead_already_enrolled` | the Lead already has an `active` or `paused` Enrollment |
+| `no_active_variant` | the Campaign has no active Variant |
+| `no_sending_inbox` | no Sending Inbox is `connecting` or `active` |
+
+A wrong argument type, a bad origin or Step list, an unknown Contact or Campaign, or a missing
+Sequence raises (`TypeError`, `ValueError`, `LookupError`) before any write. On success, in one
+transaction: the Variant comes round-robin in name order (inactive ones skipped,
+`domain.enrollment.next_variant`), the inbox from `domain.sending_policy.pick_inbox` (most
+forecast capacity, then fewest live Enrollments, then the earliest registered; every cap is 0
+until Epic 6, so today it spreads by live count); the counter row is upserted; the Enrollment is
+stored `active` with its Variant, inbox, Sequence and version, and Offer bound for good (a
+trigger refuses any change to them); one `events` row (cause `enrolled`); one
+`eligibility_basis` Provenance Record (`research.record_eligibility_basis`, with the Campaign's
+LIA for a UK Campaign); and `Enrolled` moves a `new` Lead to `queued`
+(`Pipeline.advance_to_at_least`). No job is enqueued yet: drafting joins in Story 4.9.
+
+**History.** `queries.sequencing.ended_sequences(contact_id)` feeds Eligibility the Contact's
+ended Enrollments that sent a Step (`replied` when stopped by a Reply or a Manual Reply), so a
+Sequence that ended without a Reply blocks re-contact until FR-63 allows it.
+
+**Stops.** `Sequencing.stop(cause=..., enrollment_id | lead_id | contact_id, cause_ref=None)`
+stops live Enrollments (`ended_at` never before the last Step sent) and is a no-op on ended
+ones. It runs automatically when a suppression blocks the Contact (`suppressed`, before an
+opt-out closes the Lead `lost`), when the Lead is closed `lost` or `disqualified`
+(`lead_closed`, even if it was closed already) and when the Contact is erased
+(`contact_erased`). `Discovery.merge` refuses two Leads that both have a live Enrollment;
+otherwise the loser's Enrollments move to the survivor.
+
+**The Enrollment machine** (`nextron/domain/enrollment.py`):
+
+| Event | From | To | Cause |
+|---|---|---|---|
+| `pause_<cause>` (`inbound_pending`, `uncertain_class`, `operator`) | `active` | `paused` | the pause cause |
+| `resume` | `paused` | `active` | `resumed` |
+| `stop_<cause>` (`reply`, `manual_reply`, `hard_bounce`, `suppressed`, `operator_stop`, `operator_rejected`, `lead_closed`, `inbox_removed`, `contact_erased`) | `active`, `paused` | `stopped` | the stop cause |
+| `complete` | `active`, `paused` | `completed` | `completed` |
 
 ## Leads list and Lead page
 
@@ -2556,6 +2617,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0035_2_11_job_postings` | `job_postings` (foreign keys to `leads`, `signals` and `evidence` with no cascade; `ix_job_postings_lead_id`, `ix_job_postings_signal_id`; unique on `lead_id`, `url` and `title`; `ck_job_postings_source`, `ck_job_postings_board_token`, `ck_job_postings_status` and `ck_job_postings_closed_at`); adds nine nullable counts to `crawl_runs` in place (`add_column`, no check): `careers_postings`, `careers_events`, `<source>_postings` and `<source>_events` for `greenhouse`, `lever` and `ashby`, and `board_errors` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)) | `research` |
 | `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
 | `0037_3_14_erasure_receipts` | `erasure_receipts` (a foreign key to `contacts` with no cascade, `ix_erasure_receipts_contact_id`, reference, `dsr` reference, cause and outcome checks; `trg_erasure_receipts_no_delete` and `trg_erasure_receipts_immutable`), `erasure_receipt_stores` (a foreign key to `erasure_receipts` with no cascade, `ix_erasure_receipt_stores_receipt_id`, store, status, detail and no-`@` checks, unique on `receipt_id` and `store`; triggers: no delete, insert never replaces, update only from `pending` with the store and action unchanged) and `trg_data_subject_requests_receipt` (a request's `receipt_id` must name a receipt of its own Contact) (see [Erasure receipts and the stores outside the database](#erasure-receipts-and-the-stores-outside-the-database)) | `compliance` |
+| `0038_4_8_enrollments` | `enrollments` (foreign keys to `leads`, `contacts`, `campaigns`, `variants`, `sending_inboxes`, `sequences` and `offers` with no cascade; origin, status, cause, ended and version checks; the partial unique index `uq_enrollments_one_live_per_lead`; `ix_enrollments_contact_id`, `ix_enrollments_sending_inbox_id`; triggers `trg_enrollments_bound` (the bound Variant, inbox, Sequence and Offer never change) and `trg_enrollments_erased_insert`) and `variant_counters` (one per Campaign, `uq_variant_counters_campaign_id`) (see [Enrollments](#enrollments)) | `sequencing` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

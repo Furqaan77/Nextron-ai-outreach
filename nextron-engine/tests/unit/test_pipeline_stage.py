@@ -1,6 +1,7 @@
 """The Lead Pipeline Stage machine (``nextron.domain.pipeline_stage``, AD-4): every (stage,
 event) pair is its table row or raises, ``CREATION`` for every source, and ``reopen`` and
-``merged`` on every pair of stages (decision 2)."""
+``merged`` on every pair of stages (decision 2), and ``advance`` (Story 4.8) on every pair of
+stage and target."""
 
 import itertools
 from types import MappingProxyType
@@ -12,6 +13,7 @@ from nextron.domain.leads import LeadSource
 from nextron.domain.machines import IllegalTransition, Transition
 from nextron.domain.pipeline_stage import (
     ADVANCEMENT,
+    AUTOMATIC_EVENTS,
     CLOSED_STAGES,
     CREATION,
     MACHINE,
@@ -21,6 +23,7 @@ from nextron.domain.pipeline_stage import (
     PipelineStage,
     StageCause,
     StageEvent,
+    advance,
     merged,
     reopen,
     transition,
@@ -236,3 +239,64 @@ def test_merged_refuses_what_is_no_stage(bad: object) -> None:
         merged(bad, S.NEW)  # type: ignore[arg-type]
     with pytest.raises(IllegalTransition):
         merged(S.NEW, bad)  # type: ignore[arg-type]
+
+
+# advance (Story 4.8) ------------------------------------------------------------------------------
+
+TARGETS = {"queued": "enroll", "contacted": "send", "replied": "reply", "interested": "hot_reply"}
+
+
+def expected_advance(current: str, target: str) -> tuple[str, str] | None:
+    """The spec's rule, written out: closed and parked stay (but Not Now on a hot Reply), and so
+    does a stage at or past the target; otherwise the target's event row."""
+    if current in ("lost", "disqualified"):
+        return None
+    if current == "not_now":
+        return ("interested", "hot_reply") if target == "interested" else None
+    order = [str(stage) for stage in ADVANCEMENT]
+    if order.index(current) >= order.index(target):
+        return None
+    return EXPECTED[(current, TARGETS[target])]
+
+
+def test_the_automatic_targets_are_the_four_moves() -> None:
+    assert {str(k): str(v) for k, v in AUTOMATIC_EVENTS.items()} == TARGETS
+    assert isinstance(AUTOMATIC_EVENTS, MappingProxyType)
+
+
+@pytest.mark.parametrize(
+    ("current", "target"), list(itertools.product(PipelineStage, [S(t) for t in TARGETS]))
+)
+def test_advance_on_every_stage_and_target(current: PipelineStage, target: PipelineStage) -> None:
+    found = advance(current, target)
+    expected = expected_advance(str(current), str(target))
+
+    if expected is None:
+        assert found is None
+    else:
+        assert found == Transition(S(expected[0]), StageCause(expected[1]))
+
+
+def test_advance_examples() -> None:
+    assert advance(S.NEW, S.QUEUED) == Transition(S.QUEUED, StageCause.ENROLLED)
+    assert advance(S.QUEUED, S.QUEUED) is None
+    assert advance(S.CONTACTED, S.QUEUED) is None
+    assert advance(S.LOST, S.QUEUED) is None
+    assert advance(S.NOT_NOW, S.QUEUED) is None  # the recontact event, not advance
+    assert advance(S.NOT_NOW, S.INTERESTED) == Transition(S.INTERESTED, StageCause.HOT_REPLY)
+    assert advance(S.NEW, S.INTERESTED) == Transition(S.INTERESTED, StageCause.HOT_REPLY)
+    assert advance("new", "queued") == Transition(S.QUEUED, StageCause.ENROLLED)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "target", [S.NEW, S.CALL_BOOKED, S.WON, S.LOST, S.NOT_NOW, "nope", None, 3, []]
+)
+def test_advance_refuses_a_target_without_an_automatic_move(target: object) -> None:
+    with pytest.raises(ValueError, match="no automatic move"):
+        advance(S.NEW, target)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad", ["nope", None, 3, []])
+def test_advance_refuses_what_is_no_stage(bad: object) -> None:
+    with pytest.raises(IllegalTransition):
+        advance(bad, S.QUEUED)  # type: ignore[arg-type]

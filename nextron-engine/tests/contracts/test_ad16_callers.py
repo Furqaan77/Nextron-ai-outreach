@@ -11,9 +11,11 @@ violation.
   the AST finds such a def; the patterns are loose (``*find*email*``, ``*verify*email*``,
   ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever. Not
   built yet: ``find_contact_email``, ``verify_contact_email``, the Signal Inbox chain, replies,
-  ``sequencing.enroll``, ``drafting.request_*``, ``approval.approve``, the pipeline Tasks and
-  call sheets and ``compliance.assert_sendable``: their stories add a scenario here when they
-  build them.
+  ``drafting.request_*``, ``approval.approve``, the pipeline Tasks and call sheets and
+  ``compliance.assert_sendable``: their stories add a scenario here when they build them.
+  ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with Law-PrivateAI x US active
+  and one Sending Inbox: an eligible US Contact's two gate calls (``enroll``'s own and
+  ``evaluate_eligibility``'s) come before its first write, and ``Blocked`` writes nothing.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -68,7 +70,9 @@ from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.people import PeopleExtractions
-from nextron.app.setup.api import Setup
+from nextron.app.sending.api import Sending
+from nextron.app.sequencing.api import Sequencing
+from nextron.app.setup.api import Campaigns, Setup, check_seed
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
@@ -84,8 +88,12 @@ from nextron.domain.contactability import (
 )
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource
 from nextron.domain.leads import LeadIdentity, LeadSource
+from nextron.domain.campaign import validate_campaigns
+from nextron.domain.enrollment import EnrollmentOrigin
 from nextron.domain.markets import validate_markets
+from nextron.domain.offers import validate_offers
 from nextron.domain.segments import validate_segments
+from nextron.domain.sequences import validate_sequences
 from nextron.ports.llm import LlmOk, LlmUsage
 from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
 from tests.app.test_signal_extraction import HOME_HTML as RESEARCH_HOME_HTML
@@ -1027,9 +1035,79 @@ def _no_person_evidence_without_a_contact(world: World) -> None:
     )
 
 
+def _shipped[T](name: str, validate: Callable[[object], T]) -> T:
+    return validate(seed_yaml.parse((main.SEED_DIR / name).read_text(encoding="utf-8")))
+
+
+def _enrollable(world: World) -> str:
+    """The shipped seeds synced, Law-PrivateAI x US active and one Sending Inbox registered
+    (once per world); the Campaign's id."""
+    clock = FrozenClock(T0)
+    with world.engine.connect() as connection:
+        found = connection.exec_driver_sql(
+            "SELECT id, status FROM campaigns WHERE key = 'law_private_ai_us'"
+        ).first()
+    if found is not None and found[1] == "active":
+        return str(found[0])
+    checked = check_seed(
+        _shipped(main.SEGMENTS_FILE_NAME, validate_segments),
+        _shipped(main.MARKETS_FILE_NAME, validate_markets),
+        _shipped(main.SEQUENCES_FILE_NAME, validate_sequences),
+        _shipped(main.OFFERS_FILE_NAME, validate_offers),
+        _shipped(main.CAMPAIGNS_FILE_NAME, validate_campaigns),
+    )
+    world.transact(lambda: Setup(clock).seed_sync(checked, clock.now()))
+    with world.units.open():
+        Setup(clock).save({"sender_name": "Test Sender"})
+    with world.units.open():
+        Sending(clock, env="prod").register_inbox("sender@example-sender.com", "Main")
+    with world.engine.connect() as connection:
+        campaign_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM campaigns WHERE key = 'law_private_ai_us'"
+            ).scalar_one()
+        )
+    with world.units.open():
+        Campaigns(clock).activate(campaign_id)
+    return campaign_id
+
+
+def _enroll(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.8: an eligible US Contact enrolled in the active US Campaign. Its gate call, then
+    the one ``evaluate_eligibility`` makes, both before the first write."""
+    campaign_id = _enrollable(world)
+    domain = f"firm-{tag}.com"
+    identity = LeadIdentity(f"Firm {tag}", world.segment, web_domain=domain, country_code="US")
+    upserted = world.transact(lambda: world.discovery.upsert_lead(identity, LeadSource.CSV))
+    assert upserted.lead_id is not None
+    contact_id = world.adder(
+        upserted.lead_id,
+        ContactCandidate(name=NAME, email=f"jane@{domain}"),
+        ProvenanceSource.WEBSITE,
+    )().contact_id
+    assert contact_id is not None
+    sequencing = Sequencing(FrozenClock(T0))
+
+    def action() -> object:
+        return world.transact(
+            lambda: sequencing.enroll(contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,))
+        )
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate)
+
+
+def _enrolled(world: World) -> None:
+    """An allowed enroll created an Enrollment (the scenario isn't vacuous)."""
+    with world.engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM enrollments").scalar_one() == 1
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
         "discovery.upsert_lead": Scenario((_upsert,)),
+        # Story 4.8: Blocked returns the refusal before any write, so nothing at all is added
+        "sequencing.enroll": Scenario((_enroll,), after_blocked=_enrolled),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1126,6 +1204,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "discovery.csv_import",
         *(f"research.add_contact[{source}]" for source in CONTACT_SOURCES),
         "research.people_extraction",
+        "sequencing.enroll",  # Story 4.8
     }
     assert scenario_problems(package_index(), SCENARIOS) == []
 
@@ -1186,7 +1265,9 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
         },
     )
 
-    assert scenario_problems(index, SCENARIOS) == [
+    # Story 4.8's real scenario left out, so the probe's enroll has none
+    without_enroll = [name for name in SCENARIOS if name != "sequencing.enroll"]
+    assert scenario_problems(index, without_enroll) == [
         "find_contact_email is built (app/research/api.py Research.find_email_for_contact) but "
         "has no scenario",
         "verify_contact_email is built (app/research/api.py Research.verify_address_email) but "
@@ -1238,8 +1319,17 @@ def test_the_insert_scan_finds_the_guarded_repository_inserts() -> None:
 
     assert found[("db/repos/discovery/leads.py", "insert")] == {"leads"}
     assert found[("db/repos/research/contacts.py", "insert")] == {"contacts"}
-    assert set(found.values()) <= {frozenset({"leads"}), frozenset({"contacts"})}
-    assert guarded_models(package_index()) == {"LeadRecord": "leads", "ContactRecord": "contacts"}
+    assert found[("db/repos/sequencing/enrollments.py", "insert")] == {"enrollments"}  # 4.8
+    assert set(found.values()) <= {
+        frozenset({"leads"}),
+        frozenset({"contacts"}),
+        frozenset({"enrollments"}),
+    }
+    assert guarded_models(package_index()) == {
+        "LeadRecord": "leads",
+        "ContactRecord": "contacts",
+        "EnrollmentRecord": "enrollments",
+    }
 
 
 @pytest.mark.parametrize(

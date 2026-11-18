@@ -30,6 +30,7 @@ from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
 from nextron.db import eventlog
@@ -111,6 +112,22 @@ JANE_RECEIPT_REF = "Earlier erase request"
 BOB_RECEIPT_REF = "Older erase request"
 RECEIPT_COLUMNS = ("id", "contact_id", "request_ref", "cause", "outcome", "created_at", "stores")
 RECEIPT_STORE_COLUMNS = ("id", "receipt_id", "store", "action", "status", "detail", "at")
+# Story 4.8: an Enrollment each, written directly (the export only reads them); the ids it is
+# bound to are stand-ins (the raw connection doesn't enforce foreign keys)
+JANE_ENROLLMENT = "01JD3QZ8X5V9K2M7N4P6R8T0E1"
+BOB_ENROLLMENT = "01JD3QZ8X5V9K2M7N4P6R8T0E2"
+BOUND = {
+    "campaign_id": "01JD3QZ8X5V9K2M7N4P6R8T0F1",
+    "variant_id": "01JD3QZ8X5V9K2M7N4P6R8T0F2",
+    "sending_inbox_id": "01JD3QZ8X5V9K2M7N4P6R8T0F3",
+    "sequence_id": "01JD3QZ8X5V9K2M7N4P6R8T0F4",
+    "offer_id": "01JD3QZ8X5V9K2M7N4P6R8T0F5",
+}
+ENROLLMENT_COLUMNS = (
+    "id", "lead_id", "contact_id", "campaign_id", "variant_id", "sending_inbox_id", "sequence_id",
+    "sequence_version", "offer_id", "origin", "status", "pause_cause", "stop_cause", "created_at",
+    "updated_at", "last_step_sent_at", "ended_at",
+)  # fmt: skip
 
 
 @pytest.fixture
@@ -246,7 +263,12 @@ class Seeded:
     """Jane (the Contact exported) and Bob (another Contact on her Lead), and what each holds."""
 
     def __init__(
-        self, world: World, *, jane_entries: bool = True, receipts: bool = True
+        self,
+        world: World,
+        *,
+        jane_entries: bool = True,
+        receipts: bool = True,
+        enrollments: bool = True,
     ) -> None:
         self.lead = world.lead()
         self.jane = world.contact(
@@ -345,6 +367,9 @@ class Seeded:
                 JANE_REPLY, "question", contact_id=self.jane, names=("Jane Doe",)
             )
         )
+        if enrollments:
+            enrollment(world, JANE_ENROLLMENT, self.lead, self.jane, ended=False)
+            enrollment(world, BOB_ENROLLMENT, self.lead, self.bob, ended=True)
         if receipts:
             self.jane_receipt = receipt(world, self.jane, JANE_RECEIPT_REF)
             self.bob_receipt = receipt(world, self.bob, BOB_RECEIPT_REF)
@@ -361,6 +386,35 @@ class Seeded:
             )
         with world.units.open():
             world.compliance.add_value(OLD_ADDRESS)
+
+
+def enrollment(
+    world: World, enrollment_id: str, lead_id: str, contact_id: str, *, ended: bool
+) -> None:
+    """Store an Enrollment for ``contact_id`` (Story 4.8): ``active``, or ``completed`` after
+    one Step."""
+    stamp = "2026-11-18T09:00:00.000000Z"
+    world.sql(
+        "INSERT INTO enrollments (id, lead_id, contact_id, campaign_id, variant_id, "
+        "sending_inbox_id, sequence_id, sequence_version, offer_id, origin, status, pause_cause, "
+        "stop_cause, created_at, updated_at, last_step_sent_at, ended_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'selection', ?, NULL, NULL, ?, ?, ?, ?)",
+        (
+            enrollment_id,
+            lead_id,
+            contact_id,
+            BOUND["campaign_id"],
+            BOUND["variant_id"],
+            BOUND["sending_inbox_id"],
+            BOUND["sequence_id"],
+            BOUND["offer_id"],
+            "completed" if ended else "active",
+            stamp,
+            stamp,
+            stamp if ended else None,
+            stamp if ended else None,
+        ),
+    )
 
 
 def receipt(world: World, contact_id: str, request_ref: str) -> str:
@@ -399,6 +453,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "compliance",
         "notify",
         "playbook",
+        "sequencing",
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (
@@ -499,6 +554,22 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         (seeded.jane_receipt, "database", "done", "Rows tombstoned"),
         (seeded.jane_receipt, "backups", "residual", "2 copies held"),
     ]
+    # Story 4.8: her Enrollment, every column; Bob's isn't hers. Her firm-wide entries
+    # stopped it (sequencing's stop_suppressed)
+    [enrolled] = file["sequencing"]["enrollments"]
+    assert tuple(enrolled) == ENROLLMENT_COLUMNS
+    assert (enrolled["id"], enrolled["contact_id"], enrolled["status"]) == (
+        JANE_ENROLLMENT,
+        seeded.jane,
+        "stopped",
+    )
+    assert {key: enrolled[key] for key in BOUND} == BOUND
+    assert (enrolled["origin"], enrolled["stop_cause"], enrolled["created_at"]) == (
+        "selection",
+        "suppressed",
+        "2026-11-18T09:00:00.000000Z",
+    )
+    assert enrolled["ended_at"] == "2026-11-18T11:00:00.000000Z"
     [alert] = file["notify"]["alerts"]
     assert (alert["subject"], alert["text"]) == (seeded.jane, JANE_ALERT)
     [notice] = file["notify"]["notifications"]
@@ -554,6 +625,7 @@ def test_no_other_contacts_data_or_any_hash_id_or_cause_is_in_the_file(world: Wo
         BOB_CAUSE,
         BOB_RECEIPT_REF,  # Story 3.14: Bob's receipt
         seeded.bob_receipt,
+        BOB_ENROLLMENT,  # Story 4.8: Bob's Enrollment
     ):
         assert value not in text, value
     assert TEAM_TEXT not in json.loads(text)["research"]["pages"][0].values()
@@ -742,6 +814,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     assert file["compliance"]["erasure_receipts"] == []
     assert file["notify"] == {"alerts": [], "notifications": []}
     assert file["playbook"] == {"override_cases": []}
+    assert file["sequencing"] == {"enrollments": []}
     assert file["event_log"] == {"contact_history": []}
 
 
@@ -805,6 +878,13 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     assert erase_request["receipt_id"] == stored_receipt["id"]
     assert (stored_receipt["request_ref"], stored_receipt["outcome"]) == (ERASE_REF, "erased")
     assert len(stored_receipt["stores"]) == 17
+    # Story 4.8: sequencing's hook stopped her live Enrollment
+    [enrolled] = file["sequencing"]["enrollments"]
+    assert (enrolled["id"], enrolled["status"], enrolled["stop_cause"]) == (
+        JANE_ENROLLMENT,
+        "stopped",
+        "suppressed",  # a DSR erasure suppresses first (Story 4.8)
+    )
 
 
 def test_an_entry_found_only_by_a_request_is_exported(world: World) -> None:
@@ -995,6 +1075,9 @@ def test_the_readers_return_every_column(world: World) -> None:
     assert [row["entity_id"] for row in history] == [seeded.jane]
     with pytest.raises(LookupError):
         world.read(lambda: research_queries.export_pii("nope"))
+    bobs = world.read(lambda: sequencing_queries.export_pii(seeded.bob))["enrollments"]
+    assert [row["id"] for row in bobs] == [BOB_ENROLLMENT]  # Story 4.8
+    assert world.read(lambda: sequencing_queries.export_pii("nope")) == {"enrollments": ()}
     assert world.read(lambda: compliance_queries.export_pii("nope", [])) == {
         "suppression": (),
         "requests": (),

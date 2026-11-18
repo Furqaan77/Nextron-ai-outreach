@@ -168,12 +168,14 @@ def withheld_values(world: World, coverage: Mapping[str, Coverage]) -> dict[str,
 def test_every_personal_data_table_is_covered_by_its_owner() -> None:
     assert coverage_problems(COVERAGE, PII, TABLES) == []
     # Story 4.6's ai_test_cases and Story 2.11's job_postings
-    assert len(personal_columns(PII)) == len(COVERAGE) == 17
+    assert len(personal_columns(PII)) == 17
+    assert len(COVERAGE) == 18  # Story 4.8's enrollments: no personal data, but a Contact's
     assert CONTACT_TABLES == {
         "provenance_records",
         "evidence",
         "data_subject_requests",
         "erasure_receipts",  # Story 3.14
+        "enrollments",  # Story 4.8
     }
 
 
@@ -332,7 +334,7 @@ def full_file() -> dict[str, Any]:
         if isinstance(entry, Exported):
             row = {
                 entry.shown_as.get(column, column): "x"
-                for column in needed[table] - set(entry.withheld)
+                for column in needed.get(table, frozenset()) - set(entry.withheld)
             }
             file.setdefault(entry.owner, {})[entry.section] = [row]
     return file

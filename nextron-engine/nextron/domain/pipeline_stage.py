@@ -53,8 +53,18 @@ it, or ``None`` when it keeps its stage:
    that ``hot_reply`` and ``book_call`` move on from);
 4. a tie keeps the survivor's stage.
 
-``reopen`` and ``merged`` are functions, not table rows, because their target depends on more
-than the event.
+**Advancing (Story 4.8).** ``advance(current, target)`` is the automatic move behind
+``Pipeline.advance_to_at_least(target)``: the ``Transition`` that brings ``current`` up to
+``target``, or ``None`` when nothing moves. ``AUTOMATIC_EVENTS`` holds the only targets and the
+event each applies: ``queued`` (``enroll``), ``contacted`` (``send``), ``replied`` (``reply``)
+and ``interested`` (``hot_reply``); any other target raises ``ValueError``. It is ``None`` when
+``current`` is closed, when it is parked (``not_now``), except ``not_now`` to ``interested`` on
+a hot Reply, and when ``current`` is at or past ``target`` in ``ADVANCEMENT``. Not Now's move to
+``queued`` is the ``recontact`` event, which the re-contact story applies, not ``advance``. A
+``current`` that is no stage raises ``IllegalTransition``.
+
+``reopen``, ``merged`` and ``advance`` are functions, not table rows, because their target
+depends on more than the event.
 """
 
 from collections.abc import Mapping
@@ -224,6 +234,16 @@ TRANSITIONS: Final[
 
 _REOPENABLE: Final = frozenset((*OPEN_STAGES, *PARKED_STAGES))
 
+# The targets of the automatic moves (advance_to_at_least) and the event each applies.
+AUTOMATIC_EVENTS: Final[Mapping[PipelineStage, StageEvent]] = MappingProxyType(
+    {
+        PipelineStage.QUEUED: StageEvent.ENROLL,
+        PipelineStage.CONTACTED: StageEvent.SEND,
+        PipelineStage.REPLIED: StageEvent.REPLY,
+        PipelineStage.INTERESTED: StageEvent.HOT_REPLY,
+    }
+)
+
 
 def transition(
     current: PipelineStage, event: StageEvent
@@ -280,3 +300,24 @@ def merged(
     if ADVANCEMENT.index(other) > ADVANCEMENT.index(kept):
         return Transition(other, StageCause.LEADS_MERGED)
     return None
+
+
+def advance(
+    current: PipelineStage, target: PipelineStage
+) -> Transition[PipelineStage, StageCause] | None:
+    """The automatic move that brings ``current`` up to ``target``, or ``None``; see the module
+    docstring."""
+    wanted = _stage(target)
+    event = None if wanted is None else AUTOMATIC_EVENTS.get(wanted)
+    if wanted is None or event is None:
+        raise ValueError("advance: the target has no automatic move")
+    stored = _stage(current)
+    if stored is None:
+        raise IllegalTransition(MACHINE, event, current)
+    if stored in CLOSED_STAGES:
+        return None
+    if stored in PARKED_STAGES:
+        return transition(stored, event) if wanted is PipelineStage.INTERESTED else None
+    if ADVANCEMENT.index(stored) >= ADVANCEMENT.index(wanted):
+        return None
+    return transition(stored, event)

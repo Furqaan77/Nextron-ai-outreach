@@ -1,6 +1,410 @@
-"""Public command API of the ``sequencing`` service.
+"""Public command API of the ``sequencing`` service (AD-3, AD-4, AD-16, AD-21, FR-3, FR-63;
+Story 4.8).
 
 Other services and the delivery layers change ``sequencing`` data only through this module (AD-3).
-Commands join the caller's unit of work and never begin, commit or roll back. Empty until a
-story adds a command.
+Commands join the caller's unit of work and never begin, commit or roll back.
+
+``Sequencing(clock)`` owns ``enrollments`` and ``variant_counters`` and applies the Enrollment
+machine (``nextron.domain.enrollment``). Every status change appends one ``events`` row in the
+same transaction: entity ``enrollments``, at the clock's now, actor ``operator`` for origin
+``operator_pick`` and the stop causes ``operator_stop`` and ``operator_rejected``, otherwise
+``system:sequencing``.
+
+**``@command enroll(contact_id, campaign_id, origin, steps) -> NewEnrollment | EnrollRefusal``**
+is the only creator of an Enrollment. It runs in the caller's transaction.
+
+1. **Arguments.** ``contact_id`` and ``campaign_id`` must be ``str``, ``origin`` an
+   ``EnrollmentOrigin`` value and ``steps`` a non-empty ``tuple`` or ``list`` of ``int`` Step
+   numbers (``bool`` refused), strictly ascending, each within the Campaign's Sequence: another
+   type raises ``TypeError``, a bad value ``ValueError``. An unknown Contact or Campaign, or a
+   Campaign whose Sequence is missing, raises ``LookupError``; a stored Campaign that no longer
+   decodes raises its ``InvalidCampaigns`` (fail closed). Nothing is written.
+2. **Refusals**, checked in this order, each an ``EnrollRefusal`` with nothing written:
+   ``blocked`` (``compliance_api.assert_contactable(ContactSubject(contact_id), "email",
+   "cold")``, looked up at call time, answers ``Blocked``; ``blocks`` are its reasons);
+   ``campaign_not_active`` (``queries.setup.campaign_active``); ``missing_tz_or_market`` (the
+   Contact has no ``tz`` or no ``market_id``, AD-11); ``not_eligible``
+   (``Compliance(clock).evaluate_eligibility``, with the Contact's Enrollment history; ``reasons``
+   are the Decision's; the Decision is never stored); ``campaign_mismatch`` (the Lead's Segment
+   or the Contact's Market isn't the Campaign's); ``lead_already_replied`` (the Lead's stage
+   isn't ``new``, ``queued`` or ``contacted``); ``lead_already_enrolled`` (the Lead has a live
+   Enrollment; ``uq_enrollments_one_live_per_lead`` also refuses a raw duplicate);
+   ``no_active_variant``; ``no_sending_inbox`` (``queries.sending.inboxes_for_binding()`` is
+   empty).
+3. **Binding.** The Variant is ``next_variant(campaign.variants, last)`` from the Campaign's
+   counter (round-robin in name order, skipping inactive Variants). The inbox is
+   ``pick_inbox`` over the bindable inboxes, each weighed by ``capacity_forecast(its cold Daily
+   Cap, its follow-ups due)`` on today's date in the ``sender_timezone`` (UTC while that is unset
+   or unreadable), its live Enrollments and when it was registered. Until Epic 6 every cap is 0
+   (``queries.sending.cold_daily_caps``) and no follow-up is due until Story 4.9 fills
+   ``_follow_ups_due``, so the inbox with the fewest live Enrollments wins, then the earliest
+   registered.
+4. **Writes**, in order: the Campaign's ``variant_counters`` row upserted; the Enrollment
+   inserted ``active`` with its ``variant_id``, ``sending_inbox_id``, ``sequence_id``,
+   ``sequence_version``, ``offer_id`` and ``origin`` bound for good, and one ``events`` row
+   (``None`` to ``active``, cause ``enrolled``, ``cause_ref`` the Campaign);
+   ``research.record_eligibility_basis(contact_id, decision, campaign_id, lia_ref, lia_date,
+   now)`` with the Campaign's LIA only when ``needs_lia`` of its Market's country, else
+   ``None, None``; then ``Enrolled(enrollment_id, lead_id)`` is published (its subscriber,
+   ``Pipeline.on_enrolled``, moves a ``new`` Lead to ``queued``). No job is enqueued (drafting
+   joins in Story 4.9). It returns ``NewEnrollment``.
+
+Only ``enroll`` has "enroll" in a def name here (the AD-16 manifest matches ``*enroll*``), and
+the ``enrollments`` insert is called lexically inside it.
+
+**``@command stop(*, cause, enrollment_id=None, lead_id=None, contact_id=None,
+cause_ref=None) -> tuple[str, ...]``** stops live Enrollments: the one ``enrollment_id`` (an
+unknown one raises ``LookupError``), the Lead's or every one of the Contact's; exactly one of
+the three is given (otherwise ``ValueError``). ``cause`` is a ``StopCause`` value and
+``cause_ref`` ``None`` or a ULID (otherwise ``ValueError``; a non-``str`` id ``TypeError``). Each
+live one moves to ``stopped`` with its ``stop_cause``, its ``pause_cause`` cleared and
+``ended_at`` = ``max(now, last_step_sent_at)``, so the ``ended_at >= last_step_sent_at`` CHECK
+never rolls a stop back, with one ``events`` row. An ended Enrollment is left as it is, so a
+repeat is a no-op. It returns the ids it stopped, oldest first. Story 4.9 adds
+``approval.cancel_pending`` here.
+
+**Subscribers** (``nextron.main.build_subscribers``), each idempotent:
+
+- ``@command stop_suppressed(n: SubjectSuppressed)``: stops, cause ``suppressed`` and
+  ``cause_ref`` the entry, the named Contact's live Enrollments, then every live Enrollment whose
+  Contact the gate now blocks on ``email`` for ``cold`` (a domain or shared key suppression
+  reaches Contacts the notification doesn't name).
+- ``@command erase_pii(n: ContactErased)``: stops the Contact's live Enrollments, cause
+  ``contact_erased``. ``sequencing``'s tables hold no personal data, so it declares no
+  ``ERASURE``.
+- ``@command reparent_lead(n: LeadsMerged)``: moves the merged Lead's Enrollments to the
+  survivor (``Discovery.merge`` refuses a merge when both Leads have a live one); when the
+  survivor is closed (``lost`` or ``disqualified``), the live one it now holds stops with
+  ``lead_closed``, ``cause_ref`` the merged Lead.
 """
+
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, tzinfo
+from types import MappingProxyType
+from typing import Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from nextron.app.compliance import api as compliance_api
+from nextron.app.compliance.api import Compliance
+from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import pipeline as pipeline_queries
+from nextron.app.queries import research as research_queries
+from nextron.app.queries import sending as sending_queries
+from nextron.app.queries import sequencing as sequencing_queries
+from nextron.app.queries import setup as setup_queries
+from nextron.app.research.api import Research
+from nextron.db import eventlog
+from nextron.db.repos.sequencing import enrollments as enrollments_repo
+from nextron.db.repos.sequencing import variant_counters as counters_repo
+from nextron.db.repos.sequencing.enrollments import StoredEnrollment
+from nextron.db.uow import command, current
+from nextron.domain.campaign import needs_lia
+from nextron.domain.contactability import Blocked, ContactSubject
+from nextron.domain.enrollment import (
+    CREATION,
+    LIVE_STATUSES,
+    STOP_EVENTS,
+    EnrollmentOrigin,
+    EnrollmentStatus,
+    EnrollRefusal,
+    NewEnrollment,
+    RefusalCode,
+    StopCause,
+    next_variant,
+    transition,
+)
+from nextron.domain.ids import is_ulid
+from nextron.domain.notifications import ContactErased, Enrolled, LeadsMerged, SubjectSuppressed
+from nextron.domain.pipeline_stage import CLOSED_STAGES, PipelineStage
+from nextron.domain.sending_policy import InboxLoad, capacity_forecast, pick_inbox
+from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
+from nextron.ports.clock import Clock
+
+ENTITY: Final = "enrollments"
+SYSTEM_ACTOR: Final = "system:sequencing"
+OPERATOR_ACTOR: Final = "operator"
+OPERATOR_STOPS: Final = frozenset({StopCause.OPERATOR_STOP, StopCause.OPERATOR_REJECTED})
+ENROLLABLE_STAGES: Final = frozenset(
+    {PipelineStage.NEW, PipelineStage.QUEUED, PipelineStage.CONTACTED}
+)
+CHANNEL: Final = "email"
+PURPOSE: Final = "cold"
+
+
+def _origin_of(origin: object) -> EnrollmentOrigin:
+    if not isinstance(origin, str):
+        raise TypeError(f"enroll takes an EnrollmentOrigin, not {type(origin).__name__}")
+    try:
+        return EnrollmentOrigin(origin)
+    except ValueError:
+        raise ValueError("enroll: the origin is unknown") from None
+
+
+def _checked_steps(steps: object) -> tuple[int, ...]:
+    """``steps`` as a tuple; ``TypeError`` or ``ValueError`` when it isn't Step numbers."""
+    if not isinstance(steps, tuple | list):
+        raise TypeError(f"enroll takes the steps as a tuple, not {type(steps).__name__}")
+    if not all(isinstance(step, int) and not isinstance(step, bool) for step in steps):
+        raise TypeError("enroll takes the steps as int Step numbers")
+    found = tuple(steps)
+    if not found:
+        raise ValueError("enroll needs at least one Step")
+    if any(later <= earlier for earlier, later in zip(found, found[1:], strict=False)):
+        raise ValueError("enroll takes the steps in ascending order, each once")
+    return found
+
+
+def _stop_cause_of(cause: object) -> StopCause:
+    if not isinstance(cause, str):
+        raise TypeError(f"stop takes a StopCause, not {type(cause).__name__}")
+    try:
+        return StopCause(cause)
+    except ValueError:
+        raise ValueError("stop: the cause is unknown") from None
+
+
+def _actor_of_origin(origin: EnrollmentOrigin) -> str:
+    return OPERATOR_ACTOR if origin is EnrollmentOrigin.OPERATOR_PICK else SYSTEM_ACTOR
+
+
+def _actor_of_stop(cause: StopCause) -> str:
+    return OPERATOR_ACTOR if cause in OPERATOR_STOPS else SYSTEM_ACTOR
+
+
+def _local_date(now: datetime) -> date:
+    """The date of ``now`` in ``sender_timezone``, or in UTC while it is unset or unreadable."""
+    zone: tzinfo = UTC
+    try:
+        zone = ZoneInfo(str(setup_queries.get(Key.SENDER_TIMEZONE)))
+    except (SettingNotSet, InvalidSettingValue, ZoneInfoNotFoundError, ValueError, OSError):
+        pass
+    return now.astimezone(zone).date()
+
+
+def _follow_ups_due(local_date: date) -> Mapping[str, int]:
+    """Each inbox's follow-ups due on ``local_date``: none until Story 4.9 reads them from
+    ``queries.drafting``."""
+    return MappingProxyType({})
+
+
+def _picked_inbox(inboxes: Sequence[sending_queries.SendingInboxView], now: datetime) -> str:
+    """The bindable inbox a new Enrollment binds to (``pick_inbox``)."""
+    local_date = _local_date(now)
+    caps = sending_queries.cold_daily_caps(local_date)
+    due = _follow_ups_due(local_date)
+    live = sequencing_queries.live_counts_by_inbox()
+    loads = [
+        InboxLoad(
+            inbox_id=inbox.id,
+            capacity=capacity_forecast(caps.get(inbox.id, 0), due.get(inbox.id, 0)),
+            live=live.get(inbox.id, 0),
+            registered_at=inbox.created_at,
+        )
+        for inbox in inboxes
+    ]
+    picked = pick_inbox(loads)
+    if picked is None:  # the caller refused an empty list already
+        raise LookupError("no Sending Inbox to bind")
+    return picked
+
+
+def _country_of(market_id: str) -> str | None:
+    found = next((market for market in setup_queries.markets() if market.id == market_id), None)
+    return None if found is None else found.definition.country_code
+
+
+class Sequencing:
+    """Enrollments of Contacts in Campaigns; see the module docstring."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    @command
+    def enroll(
+        self, contact_id: str, campaign_id: str, origin: EnrollmentOrigin, steps: Sequence[int]
+    ) -> NewEnrollment | EnrollRefusal:
+        """Enroll the Contact ``contact_id`` in the Campaign ``campaign_id``, or refuse; see the
+        module docstring."""
+        if not isinstance(contact_id, str) or not isinstance(campaign_id, str):
+            raise TypeError("enroll takes the Contact and Campaign ids as str")
+        chosen_origin = _origin_of(origin)
+        chosen_steps = _checked_steps(steps)
+        contact = research_queries.contact(contact_id)
+        if contact is None:
+            raise LookupError("enroll: the Contact is unknown")
+        campaign = setup_queries.campaign(campaign_id)
+        if campaign is None:
+            raise LookupError("enroll: the Campaign is unknown")
+        sequence = setup_queries.sequence_by_id(campaign.sequence_id)
+        if sequence is None:
+            raise LookupError("enroll: the Campaign's Sequence is missing")
+        if chosen_steps[-1] > len(sequence.definition.steps) or chosen_steps[0] < 1:
+            raise ValueError("enroll: a Step isn't in the Campaign's Sequence")
+        lead = discovery_queries.lead(contact.lead_id)
+        if lead is None:  # the contacts table's foreign key keeps it
+            raise LookupError("enroll: the Contact's Lead is unknown")
+
+        # (1) the gate, a global looked up at call time (AD-16), before anything else
+        answer = compliance_api.assert_contactable(ContactSubject(contact.id), CHANNEL, PURPOSE)
+        if isinstance(answer, Blocked):
+            return EnrollRefusal(RefusalCode.BLOCKED, blocks=answer.reasons)
+        if not setup_queries.campaign_active(campaign.id):
+            return EnrollRefusal(RefusalCode.CAMPAIGN_NOT_ACTIVE)
+        if contact.tz is None or contact.market_id is None:
+            return EnrollRefusal(RefusalCode.MISSING_TZ_OR_MARKET)
+        decision = Compliance(self._clock).evaluate_eligibility(contact.id)
+        if not decision.eligible:
+            return EnrollRefusal(RefusalCode.NOT_ELIGIBLE, reasons=decision.reasons)
+        if lead.segment_id != campaign.segment_id or contact.market_id != campaign.market_id:
+            return EnrollRefusal(RefusalCode.CAMPAIGN_MISMATCH)
+        if pipeline_queries.stage(lead.id) not in ENROLLABLE_STAGES:
+            return EnrollRefusal(RefusalCode.LEAD_ALREADY_REPLIED)
+        if sequencing_queries.live_enrollment(lead.id) is not None:
+            return EnrollRefusal(RefusalCode.LEAD_ALREADY_ENROLLED)
+        variant_id = next_variant(campaign.variants, counters_repo.last_variant_id(campaign.id))
+        if variant_id is None:
+            return EnrollRefusal(RefusalCode.NO_ACTIVE_VARIANT)
+        inboxes = sending_queries.inboxes_for_binding()
+        if not inboxes:
+            return EnrollRefusal(RefusalCode.NO_SENDING_INBOX)
+
+        now = self._clock.now()
+        inbox_id = _picked_inbox(inboxes, now)
+        counters_repo.record(campaign.id, variant_id, now)
+        enrollment_id = enrollments_repo.insert(
+            lead_id=lead.id,
+            contact_id=contact.id,
+            campaign_id=campaign.id,
+            variant_id=variant_id,
+            sending_inbox_id=inbox_id,
+            sequence_id=sequence.id,
+            sequence_version=sequence.version,
+            offer_id=campaign.offer_id,
+            origin=str(chosen_origin),
+            status=str(CREATION.to),
+            at=now,
+        )
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=enrollment_id,
+            from_status=None,
+            to_status=str(CREATION.to),
+            cause=str(CREATION.cause),
+            cause_ref=campaign.id,
+            actor=_actor_of_origin(chosen_origin),
+            at=now,
+        )
+        lia = campaign.lia if needs_lia(_country_of(campaign.market_id)) else None
+        Research(self._clock).record_eligibility_basis(
+            contact.id,
+            decision,
+            campaign.id,
+            None if lia is None else lia.ref,
+            None if lia is None else lia.date,
+            now,
+        )
+        current().publish(Enrolled(enrollment_id=enrollment_id, lead_id=lead.id))
+        return NewEnrollment(
+            enrollment_id=enrollment_id,
+            lead_id=lead.id,
+            contact_id=contact.id,
+            campaign_id=campaign.id,
+            variant_id=variant_id,
+            sending_inbox_id=inbox_id,
+        )
+
+    @command
+    def stop(
+        self,
+        *,
+        cause: StopCause,
+        enrollment_id: str | None = None,
+        lead_id: str | None = None,
+        contact_id: str | None = None,
+        cause_ref: str | None = None,
+    ) -> tuple[str, ...]:
+        """Stop the live Enrollments named; the ids stopped. See the module docstring."""
+        chosen = _stop_cause_of(cause)
+        named = [value for value in (enrollment_id, lead_id, contact_id) if value is not None]
+        if len(named) != 1:
+            raise ValueError("stop takes exactly one of enrollment_id, lead_id and contact_id")
+        if not isinstance(named[0], str):
+            raise TypeError("stop takes the id as str")
+        if not (cause_ref is None or is_ulid(cause_ref)):
+            raise ValueError("stop: cause_ref must be None or a ULID")
+        if enrollment_id is not None:
+            found = sequencing_queries.enrollment(enrollment_id)
+            if found is None:
+                raise LookupError("stop: the Enrollment is unknown")
+            rows = [found] if EnrollmentStatus(found.status) in LIVE_STATUSES else []
+        elif lead_id is not None:
+            live = sequencing_queries.live_enrollment(lead_id)
+            rows = [] if live is None else [live]
+        else:
+            assert contact_id is not None
+            rows = enrollments_repo.live_for_contact(contact_id) if is_ulid(contact_id) else []
+        now = self._clock.now()
+        return tuple(self._stop_row(row, chosen, cause_ref, now) for row in rows)
+
+    def _stop_row(
+        self, row: StoredEnrollment, cause: StopCause, cause_ref: str | None, now: datetime
+    ) -> str:
+        """Move one live Enrollment to ``stopped``; its id."""
+        current_status = EnrollmentStatus(row.status)
+        change = transition(current_status, STOP_EVENTS[cause])
+        last_step = row.last_step_sent_at
+        ended_at = now if last_step is None else max(now, last_step)
+        enrollments_repo.set_status(
+            row.id,
+            status=str(change.to),
+            pause_cause=None,
+            stop_cause=str(cause),
+            ended_at=ended_at,
+            at=now,
+        )
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=row.id,
+            from_status=str(current_status),
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=cause_ref,
+            actor=_actor_of_stop(cause),
+            at=now,
+        )
+        return row.id
+
+    @command
+    def stop_suppressed(self, n: SubjectSuppressed) -> None:
+        """Stop the live Enrollments a suppression now blocks; see the module docstring."""
+        if n.contact_id is not None:
+            self.stop(
+                cause=StopCause.SUPPRESSED,
+                contact_id=n.contact_id,
+                cause_ref=n.suppression_entry_id,
+            )
+        now = self._clock.now()
+        for row in enrollments_repo.live():
+            answer = compliance_api.assert_contactable(
+                ContactSubject(row.contact_id), CHANNEL, PURPOSE
+            )
+            if isinstance(answer, Blocked):
+                self._stop_row(row, StopCause.SUPPRESSED, n.suppression_entry_id, now)
+
+    @command
+    def erase_pii(self, n: ContactErased) -> None:
+        """Stop the erased Contact's live Enrollments (cause ``contact_erased``)."""
+        self.stop(cause=StopCause.CONTACT_ERASED, contact_id=n.contact_id)
+
+    @command
+    def reparent_lead(self, n: LeadsMerged) -> None:
+        """Move the merged Lead's Enrollments to the survivor; stop a moved live one when the
+        survivor is closed."""
+        enrollments_repo.move_lead(n.merged_lead_id, n.survivor_lead_id, self._clock.now())
+        if pipeline_queries.stage(n.survivor_lead_id) in CLOSED_STAGES:
+            self.stop(
+                cause=StopCause.LEAD_CLOSED,
+                lead_id=n.survivor_lead_id,
+                cause_ref=n.merged_lead_id,
+            )
+

@@ -123,7 +123,8 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
   ``queries.compliance.export_pii(contact_id, export_hashes(...))`` with the hashes of every
   key held for the Contact (its stored values, its Lead's ``web_domain`` through
   ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii``,
-  ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6) and
+  ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6),
+  ``queries.sequencing.export_pii`` (the Contact's Enrollments, Story 4.8) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -186,11 +187,14 @@ the send gate, 6.9) calls it, and it is the only caller of
    ``confirmed`` corporate code and for a ``not_corporate`` code (so the reason is
    ``uk_legal_form_ineligible``); anything else, a Lead never checked included, is unconfirmed
    (``uk_legal_form_unconfirmed`` in a GB Market).
-6. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code, stage,
-   legal_form=, legal_form_confirmed=), market_rules, clock.now())``. No Enrollment history,
-   Event times or re-contact date is read yet (Stories 4.8, 2.9 and Epic 7 pass them), so
-   ``history`` and ``events_first_seen`` are empty and ``recontact_on`` is ``None`` (every
-   ``not_now`` Lead fails with ``not_now_undated``).
+6. **History (FR-63, Story 4.8).** ``history`` is ``queries.sequencing.ended_sequences(
+   contact.id)``: the Contact's ended Enrollments that sent a Step, so a Sequence that ended
+   without a Reply blocks a re-contact (``recontact_not_allowed``) until FR-63 allows it.
+7. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code, stage,
+   legal_form=, legal_form_confirmed=), market_rules, clock.now())``. No Event times or
+   re-contact date is read yet (Stories 2.9 and Epic 7 pass them), so ``events_first_seen``
+   is empty and ``recontact_on`` is ``None`` (every ``not_now`` Lead fails with
+   ``not_now_undated``).
 
 Nothing is written, cached or logged: each call reads the current facts again, so an edit to a
 Market, a suppression or a stage change shows in the very next Decision.
@@ -213,6 +217,7 @@ from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
@@ -625,6 +630,7 @@ class Compliance:
                 "compliance": compliance_queries.export_pii(contact_id, hashes),
                 "notify": notify_queries.export_pii(contact_id),
                 "playbook": playbook_queries.export_pii(contact_id),
+                "sequencing": sequencing_queries.export_pii(contact_id),
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )
@@ -694,6 +700,7 @@ class Compliance:
                 provenance_recorded=provenance_recorded(
                     contact.email, research_queries.provenance(contact.id)
                 ),
+                history=sequencing_queries.ended_sequences(contact.id),
             ),
             EligibilityLead(
                 country_code=lead.country_code,

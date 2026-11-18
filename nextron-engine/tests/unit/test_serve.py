@@ -28,6 +28,7 @@ from nextron.app.ops import api as ops_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
+from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup import api as setup_api
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
 from nextron.db import migrations
@@ -41,6 +42,7 @@ from nextron.domain.ai_test_gate import TestSet
 from nextron.domain.notifications import (
     NOTIFICATIONS,
     ContactErased,
+    Enrolled,
     LeadsMerged,
     SubjectSuppressed,
 )
@@ -780,20 +782,25 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert subscribers.frozen
     found = subscribers.subscribers_of(LeadsMerged)
     assert all(is_command(subscriber) for subscriber in found)
-    assert [subscriber.__name__ for subscriber in found] == ["reparent_lead", "reparent_lead"]
+    assert [subscriber.__name__ for subscriber in found] == ["reparent_lead"] * 3
     owners = [type(getattr(subscriber, "__self__", None)) for subscriber in found]
-    assert owners == [Pipeline, Research]  # pipeline first, then research
-    [suppressed] = subscribers.subscribers_of(SubjectSuppressed)  # Story 3.3
-    assert is_command(suppressed)
-    assert suppressed.__name__ == "close_suppressed"
-    assert type(getattr(suppressed, "__self__", None)) is Pipeline
+    assert owners == [Pipeline, Research, Sequencing]  # pipeline, research, then sequencing
+    suppressed = subscribers.subscribers_of(SubjectSuppressed)  # Stories 4.8 and 3.3
+    assert all(is_command(subscriber) for subscriber in suppressed)
+    assert [subscriber.__name__ for subscriber in suppressed] == [
+        "stop_suppressed",
+        "close_suppressed",
+    ]
+    owners = [type(getattr(subscriber, "__self__", None)) for subscriber in suppressed]
+    assert owners == [Sequencing, Pipeline]
     erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
     assert all(is_command(subscriber) for subscriber in erased)
     assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
-    compliance, research, playbook, *rest = erased
+    compliance, research, playbook, sequencing, *rest = erased
     assert type(getattr(compliance, "__self__", None)) is Erasures  # compliance first
     assert type(getattr(research, "__self__", None)) is Research  # then research
     assert type(getattr(playbook, "__self__", None)) is Playbook  # Story 4.6's override cases
+    assert type(getattr(sequencing, "__self__", None)) is Sequencing  # Story 4.8, then no-ops
     assert rest == [
         setup_api.erase_pii,
         drafting_api.erase_pii,
@@ -801,7 +808,11 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
         ops_api.erase_pii,
         notify_api.erase_pii,
     ]
-    registered = (LeadsMerged, SubjectSuppressed, ContactErased)
+    [enrolled] = subscribers.subscribers_of(Enrolled)  # Story 4.8
+    assert is_command(enrolled)
+    assert enrolled.__name__ == "on_enrolled"
+    assert type(getattr(enrolled, "__self__", None)) is Pipeline
+    registered = (LeadsMerged, SubjectSuppressed, ContactErased, Enrolled)
     others = [kind for kind in NOTIFICATIONS if kind not in registered]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
 
@@ -813,11 +824,12 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     found = [
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
-        *subscribers.subscribers_of(ContactErased)[:3],  # the rest are module functions
+        *subscribers.subscribers_of(ContactErased)[:4],  # the rest are module functions
+        *subscribers.subscribers_of(Enrolled),
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 6
+    assert clocks == [clock] * 10
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 
@@ -870,7 +882,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0038_more", create_table("more")))
+    extend(location, ("0039_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -884,7 +896,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0038_more"
+    assert spy.calls[0]["db_revision"] == "0039_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade
