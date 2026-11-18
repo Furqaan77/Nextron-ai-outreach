@@ -494,9 +494,43 @@ def test_refused_prompts_store_no_playbook_and_no_check(
 # Row: Pinned Playbook
 
 
+def raw_run(engine: Engine, route: str, playbook_sha256: str | None) -> str:
+    """A passing test run of the stored tuple of ``route`` with that Playbook (Story 4.5: a
+    tested activation names a stored run), inserting the tuple row when there is none."""
+    found = query(
+        engine,
+        "SELECT id FROM ai_route_tuples WHERE route = ? AND playbook_sha256 IS ?",
+        (route, playbook_sha256),
+    )
+    if found:
+        [(tuple_id,)] = found
+    else:
+        [(sha,)] = query(
+            engine, "SELECT sha256 FROM prompt_snapshots WHERE route = ? LIMIT 1", (route,)
+        )
+        tuple_id = new_id()
+        query(
+            engine,
+            "INSERT INTO ai_route_tuples (id, route, model, effort, prompt_version, prompt_sha256, "
+            "playbook_sha256, schema_version, created_at) VALUES (?, ?, 'claude-opus-5-5', "
+            "'high', 'v1', ?, ?, 1, ?)",
+            (tuple_id, route, sha, playbook_sha256, STAMP),
+        )
+    run_id = new_id()
+    query(
+        engine,
+        "INSERT INTO ai_test_runs (id, tuple_id, test_set, outcome, error, case_count, "
+        "passed_count, metrics, results, cost_micros, started_at, finished_at) VALUES "
+        "(?, ?, 'drafting_smoke', 'passed', NULL, 10, 10, '[]', '[]', 0, ?, ?)",
+        (run_id, tuple_id, STAMP, STAMP),
+    )
+    return run_id
+
+
 def pin(engine: Engine, pinned: PlaybookSnapshot) -> str:
     """A tested activation of the probe route that names ``pinned``: what Story 4.5 writes."""
     activation_id = new_id()
+    run_id = raw_run(engine, PROBE, pinned.sha256)
     query(
         engine,
         "INSERT INTO ai_route_activations (id, route, model, effort, prompt_version, "
@@ -510,7 +544,7 @@ def pin(engine: Engine, pinned: PlaybookSnapshot) -> str:
             "v1",
             PROBE_FILE.sha256,
             pinned.sha256,
-            new_id(),
+            run_id,
             STAMP,
         ),
     )
@@ -629,6 +663,12 @@ def test_the_queries_on_an_empty_database(units: UnitOfWorkFactory) -> None:
     assert health(units) == ()
 
 
+def only_tuple_id(units: UnitOfWorkFactory, route: str) -> str:
+    """The id of the one tuple row of ``route``."""
+    [(tuple_id,)] = query(units.engine, "SELECT id FROM ai_route_tuples WHERE route = ?", (route,))
+    return str(tuple_id)
+
+
 def test_route_tuples_shows_each_route_by_name_with_its_active_tuple(
     units: UnitOfWorkFactory,
 ) -> None:
@@ -647,6 +687,9 @@ def test_route_tuples_shows_each_route_by_name_with_its_active_tuple(
         activated_at=DEFAULT_NOW,
         bootstrap=True,
         actor="seed",
+        tuple_id=only_tuple_id(units, "extract_people"),
+        ungated=True,  # Story 4.5: a bootstrap activation serves without a test run
+        run=None,
     )
     assert people.candidates == ()  # its only tuple is the active one
     assert found[0].active is None and len(found[0].candidates) == 1

@@ -5,8 +5,9 @@
   ``Triggers`` or calls ``register_trigger``, under any alias.
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
-  ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, and ``enrich_lead``,
-  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, with their settings); the triggers
+  ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
+  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, and ``run_ai_test_sets``, Story 4.5,
+  with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
   ``resolve_contact_markets`` has no trigger.
@@ -357,6 +358,19 @@ class RecordingResearch:
         return 0
 
 
+class RecordingTestRuns:
+    """Stands in for the ``playbook`` service's ``AiTestRuns``; ``allowed`` is what ``run``
+    returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[tuple[str, str, bool]] = []
+
+    def run(self, tuple_id: str, test_set: str, *, activate: bool = True) -> bool:
+        self.calls.append((tuple_id, test_set, activate))
+        return self.allowed
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -368,6 +382,7 @@ def registry(**overrides: object) -> JobTypes:
         "crawls": RecordingCrawls,
         "discovery": RecordingDiscovery,
         "research": RecordingResearch,
+        "test_runs": RecordingTestRuns,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -420,6 +435,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "enrich_lead",
         "canonicalize_lead",
         "purge_page_text",
+        "run_ai_test_sets",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -587,6 +603,57 @@ def test_a_crawl_job_without_its_ids_is_invalid(name: str, payload: dict[str, ob
     with pytest.raises(InvalidJob, match="must be a ULID"):
         job_types.get(name).handler(Job(RUN, name, Lane.BULK, payload, 1))
     assert (crawls.calls, discovery.calls) == ([], [])
+
+
+TUPLE = "01JD0000000000000000000012"
+
+
+def test_run_ai_test_sets_is_bulk_only_and_runs_the_payloads_tuple_and_set() -> None:
+    runs = RecordingTestRuns()
+    found = registry(test_runs=lambda: runs).get("run_ai_test_sets")
+    payload = {"v": 1, "tuple_id": TUPLE, "test_set": "extraction"}
+
+    result = found.handler(Job(RUN, "run_ai_test_sets", Lane.BULK, payload, 1))
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 30, timedelta(hours=2), 3, JobGroup.OTHER)
+    assert result is None
+    assert runs.calls == [(TUPLE, "extraction", True)]
+
+
+def test_run_ai_test_sets_is_deferred_when_the_budget_refuses() -> None:
+    runs = RecordingTestRuns(allowed=False)
+    handler = registry(test_runs=lambda: runs).get("run_ai_test_sets").handler
+    payload = {"v": 1, "tuple_id": TUPLE, "test_set": "reply"}
+
+    assert handler(Job(RUN, "run_ai_test_sets", Lane.BULK, payload, 1)) is DEFERRED
+
+
+@pytest.mark.parametrize(
+    ("payload", "problem"),
+    [
+        ({"v": 1, "test_set": "extraction"}, "must be a ULID"),
+        ({"v": 1, "tuple_id": "not-a-ulid", "test_set": "extraction"}, "must be a ULID"),
+        ({"v": 1, "tuple_id": TUPLE}, "must be an AI Test Set"),
+        ({"v": 1, "tuple_id": TUPLE, "test_set": "drafting"}, "must be an AI Test Set"),
+        ({"v": 1, "tuple_id": TUPLE, "test_set": 3}, "must be an AI Test Set"),
+    ],
+)
+def test_a_run_ai_test_sets_job_without_its_tuple_or_set_is_invalid(
+    payload: dict[str, object], problem: str
+) -> None:
+    runs = RecordingTestRuns()
+    handler = registry(test_runs=lambda: runs).get("run_ai_test_sets").handler
+
+    with pytest.raises(InvalidJob, match=problem):
+        handler(Job(RUN, "run_ai_test_sets", Lane.BULK, payload, 1))
+    assert runs.calls == []
 
 
 def test_build_triggers_registers_backup_restore_test_recovery_check_then_purge() -> None:

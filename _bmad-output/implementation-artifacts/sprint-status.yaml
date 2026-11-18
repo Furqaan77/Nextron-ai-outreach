@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-18-2026 04:30
+last_updated: 11-18-2026 06:44
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -102,7 +102,7 @@ development_status:
   4-2-configure-campaigns-offers-and-variants-with-pause-resume-an: review
   4-3-maintain-approved-company-facts-with-versions: review
   4-4-snapshot-the-sales-playbook-and-pin-it-in-route-tuples: review
-  4-5-gate-ai-route-activation-on-test-runs: backlog
+  4-5-gate-ai-route-activation-on-test-runs: review
   4-6-build-the-ai-test-sets: backlog
   4-7-register-the-sending-inboxes-that-sequences-bind-to: review
   4-8-enroll-a-contact-in-a-campaign: backlog

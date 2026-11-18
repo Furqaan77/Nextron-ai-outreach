@@ -167,6 +167,34 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "playbook_sha256": PiiClass.NONE,
         "problem": PiiClass.NONE,
     },
+    # Story 4.5. Test cases are synthetic (invented firms and people on .test domains); runs
+    # hold codes, counts, metrics and the synthetic cases' verdicts.
+    "ai_test_cases": {
+        "id": PiiClass.NONE,
+        "case_key": PiiClass.NONE,
+        "test_set": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "input": PiiClass.NONE,
+        "expected": PiiClass.NONE,
+        "covers": PiiClass.NONE,
+        "sha256": PiiClass.NONE,
+        "loaded_at": PiiClass.NONE,
+        "retired_at": PiiClass.NONE,
+    },
+    "ai_test_runs": {
+        "id": PiiClass.NONE,
+        "tuple_id": PiiClass.NONE,
+        "test_set": PiiClass.NONE,
+        "outcome": PiiClass.NONE,
+        "error": PiiClass.NONE,
+        "case_count": PiiClass.NONE,
+        "passed_count": PiiClass.NONE,
+        "metrics": PiiClass.NONE,
+        "results": PiiClass.NONE,
+        "cost_micros": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "finished_at": PiiClass.NONE,
+    },
     # Story 2.3. A Contact is a person: free text is redacted, the address is kept as a hash so
     # suppression and dedupe still match after an erasure, and the LinkedIn URL is nulled.
     "contacts": {

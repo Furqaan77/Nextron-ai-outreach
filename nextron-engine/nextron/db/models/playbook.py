@@ -18,7 +18,9 @@ so Epic 4 can't activate an untested tuple without a schema change); ``activated
 ``deactivated_at``, NULL while the activation is active. ``(route, prompt_version,
 prompt_sha256)`` references the snapshot, so an activation always names stored text, and the
 partial unique index ``uq_ai_route_activations_active_route`` allows one active activation per
-route. ``test_run_id`` has no foreign key yet: Epic 4 adds ``ai_test_runs``. Story 4.4
+route. Story 4.5 (migration ``0023_4_5_ai_test_runs``, which rebuilds the table again) gives
+``test_run_id`` its foreign key to ``ai_test_runs.id``: the passing run that qualified a tested
+activation. Story 4.4
 (migration ``0022_4_4_playbook_snapshots``, which rebuilds the table) adds a nullable
 ``playbook_sha256`` after ``prompt_sha256``: the Sales Playbook snapshot the tuple runs under
 (a foreign key to ``playbook_snapshots.sha256``; ``ck_ai_route_activations_playbook_sha256``:
@@ -49,6 +51,23 @@ ULID is the tuple id Stories 4.5 and 4.12 name.
 ``ck_playbook_checks_outcome``: exactly one of the two is set. None of the three Story 4.4
 tables is ever updated or deleted.
 
+``ai_test_cases`` (Story 4.5) holds every AI Test Set case ever loaded, written only by
+``nextron.db.repos.playbook.test_cases``: ``case_key``, ``test_set``
+(``ck_ai_test_cases_test_set``: one of the four ``TestSet`` values), ``route``, the canonical
+JSON ``input``, ``expected`` and ``covers``, the case's ``sha256`` (``ck_ai_test_cases_sha256``),
+``loaded_at`` and ``retired_at`` (NULL while the case is live). The partial unique index
+``uq_ai_test_cases_live_key`` keeps one live case per ``(test_set, case_key)``. A row is never
+deleted, and only ``retired_at`` is ever set.
+
+``ai_test_runs`` (Story 4.5) holds every run of a tuple's AI Test Set, written only by
+``nextron.db.repos.playbook.test_runs``: the ``tuple_id`` (a foreign key to
+``ai_route_tuples.id``), ``test_set``, ``outcome`` (``ck_ai_test_runs_outcome``: ``passed`` or
+``failed``), ``error`` (``ck_ai_test_runs_error``: NULL or a ``RunError``;
+``ck_ai_test_runs_error_when_failed``: only a failed run has one), ``case_count`` and
+``passed_count`` (``ck_ai_test_runs_counts``, with ``cost_micros``), the canonical JSON
+``metrics`` and ``results``, ``cost_micros``, ``started_at`` and ``finished_at``; indexed by
+``(tuple_id, test_set)``. A row is never updated or deleted.
+
 ``company_facts`` holds the Approved Company Facts (FR-72, Story 4.3) as append-only versions,
 written only by ``nextron.db.repos.playbook.company_facts`` (migration
 ``0017_4_3_company_facts``): one row per version, keyed (``fact_id``, ``version``)
@@ -69,8 +88,9 @@ REPLACE`` can't replace a version); and ``trg_company_facts_immutable`` aborts a
 that changes any column but ``retracted_at``, or changes ``retracted_at`` once it isn't NULL. A
 later migration that rebuilds the table in batch mode must create them again.
 
-Prompts and the Playbook are the engine's own text, and activations, tuples and checks hold
-codes, hashes and times; facts are claims
+Prompts and the Playbook are the engine's own text, activations, tuples, checks and runs hold
+codes, hashes, counts and times, and test cases are synthetic (invented firms and people on
+``.test`` domains); facts are claims
 about Nextron, its work, its Offer and public regulation, never about a person. So no column
 is personal data (PII class ``none``).
 """
@@ -95,6 +115,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.ai import Effort
+from nextron.domain.ai_test_gate import RunError, RunOutcome, TestSet
 from nextron.domain.playbook import PlaybookProblem, SyncTrigger
 
 ROUTE_LENGTH: Final = 64  # nextron.domain.budget.CODE_PATTERN allows 64 characters
@@ -135,6 +156,22 @@ OUTCOME_CHECK: Final = "(playbook_sha256 IS NULL) <> (problem IS NULL)"
 NO_PLAYBOOK_WHERE: Final = "playbook_sha256 IS NULL"
 PLAYBOOK_WHERE: Final = "playbook_sha256 IS NOT NULL"
 TUPLE_COLUMNS: Final = ("route", "model", "effort", "prompt_version", "schema_version")
+
+CASE_KEY_LENGTH: Final = 64  # nextron.domain.ai_test_cases.CASE_KEY_PATTERN
+TEST_SET_LENGTH: Final = 16
+OUTCOME_LENGTH: Final = 8
+RUN_ERROR_LENGTH: Final = 16
+TEST_SET_CHECK: Final = "test_set IN ({})".format(",".join(f"'{found}'" for found in TestSet))
+RUN_OUTCOME_CHECK: Final = "outcome IN ({})".format(",".join(f"'{found}'" for found in RunOutcome))
+RUN_ERROR_CHECK: Final = "error IS NULL OR error IN ({})".format(
+    ",".join(f"'{found}'" for found in RunError)
+)
+ERROR_WHEN_FAILED_CHECK: Final = f"error IS NULL OR outcome = '{RunOutcome.FAILED}'"
+RUN_COUNTS_CHECK: Final = (
+    "case_count >= 0 AND passed_count >= 0 AND passed_count <= case_count "
+    "AND cost_micros >= 0"
+)
+LIVE_WHERE: Final = "retired_at IS NULL"
 
 FACT_ID_LENGTH: Final = 31  # nextron.domain.company_facts.FACT_ID_PATTERN
 FACT_TYPE_LENGTH: Final = 16  # company, case_study, offer, regulation, statistic
@@ -200,7 +237,7 @@ class AiRouteActivationRecord(Base):
     schema_version: Mapped[int] = mapped_column(Integer)
     actor: Mapped[str] = mapped_column(String(ACTOR_LENGTH))
     bootstrap: Mapped[bool] = mapped_column(Boolean)
-    test_run_id: Mapped[str | None] = mapped_column(Ulid)
+    test_run_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("ai_test_runs.id"))
     activated_at: Mapped[datetime] = mapped_column(UtcDateTime)
     deactivated_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
@@ -283,6 +320,61 @@ class PlaybookCheckRecord(Base):
         String(SHA256_LENGTH), ForeignKey("playbook_snapshots.sha256")
     )
     problem: Mapped[str | None] = mapped_column(String(PROBLEM_LENGTH))
+
+
+class AiTestCaseRecord(Base):
+    """One loaded AI Test Set case; live while ``retired_at`` is NULL."""
+
+    __tablename__ = "ai_test_cases"
+    __table_args__ = (
+        Index(
+            "uq_ai_test_cases_live_key",
+            "test_set",
+            "case_key",
+            unique=True,
+            sqlite_where=text(LIVE_WHERE),
+        ),
+        CheckConstraint(TEST_SET_CHECK, name="test_set"),
+        CheckConstraint(SHA256_CHECK, name="sha256"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    case_key: Mapped[str] = mapped_column(String(CASE_KEY_LENGTH))
+    test_set: Mapped[str] = mapped_column(String(TEST_SET_LENGTH))
+    route: Mapped[str] = mapped_column(String(ROUTE_LENGTH))
+    input: Mapped[str] = mapped_column(Text)
+    expected: Mapped[str] = mapped_column(Text)
+    covers: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH))
+    loaded_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    retired_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+class AiTestRunRecord(Base):
+    """One run of a tuple's AI Test Set: its outcome, counts, metrics and case results."""
+
+    __tablename__ = "ai_test_runs"
+    __table_args__ = (
+        Index("ix_ai_test_runs_tuple_id_test_set", "tuple_id", "test_set"),
+        CheckConstraint(TEST_SET_CHECK, name="test_set"),
+        CheckConstraint(RUN_OUTCOME_CHECK, name="outcome"),
+        CheckConstraint(RUN_ERROR_CHECK, name="error"),
+        CheckConstraint(ERROR_WHEN_FAILED_CHECK, name="error_when_failed"),
+        CheckConstraint(RUN_COUNTS_CHECK, name="counts"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    tuple_id: Mapped[str] = mapped_column(Ulid, ForeignKey("ai_route_tuples.id"))
+    test_set: Mapped[str] = mapped_column(String(TEST_SET_LENGTH))
+    outcome: Mapped[str] = mapped_column(String(OUTCOME_LENGTH))
+    error: Mapped[str | None] = mapped_column(String(RUN_ERROR_LENGTH))
+    case_count: Mapped[int] = mapped_column(Integer)
+    passed_count: Mapped[int] = mapped_column(Integer)
+    metrics: Mapped[str] = mapped_column(Text)
+    results: Mapped[str] = mapped_column(Text)
+    cost_micros: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    finished_at: Mapped[datetime] = mapped_column(UtcDateTime)
 
 
 class CompanyFactRecord(Base):

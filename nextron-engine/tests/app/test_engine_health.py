@@ -208,6 +208,7 @@ def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
         crawls=no_crawls,
         discovery=no_crawls,
         research=no_crawls,
+        test_runs=no_crawls,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
@@ -311,6 +312,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
             crawls=no_crawls,
             discovery=no_crawls,
             research=no_crawls,
+            test_runs=no_crawls,
         ),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
@@ -337,6 +339,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("send_alert", None),
                 LastRun("resolve_contact_markets", None),
                 LastRun("purge_page_text", None),
+                LastRun("run_ai_test_sets", None),
             ),
         ),
     )

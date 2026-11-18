@@ -65,16 +65,26 @@ the addresses those lookups returned. Reverse lookups stay loopback-only. ``test
 passes ``AI_EVAL_HOSTS`` (``api.anthropic.com``, the Claude API) only to items marked
 ``ai_eval``, which are skipped unless ``-m ai_eval`` selects them. Every other test gets no
 allowed host.
+
+**Engines a test starts (Story 4.5, decision 10).** A child process gets none of these guards
+from pytest, so ``child_env(variables)`` returns a copy of the environment ``variables`` with
+``CHILD_GUARD_DIR`` (``tests/child_guard``), then the engine root, first on ``PYTHONPATH``:
+Python then imports ``tests/child_guard/sitecustomize.py`` at start, which installs
+``guard_network`` with no allowed host, for good, or ends the child with exit code 97 when it
+can't. Every test that starts ``python -m nextron`` passes its environment through it
+(``tests/contracts/test_test_isolation.py``).
 """
 
 import dataclasses
 import importlib
 import ipaddress
+import os
 import socket
 import sys
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
@@ -83,6 +93,10 @@ from keyring.backends.Windows import WinVaultKeyring
 from nextron import main
 
 ROLE_ADAPTER_MODULE: Final = "nextron.main"
+TESTS_DIR: Final = Path(__file__).resolve().parent
+CHILD_GUARD_DIR: Final = TESTS_DIR / "child_guard"
+ENGINE_ROOT: Final = TESTS_DIR.parent
+PYTHONPATH: Final = "PYTHONPATH"
 
 LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.secrets", "default_backend"),
@@ -419,3 +433,17 @@ def guard_network(
 
         monkeypatch.setattr(IocpProactor, "connect", proactor_connect)
         monkeypatch.setattr(IocpProactor, "sendto", proactor_sendto)
+
+
+def child_env(variables: Mapping[str, str]) -> dict[str, str]:
+    """A copy of ``variables`` whose ``PYTHONPATH`` starts with ``CHILD_GUARD_DIR``, then the
+    engine root, then what it held, so a child Python process installs the network guard."""
+    found = dict(variables)
+    existing = next((name for name in found if name.upper() == PYTHONPATH), None)
+    parts = [str(CHILD_GUARD_DIR), str(ENGINE_ROOT)]
+    if existing is not None:
+        held = found.pop(existing)
+        if held:
+            parts.append(held)
+    found[PYTHONPATH] = os.pathsep.join(parts)
+    return found

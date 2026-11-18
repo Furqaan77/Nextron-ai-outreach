@@ -76,7 +76,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   work, then ``playbook.sync_prompts(..., trigger=SyncTrigger.OPERATOR_CHECK)`` (``Playbook``)
   in its own unit of work, then renders the panel again in a read-only one, with the check's
   notice and, when the Playbook read failed, its alert. ``InvalidPrompts`` answers 200 with the
-  alert "Nothing was stored: <message>".
+  alert "Nothing was stored: <message>". After a sync it also runs ``test_runs.queue_runs()``
+  (``AiTestRuns``, Story 4.5) in a unit of work of its own, so each new tuple gets its test
+  run, and the notice adds "Queued <n> test run(s)." when it queued any.
+- ``POST /ai/rollback`` (``ai_content_rollback``, ``@personal_data(False)``, Story 4.5): its
+  only fields are ``csrf_token`` and one ``tuple_id`` that is a ULID (anything else is
+  ``MalformedForm``, 400). It runs ``playbook.activate(tuple_id,
+  trigger=ActivationTrigger.ROLLBACK)`` in its own unit of work, then renders the panel again in
+  a read-only one with the notice "Rolled back <route> to tuple <id>." ("<route> already runs
+  tuple <id>." when it already served); a refusal (``ActivationRefused``) answers 200 with the
+  panel and an alert of its text, and nothing changed.
 - ``GET /quotas`` (``quotas_page``, ``@personal_data(False)``): the Quotas and cost page
   (UX-DR28), rendered from ``budget.status()`` (the ``ops`` service's ``Budget``) through
   ``nextron.web.quotas_page``, and linked from the Settings page; see that module.
@@ -179,7 +188,13 @@ from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
-from nextron.app.playbook.api import CompanyFacts, Playbook
+from nextron.app.playbook.api import (
+    ActivationRefused,
+    ActivationTrigger,
+    AiTestRuns,
+    CompanyFacts,
+    Playbook,
+)
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
@@ -383,6 +398,7 @@ def create_app(
     facts: CompanyFacts,
     playbook: Playbook,
     ai_content: ai_rows.ContentLoader,
+    test_runs: AiTestRuns,
     credentials: Credentials,
     google: GoogleAccess,
     notify: Notify,
@@ -401,7 +417,8 @@ def create_app(
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``campaigns`` runs the Settings page's
     Campaign controls (activate, pause, resume, save the LIA), ``facts`` the Approved Company Facts,
-    ``playbook`` the AI content view's "Check for changes" with the inputs ``ai_content`` loads,
+    ``playbook`` the AI content view's "Check for changes" with the inputs ``ai_content`` loads
+    and its rollback, ``test_runs`` queues the test runs of new tuples after a check,
     ``credentials`` the external credentials and ``google`` the Google client and grants (both
     in Credential Manager, not the database);
     ``notify`` dismisses notifications; ``budget`` gives the Quotas and cost page its figures;
@@ -717,12 +734,31 @@ def create_app(
                 return ai_content_answer(
                     request, ai_rows.PANEL_TEMPLATE, alert=ai_rows.prompts_refused(refused)
                 )
+        with units.open():  # decision 4: each new tuple's test run, in a unit of work of its own
+            queued = test_runs.queue_runs()
         with units.open(read_only=True):
             return ai_content_answer(
                 request,
                 ai_rows.PANEL_TEMPLATE,
-                notice=ai_rows.check_notice(result),
+                notice=ai_rows.check_notice(result, queued),
                 alert=ai_rows.check_alert(result),
+            )
+
+    @app.post("/ai/rollback", name="ai_content_rollback")
+    @personal_data(False)
+    def ai_content_rollback(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        tuple_id = ai_rows.submitted_rollback(fields)
+        try:
+            with units.open():
+                activated = playbook.activate(tuple_id, trigger=ActivationTrigger.ROLLBACK)
+        except ActivationRefused as refused:  # 200, so HTMX swaps the panel in; nothing changed
+            with units.open(read_only=True):
+                return ai_content_answer(request, ai_rows.PANEL_TEMPLATE, alert=refused.message)
+        with units.open(read_only=True):
+            return ai_content_answer(
+                request, ai_rows.PANEL_TEMPLATE, notice=ai_rows.rollback_notice(activated)
             )
 
     def row_answer(request: Request, row: credential_rows.CredentialRow) -> HTMLResponse:

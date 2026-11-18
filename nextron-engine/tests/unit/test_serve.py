@@ -27,6 +27,7 @@ from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, is_command
 from nextron.domain.backup import BackupKind, BackupNotVerified
 from nextron.domain.ai import RouteSpec
+from nextron.domain.ai_test_cases import InvalidTestCases, TestCase
 from nextron.domain.notifications import NOTIFICATIONS, LeadsMerged
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
@@ -99,6 +100,7 @@ def run_serve(
     reload: bool = False,
     load_prompts: main.PromptLoader = main.load_prompts,
     read_playbook: main.PlaybookReader = main.read_playbook_file,
+    load_test_cases: main.TestCaseLoader = main.load_test_cases,
 ) -> tuple[int, str, ServerSpy]:
     spy = ServerSpy()
     err = io.StringIO()
@@ -109,6 +111,7 @@ def run_serve(
         err=err,
         load_prompts=load_prompts,
         read_playbook=read_playbook,
+        load_test_cases=load_test_cases,
     )
     return code, err.getvalue(), spy
 
@@ -117,6 +120,11 @@ def no_prompts() -> tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]:
     """A loader with nothing to sync, for a toy migration chain that has no playbook tables:
     the sync then reads and writes no table."""
     return (), ()
+
+
+def no_cases() -> tuple[TestCase, ...]:
+    """A case loader with nothing to sync (Story 4.5), for the same toy chains."""
+    return ()
 
 
 @pytest.fixture
@@ -503,7 +511,7 @@ def test_a_database_behind_is_upgraded_before_the_server_starts(
     extend(location, ("0002_b", create_table("b")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
 
-    code, err, spy = run_serve(load_prompts=no_prompts)
+    code, err, spy = run_serve(load_prompts=no_prompts, load_test_cases=no_cases)
 
     assert (code, err) == (0, "")
     assert spy.calls[0]["db_revision"] == "0002_b"
@@ -772,7 +780,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0023_more", create_table("more")))
+    extend(location, ("0024_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -786,7 +794,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0023_more"
+    assert spy.calls[0]["db_revision"] == "0024_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade
@@ -935,7 +943,7 @@ def test_a_copy_whose_row_cannot_be_recorded_is_kept_and_startup_continues(
     extend(location, ("0002_b", create_table("b")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
 
-    code, err, spy = run_serve(load_prompts=no_prompts)
+    code, err, spy = run_serve(load_prompts=no_prompts, load_test_cases=no_cases)
 
     assert (code, err) == (0, "")
     assert spy.calls[0]["db_revision"] == "0002_b"
@@ -1309,3 +1317,159 @@ def test_the_served_app_loads_the_ai_content_from_the_configured_playbook(
     files, defaults, read = kwargs["ai_content"]()  # the loader runs only when called
     assert (files, defaults) == main.load_prompts()
     assert isinstance(read, PlaybookSnapshot) and read.version == "7.7.7-wiring"
+
+
+# Story 4.5: the AI Test Set cases loaded at serve start
+
+
+def case_rows(db_file: Path) -> list[tuple[Any, ...]]:
+    """The ``ai_test_cases`` rows, read outside the engine."""
+    reader = sqlite3.connect(f"{db_file.as_uri()}?mode=ro", uri=True)
+    try:
+        return reader.execute(
+            "SELECT case_key, test_set, route, sha256, retired_at FROM ai_test_cases "
+            "ORDER BY case_key, loaded_at"
+        ).fetchall()
+    finally:
+        reader.close()
+
+
+@pytest.fixture
+def ai_sets(tmp_path: Path) -> Path:
+    """A copy of the shipped ``tests/ai_sets`` folder a test may change."""
+    folder = tmp_path / "ai_sets"
+    shutil.copytree(main.AI_SETS_DIR, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    return folder
+
+
+def cases_of(folder: Path) -> main.TestCaseLoader:
+    return lambda: main.load_test_cases(folder)
+
+
+def test_a_first_start_stores_the_extraction_fixtures(dev: Path) -> None:
+    cases = main.load_test_cases()
+
+    code, err, spy = run_serve()
+
+    assert (code, err) == (0, "")
+    assert case_rows(dev / "nextron.db") == sorted(
+        (case.case_key, "extraction", case.route, case.sha256, None) for case in cases
+    )
+    assert len(cases) == 11
+    lines = log_lines(dev)
+    logged = [line["event"] for line in lines]
+    assert logged.index("prompts_synced") < logged.index("test_cases_synced")
+    assert logged.index("test_cases_synced") < logged.index("engine_started")
+    [synced] = [line for line in lines if line["event"] == "test_cases_synced"]
+    assert (synced["added_count"], synced["unchanged_count"]) == (11, 0)
+
+
+def test_an_edited_fixture_retires_its_old_row_at_the_next_start(
+    dev: Path, ai_sets: Path
+) -> None:
+    assert run_serve(load_test_cases=cases_of(ai_sets))[0] == 0
+    path = ai_sets / "extraction" / "ops_inbox_job_ad.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["expect"]["forbidden_signals"] = ["ops_expansion"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert run_serve(load_test_cases=cases_of(ai_sets))[0] == 0
+
+    rows = [row for row in case_rows(dev / "nextron.db") if row[0] == "ops_inbox_job_ad"]
+    assert len(rows) == 2
+    assert sorted(row[4] is None for row in rows) == [False, True]  # one retired, one live
+    assert len({row[3] for row in rows}) == 2
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            lambda folder: (folder / "extraction" / "ops_inbox_job_ad.json").write_text(
+                "{not json", encoding="utf-8"
+            ),
+            "extraction/ops_inbox_job_ad.json: the file isn't UTF-8 JSON",
+        ),
+        (
+            lambda folder: (folder / "extraction" / "ops_inbox_job_ad.json").write_bytes(
+                b'{"case": "\xff"}'
+            ),
+            "extraction/ops_inbox_job_ad.json: the file isn't UTF-8 JSON",
+        ),
+        (
+            lambda folder: (folder / "extraction" / "ops_inbox_job_ad.json").write_text(
+                (folder / "extraction" / "ops_inbox_job_ad.json")
+                .read_text(encoding="utf-8")
+                .replace('"injection": null', '"injection": "other"'),
+                encoding="utf-8",
+            ),
+            "ops_inbox_job_ad.json: injection must be null or one of",
+        ),
+        (
+            lambda folder: shutil.rmtree(folder / "extraction"),
+            "extraction: the folder doesn't exist",
+        ),
+    ],
+)
+def test_a_malformed_fixture_exits_2_and_stores_nothing(
+    dev: Path, ai_sets: Path, change: Any, message: str
+) -> None:
+    change(ai_sets)
+
+    code, err, spy = run_serve(load_test_cases=cases_of(ai_sets))
+
+    assert code == 2
+    assert err.startswith(f"startup check failed: ai_sets: {message}")
+    assert spy.calls == []
+    assert case_rows(dev / "nextron.db") == []
+    assert prompt_rows(dev / "nextron.db") == ([], [])  # the files are read before any write
+    [failed] = [line for line in main_log(dev) if line["event"] == "startup_check_failed"]
+    assert (failed["level"], failed["check"]) == ("ERROR", "ai_sets")
+    assert "engine_started" not in events(dev)
+
+
+def test_the_case_loader_runs_outside_any_unit_of_work(dev: Path) -> None:
+    seen: list[bool] = []
+
+    def loader() -> tuple[TestCase, ...]:
+        try:
+            current()
+        except UnitOfWorkError:
+            seen.append(True)
+        return main.load_test_cases()
+
+    assert run_serve(load_test_cases=loader)[0] == 0
+    assert seen == [True]
+
+
+def test_load_test_cases_names_the_file_and_the_field_never_the_text(tmp_path: Path) -> None:
+    folder = tmp_path / "ai_sets"
+    shutil.copytree(main.AI_SETS_DIR, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    path = folder / "extraction" / "law_inbox_confidentiality_post.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    secret = data["blocks"][0]["text"]
+    data["blocks"][0]["source"] = ""
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(InvalidTestCases) as raised:
+        main.load_test_cases(folder)
+
+    assert raised.value.message == (
+        "law_inbox_confidentiality_post.json: blocks[0].source must be a non-empty string"
+    )
+    assert secret not in str(raised.value)
+    path.write_bytes(b" " * (main.MAX_CASE_FILE_BYTES + 1))
+    with pytest.raises(InvalidTestCases, match="larger than 1 MiB"):
+        main.load_test_cases(folder)
+
+
+def test_load_test_cases_reads_every_extraction_file_by_name() -> None:
+    cases = main.load_test_cases()
+
+    files = sorted(path.stem for path in (main.AI_SETS_DIR / "extraction").glob("*.json"))
+    assert [case.case_key for case in cases] == files
+    assert {case.route for case in cases} == {
+        "extract_signals",
+        "extract_people",
+        "signal_inbox_parse",
+    }

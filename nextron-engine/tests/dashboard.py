@@ -57,6 +57,10 @@ for changes" runs it on what ``ai_content`` loads (``shipped_ai_content`` unless
 another loader: the shipped prompt files and defaults, and ``TEST_PLAYBOOK``, a synthetic
 Sales Playbook, so no test reads or edits the real one).
 
+Its ``AiTestRuns`` (``test_runs``, Story 4.5) uses the same clock, ``meter`` and ``queue``,
+and ``llm``, a ``ScriptedLlm`` (empty unless a test passes one, so a test that runs a set
+scripts every answer); Check for changes queues its runs and the jobs run them.
+
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
@@ -88,7 +92,7 @@ from nextron.app.ops.api import (
     RestoreTests,
 )
 from nextron.app.pipeline.api import Pipeline
-from nextron.app.playbook.api import CompanyFacts, Playbook
+from nextron.app.playbook.api import AiTestRuns, CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
@@ -110,6 +114,7 @@ from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
+from tests.fakes.llm import ScriptedLlm
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -280,6 +285,7 @@ class Dashboard:
     ai_content: Callable[
         [], tuple[Sequence[PromptFile], Sequence[RouteSpec], PlaybookSnapshot | PlaybookProblem]
     ] = shipped_ai_content
+    llm: ScriptedLlm = field(default_factory=ScriptedLlm)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -301,6 +307,7 @@ class Dashboard:
     sending: Sending = field(init=False)
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
+    test_runs: AiTestRuns = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -329,6 +336,7 @@ class Dashboard:
             crawls=no_crawl_jobs,
             discovery=no_crawl_jobs,
             research=no_crawl_jobs,
+            test_runs=lambda: self.test_runs,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -368,6 +376,7 @@ class Dashboard:
         )
         self.research = Research(self.clock)
         self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
+        self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.lead_imports = LeadImports(
             self.clock,
             Discovery(self.clock, Pipeline(self.clock), self.queue),
@@ -385,6 +394,7 @@ class Dashboard:
             facts=self.facts,
             playbook=self.playbook,
             ai_content=self.ai_content,
+            test_runs=self.test_runs,
             credentials=self.credentials,
             google=self.google,
             notify=self.notify,

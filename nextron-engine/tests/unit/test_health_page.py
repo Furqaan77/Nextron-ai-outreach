@@ -290,6 +290,7 @@ NEVER_RUN = [
         ["send_alert", "never"],
         ["resolve_contact_markets", "never"],  # Story 3.2's one-off, group Other
         ["purge_page_text", "never"],
+        ["run_ai_test_sets", "never"],  # Story 4.5, group Other
     ],
 ]
 
@@ -409,6 +410,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
             ["send_alert", "2026-11-17 09:05:00 UTC"],
             ["resolve_contact_markets", "never"],
             ["purge_page_text", "never"],
+            ["run_ai_test_sets", "never"],
         ],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms

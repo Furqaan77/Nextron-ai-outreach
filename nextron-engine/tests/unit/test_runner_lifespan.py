@@ -9,8 +9,11 @@ failed; a failed recovery startup pass stops the start before the startup step r
 failed startup step is logged (``startup_step_failed``, its type only) and the engine still
 starts. On the real ``build_app`` (Story 3.2), the startup
 step queues one ``resolve_contact_markets`` job when a Contact is unresolved, and none
-otherwise. On a real database at head, driven through the ASGI lifespan by hand: startup starts
-the named threads, beats once (the ``runner_heartbeat`` row and ``<data dir>\\heartbeat``),
+otherwise; Story 4.5 adds the ``queue_test_runs`` step after it (``run_startup_steps``: a step
+that raises is logged with its name and the next still runs), which queues one
+``run_ai_test_sets`` job per stored extraction tuple. On a real database at head, driven
+through the ASGI lifespan by hand: startup starts the named threads, beats once (the
+``runner_heartbeat`` row and ``<data dir>\\heartbeat``),
 shutdown stops them, and building the app starts none.
 
 The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
@@ -82,6 +85,7 @@ from nextron.domain.google_oauth import (
 )
 from nextron.domain.job import Lane
 from nextron.domain.leads import LeadIdentity, LeadSource
+from nextron.domain.playbook import PlaybookSnapshot
 from nextron.domain.recovery import (
     RecoveryContext,
     RecoveryHandler,
@@ -105,6 +109,7 @@ from tests.fakes.secrets import InMemorySecrets
 from tests.live_guard import allow_live_constructor
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+PLAYBOOK = PlaybookSnapshot("1.0.0", "---\nversion: 1.0.0\n---\n\nA test Sales Playbook.\n")
 JOB = "01JD3QZ8X5V9K2M7N4P6R8T0WY"
 EXPECTED_THREADS = [
     "nextron-job-bulk-1",
@@ -219,6 +224,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "enrich_lead",
         "canonicalize_lead",
         "purge_page_text",
+        "run_ai_test_sets",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -522,6 +528,7 @@ def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
         crawls=no_crawls,
         discovery=no_crawls,
         research=no_crawls,
+        test_runs=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -714,6 +721,7 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
         crawls=no_crawls,
         discovery=no_crawls,
         research=no_crawls,
+        test_runs=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -768,6 +776,67 @@ def test_the_built_lifespan_queues_nothing_when_every_contact_is_resolved(
     # purge_page_text's startup tick (Story 2.5) may be queued; resolve_contact_markets isn't
     jobs = "SELECT COUNT(*) FROM jobs WHERE type = 'resolve_contact_markets'"
     assert raw_query(units, jobs) == [(0,)]
+
+
+def test_the_built_startup_queues_contact_markets_then_the_test_runs(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    startups: list[Callable[[], None]] = []
+    real_lifespan = main.engine_lifespan
+
+    def recording_lifespan(*args: Any, startup: Callable[[], None], **kwargs: Any) -> Any:
+        startups.append(startup)
+        return real_lifespan(*args, startup=startup, **kwargs)
+
+    names: list[str] = []
+    real_steps = main.run_startup_steps
+
+    def recording_steps(steps: Any) -> None:
+        names.extend(name for name, _ in steps)
+        real_steps(steps)
+
+    monkeypatch.setattr(main, "engine_lifespan", recording_lifespan)
+    monkeypatch.setattr(main, "run_startup_steps", recording_steps)
+    build(units)
+    files, defaults = main.load_prompts()
+    with units.open():
+        main.Playbook(FrozenClock(T)).sync_prompts(files, defaults, PLAYBOOK)
+    [startup] = startups
+
+    startup()  # the lifespan's startup step alone: no runner starts
+
+    assert names == ["queue_contact_markets", "queue_test_runs"]
+    jobs = raw_query(
+        units,
+        "SELECT lane, idempotency_key FROM jobs WHERE type = 'run_ai_test_sets' "
+        "ORDER BY idempotency_key",
+    )
+    tuples = raw_query(units, "SELECT id FROM ai_route_tuples ORDER BY id")
+    assert jobs == [("bulk", f"run_ai_test_sets:{row[0]}:extraction") for row in tuples]
+    assert len(jobs) == 3
+
+
+def test_a_failed_startup_step_is_logged_with_its_name_and_the_next_still_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ran: list[str] = []
+
+    def broken() -> None:
+        ran.append("queue_contact_markets")
+        raise RuntimeError("the database is locked")
+
+    main.run_startup_steps(
+        (("queue_contact_markets", broken), ("queue_test_runs", lambda: ran.append("runs")))
+    )
+
+    assert ran == ["queue_contact_markets", "runs"]
+    [failed] = [r for r in caplog.records if r.getMessage() == "startup_step_failed"]
+    assert (failed.levelname, failed.step, failed.error) == (  # type: ignore[attr-defined]
+        "ERROR",
+        "queue_contact_markets",
+        "RuntimeError",
+    )
+    assert "locked" not in caplog.text
 
 
 def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_stops_them(

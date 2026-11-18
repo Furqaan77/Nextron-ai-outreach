@@ -166,6 +166,7 @@ def world(db_engine: Engine) -> World:
         crawls=no_jobs,
         discovery=no_jobs,
         research=no_jobs,
+        test_runs=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     found = World(
@@ -510,6 +511,7 @@ def test_the_enrich_lead_handler_defers_a_refused_crawl(world: World) -> None:
         crawls=lambda: world.crawls,
         discovery=no_jobs,
         research=no_jobs,
+        test_runs=no_jobs,
     ).get("enrich_lead").handler
     job = Job("01JD0000000000000000000099", "enrich_lead", Lane.BULK, {"v": 1, "lead_id": lead}, 1)
 

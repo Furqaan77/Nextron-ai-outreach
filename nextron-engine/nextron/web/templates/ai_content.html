@@ -2,7 +2,7 @@
 {% block title %}Nextron: AI content{% endblock %}
 {% block content %}
 <h1>AI content</h1>
-<p>Each AI route runs one pinned tuple: a model, an effort, a prompt version, a schema version and, for a route that drafts with it, a stored snapshot of the Sales Playbook. The engine records every new tuple here as a candidate. A candidate never runs until the AI test gate activates it; the three extraction routes were activated at first start without a test run.</p>
+<p>Each AI route runs one pinned tuple: a model, an effort, a prompt version, a schema version and, for a route that drafts with it, a stored snapshot of the Sales Playbook. The engine records every new tuple here as a candidate and runs it against its AI Test Set. A tuple serves only once its test run passed; the three extraction routes were activated at first start without a test run, so they show as "Ungated" until a run of theirs passes. You can roll back to an earlier tuple that passed.</p>
 <p>Other settings are on the <a href="/settings">Settings page</a>.</p>
 {% include "ai_content_panel.html" %}
 {% endblock %}

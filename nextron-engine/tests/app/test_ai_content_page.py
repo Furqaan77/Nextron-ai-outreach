@@ -3,12 +3,19 @@ through ``Dashboard(units=units)`` on a temporary database at head. It checks th
 the Sales Playbook block, each route's active tuple and candidates, the check's notices and
 alerts, the ``InvalidPrompts`` alert with nothing stored, the 400 and 403 refusals, the
 Settings link, that the navigation is unchanged, and ``Cache-Control: no-store``. The loader is
-injected: the shipped prompt files with a synthetic Sales Playbook, never the real file."""
+injected: the shipped prompt files with a synthetic Sales Playbook, never the real file.
+
+Story 4.5 adds the AI test gate: the "Ungated" and "No test run yet" marks, a run's metrics
+against their bars and its failing cases (escaped, inside ``hx-disable``), the error of a set
+too small, the rollback form and ``POST /ai/rollback`` (its notice, a refusal's alert and the
+400s), Check for changes queueing the runs, and the health panel's failed active tuple. Runs
+use the dashboard's ``ScriptedLlm``."""
 
 import dataclasses
 import re
 from collections.abc import Callable
 from html import unescape
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -16,10 +23,15 @@ from sqlalchemy import Engine
 from sqlalchemy import text as sql
 
 from nextron import main
-from nextron.app.playbook.api import Playbook
+from nextron.adapters.ai import routes
+from nextron.app.playbook.api import Playbook, PromptSync
+from nextron.app.queries import playbook as playbook_queries
+from nextron.app.setup.api import Setup
 from nextron.db.models.base import new_id
 from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current
+from nextron.domain import seed_yaml
 from nextron.domain.ai import Effort, RouteSpec
+from nextron.domain.ai_test_cases import TestCase
 from nextron.domain.playbook import (
     PlaybookProblem,
     PlaybookSnapshot,
@@ -28,6 +40,9 @@ from nextron.domain.playbook import (
     read_playbook,
 )
 from nextron.domain.prompts import InvalidPrompts, PromptFile
+from nextron.domain.segments import validate_segments
+from nextron.ports.llm import LlmOk, LlmUsage
+from nextron.web.ai_content_page import check_notice
 from nextron.web.csrf import SECURITY_CHECK_FAILED
 from nextron.web.forms import MALFORMED_FORM
 from tests.asgi import Reply
@@ -182,14 +197,25 @@ def test_a_playbook_route_shows_its_tested_tuple_and_a_playbook_candidate(
     probe_spec = RouteSpec(PROBE, "claude-opus-5-5", Effort.HIGH, "v1", 1, uses_playbook=True)
     with units.open():
         Playbook(FrozenClock()).sync_prompts((*files, probe_file), (*defaults, probe_spec), first)
-    # a tested activation pinned to the first snapshot, as Story 4.5's gate will write one
+    # a tested activation pinned to the first snapshot, as Story 4.5's gate writes one
+    run_id = new_id()
     with db_engine.connect() as connection:
+        [(tuple_id,)] = connection.exec_driver_sql(
+            "SELECT id FROM ai_route_tuples WHERE route = ?", (PROBE,)
+        ).all()
+        connection.exec_driver_sql(
+            "INSERT INTO ai_test_runs (id, tuple_id, test_set, outcome, error, case_count, "
+            "passed_count, metrics, results, cost_micros, started_at, finished_at) VALUES "
+            "(?, ?, 'drafting_smoke', 'passed', NULL, 10, 10, '[]', '[]', 0, "
+            "'2026-11-16T10:00:00.000000Z', '2026-11-16T10:00:00.000000Z')",
+            (run_id, tuple_id),
+        )
         connection.exec_driver_sql(
             "INSERT INTO ai_route_activations (id, route, model, effort, prompt_version, "
             "prompt_sha256, playbook_sha256, schema_version, actor, bootstrap, test_run_id, "
             "activated_at, deactivated_at) VALUES (?, ?, 'claude-opus-5-5', 'high', 'v1', ?, ?, "
             "1, 'operator', 0, ?, '2026-11-16T10:00:00.000000Z', NULL)",
-            (new_id(), PROBE, probe_file.sha256, first.sha256, new_id()),
+            (new_id(), PROBE, probe_file.sha256, first.sha256, run_id),
         )
         connection.commit()
     with units.open():
@@ -264,8 +290,8 @@ def test_a_check_syncs_and_renders_the_panel_with_its_notice(units: UnitOfWorkFa
     assert "<html" not in reply.text
     assert (
         '<p class="notice" role="status">Checked for changes: 3 new candidate tuples. Stored '
-        f"Sales Playbook version 9.9.9-test ({pinned.sha256[:12]}).</p>"
-    ) in reply.text
+        f"Sales Playbook version 9.9.9-test ({pinned.sha256[:12]}). Queued 3 test runs.</p>"
+    ) in reply.text  # Story 4.5: each new tuple's paid test run is announced
     assert 'role="alert"' not in reply.text
     assert counts(units) == (1, 3, 1, 3)
     assert "with Check for changes: read without a problem." in texts(reply.text)
@@ -304,7 +330,7 @@ def test_a_check_whose_read_failed_shows_the_problem(units: UnitOfWorkFactory) -
     reply = check(dashboard)
 
     assert reply.status == 200
-    assert "Checked for changes: 3 new candidate tuples.</p>" in reply.text
+    assert "Checked for changes: 3 new candidate tuples. Queued 3 test runs.</p>" in reply.text
     alert = (
         '<p class="notice notice-refused" role="alert">Sales Playbook: '
         f"{problem_text(PlaybookProblem.BAD_VERSION)}</p>"
@@ -426,3 +452,314 @@ def test_the_health_panel_shows_a_playbook_problem_until_a_good_read(
     check(dashboard)  # a good read: TEST_PLAYBOOK
     after = unescape(dashboard.get("/health/panel/live", cookie=cookie).text)
     assert "Sales Playbook: " not in after
+
+
+# The AI test gate (Story 4.5) -------------------------------------------------------------------
+
+PEOPLE_ANSWER_NAME = "<b>Priya</b> & Co"  # a model answer is text: always escaped
+
+
+def gate_world(units: UnitOfWorkFactory, **changes: Any) -> Dashboard:
+    """A first start's state (the Segments, the shipped prompts with ``TEST_PLAYBOOK`` and the
+    extraction fixtures) and a dashboard on it."""
+    segments = validate_segments(
+        seed_yaml.parse((main.SEED_DIR / main.SEGMENTS_FILE_NAME).read_text(encoding="utf-8"))
+    )
+    with units.open():
+        Setup(FrozenClock()).sync_segments(segments)
+    startup_sync(units, read_playbook(TEST_PLAYBOOK.encode("utf-8")))
+    with units.open():
+        Playbook(FrozenClock()).sync_test_cases(main.load_test_cases())
+    return dashboard_on(units, **changes)
+
+
+def people_cases() -> list[TestCase]:
+    return sorted(
+        (case for case in main.load_test_cases() if case.route == "extract_people"),
+        key=lambda case: case.case_key,
+    )
+
+
+def people_answers(*, wrong_name: bool = False) -> list[LlmOk]:
+    answers = []
+    for case in people_cases():
+        people = [dict(person) for person in case.expected["people"]]
+        if wrong_name and case.case_key == "law_people_team_pages":
+            people[0]["name"] = PEOPLE_ANSWER_NAME  # two of seven people missed: under 80%
+            people[1]["name"] = PEOPLE_ANSWER_NAME
+        answers.append(
+            LlmOk(
+                {"people": people},
+                model="claude-haiku-5-5",
+                usage=LlmUsage(requests=1, cost_micros=1_000),
+            )
+        )
+    return answers
+
+
+def tuple_id_of(units: UnitOfWorkFactory, route: str, effort: str = "medium") -> str:
+    with units.open(read_only=True) as unit:
+        found = unit.session.execute(
+            sql("SELECT id FROM ai_route_tuples WHERE route = :route AND effort = :effort"),
+            {"route": route, "effort": effort},
+        ).scalar_one()
+    return str(found)
+
+
+def run_people(dashboard: Dashboard, units: UnitOfWorkFactory, tuple_id: str | None = None) -> None:
+    chosen = tuple_id or tuple_id_of(units, "extract_people")
+    with units.open():
+        dashboard.test_runs.run(chosen, "extraction")
+
+
+def rollback(dashboard: Dashboard, body: str) -> Reply:
+    cookie = dashboard.open_session()
+    csrf = dashboard.csrf_token(cookie)
+    return dashboard.post(
+        "/ai/rollback",
+        cookie=cookie,
+        token=csrf,
+        headers=[(b"content-type", FORM)],
+        body=(f"csrf_token={csrf}" + (f"&{body}" if body else "")).encode("ascii"),
+    )
+
+
+def test_the_bootstrap_tuples_are_marked_ungated_with_no_test_run_yet(
+    units: UnitOfWorkFactory,
+) -> None:
+    dashboard = gate_world(units)
+
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+
+    for route in ROUTES:
+        section = route_section(html, route)
+        assert "(bootstrap, by seed) Ungated: this tuple serves without a passing test run." in (
+            section
+        )
+        assert "No test run yet" in section
+    assert html.count('class="ai-mark ai-ungated"') == 3
+    assert "Roll back to this tuple" not in html
+
+
+def test_a_passing_run_shows_its_metrics_and_clears_the_ungated_mark(
+    units: UnitOfWorkFactory,
+) -> None:
+    dashboard = gate_world(units)
+    dashboard.llm.script.extend(people_answers())
+    run_people(dashboard, units)
+
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+
+    section = route_section(html, "extract_people")
+    assert "(tested, by system:playbook)" in section
+    assert "Ungated" not in section
+    assert (
+        "Test run: Passed. Extraction fixtures, 2 of 2 cases passed, cost $0.0020, finished "
+        "2026-11-16 09:00 UTC."
+    ) in section
+    assert (
+        "Metric Value Bar Result "
+        "Quotes that pass the substring check 100% (7 of 7) at least 100% Pass "
+        "Labelled people found 100% (7 of 7) at least 80% Pass "
+        "Forbidden Signal types proposed 0 at most 0 Pass "
+        "Cases answered 100% (2 of 2) at least 100% Pass"
+    ) in section
+    assert "Failing cases" not in section
+    # the bootstrap tuple it replaced is the same tuple: no candidate, so no rollback
+    assert "Candidates (0)" in section
+
+
+def test_a_failing_run_lists_its_failing_cases_escaped_inside_hx_disable(
+    units: UnitOfWorkFactory,
+) -> None:
+    dashboard = gate_world(units)
+    dashboard.llm.script.extend(people_answers(wrong_name=True))
+    run_people(dashboard, units)
+
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+
+    section = route_section(html, "extract_people")
+    assert "Ungated: this tuple serves without a passing test run." in section
+    assert "Test run: Failed. Extraction fixtures, 1 of 2 cases passed" in section
+    assert "Labelled people found 71% (5 of 7) at least 80% Fail" in section
+    assert "Quotes that pass the substring check 100% (7 of 7) at least 100% Pass" in section
+    match = re.search(r'<div class="ai-failing" hx-disable>(.*?)</div>', html, re.DOTALL)
+    assert match is not None
+    failing = texts(match.group(1))
+    assert failing.startswith("Failing cases (1) Case id Expected Got law_people_team_pages ")
+    assert "Expected Got law_people_team_pages People: Daniel Okafor, Margaret Ellison" in failing
+    assert PEOPLE_ANSWER_NAME not in html  # escaped, never raw markup
+    assert "&lt;b&gt;Priya&lt;/b&gt; &amp; Co" in html
+
+
+def test_a_set_too_small_shows_its_error(units: UnitOfWorkFactory) -> None:
+    dashboard = gate_world(units)
+    with units.open():
+        Playbook(FrozenClock()).sync_test_cases(
+            [case for case in main.load_test_cases() if case.route != "extract_people"]
+        )
+    run_people(dashboard, units)
+
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+    section = route_section(html, "extract_people")
+
+    assert "Test run: Failed (set too small). Extraction fixtures, 0 of 0 cases passed" in section
+    assert dashboard.llm.calls == []
+
+
+def newer_people_tuple(units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A newer candidate of extract_people at effort high, which ``ScriptedLlm`` accepts."""
+    [default] = routes.CANDIDATES["extract_people"]
+    high = dataclasses.replace(default, effort=Effort.HIGH)
+    changed = {**routes.CANDIDATES, "extract_people": (default, high)}
+    monkeypatch.setattr(routes, "CANDIDATES", MappingProxyType(changed))
+    files, defaults = main.load_prompts()
+    high = tuple(
+        dataclasses.replace(spec, effort=Effort.HIGH) if spec.route == "extract_people" else spec
+        for spec in defaults
+    )
+    with units.open():
+        Playbook(FrozenClock(DEFAULT_NOW.replace(hour=10))).sync_prompts(
+            files, high, read_playbook(TEST_PLAYBOOK.encode("utf-8"))
+        )
+    return tuple_id_of(units, "extract_people", "high")
+
+
+def test_a_passing_older_tuple_can_be_rolled_back_to(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dashboard = gate_world(units)
+    old = tuple_id_of(units, "extract_people")
+    dashboard.llm.script.extend(people_answers())
+    run_people(dashboard, units, old)  # the bootstrap tuple passes: tested
+    new = newer_people_tuple(units, monkeypatch)
+    dashboard.llm.script.extend(people_answers())
+    run_people(dashboard, units, new)  # the newest candidate passes: it serves
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+    section = route_section(html, "extract_people")
+    assert "Effort high" in section.split("Candidates")[0]
+    assert section.count("Roll back to this tuple") == 1
+    assert f'<input type="hidden" name="tuple_id" value="{old}">' in html
+    assert 'hx-post="/ai/rollback" hx-target="#ai-content-panel" hx-swap="outerHTML"' in html
+
+    reply = rollback(dashboard, f"tuple_id={old}")
+
+    assert reply.status == 200
+    assert reply.text.startswith('<div id="ai-content-panel">')
+    assert (
+        f'<p class="notice" role="status">Rolled back extract_people to tuple {old}.</p>'
+    ) in reply.text
+    section = route_section(reply.text, "extract_people")
+    assert "Effort medium" in section.split("Candidates")[0]
+    assert "(tested, by operator)" in section
+    with units.open(read_only=True):
+        served = playbook_queries.active_tuple("extract_people")
+    assert served is not None and served.effort is Effort.MEDIUM
+    before = counts(units)
+
+    again = rollback(dashboard, f"tuple_id={old}")  # it already serves: nothing changes
+
+    assert (
+        f'<p class="notice" role="status">extract_people already runs tuple {old}.</p>'
+    ) in again.text
+    assert "Rolled back" not in again.text
+    assert counts(units) == before
+
+
+def test_the_check_notice_counts_the_queued_test_runs() -> None:
+    result = PromptSync((), (), (), (), (("extract_people", new_id()),), None)
+
+    assert check_notice(result) == "Checked for changes: 1 new candidate tuple."
+    assert check_notice(result, 0) == "Checked for changes: 1 new candidate tuple."
+    assert check_notice(result, 1) == (
+        "Checked for changes: 1 new candidate tuple. Queued 1 test run."
+    )
+    assert check_notice(result, 2).endswith(" Queued 2 test runs.")
+
+
+def test_a_share_of_nothing_reads_none_and_passes_the_quote_bar(
+    units: UnitOfWorkFactory,
+) -> None:
+    dashboard = gate_world(units)
+    signals = [case for case in main.load_test_cases() if case.route == "extract_signals"]
+    dashboard.llm.script.extend(
+        LlmOk({"signals": []}, model="claude-haiku-5-5", usage=LlmUsage()) for _ in signals
+    )
+    tuple_id = tuple_id_of(units, "extract_signals")
+    with units.open():
+        dashboard.test_runs.run(tuple_id, "extraction")
+
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+
+    section = route_section(html, "extract_signals")
+    assert "Quotes that pass the substring check none (0 of 0) at least 100% Pass" in section
+    assert "Labelled Signals found 0% (0 of 9) at least 80% Fail" in section
+
+
+def test_a_refused_rollback_answers_200_with_an_alert_and_changes_nothing(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dashboard = gate_world(units)
+    untested = newer_people_tuple(units, monkeypatch)
+    before = counts(units)
+
+    reply = rollback(dashboard, f"tuple_id={untested}")
+
+    assert reply.status == 200
+    assert (
+        '<p class="notice notice-refused" role="alert">No passing test run for this tuple</p>'
+    ) in reply.text
+    assert counts(units) == before
+    reply = rollback(dashboard, f"tuple_id={new_id()}")
+    assert '<p class="notice notice-refused" role="alert">No such tuple</p>' in reply.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "",
+        "tuple_id=not-a-ulid",
+        "tuple_id=01JD0000000000000000000099&tuple_id=01JD0000000000000000000098",
+        "tuple_id=01JD0000000000000000000099&extra=1",
+    ],
+)
+def test_a_malformed_rollback_is_refused_with_400(units: UnitOfWorkFactory, body: str) -> None:
+    dashboard = gate_world(units)
+    before = counts(units)
+
+    reply = rollback(dashboard, body)
+
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert counts(units) == before
+
+
+def test_check_for_changes_queues_a_run_of_each_tuple_without_one(
+    units: UnitOfWorkFactory,
+) -> None:
+    dashboard = dashboard_on(units)
+
+    check(dashboard)
+
+    with units.open(read_only=True) as unit:
+        keys = unit.session.execute(
+            sql("SELECT idempotency_key FROM jobs WHERE type = 'run_ai_test_sets'")
+        ).scalars().all()
+    assert sorted(keys) == sorted(
+        f"run_ai_test_sets:{tuple_id_of(units, route)}:extraction" for route in ROUTES
+    )
+    check(dashboard)  # the live jobs absorb a second check
+    with units.open(read_only=True) as unit:
+        again = unit.session.execute(
+            sql("SELECT COUNT(*) FROM jobs WHERE type = 'run_ai_test_sets'")
+        ).scalar_one()
+    assert again == 3
+
+
+def test_the_health_panel_shows_a_failed_active_tuple(units: UnitOfWorkFactory) -> None:
+    dashboard = gate_world(units)
+    dashboard.llm.script.extend(people_answers(wrong_name=True))
+    run_people(dashboard, units)
+
+    panel = texts(dashboard.get("/health/panel", cookie=dashboard.open_session()).text)
+
+    assert "extract_people: active tuple failed its test set" in panel

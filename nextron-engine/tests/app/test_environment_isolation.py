@@ -45,6 +45,7 @@ from nextron.db.migrations import head_revision
 from tests.app.test_serve_process import fetch
 from tests.asgi import Reply, request
 from tests.dashboard import FORM, body_hx_headers, form
+from tests.live_guard import child_env
 from tests.fakes.clock import FrozenClock
 from tests.fakes.units import FakeUnits
 from tests.migration_chains import stored_revisions
@@ -87,7 +88,10 @@ def free_ports(count: int) -> list[int]:
 def start_engine(env: str, port: int, local_app_data: Path, tmp_path: Path) -> Engine:
     """``python -m nextron serve`` for ``env`` on ``port``: the default data dir under
     ``local_app_data``."""
-    variables = {k: v for k, v in os.environ.items() if not k.upper().startswith("NEXTRON_")}
+    # Story 4.5: every engine a test starts gets the network guard (tests/child_guard)
+    variables = child_env(
+        {k: v for k, v in os.environ.items() if not k.upper().startswith("NEXTRON_")}
+    )
     variables.update(
         NEXTRON_ENV=env,
         NEXTRON_PORT=str(port),

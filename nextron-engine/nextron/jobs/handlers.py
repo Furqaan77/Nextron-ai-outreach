@@ -41,6 +41,10 @@ handler runs in.
 - ``canonicalize_lead(discovery)`` (Story 2.5): calls ``discovery().canonicalize_lead(lead_id,
   run_id)`` once.
 - ``purge_page_text(research)`` (Story 2.5): calls ``research().purge_page_text()`` once.
+- ``run_ai_test_sets(runs)`` (Story 4.5): calls ``runs().run(tuple_id, test_set)`` once (the
+  ``playbook`` service's ``AiTestRuns``; ``nextron.main`` passes ``lambda: test_runs``), and
+  returns ``DEFERRED`` when it returns ``False`` (the budget refused the run). ``test_set`` must
+  be the value of a ``nextron.domain.ai_test_gate.TestSet``, else ``InvalidJob``.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -48,6 +52,7 @@ A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the
 from collections.abc import Callable
 from typing import Final, Protocol
 
+from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
 from nextron.domain.ids import is_ulid
@@ -202,3 +207,25 @@ def purge_page_text(research: Callable[[], PurgingPageText]) -> Handler:
         research().purge_page_text()
 
     return handle_purge_page_text
+
+
+class AiTestRunning(Protocol):
+    """What ``run_ai_test_sets`` needs of the ``playbook`` service's ``AiTestRuns``."""
+
+    def run(self, tuple_id: str, test_set: str, *, activate: bool = True) -> bool: ...
+
+
+def run_ai_test_sets(runs: Callable[[], AiTestRunning]) -> Handler:
+    """The ``run_ai_test_sets`` job's handler: run the payload's tuple on its AI Test Set
+    through ``runs()``."""
+
+    def handle_run_ai_test_sets(job: Job) -> HandlerResult | None:
+        tuple_id = _ulid_field(job, TUPLE_ID_FIELD)
+        test_set = job.payload.get(TEST_SET_FIELD)
+        if not isinstance(test_set, str) or set_of(test_set) is None:
+            raise InvalidJob(f"{job.type}: the {TEST_SET_FIELD} field must be an AI Test Set")
+        if not runs().run(tuple_id, test_set):
+            return DEFERRED
+        return None
+
+    return handle_run_ai_test_sets

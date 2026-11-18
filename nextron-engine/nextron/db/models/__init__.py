@@ -34,6 +34,8 @@ from nextron.db.models.ops import (
 from nextron.db.models.playbook import (
     AiRouteActivationRecord,
     AiRouteTupleRecord,
+    AiTestCaseRecord,
+    AiTestRunRecord,
     CompanyFactRecord,
     PlaybookCheckRecord,
     PlaybookSnapshotRecord,
@@ -55,6 +57,8 @@ from nextron.db.models.setup import (
 __all__ = [
     "AiRouteActivationRecord",
     "AiRouteTupleRecord",
+    "AiTestCaseRecord",
+    "AiTestRunRecord",
     "AiUsageRecord",
     "AlertRecord",
     "ApiUsageRecord",

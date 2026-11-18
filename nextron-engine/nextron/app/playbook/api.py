@@ -44,8 +44,10 @@ one transaction, in this order:
    now, with one ``events`` row (entity ``ai_route_tuples``, ``None`` to ``candidate``, the
    trigger's cause and actor). Then each active activation of a default's route whose tuple has
    no row gets one the same way (the activations stored before Story 4.4);
-4. each default route with no active activation that doesn't use the Playbook gets one
-   (decision 4: a Playbook route is activated only through Story 4.5's gate): the default's
+4. each default route of ``nextron.domain.ai_test_gate.BOOTSTRAP_ROUTES`` (the three
+   extraction routes, Story 4.5) with no active activation that doesn't use the Playbook gets
+   one (decision 4: a Playbook route, and every route outside ``BOOTSTRAP_ROUTES``, is
+   activated only through Story 4.5's gate): the default's
    model, effort, prompt version and schema version, the stored prompt's SHA-256, no Playbook,
    ``actor='seed'``, ``bootstrap=True``, no test run and ``activated_at`` = now, plus one
    ``events`` row (entity ``ai_route_activations``, ``None`` to ``active``, cause
@@ -68,6 +70,73 @@ active activation kept, in ``defaults`` order; ``candidates``, the ``(route, tup
 tuple created, in creation order; and ``playbook``, a ``PlaybookRead(version, sha256, stored)``
 or the ``PlaybookProblem``. No prompt or Playbook text reaches a log record, an event or an
 error.
+
+**The AI test gate** (FR-73, FR-71, AD-8, AD-12, NFR-26, Story 4.5). A route tuple serves only
+after it passed its route's AI Test Set (``nextron.domain.ai_test_gate``); the bootstrap
+activations of ``BOOTSTRAP_ROUTES`` are the one exception, marked "ungated" until a run passes.
+
+- ``@use_case Playbook.sync_test_cases(cases) -> TestCaseSync(added, changed, retired,
+  unchanged)``: ``TypeError`` unless every item is a ``nextron.domain.ai_test_cases.TestCase``,
+  ``ValueError`` for a ``(test_set, case_key)`` that repeats, both before any transaction. Then,
+  in one transaction: a key with no live row is inserted (``added``); a live row with another
+  SHA-256 is retired (``retired_at`` = now) and the case inserted (``changed``); a live row with
+  the same SHA-256 is left alone (``unchanged``); every live row whose key isn't in ``cases`` is
+  retired (``retired``). Each is ``(test_set, case_key)``, in input order (``retired`` by set and
+  key). An empty ``cases`` touches no table and changes nothing (as ``sync_prompts`` with no
+  input). It logs ``test_cases_synced`` with the four counts. ``serve`` runs it at every start,
+  in the prompt step's unit of work (decision 2).
+- ``@use_case Playbook.activate(tuple_id, *, trigger) -> Activation(route, tuple_id, run_id,
+  changed)``. ``ActivationTrigger`` is ``test_passed`` (actor ``system:playbook``) or
+  ``rollback`` (actor ``operator``); anything else is a ``TypeError``. In one transaction it
+  refuses, with ``ActivationRefused`` (code ``activation_refused``), writing nothing so the
+  previous tuple keeps serving: an unknown tuple (a text that isn't a ULID included), "No such
+  tuple"; a tuple whose route has no set, or with no ``passed`` run on its set, "No passing
+  test run for this tuple". When the route's active activation has the tuple's model, effort,
+  prompt version, schema version and Playbook and isn't a bootstrap one, nothing changes
+  (``changed`` false). Otherwise: the active activation (when there is one) is deactivated now,
+  with an ``events`` row ``active`` to ``inactive`` (cause the trigger's value, ``cause_ref``
+  the qualifying run); an activation copied from the tuple row (its Playbook SHA-256 included)
+  is inserted, with ``bootstrap`` false, ``test_run_id`` the tuple's newest passing run and the
+  trigger's actor; and an ``events`` row ``None`` to ``active`` follows. It logs
+  ``route_activated`` (``route``, ``tuple_id``, ``run_id``, ``trigger``, ``changed``).
+
+**``AiTestRuns(clock, meter, llm, queue)``** runs the AI Test Sets.
+
+- ``@use_case queue_runs() -> int``: in one transaction, each tuple row whose route has a set
+  and that has no run on that set gets a ``run_ai_test_sets`` job (scope the tuple id,
+  discriminator the set, payload ``{"v": 1, "tuple_id": <id>, "test_set": <set>}``, the bulk
+  lane); a live job with that key absorbs it. It returns how many jobs it created and logs
+  ``ai_test_runs_queued`` (``count``). ``nextron.main`` runs it at each engine start, after
+  ``queue_contact_markets``, and the AI content view after Check for changes (decision 4).
+- ``@use_case run(tuple_id, test_set, *, activate=True) -> bool`` (the job's use case):
+
+  1. **First transaction.** When ``nextron.domain.budget.allow(BLOCKABLE, meter.snapshot(now),
+     queries.setup.budget_limits())`` is false it returns ``False`` (the job is deferred) with
+     nothing called or written (decision 3: a gate run is deferrable spend). An unknown tuple, or
+     a ``test_set`` that isn't its route's set, logs ``ai_test_run_skipped`` (``tuple_id``,
+     ``reason``) and returns ``True``. It builds the ``RouteTuple`` (``queries.playbook
+     .tuple_of``) and reads the set's live cases of the tuple's route (by ``case_key``) and the
+     stored Segments. When there are at least ``MIN_CASES`` cases, the set's scorer
+     (``SCORERS``) must exist (``LookupError`` otherwise: only ``extraction`` has one, decision
+     7), and a case naming a Segment that isn't stored raises ``InvalidTestCases`` before any
+     call.
+  2. **The calls**, with no transaction open. Fewer cases than ``MIN_CASES`` make a ``failed``
+     run with ``set_too_small`` and no call. Otherwise each case's ``llm.run(route_tuple,
+     blocks, urgency)`` runs in case order (the scorer builds the inputs). A retryable
+     ``AdapterError`` propagates and nothing is stored (the job retries); ``llm_unknown_route``
+     ends the run ``failed`` with ``unknown_route``; any other ``AdapterError`` propagates and
+     nothing is stored (decision 8). Each answer is scored (an ``LlmOk``'s ``parsed``, or the
+     result's type name).
+  3. **Last transaction.** The run is inserted (``ai_test_runs``: its outcome, ``passed`` when
+     every metric passed; the error; the case and passed counts; the metrics and every case's
+     result; the summed ``cost_micros``; ``started_at`` and ``finished_at``). When it passed,
+     ``activate`` is true and the tuple is its route's newest tuple row or the active tuple,
+     ``activate``'s work runs in this transaction with ``test_passed`` (decision 5: an older tuple
+     that passed is a rollback target only). It logs ``ai_test_run_finished`` (``tuple_id``,
+     ``run_id``, ``test_set``, ``outcome``, ``error``, ``case_count``, ``passed_count``,
+     ``cost_micros`` and ``activated``) and returns ``True``.
+
+No case or prompt text reaches a log record, an event, an error or a job payload.
 
 **Approved Company Facts** (FR-72, AD-7, AD-12, NFR-24, Story 4.3). ``CompanyFacts(clock)``
 keeps the facts a Draft may claim as append-only versions in the ``company_facts`` table
@@ -128,11 +197,15 @@ ULIDs (read through ``queries.setup``), at least one of each and never "all" (de
 
 import logging
 from collections import Counter
-from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
-from typing import Final
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Any, Final
 
+from nextron.app.jobqueue.api import JobQueue
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.playbook import activations as activations_repo
@@ -141,10 +214,40 @@ from nextron.db.repos.playbook import playbook_checks as checks_repo
 from nextron.db.repos.playbook import playbook_snapshots as playbook_snapshots_repo
 from nextron.db.repos.playbook import route_tuples as tuples_repo
 from nextron.db.repos.playbook import snapshots as snapshots_repo
+from nextron.db.repos.playbook import test_cases as cases_repo
+from nextron.db.repos.playbook import test_runs as runs_repo
+from nextron.db.repos.playbook.activations import StoredActivation
 from nextron.db.repos.playbook.company_facts import StoredFact
+from nextron.db.repos.playbook.route_tuples import StoredTuple
 from nextron.db.uow import command, current, use_case
 from nextron.domain import company_facts as facts_domain
-from nextron.domain.ai import RouteSpec
+from nextron.domain.ai import RouteSpec, RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai_test_cases import (
+    TestCase,
+    check_segments,
+    extraction_inputs,
+    score_extraction,
+    stored_case,
+)
+from nextron.domain.ai_test_gate import (
+    BOOTSTRAP_ROUTES,
+    MIN_CASES,
+    ROUTE_SETS,
+    RUN_AI_TEST_SETS_JOB,
+    TEST_SET_FIELD,
+    TUPLE_ID_FIELD,
+    CaseResult,
+    Metric,
+    RunError,
+    RunOutcome,
+    TestSet,
+    extraction_metrics,
+    metrics_json,
+    results_json,
+    run_passed,
+    set_of,
+)
+from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.company_facts import (
     ENTER_A_VALUE,
     FACT_ID_PATTERN,
@@ -159,9 +262,16 @@ from nextron.domain.company_facts import (
     fact_from_fields,
     validate_company_facts,
 )
+from nextron.domain.errors import DomainError
+from nextron.domain.ids import is_ulid
+from nextron.domain.job import VERSION_FIELD
 from nextron.domain.playbook import PlaybookProblem, PlaybookSnapshot, SyncTrigger
 from nextron.domain.prompts import USED_PROMPT_NEVER_CHANGES, InvalidPrompts, PromptFile
+from nextron.domain.segments import SegmentDef
 from nextron.ports.clock import Clock
+from nextron.ports.errors import AdapterError
+from nextron.ports.llm import LlmOk, LlmPort, LlmResult
+from nextron.ports.usage_meter import UsageMeterPort
 
 PROMPTS_SYNCED: Final = "prompts_synced"
 NOT_DEFAULT: Final = "active_tuple_not_default"
@@ -190,6 +300,19 @@ FACT_ID_FORM_REASON: Final = (
 FACT_ID_TAKEN: Final = "This fact id is already used"
 NO_SUCH_FACT: Final = "No fact has this id"
 STALE_FACT: Final = "This fact changed since the page loaded; reload the page and edit again"
+TEST_CASES_SYNCED: Final = "test_cases_synced"
+ROUTE_ACTIVATED: Final = "route_activated"
+INACTIVE_STATUS: Final = "inactive"
+NO_SUCH_TUPLE: Final = "No such tuple"
+NO_PASSING_RUN: Final = "No passing test run for this tuple"
+AI_TEST_RUNS_QUEUED: Final = "ai_test_runs_queued"
+AI_TEST_RUN_SKIPPED: Final = "ai_test_run_skipped"
+AI_TEST_RUN_FINISHED: Final = "ai_test_run_finished"
+UNKNOWN_TUPLE: Final = "unknown_tuple"
+NOT_THE_ROUTES_SET: Final = "not_the_routes_set"
+PAYLOAD_VERSION: Final = 1
+# nextron.adapters.ai.LLM_UNKNOWN_ROUTE: the app never imports the gateway (tests pin the two)
+UNKNOWN_ROUTE_CODE: Final = "llm_unknown_route"
 
 log = logging.getLogger(__name__)
 
@@ -220,12 +343,187 @@ class PromptSync:
     playbook: PlaybookRead | PlaybookProblem | None
 
 
+@dataclass(frozen=True, slots=True)
+class TestCaseSync:
+    """What ``sync_test_cases`` did, each as ``(test_set, case_key)``."""
+
+    __test__ = False  # pytest: a result, not a test class
+
+    added: tuple[tuple[str, str], ...]
+    changed: tuple[tuple[str, str], ...]
+    retired: tuple[tuple[str, str], ...]
+    unchanged: tuple[tuple[str, str], ...]
+
+
+class ActivationTrigger(StrEnum):
+    """Why a tuple is activated: its test run passed, or the Operator rolled back to it."""
+
+    TEST_PASSED = "test_passed"
+    ROLLBACK = "rollback"
+
+    @property
+    def actor(self) -> str:
+        """Who the activation's rows name."""
+        return "system:playbook" if self is ActivationTrigger.TEST_PASSED else OPERATOR_ACTOR
+
+
+class ActivationRefused(DomainError):
+    """``activate`` refused a tuple; nothing was written and the previous tuple keeps
+    serving."""
+
+    code = "activation_refused"
+
+
+@dataclass(frozen=True, slots=True)
+class Activation:
+    """What ``activate`` did: the route, the tuple, the qualifying run, and whether anything
+    changed."""
+
+    route: str
+    tuple_id: str
+    run_id: str
+    changed: bool
+
+
+def _identity(row: StoredActivation | StoredTuple) -> tuple[str, str, str, int, str | None]:
+    """What makes a tuple distinct within its route (the tuples' unique index fields)."""
+    return (row.model, row.effort, row.prompt_version, row.schema_version, row.playbook_sha256)
+
+
+def _activate(tuple_id: str, trigger: ActivationTrigger, now: datetime) -> Activation:
+    """``activate``'s work, inside the running use case's transaction; see the module
+    docstring."""
+    row = tuples_repo.get(tuple_id) if is_ulid(tuple_id) else None
+    if row is None:
+        raise ActivationRefused(NO_SUCH_TUPLE)
+    test_set = ROUTE_SETS.get(row.route)
+    passing = None if test_set is None else runs_repo.newest_passed(row.id, test_set.value)
+    if passing is None:
+        raise ActivationRefused(NO_PASSING_RUN)
+    active = activations_repo.active(row.route)
+    if active is not None and not active.bootstrap and _identity(active) == _identity(row):
+        return Activation(row.route, row.id, passing.id, changed=False)
+    if active is not None:
+        activations_repo.deactivate(active.id, now)
+        eventlog.append(
+            entity=ACTIVATIONS_ENTITY,
+            entity_id=active.id,
+            from_status=ACTIVE_STATUS,
+            to_status=INACTIVE_STATUS,
+            cause=trigger.value,
+            cause_ref=passing.id,
+            actor=trigger.actor,
+            at=now,
+        )
+    activation_id = activations_repo.insert(
+        route=row.route,
+        model=row.model,
+        effort=row.effort,
+        prompt_version=row.prompt_version,
+        prompt_sha256=row.prompt_sha256,
+        playbook_sha256=row.playbook_sha256,
+        schema_version=row.schema_version,
+        actor=trigger.actor,
+        bootstrap=False,
+        test_run_id=passing.id,
+        at=now,
+    )
+    eventlog.append(
+        entity=ACTIVATIONS_ENTITY,
+        entity_id=activation_id,
+        from_status=None,
+        to_status=ACTIVE_STATUS,
+        cause=trigger.value,
+        cause_ref=passing.id,
+        actor=trigger.actor,
+        at=now,
+    )
+    return Activation(row.route, row.id, passing.id, changed=True)
+
+
+def _log_case_sync(*found: Sequence[tuple[str, str]]) -> None:
+    added, changed, retired, unchanged = found
+    log.info(
+        TEST_CASES_SYNCED,
+        extra={
+            "added_count": len(added),
+            "changed_count": len(changed),
+            "retired_count": len(retired),
+            "unchanged_count": len(unchanged),
+        },
+    )
+
+
+def _log_activation(result: Activation, trigger: ActivationTrigger) -> None:
+    log.info(
+        ROUTE_ACTIVATED,
+        extra={
+            "route": result.route,
+            "tuple_id": result.tuple_id,
+            "run_id": result.run_id,
+            "trigger": trigger.value,
+            "changed": result.changed,
+        },
+    )
+
+
 class Playbook:
-    """The versioned AI prompts, the Sales Playbook snapshots, and which tuple each AI route
-    runs."""
+    """The versioned AI prompts, the Sales Playbook snapshots, the AI Test Set cases, and which
+    tuple each AI route runs."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
+
+    @use_case
+    def sync_test_cases(self, cases: Sequence[TestCase]) -> TestCaseSync:
+        """Store the AI Test Set cases, retiring changed and removed ones; see the module
+        docstring."""
+        chosen = tuple(cases)
+        for case in chosen:
+            if not isinstance(case, TestCase):
+                raise TypeError(f"sync_test_cases takes TestCases, not {type(case).__name__}")
+        keys = Counter((case.test_set.value, case.case_key) for case in chosen)
+        repeated = sorted(f"{test_set} {key}" for (test_set, key), n in keys.items() if n > 1)
+        if repeated:
+            raise ValueError(f"sync_test_cases got a test case more than once: {repeated[0]}")
+        now = self._clock.now()
+        added: list[tuple[str, str]] = []
+        changed: list[tuple[str, str]] = []
+        unchanged: list[tuple[str, str]] = []
+        retired: tuple[tuple[str, str], ...] = ()
+        if not chosen:  # nothing to sync: no table is touched (as sync_prompts with no input)
+            _log_case_sync(added, changed, retired, unchanged)
+            return TestCaseSync((), (), (), ())
+        with current().transaction():
+            live = {(row.test_set, row.case_key): row for row in cases_repo.all_live()}
+            for case in chosen:
+                key = (case.test_set.value, case.case_key)
+                row = live.pop(key, None)
+                if row is None:
+                    cases_repo.insert(case, now)
+                    added.append(key)
+                elif row.sha256 != case.sha256:
+                    cases_repo.retire(row.id, now)
+                    cases_repo.insert(case, now)
+                    changed.append(key)
+                else:
+                    unchanged.append(key)
+            retired = tuple(sorted(live))
+            for key in retired:
+                cases_repo.retire(live[key].id, now)
+        _log_case_sync(added, changed, retired, unchanged)
+        return TestCaseSync(tuple(added), tuple(changed), retired, tuple(unchanged))
+
+    @use_case
+    def activate(self, tuple_id: str, *, trigger: ActivationTrigger) -> Activation:
+        """Activate a tuple that passed its AI Test Set; see the module docstring."""
+        if not isinstance(trigger, ActivationTrigger):
+            raise TypeError(f"activate takes an ActivationTrigger, not {type(trigger).__name__}")
+        now = self._clock.now()
+        with current().transaction():
+            result = _activate(tuple_id, trigger, now)
+        _log_activation(result, trigger)
+        return result
 
     @use_case
     def sync_prompts(
@@ -334,8 +632,8 @@ def _sync(
             kept.append((current_activation.route, current_activation.prompt_version))
             _warn_if_not_default(current_activation, spec)
             continue
-        if spec.uses_playbook:  # decision 4: only Story 4.5's gate activates a Playbook route
-            continue
+        if spec.uses_playbook or spec.route not in BOOTSTRAP_ROUTES:
+            continue  # decision 4 and Story 4.5: every other route serves only after its gate
         activation_id = activations_repo.insert(
             route=spec.route,
             model=spec.model,
@@ -802,3 +1100,216 @@ def _saved(result: FactSaved) -> FactSaved:
         extra={"fact_id": result.fact_id, "version": result.version, "changed": result.changed},
     )
     return result
+
+
+# The AI test runs (Story 4.5) -----------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Scorer:
+    """How a set's cases are run and scored: the check before any call, each case's inputs,
+    each answer's score and the run's metrics."""
+
+    check: Callable[[Sequence[TestCase], Sequence[SegmentDef]], None]
+    inputs: Callable[[TestCase, int, Sequence[SegmentDef]], tuple[list[UntrustedBlock], Urgency]]
+    score: Callable[[TestCase, Mapping[str, Any] | str], tuple[Any, CaseResult]]
+    metrics: Callable[[str, Sequence[Any]], tuple[Metric, ...]]
+
+
+# Each set's scorer (decision 7): only extraction has one until its routes ship theirs.
+SCORERS: Final[Mapping[TestSet, Scorer]] = MappingProxyType(
+    {
+        TestSet.EXTRACTION: Scorer(
+            check=check_segments,
+            inputs=extraction_inputs,
+            score=score_extraction,
+            metrics=extraction_metrics,
+        ),
+    }
+)
+
+
+def _answer(result: LlmResult) -> Mapping[str, Any] | str:
+    """What a scorer reads: an answer's parsed object, or any other result's type name."""
+    return result.parsed if isinstance(result, LlmOk) else type(result).__name__
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    """What the first transaction read for a run."""
+
+    row: StoredTuple
+    test_set: TestSet
+    route_tuple: RouteTuple
+    cases: tuple[TestCase, ...]
+    segments: tuple[SegmentDef, ...]
+    scorer: Scorer | None  # None when the set is too small
+
+
+@dataclass(slots=True)
+class _Scored:
+    """What the calls gave."""
+
+    error: RunError | None = None
+    outcomes: list[Any] = field(default_factory=list)
+    results: list[CaseResult] = field(default_factory=list)
+    cost_micros: int = 0
+
+
+class AiTestRuns:
+    """The AI Test Set runs and their queueing; see the module docstring."""
+
+    def __init__(
+        self, clock: Clock, meter: UsageMeterPort, llm: LlmPort, queue: JobQueue
+    ) -> None:
+        self._clock = clock
+        self._meter = meter
+        self._llm = llm
+        self._queue = queue
+
+    @use_case
+    def queue_runs(self) -> int:
+        """Queue a run of each tuple row that has none on its route's set; how many jobs were
+        created."""
+        created = 0
+        with current().transaction():
+            done = {(run.tuple_id, run.test_set) for run in runs_repo.every()}
+            for row in tuples_repo.every():
+                test_set = ROUTE_SETS.get(row.route)
+                if test_set is None or (row.id, test_set.value) in done:
+                    continue
+                enqueued = self._queue.enqueue(
+                    RUN_AI_TEST_SETS_JOB,
+                    scope=row.id,
+                    discriminator=test_set.value,
+                    payload={
+                        VERSION_FIELD: PAYLOAD_VERSION,
+                        TUPLE_ID_FIELD: row.id,
+                        TEST_SET_FIELD: test_set.value,
+                    },
+                )
+                created += int(enqueued.created)
+        log.info(AI_TEST_RUNS_QUEUED, extra={"count": created})
+        return created
+
+    @use_case
+    def run(self, tuple_id: str, test_set: str, *, activate: bool = True) -> bool:
+        """Run the tuple's AI Test Set and store the run; see the module docstring."""
+        uow = current()
+        started_at = self._clock.now()
+        with uow.transaction():
+            limits = setup_queries.budget_limits()
+            if not allow(BudgetClass.BLOCKABLE, self._meter.snapshot(started_at), limits):
+                return False
+            prepared = _prepare(tuple_id, test_set)
+        if isinstance(prepared, str):
+            log.info(AI_TEST_RUN_SKIPPED, extra={"tuple_id": tuple_id, "reason": prepared})
+            return True
+        scored = self._call(prepared)
+        finished_at = self._clock.now()
+        cases = prepared.cases
+        if scored.error is not None or prepared.scorer is None:
+            metrics: tuple[Metric, ...] = ()
+            outcome = RunOutcome.FAILED
+        else:
+            metrics = prepared.scorer.metrics(prepared.row.route, scored.outcomes)
+            outcome = RunOutcome.PASSED if run_passed(metrics) else RunOutcome.FAILED
+        results = scored.results
+        activated: Activation | None = None
+        with uow.transaction():
+            run_id = runs_repo.insert(
+                tuple_id=prepared.row.id,
+                test_set=prepared.test_set.value,
+                outcome=outcome.value,
+                error=None if scored.error is None else scored.error.value,
+                case_count=len(cases),
+                passed_count=sum(1 for result in results if result.passed),
+                metrics=metrics_json(metrics),
+                results=results_json(results),
+                cost_micros=scored.cost_micros,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            if outcome is RunOutcome.PASSED and activate and _may_activate(prepared.row):
+                activated = _activate(prepared.row.id, ActivationTrigger.TEST_PASSED, finished_at)
+        if activated is not None:
+            _log_activation(activated, ActivationTrigger.TEST_PASSED)
+        log.info(
+            AI_TEST_RUN_FINISHED,
+            extra={
+                "tuple_id": prepared.row.id,
+                "run_id": run_id,
+                "test_set": prepared.test_set.value,
+                "outcome": outcome.value,
+                "error": None if scored.error is None else scored.error.value,
+                "case_count": len(cases),
+                "passed_count": sum(1 for result in results if result.passed),
+                "cost_micros": scored.cost_micros,
+                "activated": activated is not None and activated.changed,
+            },
+        )
+        return True
+
+    def _call(self, prepared: _Prepared) -> _Scored:
+        """Step 2: every case's call and score, with no transaction open."""
+        scorer = prepared.scorer
+        if scorer is None:
+            return _Scored(error=RunError.SET_TOO_SMALL)
+        scored = _Scored()
+        for number, case in enumerate(prepared.cases, start=1):
+            blocks, urgency = scorer.inputs(case, number, prepared.segments)
+            try:
+                result = self._llm.run(prepared.route_tuple, blocks, urgency)
+            except AdapterError as failure:
+                if not failure.retryable and failure.code == UNKNOWN_ROUTE_CODE:
+                    scored.error = RunError.UNKNOWN_ROUTE
+                    return scored
+                raise  # decision 8: retried, or the job dies and is queued at the next start
+            scored.cost_micros += result.usage.cost_micros
+            outcome, case_result = scorer.score(case, _answer(result))
+            scored.outcomes.append(outcome)
+            scored.results.append(case_result)
+        return scored
+
+
+def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
+    """Step 1's reads, inside the first transaction: what the run needs, or why it is
+    skipped."""
+    row = tuples_repo.get(tuple_id) if is_ulid(tuple_id) else None
+    if row is None:
+        return UNKNOWN_TUPLE
+    chosen = set_of(test_set)
+    if chosen is None or ROUTE_SETS.get(row.route) is not chosen:
+        return NOT_THE_ROUTES_SET
+    route_tuple = playbook_queries.tuple_of(row.id)
+    if route_tuple is None:  # pragma: no cover - the row was just read in this transaction
+        return UNKNOWN_TUPLE
+    cases = tuple(
+        stored_case(
+            stored.case_key,
+            stored.test_set,
+            stored.route,
+            stored.input,
+            stored.expected,
+            stored.covers,
+        )
+        for stored in cases_repo.live(chosen.value, row.route)
+    )
+    segments = tuple(seeded.definition for seeded in setup_queries.segments())
+    scorer: Scorer | None = None
+    if len(cases) >= MIN_CASES[chosen]:
+        scorer = SCORERS.get(chosen)
+        if scorer is None:
+            raise LookupError(f"the {chosen.value} set has no scorer yet")
+        scorer.check(cases, segments)
+    return _Prepared(row, chosen, route_tuple, cases, segments, scorer)
+
+
+def _may_activate(row: StoredTuple) -> bool:
+    """Decision 5: a passing run activates only its route's newest tuple row, or re-qualifies
+    the active tuple."""
+    newest = next((found for found in tuples_repo.every() if found.route == row.route), None)
+    if newest is not None and newest.id == row.id:
+        return True
+    active = activations_repo.active(row.route)
+    return active is not None and _identity(active) == _identity(row)

@@ -80,6 +80,7 @@ _NO_SERVICES: Final[dict[str, Any]] = {
     "crawls": _no_backups,
     "discovery": _no_backups,
     "research": _no_backups,
+    "test_runs": _no_backups,
 }
 
 

@@ -10,6 +10,7 @@ updated or deleted.
 - ``find(route, model, effort, prompt_version, schema_version, playbook_sha256)``: the row of
   that tuple as a ``StoredTuple`` (``playbook_sha256`` ``None`` matches only a row without a
   Playbook), or ``None``;
+- ``get(tuple_id)``: the row ``tuple_id`` as a ``StoredTuple``, or ``None`` (Story 4.5);
 - ``every()``: every row, by ``route``, then newest first (``created_at``, then ``id``);
 - ``insert(...) -> id``: a new tuple created at ``at``.
 """
@@ -75,6 +76,13 @@ def find(
         AiRouteTupleRecord.schema_version == int(schema_version),
         playbook,
     )
+    row = current().session.execute(statement).one_or_none()
+    return None if row is None else StoredTuple(*row)
+
+
+def get(tuple_id: str) -> StoredTuple | None:
+    """The row ``tuple_id``, or ``None`` when there is none."""
+    statement = select(*_COLUMNS).where(AiRouteTupleRecord.id == str(tuple_id))
     row = current().session.execute(statement).one_or_none()
     return None if row is None else StoredTuple(*row)
 

@@ -37,6 +37,26 @@ The Sales Playbook and the candidate tuples (FR-71, AD-8, NFR-25, Story 4.4):
 ``PlaybookRef(version, sha256)`` names a stored Playbook snapshot; ``short`` is its first 12
 hex digits.
 
+The AI test gate (FR-73, AD-12, NFR-26, UX-DR30, Story 4.5):
+
+- ``tuple_of(tuple_id) -> RouteTuple | None``: the ``RouteTuple`` of the stored tuple row
+  ``tuple_id`` (``None`` for an unknown id, a text that isn't a ULID included), built from its
+  prompt snapshot and Playbook snapshot and checked exactly as ``active_tuple`` checks an
+  activation's (``ValueError`` naming the route only). ``AiTestRuns.run`` calls it.
+- ``route_tuples()`` also gives each ``ActiveTuple`` its ``tuple_id`` (the tuple row with the
+  activation's fields, or ``None``), ``ungated`` (the activation is a bootstrap one: it serves
+  without a test run) and ``run``, and each ``CandidateTuple`` its ``run`` and ``passing`` (it
+  has a ``passed`` run on its route's set, so it can be rolled back to). ``run`` is the newest
+  ``RunSummary`` of the tuple row on its route's set (``ROUTE_SETS``), or ``None``: the run's
+  id, set, outcome, error, case and passed counts, metrics, the ``CaseResult``s of its failing
+  cases, cost and ``finished_at``.
+- ``health_issues()`` also reports, per route (by name) whose active tuple's newest run on its
+  set failed, ``HealthIssue("ai_tuple_failed", <route>, "<route>: active tuple failed its test
+  set", detail=TUPLE_FAILED_DETAIL)``, until a passing tuple replaces it (or the active tuple's
+  newest run passes). The detail says the tuple keeps serving until a tuple passes its test set
+  and is activated, and that the AI content page shows the run's metrics, its failing cases or
+  why it failed (a ``set_too_small`` or ``unknown_route`` run has no failing case).
+
 The Approved Company Facts (FR-72, Story 4.3). A fact's versions are append-only; its *current*
 version is its highest version that isn't retracted, or none (a retraction retracts every
 version, so a retracted fact has none until the Operator edits it again).
@@ -69,10 +89,23 @@ from nextron.db.repos.playbook import playbook_checks as checks_repo
 from nextron.db.repos.playbook import playbook_snapshots as playbook_snapshots_repo
 from nextron.db.repos.playbook import route_tuples as tuples_repo
 from nextron.db.repos.playbook import snapshots as snapshots_repo
+from nextron.db.repos.playbook import test_runs as runs_repo
 from nextron.db.repos.playbook.activations import StoredActivation
 from nextron.db.repos.playbook.company_facts import StoredFact
 from nextron.db.repos.playbook.route_tuples import StoredTuple
+from nextron.db.repos.playbook.test_runs import StoredRun
 from nextron.domain.ai import Effort, RouteTuple
+from nextron.domain.ai_test_gate import (
+    ROUTE_SETS,
+    CaseResult,
+    Metric,
+    RunError,
+    RunOutcome,
+    TestSet,
+    metrics_from_json,
+    results_from_json,
+)
+from nextron.domain.ids import is_ulid
 from nextron.domain.company_facts import FactContent, FactCreator
 from nextron.domain.health import HealthIssue
 from nextron.domain.playbook import (
@@ -93,6 +126,7 @@ __all__ = [
     "PlaybookStatus",
     "PlaybookVersion",
     "RouteTuples",
+    "RunSummary",
     "active_tuple",
     "allowed_facts",
     "company_facts",
@@ -100,6 +134,7 @@ __all__ = [
     "health_issues",
     "playbook_status",
     "route_tuples",
+    "tuple_of",
 ]
 
 PLAYBOOK_INVALID: Final = "playbook_invalid"
@@ -107,6 +142,12 @@ PLAYBOOK_SUBJECT: Final = "playbook"
 ISSUE_LEAD: Final = "Sales Playbook: "
 FIX_PLAYBOOK: Final = (
     "Fix the file, then use Check for changes on the AI content page (/ai) or restart the engine."
+)
+TUPLE_FAILED: Final = "ai_tuple_failed"
+TUPLE_FAILED_TEXT: Final = "{route}: active tuple failed its test set"
+TUPLE_FAILED_DETAIL: Final = (
+    "It keeps serving until a tuple passes its test set and is activated. The AI content page "
+    "(/ai) shows the run's metrics, its failing cases or why it failed."
 )
 
 
@@ -117,36 +158,49 @@ def active_tuple(route: str) -> RouteTuple | None:
     activation = activations_repo.active(route)
     if activation is None:
         return None
-    where = f"{activation.route} {activation.prompt_version}"
-    snapshot = snapshots_repo.get(activation.route, activation.prompt_version)
+    return _built(activation, "active tuple")
+
+
+def tuple_of(tuple_id: str) -> RouteTuple | None:
+    """The ``RouteTuple`` of the stored tuple row ``tuple_id``, checked as ``active_tuple``
+    checks an activation's, or ``None`` when there is no such row."""
+    if not is_ulid(tuple_id):
+        return None
+    row = tuples_repo.get(tuple_id)
+    return None if row is None else _built(row, "tuple")
+
+
+def _built(row: StoredActivation | StoredTuple, what: str) -> RouteTuple:
+    """The ``RouteTuple`` of an activation or a tuple row, with the snapshots' text, checked
+    against the row's SHA-256s (``ValueError`` naming the route only)."""
+    where = f"{row.route} {row.prompt_version}"
+    snapshot = snapshots_repo.get(row.route, row.prompt_version)
     if snapshot is None:
-        raise ValueError(f"the active tuple of {where} names a prompt snapshot that isn't stored")
+        raise ValueError(f"the {what} of {where} names a prompt snapshot that isn't stored")
     route_tuple = RouteTuple(
-        route=activation.route,
-        model=activation.model,
-        effort=Effort(activation.effort),
-        prompt_version=activation.prompt_version,
-        schema_version=activation.schema_version,
+        route=row.route,
+        model=row.model,
+        effort=Effort(row.effort),
+        prompt_version=row.prompt_version,
+        schema_version=row.schema_version,
         system_prompt=snapshot.text,
-        playbook=_pinned_playbook(activation),
+        playbook=_pinned_playbook(row, what),
     )
-    if not route_tuple.prompt_sha256 == snapshot.sha256 == activation.prompt_sha256:
+    if not route_tuple.prompt_sha256 == snapshot.sha256 == row.prompt_sha256:
         raise ValueError(f"the stored prompt of {where} doesn't match its SHA-256")
     return route_tuple
 
 
-def _pinned_playbook(activation: StoredActivation) -> PlaybookSnapshot | None:
-    """The Playbook snapshot the activation names, checked against its SHA-256, or ``None``."""
-    if activation.playbook_sha256 is None:
+def _pinned_playbook(row: StoredActivation | StoredTuple, what: str) -> PlaybookSnapshot | None:
+    """The Playbook snapshot the row names, checked against its SHA-256, or ``None``."""
+    if row.playbook_sha256 is None:
         return None
-    stored = playbook_snapshots_repo.get(activation.playbook_sha256)
+    stored = playbook_snapshots_repo.get(row.playbook_sha256)
     if stored is None:
-        raise ValueError(
-            f"the active tuple of {activation.route} names a Playbook snapshot that isn't stored"
-        )
+        raise ValueError(f"the {what} of {row.route} names a Playbook snapshot that isn't stored")
     pinned = PlaybookSnapshot(stored.version, stored.content)
-    if not pinned.sha256 == stored.sha256 == activation.playbook_sha256:
-        raise ValueError(f"the stored Playbook of {activation.route} doesn't match its SHA-256")
+    if not pinned.sha256 == stored.sha256 == row.playbook_sha256:
+        raise ValueError(f"the stored Playbook of {row.route} doesn't match its SHA-256")
     return pinned
 
 
@@ -164,8 +218,27 @@ class PlaybookRef:
 
 
 @dataclass(frozen=True, slots=True)
+class RunSummary:
+    """A tuple's test run as the AI content view shows it: ``failing`` holds the
+    ``CaseResult`` of each case that failed, in case order."""
+
+    id: str
+    test_set: TestSet
+    outcome: RunOutcome
+    error: RunError | None
+    case_count: int
+    passed_count: int
+    metrics: tuple[Metric, ...]
+    failing: tuple[CaseResult, ...]
+    cost_micros: int
+    finished_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ActiveTuple:
-    """The tuple a route runs: its active activation."""
+    """The tuple a route runs: its active activation, the tuple row with its fields
+    (``tuple_id``, or ``None``), whether it serves without a test run (``ungated``) and that
+    row's newest run on the route's set."""
 
     model: str
     effort: Effort
@@ -175,11 +248,15 @@ class ActiveTuple:
     activated_at: datetime
     bootstrap: bool
     actor: str
+    tuple_id: str | None
+    ungated: bool
+    run: RunSummary | None
 
 
 @dataclass(frozen=True, slots=True)
 class CandidateTuple:
-    """A stored tuple of a route that isn't its active one."""
+    """A stored tuple of a route that isn't its active one, its newest run on the route's set
+    and whether it has a passing one (``passing``: a rollback target)."""
 
     id: str
     model: str
@@ -188,6 +265,8 @@ class CandidateTuple:
     schema_version: int
     playbook: PlaybookRef | None
     created_at: datetime
+    run: RunSummary | None
+    passing: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +326,51 @@ def _identity(row: StoredActivation | StoredTuple) -> tuple[str, str, str, int, 
     return (row.model, row.effort, row.prompt_version, row.schema_version, row.playbook_sha256)
 
 
-def _active(activation: StoredActivation, versions: dict[str, str]) -> ActiveTuple:
+class _Runs:
+    """Every stored run, read once: the newest of each tuple on each set, and which tuples
+    passed."""
+
+    def __init__(self) -> None:
+        self.newest: dict[tuple[str, str], StoredRun] = {}
+        self.passed: set[tuple[str, str]] = set()
+        for run in runs_repo.every():  # by tuple and set, newest first
+            key = (run.tuple_id, run.test_set)
+            self.newest.setdefault(key, run)
+            if run.outcome == RunOutcome.PASSED.value:
+                self.passed.add(key)
+
+    def summary(self, route: str, tuple_id: str | None) -> RunSummary | None:
+        """The newest run of ``tuple_id`` on ``route``'s set, or ``None``."""
+        test_set = ROUTE_SETS.get(route)
+        if tuple_id is None or test_set is None:
+            return None
+        run = self.newest.get((tuple_id, test_set.value))
+        return None if run is None else _summary(run)
+
+    def passing(self, route: str, tuple_id: str) -> bool:
+        """Whether ``tuple_id`` has a ``passed`` run on ``route``'s set."""
+        test_set = ROUTE_SETS.get(route)
+        return test_set is not None and (tuple_id, test_set.value) in self.passed
+
+
+def _summary(run: StoredRun) -> RunSummary:
+    return RunSummary(
+        id=run.id,
+        test_set=TestSet(run.test_set),
+        outcome=RunOutcome(run.outcome),
+        error=None if run.error is None else RunError(run.error),
+        case_count=run.case_count,
+        passed_count=run.passed_count,
+        metrics=metrics_from_json(run.metrics),
+        failing=tuple(result for result in results_from_json(run.results) if not result.passed),
+        cost_micros=run.cost_micros,
+        finished_at=run.finished_at,
+    )
+
+
+def _active(
+    activation: StoredActivation, tuple_id: str | None, runs: _Runs, versions: dict[str, str]
+) -> ActiveTuple:
     return ActiveTuple(
         model=activation.model,
         effort=Effort(activation.effort),
@@ -257,10 +380,13 @@ def _active(activation: StoredActivation, versions: dict[str, str]) -> ActiveTup
         activated_at=activation.activated_at,
         bootstrap=activation.bootstrap,
         actor=activation.actor,
+        tuple_id=tuple_id,
+        ungated=activation.bootstrap,
+        run=runs.summary(activation.route, tuple_id),
     )
 
 
-def _candidate(row: StoredTuple, versions: dict[str, str]) -> CandidateTuple:
+def _candidate(row: StoredTuple, runs: _Runs, versions: dict[str, str]) -> CandidateTuple:
     return CandidateTuple(
         id=row.id,
         model=row.model,
@@ -269,26 +395,44 @@ def _candidate(row: StoredTuple, versions: dict[str, str]) -> CandidateTuple:
         schema_version=row.schema_version,
         playbook=_ref(row.route, row.playbook_sha256, versions),
         created_at=row.created_at,
+        run=runs.summary(row.route, row.id),
+        passing=runs.passing(row.route, row.id),
     )
+
+
+def _rows_by_route() -> dict[str, list[StoredTuple]]:
+    rows: dict[str, list[StoredTuple]] = {}
+    for row in tuples_repo.every():  # by route, newest first
+        rows.setdefault(row.route, []).append(row)
+    return rows
+
+
+def _active_row(activation: StoredActivation, rows: list[StoredTuple]) -> StoredTuple | None:
+    """The tuple row with the activation's fields, or ``None``."""
+    identity = _identity(activation)
+    return next((row for row in rows if _identity(row) == identity), None)
 
 
 def route_tuples() -> tuple[RouteTuples, ...]:
     """Every route's active tuple and candidates, by route name; see the module docstring."""
     versions: dict[str, str] = {}  # Playbook SHA-256 -> version, read once each
     actives = {activation.route: activation for activation in activations_repo.all_active()}
-    rows: dict[str, list[StoredTuple]] = {}
-    for row in tuples_repo.every():  # by route, newest first
-        rows.setdefault(row.route, []).append(row)
+    rows = _rows_by_route()
+    runs = _Runs()
     found: list[RouteTuples] = []
     for route in sorted(actives.keys() | rows.keys()):
         activation = actives.get(route)
         active_identity = None if activation is None else _identity(activation)
         candidates = tuple(
-            _candidate(row, versions)
+            _candidate(row, runs, versions)
             for row in rows.get(route, [])
             if _identity(row) != active_identity
         )
-        active = None if activation is None else _active(activation, versions)
+        active = None
+        if activation is not None:
+            matching = _active_row(activation, rows.get(route, []))
+            tuple_id = None if matching is None else matching.id
+            active = _active(activation, tuple_id, runs, versions)
         found.append(RouteTuples(route, active, candidates))
     return tuple(found)
 
@@ -315,13 +459,31 @@ def playbook_status() -> PlaybookStatus:
 
 
 def health_issues() -> tuple[HealthIssue, ...]:
-    """``playbook_invalid`` when the newest Playbook check recorded a problem; otherwise
-    none."""
+    """``playbook_invalid`` when the newest Playbook check recorded a problem, then
+    ``ai_tuple_failed`` for each route whose active tuple's newest run failed; see the module
+    docstring."""
+    issues: list[HealthIssue] = []
     newest = checks_repo.newest()
-    if newest is None or newest.problem is None:
-        return ()
-    text = ISSUE_LEAD + problem_text(PlaybookProblem(newest.problem))
-    return (HealthIssue(PLAYBOOK_INVALID, PLAYBOOK_SUBJECT, text, detail=FIX_PLAYBOOK),)
+    if newest is not None and newest.problem is not None:
+        text = ISSUE_LEAD + problem_text(PlaybookProblem(newest.problem))
+        issues.append(HealthIssue(PLAYBOOK_INVALID, PLAYBOOK_SUBJECT, text, detail=FIX_PLAYBOOK))
+    rows = _rows_by_route()
+    for activation in activations_repo.all_active():  # by route
+        test_set = ROUTE_SETS.get(activation.route)
+        matching = _active_row(activation, rows.get(activation.route, []))
+        if test_set is None or matching is None:
+            continue
+        run = runs_repo.newest(matching.id, test_set.value)
+        if run is not None and run.outcome == RunOutcome.FAILED.value:
+            issues.append(
+                HealthIssue(
+                    TUPLE_FAILED,
+                    activation.route,
+                    TUPLE_FAILED_TEXT.format(route=activation.route),
+                    detail=TUPLE_FAILED_DETAIL,
+                )
+            )
+    return tuple(issues)
 
 
 @dataclass(frozen=True, slots=True)

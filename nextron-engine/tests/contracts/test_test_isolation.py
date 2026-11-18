@@ -4,6 +4,12 @@ every adapter package is classified, and nothing reaches the network. Where a ch
 silently pass, it also runs on a probe that breaks it.
 
 The guards themselves live in ``tests/live_guard.py`` and are applied by ``tests/conftest.py``.
+
+**Engines a test starts (Story 4.5, decision 10).** A child process gets none of pytest's
+guards, so every test module that starts ``python -m nextron`` passes the child's environment
+through ``tests.live_guard.child_env``; and a child started with it can't look up or reach a
+real host (or does not start at all when the guard can't be installed), while loopback still
+works.
 """
 
 import asyncio
@@ -11,7 +17,9 @@ import importlib
 import inspect
 import os
 import pkgutil
+import re
 import socket
+import subprocess
 import sys
 import types
 import typing
@@ -30,7 +38,7 @@ from nextron import main
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.bootstrap import load_bootstrap
 from nextron.main import AdapterContext, RoleAdapter, SinkRole, build_role_adapter
-from tests.contracts.support import PACKAGE
+from tests.contracts.support import ENGINE_ROOT, PACKAGE
 from tests.contracts.test_sink_contracts import senders_in
 from tests.fakes import PORT_FAKES
 from tests.fakes.alert import InMemoryAlert
@@ -49,6 +57,7 @@ from tests.live_guard import (
     NoExternalSystem,
     NotYetBuilt,
     allow_live_constructor,
+    child_env,
     guard_live_constructors,
     is_local_host,
     is_refused,
@@ -706,3 +715,101 @@ def test_loopback_still_works_through_asyncio() -> None:
         return echoed, datagram
 
     assert asyncio.run(exchange()) == (b"ping", b"pong")
+
+
+# Engines a test starts (Story 4.5) -----------------------------------------------------------
+
+STARTS_THE_ENGINE: Final = re.compile(r"""["']-m["']\s*,\s*["']nextron["']""")
+CHILD_PROBE: Final = (
+    "import socket\n"
+    "for call in (lambda: socket.getaddrinfo('example.com', 443),\n"
+    "             lambda: socket.create_connection(('192.0.2.1', 443), timeout=1)):\n"
+    "    try:\n"
+    "        call()\n"
+    "    except Exception as error:\n"
+    "        print(type(error).__name__)\n"
+    "    else:\n"
+    "        print('reached')\n"
+    "server = socket.socket()\n"
+    "server.bind(('127.0.0.1', 0))\n"
+    "server.listen()\n"
+    "socket.create_connection(server.getsockname(), timeout=5).close()\n"
+    "print('loopback')\n"
+)
+
+
+def modules_that_start_the_engine(root: Path) -> list[Path]:
+    """Every test module under ``root`` that starts ``python -m nextron``."""
+    return sorted(
+        path
+        for path in root.rglob("*.py")
+        if STARTS_THE_ENGINE.search(path.read_text(encoding="utf-8")) is not None
+    )
+
+
+def test_every_test_that_starts_the_engine_guards_its_network() -> None:
+    found = modules_that_start_the_engine(ENGINE_ROOT / "tests")
+
+    assert found  # the check looks at real modules
+    unguarded = [
+        path.relative_to(ENGINE_ROOT).as_posix()
+        for path in found
+        if "child_env(" not in path.read_text(encoding="utf-8")
+    ]
+    assert unguarded == []
+
+
+def test_the_engine_check_finds_a_module_that_starts_the_engine(tmp_path: Path) -> None:
+    (tmp_path / "test_probe.py").write_text(
+        'import subprocess, sys\nsubprocess.run([sys.executable, "-m", "nextron", "serve"])\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "test_other.py").write_text("print('-m nextron')\n", encoding="utf-8")
+
+    assert modules_that_start_the_engine(tmp_path) == [tmp_path / "test_probe.py"]
+
+
+def test_a_child_started_with_child_env_reaches_only_loopback() -> None:
+    variables = child_env({**os.environ, "PYTHONPATH": str(ENGINE_ROOT / "missing")})
+
+    done = subprocess.run(  # noqa: S603 - this interpreter, a fixed snippet
+        [sys.executable, "-c", CHILD_PROBE],
+        env=variables,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert (done.returncode, done.stdout.split()) == (
+        0,
+        ["NetworkInTests", "NetworkInTests", "loopback"],
+    ), done.stderr
+    assert variables["PYTHONPATH"].split(os.pathsep) == [
+        str(ENGINE_ROOT / "tests" / "child_guard"),
+        str(ENGINE_ROOT),
+        str(ENGINE_ROOT / "missing"),
+    ]
+
+
+def test_a_child_whose_guard_cant_be_installed_never_runs(tmp_path: Path) -> None:
+    broken = tmp_path / "tests"
+    broken.mkdir()
+    (broken / "__init__.py").write_text("", encoding="utf-8")
+    (broken / "live_guard.py").write_text("raise RuntimeError('no guard')\n", encoding="utf-8")
+    variables = child_env(dict(os.environ))
+    paths = variables["PYTHONPATH"].split(os.pathsep)
+    variables["PYTHONPATH"] = os.pathsep.join([paths[0], str(tmp_path), *paths[2:]])
+
+    done = subprocess.run(  # noqa: S603 - this interpreter, a fixed snippet
+        [sys.executable, "-c", "print('ran')"],
+        env=variables,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert done.returncode == 97
+    assert "ran" not in done.stdout
+    assert "the child network guard failed: RuntimeError" in done.stderr
