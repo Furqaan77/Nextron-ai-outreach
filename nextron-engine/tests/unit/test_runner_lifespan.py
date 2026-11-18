@@ -228,6 +228,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "extract_lead",
         "select_primary_contact",
         "run_ai_test_sets",
+        "check_domains",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -889,6 +890,7 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
         "job_runner_started",
         "daily_trigger_scheduled",  # backup_db
         "daily_trigger_scheduled",  # restore_test
+        "daily_trigger_scheduled",  # check_domains (Story 6.5)
         "scheduler_started",
         "scheduler_stopped",
         "job_runner_stopped",
@@ -896,8 +898,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    # backup_db, restore_test, check_recovery and purge_page_text
-    assert scheduled.triggers == 4  # type: ignore[attr-defined]
+    # backup_db, restore_test, check_recovery, purge_page_text and check_domains
+    assert scheduled.triggers == 5  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1259,6 +1261,7 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
 
     assert sorted(job.id for job in jobs) == [
         "backup_db",
+        "check_domains",
         "check_recovery",
         "purge_page_text",
         "restore_test",
@@ -1271,16 +1274,21 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         (job for job in jobs if job.id not in {"check_recovery", "purge_page_text"}),
         key=lambda job: job.id,
     )
-    for job, hour in zip(dailies, ("10", "11"), strict=True):
+    for job, hour in zip(dailies, ("10", "7", "11"), strict=True):  # check_domains at 07:00
         assert isinstance(job.trigger, CronTrigger)
         fields = {field.name: str(field) for field in job.trigger.fields}
         assert (fields["hour"], fields["minute"]) == (hour, "0")
         assert str(job.trigger.timezone) == "UTC"
         assert (job.misfire_grace_time, job.coalesce, job.max_instances) == (86400, True, 1)
     scheduled = [r for r in caplog.records if r.getMessage() == "daily_trigger_scheduled"]
-    assert [getattr(record, "trigger") for record in scheduled] == ["backup_db", "restore_test"]
-    # a new database never catches up: no daily backup and no monthly restore test yet
-    assert [getattr(record, "catch_up") for record in scheduled] == [False, False]
+    assert [getattr(record, "trigger") for record in scheduled] == [
+        "backup_db",
+        "restore_test",
+        "check_domains",
+    ]
+    # a new database never catches up: no daily backup, no monthly restore test and no Sending
+    # Domain yet
+    assert [getattr(record, "catch_up") for record in scheduled] == [False, False, False]
     assert engine.backups() == []
     assert not (engine.config.backup_dir).exists()
 

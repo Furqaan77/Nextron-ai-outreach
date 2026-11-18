@@ -335,6 +335,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("select_primary_contact", None),
             ),
         ),
+        GroupRuns(JobGroup.SENDING, (LastRun("check_domains", None),)),  # Story 6.5
         GroupRuns(
             JobGroup.BACKUP,
             (

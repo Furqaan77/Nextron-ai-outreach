@@ -72,6 +72,11 @@ Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sen
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
 work.
+
+Its ``DomainChecks`` (``domain_checks``, Story 6.5) is ``DomainChecks(clock, dns, queue)`` on
+``dns``, a ``FakeDns`` unless a test passes another; the Sending Inboxes page's authentication
+section reads it and its Recheck queues through it, and the job types' ``check_domains`` calls
+it. The health-issue registry reads the Sending Domains on the dashboard's clock.
 """
 
 import json
@@ -106,6 +111,7 @@ from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
+from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.ai import RouteSpec
@@ -115,6 +121,7 @@ from nextron.domain.playbook import PlaybookProblem, PlaybookSnapshot, read_play
 from nextron.domain.prompts import PromptFile
 from nextron.domain.readiness import CheckResult, Status
 from nextron.ports.alert import AlertPort
+from nextron.ports.dns import DnsPort
 from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import Query
 from nextron.web.app import create_app
@@ -123,6 +130,7 @@ from tests.asgi import DEFAULT_HOST, Headers, Reply, request
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
+from tests.fakes.dns import FakeDns
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
@@ -297,6 +305,7 @@ class Dashboard:
     offpc_target: InMemoryBackupTarget = field(default_factory=InMemoryBackupTarget)
     inspect: Callable[[Path], CopyInspection] = inspect_copy
     email_syntax: EmailSyntaxPort = field(default_factory=FakeEmailSyntax)
+    dns: DnsPort = field(default_factory=FakeDns)
     ai_content: Callable[
         [], tuple[Sequence[PromptFile], Sequence[RouteSpec], PlaybookSnapshot | PlaybookProblem]
     ] = shipped_ai_content
@@ -320,6 +329,7 @@ class Dashboard:
     restore_tests: RestoreTests = field(init=False)
     lead_imports: LeadImports = field(init=False)
     sending: Sending = field(init=False)
+    domain_checks: DomainChecks = field(init=False)
     compliance: Compliance = field(init=False)
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
@@ -357,6 +367,7 @@ class Dashboard:
             extractions=no_crawl_jobs,
             primary=no_crawl_jobs,
             test_runs=lambda: self.test_runs,
+            domain_checks=lambda: self.domain_checks,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -385,6 +396,7 @@ class Dashboard:
             queue=self.queue,
         )
         self.sending = Sending(self.clock, env=self.env)
+        self.domain_checks = DomainChecks(self.clock, self.dns, self.queue)
         self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
@@ -392,7 +404,7 @@ class Dashboard:
         self.health = EngineHealth(
             self.clock,
             self.job_types,
-            issues=main.build_health_issues(budget=self.budget),
+            issues=main.build_health_issues(budget=self.budget, clock=self.clock),
             readiness=self.readiness,
         )
         self.research = Research(self.clock)
@@ -432,6 +444,7 @@ class Dashboard:
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,
             erasures=self.erasures,
+            domain_checks=self.domain_checks,
             units=self.units,
             **extra,
         )

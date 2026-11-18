@@ -136,7 +136,17 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   one ``address`` and one ``label`` (anything else is ``MalformedForm``, 400); it registers the
   inbox through ``sending`` (``Sending.register_inbox``) in its own unit of work, then renders
   the panel again in a read-only one, with "Inbox registered." or the ``InboxRefused`` message
-  and the typed values.
+  and the typed values. The page also includes the Sending Domain authentication section.
+- ``GET /inboxes/auth`` (``inbox_auth_panel``) and ``POST /inboxes/auth/recheck``
+  (``inbox_auth_recheck``), both ``@personal_data(False)`` (domain names and check results
+  only): the Sending Domain authentication section (Story 6.5, FR-64), which HTMX re-fetches
+  every 30 s; see ``nextron.web.inboxes_page``. The GET renders ``domain_checks.auths()``
+  (``DomainChecks``). The POST's fields, apart from ``csrf_token``, must be exactly one
+  ``sending_domain_id``, a ULID (anything else is ``MalformedForm``, 400); it runs
+  ``DomainChecks.recheck`` in its own unit of work, then renders the section again in a
+  read-only one, with "Recheck queued for <domain>; the result appears here when it lands." or
+  "That Sending Domain has no inboxes to check.". The check itself runs as a ``check_domains``
+  job on the interactive lane, never in the request.
 - ``GET /suppression`` (``suppression_page``), ``POST /suppression/add`` (``suppression_add``),
   ``POST /suppression/import`` (``suppression_import``), ``POST /suppression/search``
   (``suppression_search``) and ``POST /suppression/reverse`` (``suppression_reverse``), all
@@ -261,6 +271,7 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
+from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import (
     Campaigns,
     Credentials,
@@ -487,6 +498,7 @@ def create_app(
     compliance: Compliance,
     primary_contacts: PrimaryContacts,
     erasures: Erasures,
+    domain_checks: DomainChecks,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -507,7 +519,8 @@ def create_app(
     page its Signals, Evidence and headquarters zone, and ``primary_contacts`` runs its "Make
     primary"; ``compliance`` runs the Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
-    reads); ``erasures`` erases a Contact from the Lead page's erase step.
+    reads); ``erasures`` erases a Contact from the Lead page's erase step; ``domain_checks``
+    reads the Sending Domain authentication section and queues its Recheck.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1177,7 +1190,15 @@ def create_app(
         context = inbox_rows.panel_context(
             sending_queries.inboxes(), notice=notice, address=address, label=label
         )
+        if template == inbox_rows.PAGE_TEMPLATE:
+            context.update(inbox_rows.auth_context(domain_checks.auths()))
         return page(request, template, **context)
+
+    def inbox_auth_answer(
+        request: Request, *, notice: credential_rows.Notice | None = None
+    ) -> HTMLResponse:
+        context = inbox_rows.auth_context(domain_checks.auths(), notice=notice)
+        return page(request, inbox_rows.AUTH_TEMPLATE, **context)
 
     @app.get("/inboxes", name="inboxes_page")
     @personal_data(True)  # the panel shows inbox addresses
@@ -1207,6 +1228,32 @@ def create_app(
             return inboxes_answer(
                 request, inbox_rows.PANEL_TEMPLATE, notice=inbox_rows.registered()
             )
+
+    @app.get("/inboxes/auth", name="inbox_auth_panel")
+    @personal_data(False)  # Sending Domain names and their check results only
+    def inbox_auth_panel(request: Request) -> HTMLResponse:
+        return inbox_auth_answer(request)
+
+    @app.post("/inboxes/auth/recheck", name="inbox_auth_recheck")
+    @personal_data(False)
+    def inbox_auth_recheck(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        sending_domain_id = inbox_rows.submitted_recheck(fields)
+        with units.open():
+            queued = domain_checks.recheck(sending_domain_id)
+        with units.open(read_only=True):
+            if not queued:
+                return inbox_auth_answer(request, notice=inbox_rows.recheck_refused())
+            shown = next(
+                (
+                    view.domain
+                    for view in domain_checks.auths()
+                    if view.sending_domain_id == sending_domain_id
+                ),
+                sending_domain_id,
+            )
+            return inbox_auth_answer(request, notice=inbox_rows.recheck_queued(shown))
 
     def suppression_answer(
         request: Request,

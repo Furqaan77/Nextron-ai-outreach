@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0032_3_13_erase_contacts"
+HEAD = "0033_6_5_domain_checks"
 
 
 @pytest.fixture

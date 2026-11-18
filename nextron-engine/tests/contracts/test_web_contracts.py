@@ -183,6 +183,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/import",
         "/inboxes",
         "/inboxes",
+        "/inboxes/auth",
+        "/inboxes/auth/recheck",
         "/suppression",
         "/suppression/add",
         "/suppression/import",
@@ -311,6 +313,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /health/panel",
         "GET /health/panel/live",
         "GET /inboxes",
+        "GET /inboxes/auth",
         "GET /suppression",
     ):
         assert route in str(caught.value)
@@ -333,6 +336,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /health/jobs/dismiss",
         "POST /health/backup",
         "POST /inboxes",
+        "POST /inboxes/auth/recheck",
         "POST /suppression/add",
         "POST /suppression/import",
         "POST /suppression/search",
@@ -511,6 +515,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /health/panel",
         "GET /health/panel/live",
         "GET /inboxes",
+        "GET /inboxes/auth",
         "GET /suppression",
     ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
@@ -532,6 +537,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "POST /ai/rollback",
         "POST /health/jobs/dismiss",
         "POST /inboxes",
+        "POST /inboxes/auth/recheck",
         "POST /suppression/add",
         "POST /suppression/import",
         "POST /suppression/search",
@@ -641,6 +647,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "health.html",
         "health_panel.html",
         "home.html",
+        "inbox_auth_panel.html",
         "inboxes.html",
         "inboxes_panel.html",
         "lead.html",

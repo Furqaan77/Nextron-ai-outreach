@@ -296,6 +296,19 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "created_at",
         ),
     },
+    "domain_checks": {
+        "sending": (
+            "id",
+            "sending_domain_id",
+            "checked_at",
+            "spf_ok",
+            "dkim_ok",
+            "dmarc_ok",
+            "aligned_ok",
+            "passed",
+            "details",
+        ),
+    },
     "crawl_runs": {
         "research": (
             "id",

@@ -67,6 +67,7 @@ def _triggers(job_types: JobTypes) -> Any:
         backup_schedule=_daily(time(10)),
         restore_test_schedule=_daily(time(11)),
         recovery_active=lambda: False,
+        domain_check_schedule=_daily(time(7)),
     )
 
 

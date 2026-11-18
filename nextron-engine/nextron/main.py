@@ -156,8 +156,8 @@ queue runs after Check for changes. ``build_job_types(..., test_runs=lambda: tes
 the registry cycle.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
-contact_markets, crawls, discovery, research, extractions, primary, test_runs)`` is the job
-type registry: the only
+contact_markets, crawls, discovery, research, extractions, primary, test_runs,
+domain_checks=...)`` is the job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -181,10 +181,14 @@ only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(researc
 ``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
 minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``), Story
 2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
-retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), and Story 4.5's
+retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), Story 4.5's
 ``run_ai_test_sets`` (bulk only, priority 30, ``max_runtime`` 2 hours, retry limit 3,
-``handlers.run_ai_test_sets(test_runs)``, ``other``).
-``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
+``handlers.run_ai_test_sets(test_runs)``, ``other``), and Story 6.5's ``check_domains``
+(the interactive lane only, priority 60, 2 minutes, retry limit 3,
+``handlers.check_domains(domain_checks)``, ``sending``). ``domain_checks`` is the one optional
+service: it defaults to a provider that raises ``RuntimeError`` when called, so a registry built
+without it (only tests do) fails a ``check_domains`` job; ``build_app`` always passes the real
+one. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
 **The website crawl (Story 2.5, AD-9, AD-18).** ``build_app`` builds one
@@ -240,7 +244,8 @@ dashboard notice once a month. The meter needs the hook, the hook needs ``budget
 Building the app builds no adapter or HTTP client and records nothing.
 
 **Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule, restore_test_schedule,
-recovery_active)`` is the trigger registry: the only code that constructs ``Triggers`` or calls
+recovery_active, domain_check_schedule)`` is the trigger registry: the only code that constructs
+``Triggers`` or calls
 ``register_trigger``. Register each AD-10 ``Trigger`` there, after its job type (a firing
 enqueues the job type with the trigger's own name), then it is frozen. So far: ``backup_db``
 (Story 1.16), a ``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``, then
@@ -249,7 +254,9 @@ fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``, then ``check_recovery`` 
 ``Every(CHECK_PERIOD, at_startup=True, active=recovery_active)``: every minute, and at start,
 but the scheduler enqueues it only while ``recovery_active()`` returns ``True``, so no job row is
 made once recovery is over, then ``purge_page_text`` (Story 2.5), ``Every(1 day,
-at_startup=True)``: the PC is not on at fixed times, so it also runs at every start.
+at_startup=True)``: the PC is not on at fixed times, so it also runs at every start, then
+``check_domains`` (Story 6.5), a ``DailyAt(domain_check_schedule,
+fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``.
 ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
@@ -373,6 +380,16 @@ first beat).
 Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
 external service.
 
+**Domain checks (Story 6.5; FR-64, NFR-4, NFR-20).** ``build_app(..., dns=None)`` builds one
+``DnspythonDns(meter=meter)`` (``nextron.adapters.dns``) unless a ``dns=`` is injected; building
+it builds no resolver and reads no DNS configuration (its first query does). ``DomainChecks(clock,
+dns, queue)`` (``nextron.app.sending.checks``) runs the ``check_domains`` jobs, reached through
+``domain_checks=lambda: domain_checks``; the scheduler reads the daily time through
+``read_domain_check_schedule(units, domain_checks)``; the health-issue registry gets its
+``sending`` source on the same clock; and the dashboard gets it (``create_app(...,
+domain_checks=...)``) for the Sending Inboxes page's Recheck. Story 6.2 calls
+``DomainChecks.queue_check`` inside its connect transaction.
+
 **The Suppression List panel (Story 3.5; AD-16, FR-50, FR-41).** ``build_app`` builds one
 ``Compliance(clock)`` (``nextron.app.compliance.api``) and hands it to ``create_app(...,
 compliance=compliance)``: the panel's add, import and Reverse run its use cases. Its
@@ -426,16 +443,19 @@ doctor never starts a consent flow.
 (``offpc_dir`` is blank and ``unsub_active_kid`` the schema default with no database file),
 ``EngineDatabase`` in the engine.
 
-**Health (AD-10, AD-20, FR-58, OP-9).** ``build_health_issues(*, budget)`` is the health-issue
-registry: the only code that constructs ``HealthIssues`` or calls ``register_source``
+**Health (AD-10, AD-20, FR-58, OP-9).** ``build_health_issues(*, budget, clock=None)`` is the
+health-issue registry: the only code that constructs ``HealthIssues`` or calls
+``register_source``
 (``nextron.domain.health``; ``tests/contracts/test_health_contracts.py``). It registers
 ``IssueSource("jobqueue", queries.jobqueue.health_issues)`` (each dead job), then
 ``IssueSource("budget", budget.health_issues)`` (AI spend and quotas), then
 ``IssueSource("backups", queries.ops.health_issues)`` (each failed backup newer than the newest
 verified one), then ``IssueSource("playbook", queries.playbook.health_issues)`` (the newest
-Sales Playbook check's problem, Story 4.4), then freezes it; each later owner registers its
-``queries.<owner>.health_issues`` there. ``build_app`` builds one
-``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget),
+Sales Playbook check's problem, Story 4.4), then ``IssueSource("sending", lambda:
+queries.sending.health_issues(clock.now()))`` (each listed Sending Domain whose cold sends are
+blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then freezes it; each later owner
+registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
+``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
 (``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
 ``create_app(..., health=health, queue=queue)``: the health panel (``GET /health/panel``)
@@ -606,6 +626,7 @@ from nextron import __version__
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.crawler import HttpCrawler
+from nextron.adapters.dns import DnspythonDns
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.renderer import PlaywrightRenderer
@@ -643,11 +664,13 @@ from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, 
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import playbook as playbook_queries
+from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.app.sending.api import Sending
+from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup import api as setup_api
 from nextron.app.setup.api import (
     Campaigns,
@@ -702,6 +725,7 @@ from nextron.domain.crawl import (
     PURGE_PAGE_TEXT_JOB,
     RENDER_PAGES_JOB,
 )
+from nextron.domain.domain_auth import CHECK_DOMAINS_JOB, DOMAIN_CHECK_TIME
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
@@ -755,6 +779,7 @@ from nextron.ports.alert import AlertPort
 from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
+from nextron.ports.dns import DnsPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.llm import LlmPort
@@ -910,6 +935,7 @@ def build_app(
     crawler: CrawlerPort | None = None,
     llm: LlmPort | None = None,
     renderer: RendererPort | None = None,
+    dns: DnsPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -942,7 +968,10 @@ def build_app(
     this module loads no AI package), which builds its HTTP client on its first call.
     ``AiTestRuns`` runs the AI Test Sets (the ``run_ai_test_sets`` job) through that same
     ``llm``; the lifespan's startup queues a run of each tuple that has none
-    (``queue_test_runs``, after ``queue_contact_markets``)."""
+    (``queue_test_runs``, after ``queue_contact_markets``). ``DomainChecks`` checks the
+    Sending Domains' DNS authentication (the ``check_domains`` job) through ``dns``
+    (``DnspythonDns(meter=meter)`` unless injected), which builds its resolver on its first
+    query."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -962,7 +991,7 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions, primary_contacts and test_runs are bound just below
+    # extractions, primary_contacts, test_runs and domain_checks are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -975,6 +1004,7 @@ def build_app(
         extractions=lambda: extractions,
         primary=lambda: primary_contacts,
         test_runs=lambda: test_runs,
+        domain_checks=lambda: domain_checks,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
@@ -995,6 +1025,9 @@ def build_app(
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research)
+    domain_checks = DomainChecks(
+        clock, dns if dns is not None else DnspythonDns(meter=meter), queue
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1023,6 +1056,7 @@ def build_app(
         backup_schedule=functools.partial(read_backup_schedule, units, backups),
         restore_test_schedule=functools.partial(read_restore_test_schedule, units, restore_tests),
         recovery_active=functools.partial(read_recovery_mode, units),
+        domain_check_schedule=functools.partial(read_domain_check_schedule, units, domain_checks),
     )
     scheduler = Scheduler(units, queue, triggers)
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
@@ -1039,7 +1073,7 @@ def build_app(
     health = EngineHealth(
         clock,
         job_types,
-        issues=build_health_issues(budget=budget),
+        issues=build_health_issues(budget=budget, clock=clock),
         readiness=functools.partial(run_checks, build_doctor_checks(), context),
     )
     return create_app(
@@ -1067,6 +1101,7 @@ def build_app(
         compliance=compliance,
         primary_contacts=primary_contacts,
         erasures=Erasures(clock, compliance),  # Story 3.13: on the same Compliance
+        domain_checks=domain_checks,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1138,6 +1173,7 @@ def build_job_types(
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
     test_runs: Callable[[], handlers.AiTestRunning],
+    domain_checks: Callable[[], handlers.DomainChecking] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1150,8 +1186,12 @@ def build_job_types(
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
     service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions`` that
     ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
-    ``select_primary_contact`` jobs call, and ``test_runs`` the ``playbook`` service's
-    ``AiTestRuns`` that ``run_ai_test_sets`` jobs call."""
+    ``select_primary_contact`` jobs call, ``test_runs`` the ``playbook`` service's
+    ``AiTestRuns`` that ``run_ai_test_sets`` jobs call, and ``domain_checks`` the ``sending``
+    service's ``DomainChecks`` that ``check_domains`` jobs call (when it is ``None``, a
+    provider that raises ``RuntimeError`` when a job calls it: ``build_app`` always passes the
+    real one)."""
+    checks = domain_checks if domain_checks is not None else no_domain_checks
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1305,19 +1345,42 @@ def build_job_types(
             group=JobGroup.OTHER,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_DOMAINS_JOB,
+            default_lane=Lane.INTERACTIVE,
+            lanes=frozenset({Lane.INTERACTIVE}),  # a Recheck lands in seconds, not behind crawls
+            priority=60,
+            # three TXT queries of at most 5 s each, then the insert
+            max_runtime=timedelta(minutes=2),
+            retry_limit=3,
+            handler=handlers.check_domains(checks),
+            group=JobGroup.SENDING,
+        )
+    )
     job_types.freeze()
     return job_types
 
 
-def build_health_issues(*, budget: Budget) -> HealthIssues:
+def no_domain_checks() -> handlers.DomainChecking:
+    """``build_job_types``'s default ``domain_checks``: a registry built without the service
+    fails a ``check_domains`` job instead of checking nothing."""
+    raise RuntimeError("this job type registry was built without domain_checks")
+
+
+def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
-    quotas, then the failed backups, then the Sales Playbook's problem. Each later owner
-    registers its ``queries.<owner>.health_issues`` here, before ``freeze()``."""
+    quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
+    Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
+    ``clock`` is ``None``). Each later owner registers its ``queries.<owner>.health_issues``
+    here, before ``freeze()``."""
+    now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
     issues.register_source(IssueSource("budget", budget.health_issues))
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
+    issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
     issues.freeze()
     return issues
 
@@ -1328,13 +1391,15 @@ def build_triggers(
     backup_schedule: Callable[[], DailyRun],
     restore_test_schedule: Callable[[], DailyRun],
     recovery_active: Callable[[], bool],
+    domain_check_schedule: Callable[[], DailyRun],
 ) -> Triggers:
     """The trigger registry (AD-10), frozen: register each trigger with
     ``register_trigger(Trigger.X, Every(...))`` or ``DailyAt(...)``, after its job type, before
     ``freeze()``. ``backup_schedule`` returns the daily backup's ``DailyRun`` and
     ``restore_test_schedule`` the daily restore-test check's; the scheduler calls them when it
     starts. ``recovery_active`` says whether recovery mode is on; the scheduler calls it before
-    each ``check_recovery`` firing."""
+    each ``check_recovery`` firing. ``domain_check_schedule`` returns the daily domain checks'
+    ``DailyRun``, read when the scheduler starts."""
     triggers = Triggers(job_types)
     triggers.register_trigger(
         Trigger.BACKUP_DB,
@@ -1353,6 +1418,10 @@ def build_triggers(
     # the PC is not on at fixed times: purge at every start too
     triggers.register_trigger(
         Trigger.PURGE_PAGE_TEXT, Every(PURGE_PAGE_TEXT_PERIOD, at_startup=True)
+    )
+    triggers.register_trigger(
+        Trigger.CHECK_DOMAINS,
+        DailyAt(domain_check_schedule, fallback=DailyRun(DOMAIN_CHECK_TIME, FALLBACK_TIMEZONE)),
     )
     triggers.freeze()
     return triggers
@@ -1446,6 +1515,20 @@ def read_backup_schedule(units: Units, backups: Backups) -> DailyRun:
     def read() -> DailyRun:
         with units.open(read_only=True):
             found = backups.schedule()
+        return DailyRun(found.at, found.timezone, catch_up=found.missed)
+
+    return contextvars.Context().run(read)
+
+
+def read_domain_check_schedule(units: Units, checks: DomainChecks) -> DailyRun:
+    """The daily domain checks' ``DailyRun`` (Story 6.5): ``checks.schedule()`` read in its own
+    read-only unit of work inside a fresh ``contextvars.Context()``, so it works whatever the
+    caller has open; ``catch_up`` is whether a listed Sending Domain has no check since the
+    latest daily time."""
+
+    def read() -> DailyRun:
+        with units.open(read_only=True):
+            found = checks.schedule()
         return DailyRun(found.at, found.timezone, catch_up=found.missed)
 
     return contextvars.Context().run(read)
