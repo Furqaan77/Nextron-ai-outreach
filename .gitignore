@@ -12,6 +12,7 @@ build/
 # Node / Cloudflare Worker
 node_modules/
 .wrangler/
+.dev.vars*
 
 # BMAD render cache
 _bmad/render/

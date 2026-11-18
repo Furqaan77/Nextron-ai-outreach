@@ -1,0 +1,45 @@
+// Nextron's unsubscribe Worker (Story 3.10). Deploy only through `npm run deploy:<env>`, whose
+// scripts/check-config.mjs refuses this file until Story 3.9 (OQ-A7) names the Sending Domains:
+// replace every "sending-domain-1.invalid" host and every placeholder KV id first.
+// One custom-domain route per Sending Domain and environment; never *.workers.dev (AD-14).
+// Logs, Logpush, workers.dev and preview URLs are off at the top level and in every env.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nextron-unsubscribe",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "send_metrics": false,
+  "workers_dev": false,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": { "enabled": false, "logs": { "enabled": false, "invocation_logs": false } },
+  "env": {
+    "dev": {
+      "name": "nextron-unsubscribe-dev",
+      "workers_dev": false,
+      "preview_urls": false,
+      "logpush": false,
+      "observability": { "enabled": false, "logs": { "enabled": false, "invocation_logs": false } },
+      "routes": [{ "pattern": "u-dev.sending-domain-1.invalid", "custom_domain": true }],
+      "kv_namespaces": [{ "binding": "UNSUB", "id": "PLACEHOLDER-DEV-KV-NAMESPACE-ID" }]
+    },
+    "test": {
+      "name": "nextron-unsubscribe-test",
+      "workers_dev": false,
+      "preview_urls": false,
+      "logpush": false,
+      "observability": { "enabled": false, "logs": { "enabled": false, "invocation_logs": false } },
+      "routes": [{ "pattern": "u-test.sending-domain-1.invalid", "custom_domain": true }],
+      "kv_namespaces": [{ "binding": "UNSUB", "id": "PLACEHOLDER-TEST-KV-NAMESPACE-ID" }]
+    },
+    "prod": {
+      "name": "nextron-unsubscribe-prod",
+      "workers_dev": false,
+      "preview_urls": false,
+      "logpush": false,
+      "observability": { "enabled": false, "logs": { "enabled": false, "invocation_logs": false } },
+      "routes": [{ "pattern": "u.sending-domain-1.invalid", "custom_domain": true }],
+      "kv_namespaces": [{ "binding": "UNSUB", "id": "PLACEHOLDER-PROD-KV-NAMESPACE-ID" }]
+    }
+  }
+}
