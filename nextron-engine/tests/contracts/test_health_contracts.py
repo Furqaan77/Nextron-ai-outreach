@@ -4,7 +4,9 @@
   ``HealthIssues`` or calls ``register_source``, under any alias (the same AST check as the job,
   trigger and doctor registries, ``tests/contracts/test_job_contracts.py``).
 - **It ships frozen** with exactly the ``SOURCES``, in that order (``sending``, Story 6.5,
-  reads at the clock it is given); each later owner that adds a source extends ``SOURCES``.
+  reads at the clock it is given); each later owner that adds a source extends ``SOURCES``
+  (Story 3.16's ``compliance`` is last, and registered when the erasure ledger's path is given,
+  as ``build_app`` always does).
 - **Every job type names its group.** Each ``JobType(...)`` call in ``build_job_types`` passes
   ``group=`` (``JobType.group`` defaults to ``other``, so a forgotten group would hide a type
   under "Other" on the health panel).
@@ -18,6 +20,7 @@ never on the real tree.
 
 import ast
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -139,6 +142,21 @@ def test_the_registry_ships_frozen_with_the_six_owner_sources(
     with pytest.raises(RuntimeError):
         issues.register_source(IssueSource("late", tuple))
     assert main.build_health_issues(budget=budget) is not issues  # a new registry each time
+
+
+def test_given_the_ledger_the_registry_ends_with_compliance(tmp_path: Path) -> None:
+    meter = InMemoryUsageMeter(FrozenClock())
+    budget = main.Budget(FrozenClock(), meter, notify=None)  # type: ignore[arg-type]
+    ledger = tmp_path / "erasure-ledger.jsonl"
+
+    issues = main.build_health_issues(budget=budget, ledger=ledger)
+
+    assert issues.frozen
+    assert tuple(source.name for source in issues.sources) == (*SOURCES, "compliance")
+    compliance = issues.sources[-1]
+    read: Any = compliance.read
+    assert read.func is main.compliance_queries.ledger_health_issues
+    assert read.args == (ledger,)
 
 
 # Every job type names its group -----------------------------------------------------------------

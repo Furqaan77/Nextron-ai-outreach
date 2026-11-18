@@ -197,7 +197,12 @@ def test_dev_and_test_run_side_by_side_without_touching_each_other(
         engine.process.terminate()
         engine.process.wait(timeout=30)
 
-    assert sorted(path.name for path in nextron_dir.iterdir()) == ["dev", "test"]
+    assert sorted(path.name for path in nextron_dir.iterdir()) == ["backups", "dev", "test"]
+    # each engine's startup made its own empty erasure ledger in its own backup dir (Story 3.16)
+    assert sorted(path.name for path in (nextron_dir / "backups").iterdir()) == ["dev", "test"]
+    for env in ENVIRONMENTS:
+        ledger_dir = nextron_dir / "backups" / env
+        assert [path.name for path in ledger_dir.iterdir()] == ["erasure-ledger.jsonl"]
     assert sorted(path.name for path in local_app_data.iterdir()) == ["Nextron"]
     for env in ENVIRONMENTS:
         data_dir = nextron_dir / env

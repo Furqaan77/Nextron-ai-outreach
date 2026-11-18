@@ -42,6 +42,14 @@ The rules, each enforced here (a broken rule raises ``UnitOfWorkError``):
 - ``uow.publish(notification)`` needs an open transaction and a type exactly in
   ``NOTIFICATIONS`` (not a subclass). It runs that type's subscribers synchronously, in
   registration order, in the same transaction.
+- ``uow.after_commit(callback)`` (Story 3.16) needs an open write transaction (else
+  ``UnitOfWorkError``; a read-only unit of work refuses it too). The callbacks run in the order
+  registered, right after that transaction commits: outside it (no transaction is open, so a
+  callback may do file I/O, or open another ``uow.transaction()`` of the still-running use
+  case), while the use case still runs. A rollback, a doomed transaction included, drops them
+  unrun. An exception from one is logged ``after_commit_failed`` (ERROR, with ``code``, the
+  exception's type, ``callback``, the callback's qualified name, and the traceback) and the rest
+  still run; it never reaches the use case.
 - ``in_transaction()`` says whether a unit of work open in this context, on this thread, holds a
   transaction (a use case's, or a read-only unit's read). A port call must never run inside
   one; ``nextron.db.metering`` checks it before writing in a unit of work of its own.
@@ -66,6 +74,7 @@ runs in (``nextron.web.routing``); ``uow.read_only`` says which kind is open. It
 
 import functools
 import inspect
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -108,6 +117,9 @@ REFUSED_READ_ONLY_METHODS: Final = frozenset(
 _COMMAND_MARK: Final = "__nextron_command__"
 _USE_CASE_MARK: Final = "__nextron_use_case__"
 _MARKER: Final = object()
+AFTER_COMMIT_FAILED: Final = "after_commit_failed"
+
+log = logging.getLogger(__name__)
 
 Subscriber = Callable[[Any], object]
 
@@ -175,6 +187,7 @@ class _Transaction:
         self.doom: str | None = None  # why it must roll back; the first reason wins
         self.cause: BaseException | None = None
         self.ending = False  # set while the unit of work commits or rolls back
+        self.after_commit: list[Callable[[], object]] = []  # run once it has committed
 
     def doom_with(self, reason: str, cause: BaseException | None = None) -> None:
         if self.doom is None:
@@ -336,6 +349,33 @@ class UnitOfWork:
             raise
         self._tx = None
         self._end(tx, commit=True)
+        self._run_after_commit(tx.after_commit)
+
+    def after_commit(self, callback: Callable[[], object]) -> None:
+        """Run ``callback()`` right after the open transaction commits; see the module
+        docstring."""
+        self._check_open()
+        self._refuse_in_read_only("uow.after_commit")
+        if self._tx is None:
+            raise UnitOfWorkError("after_commit needs an open transaction")
+        if not callable(callback):
+            raise TypeError("after_commit takes a callable")
+        self._tx.after_commit.append(callback)
+
+    @staticmethod
+    def _run_after_commit(callbacks: list[Callable[[], object]]) -> None:
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as error:  # noqa: BLE001 - the commit stands; the rest still run
+                log.error(
+                    AFTER_COMMIT_FAILED,
+                    exc_info=error,
+                    extra={
+                        "code": type(error).__name__,
+                        "callback": getattr(callback, "__qualname__", type(callback).__name__),
+                    },
+                )
 
     def _begin(self) -> _Transaction:
         connection = self._engine.connect()

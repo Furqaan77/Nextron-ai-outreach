@@ -26,6 +26,8 @@ Story 3.14:
   is ``NULL`` (a trigger refuses a receipt of another Contact, or none); the row count;
 - ``open_erase_requests()``: every ``open`` ``erase`` request, oldest first (``opened_at``, then
   ``id``).
+- ``completed_erase_contact_ids()`` (Story 3.16): the ids of every Contact with a ``completed``
+  ``erase`` request.
 
 Nothing here removes a request: they are the proof of erasure, and the table's triggers refuse a
 ``DELETE`` too.
@@ -184,3 +186,14 @@ def open_erase_requests() -> tuple[StoredRequest, ...]:
         .order_by(DataSubjectRequestRecord.opened_at, DataSubjectRequestRecord.id)
     )
     return tuple(StoredRequest(*row) for row in current().session.execute(statement))
+def completed_erase_contact_ids() -> frozenset[str]:
+    """The ids of every Contact with a ``completed`` ``erase`` request."""
+    statement = (
+        select(DataSubjectRequestRecord.contact_id)
+        .where(
+            DataSubjectRequestRecord.kind == ERASE,
+            DataSubjectRequestRecord.status == COMPLETED,
+        )
+        .distinct()
+    )
+    return frozenset(current().session.execute(statement).scalars())

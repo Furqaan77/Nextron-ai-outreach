@@ -117,6 +117,7 @@ FILES = [
     "nextron/domain/erasure_receipt.py",
     "nextron/domain/enrollment.py",
     "nextron/domain/sending_policy.py",
+    "nextron/domain/erasure_ledger.py",
     "nextron/db/__init__.py",
     "nextron/db/engine.py",
     "nextron/db/uow.py",

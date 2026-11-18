@@ -1,7 +1,8 @@
 """Read API of the ``compliance`` service (AD-3, AD-16, AD-17; Stories 3.4, 3.5, 3.8, 3.13,
-3.14 and 3.15).
+3.14, 3.15 and 3.16).
 
-Import rule: ``nextron.domain`` and ``nextron.db.repos.compliance`` only. All read through the
+Import rule: ``nextron.domain`` and ``nextron.db.repos.compliance`` only, plus
+``nextron.app.queries.ops`` for the recovery row (Story 3.16). All read through the
 current unit of work, read-only ones included; nothing here writes, caches or logs. Each listed
 entry is a ``ListedEntry`` (``id``, ``kind``, ``value_hash``, ``domain_plain``, ``status``,
 ``source``, ``created_at``): never its ``cause_ref``, ``voided_at`` or ``void_reason``.
@@ -62,19 +63,32 @@ Story 3.14:
   erasure receipts, oldest first, each with its store rows in ``ErasureStore`` order, by
   Contact id (a Contact with none is left out). The Lead page and the erase step show them.
 - ``health_issues()``: the erasures' health issues (``nextron.main.build_health_issues``
-  registers it last, as the ``erasure`` source), oldest first: one ``erasure_open`` issue per
+  registers it as the ``erasure`` source, before ``compliance``), oldest first: one ``erasure_open`` issue per
   ``open`` erase request (subject the request; "Erasure request still open: Contact <id>; erase
   it again from the Lead page"), then one ``erasure_failed`` issue per ``failed`` store row
   (subject the receipt; "Erasure failed: <store label>, Contact <id>, receipt <id>", detail the
   row's detail). There is no Dismiss: an open request clears when an erasure completes it, and a
   failed store stays (retrying or acknowledging one is deferred).
+- ``pending_reapply() -> str | None`` (Story 3.16): the id of the ``on`` recovery row
+  (``queries.ops.recovery_state``) while its ``reapply_erasure_ledger`` step is ``pending``,
+  else ``None``.
+- ``ledger_health_issues(ledger: Path)`` (Story 3.16; the health source ``compliance``): while
+  ``pending_reapply()`` gives a row, one issue: ``erasure_ledger_missing`` ("Erasure ledger not
+  found; sending stays blocked", detail "Put the ledger at <path> and restart the engine") when
+  no file is at ``ledger``, else ``erasure_ledger_not_reapplied`` ("Erasure ledger not yet
+  reapplied; sending stays blocked", detail "Restart the engine to retry; the log has
+  recovery_step_failed"), each with the recovery row's id as its subject. Otherwise ``()``. It
+  only checks whether the file exists; it never opens it.
 """
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
+from pathlib import Path
 from typing import Final
+
+from nextron.app.queries import ops as ops_queries
 
 from nextron.db.repos.compliance import data_subject_requests as requests_repo
 from nextron.db.repos.compliance import erasure_receipts as receipts_repo
@@ -87,6 +101,7 @@ from nextron.domain.contactability import KeyKind, SuppressionKey, is_hash
 from nextron.domain.erasure_receipt import ErasureStore
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
+from nextron.domain.recovery import RecoveryMode, StepStatus
 from nextron.domain.suppression_entry import EntryStatus, SuppressionSource
 
 ERASURE_OPEN: Final = "erasure_open"
@@ -106,13 +121,22 @@ __all__ = [
     "entry_list",
     "export_pii",
     "health_issues",
+    "ledger_health_issues",
     "newest_unsub_token",
     "newest_unsub_tokens",
     "open_request",
+    "pending_reapply",
     "receipts",
 ]
 
 ENTRIES_PER_PAGE: Final = 50
+ERASURE_LEDGER_MISSING: Final = "erasure_ledger_missing"
+ERASURE_LEDGER_NOT_REAPPLIED: Final = "erasure_ledger_not_reapplied"
+LEDGER_MISSING_TEXT: Final = "Erasure ledger not found; sending stays blocked"
+LEDGER_NOT_REAPPLIED_TEXT: Final = "Erasure ledger not yet reapplied; sending stays blocked"
+LEDGER_NOT_REAPPLIED_DETAIL: Final = (
+    "Restart the engine to retry; the log has recovery_step_failed"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,3 +296,37 @@ def health_issues() -> tuple[HealthIssue, ...]:
         for row in receipts_repo.failed_rows()
     )
     return still_open + failed
+def pending_reapply() -> str | None:
+    """The ``on`` recovery row's id while its erasure ledger step is ``pending``, else
+    ``None``."""
+    row = ops_queries.recovery_state()
+    if row is None or row.mode != RecoveryMode.ON:
+        return None
+    if row.reapply_erasure_ledger != StepStatus.PENDING:
+        return None
+    return row.id
+
+
+def ledger_health_issues(ledger: Path) -> tuple[HealthIssue, ...]:
+    """The erasure ledger's issue while a restore's reapply is pending; see the module
+    docstring."""
+    recovery_id = pending_reapply()
+    if recovery_id is None:
+        return ()
+    if not ledger.exists():
+        return (
+            HealthIssue(
+                ERASURE_LEDGER_MISSING,
+                recovery_id,
+                LEDGER_MISSING_TEXT,
+                detail=f"Put the ledger at {ledger} and restart the engine",
+            ),
+        )
+    return (
+        HealthIssue(
+            ERASURE_LEDGER_NOT_REAPPLIED,
+            recovery_id,
+            LEDGER_NOT_REAPPLIED_TEXT,
+            detail=LEDGER_NOT_REAPPLIED_DETAIL,
+        ),
+    )

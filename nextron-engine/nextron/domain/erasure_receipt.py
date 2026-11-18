@@ -186,7 +186,9 @@ STORE_ACTIONS: Final[Mapping[ErasureStore, str]] = MappingProxyType(
             "Nothing to erase: decrypted work copies are deleted after each restore test or "
             "restore"
         ),
-        ErasureStore.ERASURE_LEDGER: "Nothing to erase: the ledger holds ids and hashes only",
+        ErasureStore.ERASURE_LEDGER: (
+            "Nothing to erase: the ledger holds ids, key hashes and firm domains only"
+        ),
     }
 )
 
@@ -478,8 +480,7 @@ NO_ALERT_DETAIL: Final = "No Telegram alert about the Contact was sent"
 TELEGRAM_OLDER: Final = "(Telegram message older than 48 hours)"
 BACKUPS_TAIL: Final = (
     "Copies saved by `nextron restore` or left by a failed migration are kept until deleted by "
-    "hand. A restore brings the Contact back until the erasure ledger exists: erase it again "
-    "after a restore."
+    "hand. Erasure re-applied after any restore."
 )
 BACKUP_WINDOW_DAYS: Final = 35  # nextron.domain.backup.MAX_ROTATION_DAYS, AD-17's rotation
 ANTHROPIC_DETAIL: Final = (
@@ -500,7 +501,7 @@ RESTORE_WORK_DETAIL: Final = (
     "Decrypted work copies are deleted when each restore test or restore ends, and a crash's "
     "leftover at the next daily check"
 )
-ERASURE_LEDGER_DETAIL: Final = "The ledger holds ids and hashes only"
+ERASURE_LEDGER_DETAIL: Final = "The ledger holds ids, key hashes and firm domains only"
 NO_SINK_IN_PROD_DETAIL: Final = "This environment (prod) records no sink files"
 NO_SINK_ADDRESS_DETAIL: Final = (
     "The Contact had no address, so no sink message was addressed to it"

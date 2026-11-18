@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron import main
+from nextron.app.compliance.ledger import LedgerAppender
 from nextron.bootstrap import load_bootstrap
 from nextron.db.models.base import new_id
 from nextron.db.uow import UnitOfWorkFactory
@@ -1073,15 +1074,37 @@ def test_build_app_builds_compliance_on_its_clock(
         clocks.append(FrozenClock(T))
         return clocks[-1]
 
-    def compliance(clock: Any) -> Any:
+    built: list[Any] = []
+    registries: list[Any] = []
+    real_build_health_issues = main.build_health_issues
+
+    def compliance(clock: Any, **kwargs: Any) -> Any:
         given.append(clock)
-        return real_compliance(clock)
+        built.append(real_compliance(clock, **kwargs))
+        return built[-1]
+
+    def build_health_issues(**kwargs: Any) -> Any:
+        registries.append(real_build_health_issues(**kwargs))
+        return registries[-1]
 
     monkeypatch.setattr(main, "KeyringSecrets", lambda env: InMemorySecrets(env))
     monkeypatch.setattr(main, "SystemClock", system_clock)
     monkeypatch.setattr(main, "Compliance", compliance)
+    monkeypatch.setattr(main, "build_health_issues", build_health_issues)
+    config = load_bootstrap()
 
-    main.build_app(load_bootstrap(), units=FakeUnits())
+    main.build_app(config, units=FakeUnits())
 
     [clock] = clocks
     assert given == [clock]
+    # Story 3.16: its writers append to the ledger in the backup dir
+    ledger_path = config.backup_dir / "erasure-ledger.jsonl"
+    [built_compliance] = built
+    assert isinstance(built_compliance.ledger, LedgerAppender)
+    assert built_compliance.ledger.file.path == ledger_path
+    # and the health panel's compliance source reads that same ledger's path
+    [issues] = registries
+    compliance_source = issues.sources[-1]
+    assert compliance_source.name == "compliance"
+    assert compliance_source.read.func is main.compliance_queries.ledger_health_issues
+    assert compliance_source.read.args == (ledger_path,)

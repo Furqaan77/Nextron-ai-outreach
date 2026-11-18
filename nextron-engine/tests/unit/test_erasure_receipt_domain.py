@@ -403,8 +403,8 @@ def test_the_backups_detail_gives_the_counts_the_age_out_window_and_the_bound() 
         "2 local and 1 off-PC copies taken before the erasure hold the Contact; they age out "
         "between 2026-12-01 and 2026-12-20, and every copy taken before the erasure ages out by "
         "2026-12-23, while daily backups keep running. Copies saved by `nextron restore` or left "
-        "by a failed migration are kept until deleted by hand. A restore brings the Contact back "
-        "until the erasure ledger exists: erase it again after a restore."
+        "by a failed migration are kept until deleted by hand. Erasure re-applied after any "
+        "restore."
     )
     # no recorded copy (a backup still running isn't recorded yet): residual all the same
     none = receipt.backups(local=0, offpc=0, first=None, last=None, erased_at=ERASED_AT)
@@ -498,7 +498,7 @@ def test_the_fixed_results_are_the_ad17_texts() -> None:
         "Logs hold ids and codes only; email addresses are masked when written"
     )
     assert FIXED_RESULTS[ErasureStore.ERASURE_LEDGER].detail == (
-        "The ledger holds ids and hashes only"
+        "The ledger holds ids, key hashes and firm domains only"
     )
 
 

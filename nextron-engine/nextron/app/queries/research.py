@@ -7,6 +7,8 @@ current unit of work, read-only ones included.
   that id (a text that isn't a ULID included).
 - ``contacts(lead_id)``: the Lead's Contacts as ``StoredContact`` rows, oldest first (by
   ``created_at``, then ``id``); empty for an unknown Lead (a text that isn't a ULID included).
+- ``erased_contacts()`` (Story 3.16): ``(id, erased_at)`` of every erased Contact, by
+  ``erased_at``, then ``id``.
 - ``contacts_with_email(email)`` (Story 3.5): the Contacts whose stored ``email`` (always
   normalised, ``identity.normalize_email``) is exactly ``email``, oldest first; empty for a
   value that isn't a ``str``. ``Compliance.suppress`` reads it for an address the Operator
@@ -210,6 +212,11 @@ def contacts(lead_id: str) -> tuple[StoredContact, ...]:
     if not is_ulid(lead_id):
         return ()
     return contacts_repo.for_lead(lead_id)
+
+
+def erased_contacts() -> tuple[tuple[str, datetime], ...]:
+    """``(id, erased_at)`` of every erased Contact, by ``erased_at``, then ``id``."""
+    return contacts_repo.erased()
 
 
 def contacts_with_email(email: str) -> tuple[StoredContact, ...]:

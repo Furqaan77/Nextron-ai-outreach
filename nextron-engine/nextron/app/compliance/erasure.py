@@ -60,7 +60,8 @@ hook-only instance of ``nextron.main.build_subscribers``) ``erase_contact`` rais
      transaction rolls back). Then the request is completed: ``completed``, ``completed_at``
      now, and one ``events`` row ``open`` to ``completed``, cause ``completed``, ``cause_ref``
      the Contact, actor ``operator``. Last comes the receipt (outcome ``erased``).
-     ``erased=True``.
+     ``erased=True``. When ``compliance.ledger`` is set (Story 3.16), one ``Erased(contact_id,
+     cause, erased_at)`` line is recorded, and appended to the erasure ledger after the commit.
 
   **The receipt** (Story 3.14), in the same transaction: one ``erasure_receipts`` row (the
   reference for ``dsr``, none for ``retention``; the cause; the outcome) with one row per
@@ -183,6 +184,7 @@ from nextron.domain.erasure_receipt import (
     mentions_name,
     url_mentions_name,
 )
+from nextron.domain.erasure_ledger import Erased
 from nextron.domain.ids import is_ulid
 from nextron.domain.notifications import ContactErased
 from nextron.domain.suppression_entry import SuppressionSource
@@ -353,6 +355,9 @@ class Erasures:
         receipt_id = self._receipt(
             contact.id, ref, found_cause, ReceiptOutcome.ERASED, items, request_id
         )
+        ledger = self._compliance.ledger
+        if ledger is not None:  # Story 3.16: appended once the transaction commits
+            ledger.record([Erased(contact.id, found_cause, after.erased_at)])
         return ErasureResult(contact.id, request_id, erased=True, receipt_id=receipt_id)
 
     def _receipt(

@@ -17,7 +17,7 @@ through the ASGI lifespan by hand: startup starts the named threads, beats once 
 shutdown stops them, and building the app starts none.
 
 The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
-``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the thirteen
+``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the fourteen
 doctor rows in order (``port_free`` ok without a probe, the grant ok without a refresh) and the
 dead job, and writes nothing; a wiring that ran doctor's own forms would be caught.
 
@@ -531,6 +531,7 @@ DOCTOR_IDS = [
     "required_credentials",
     "internal_notify_grant",
     "offpc_backup",
+    "erasure_ledger",  # Story 3.16
     "required_settings",
     "database_revision",
     "unsub_token_keys",
@@ -909,7 +910,7 @@ def test_the_built_startup_queues_contact_markets_then_the_test_runs(
 
     startup()  # the lifespan's startup step alone: no runner starts
 
-    assert names == ["queue_contact_markets", "queue_test_runs"]
+    assert names == ["sync_erasure_ledger", "queue_contact_markets", "queue_test_runs"]
     jobs = raw_query(
         units,
         "SELECT lane, idempotency_key FROM jobs WHERE type = 'run_ai_test_sets' "
@@ -1361,7 +1362,9 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     # Domain yet
     assert [getattr(record, "catch_up") for record in scheduled] == [False, False, False]
     assert engine.backups() == []
-    assert not (engine.config.backup_dir).exists()
+    # the backup dir holds only the empty erasure ledger the startup sync made (Story 3.16)
+    assert [path.name for path in engine.config.backup_dir.iterdir()] == ["erasure-ledger.jsonl"]
+    assert (engine.config.backup_dir / "erasure-ledger.jsonl").read_bytes() == b""
 
 
 
@@ -1532,7 +1535,11 @@ def test_back_up_now_copies_the_backup_off_the_pc_encrypted_with_the_real_adapte
 
     assert status == "copied"
     assert name == "nextron-test-20261117T090000.000Z.db.enc"
-    assert [found.name for found in folder.iterdir()] == [name]
+    # with its erasure ledger, which the startup sync made (Story 3.16)
+    assert sorted(found.name for found in folder.iterdir()) == [
+        name,
+        "nextron-test-20261117T090000.000Z.ledger.jsonl.enc",
+    ]
     sealed = (folder / name).read_bytes()
     assert sealed[:8] == b"NXBK\x01\x11\x08\x01"  # format v1, the default scrypt: 2**17, 8, 1
     restored = tmp_path / "restored.db"
@@ -1608,7 +1615,10 @@ def test_run_restore_test_now_restores_the_off_pc_copy_with_the_real_runner(
     assert 'class="health-restore"' in panel
     restore_dir = engine.config.backup_dir / "restore_test"
     assert restore_dir.is_dir() and list(restore_dir.iterdir()) == []  # no work folder left
-    assert [found.name for found in folder.iterdir()] == [name]  # the copy itself stays
+    assert sorted(found.name for found in folder.iterdir()) == [  # the copy itself stays
+        name,
+        "nextron-test-20261117T090000.000Z.ledger.jsonl.enc",
+    ]
     assert raw_query(engine.units, "SELECT count(*) FROM alerts") == [(0,)]
     logged = caplog.text + "".join(str(vars(record)) for record in caplog.records)
     assert PLANTED_PASSPHRASE not in logged and "QZXPLANTED" not in panel
@@ -1643,12 +1653,15 @@ def wait_for_recovery_off(engine: RealEngine) -> Any:
     pytest.fail("check_recovery did not end recovery mode")
 
 
-def test_an_on_row_with_no_handlers_ends_after_the_start(
+def test_an_on_row_with_its_ledger_ends_after_the_start(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
     engine = real_engine(monkeypatch)
     recovery_id = turn_recovery_on(engine)
+    # Story 3.16's startup step reapplies the (empty) ledger; the other three have no handler
+    engine.config.backup_dir.mkdir(parents=True, exist_ok=True)
+    (engine.config.backup_dir / "erasure-ledger.jsonl").touch()
     try:
         with serving(engine.app):
             ended = wait_for_recovery_off(engine)
@@ -1658,7 +1671,12 @@ def test_an_on_row_with_no_handlers_ends_after_the_start(
         engine.units.engine.dispose()
 
     assert (ended.id, ended.ended_at) == (recovery_id, T)
-    assert {status for _, status in ended.steps} == {StepStatus.NOT_APPLICABLE}
+    assert dict(ended.steps) == {
+        RecoveryStep.REAPPLY_ERASURE_LEDGER: StepStatus.DONE,
+        RecoveryStep.MARK_OMS_UNKNOWN: StepStatus.NOT_APPLICABLE,
+        RecoveryStep.REINGEST_MAILBOXES: StepStatus.NOT_APPLICABLE,
+        RecoveryStep.REPOLL_UNSUBSCRIBES: StepStatus.NOT_APPLICABLE,
+    }
     assert "Last restore: 2026-11-17 09:00:00 UTC, from nextron-test-" in panel
     events = [r.getMessage() for r in caplog.records]
     # every step was settled before the runner started; the at-startup check ended it
@@ -1669,7 +1687,8 @@ def test_an_on_row_with_no_handlers_ends_after_the_start(
         if event == "recovery_step_not_applicable"
     )
     assert last_marked < events.index("job_runner_started")
-    assert events.count("recovery_step_not_applicable") == 4
+    assert events.count("recovery_step_not_applicable") == 3
+    assert events.index("recovery_step_done") < events.index("job_runner_started")
     assert events.index("job_runner_started") < events.index("recovery_mode_ended")
     [jobs] = raw_query(engine.units, "SELECT count(*) FROM jobs WHERE type = 'check_recovery'")
     assert jobs[0] >= 1

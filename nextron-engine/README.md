@@ -70,6 +70,7 @@ has an id, a status (`ok`, `warn` or `fail`) and a one-line message:
 | `required_credentials` | the 5 required credentials (see [Credentials](#credentials)) are set, each 1,280 characters or fewer | | lists the labels that are not set, too long, or unreadable in Credential Manager |
 | `internal_notify_grant` | the Google `internal_notify` grant is stored and Google refreshed it | Google can't be reached: run doctor again later | the Desktop client is not imported, the grant is missing or needs re-consent, Credential Manager fails, or another error (by its code) |
 | `offpc_backup` | "Off-PC backup folder" (`backup_offpc_dir`) is set, on another drive than the data dir, and the Backup passphrase is set (see [Backups](#backups)) | `off-PC backup not configured (OQ-A3): backups are local only; ...`, listing every reason with its fix: the folder is blank, is the data dir or the backup dir (or inside either), or can't be read; the passphrase is not set, too long or unreadable. Or the folder is on the data dir's drive (a lost disk would take both) | |
+| `erasure_ledger` | `<backup dir>\erasure-ledger.jsonl` exists and is writable (see [The erasure ledger](#the-erasure-ledger)) | it is missing and there is no database yet: it is created at the first engine start | it is missing while the database exists (start the engine, or after a restore put the ledger's copy there), or it isn't writable |
 | `required_settings` | every required setting (`sender_name`, `sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
 | `database_revision` | the database is at the code's head revision | no database file, an empty one, or one behind head: "will migrate on next start" | a revision this code doesn't know ("newer than this code"), or not this engine's database |
 | `unsub_token_keys` | the active key id's two unsubscribe token keys (see [Unsubscribe tokens](#unsubscribe-tokens)) are set, are 32-byte base64url keys and differ | | either is missing, malformed or unreadable (naming its keyring entry, such as `unsub/k_tok/1`), the two are the same key, or the `unsub_active_kid` setting can't be read |
@@ -1631,9 +1632,9 @@ CASCADE`. A new personal-data table fails until its owner declares it. `tests/ap
 test_erasure.py` plants a value in every personal-data column a Contact's data can reach and
 checks that none survives anywhere in the database, that no `DELETE` runs and no row is lost.
 
-Not yet (later stories): the erasure ledger (3.16). Until Story 3.16's
-ledger, restoring a backup taken before an erasure brings the Contact back: erase it again after
-any restore. The stores outside the database and the receipt are Story 3.14 (next section).
+A restore no longer brings an erased Contact back: the erasure ledger reapplies the erasure
+(see [The erasure ledger](#the-erasure-ledger)). The stores outside the database and the receipt
+are Story 3.14 (next section).
 
 ### Erasure receipts and the stores outside the database
 
@@ -1668,8 +1669,8 @@ The 17 stores, in the order a receipt shows them:
 | Telegram | messages about the Contact under 48 hours old are deleted (`deleteMessage`); older ones, unconfirmed ones and ones Telegram refuses are `residual`; no alert: `none_held` |
 | AI Test Sets | the Reply override cases made from the Contact (Story 4.6), which playbook's hook erased and retired: `done` with their count, `residual` while one still holds text, else `none_held` (the other cases are synthetic or pseudonymised) |
 | Anthropic, Worker KV, nextronai.com inbox | `residual` with the AD-17 text |
-| Backups | always `residual`: the recorded local and off-PC copies taken while the database held the Contact and the dates they age out (or that no recorded copy holds it), and the bound every copy taken before the erasure ages out by (the erasure date plus 35 days, which also covers a backup still running); a restore brings the Contact back until the ledger exists (erase it again after a restore) |
-| Logs, restore work copies, erasure ledger | `none_held` (ids and codes only; work copies deleted; hashes only) |
+| Backups | always `residual`: the recorded local and off-PC copies taken while the database held the Contact and the dates they age out (or that no recorded copy holds it), and the bound every copy taken before the erasure ages out by (the erasure date plus 35 days, which also covers a backup still running); erasure re-applied after any restore (see [The erasure ledger](#the-erasure-ledger)) |
+| Logs, restore work copies, erasure ledger | `none_held` (ids and codes only; work copies deleted; ids, key hashes and firm domains only) |
 | Dev and test sink files | `done` with the recorded messages tombstoned, or `none_held` (none, or `prod`, which records none) |
 
 A store starts `pending` and settles once (the triggers refuse any other change): `done`,
@@ -1825,6 +1826,85 @@ case. In one transaction it runs `open_dsr(contact_id, export, request_ref)` and
 `complete_dsr(request_id)`, each appending one `events` row (`opened`, then `completed`,
 `cause_ref` the Contact, actor `operator`), then `Compliance.export_contact(contact_id)`, which
 only reads, so it also runs in a read-only unit of work. Any failure rolls all three back.
+
+## The erasure ledger
+
+Story 3.16 (FR-50, FR-52, AD-16, AD-17, AD-20) makes a restore safe. A backup copy has forgotten
+every opt-out, void and erasure made after it was taken, so restoring it could bring back an
+erased person or an opted-out address. The engine therefore mirrors each of them to an
+append-only file, `<backup dir>\erasure-ledger.jsonl`, and reapplies that file after every
+restore, before any job runs.
+
+**What is written.** Each committed change appends one JSON line, flushed and fsynced
+(`nextron/app/compliance/ledger.py`; the lines in `nextron/domain/erasure_ledger.py`):
+
+```text
+{"v":1,"type":"suppressed","entry_id":"01J...","kind":"address","value_hash":"<64 hex>","source":"one_click","at":"2026-11-18T09:00:00.000000Z"}
+{"v":1,"type":"voided","entry_id":"01J...","at":"2026-11-18T09:05:00.000000Z"}
+{"v":1,"type":"erased","contact_id":"01J...","cause":"dsr","at":"2026-11-18T09:10:00.000000Z"}
+```
+
+A domain key's line also carries `"domain"` (last): the firm's web domain, which a domain entry
+needs to be re-inserted. Nothing else in the file is plain text: hashes, ids, enum values and
+times only (a test runs the log-redaction detector over a ledger an erasure wrote). Every writer
+goes through `Compliance` (`suppress`, `reverse_optout`, `Erasures.erase_contact`), so the
+unsubscribe poll, reply rules and retention are covered too.
+
+- **After the commit, never before.** The line is appended through `UnitOfWork.after_commit`
+  (`nextron/db/uow.py`): a callback runs right after its transaction commits, outside it; a
+  rollback drops it. So a rolled-back change never reaches the ledger.
+- **A failed append** (a full or read-only drive, say) doesn't undo the change. It logs
+  `erasure_ledger_append_failed` (ERROR: `count`, `code`) and raises the ops alert
+  `erasure_ledger_failed` on Telegram and the dashboard: "Erasure ledger append failed: <n>
+  line(s) not written (<ErrorType>); the next engine start re-appends them".
+- **At every engine start** the first startup step, `sync_erasure_ledger`, appends every entry,
+  void and erasure the database holds that the file lacks (a crash between a commit and its
+  append, a failed append, and every row from before this story), logging
+  `erasure_ledger_synced` (`appended`). A second start appends nothing. A missing file is
+  created then, unless a restore is waiting for its ledger (below).
+- **A torn last line** (a crash in the middle of a write) is ignored when the file is read,
+  and the next append starts on a new line. The startup sync re-appends what it held.
+- **Never rewritten.** No code truncates, rewrites, renames over or deletes the ledger
+  (`tests/contracts/test_erasure_ledger_contracts.py`). It is copied off the PC with every
+  backup (as `nextron-<env>-<stamp>.ledger.jsonl.enc`, see [Off the PC](#off-the-pc)).
+
+**After a restore.** `nextron restore` turns recovery mode on. At the next engine start, before
+the job runner starts, the recovery step "Reapply the erasure ledger" (`reapply_erasure_ledger`,
+owner `compliance`) reads the whole file and, in one transaction:
+
+1. voids every entry a `voided` line names (reason "reapplied after restore");
+2. re-inserts an `active` entry for every `suppressed` line whose key has none and that was not
+   voided later (same source; `cause_ref` the original entry's id; a new id, which is appended
+   to the ledger too). Pipeline Stages are left as they are: the gate reads the list;
+3. re-erases every `erased` line's Contact that isn't tombstoned: a `dsr` line with the request
+   reference "reapplied after restore" (so the person's keys are suppressed again and the
+   request shows it), a `retention` line as a retention erasure.
+
+If anything fails, it all rolls back, the step stays pending (`recovery_step_failed` in the
+log) and the next start tries again. When it succeeds the step is `done` and
+`erasure_ledger_reapplied` (`voided`, `reinstated`, `erased`) is logged; reapplying again
+changes nothing.
+
+**A missing ledger.** If the file isn't there after a restore, the step stays pending, recovery
+mode stays on and sending stays held. The health panel shows "Erasure ledger not found; sending
+stays blocked" ("Put the ledger at <path> and restart the engine"); the startup sync doesn't
+create an empty one meanwhile. A ledger that is there but failed to reapply shows "Erasure
+ledger not yet reapplied; sending stays blocked". **On a new PC**, `nextron restore` of an
+encrypted `.db.enc` copy puts the ledger back itself when the backup dir has none: it decrypts
+the newest `nextron-<env>-<stamp>.ledger.jsonl.enc` beside the copy into place, printing
+`erasure ledger recovered from <name>` (log `erasure_ledger_recovered`). When there is none, or
+it can't be decrypted, it prints `no erasure ledger found: recovery mode holds sending until
+<path> exists` (log `erasure_ledger_not_recovered`, WARNING, `code`) and the restore goes on:
+copy the newest ledger there yourself, then start the engine.
+
+**Doctor.** `erasure_ledger` is `ok` when the file exists and is writable; it fails when it is
+missing (once there is a database) or not writable, and only warns before the first engine
+start.
+
+**Logs**: `erasure_ledger_append_failed`, `erasure_ledger_alert_failed`, `erasure_ledger_synced`,
+`erasure_ledger_missing` (WARNING), `erasure_ledger_damaged_lines` (WARNING: `malformed`,
+`torn`), `erasure_ledger_reapplied`, and `after_commit_failed` (ERROR, `code`) from the unit of
+work. Counts, codes and ids only.
 
 ## Unsubscribe tokens
 
@@ -3105,8 +3185,9 @@ included), a passphrase or an error's text: `backup_requested` (`job_id`, `job_c
 `offpc_rotation_failed` (ERROR: `backup_id`, `code`) and `offpc_record_failed` (ERROR:
 `backup_id`, `code`).
 
-**Not done yet.** Story 4.x writes the erasure ledger (`nextron restore` puts back a database
-copy only; see [Restore and recovery mode](#restore-and-recovery-mode)). There is no
+**The ledger.** Story 3.16 writes the erasure ledger (see [The erasure
+ledger](#the-erasure-ledger)), so each off-PC copy now has its ledger beside it, and `nextron
+restore` puts the newest one back on a new PC. **Not done yet.** There is no
 passphrase-strength rule. A failed off-PC copy is never retried
 before the next backup.
 
@@ -3270,8 +3351,10 @@ closed.
 | Re-ingest the mailboxes | Story 6.12 |
 | Re-poll the unsubscribe Worker | Story 3.12 |
 
-None of them is registered yet, so in Epic 1 all four become `not applicable` at the first
-start and recovery mode ends within a minute. A story adds its step in
+Story 3.16 registers "Reapply the erasure ledger" as a startup step (see [The erasure
+ledger](#the-erasure-ledger)); the other three aren't registered yet, so they become `not
+applicable` at the first start, and recovery mode ends within a minute once the ledger is
+reapplied. A story adds its step in
 `nextron.main.build_recovery_steps`, the only code that builds the registry
 (`tests/contracts/test_recovery_contracts.py`): `RecoveryHandler(step, owner, run, startup)`,
 where `run(context)` (the restore's `recovery_id`, `backup_at` and `restored_at`) returns `True`
@@ -3290,8 +3373,13 @@ work, don't do it). A handler that raises, or returns anything but a `bool`, log
 `recovery_mode_ended` (`recovery_id`). File names only, never a path. There is no `events` row,
 no Telegram alert, no setting and no doctor check: the banner and the panel are the signals.
 
-**Not covered yet:** rotating the `pre_restore` copies, and restoring the erasure ledger's
-off-PC copy (Story 3.16).
+**The erasure ledger (Story 3.16).** After the checks and before the swap, when the backup dir
+has no `erasure-ledger.jsonl` and the copy is an encrypted `.db.enc`, `restore` decrypts the
+newest off-PC ledger copy beside it into place (see [The erasure
+ledger](#the-erasure-ledger)); otherwise it says recovery mode will hold sending until the file
+is there, and goes on.
+
+**Not covered yet:** rotating the `pre_restore` copies.
 
 ## Triggers and the heartbeat
 
@@ -4956,6 +5044,10 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    - then each failed restore test newer than the newest passed one, oldest first: "Restore
      test failed: <kind> <ULID>, <reason>", with "Error: <redacted detail, or the reason>". It
      clears when a later test passes; there is no Dismiss;
+   - after a restore, while the erasure ledger isn't reapplied (Story 3.16): "Erasure ledger
+     not found; sending stays blocked" ("Put the ledger at <path> and restart the engine") or
+     "Erasure ledger not yet reapplied; sending stays blocked" ("Restart the engine to retry;
+     the log has recovery_step_failed"); see [The erasure ledger](#the-erasure-ledger);
    - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
      fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
      traceback); the other sources still show.
@@ -4963,7 +5055,7 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
 8. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
-   the same thirteen ids in the same order, with "<n> ok, <n> warn, <n> fail".
+   the same fourteen ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
 (`GET /health/panel/live`, the panel alone) while the page is open. Every answer is

@@ -589,8 +589,8 @@ def test_no_recorded_backup_is_still_residual_with_its_bound(world: World) -> No
     assert detail["backups"] == (
         "No recorded backup copy holds the Contact; every copy taken before the erasure ages out "
         "by 2026-12-23, while daily backups keep running. Copies saved by `nextron restore` or "
-        "left by a failed migration are kept until deleted by hand. A restore brings the Contact "
-        "back until the erasure ledger exists: erase it again after a restore."
+        "left by a failed migration are kept until deleted by hand. Erasure re-applied after any "
+        "restore."
     )
 
 

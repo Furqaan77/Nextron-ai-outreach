@@ -5,10 +5,12 @@ Other services and the delivery layers change ``compliance`` data only through t
 Commands join the caller's unit of work and never begin, commit or roll back; the use cases
 (Story 3.5's panel actions) open their own transactions.
 
-``Compliance(clock, *, codec=None)`` owns the Suppression List (``suppression_entries``) and
-applies the SuppressionEntry machine (``nextron.domain.suppression_entry``). It is the only code
-that writes the list (``tests/contracts/test_suppression_contracts.py``): ``suppress`` adds
-entries and ``reverse_optout`` voids one. An entry is permanent: nothing here, or anywhere,
+``Compliance(clock, *, codec=None, ledger=None)`` owns the Suppression List
+(``suppression_entries``) and applies the SuppressionEntry machine
+(``nextron.domain.suppression_entry``). It is the only code that writes the list
+(``tests/contracts/test_suppression_contracts.py``): ``suppress`` adds entries and
+``reverse_optout`` voids one (and, after a restore, ``reinstate`` and ``void_reapplied``,
+below). An entry is permanent: nothing here, or anywhere,
 removes one or ages one out. It also issues the unsubscribe tokens (``unsub_tokens``) through
 ``codec``, a ``TokenCodecPort``.
 
@@ -97,6 +99,28 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
   (``AdapterError`` ``unsub_key_missing``) rolls the enqueue back, so no message goes out
   without a working link. It logs nothing and writes no ``events`` row; only the token's hash
   is stored.
+
+**The erasure ledger (Story 3.16).** ``ledger`` is a ``LedgerRecorder``
+(``nextron.app.compliance.ledger.LedgerAppender`` in the engine), also reachable as
+``compliance.ledger``. When one is given, every entry ``suppress`` (through ``_write``) or
+``reinstate`` writes records one ``Suppressed`` line, ``reverse_optout`` one ``Voided`` line,
+and ``Erasures.erase_contact`` one ``Erased`` line when it erased: ``record`` appends them to
+the ledger after the transaction commits, so a rolled-back change never reaches it. With no
+ledger nothing is recorded.
+
+The two reapply writers (their caller is ``nextron.app.compliance.ledger.ErasureLedger``):
+
+- ``@command reinstate(line: Suppressed) -> str | None``: unless the key (``line.kind``,
+  ``line.value_hash``) has an ``active`` entry (``None``), it inserts an ``active`` entry with
+  the line's source, ``cause_ref`` the line's entry id and ``domain_plain`` the line's domain,
+  and one ``events`` row (``None`` to ``active``, cause ``CREATION[source].cause``, that
+  ``cause_ref``, actor ``system:compliance``), and returns the new id. It publishes nothing, so
+  no Pipeline Stage changes (the gate reads the list).
+- ``@command void_reapplied(entry_id) -> bool``: voids the ``active`` entry ``entry_id``
+  (``void_reason`` ``REAPPLIED``, "reapplied after restore") with one ``events`` row
+  (``active`` to ``voided``, the machine's cause, no ``cause_ref``, actor
+  ``system:compliance``). An unknown or already voided entry is ``False``, and so is one whose
+  source can't be voided (only ``reply_rule`` can; it stays suppressed, the safe side).
 
 **The panel's use cases** (Story 3.5; each the one use case of a web POST's unit of work):
 
@@ -204,7 +228,7 @@ Market, a suppression or a stage change shows in the very next Decision.
 use case and Story 3.15's ``export_on_request``) and compliance's ``ERASURE`` declarations.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
@@ -258,6 +282,7 @@ from nextron.domain.contactability import (
 )
 from nextron.domain.contacts import provenance_recorded
 from nextron.domain.eligibility import Decision, EligibilityContact, EligibilityLead, evaluate
+from nextron.domain.erasure_ledger import REAPPLIED, LedgerLine, Suppressed, Voided
 from nextron.domain.ids import is_ulid
 from nextron.domain.legal_form import eligibility_facts
 from nextron.domain.markets import InvalidMarkets, MarketDef
@@ -351,6 +376,13 @@ def _check_arguments(subject: object, scope: object, source: object, cause_ref: 
         raise ValueError("suppress: a DomainSubject takes scope firm only")
 
 
+class LedgerRecorder(Protocol):
+    """What ``Compliance`` needs of the erasure ledger's appender: ``record(lines)``, called
+    inside a transaction, appends them once it commits."""
+
+    def record(self, lines: Sequence[LedgerLine]) -> None: ...
+
+
 class OutboundAddress(Protocol):
     """What ``issue_unsub_token`` reads of an OutboundMessage: its id and its To address."""
 
@@ -392,9 +424,25 @@ def _scope_of(subject: AddressSubject | DomainSubject) -> SuppressionScope:
 class Compliance:
     """The Suppression List; see the module docstring."""
 
-    def __init__(self, clock: Clock, *, codec: TokenCodecPort | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        codec: TokenCodecPort | None = None,
+        ledger: LedgerRecorder | None = None,
+    ) -> None:
         self._clock = clock
         self._codec = codec
+        self._ledger = ledger
+
+    @property
+    def ledger(self) -> LedgerRecorder | None:
+        """The erasure ledger's recorder, or ``None`` when nothing is recorded."""
+        return self._ledger
+
+    def _record(self, lines: Sequence[LedgerLine]) -> None:
+        if self._ledger is not None and lines:
+            self._ledger.record(lines)
 
     def _write(
         self,
@@ -409,6 +457,7 @@ class Compliance:
         written: list[str] = []
         existing: list[str] = []
         ids: list[str] = []
+        lines: list[LedgerLine] = []
         for key in keys:
             found = entries_repo.active_for(str(key.kind), key.value_hash)
             if found is not None:
@@ -435,6 +484,10 @@ class Compliance:
             )
             written.append(entry_id)
             ids.append(entry_id)
+            lines.append(
+                Suppressed(entry_id, key.kind, key.value_hash, source, now, key.domain_plain)
+            )
+        self._record(lines)
         return SuppressResult(tuple(written), tuple(existing)), tuple(ids)
 
     @command
@@ -563,11 +616,70 @@ class Compliance:
             actor=OPERATOR_ACTOR,
             at=now,
         )
+        self._record([Voided(entry.id, now)])
         if entry.cause_ref is None:
             return ()
         return entries_repo.active_ids_for_cause(
             source=str(SuppressionSource.REPLY_RULE), cause_ref=entry.cause_ref
         )
+
+    @command
+    def reinstate(self, line: Suppressed) -> str | None:
+        """Re-insert the entry of a ledger line after a restore; see the module docstring."""
+        if not isinstance(line, Suppressed):
+            raise TypeError(f"reinstate takes a Suppressed line, not {type(line).__name__}")
+        if entries_repo.active_for(str(line.kind), line.value_hash) is not None:
+            return None
+        change = CREATION[line.source]
+        now = self._clock.now()
+        entry_id = entries_repo.insert(
+            kind=str(line.kind),
+            value_hash=line.value_hash,
+            domain_plain=line.domain,
+            source=str(line.source),
+            cause_ref=line.entry_id,
+            created_at=now,
+        )
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=entry_id,
+            from_status=None,
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=line.entry_id,
+            actor=SYSTEM_ACTOR,
+            at=now,
+        )
+        self._record(
+            [Suppressed(entry_id, line.kind, line.value_hash, line.source, now, line.domain)]
+        )
+        return entry_id
+
+    @command
+    def void_reapplied(self, entry_id: str) -> bool:
+        """Void an entry a ledger line voided, after a restore; see the module docstring."""
+        if not isinstance(entry_id, str):
+            raise TypeError(f"void_reapplied takes an entry id, not {type(entry_id).__name__}")
+        entry = entries_repo.get(entry_id) if is_ulid(entry_id) else None
+        if entry is None or entry.status != EntryStatus.ACTIVE:
+            return False
+        if entry.source not in VOIDABLE_SOURCES:  # the table refuses it: it stays suppressed
+            return False
+        change = transition(EntryStatus.ACTIVE, EntryEvent.VOID)
+        now = self._clock.now()
+        if not entries_repo.void(entry.id, now, REAPPLIED):
+            return False
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=entry.id,
+            from_status=entry.status,
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=None,
+            actor=SYSTEM_ACTOR,
+            at=now,
+        )
+        return True
 
     @command
     def import_values(self, values: Iterable[EntryValue]) -> ImportCounts:

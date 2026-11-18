@@ -16,7 +16,8 @@ proving each check catches a violation.
   3.13) in ``nextron/app/compliance/erasure.py``, so a void reason is redacted only by
   compliance's erasure hook. Every public function of the repository is classified as a
   reader (``get``, ``active_for``, ``listed``, ``count_listed``, ``by_ids``,
-  ``active_ids_for_cause``, ``voided_for``) or a writer (``insert``, ``void``,
+  ``active_ids_for_cause``, ``voided_for``, and Story 3.16's ``all_for_ledger`` and
+  ``voided_for_ledger``) or a writer (``insert``, ``void``,
   ``redact_void_reason``): a new one fails until it is classified here.
 - **The model stays in the database layer.** ``SuppressionEntryRecord`` is named (as a name, an
   attribute, an import or in a string) only under ``nextron/db/models`` and
@@ -71,6 +72,8 @@ READERS = frozenset(
         "active_ids_for_cause",
         "voided_for",  # Story 3.13
         "for_export",  # Story 3.15
+        "all_for_ledger",  # Story 3.16
+        "voided_for_ledger",  # Story 3.16
     }
 )
 ALLOWED_WRITER = "app/compliance/api.py"
@@ -572,6 +575,7 @@ def test_the_classification_check_catches_a_missing_function(tmp_path: Path) -> 
     assert repository_classification_problems(path) == [
         "active_for is classified but missing",
         "active_ids_for_cause is classified but missing",
+        "all_for_ledger is classified but missing",
         "by_ids is classified but missing",
         "count_listed is classified but missing",
         "for_export is classified but missing",
@@ -580,6 +584,7 @@ def test_the_classification_check_catches_a_missing_function(tmp_path: Path) -> 
         "redact_void_reason is classified but missing",
         "void is classified but missing",
         "voided_for is classified but missing",
+        "voided_for_ledger is classified but missing",
     ]
 
 

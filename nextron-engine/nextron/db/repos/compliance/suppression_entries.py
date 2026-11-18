@@ -19,6 +19,8 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
   ``value_hashes`` or whose ``cause_ref`` is in ``cause_refs``, as a ``dict`` of only its
   ``EXPORT_COLUMNS`` (``kind``, ``status``, ``source``, ``created_at``, ``voided_at`` and
   ``void_reason``: never its id, hash, domain or cause), by ``created_at``, then ``id``;
+  ``all_for_ledger()`` (Story 3.16), every row, by ``created_at``, then ``id``;
+  ``voided_for_ledger()``, every ``voided`` row, by ``voided_at``, then ``id``;
 - the writers: ``insert(...) -> id``, a new ``active`` row; ``void(entry_id, voided_at,
   void_reason) -> bool``, which sets one ``active`` row ``voided`` with its time and reason
   (``UPDATE ... WHERE id = ? AND status = 'active'``) and says whether it did;
@@ -255,6 +257,24 @@ def voided_for(kind: str, value_hash: str) -> tuple[StoredSuppressionEntry, ...]
             SuppressionEntryRecord.status == VOIDED,
         )
         .order_by(SuppressionEntryRecord.id)
+    )
+    return tuple(StoredSuppressionEntry(*row) for row in current().session.execute(statement))
+
+
+def all_for_ledger() -> tuple[StoredSuppressionEntry, ...]:
+    """Every entry, oldest first (by ``created_at``, then ``id``)."""
+    statement = select(*_COLUMNS).order_by(
+        SuppressionEntryRecord.created_at, SuppressionEntryRecord.id
+    )
+    return tuple(StoredSuppressionEntry(*row) for row in current().session.execute(statement))
+
+
+def voided_for_ledger() -> tuple[StoredSuppressionEntry, ...]:
+    """Every ``voided`` entry, by ``voided_at``, then ``id``."""
+    statement = (
+        select(*_COLUMNS)
+        .where(SuppressionEntryRecord.status == VOIDED)
+        .order_by(SuppressionEntryRecord.voided_at, SuppressionEntryRecord.id)
     )
     return tuple(StoredSuppressionEntry(*row) for row in current().session.execute(statement))
 

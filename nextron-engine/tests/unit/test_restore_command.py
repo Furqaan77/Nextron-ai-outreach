@@ -34,7 +34,7 @@ from nextron.db.migrations import alembic_config, ensure_current, head_revision,
 from nextron.db.models.base import new_id, utc_text
 from nextron.db.repos.ops.snapshot import snapshot
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
-from nextron.domain.backup import copy_name
+from nextron.domain.backup import copy_name, offpc_names
 from nextron.lock import InstanceLock
 from tests.fakes.clock import FrozenClock
 from tests.fakes.probes import fake_probes
@@ -1021,3 +1021,102 @@ def test_cli_dispatches_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli.main(["restore", "y.db.enc"]) == 7
     assert calls == [("x.db", {"yes": True}), ("y.db.enc", {"yes": False})]
 
+
+
+# Row: New PC, the erasure ledger (Story 3.16) ----------------------------------------------------
+
+LEDGER_BYTES = b'{"v":1,"type":"voided","entry_id":"01JD3QZ8X5V9K2M7N4P6R8T0WA","at":"x"}\n'
+
+
+def ledger_copy(place: Place, at: datetime, data: bytes = LEDGER_BYTES) -> str:
+    """An off-PC ledger copy beside the encrypted copy, made by the real ``put``."""
+    folder = place.tmp_path / "offpc"
+    source = place.tmp_path / f"ledger-{at:%H%M%S}.jsonl"
+    source.write_bytes(data)
+    secrets = InMemorySecrets("test")
+    secrets.write("backup/passphrase", PASSPHRASE)
+    name = offpc_names("test", at)[1]
+    FolderBackupTarget(folder, secrets=secrets, params=LOW_SCRYPT).put(source, name)
+    return name
+
+
+def ledger_path(place: Place) -> Path:
+    return place.config.backup_dir / "erasure-ledger.jsonl"
+
+
+def test_on_a_new_pc_the_newest_offpc_ledger_is_decrypted_into_the_backup_dir(
+    place: Place,
+) -> None:
+    copy = encrypted_copy(place)
+    ledger_copy(place, STAMP_AT - timedelta(days=1), b"old\n")
+    newest = ledger_copy(place, STAMP_AT)
+    given = Given(copy)
+
+    result = run_restore(copy, passphrase=PASSPHRASE)
+
+    assert result.code == 0, result.err
+    assert ledger_path(place).read_bytes() == LEDGER_BYTES
+    assert f"erasure ledger recovered from {newest}" in result.out
+    assert not ledger_path(place).with_name("erasure-ledger.jsonl.part").exists()
+    [recovered] = place.events("erasure_ledger_recovered")
+    assert recovered["file"] == newest
+    given.assert_unchanged()
+    assert_no_path_in_the_log(place)
+
+
+def test_a_ledger_in_the_backup_dir_is_kept_as_it_is(place: Place) -> None:
+    copy = encrypted_copy(place)
+    ledger_copy(place, STAMP_AT)
+    ledger_path(place).parent.mkdir(parents=True, exist_ok=True)
+    ledger_path(place).write_bytes(b"current\n")
+
+    result = run_restore(copy, passphrase=PASSPHRASE)
+
+    assert result.code == 0, result.err
+    assert ledger_path(place).read_bytes() == b"current\n"
+    assert "erasure ledger" not in result.out
+    assert place.events("erasure_ledger_recovered") == []
+    assert place.events("erasure_ledger_not_recovered") == []
+
+
+def test_a_stale_part_file_is_cleared_before_the_ledger_is_decrypted(place: Place) -> None:
+    copy = encrypted_copy(place)
+    ledger_copy(place, STAMP_AT)
+    part = ledger_path(place).with_name("erasure-ledger.jsonl.part")
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"half")
+
+    result = run_restore(copy, passphrase=PASSPHRASE)
+
+    assert result.code == 0, result.err
+    assert ledger_path(place).read_bytes() == LEDGER_BYTES
+    assert not part.exists()
+
+
+@pytest.mark.parametrize("case", ["no ledger copy", "tampered", "plain copy"])
+def test_without_a_usable_ledger_the_restore_warns_and_goes_on(place: Place, case: str) -> None:
+    if case == "plain copy":
+        copy = place.copy(marker="plain")
+    else:
+        copy = encrypted_copy(place)
+    if case == "tampered":
+        name = ledger_copy(place, STAMP_AT)
+        target = place.tmp_path / "offpc" / name
+        data = bytearray(target.read_bytes())
+        data[len(data) // 2] ^= 0x01
+        target.write_bytes(bytes(data))
+
+    result = run_restore(copy, passphrase=PASSPHRASE)
+
+    assert result.code == 0, result.err
+    assert marker(place.db_path) in {"encrypted", "plain"}
+    assert (
+        f"no erasure ledger found: recovery mode holds sending until {ledger_path(place)} exists"
+        in result.out
+    )
+    assert not ledger_path(place).exists()
+    assert not ledger_path(place).with_name("erasure-ledger.jsonl.part").exists()
+    [warned] = place.events("erasure_ledger_not_recovered")
+    assert warned["level"] == "WARNING"
+    assert warned["code"] == ("backup_tampered" if case == "tampered" else "not_found")
+    assert_no_path_in_the_log(place)

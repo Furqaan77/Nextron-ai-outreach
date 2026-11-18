@@ -143,7 +143,19 @@ would fail closed.
 being ``SinkRecorder(<data dir>\\sink, clock)`` (the ``SinkFilesPort`` of the dev and test sink
 files) outside ``prod`` and ``None`` in ``prod``; the registry reaches it through
 ``erasure_stores=lambda: erasure_stores``. ``build_health_issues`` registers
-``queries.compliance.health_issues`` last (open erase requests and failed stores).
+``queries.compliance.health_issues`` (open erase requests and failed stores) as the
+``erasure`` source.
+
+**The erasure ledger (Story 3.16).** ``build_app`` builds one ``LedgerFile(<backup
+dir>\\erasure-ledger.jsonl)`` (``nextron.app.compliance.ledger``), one ``LedgerAppender(file,
+notify)``, the one ``Compliance(clock, ledger=appender)`` (so the panel, the erasure and every
+other writer through it append their lines after each commit) and one ``ErasureLedger(clock,
+file, compliance, erasures)``. ``build_recovery_steps(reapply=ledger.reapply)`` registers the
+``reapply_erasure_ledger`` startup step; the first startup step, ``sync_erasure_ledger(units,
+ledger)``, runs ``ledger.sync()`` in a unit of work of its own (inside a fresh
+``contextvars.Context()``) after the recovery pass; ``build_health_issues(..., ledger=<path>)``
+registers the ``compliance`` source; and the doctor registry checks the file
+(``erasure_ledger``).
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
 ``LeadImports(clock, discovery, research, EmailValidatorSyntax())``, on the same ``discovery =
@@ -344,7 +356,9 @@ calendar month, and a month's slot missed while the engine was off is made up on
 **Recovery mode (Story 1.19; AD-2, AD-5, AD-17, AD-20, OP-8).** ``build_recovery_steps()`` is
 the recovery step registry (``nextron.domain.recovery.RecoverySteps``): the only code that
 constructs one or calls ``register_step`` (``tests/contracts/test_recovery_contracts.py``). It
-ships empty and frozen; Stories 3.12, 3.16 and 6.12 register their ``RecoveryHandler``s there.
+ships empty and frozen with no argument; ``build_recovery_steps(reapply=...)`` registers Story
+3.16's ``reapply_erasure_ledger`` (owner ``compliance``, a startup step), and Stories 3.12 and
+6.12 register their ``RecoveryHandler``s there.
 ``build_app(..., recovery_steps=None)`` builds one ``Recovery(clock)`` (``nextron.app.ops.api``)
 and one ``RecoveryRunner(units, recovery, recovery_steps or build_recovery_steps())``
 (``nextron.jobs.recovery``), passes ``recovery=lambda: recovery_runner`` to
@@ -391,6 +405,15 @@ invalid bootstrap config or a failed environment check. Its steps, in order:
 12. ``Recovery(clock).begin(...)`` in a unit of work on the candidate's own
     ``UnitOfWorkFactory`` turns recovery mode on in it; then its engine is disposed. A failure
     in step 11 or 12 discards the ``pre_restore`` copy (best effort), so nothing was changed.
+12a. **The erasure ledger (Story 3.16).** When ``<backup dir>\\erasure-ledger.jsonl`` doesn't
+    exist and the file is an encrypted ``.db.enc``, the newest
+    ``nextron-<env>-<stamp>.ledger.jsonl.enc`` beside it (``targets(file.parent).list()``) is
+    decrypted (``get``) into ``<backup dir>\\erasure-ledger.jsonl.part`` (a stale one is
+    cleared first) and renamed into place, never over an existing ledger, printing and logging
+    ``erasure_ledger_recovered`` (``file``). When none is found, or that fails, it prints ``no
+    erasure ledger found: recovery mode holds sending until <path> exists`` and logs
+    ``erasure_ledger_not_recovered`` (WARNING, ``code``), and the restore goes on: recovery
+    mode then holds sending until the file is put there.
 13. ``swap_in(candidate, <data dir>\\nextron.db)``: SQLite's backup API, one write transaction.
     A failure leaves the database unchanged (an empty file ``swap_in`` created on a new PC is
     discarded) and keeps the ``pre_restore`` copy, whose full path the message names.
@@ -445,7 +468,8 @@ included). Building the app starts nothing. Startup first runs the recovery step
 (``recovery_startup``) through ``asyncio.to_thread``; if it raises (``recovery_state`` can't be
 read or written), the server doesn't start: Uvicorn exits 3, and ``serve`` reports
 ``server_start_failed`` and exits 2, which fails closed. Next it runs the ``startup`` step
-(``run_startup_steps``: ``queue_contact_markets``, then ``queue_test_runs``) through
+(``run_startup_steps``: ``sync_erasure_ledger``, then ``queue_contact_markets``, then
+``queue_test_runs``) through
 ``asyncio.to_thread``; an exception there is logged as ``startup_step_failed`` (ERROR, with the
 exception's type and, from ``run_startup_steps``, the step's name) and never stops the engine.
 The
@@ -497,9 +521,12 @@ Sales Playbook check's problem, Story 4.4), then ``IssueSource("sending", lambda
 queries.sending.health_issues(clock.now()))`` (each listed Sending Domain whose cold sends are
 blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then ``IssueSource("erasure",
 queries.compliance.health_issues)`` (each open erase request and each failed erasure store,
-Story 3.14), then freezes it; each later owner
+Story 3.14), then, given ``ledger``, ``IssueSource("compliance",
+functools.partial(queries.compliance.ledger_health_issues, ledger))`` (a missing or unreapplied
+erasure ledger after a restore, Story 3.16), then freezes it; each later owner
 registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
-``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock),
+``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock,
+ledger=<the ledger's path>),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
 (``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
 ``create_app(..., health=health, queue=queue)``: the health panel (``GET /health/panel``)
@@ -655,7 +682,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -682,6 +709,7 @@ from nextron.adapters.telegram import TelegramAlert
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.compliance.erasure_stores import ErasureStores
+from nextron.app.compliance.ledger import ErasureLedger, LedgerAppender, LedgerFile
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.drafting import api as drafting_api
@@ -759,9 +787,11 @@ from nextron.domain.alert import SEND_ALERT_JOB, Channel
 from nextron.domain.backup import (
     BACKUP_DB_JOB,
     DEFAULT_BACKUP_TIME,
+    ERASURE_LEDGER_FILE,
     LOCAL_DIR_NAME,
     BackupKind,
     copy_name,
+    offpc_stamp,
 )
 from nextron.domain.ai import RouteSpec
 from nextron.domain.ai_test_cases import InvalidTestCases, TestCase, extraction_case
@@ -811,6 +841,9 @@ from nextron.domain.recovery import (
     ENCRYPTED,
     PRE_RESTORE_DIR_NAME,
     RESTORE_WORK_DIR_NAME,
+    RecoveryContext,
+    RecoveryHandler,
+    RecoveryStep,
     RecoverySteps,
     backup_time,
     copy_env,
@@ -848,6 +881,7 @@ from nextron.startup_checks import (
     BACKUP_DIR_SEPARATE,
     DATA_DIR_OUTSIDE_ONEDRIVE,
     DATABASE_REVISION,
+    ERASURE_LEDGER,
     INTERNAL_NOTIFY_GRANT,
     OFFPC_BACKUP,
     PORT_FREE,
@@ -867,6 +901,7 @@ from nextron.startup_checks import (
     check_backup_dir_separate,
     check_data_dir_outside_onedrive,
     check_database_revision,
+    check_erasure_ledger,
     check_internal_notify_grant,
     check_offpc_backup,
     check_port_free,
@@ -1053,14 +1088,9 @@ def build_app(
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
-    recovery_runner = RecoveryRunner(
-        units,
-        Recovery(clock),
-        recovery_steps if recovery_steps is not None else build_recovery_steps(),
-    )
-    # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms and
-    # erasure_stores are bound just below
+    # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
+    # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms
+    # and erasure_stores are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1136,9 +1166,24 @@ def build_app(
     )
     restore_tests = build_restore_tests(config, clock, offpc, notify, queue)
     contact_markets = ContactMarkets(clock, research, queue)
-    compliance = Compliance(clock)  # the Suppression List panel, Eligibility and erasure
+    # Story 3.16: one ledger file; every suppression, void and erasure is appended after commit
+    ledger_file = LedgerFile(config.backup_dir / ERASURE_LEDGER_FILE)
+    # the Suppression List panel, Eligibility and erasure
+    compliance = Compliance(clock, ledger=LedgerAppender(ledger_file, notify))
+    erasures = Erasures(clock, compliance, queue=queue)  # Story 3.13: on the same Compliance
+    erasure_ledger = ErasureLedger(clock, ledger_file, compliance, erasures)
+    recovery_runner = RecoveryRunner(
+        units,
+        Recovery(clock),
+        (
+            recovery_steps
+            if recovery_steps is not None
+            else build_recovery_steps(reapply=erasure_ledger.reapply)
+        ),
+    )
     test_runs = AiTestRuns(clock, meter, llm, queue)
     startup_steps = (
+        ("sync_erasure_ledger", functools.partial(sync_erasure_ledger, units, erasure_ledger)),
         ("queue_contact_markets", functools.partial(queue_contact_markets, units, contact_markets)),
         ("queue_test_runs", functools.partial(queue_test_runs, units, test_runs)),
     )
@@ -1166,7 +1211,7 @@ def build_app(
     health = EngineHealth(
         clock,
         job_types,
-        issues=build_health_issues(budget=budget, clock=clock),
+        issues=build_health_issues(budget=budget, clock=clock, ledger=ledger_file.path),
         readiness=functools.partial(run_checks, build_doctor_checks(), context),
     )
     return create_app(
@@ -1193,7 +1238,7 @@ def build_app(
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,
-        erasures=Erasures(clock, compliance, queue=queue),  # Story 3.13: on the same Compliance
+        erasures=erasures,  # Story 3.13: on the same Compliance, with the queue
         domain_checks=domain_checks,
         units=units,
         lifespan=engine_lifespan(
@@ -1204,6 +1249,18 @@ def build_app(
             startup=functools.partial(run_startup_steps, startup_steps),
         ),
     )
+
+
+def sync_erasure_ledger(units: Units, ledger: ErasureLedger) -> None:
+    """The engine's first startup step (Story 3.16): ``ledger.sync()`` in a unit of work of its
+    own, inside a fresh ``contextvars.Context()``, after the recovery startup pass, so every
+    entry, void and erasure the ledger lacks is appended."""
+
+    def run() -> None:
+        with units.open():
+            ledger.sync()
+
+    contextvars.Context().run(run)
 
 
 def queue_contact_markets(units: Units, contact_markets: ContactMarkets) -> None:
@@ -1525,12 +1582,16 @@ def _no_erasure_stores() -> handlers.StoreErasing:
     raise RuntimeError("erase_external has no ErasureStores wired")
 
 
-def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> HealthIssues:
+def build_health_issues(
+    *, budget: Budget, clock: Clock | None = None, ledger: Path | None = None
+) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
     Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
-    ``clock`` is ``None``), then the erasures' open requests and failed stores. Each later owner registers its ``queries.<owner>.health_issues``
-    here, before ``freeze()``."""
+    ``clock`` is ``None``), then the erasures' open requests and failed stores, then, given the
+    erasure ledger's path ``ledger`` (``build_app`` always gives it), compliance's missing or
+    unreapplied ledger (Story 3.16). Each later owner registers its
+    ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
@@ -1539,6 +1600,12 @@ def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> Health
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
     issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
     issues.register_source(IssueSource("erasure", compliance_queries.health_issues))
+    if ledger is not None:
+        issues.register_source(
+            IssueSource(
+                "compliance", functools.partial(compliance_queries.ledger_health_issues, ledger)
+            )
+        )
     issues.freeze()
     return issues
 
@@ -1641,14 +1708,23 @@ def read_restore_test_schedule(units: Units, tests: RestoreTests) -> DailyRun:
     return contextvars.Context().run(read)
 
 
-def build_recovery_steps() -> RecoverySteps:
+def build_recovery_steps(
+    reapply: Callable[[RecoveryContext], bool] | None = None,
+) -> RecoverySteps:
     """The recovery step registry (Story 1.19), frozen: the only code that constructs
-    ``RecoverySteps`` or calls ``register_step``. Empty until a story adds a handler: Story 3.16
-    registers ``reapply_erasure_ledger``, Story 6.12 ``mark_oms_unknown`` and
-    ``reingest_mailboxes``, and Story 3.12 ``repoll_unsubscribes``, each with
-    ``register_step(RecoveryHandler(step, owner, run, startup))`` before ``freeze()``. A step
-    with no handler becomes ``not_applicable``."""
+    ``RecoverySteps`` or calls ``register_step``. Given ``reapply`` (``build_app`` passes
+    ``ErasureLedger.reapply``), Story 3.16 registers ``reapply_erasure_ledger`` (owner
+    ``compliance``, a ``startup`` step: it runs before the job runner); with no argument the
+    registry is empty. Story 6.12 adds ``mark_oms_unknown`` and ``reingest_mailboxes``, and
+    Story 3.12 ``repoll_unsubscribes``, each with ``register_step(RecoveryHandler(step, owner,
+    run, startup))`` before ``freeze()``. A step with no handler becomes ``not_applicable``."""
     steps = RecoverySteps()
+    if reapply is not None:
+        steps.register_step(
+            RecoveryHandler(
+                RecoveryStep.REAPPLY_ERASURE_LEDGER, "compliance", reapply, startup=True
+            )
+        )
     steps.freeze()
     return steps
 
@@ -2370,11 +2446,13 @@ class DoctorContext:
 
 def build_doctor_checks() -> DoctorChecks[DoctorContext]:
     """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, Story 1.17's
-    ``offpc_backup`` (after ``internal_notify_grant``) and Story 3.8's ``unsub_token_keys``
-    (last, after ``database_revision``), thirteen in all, in the order doctor prints them (the
-    health panel shows the same list). With ``DoctorContext.in_engine``, ``port_free`` and
-    ``internal_notify_grant`` take their no-probe, no-network forms. Later stories register
-    their checks here, before ``freeze()``.
+    ``offpc_backup`` (after ``internal_notify_grant``), Story 3.16's ``erasure_ledger`` (after
+    ``offpc_backup``; it only looks at the file, never at the database's contents) and Story
+    3.8's ``unsub_token_keys`` (last, after ``database_revision``), fourteen in all, in the
+    order doctor prints them (the health panel shows the same list). With
+    ``DoctorContext.in_engine``, ``port_free`` and ``internal_notify_grant`` take their
+    no-probe, no-network forms. Later stories register their checks here, before
+    ``freeze()``.
 
     The order rule: the health panel runs this registry inside a GET's read-only unit of work,
     where the first check that reads the database (``offpc_backup``'s setting read, then
@@ -2420,6 +2498,12 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
             OFFPC_BACKUP,
             lambda c: check_offpc_backup(
                 c.secrets.read, c.database.offpc_dir, c.config.data_dir, c.config.backup_dir
+            ),
+        ),
+        DoctorCheck(
+            ERASURE_LEDGER,
+            lambda c: check_erasure_ledger(
+                c.config.backup_dir / ERASURE_LEDGER_FILE, c.database.exists
             ),
         ),
         DoctorCheck(
@@ -3016,6 +3100,7 @@ class _Restore:
             if pre_restore is not None:  # nothing was changed: no safety copy is left either
                 discard(pre_restore)
             raise
+        self._recover_ledger()  # step 12a (Story 3.16): never fails the restore
         try:  # step 13
             swap_in(candidate, self.db_path)
         except Exception as exc:
@@ -3063,6 +3148,35 @@ class _Restore:
         )
         return EXIT_OK
 
+    def _recover_ledger(self) -> None:
+        """Step 12a: with no erasure ledger in the backup dir and an encrypted copy, decrypt
+        the newest off-PC ledger copy beside the file into place; see the module docstring."""
+        ledger = self.config.backup_dir / ERASURE_LEDGER_FILE
+        if ledger.exists():
+            return
+        code = "not_found"
+        if copy_format(self.file.name) == ENCRYPTED:
+            try:
+                target = self.targets()(self.file.parent)
+                name = _newest_ledger_copy(self.config.env, target.list())
+                if name is not None:
+                    part = ledger.with_name(ledger.name + LEDGER_PART_SUFFIX)
+                    _fresh_part(part)
+                    target.get(name, part)
+                    if ledger.exists():  # never over an existing ledger
+                        raise FileExistsError(ledger.name)
+                    os.rename(part, ledger)
+                    print(f"erasure ledger recovered from {name}", file=self.out)
+                    log.info("erasure_ledger_recovered", extra={"file": name})
+                    return
+            except Exception as exc:  # noqa: BLE001 - recovery mode still holds sending
+                code = error_code(exc)
+        print(
+            f"no erasure ledger found: recovery mode holds sending until {ledger} exists",
+            file=self.out,
+        )
+        log.warning("erasure_ledger_not_recovered", extra={"code": code})
+
     def _verify(self, revision: str, recovery_id: str) -> str | None:
         """Step 14: what is wrong with the live database after the swap, or ``None``."""
         try:
@@ -3076,6 +3190,28 @@ class _Restore:
         if check.active_ids != (recovery_id,):
             return "recovery_row_mismatch"
         return None
+
+
+LEDGER_PART_SUFFIX: Final = ".part"
+_LEDGER_COPY_SHAPE: Final = ".ledger.jsonl.enc"
+
+
+def _newest_ledger_copy(env: str, names: Iterable[str]) -> str | None:
+    """The newest complete off-PC ledger copy of ``env`` among ``names``, or ``None``."""
+    found = [
+        (stamp, name)
+        for name in names
+        if name.endswith(_LEDGER_COPY_SHAPE) and (stamp := offpc_stamp(env, name)) is not None
+    ]
+    return max(found)[1] if found else None
+
+
+def _fresh_part(part: Path) -> None:
+    """Make the backup dir (a new PC has none yet) and clear a ``.part`` file an interrupted
+    restore left, so the decryption can write it."""
+    part.parent.mkdir(parents=True, exist_ok=True)
+    if part.exists():
+        discard(part)
 
 
 def restore(
