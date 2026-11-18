@@ -415,7 +415,8 @@ def test_a_person_gone_from_the_changed_team_page_has_their_evidence_retracted(
     assert people_runs(world, lead)[1] == ("ok", None, PEOPLE_ACTOR, 2, 0, 1, 0)
     # Jane is departed: the selection picks Kim
     with world.units.open():
-        choice = PrimaryContacts(world.clock, world.research).select_primary_contact(lead)
+        selection = PrimaryContacts(world.clock, world.research, world.queue)
+        choice = selection.select_primary_contact(lead)
     assert choice is not None and choice.contact_id == kim["id"]
     assert jane["id"] != kim["id"]
 
@@ -491,7 +492,8 @@ def test_a_decision_makers_changed_line_supersedes_their_evidence(
     assert [c["name"] for c in contacts(world, lead)] == ["Jane Roe"]  # not a second Jane
     # she isn't departed: the selection still picks her
     with world.units.open():
-        choice = PrimaryContacts(world.clock, world.research).select_primary_contact(lead)
+        selection = PrimaryContacts(world.clock, world.research, world.queue)
+        choice = selection.select_primary_contact(lead)
     assert choice is not None and choice.contact_id == jane["id"]
 
 

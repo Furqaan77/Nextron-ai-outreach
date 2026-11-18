@@ -7,7 +7,8 @@
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
-  ``extract_lead``, Story 2.9, and ``select_primary_contact``, Story 2.10,
+  ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, and
+  ``find_contact_email``, Story 2.13,
   with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
@@ -387,6 +388,18 @@ class RecordingPrimary:
         self.calls.append(lead_id)
 
 
+class RecordingFinding:
+    """Stands in for the ``research`` service's ``EmailFinding``."""
+
+    def __init__(self, answer: str | None = "found") -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, str]] = []
+
+    def find_contact_email(self, lead_id: str, contact_id: str) -> str | None:
+        self.calls.append((lead_id, contact_id))
+        return self.answer
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -400,9 +413,26 @@ def registry(**overrides: object) -> JobTypes:
         "research": RecordingResearch,
         "extractions": RecordingExtractions,
         "primary": RecordingPrimary,
+        "finding": RecordingFinding,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
+
+
+def _services() -> dict[str, object]:
+    """The recording services ``registry`` passes, by keyword."""
+    return {
+        "alerts": RecordingAlerts,
+        "backups": RecordingBackups,
+        "restore_tests": RecordingRestoreTests,
+        "recovery": RecordingRecovery,
+        "contact_markets": RecordingContactMarkets,
+        "crawls": RecordingCrawls,
+        "discovery": RecordingDiscovery,
+        "research": RecordingResearch,
+        "extractions": RecordingExtractions,
+        "primary": RecordingPrimary,
+    }
 
 
 def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> None:
@@ -455,6 +485,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "purge_page_text",
         "extract_lead",
         "select_primary_contact",
+        "find_contact_email",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -560,6 +591,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "purge_page_text",
             "extract_lead",
             "select_primary_contact",
+            "find_contact_email",
         )
         for found in [job_types.get(name)]
     }
@@ -585,6 +617,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             3,
             JobGroup.ENRICHMENT,
         ),
+        "find_contact_email": (Lane.BULK, both, 45, timedelta(minutes=5), 3, JobGroup.ENRICHMENT),
         "purge_page_text": (
             Lane.BULK,
             frozenset({Lane.BULK}),
@@ -667,6 +700,45 @@ def test_select_primary_contact_calls_its_service_once() -> None:
 
     assert result is None
     assert primary.calls == [LEAD]
+
+
+@pytest.mark.parametrize(("answer", "result"), [("found", None), ("quota_reached", DEFERRED)])
+def test_find_contact_email_calls_its_service_once_and_defers_on_a_quota(
+    answer: str, result: object
+) -> None:
+    finding = RecordingFinding(answer)
+    handler = registry(finding=lambda: finding).get("find_contact_email").handler
+    payload = {"v": 1, "lead_id": LEAD, "contact_id": RUN}
+
+    assert handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1)) == result
+    assert finding.calls == [(LEAD, RUN)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "contact_id": RUN},
+        {"v": 1, "lead_id": LEAD},
+        {"v": 1, "lead_id": LEAD, "contact_id": "not-a-ulid"},
+    ],
+)
+def test_a_find_contact_email_job_without_its_ids_is_invalid(payload: dict[str, object]) -> None:
+    finding = RecordingFinding()
+    handler = registry(finding=lambda: finding).get("find_contact_email").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1))
+    assert finding.calls == []
+
+
+def test_find_contact_email_without_a_finding_fails_when_it_runs() -> None:
+    handler = main.build_job_types(
+        **{k: v for k, v in _services().items() if k != "finding"}  # type: ignore[arg-type]
+    ).get("find_contact_email").handler
+    payload = {"v": 1, "lead_id": LEAD, "contact_id": RUN}
+
+    with pytest.raises(RuntimeError, match="no EmailFinding"):
+        handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1))
 
 
 @pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])

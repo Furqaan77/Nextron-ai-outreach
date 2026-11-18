@@ -145,7 +145,9 @@ only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(researc
 ``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
 minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``) and Story
 2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
-retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``).
+retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``) and Story 2.13's
+``find_contact_email`` (bulk by default, or interactive, priority 45, 5 minutes, retry limit 3,
+``handlers.find_contact_email(finding)``, ``enrichment``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -172,9 +174,17 @@ Evidence.
 
 **Decision-makers and the Primary Contact (Story 2.10).** ``PeopleExtractions(clock, meter, llm,
 research, queue)`` (``nextron.app.research.people``) is ``SignalExtractions``' people step (its
-last argument), on the same gateway. ``PrimaryContacts(clock, research)`` runs the
+last argument), on the same gateway. ``PrimaryContacts(clock, research, queue)`` runs the
 ``select_primary_contact`` jobs, reached through ``primary=lambda: primary_contacts``, and the
 Lead page's "Make primary" (``create_app(..., primary_contacts=...)``).
+
+**Finding email addresses (Story 2.13).** ``EmailFinding(clock, meter, research, queue,
+domain_search=, hunter=, prospeo=)`` (``nextron.app.research.finding``) runs the
+``find_contact_email`` jobs, reached through ``finding=lambda: email_finding``, and the Lead
+page's "Find email" (``create_app(..., email_finding=...)``). One ``HunterFinder(secrets,
+meter=meter)`` (``nextron.adapters.hunter``) serves Domain Search and Email Finder, and
+``ProspeoFinder(secrets, meter=meter)`` (``nextron.adapters.prospeo``) the fallback, unless
+injected.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -567,6 +577,8 @@ from nextron.adapters.clock import SystemClock
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
+from nextron.adapters.hunter import HunterFinder
+from nextron.adapters.prospeo import ProspeoFinder
 from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
@@ -600,6 +612,7 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
+from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
@@ -653,6 +666,7 @@ from nextron.domain.crawl import (
     PURGE_PAGE_TEXT_JOB,
     RENDER_PAGES_JOB,
 )
+from nextron.domain.email_finding import FIND_CONTACT_EMAIL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
@@ -706,6 +720,7 @@ from nextron.ports.alert import AlertPort
 from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
+from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.llm import LlmPort
@@ -855,6 +870,9 @@ def build_app(
     crawler: CrawlerPort | None = None,
     llm: LlmPort | None = None,
     renderer: RendererPort | None = None,
+    domain_search: DomainSearchPort | None = None,
+    hunter: EmailFinderPort | None = None,
+    prospeo: EmailFinderPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -884,7 +902,11 @@ def build_app(
     (``PlaywrightRenderer(meter=meter)`` on that same ``HttpCrawler`` unless injected), which
     starts a browser only for each render. The Signal extraction calls Claude through ``llm``
     (``ClaudeGateway(secrets, meter=meter)`` unless injected, imported here so that importing
-    this module loads no AI package), which builds its HTTP client on its first call."""
+    this module loads no AI package), which builds its HTTP client on its first call. The email
+    search (Story 2.13) calls Hunter's Domain Search and Email Finder through ``domain_search``
+    and ``hunter`` (one ``HunterFinder(secrets, meter=meter)`` unless injected) and Prospeo
+    through ``prospeo`` (``ProspeoFinder(secrets, meter=meter)`` unless injected); each builds
+    its HTTP client on its first call."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -916,6 +938,7 @@ def build_app(
         research=lambda: research,
         extractions=lambda: extractions,
         primary=lambda: primary_contacts,
+        finding=lambda: email_finding,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
@@ -935,7 +958,17 @@ def build_app(
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
-    primary_contacts = PrimaryContacts(clock, research)
+    primary_contacts = PrimaryContacts(clock, research, queue)
+    hunter_finder = HunterFinder(secrets, meter=meter)
+    email_finding = EmailFinding(
+        clock,
+        meter,
+        research,
+        queue,
+        domain_search=domain_search if domain_search is not None else hunter_finder,
+        hunter=hunter if hunter is not None else hunter_finder,
+        prospeo=prospeo if prospeo is not None else ProspeoFinder(secrets, meter=meter),
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1000,6 +1033,7 @@ def build_app(
         lead_signals=LeadSignals(clock),
         compliance=Compliance(clock),
         primary_contacts=primary_contacts,
+        email_finding=email_finding,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1035,6 +1069,11 @@ def check_usage(units: Units, budget: Budget) -> None:
     contextvars.Context().run(run)
 
 
+def _no_finding() -> handlers.FindingEmail:
+    """``build_job_types``' ``finding`` when none is given: a ``find_contact_email`` job fails."""
+    raise RuntimeError("no EmailFinding was given to build_job_types")
+
+
 def build_job_types(
     *,
     alerts: Callable[[], handlers.AlertSending],
@@ -1047,6 +1086,7 @@ def build_job_types(
     research: Callable[[], handlers.PurgingPageText],
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
+    finding: Callable[[], handlers.FindingEmail] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1058,8 +1098,11 @@ def build_job_types(
     ``WebsiteCrawls`` that ``enrich_lead`` and ``render_pages`` jobs call, ``discovery`` the
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
     service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions`` that
-    ``extract_lead`` jobs call, and ``primary`` its ``PrimaryContacts`` that
-    ``select_primary_contact`` jobs call."""
+    ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
+    ``select_primary_contact`` jobs call, and ``finding`` its ``EmailFinding`` that
+    ``find_contact_email`` jobs call (left out, as in tests that never run one, the handler
+    raises ``RuntimeError`` when a job runs)."""
+    found = finding if finding is not None else _no_finding
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1197,6 +1240,18 @@ def build_job_types(
             max_runtime=timedelta(minutes=5),
             retry_limit=3,
             handler=handlers.select_primary_contact(primary),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=FIND_CONTACT_EMAIL_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            max_runtime=timedelta(minutes=5),  # four paid calls at 15 s each, database waits
+            retry_limit=3,
+            handler=handlers.find_contact_email(found),
             group=JobGroup.ENRICHMENT,
         )
     )

@@ -205,6 +205,35 @@ def test_a_render_returns_the_rendered_dom_parsed_against_the_final_url(world: W
         ("iframe", "https://calendly.com/smith-law/consult"),
     ]
     assert "We help" not in repr(rendered)
+    assert rendered.mailto == ()
+
+
+def test_a_render_carries_the_rendered_doms_mailto_addresses_not_the_shells(
+    world: World,
+) -> None:
+    world.web.on(SITE, "/", page(f"{SHELL}<a href='mailto:shell@smith-law.co.uk'>Email</a>"))
+    world.site.dom = RENDERED.replace(
+        "</body>",
+        "<a href='mailto:Jane.Roe@Smith-Law.co.uk?subject=Hi'>Jane</a>"
+        "<a hidden href='mailto:hidden@smith-law.co.uk'>x</a></body>",
+    )
+
+    rendered = world.render()
+
+    assert rendered.mailto == ("jane.roe@smith-law.co.uk",)
+    assert "jane.roe" not in repr(rendered)
+    assert [link.url for link in rendered.links if link.tag == "a"] == [f"https://{SITE}/team"]
+
+
+def test_a_rendered_page_checks_its_mailto() -> None:
+    rendered = RenderedPage(HOME, HOME, mailto=("jane@roe.law",))
+
+    assert rendered.mailto == ("jane@roe.law",)
+    assert "jane@" not in repr(rendered)
+    assert RenderedPage(HOME, HOME).mailto == ()
+    for bad in (["jane@roe.law"], "jane@roe.law", ("jane@roe.law", 1), None):
+        with pytest.raises(TypeError, match="mailto must be a tuple of str"):
+            RenderedPage(HOME, HOME, mailto=bad)  # type: ignore[arg-type]
 
 
 def test_the_context_routes_every_request_closes_every_socket_and_is_closed(world: World) -> None:

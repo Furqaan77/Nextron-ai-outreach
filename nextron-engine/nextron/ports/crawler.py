@@ -12,12 +12,14 @@ and ``crawl_delay_s`` is the file's crawl delay for it (``None`` when it gives n
 other status both are ``None``.
 
 **``fetch_page(url, *, site, min_interval_s) -> FetchedPage(url, final_url, status, media_type,
-text, links, html)``** fetches one page, following redirects. ``site`` is ``None`` or a
+text, links, html, mailto)``** fetches one page, following redirects. ``site`` is ``None`` or a
 registrable domain every hop must stay on. A 2xx answer carries its ``media_type`` and its
 parsed content: ``text`` (the visible text, ``nextron.domain.crawl.visible_text``), ``links``
 (a tuple of ``PageLink(url, text, tag)``: each visible ``a[href]`` and every ``iframe[src]`` and
-``script[src]``, absolute, without a fragment, ``tag`` one of ``a``, ``iframe`` or ``script``)
-and ``html`` (the decoded document). Any other status has ``text=""``, ``html=""`` and no links.
+``script[src]``, absolute, without a fragment, ``tag`` one of ``a``, ``iframe`` or ``script``),
+``html`` (the decoded document) and ``mailto`` (Story 2.13: a tuple of the normalised addresses
+of its visible ``mailto:`` links, distinct, in document order, at most 20; none for a page
+that isn't HTML). Any other status has ``text=""``, ``html=""``, no links and no ``mailto``.
 
 ``min_interval_s`` is the least time between two requests to the same registrable domain; an
 adapter never goes under ``nextron.domain.crawl.MIN_INTERVAL_S`` (1 s), whatever it is given.
@@ -33,7 +35,7 @@ adapter never goes under ``nextron.domain.crawl.MIN_INTERVAL_S`` (1 s), whatever
   take;
 - ``fetch_failed``: anything else.
 
-No value here shows page text, HTML or links in its ``repr``.
+No value here shows page text, HTML, links or ``mailto`` addresses in its ``repr``.
 """
 
 from collections.abc import Callable
@@ -111,8 +113,8 @@ class Robots:
 
 @dataclass(frozen=True, slots=True)
 class FetchedPage:
-    """One fetched page; see the module docstring. Its text, links and HTML never show in the
-    ``repr``."""
+    """One fetched page; see the module docstring. Its text, links, HTML and ``mailto``
+    addresses never show in the ``repr``."""
 
     url: str
     final_url: str
@@ -121,6 +123,7 @@ class FetchedPage:
     text: str = field(default="", repr=False)
     links: tuple[PageLink, ...] = field(default=(), repr=False)
     html: str = field(default="", repr=False)
+    mailto: tuple[str, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if not all(isinstance(value, str) for value in (self.url, self.final_url)):
@@ -132,8 +135,12 @@ class FetchedPage:
             isinstance(link, PageLink) for link in self.links
         ):
             raise TypeError("links must be a tuple of PageLink")
-        if not _is_2xx(self.status) and (self.text or self.html or self.links):
-            raise ValueError("a page that isn't 2xx has no text, HTML or links")
+        if not isinstance(self.mailto, tuple) or not all(
+            isinstance(address, str) for address in self.mailto
+        ):
+            raise TypeError("mailto must be a tuple of str")
+        if not _is_2xx(self.status) and (self.text or self.html or self.links or self.mailto):
+            raise ValueError("a page that isn't 2xx has no text, HTML, links or mailto")
 
     @property
     def ok(self) -> bool:

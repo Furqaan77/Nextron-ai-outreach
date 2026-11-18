@@ -331,6 +331,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("render_pages", None),
                 LastRun("extract_lead", None),
                 LastRun("select_primary_contact", None),
+                LastRun("find_contact_email", None),
             ),
         ),
         GroupRuns(

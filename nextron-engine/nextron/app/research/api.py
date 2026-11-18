@@ -110,8 +110,9 @@ cause ``selection`` with actor ``system:research``, or cause and actor ``operato
 decision-makers and run the selection.
 
 - ``@use_case purge_page_text() -> int`` (the daily ``purge_page_text`` job, Story 2.5): in one
-  transaction, nulls ``text`` on every page whose ``text_purge_after`` is now or earlier, keeping
-  ``content_hash``; logs ``page_text_purged`` (``count``) and returns the count.
+  transaction, nulls ``text`` (and, Story 2.13, the page's ``mailto`` addresses with it) on
+  every page whose ``text_purge_after`` is now or earlier, keeping ``content_hash``; logs
+  ``page_text_purged`` (``count``) and returns the count.
 
 **Resolving a Contact's Market and timezone (Story 3.2, AD-11).** One routine, ``_resolve``,
 serves ``add_contact``, ``reparent_lead`` and ``resolve_market``. It reads the Contact, its Lead
@@ -196,8 +197,10 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    (outcome ``ok`` unless step 2 or 3 ended it); each stored page is upserted on
    ``(lead_id, url)`` with its
    ``content_hash`` (``text_hash`` of its text), ``fetched_at``, ``text_purge_after``
-   (``fetched_at`` + 30 days) and ``changed_at`` (``fetched_at`` for a new page or a changed
-   hash, else kept); and every ``a``, ``iframe`` and ``script`` link of a stored page that
+   (``fetched_at`` + 30 days), ``changed_at`` (``fetched_at`` for a new page or a changed
+   hash, else kept) and ``mailto`` (Story 2.13: the fetch's ``FetchedPage.mailto`` addresses,
+   replacing what the page held, NULL when it has none; the hash and ``changed_at`` ignore
+   them); and every ``a``, ``iframe`` and ``script`` link of a stored page that
    ``check_url`` accepts and whose host is in ``ats_hosts`` is upserted on ``(lead_id, url)``
    (``first_seen_at`` kept, ``last_seen_at``, ``run_id`` and ``page_id`` updated; the first page
    that holds it in the run). Each upserted page's ``page_contact_methods`` rows are replaced
@@ -234,8 +237,10 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    Lead's latest (a crawl finished during the renders), nothing is written or enqueued (the
    newer run queues its own extraction). Otherwise a non-empty rendered text replaces the
    page's ``text`` and ``content_hash`` (``changed_at`` moves to the render's time when the
-   hash changed); the render's detections the page doesn't hold yet are added (``detected_at``
-   the render's time), and so are the tag managers it loads (``add_tag_managers``); the run's
+   hash changed), and the render's ``mailto`` addresses replace the crawl's with it (Story
+   2.13; an empty render keeps both); the render's detections the page doesn't hold yet are
+   added (``detected_at`` the render's time), and so are the tag managers it loads
+   (``add_tag_managers``); the run's
    ``renders`` (successes) and ``errors`` grow; the Lead's ``contact_methods`` is set; and
    ``extract_lead`` is enqueued (below), so the Signals are read from the rendered text.
 4. It logs ``render_finished`` (``lead_id``, ``run_id``, ``pages``, ``renders``, ``errors``,
@@ -669,14 +674,21 @@ class Research:
             if chosen is None
             else next(market.id for market in stored if market.code == chosen.code)
         )
-        values: dict[str, str | None] = {
-            "market_id": market_id,
-            "market_basis": str(resolved.market_basis),
-            "tz": resolved.tz,
-            "tz_basis": str(resolved.tz_basis),
-        }
-        if any(getattr(contact, name) != value for name, value in values.items()):
-            contacts_repo.fill(contact.id, self._clock.now(), **values)
+        market_basis, tz_basis = str(resolved.market_basis), str(resolved.tz_basis)
+        if (contact.market_id, contact.market_basis, contact.tz, contact.tz_basis) != (
+            market_id,
+            market_basis,
+            resolved.tz,
+            tz_basis,
+        ):  # named keywords, never a splat: only add_contact and EmailFinding write an email
+            contacts_repo.fill(
+                contact.id,
+                self._clock.now(),
+                market_id=market_id,
+                market_basis=market_basis,
+                tz=resolved.tz,
+                tz_basis=tz_basis,
+            )
         notes = "\n".join(resolved.notes) or None
         record = provenance_repo.first_contact_record(contact.id)
         if record is not None and record.notes != notes:
@@ -990,6 +1002,7 @@ class _Page:
     links: tuple[PageLink, ...] = field(repr=False)
     detections: tuple[Detection, ...] = field(default=(), repr=False)
     tag_managers: tuple[str, ...] = ()
+    mailto: tuple[str, ...] = field(default=(), repr=False)  # Story 2.13
 
 
 @dataclass(frozen=True, slots=True)
@@ -1002,7 +1015,8 @@ class _Candidate:
 
 @dataclass(frozen=True, slots=True)
 class _Rendered:
-    """What one render gave: its text and detections, or the error code it failed with."""
+    """What one render gave: its text, ``mailto`` addresses and detections, or the error code
+    it failed with."""
 
     page_id: str
     at: datetime
@@ -1010,6 +1024,7 @@ class _Rendered:
     detections: tuple[Detection, ...] = field(default=(), repr=False)
     tag_managers: tuple[str, ...] = ()
     error_code: str | None = None
+    mailto: tuple[str, ...] = field(default=(), repr=False)  # Story 2.13
 
 
 def _embeds(links: Iterable[PageLink]) -> list[tuple[str, str]]:
@@ -1310,6 +1325,7 @@ class WebsiteCrawls:
             links=fetched.links,
             detections=detect(fetched.html, _embeds(fetched.links), fetched.text),
             tag_managers=tag_managers(fetched.html, _embeds(fetched.links)),
+            mailto=fetched.mailto,
         )
 
     # The apply transaction ---------------------------------------------------------------------
@@ -1392,6 +1408,7 @@ class WebsiteCrawls:
                 text=page.text,
                 text_purge_after=purge_after,
                 changed_at=page.fetched_at,
+                mailto=page.mailto,
             )
         crawl_repo.update_page(
             stored.id,
@@ -1404,6 +1421,7 @@ class WebsiteCrawls:
             text=page.text,
             text_purge_after=purge_after,
             changed_at=stored.changed_at if stored.content_hash == digest else page.fetched_at,
+            mailto=page.mailto,
         )
         return stored.id
 
@@ -1539,6 +1557,7 @@ class WebsiteCrawls:
             text=rendered.text,
             detections=detect(rendered.html, _embeds(rendered.links), rendered.text),
             tag_managers=tag_managers(rendered.html, _embeds(rendered.links)),
+            mailto=rendered.mailto,
         )
 
     def _apply_renders(
@@ -1570,6 +1589,7 @@ class WebsiteCrawls:
                     text=result.text,
                     content_hash=digest,
                     changed_at=page.changed_at if digest == page.content_hash else result.at,
+                    mailto=result.mailto,
                 )
             crawl_repo.add_contact_methods(page.id, result.detections, result.at)
             crawl_repo.add_tag_managers(page.id, result.tag_managers)

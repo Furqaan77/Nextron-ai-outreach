@@ -939,6 +939,140 @@ def test_the_purge_nulls_text_past_30_days_and_keeps_the_hash(world: World) -> N
     assert (new_page.text, new_page.content_hash) == (None, text_hash("New"))
 
 
+# Row: mailto addresses (Story 2.13) -------------------------------------------------------------
+
+TEAM = f"{ORIGIN}/team"
+MAILTO_HOME = (
+    '<h1>Smith Law LLP</h1><a href="/team">Our team</a> '
+    "<a{}>Email us</a>"  # the same text with or without its mailto: href
+)
+
+
+def stored_mailto(world: World, lead: str) -> dict[str, Any]:
+    """Each of the Lead's pages' raw ``mailto`` column, by URL."""
+    return dict(
+        world.sql("SELECT url, mailto FROM crawled_pages WHERE lead_id = ? ORDER BY url", (lead,))
+    )
+
+
+def test_a_pages_mailto_addresses_are_stored_replaced_and_purged_with_its_text(
+    world: World,
+) -> None:
+    lead = world.lead()
+    world.site(
+        {
+            HOME: html_page(HOME, MAILTO_HOME.format(' href="MAILTO:Info@Smith-Law.co.uk?x=1"')),
+            TEAM: html_page(
+                TEAM,
+                "<p>Jane Doe, Partner</p>"
+                '<a href="mailto:jane.doe@smith-law.co.uk,john@smith-law.co.uk">Email</a>'
+                '<a hidden href="mailto:hidden@smith-law.co.uk">x</a>',
+            ),
+        }
+    )
+
+    world.crawl(lead)
+
+    first = world.pages(lead)
+    assert first[HOME].mailto == ("info@smith-law.co.uk",)
+    assert first[TEAM].mailto == ("jane.doe@smith-law.co.uk", "john@smith-law.co.uk")
+    assert "jane.doe" not in repr(first[TEAM])
+    assert stored_mailto(world, lead) == {
+        HOME: '["info@smith-law.co.uk"]',
+        TEAM: '["jane.doe@smith-law.co.uk","john@smith-law.co.uk"]',
+    }
+
+    # a re-crawl replaces the list (NULL when the page has none); the text is the same, so
+    # the hash and changed_at are kept
+    world.clock.advance(timedelta(days=1))
+    world.crawler.pages[HOME] = html_page(HOME, MAILTO_HOME.format(""))
+    world.crawler.pages[TEAM] = html_page(
+        TEAM, '<p>Jane Doe, Partner</p><a href="mailto:john@smith-law.co.uk">Email</a>'
+    )
+
+    world.crawl(lead)
+
+    second = world.pages(lead)
+    assert (second[HOME].mailto, second[TEAM].mailto) == ((), ("john@smith-law.co.uk",))
+    assert stored_mailto(world, lead) == {HOME: None, TEAM: '["john@smith-law.co.uk"]'}
+    for url in (HOME, TEAM):
+        assert (second[url].text, second[url].content_hash, second[url].changed_at) == (
+            first[url].text,
+            first[url].content_hash,
+            T0,
+        )
+        assert second[url].fetched_at == T0 + timedelta(days=1)
+
+    world.clock.set(T0 + timedelta(days=31))  # the second fetch's purge time
+    with world.units.open():
+        assert world.research.purge_page_text() == 2
+
+    purged = world.pages(lead)
+    assert stored_mailto(world, lead) == {HOME: None, TEAM: None}
+    for url in (HOME, TEAM):
+        assert (purged[url].text, purged[url].mailto) == (None, ())
+        assert purged[url].content_hash == second[url].content_hash
+
+
+def test_the_repository_stores_no_addresses_as_null_and_a_list_in_order(world: World) -> None:
+    lead = world.lead()
+    world.site({HOME: html_page(HOME, "<p>Home</p>")})
+    world.crawl(lead)
+    [home] = world.pages(lead).values()
+    url = f"{ORIGIN}/contact"
+
+    def insert() -> str:
+        return research_crawl_repo.insert_page(
+            lead_id=lead,
+            run_id=home.run_id,
+            url=url,
+            final_url=url,
+            kind=home.kind,
+            fetched_at=T0,
+            http_status=200,
+            content_hash=text_hash("x"),
+            text="x",
+            text_purge_after=T0 + timedelta(days=30),
+            changed_at=T0,
+            mailto=(),
+        )
+
+    page_id = world.transact(insert)
+    raw = "SELECT mailto FROM crawled_pages WHERE id = ?"
+    assert world.sql(raw, (page_id,)) == [(None,)]
+    assert stored_mailto(world, lead)[HOME] is None  # a crawled page without mailto links
+
+    world.transact(
+        lambda: research_crawl_repo.set_page_text(
+            page_id,
+            text="y",
+            content_hash=text_hash("y"),
+            changed_at=T0,
+            mailto=["zoe@roe.law", "adam@roe.law"],
+        )
+    )
+    assert world.sql(raw, (page_id,)) == [('["zoe@roe.law","adam@roe.law"]',)]
+    assert world.pages(lead)[url].mailto == ("zoe@roe.law", "adam@roe.law")
+
+    world.transact(
+        lambda: research_crawl_repo.update_page(
+            page_id,
+            run_id=home.run_id,
+            final_url=url,
+            kind=home.kind,
+            fetched_at=T0,
+            http_status=200,
+            content_hash=text_hash("y"),
+            text="y",
+            text_purge_after=T0 + timedelta(days=30),
+            changed_at=T0,
+            mailto=[],
+        )
+    )
+    assert world.sql(raw, (page_id,)) == [(None,)]
+    assert world.pages(lead)[url].mailto == ()
+
+
 # Row: CSV Lead ----------------------------------------------------------------------------------
 
 

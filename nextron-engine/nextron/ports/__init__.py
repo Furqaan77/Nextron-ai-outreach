@@ -12,4 +12,8 @@ metered usage. Its values live in ``nextron.domain.ai``; ``nextron.adapters.ai``
 ``CrawlerPort`` (``crawler``) is the one way to fetch the web (Story 2.5): ``fetch_robots`` and
 ``fetch_page`` pass every hop through ``nextron.domain.fetch_policy`` and return parsed, visible
 text; ``nextron.adapters.crawler`` implements it.
+
+``EmailFinderPort`` and ``DomainSearchPort`` (``email_finder``, Story 2.13) ask a paid finder
+for one person's address and Hunter's Domain Search for a domain's pattern and people;
+``nextron.adapters.hunter`` implements both and ``nextron.adapters.prospeo`` the first.
 """

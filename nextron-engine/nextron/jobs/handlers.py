@@ -50,6 +50,10 @@ handler runs in.
 - ``select_primary_contact(primary)`` (Story 2.10): calls
   ``primary().select_primary_contact(lead_id)`` once (the research service's
   ``PrimaryContacts``) and returns ``None``.
+- ``find_contact_email(finding)`` (Story 2.13): calls ``finding().find_contact_email(lead_id,
+  contact_id)`` once (the research service's ``EmailFinding``) and returns ``DEFERRED`` when it
+  returns ``quota_reached`` (a Hunter or Prospeo quota refused the paid step). A retryable
+  ``AdapterError`` it raises is retried by the runner; any other error fails the job.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -59,6 +63,7 @@ from typing import Final, Protocol
 
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
+from nextron.domain.email_finding import CONTACT_ID_FIELD, EmailSearchOutcome
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
 from nextron.domain.restore_test import RestoreTestKind
@@ -251,6 +256,26 @@ def select_primary_contact(primary: Callable[[], SelectingPrimary]) -> Handler:
         primary().select_primary_contact(lead_id)
 
     return handle_select_primary_contact
+
+
+class FindingEmail(Protocol):
+    """What ``find_contact_email`` needs of the ``research`` service's ``EmailFinding``."""
+
+    def find_contact_email(self, lead_id: str, contact_id: str) -> object: ...
+
+
+def find_contact_email(finding: Callable[[], FindingEmail]) -> Handler:
+    """The ``find_contact_email`` job's handler: find the payload's Contact's email address
+    through ``finding()``."""
+
+    def handle_find_contact_email(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        contact_id = _ulid_field(job, CONTACT_ID_FIELD)
+        if finding().find_contact_email(lead_id, contact_id) == EmailSearchOutcome.QUOTA_REACHED:
+            return DEFERRED
+        return None
+
+    return handle_find_contact_email
 
 
 def extract_lead(extractions: Callable[[], Extracting]) -> Handler:

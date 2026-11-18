@@ -43,7 +43,14 @@ def rendered_page(url: str, html: str = "", *, final_url: str | None = None) -> 
     """A render's answer: ``html`` parsed as the adapter parses the rendered DOM."""
     landed = url if final_url is None else final_url
     parsed = parse_html(html, landed)
-    return RenderedPage(url=url, final_url=landed, text=parsed.text, links=parsed.links, html=html)
+    return RenderedPage(
+        url=url,
+        final_url=landed,
+        text=parsed.text,
+        links=parsed.links,
+        html=html,
+        mailto=parsed.mailto,
+    )
 
 
 class ScriptedRenderer:

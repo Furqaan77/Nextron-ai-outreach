@@ -51,7 +51,8 @@ else ``fetch_unsupported_type``; its body may not pass ``MAX_PAGE_BYTES`` (robot
 ``MAX_ROBOTS_BYTES``), checked against ``Content-Length`` before reading and against the
 decoded bytes while reading, else ``fetch_too_large``. A page is decoded and parsed by
 ``nextron.adapters.crawler.parsing`` (``text/html`` and ``application/xhtml+xml``: the visible
-text and links; ``application/json``: ``visible_text`` of the body, no links, no HTML).
+text, links and ``mailto:`` addresses; ``application/json``: ``visible_text`` of the body, no
+links, no HTML, no ``mailto``).
 robots.txt is decoded as ``utf-8-sig`` (a byte-order mark breaks protego) with replacement and
 parsed by protego; ``allows(url)`` is protego's ``can_fetch(url, ROBOTS_TOKEN)`` (``False``
 when protego raises) and ``crawl_delay_s`` its ``crawl_delay(ROBOTS_TOKEN)``.
@@ -375,6 +376,7 @@ class HttpCrawler:
             text=parsed.text,
             links=parsed.links,
             html=document,
+            mailto=parsed.mailto,
         )
 
     # For the renderer -----------------------------------------------------------------------------

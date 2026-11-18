@@ -96,6 +96,7 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
+from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
@@ -115,6 +116,7 @@ from tests.asgi import DEFAULT_HOST, Headers, Reply, request
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.secrets import InMemorySecrets
@@ -314,6 +316,7 @@ class Dashboard:
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
     primary_contacts: PrimaryContacts = field(init=False)
+    email_finding: EmailFinding = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -384,7 +387,16 @@ class Dashboard:
         )
         self.research = Research(self.clock)
         self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
-        self.primary_contacts = PrimaryContacts(self.clock, self.research)
+        self.primary_contacts = PrimaryContacts(self.clock, self.research, self.queue)
+        self.email_finding = EmailFinding(  # its paid ports answer nothing; tests replace them
+            self.clock,
+            meter,
+            self.research,
+            self.queue,
+            domain_search=ScriptedDomainSearch(),
+            hunter=ScriptedFinder(),
+            prospeo=ScriptedFinder(),
+        )
         self.lead_imports = LeadImports(
             self.clock,
             Discovery(self.clock, Pipeline(self.clock), self.queue),
@@ -415,6 +427,7 @@ class Dashboard:
             lead_signals=LeadSignals(self.clock),
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,
+            email_finding=self.email_finding,
             units=self.units,
             **extra,
         )

@@ -49,7 +49,7 @@ from nextron.db.models.playbook import (
     PlaybookSnapshotRecord,
     PromptSnapshotRecord,
 )
-from nextron.db.models.research import ContactRecord, ProvenanceRecord
+from nextron.db.models.research import ContactRecord, EmailDomainRecord, ProvenanceRecord
 from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
 from nextron.db.models.setup import (
     CampaignRecord,
@@ -80,6 +80,7 @@ __all__ = [
     "CampaignRecord",
     "CompanyFactRecord",
     "ContactRecord",
+    "EmailDomainRecord",
     "CrawlRunRecord",
     "CrawledPageRecord",
     "EventRecord",

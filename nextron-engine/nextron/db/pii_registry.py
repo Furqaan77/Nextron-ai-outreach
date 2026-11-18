@@ -193,6 +193,23 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
         "primary_set_by": PiiClass.NONE,  # Story 2.10: who chose the Primary (a code)
+        # Story 2.13: the finders tried and the search's outcome (codes), and when it ran
+        "email_search_tried": PiiClass.NONE,
+        "email_search_outcome": PiiClass.NONE,
+        "email_search_at": PiiClass.NONE,
+    },
+    # Story 2.13. What the engine learned about a mail domain: a firm's domain, a pattern code
+    # and Evidence ids, never a person's name or address.
+    "email_domains": {
+        "id": PiiClass.NONE,
+        "domain": PiiClass.NONE,
+        "pattern": PiiClass.NONE,
+        "pattern_source": PiiClass.NONE,
+        "pattern_evidence_ids": PiiClass.NONE,
+        "pattern_learned_at": PiiClass.NONE,
+        "domain_search_at": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
     },
     # Story 2.3. A record's source detail (a CSV's origin, a URL) and notes are free text; its
     # address is the Contact's address at the time, kept as a hash like contacts.email.
@@ -312,6 +329,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text_purge_after": PiiClass.NONE,
         "changed_at": PiiClass.NONE,
         "tag_managers": PiiClass.NONE,  # Story 2.9: tag manager keys, codes only
+        "mailto": PiiClass.NULL,  # Story 2.13: published addresses (JSON), purged with the text
     },
     "ats_links": {
         "id": PiiClass.NONE,

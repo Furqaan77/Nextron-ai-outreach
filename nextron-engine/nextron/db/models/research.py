@@ -72,6 +72,7 @@ from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.address_class import AddressClass
 from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
+from nextron.domain.email_finding import Pattern, PatternSource
 
 TEXT_LENGTH: Final = 200  # nextron.domain.contacts.MAX_TEXT_LENGTH
 EMAIL_LENGTH: Final = 254  # nextron.domain.identity.MAX_EMAIL_LENGTH
@@ -87,8 +88,21 @@ BASIS_LENGTH: Final = 32
 COUNTRY_LENGTH: Final = 2
 SET_BY_LENGTH: Final = 8  # nextron.domain.contacts.PrimarySetBy
 ONE_PRIMARY_WHERE: Final = "is_primary = 1"
+TRIED_LENGTH: Final = 32  # Story 2.13: "hunter,prospeo"
+OUTCOME_LENGTH: Final = 16  # nextron.domain.email_finding.EmailSearchOutcome
+DOMAIN_LENGTH: Final = 253  # nextron.domain.identity.MAX_DOMAIN_LENGTH
+PATTERN_LENGTH: Final = 16  # nextron.domain.email_finding.Pattern
+PATTERN_SOURCE_LENGTH: Final = 32  # nextron.domain.email_finding.PatternSource
 
-type _Values = type[AddressClass | ProvenanceSource | ProvenanceSubject | MarketBasis | TzBasis]
+type _Values = type[
+    AddressClass
+    | ProvenanceSource
+    | ProvenanceSubject
+    | MarketBasis
+    | TzBasis
+    | Pattern
+    | PatternSource
+]
 
 
 def _one_of(column: str, values: _Values) -> str:
@@ -114,6 +128,18 @@ RECORD_ADDRESS_CHECK: Final = (
     f"(subject = '{ProvenanceSubject.ADDRESS}') = (address IS NOT NULL)"
 )
 RECORD_CLASS_CHECK: Final = "address_class IS NULL OR " + _one_of("address_class", AddressClass)
+EMAIL_DOMAIN_PATTERN_CHECK: Final = "pattern IS NULL OR " + _one_of("pattern", Pattern)
+EMAIL_DOMAIN_SOURCE_CHECK: Final = "pattern_source IS NULL OR " + _one_of(
+    "pattern_source", PatternSource
+)
+EMAIL_DOMAIN_LEARNED_CHECK: Final = (
+    "(pattern IS NULL) = (pattern_source IS NULL) "
+    "AND (pattern IS NULL) = (pattern_learned_at IS NULL)"
+)
+EMAIL_DOMAIN_EVIDENCE_CHECK: Final = (
+    f"(COALESCE(pattern_source, '') = '{PatternSource.PUBLISHED}') "
+    "= (pattern_evidence_ids IS NOT NULL)"
+)
 
 
 class ContactRecord(Base):
@@ -156,6 +182,9 @@ class ContactRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
     primary_set_by: Mapped[str | None] = mapped_column(String(SET_BY_LENGTH))
+    email_search_tried: Mapped[str | None] = mapped_column(String(TRIED_LENGTH))  # Story 2.13
+    email_search_outcome: Mapped[str | None] = mapped_column(String(OUTCOME_LENGTH))
+    email_search_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class ProvenanceRecord(Base):
@@ -184,3 +213,26 @@ class ProvenanceRecord(Base):
     lia_ref: Mapped[str | None] = mapped_column(String(LIA_REF_LENGTH))
     lia_date: Mapped[date | None] = mapped_column(Date)
     basis_recorded_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+class EmailDomainRecord(Base):
+    """What the engine learned about one registrable mail domain (Story 2.13): its address
+    pattern and whether Hunter's Domain Search already ran for it."""
+
+    __tablename__ = "email_domains"
+    __table_args__ = (
+        CheckConstraint(EMAIL_DOMAIN_PATTERN_CHECK, name="pattern"),
+        CheckConstraint(EMAIL_DOMAIN_SOURCE_CHECK, name="pattern_source"),
+        CheckConstraint(EMAIL_DOMAIN_LEARNED_CHECK, name="pattern_learned"),
+        CheckConstraint(EMAIL_DOMAIN_EVIDENCE_CHECK, name="pattern_evidence"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), unique=True)
+    pattern: Mapped[str | None] = mapped_column(String(PATTERN_LENGTH))
+    pattern_source: Mapped[str | None] = mapped_column(String(PATTERN_SOURCE_LENGTH))
+    pattern_evidence_ids: Mapped[str | None] = mapped_column(Text)
+    pattern_learned_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    domain_search_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)

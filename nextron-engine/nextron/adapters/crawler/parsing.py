@@ -1,5 +1,5 @@
-"""Decoding and parsing a fetched page (AD-18): the visible text and the links, with hidden
-content stripped before anything is read.
+"""Decoding and parsing a fetched page (AD-18): the visible text, the links and the ``mailto:``
+addresses, with hidden content stripped before anything is read.
 
 Import rule: ``nextron.ports``, ``nextron.domain``, ``selectolax`` and the standard library.
 Nothing here reaches the network or logs.
@@ -14,7 +14,7 @@ Nothing here reaches the network or logs.
   charset can't decode become U+FFFD, and a decode that still raises falls back to UTF-8 (a
   domain-name codec named as a charset passes plain ASCII through and raises on anything else,
   so it falls back too).
-- ``parse_html(document, page_url) -> ParsedHtml(text, links)`` with selectolax's
+- ``parse_html(document, page_url) -> ParsedHtml(text, links, mailto)`` with selectolax's
   ``LexborHTMLParser``, in this order:
 
   1. ``<base href>`` (the first, resolved against ``page_url``) is read; links resolve against
@@ -32,7 +32,8 @@ Nothing here reaches the network or logs.
      page loads); their descendants are checked. Opacity, off-screen positioning and
      stylesheet rules are not read.
   4. Every remaining ``a[href]`` is a link, its text the anchor's text with whitespace
-     collapsed.
+     collapsed. A remaining ``a[href]`` whose ``href`` starts with ``mailto:`` (any case)
+     gives its addresses instead (Story 2.13), below.
   5. The body's text: text nodes are joined as they are, with a line break only at the
      boundaries of block elements (``BLOCK_TAGS``, ``br`` and ``hr`` included); a line break
      inside a text node is a space, except within ``pre``. Then
@@ -41,6 +42,14 @@ Nothing here reaches the network or logs.
   A link's URL is the ``href`` or ``src`` with ASCII whitespace stripped and tabs and newlines
   removed, resolved with ``urllib.parse.urljoin`` and without its fragment. Only ``http`` and
   ``https`` links are kept; one that can't be resolved is dropped.
+
+  ``mailto`` holds the addresses of the visible ``mailto:`` links, read after step 3, so a
+  hidden link never counts. A ``mailto:`` ``href``, cleaned as a link's URL is, is read after
+  the scheme and before any ``?`` (``subject``, ``cc`` and the other headers are ignored),
+  percent-decoded as UTF-8 (an ``href`` whose escapes aren't UTF-8 gives none) and split on
+  commas; each part is kept only when ``nextron.domain.identity.normalize_email`` accepts it,
+  in its normalised form. They are distinct, in document order, at most ``MAX_MAILTO`` (20).
+  Text that merely looks like an address (``jane [at] firm``) isn't read.
 """
 
 import codecs
@@ -52,6 +61,7 @@ from typing import Final
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from nextron.domain.crawl import visible_text
+from nextron.domain.identity import IdentityError, normalize_email
 from nextron.ports.crawler import PageLink
 
 # Elements whose content a browser never renders: removed with everything in them
@@ -90,14 +100,19 @@ META_CHARSET: Final = re.compile(
 URL_NOISE: Final = re.compile("[\t\n\r]")
 ASCII_WHITESPACE: Final = "\t\n\f\r "
 LINE_BREAKS: Final = re.compile(r"[\r\n\f\v\x1c-\x1e\x85\u2028\u2029]")
+MAILTO_SCHEME: Final = "mailto:"
+MAILTO_HEADERS: Final = "?"  # the recipients end where the headers (?subject=...) begin
+MAILTO_SEPARATOR: Final = ","
+MAX_MAILTO: Final = 20
 
 
 @dataclass(frozen=True, slots=True)
 class ParsedHtml:
-    """A page's visible text and links; neither shows in the ``repr``."""
+    """A page's visible text, links and ``mailto:`` addresses; none shows in the ``repr``."""
 
     text: str = field(repr=False)
     links: tuple[PageLink, ...] = field(repr=False)
+    mailto: tuple[str, ...] = field(default=(), repr=False)
 
 
 # Decoding -------------------------------------------------------------------------------------
@@ -226,6 +241,28 @@ def _resolve(base: str, reference: str | None) -> str | None:
     return resolved if scheme in WEB_SCHEMES else None
 
 
+def _mailto(reference: str | None) -> list[str]:
+    """The addresses a ``mailto:`` ``reference`` names, normalised; ``[]`` for any other
+    reference."""
+    if reference is None:
+        return []
+    cleaned = URL_NOISE.sub("", reference.strip(ASCII_WHITESPACE))
+    if cleaned[: len(MAILTO_SCHEME)].lower() != MAILTO_SCHEME:
+        return []
+    recipients = cleaned[len(MAILTO_SCHEME) :].partition(MAILTO_HEADERS)[0]
+    try:
+        decoded = urllib.parse.unquote(recipients, errors="strict")
+    except UnicodeDecodeError:
+        return []
+    found = []
+    for part in decoded.split(MAILTO_SEPARATOR):
+        try:
+            found.append(normalize_email(part))
+        except IdentityError:
+            continue
+    return found
+
+
 def _base(tree: LexborHTMLParser, page_url: str) -> str:
     node = tree.css_first("base[href]")
     if node is None:
@@ -264,8 +301,8 @@ def _body_text(body: LexborNode | None) -> str:
 
 
 def parse_html(document: str, page_url: str) -> ParsedHtml:
-    """The visible text and links of ``document``, fetched from ``page_url``; see the module
-    docstring."""
+    """The visible text, links and ``mailto:`` addresses of ``document``, fetched from
+    ``page_url``; see the module docstring."""
     tree = LexborHTMLParser(document)
     base = _base(tree, page_url)
     embeds = []
@@ -277,10 +314,16 @@ def parse_html(document: str, page_url: str) -> ParsedHtml:
     if root is not None:
         _strip_hidden(root)
     anchors = []
+    addresses: dict[str, None] = {}  # distinct, in document order
     for node in tree.css("a[href]"):
-        url = _resolve(base, node.attributes.get("href"))
+        href = node.attributes.get("href")
+        url = _resolve(base, href)
         if url is not None:
             text = _collapsed(node.text(deep=True, separator=" ", strip=False))
             anchors.append(PageLink(url=url, text=text, tag="a"))
+            continue
+        for address in _mailto(href):
+            if len(addresses) < MAX_MAILTO:
+                addresses.setdefault(address)
     text = visible_text(_body_text(tree.body))
-    return ParsedHtml(text=text, links=(*anchors, *embeds))
+    return ParsedHtml(text=text, links=(*anchors, *embeds), mailto=tuple(addresses))

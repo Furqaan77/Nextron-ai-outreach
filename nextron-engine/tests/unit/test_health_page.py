@@ -285,6 +285,7 @@ NEVER_RUN = [
         ["render_pages", "never"],
         ["extract_lead", "never"],
         ["select_primary_contact", "never"],
+        ["find_contact_email", "never"],
     ],
     [
         ["Job type", "Last success"],

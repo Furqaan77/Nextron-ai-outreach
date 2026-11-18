@@ -492,4 +492,5 @@ class PlaywrightRenderer:
             text=parsed.text,
             links=parsed.links,
             html=html,
+            mailto=parsed.mailto,
         )

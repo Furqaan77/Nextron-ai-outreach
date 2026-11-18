@@ -11,6 +11,9 @@ a script, after the real adapter's checks on the first URL, and records every ca
 given (kid 1 by default) and decodes only the tokens it encoded.
 ``ScriptedRenderer`` (``renderer``) fakes ``RendererPort`` the same way, by URL;
 ``nextron.adapters.renderer`` itself is tested on the fake Playwright objects of ``browser``.
+``ScriptedFinder`` and ``ScriptedDomainSearch`` (``email_finder``) fake ``EmailFinderPort`` and
+``DomainSearchPort``: each answers with the next scripted answer or ``AdapterError``, and with
+nothing found once the script is exhausted, and records every call.
 
 ``PORT_FAKES`` maps every port Protocol in ``nextron/ports`` to its fake; each fake can be
 built with no arguments. ``tests/contracts/test_test_isolation.py`` fails when a port has no
@@ -26,6 +29,7 @@ from nextron.ports.alert import AlertPort
 from nextron.ports.backup_target import BackupTargetPort
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
+from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort
 from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
 from nextron.ports.llm import LlmPort
@@ -38,6 +42,7 @@ from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import ScriptedCrawler
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
@@ -63,5 +68,7 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         CrawlerPort: ScriptedCrawler,
         TokenCodecPort: FakeTokenCodec,
         RendererPort: ScriptedRenderer,
+        EmailFinderPort: ScriptedFinder,
+        DomainSearchPort: ScriptedDomainSearch,
     }
 )

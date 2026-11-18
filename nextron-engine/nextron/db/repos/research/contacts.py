@@ -15,6 +15,10 @@ nothing; ``nextron.app.research`` does.
   default (false), and ``tz``, ``market_id`` and both bases are NULL until ``research``
   resolves it;
 - ``fill(contact_id, updated_at, **fields)``: sets the named columns and ``updated_at``;
+- ``set_address(contact_id, *, email, address_class, at)`` (Story 2.13): gives a Contact that
+  has no address one (the ``find_contact_email`` job's); ``set_email_search(contact_id, *,
+  tried, outcome, at)``: records the email search's finders tried and, unless
+  ``outcome`` is ``None``, its outcome and time;
 - ``unresolved_ids(after, limit)``: up to ``limit`` ids of Contacts not yet resolved
   (``market_basis`` NULL) with an id after ``after`` (``None``: from the first), by id;
 - ``has_unresolved()``: whether any Contact is not yet resolved;
@@ -62,6 +66,9 @@ class StoredContact:
     office_region: str | None
     created_at: datetime
     updated_at: datetime
+    email_search_tried: str | None = None  # Story 2.13
+    email_search_outcome: str | None = None
+    email_search_at: datetime | None = None
 
 
 _COLUMNS = (
@@ -82,6 +89,9 @@ _COLUMNS = (
     ContactRecord.office_region,
     ContactRecord.created_at,
     ContactRecord.updated_at,
+    ContactRecord.email_search_tried,
+    ContactRecord.email_search_outcome,
+    ContactRecord.email_search_at,
 )
 
 
@@ -211,4 +221,29 @@ def move_to_lead(
         values["primary_set_by"] = None
     current().session.execute(
         update_rows(ContactRecord).where(ContactRecord.lead_id == from_lead).values(**values)
+    )
+
+
+def set_address(contact_id: str, *, email: str, address_class: str, at: datetime) -> None:
+    """Give the Contact ``contact_id`` the address ``email`` of class ``address_class``, updated
+    at ``at`` (Story 2.13: an address the email search found)."""
+    current().session.execute(
+        update_rows(ContactRecord)
+        .where(ContactRecord.id == contact_id)
+        .values(email=email, address_class=address_class, updated_at=at)
+    )
+
+
+def set_email_search(
+    contact_id: str, *, tried: str | None, outcome: str | None, at: datetime | None
+) -> None:
+    """Record the Contact ``contact_id``'s email search: the finders tried (comma-joined, or
+    ``None``) and, unless ``outcome`` is ``None`` (the search goes on), its outcome and when it
+    ended; ``updated_at`` is left alone."""
+    values: dict[str, object] = {"email_search_tried": tried}
+    if outcome is not None:
+        values["email_search_outcome"] = outcome
+        values["email_search_at"] = at
+    current().session.execute(
+        update_rows(ContactRecord).where(ContactRecord.id == contact_id).values(values)
     )

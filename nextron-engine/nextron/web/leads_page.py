@@ -119,6 +119,7 @@ from nextron.domain.contacts import (
     ProvenanceSubject,
 )
 from nextron.domain.eligibility import Decision
+from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.extraction import FactKind
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import EvidenceType, SignalClass
@@ -145,6 +146,25 @@ REFUSALS: Final[Mapping[str, str]] = MappingProxyType(
         PrimaryRefusal.ADDRESS_INVALID: "That Contact's address is Invalid.",
     }
 )
+# Story 2.13: why a Contact without a usable address has none yet, by its email search's outcome
+SEARCH_NOTES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        EmailSearchOutcome.QUOTA_REACHED: "email not found yet: quota reached",
+        EmailSearchOutcome.NOT_FOUND: "no email address found",
+        EmailSearchOutcome.SUPPRESSED: "not searched: on the Suppression List",
+        EmailSearchOutcome.LEAD_CLOSED: "not searched: the Lead is Lost or Disqualified",
+    }
+)
+# The "Find email" answers, by the queue_search result
+SEARCH_NOTICES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "queued": "Looking for an email address. Reload the page in a minute.",
+        "merged_lead": "This Lead was merged into another Lead.",
+        "not_on_lead": "That Contact isn't on this Lead.",
+        "has_address": "That Contact already has an address.",
+    }
+)
+SEARCH_QUEUED: Final = "queued"
 LIST_PATH: Final = "/leads"
 
 STAGE_FIELD: Final = "stage"
@@ -515,6 +535,8 @@ class ContactRow:
     eligibility: EligibilityRow
     records: tuple[ProvenanceRow, ...]
     can_make_primary: bool = True
+    search_note: str | None = None  # Story 2.13: no usable address, by the search's outcome
+    can_find_email: bool = False  # Story 2.13: "Find email" (no usable address)
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,6 +694,7 @@ def contact_row(
     contact: StoredContact, records: Iterable[StoredProvenance], decision: Decision
 ) -> ContactRow:
     """One Contact as the Lead page shows it."""
+    usable = contact.email is not None and contact.address_class != INVALID_ADDRESS
     return ContactRow(
         contact_id=contact.id,
         name=contact.name,
@@ -684,6 +707,8 @@ def contact_row(
         records=tuple(provenance_row(record) for record in records),
         can_make_primary=not _operators_primary(contact)
         and contact.address_class != INVALID_ADDRESS,
+        search_note=None if usable else SEARCH_NOTES.get(contact.email_search_outcome or ""),
+        can_find_email=not usable,
     )
 
 
@@ -705,6 +730,12 @@ def primary_set() -> Notice:
 def primary_refused(refusal: PrimaryRefused) -> Notice:
     """The notice of a "Make primary" that was refused (nothing was written)."""
     return Notice(Role.ALERT, REFUSALS[refusal.reason])
+
+
+def search_answer(result: str) -> Notice:
+    """The notice of a "Find email": a status when the search was queued, else an alert."""
+    role = Role.STATUS if result == SEARCH_QUEUED else Role.ALERT
+    return Notice(role, SEARCH_NOTICES[result])
 
 
 def submitted_contact(fields: FormFields) -> str:

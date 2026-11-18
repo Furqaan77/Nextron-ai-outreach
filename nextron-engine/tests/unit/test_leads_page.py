@@ -9,6 +9,7 @@ its ``data-reason``, recomputed on every render, nothing stored, inside ``hx-dis
 the queries-only import rule. Story 2.9 adds the headquarters zone and the Signals and Evidence
 sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped)."""
 
+import json
 import ast
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -680,7 +681,7 @@ def test_the_empty_cases(world: World) -> None:
     assert nothing.find("section", class_="lead-evidence").text == "Evidence No Evidence yet."
     assert not nothing.find_all("table")
     first, second = page.find_all("tr", class_="contact-row")
-    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primary"]
+    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primaryFind email"]
     assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No", "Make primary"]
     rows = page.find_all("tr", class_="provenance-row")
     assert rows[0].text == "No Provenance Record."
@@ -1381,7 +1382,12 @@ def primary_paragraphs(page: Tree) -> list[Node]:
 
 def make_primary_forms(page: Tree) -> list[Node]:
     panel = page.find("section", id="lead-contacts")
-    return panel.find_all("form")
+    return [node for node in panel.find_all("form") if node.attrs["action"].endswith("/primary")]
+
+
+def find_email_forms(page: Tree) -> list[Node]:
+    panel = page.find("section", id="lead-contacts")
+    return [node for node in panel.find_all("form") if node.attrs["action"].endswith("/find-email")]
 
 
 def post_primary(world: World, lead: str, contact: str, *, token: bool = True) -> Reply:
@@ -1465,7 +1471,7 @@ def test_a_contact_with_an_invalid_address_has_no_make_primary_form(world: World
     values = {n.attrs["name"]: n.attrs.get("value") for n in form_node.find_all("input")}
     assert values["contact_id"] == jane
     first, _ = page.find_all("tr", class_="contact-row")
-    assert cells(first)[6] == ""
+    assert cells(first)[6] == "Find email"  # Story 2.13: an Invalid address isn't usable
 
 
 def test_no_decision_maker_found_is_shown_only_after_a_selection_found_none(
@@ -1622,3 +1628,163 @@ def test_a_person_evidence_row_supports_its_contact(world: World) -> None:
     [row] = page.find_all("tr", class_="evidence-row")
     assert cells(row)[2] == f"Contact: {HOSTILE_NAME}"
     assert page.disabled("Contact: <script>") == [True]
+
+
+# Story 2.13: the email search's note and "Find email" -------------------------------------------
+
+
+def post_find_email(world: World, lead: str, contact: str, *, token: bool = True) -> Reply:
+    return world.dashboard.post(
+        f"/leads/{lead}/find-email",
+        cookie=world.cookie,
+        token=world.dashboard.csrf_token(world.cookie) if token else None,
+        headers=[(b"content-type", FORM)],
+        body=form(contact_id=contact),
+    )
+
+
+def find_email_jobs(world: World) -> list[tuple[Any, ...]]:
+    return world.sql(
+        "SELECT idempotency_key, lane, payload FROM jobs WHERE type = 'find_contact_email' ORDER BY id"
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "note"),
+    [
+        ("quota_reached", "email not found yet: quota reached"),
+        ("not_found", "no email address found"),
+        ("suppressed", "not searched: on the Suppression List"),
+        ("lead_closed", "not searched: the Lead is Lost or Disqualified"),
+        (None, None),
+        ("found", None),
+    ],
+)
+def test_a_contact_without_an_address_shows_its_search_note_and_find_email(
+    world: World, outcome: str | None, note: str | None
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    world.sql("UPDATE contacts SET email_search_outcome = ? WHERE id = ?", (outcome, jane))
+
+    page = world.page(f"/leads/{lead}")
+
+    notes = page.find_all("p", class_="email-search-note")
+    assert [found.text for found in notes] == ([] if note is None else [note])
+    [form_node] = find_email_forms(page)
+    assert form_node.attrs["method"] == "post"
+    assert form_node.attrs["hx-post"] == f"/leads/{lead}/find-email"
+    assert form_node.attrs["hx-target"] == "#lead-contacts"
+    assert form_node.attrs["hx-swap"] == "outerHTML"
+    values = {n.attrs["name"]: n.attrs.get("value") for n in form_node.find_all("input")}
+    assert values["contact_id"] == jane
+    assert len(values) == 2  # the CSRF token and the Contact
+
+
+def test_a_contact_with_a_usable_address_has_no_note_and_no_find_email(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", email="jane@smith-law.co.uk"))
+    world.sql("UPDATE contacts SET email_search_outcome = 'not_found' WHERE id = ?", (jane,))
+
+    page = world.page(f"/leads/{lead}")
+
+    assert page.find_all("p", class_="email-search-note") == []
+    assert find_email_forms(page) == []
+
+
+def test_find_email_queues_the_search_and_answers_the_panel(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+
+    reply = post_find_email(world, lead, jane)
+
+    assert reply.status == 200
+    assert reply.header(b"cache-control") == b"no-store"
+    panel = Tree(reply.text)
+    [section] = panel.find_all("section")
+    assert section.attrs["id"] == "lead-contacts"
+    assert panel.find("p", role="status").text == (
+        "Looking for an email address. Reload the page in a minute."
+    )
+    [(scope, lane, payload)] = find_email_jobs(world)
+    assert (scope, lane) == (f"find_contact_email:{jane}:tick", "interactive")
+    assert json.loads(payload) == {"v": 1, "lead_id": lead, "contact_id": jane}
+
+
+def test_each_find_email_refusal_answers_its_notice_and_queues_nothing(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    held = world.add(
+        lead, ContactCandidate(name="Cy Ceo", email="cy@smith-law.co.uk"), seconds=1
+    )
+    other = world.lead("Jones Law", "jones-law.co.uk", minutes=1)
+    elsewhere = world.add(other, ContactCandidate(name="Bo Day", role="Owner"))
+    merged = world.lead("Smith Law Two", "smith-law-two.co.uk", minutes=2)
+    world.merge(lead, merged)
+
+    for target, contact, notice in [
+        (lead, elsewhere, "That Contact isn't on this Lead."),
+        (lead, "not-a-ulid", "That Contact isn't on this Lead."),
+        (lead, held, "That Contact already has an address."),
+        (merged, jane, "This Lead was merged into another Lead."),
+    ]:
+        reply = post_find_email(world, target, contact)
+        assert reply.status == 200, reply
+        alert = Tree(reply.text).find("p", role="alert")
+        assert alert.text == notice
+
+    assert find_email_jobs(world) == []
+
+
+@pytest.mark.parametrize("lead", [UNKNOWN, "not-a-ulid"])
+def test_find_email_on_an_unknown_lead_is_404_without_echoing_the_id(
+    world: World, lead: str
+) -> None:
+    known = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(known, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+
+    reply = post_find_email(world, lead, jane)
+
+    assert reply.status == 404
+    assert reply.text == "That Lead doesn't exist."
+    assert lead not in reply.text and jane not in reply.text
+    assert find_email_jobs(world) == []
+
+
+def test_find_email_needs_the_csrf_token_and_exactly_its_field(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    token = world.dashboard.csrf_token(world.cookie)
+
+    assert post_find_email(world, lead, jane, token=False).status == 403
+    for body in (form(contact_id=jane, extra="x"), b""):
+        reply = world.dashboard.post(
+            f"/leads/{lead}/find-email",
+            cookie=world.cookie,
+            token=token,
+            headers=[(b"content-type", FORM)],
+            body=body,
+        )
+        assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert find_email_jobs(world) == []
+
+
+def test_the_find_email_route_is_a_post_declaring_personal_data(world: World) -> None:
+    [route] = [
+        route
+        for route in world.dashboard.app.routes
+        if getattr(route, "name", None) == "lead_find_email"
+    ]
+
+    assert getattr(route, "path") == "/leads/{lead_id}/find-email"
+    assert getattr(route, "methods") == {"POST"}
+    assert getattr(getattr(route, "endpoint"), "__nextron_personal_data__") is True
+
+
+def test_a_hostile_name_beside_the_find_email_form_is_escaped(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name=HOSTILE_NAME, role="Managing Partner"))
+
+    reply = post_find_email(world, lead, jane)
+
+    assert "<script>alert" not in reply.text and '<b hx-get="/x">' not in reply.text

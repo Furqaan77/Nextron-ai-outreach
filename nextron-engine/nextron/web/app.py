@@ -170,6 +170,14 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   when it was refused (nothing written), the refusal's notice. An unknown Lead (a text that
   isn't a ULID included) answers 404 with the plain text "That Lead doesn't exist.", which
   never echoes the id.
+- ``POST /leads/{lead_id}/find-email`` (``lead_find_email``, Story 2.13,
+  ``@personal_data(True)``): the Contacts panel's "Find email", on a Contact without a usable
+  address. The form is exactly ``contact_id``. It runs ``email_finding.queue_search(lead_id,
+  contact_id)`` in its own unit of work and answers 200 with the Contacts panel and a notice:
+  "Looking for an email address. Reload the page in a minute." when the search was queued,
+  else "This Lead was merged into another Lead.", "That Contact isn't on this Lead." or "That
+  Contact already has an address." (nothing written). An unknown Lead answers 404 with "That
+  Lead doesn't exist.".
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -230,6 +238,7 @@ from nextron.app.queries import research as research_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.extraction import LeadSignals
+from nextron.app.research.finding import EmailFinding, SearchQueued
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
@@ -455,6 +464,7 @@ def create_app(
     compliance: Compliance,
     primary_contacts: PrimaryContacts,
     units: Units,
+    email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
 ) -> FastAPI:
@@ -470,8 +480,9 @@ def create_app(
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
-    page its Signals, Evidence and headquarters zone, and ``primary_contacts`` runs its "Make
-    primary"; ``compliance`` runs the Suppression List panel's add, import and Reverse, and
+    page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
+    primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
+    answers 503); ``compliance`` runs the Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads).
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
@@ -1343,6 +1354,36 @@ def create_app(
                 text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
                 return PlainTextResponse(text, status_code=404, headers=NO_STORE)
             notice = lead_rows.primary_refused(refused)
+        with units.open(read_only=True):  # 200, so HTMX swaps the panel in
+            contacts = research_queries.contacts(lead_id)
+            # live on every render, never stored (FR-18, AD-16)
+            decisions = {each.id: compliance.evaluate_eligibility(each.id) for each in contacts}
+            context = lead_rows.contacts_context(
+                lead_id,
+                contacts,
+                research_queries.lead_provenance(lead_id),
+                decisions,
+                research_queries.no_decision_maker(lead_id),
+                notice,
+            )
+            return page(request, lead_rows.CONTACTS_TEMPLATE, **context)
+
+    @app.post("/leads/{lead_id}/find-email", name="lead_find_email")
+    @personal_data(True)  # the panel shows Contacts, who are people
+    def lead_find_email(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        contact_id = lead_rows.submitted_contact(fields)
+        if email_finding is None:
+            return PlainTextResponse(
+                "Finding email addresses isn't set up.", status_code=503, headers=NO_STORE
+            )
+        with units.open():
+            result = email_finding.queue_search(lead_id, contact_id)
+        if result is SearchQueued.UNKNOWN_LEAD:  # never echoes the id
+            text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
+            return PlainTextResponse(text, status_code=404, headers=NO_STORE)
+        notice = lead_rows.search_answer(str(result))
         with units.open(read_only=True):  # 200, so HTMX swaps the panel in
             contacts = research_queries.contacts(lead_id)
             # live on every render, never stored (FR-18, AD-16)
