@@ -397,7 +397,12 @@ def test_get_never_overwrites_an_existing_target(
 @pytest.mark.parametrize(
     ("damage", "code"),
     [
-        (lambda data: data[:HEADER_SIZE + 100] + b"\xff" + data[HEADER_SIZE + 101 :], "tampered"),
+        (  # flip every bit of one ciphertext byte, so the byte always changes
+            lambda data: data[: HEADER_SIZE + 100]
+            + bytes([data[HEADER_SIZE + 100] ^ 0xFF])
+            + data[HEADER_SIZE + 101 :],
+            "tampered",
+        ),
         (lambda data: data[: HEADER_SIZE + 65_536 + 16], "truncated"),
         (lambda data: b"NOPE" + data[4:], "bad_format"),
     ],
