@@ -64,7 +64,17 @@ ORIGIN = "Law Society directory, Manchester"
 UNKNOWN = "01KA0000000000000000000000"  # a ULID no Lead has
 VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"})
 LIST_HEADER = ["Name", "Website", "Segment", "Country", "Stage", "Created"]
-CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary", "Action"]
+CONTACT_HEADER = [
+    "Name",
+    "Role",
+    "Email",
+    "Address Class",
+    "LinkedIn",
+    "Primary",
+    "Action",
+    "Erasure",  # Story 3.13
+]
+ERASE = "Erase (data subject request)"  # Story 3.13
 RECORD_HEADER = ["Record", "Source", "Detail", "Retrieved", "Address Class"]
 SIGNAL_HEADER = ["Signal", "Class", "Tier", "Date", "Age", "Status", "Score only"]
 EVIDENCE_HEADER = ["Type", "Evidence", "Supports", "Source", "Retrieved", "Extraction"]
@@ -642,11 +652,17 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "https://www.linkedin.com/in/jane-doe",
         "No",
         "Make primary",
+        ERASE,
     ]
     # Story 2.10: each untrusted cell carries hx-disable, the "Make primary" cell doesn't
     untrusted = [n for n in contact.children if isinstance(n, Node) and n.tag == "td"][:5]
     assert all("hx-disable" in cell.attrs for cell in untrusted)
-    linkedin = contact.find("a")
+    linkedin, erase = contact.find_all("a")
+    [(contact_id,)] = world.sql("SELECT id FROM contacts")
+    assert erase.attrs == {
+        "class": "erase-link",
+        "href": f"{href}/contacts/{contact_id}/erase",
+    }
     assert linkedin.attrs["href"] == "https://www.linkedin.com/in/jane-doe"
     assert linkedin.attrs["rel"] == "noopener noreferrer"
     records = table_rows(table.find("table", class_="provenance-table"))
@@ -682,8 +698,17 @@ def test_the_empty_cases(world: World) -> None:
     assert nothing.find("section", class_="lead-evidence").text == "Evidence No Evidence yet."
     assert not nothing.find_all("table")
     first, second = page.find_all("tr", class_="contact-row")
-    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primary"]
-    assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No", "Make primary"]
+    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primary", ERASE]
+    assert cells(second) == [
+        "—",
+        "—",
+        "info@jones.co.uk",
+        "guessed",
+        "—",
+        "No",
+        "Make primary",
+        ERASE,
+    ]
     rows = page.find_all("tr", class_="provenance-row")
     # Story 3.7: a Contact with no source record shows "Provenance missing" in its place
     assert rows[0].find("p", class_="provenance-missing").text == "Provenance missing"
@@ -1117,7 +1142,7 @@ def test_each_contact_shows_its_live_eligibility_under_its_row(world: World) -> 
     assert summary_class(us_row) == "eligibility-summary eligible"
     for row in (uk_row, us_row):
         cell = row.find("td")
-        assert cell.attrs["colspan"] == "7"  # the Contacts panel's seven columns (Story 2.10)
+        assert cell.attrs["colspan"] == "8"  # the Contacts panel's eight columns (2.10, 3.13)
         assert "hx-disable" in cell.attrs  # each untrusted cell carries it (Story 2.10)
         table = next(node for node in row.ancestors() if node.tag == "table")
         assert "contact-table" in (table.attrs.get("class") or "")
@@ -1443,7 +1468,8 @@ def test_the_operators_primary_line_and_the_make_primary_forms(world: World) -> 
     assert not any("hx-disable" in node.attrs for node in form_node.ancestors())
     for row in rows:
         data = [cell for cell in row.children if isinstance(cell, Node) and cell.tag == "td"]
-        assert ["hx-disable" in cell.attrs for cell in data] == [True] * 5 + [False, False]
+        # Primary, the form and (Story 3.13) the Erasure cell, which holds only the erase link
+        assert ["hx-disable" in cell.attrs for cell in data] == [True] * 5 + [False] * 3
 
 
 def test_the_engines_primary_line_keeps_its_form(world: World) -> None:

@@ -10,9 +10,17 @@
 Every column of ``nextron.db.models.Base.metadata`` is classified exactly once and nothing else
 is listed; ``tests/contracts/test_persistence_contracts.py`` fails otherwise. ``events`` never
 holds personal data, so every one of its columns is ``none``.
+
+``HASH_KINDS`` (Story 3.13) maps each ``keep_hash`` column, as ``(table, column)``, to the
+suppression key kind its value is hashed as (``nextron.domain.erasure.tombstone_hash``), or to
+``None`` when the column already holds a hash. ``nextron.db.erasure.tombstoned`` reads both;
+``tests/contracts/test_erasure_contracts.py`` fails when a ``keep_hash`` column isn't listed
+here, or a listed one isn't ``keep_hash``.
 """
 
+from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
 
@@ -221,6 +229,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
         "primary_set_by": PiiClass.NONE,  # Story 2.10: who chose the Primary (a code)
+        "erased_at": PiiClass.NONE,  # Story 3.13: when the Contact was erased
     },
     # Story 2.3. A record's source detail (a CSV's origin, a URL) and notes are free text; its
     # address is the Contact's address at the time, kept as a hash like contacts.email.
@@ -310,8 +319,9 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "status": PiiClass.NONE,
         "created_at": PiiClass.NONE,
     },
-    # Story 2.5. A page's visible text may quote a person, so it is redacted; the URLs are of an
-    # organization's public pages, and the rest are IDs, codes, counts, hashes and times.
+    # Story 2.5. A page's visible text may quote a person, so an erasure nulls it (Story 3.13);
+    # the URLs are of an organization's public pages, and the rest are IDs, codes, counts,
+    # hashes and times.
     "crawl_runs": {
         "id": PiiClass.NONE,
         "lead_id": PiiClass.NONE,
@@ -336,7 +346,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "fetched_at": PiiClass.NONE,
         "http_status": PiiClass.NONE,
         "content_hash": PiiClass.NONE,
-        "text": PiiClass.REDACT,
+        # Story 3.13: an erasure nulls the text and keeps the hash, as purge_page_text does
+        "text": PiiClass.NULL,
         "text_purge_after": PiiClass.NONE,
         "changed_at": PiiClass.NONE,
         "tag_managers": PiiClass.NONE,  # Story 2.9: tag manager keys, codes only
@@ -395,6 +406,19 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "om_id": PiiClass.NONE,
         "kid": PiiClass.NONE,
         "issued_at": PiiClass.NONE,
+    },
+    # Story 3.13. A data subject request is kept as the proof of erasure; its reference is the
+    # Operator's free text (check_request_ref refuses an address or the person's name), and the
+    # rest are IDs, codes and times.
+    "data_subject_requests": {
+        "id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "request_ref": PiiClass.REDACT,
+        "opened_at": PiiClass.NONE,
+        "completed_at": PiiClass.NONE,
+        "receipt_id": PiiClass.NONE,
     },
     # Story 2.9. A quote or a fact's value is a page's words and may quote a person, so both are
     # redacted; the rest are IDs, codes, numbers, public page URLs and times.
@@ -587,3 +611,13 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "at": PiiClass.NONE,
     },
 }
+
+# Story 3.13: the suppression key kind each keep_hash column's value is hashed as, or None when
+# it already holds a hash.
+HASH_KINDS: Final[Mapping[tuple[str, str], str | None]] = MappingProxyType(
+    {
+        ("contacts", "email"): "address",
+        ("provenance_records", "address"): "address",
+        ("suppression_entries", "value_hash"): None,
+    }
+)

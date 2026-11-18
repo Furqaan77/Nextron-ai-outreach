@@ -160,6 +160,7 @@ def test_the_refusals_and_setters_are_the_specified_codes() -> None:
         "merged_lead",
         "not_on_lead",
         "address_invalid",
+        "contact_erased",  # Story 3.13, at the merge: a tombstone is nobody's Primary
     ]
     assert [str(s) for s in PrimarySetBy] == ["system", "operator"]
     assert max(len(str(s)) for s in PrimarySetBy) <= 8  # contacts.primary_set_by is String(8)

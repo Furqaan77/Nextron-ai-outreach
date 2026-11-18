@@ -65,6 +65,18 @@ Contact:
 A merged Lead's URL answers 303 to its survivor's; a text that isn't a ULID, an unknown id or a
 broken merge chain answers 404 with ``lead_missing.html``, which never echoes the id.
 
+**Erasure (Story 3.13).** Each Contact that isn't erased also links to its erase step
+(``nextron.web.erase_page.erase_href``: "Erase (data subject request)"). An erased Contact
+(``erased_at`` set) shows only its ``tombstone`` line, "[erased], erased <YYYY-MM-DD> (request
+<reference>)", the reference being its first completed erase request (the one that erased it,
+or, after a retention erasure, the first request completed afterwards;
+``queries.compliance.completed_erasures``, passed in as ``erasures``); a retention erasure with
+no request since leaves out " (request <reference>)". Its row holds no other value (no
+name, role, address, Address Class, LinkedIn URL or Primary flag), no Eligibility, basis,
+Market fact or Provenance Record (Story 3.7's rows) and no "Make primary" form (Story 2.10);
+the Lead and its other Contacts render unchanged. The erase link sits in its own "Erasure"
+column, the eighth of the Contacts table.
+
 **Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
 ``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
 
@@ -101,7 +113,8 @@ Story 3.7, so the panel the POST answers with shows them too):
   ``contact_id``;
 - the POST's ``notice``: ``primary_set()`` ("Primary Contact set.", role ``status``) or
   ``primary_refused(refusal)`` (role ``alert``): "This Lead was merged into another Lead.",
-  "That Contact isn't on this Lead." or "That Contact's address is Invalid."
+  "That Contact isn't on this Lead.", "That Contact's address is Invalid." or "That Contact
+  was erased."
   (``submitted_contact(fields)`` reads the form: exactly ``contact_id``, once, beside the CSRF
   token; anything else raises ``MalformedForm``).
 
@@ -125,6 +138,7 @@ from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlencode
 
+from nextron.app.queries.compliance import StoredRequest
 from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
 from nextron.app.queries.research import (
     EvidenceSupport,
@@ -150,6 +164,7 @@ from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import EvidenceType, SignalClass
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
+from nextron.web.erase_page import ERASE_LABEL, erase_href
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
@@ -169,6 +184,7 @@ REFUSALS: Final[Mapping[str, str]] = MappingProxyType(
         PrimaryRefusal.MERGED_LEAD: "This Lead was merged into another Lead.",
         PrimaryRefusal.NOT_ON_LEAD: "That Contact isn't on this Lead.",
         PrimaryRefusal.ADDRESS_INVALID: "That Contact's address is Invalid.",
+        PrimaryRefusal.CONTACT_ERASED: "That Contact was erased.",  # Story 3.13
     }
 )
 LIST_PATH: Final = "/leads"
@@ -208,6 +224,7 @@ NO_TZ_FACT: Final = "None ({basis})"
 BASIS_LINE: Final = "Basis: {rule}, recorded {at}"
 LIA_LINE: Final = "Legitimate interests: LIA {ref} dated {date}, recorded {at}"
 TIME_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
+TOMBSTONE_LABEL: Final = "[erased]"  # the erased Contact's row, never its stored values
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -581,7 +598,8 @@ class BasisRow:
 @dataclass(frozen=True, slots=True)
 class ContactRow:
     """One Contact as the Lead page shows it, with its live Eligibility, its recorded bases,
-    its Market facts, its Provenance Records and whether it gets a "Make primary" form."""
+    its Market facts, its Provenance Records, whether it gets a "Make primary" form and the
+    link to its erase step; an erased Contact has only its ``tombstone`` line (Story 3.13)."""
 
     contact_id: str
     name: str | None
@@ -596,6 +614,9 @@ class ContactRow:
     provenance_missing: bool
     records: tuple[ProvenanceRow, ...]
     can_make_primary: bool = True
+    erase_href: str | None = None
+    erase_label: str = ERASE_LABEL
+    tombstone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -818,14 +839,45 @@ def basis_rows(records: Iterable[StoredProvenance]) -> tuple[BasisRow, ...]:
     return tuple(basis_row(record) for record in bases)
 
 
+def tombstone_line(erased_at: datetime, request_ref: str | None) -> str:
+    """An erased Contact's row: "[erased], erased <date>", then " (request <ref>)" for a data
+    subject request."""
+    line = f"{TOMBSTONE_LABEL}, erased {day(erased_at)}"
+    return line if request_ref is None else f"{line} (request {request_ref})"
+
+
 def contact_row(
     contact: StoredContact,
     records: Iterable[StoredProvenance],
     decision: Decision,
     names: Mapping[str, str],
+    *,
+    lead_id: str | None = None,
+    erasure: StoredRequest | None = None,
 ) -> ContactRow:
     """One Contact as the Lead page shows it; ``names`` are the stored Markets' names by
-    id. The records table holds the source records only; a basis record is in ``bases``."""
+    id. The records table holds the source records only; a basis record is in ``bases``. An
+    erased Contact (Story 3.13) shows by its ``tombstone`` line only, with ``erasure`` the
+    request that erased it: no value, basis, fact, record, form or link."""
+    if contact.erased_at is not None:
+        return ContactRow(
+            contact_id=contact.id,
+            name=None,
+            role=None,
+            email=None,
+            address_class=None,
+            linkedin_url=None,
+            primary="",
+            eligibility=eligibility_row(decision),
+            bases=(),
+            facts=MarketFacts(market="", timezone="", notes=()),
+            provenance_missing=False,
+            records=(),
+            can_make_primary=False,
+            tombstone=tombstone_line(
+                contact.erased_at, None if erasure is None else erasure.request_ref
+            ),
+        )
     found = tuple(records)
     sources = tuple(
         record for record in found if record.source_kind != ProvenanceSource.ELIGIBILITY_BASIS
@@ -845,6 +897,7 @@ def contact_row(
         records=tuple(provenance_row(record) for record in sources),
         can_make_primary=not _operators_primary(contact)
         and contact.address_class != INVALID_ADDRESS,
+        erase_href=None if lead_id is None else erase_href(lead_id, contact.id),
     )
 
 
@@ -886,19 +939,30 @@ def contacts_context(
     markets: Iterable[SeededMarket],
     no_decision_maker: bool | None,
     notice: Notice | None = None,
+    *,
+    erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
 ) -> dict[str, object]:
     """What ``lead_contacts.html`` renders: the Lead's id (for the forms' path), the Primary
     line, the Contacts (in the order given, oldest first), each with its live Eligibility from
-    ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id) and its
-    Market named from ``markets``, and the POST's notice. A Contact without a Decision raises
-    ``KeyError``: the panel never shows a Contact whose Eligibility wasn't evaluated."""
+    ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id), its
+    Market named from ``markets`` and its erase link, or, for an erased one, its tombstone line
+    with its request from ``erasures`` (by Contact id), and the POST's notice. A Contact without
+    a Decision raises ``KeyError``: the panel never shows a Contact whose Eligibility wasn't
+    evaluated."""
     found = tuple(contacts)
     names = market_names(markets)
     return {
         "lead_id": lead_id,
         "primary": primary_line(found, no_decision_maker),
         "contacts": tuple(
-            contact_row(contact, provenance.get(contact.id, ()), decisions[contact.id], names)
+            contact_row(
+                contact,
+                provenance.get(contact.id, ()),
+                decisions[contact.id],
+                names,
+                lead_id=lead_id,
+                erasure=erasures.get(contact.id),
+            )
             for contact in found
         ),
         "notice": notice,
@@ -915,16 +979,26 @@ def lead_context(
     decisions: Mapping[str, Decision],
     markets: Iterable[SeededMarket],
     no_decision_maker: bool | None = None,
+    erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
     given), and the Contacts panel (``contacts_context``), each Contact with its live
-    Eligibility from ``decisions`` (by Contact id) and its Market named from ``markets`` (the
-    route passes ``()`` when the Markets can't be read)."""
+    Eligibility from ``decisions`` (by Contact id), its Market named from ``markets`` (the
+    route passes ``()`` when the Markets can't be read) and its erase link, or, for an erased
+    one, its tombstone line with its request from ``erasures`` (by Contact id)."""
     found = tuple(contacts)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
         "evidence": tuple(evidence_row(row, names) for row in signals.evidence),
-        **contacts_context(lead.id, found, provenance, decisions, markets, no_decision_maker),
+        **contacts_context(
+            lead.id,
+            found,
+            provenance,
+            decisions,
+            markets,
+            no_decision_maker,
+            erasures=erasures,
+        ),
     }

@@ -76,8 +76,9 @@ engine's choice is ``set_by`` ``system``. ``INVALID_ADDRESS`` restates
 ``AddressClass.INVALID`` (``nextron.domain.address_class`` imports this module).
 
 ``PrimaryRefused(reason)`` (code ``primary_refused``) is why the operator can't make a Contact
-Primary: a ``PrimaryRefusal``, ``unknown_lead``, ``merged_lead``, ``not_on_lead`` or
-``address_invalid``. Its message holds the reason's code only.
+Primary: a ``PrimaryRefusal``, ``unknown_lead``, ``merged_lead``, ``not_on_lead``,
+``address_invalid`` or ``contact_erased`` (Story 3.13: a tombstone is nobody's Primary). Its
+message holds the reason's code only.
 
 **``provenance_recorded(email, records) -> bool``** (FR-51, Story 3.7) answers "where did you
 get my details?" for a stored Contact. ``records`` are the Contact's Provenance Records, any
@@ -499,6 +500,7 @@ class PrimaryRefusal(StrEnum):
     MERGED_LEAD = "merged_lead"
     NOT_ON_LEAD = "not_on_lead"
     ADDRESS_INVALID = "address_invalid"
+    CONTACT_ERASED = "contact_erased"  # Story 3.13
 
 
 class PrimaryRefused(DomainError):

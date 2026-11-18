@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0031_3_7_basis_rule_width"
+HEAD = "0032_3_13_erase_contacts"
 
 
 @pytest.fixture

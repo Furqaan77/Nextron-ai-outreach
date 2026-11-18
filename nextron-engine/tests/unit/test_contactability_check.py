@@ -3,7 +3,8 @@ AD-16, Story 3.4): one table-driven case per ``BlockReason``, a voided (absent) 
 ``Allowed``, every reason at once in enum order, ``channel`` and ``purpose`` never changing the
 answer, ``Blocked``'s checks, the closed enums and their parsers, ``lookup_keys`` (order,
 de-duplication, free webmail, values that can't be normalised) and the facts' and subjects'
-type checks, with no personal value in a ``repr``."""
+type checks, with no personal value in a ``repr``. Story 3.13 adds the erased Contact: always
+``contact_erased``, its tombstone values never keys, and ``erased_person_keys``."""
 
 import dataclasses
 import itertools
@@ -25,11 +26,13 @@ from nextron.domain.contactability import (
     SuppressionKey,
     channel_of,
     check,
+    erased_person_keys,
     key_hash,
     lookup_keys,
     purpose_of,
     suppression_key,
 )
+from nextron.domain.erasure import REDACTED, tombstone_hash
 from nextron.domain.pipeline_stage import PipelineStage
 
 ULID = "01JD3QZ8X5V9K2M7N4P6R8T0AB"
@@ -97,6 +100,12 @@ REASON_CASES = [
         LeadFacts(None, stage=PipelineStage.DISQUALIFIED),
         set(),
         BlockReason.LEAD_DISQUALIFIED,
+    ),
+    (
+        "erased Contact",
+        ContactFacts(LeadFacts(WEB), erased=True),
+        set(),
+        BlockReason.CONTACT_ERASED,
     ),
 ]
 
@@ -216,6 +225,7 @@ def test_the_enums_are_closed() -> None:
         "profile_suppressed",
         "lead_lost",
         "lead_disqualified",
+        "contact_erased",
     ]
 
 
@@ -427,3 +437,60 @@ def test_no_personal_value_appears_in_a_repr() -> None:
     for planted in ("jane", "Jane", "Doe", "linkedin", "@"):
         assert planted not in texts
     assert ULID in texts
+
+
+# An erased Contact (Story 3.13) -------------------------------------------------------------------
+
+
+def erased(lead: LeadFacts | None = None, **values: str | None) -> ContactFacts:
+    """An erased Jane: her stored values are tombstones."""
+    fields = {"email": tombstone_hash("address", EMAIL), "name": REDACTED} | values
+    return ContactFacts(lead or LeadFacts(WEB), erased=True, **fields)
+
+
+def test_an_erased_contact_is_always_blocked_and_fails_closed() -> None:
+    # retention writes no entry: nothing is active, and it is blocked all the same
+    assert check(erased(), "email", "cold", ()) == Blocked((BlockReason.CONTACT_ERASED,))
+    for channel, purpose in itertools.product(Channel, Purpose):
+        assert check(erased(), channel, purpose, ()) == Blocked((BlockReason.CONTACT_ERASED,))
+
+
+def test_an_erased_contacts_values_are_never_keys() -> None:
+    plain = ContactFacts(LeadFacts(WEB), email=EMAIL, name=NAME, linkedin_url=LINKEDIN, erased=True)
+
+    # only the Lead's own domain is looked up, even when plaintext values are passed
+    assert lookup_keys(erased()) == (suppression_key("domain", WEB),)
+    assert lookup_keys(plain) == (suppression_key("domain", WEB),)
+    tombstone_person = pair("person", (REDACTED, WEB))
+    answer = check(erased(), "email", "cold", {ADDRESS, PERSON, PROFILE, tombstone_person})
+    assert answer == Blocked((BlockReason.CONTACT_ERASED,))
+
+
+def test_an_erased_contact_keeps_its_leads_reasons_in_order() -> None:
+    facts = erased(LeadFacts(WEB, ("firm-mail.com",), PipelineStage.LOST))
+    active = {FIRM_DOMAIN}
+
+    assert check(facts, "email", "cold", active) == Blocked(
+        (BlockReason.LEAD_DOMAIN_SUPPRESSED, BlockReason.LEAD_LOST, BlockReason.CONTACT_ERASED)
+    )
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "yes", "true"])
+def test_erased_must_be_a_bool(value: object) -> None:
+    with pytest.raises(TypeError, match="ContactFacts.erased must be a bool"):
+        ContactFacts(LeadFacts(WEB), erased=value)  # type: ignore[arg-type]
+
+
+def test_an_erased_contacts_only_key_is_its_stored_address_hash() -> None:
+    stored = tombstone_hash("address", EMAIL)
+
+    assert stored == key_hash("address", EMAIL)  # the suppression key's own hash
+    assert erased_person_keys(stored) == (SuppressionKey(KeyKind.ADDRESS, stored, None),)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", EMAIL, REDACTED, "A" * 64, "a" * 63, "a" * 65, 64, b"a" * 64],
+)
+def test_a_value_that_is_not_a_hash_gives_no_erased_key(value: object) -> None:
+    assert erased_person_keys(value) == ()  # type: ignore[arg-type]

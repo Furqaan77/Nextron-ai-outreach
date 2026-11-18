@@ -6,15 +6,18 @@ proving each check catches a violation.
   and its four triggers; ``owners.py`` gives every column to ``compliance`` and
   ``pii_registry.py`` classifies ``value_hash`` ``keep_hash``, ``void_reason`` ``redact`` and the
   rest ``none``.
-- **One writer.** An AST scan of every module under ``nextron/`` finds the repository's writers
-  (``insert`` and, since Story 3.5, ``void``) used (called or referenced, through any alias of
+- **One writer.** An AST scan of every module under ``nextron/`` finds each of the repository's
+  writers used (called or referenced, through any alias of
   ``nextron.db.repos.compliance.suppression_entries``: ``import ... as x``, a plain dotted
   import, the package or the module imported from its parent, a relative import, or ``from
-  ...suppression_entries import insert as y``) only in ``nextron/app/compliance/api.py``, so the
-  list changes only through ``Compliance.suppress`` and ``Compliance.reverse_optout``. Every
-  public function of the repository is classified as a reader (``get``, ``active_for``,
-  ``listed``, ``count_listed``, ``by_ids``, ``active_ids_for_cause``) or a writer
-  (``insert``, ``void``): a new one fails until it is classified here.
+  ...suppression_entries import insert as y``) only in its one home: ``insert`` and (since
+  Story 3.5) ``void`` in ``nextron/app/compliance/api.py``, so the list changes only through
+  ``Compliance.suppress`` and ``Compliance.reverse_optout``, and ``redact_void_reason`` (Story
+  3.13) in ``nextron/app/compliance/erasure.py``, so a void reason is redacted only by
+  compliance's erasure hook. Every public function of the repository is classified as a
+  reader (``get``, ``active_for``, ``listed``, ``count_listed``, ``by_ids``,
+  ``active_ids_for_cause``, ``voided_for``) or a writer (``insert``, ``void``,
+  ``redact_void_reason``): a new one fails until it is classified here.
 - **The model stays in the database layer.** ``SuppressionEntryRecord`` is named (as a name, an
   attribute, an import or in a string) only under ``nextron/db/models`` and
   ``nextron/db/repos/compliance``.
@@ -56,10 +59,24 @@ REPO_NAME = "suppression_entries"
 REPO_MODULE = f"{REPO_PACKAGE}.{REPO_NAME}"
 REPO_FILE = PACKAGE / "db" / "repos" / "compliance" / "suppression_entries.py"
 READERS = frozenset(
-    {"get", "active_for", "listed", "count_listed", "by_ids", "active_ids_for_cause"}
+    {
+        "get",
+        "active_for",
+        "listed",
+        "count_listed",
+        "by_ids",
+        "active_ids_for_cause",
+        "voided_for",  # Story 3.13
+    }
 )
-WRITERS = frozenset({"insert", "void"})
 ALLOWED_WRITER = "app/compliance/api.py"
+ERASURE_MODULE = "app/compliance/erasure.py"
+WRITER_HOMES = {  # each writer, with the one module that may use it
+    "insert": ALLOWED_WRITER,
+    "void": ALLOWED_WRITER,  # Story 3.5
+    "redact_void_reason": ERASURE_MODULE,  # Story 3.13
+}
+WRITERS = frozenset(WRITER_HOMES)
 RECORD = "SuppressionEntryRecord"
 RECORD_HOMES = ("db/models/", "db/repos/compliance/")
 MIGRATIONS = "db/alembic/versions/"
@@ -276,11 +293,11 @@ def probe_tree(tmp_path: Path, files: dict[str, str]) -> Path:
 class _WriterUses(ast.NodeVisitor):
     """Every use of the repository's writer in one module, with the function around it."""
 
-    def __init__(self, modules: set[str], functions: set[str]) -> None:
+    def __init__(self, modules: set[str], functions: dict[str, str]) -> None:
         self.modules = modules  # names (or dotted names) bound to the repository module
-        self.functions = functions  # names bound to the writer itself
+        self.functions = functions  # names bound to a writer itself, with the writer's name
         self.stack: list[str] = []
-        self.found: list[tuple[int, str, str]] = []  # (line, function, writer)
+        self.found: list[tuple[int, str, str, str]] = []  # (line, function, name, writer)
 
     def _scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
         self.stack.append(node.name)
@@ -293,18 +310,20 @@ class _WriterUses(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if node.attr in WRITERS and _dotted(node.value) in self.modules:
-            self.found.append((node.lineno, ".".join(self.stack) or "<module>", node.attr))
+            scope = ".".join(self.stack) or "<module>"
+            self.found.append((node.lineno, scope, node.attr, node.attr))
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         if node.id in self.functions and isinstance(node.ctx, ast.Load):
-            self.found.append((node.lineno, ".".join(self.stack) or "<module>", node.id))
+            scope = ".".join(self.stack) or "<module>"
+            self.found.append((node.lineno, scope, node.id, self.functions[node.id]))
 
 
-def _bindings(tree: ast.Module, package: str) -> tuple[set[str], set[str]]:
-    """The names bound to the repository module and to its writer in one module."""
+def _bindings(tree: ast.Module, package: str) -> tuple[set[str], dict[str, str]]:
+    """The names bound to the repository module and to its writers in one module."""
     modules: set[str] = set()
-    functions: set[str] = set()
+    functions: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -321,13 +340,13 @@ def _bindings(tree: ast.Module, package: str) -> tuple[set[str], set[str]]:
                 elif source == REPO_PARENT and alias.name == "compliance":
                     modules.add(f"{bound}.{REPO_NAME}")
                 elif source == REPO_MODULE and alias.name in WRITERS:
-                    functions.add(bound)
+                    functions[bound] = alias.name
     return modules, functions
 
 
-def suppression_repo_writes(root: Path) -> list[tuple[str, int, str, str]]:
-    """Every use of the repository's writer in a module under the ``nextron`` folder ``root``,
-    as ``(path, line, function, writer)``."""
+def suppression_repo_writes(root: Path) -> list[tuple[str, int, str, str, str]]:
+    """Every use of one of the repository's writers in a module under the ``nextron`` folder
+    ``root``, as ``(path, line, function, name used, writer)``."""
     found = []
     for relative, path, tree in _modules(root):
         modules, functions = _bindings(tree, _package_of(path, root))
@@ -335,16 +354,19 @@ def suppression_repo_writes(root: Path) -> list[tuple[str, int, str, str]]:
             continue
         uses = _WriterUses(modules, functions)
         uses.visit(tree)
-        found += [(relative, line, function, writer) for line, function, writer in uses.found]
+        found += [
+            (relative, line, function, name, writer)
+            for line, function, name, writer in uses.found
+        ]
     return found
 
 
 def suppression_writer_problems(root: Path) -> list[str]:
-    """Each use of the repository's writer outside ``app/compliance/api.py``."""
+    """Each use of one of the repository's writers outside its home (``WRITER_HOMES``)."""
     return [
-        f"{path}:{line} {function} uses the suppression_entries repository's {writer}"
-        for path, line, function, writer in suppression_repo_writes(root)
-        if path != ALLOWED_WRITER
+        f"{path}:{line} {function} uses the suppression_entries repository's {name}"
+        for path, line, function, name, writer in suppression_repo_writes(root)
+        if path != WRITER_HOMES[writer]
     ]
 
 
@@ -352,8 +374,12 @@ def test_only_the_compliance_api_writes_the_suppression_list() -> None:
     writes = suppression_repo_writes(PACKAGE)
 
     assert suppression_writer_problems(PACKAGE) == []
-    assert {writer for *_, writer in writes} == {"insert", "void"}  # not vacuous
-    assert {path for path, *_ in writes} == {ALLOWED_WRITER}
+    assert {writer for *_, writer in writes} == {"insert", "void", "redact_void_reason"}
+    assert {(path, writer) for path, *_, writer in writes} == {  # not vacuous
+        (ALLOWED_WRITER, "insert"),
+        (ALLOWED_WRITER, "void"),
+        (ERASURE_MODULE, "redact_void_reason"),
+    }
 
 
 WRITER_PROBES = [
@@ -419,6 +445,19 @@ WRITER_PROBES = [
         "def entry(entry_id, at):\n    return repo.void(entry_id, at, 'x')\n",
         "app/queries/compliance.py:5 entry uses the suppression_entries repository's void",
     ),
+    (  # Story 3.13: only the erasure hook redacts a void reason
+        "app/compliance/api.py",
+        "from nextron.db.repos.compliance import suppression_entries as entries_repo\n\n\n"
+        "def tidy(entry_id):\n    entries_repo.redact_void_reason(entry_id)\n",
+        "app/compliance/api.py:5 tidy uses the suppression_entries repository's "
+        "redact_void_reason",
+    ),
+    (  # and the erasure module never writes an entry
+        "app/compliance/erasure.py",
+        "from nextron.db.repos.compliance.suppression_entries import insert as add\n\n\n"
+        "def sneaky():\n    add(kind='person')\n",
+        "app/compliance/erasure.py:5 sneaky uses the suppression_entries repository's add",
+    ),
 ]
 
 
@@ -455,6 +494,22 @@ def test_the_writer_check_allows_reads_and_the_one_writer(tmp_path: Path) -> Non
 
     assert suppression_writer_problems(root) == []
     assert len(suppression_repo_writes(root)) == 2
+
+
+def test_the_writer_check_allows_the_erasure_hooks_redaction(tmp_path: Path) -> None:
+    root = probe_tree(
+        tmp_path,
+        {
+            "app/compliance/erasure.py": (
+                "from nextron.db.repos.compliance import suppression_entries as entries_repo\n\n\n"
+                "def erase_pii(entry_id):\n    entries_repo.voided_for('address', 'a')\n"
+                "    entries_repo.redact_void_reason(entry_id)\n"
+            ),
+        },
+    )
+
+    assert suppression_writer_problems(root) == []
+    assert [writer for *_, writer in suppression_repo_writes(root)] == ["redact_void_reason"]
 
 
 def repository_classification_problems(path: Path) -> list[str]:
@@ -514,7 +569,9 @@ def test_the_classification_check_catches_a_missing_function(tmp_path: Path) -> 
         "count_listed is classified but missing",
         "insert is classified but missing",
         "listed is classified but missing",
+        "redact_void_reason is classified but missing",
         "void is classified but missing",
+        "voided_for is classified but missing",
     ]
 
 

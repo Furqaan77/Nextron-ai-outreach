@@ -16,8 +16,9 @@ nothing; ``nextron.app.research`` does.
   resolves it;
 - ``fill(contact_id, updated_at, **fields)``: sets the named columns and ``updated_at``;
 - ``unresolved_ids(after, limit)``: up to ``limit`` ids of Contacts not yet resolved
-  (``market_basis`` NULL) with an id after ``after`` (``None``: from the first), by id;
-- ``has_unresolved()``: whether any Contact is not yet resolved;
+  (``market_basis`` NULL) and not erased (``erased_at`` NULL, Story 3.13) with an id after
+  ``after`` (``None``: from the first), by id;
+- ``has_unresolved()``: whether any Contact that isn't erased is not yet resolved;
 - ``has_primary(lead_id)``: whether one of the Lead's Contacts is its Primary;
 - ``set_primary(contact_id, set_by, updated_at)`` (Story 2.10): makes the Contact Primary
   (``is_primary`` true, ``primary_set_by`` ``set_by``); ``clear_primary(contact_id,
@@ -26,7 +27,16 @@ nothing; ``nextron.app.research`` does.
   caller clears the old one first;
 - ``move_to_lead(from_lead, to_lead, updated_at, clear_primary)``: gives every Contact of
   ``from_lead`` to ``to_lead`` (and, when ``clear_primary``, clears their Primary flags and
-  ``primary_set_by``), in one statement.
+  ``primary_set_by``), in one statement;
+- ``tombstone(contact_id, at)`` (Story 3.13): replaces each personal-data column of the Contact
+  with its tombstone (``nextron.db.erasure.tombstoned``: ``name`` and ``role`` ``[erased]``,
+  ``email`` its address hash, ``linkedin_url`` and the office NULL), clears ``is_primary`` and
+  ``primary_set_by`` (a tombstone is nobody's Primary, so ``has_primary`` and a merge ignore it,
+  and ``trg_contacts_tombstone`` refuses ever setting ``primary_set_by`` again) and sets
+  ``erased_at`` and ``updated_at`` to ``at``, in one statement; nothing for an unknown
+  Contact.
+
+``StoredContact.erased_at`` (last, default ``None``) is when the Contact was erased.
 """
 
 from dataclasses import dataclass
@@ -36,9 +46,12 @@ from sqlalchemy import exists, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
+from nextron.db.erasure import tombstoned
 from nextron.db.models.base import new_id
 from nextron.db.models.research import ContactRecord
 from nextron.db.uow import current
+
+TABLE = "contacts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +75,7 @@ class StoredContact:
     office_region: str | None
     created_at: datetime
     updated_at: datetime
+    erased_at: datetime | None = None
 
 
 _COLUMNS = (
@@ -82,6 +96,7 @@ _COLUMNS = (
     ContactRecord.office_region,
     ContactRecord.created_at,
     ContactRecord.updated_at,
+    ContactRecord.erased_at,
 )
 
 
@@ -159,9 +174,11 @@ def fill(contact_id: str, updated_at: datetime, **fields: str | None) -> None:
 
 
 def unresolved_ids(after: str | None, limit: int) -> tuple[str, ...]:
-    """Up to ``limit`` ids of the Contacts with no ``market_basis`` whose id is after ``after``
-    (every one with ``None``), by id."""
-    statement = select(ContactRecord.id).where(ContactRecord.market_basis.is_(None))
+    """Up to ``limit`` ids of the Contacts that aren't erased and have no ``market_basis``, whose
+    id is after ``after`` (every one with ``None``), by id."""
+    statement = select(ContactRecord.id).where(
+        ContactRecord.market_basis.is_(None), ContactRecord.erased_at.is_(None)
+    )
     if after is not None:
         statement = statement.where(ContactRecord.id > after)
     statement = statement.order_by(ContactRecord.id).limit(limit)
@@ -169,8 +186,10 @@ def unresolved_ids(after: str | None, limit: int) -> tuple[str, ...]:
 
 
 def has_unresolved() -> bool:
-    """Whether any Contact has no ``market_basis`` yet."""
-    statement = select(exists().where(ContactRecord.market_basis.is_(None)))
+    """Whether any Contact that isn't erased has no ``market_basis`` yet."""
+    statement = select(
+        exists().where(ContactRecord.market_basis.is_(None), ContactRecord.erased_at.is_(None))
+    )
     return bool(current().session.execute(statement).scalar_one())
 
 
@@ -211,4 +230,26 @@ def move_to_lead(
         values["primary_set_by"] = None
     current().session.execute(
         update_rows(ContactRecord).where(ContactRecord.lead_id == from_lead).values(**values)
+    )
+
+
+def tombstone(contact_id: str, at: datetime) -> None:
+    """Replace the Contact ``contact_id``'s personal data with tombstones, erased and updated at
+    ``at``."""
+    session = current().session
+    row = session.execute(
+        select(ContactRecord.__table__).where(ContactRecord.id == contact_id)
+    ).mappings().one_or_none()
+    if row is None:
+        return
+    session.execute(
+        update_rows(ContactRecord)
+        .where(ContactRecord.id == contact_id)
+        .values(
+            **tombstoned(TABLE, row),
+            is_primary=False,
+            primary_set_by=None,  # Story 2.10's column: cleared with is_primary
+            erased_at=at,
+            updated_at=at,
+        )
     )

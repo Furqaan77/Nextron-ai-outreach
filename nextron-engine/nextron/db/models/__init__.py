@@ -22,7 +22,11 @@ from nextron.db.models import (
     signals,
 )
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
-from nextron.db.models.compliance import SuppressionEntryRecord, UnsubTokenRecord
+from nextron.db.models.compliance import (
+    DataSubjectRequestRecord,
+    SuppressionEntryRecord,
+    UnsubTokenRecord,
+)
 from nextron.db.models.crawl import (
     AtsLinkRecord,
     CrawledPageRecord,
@@ -86,6 +90,7 @@ __all__ = [
     "ContactRecord",
     "CrawlRunRecord",
     "CrawledPageRecord",
+    "DataSubjectRequestRecord",
     "EventRecord",
     "EvidenceRecord",
     "ExtractionRunRecord",

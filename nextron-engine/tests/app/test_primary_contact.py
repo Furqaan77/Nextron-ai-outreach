@@ -30,6 +30,7 @@ from nextron.domain.contacts import (
     ProvenanceSource,
 )
 from nextron.domain.job import Job, Lane
+from nextron.domain.notifications import ContactErased
 from nextron.domain.suppression_entry import SuppressionSource
 from nextron.ports.llm import LlmOk, LlmUsage
 from tests.app.test_signal_extraction import (
@@ -599,6 +600,47 @@ def test_a_contact_the_gate_blocks_is_never_the_primary(world: World) -> None:
         ceo,
         SYSTEM_ACTOR,
     )
+
+
+def erase(world: World, contact: str) -> None:
+    """Story 3.13's research hook alone, as a retention erasure runs it: the Contact, its
+    Provenance, its person Evidence and its Lead's page text become tombstones."""
+    world.transact(lambda: world.research.erase_pii(ContactErased(contact, "retention")))
+
+
+def test_an_erased_contact_is_never_the_primary_nor_made_one(world: World) -> None:
+    """Story 3.13 met Story 2.10 at the merge. Erasing the engine's Primary clears it with its
+    ``primary_set_by``; the selection then picks the next best and never the tombstone (the gate
+    blocks it with ``contact_erased``); the operator's "Make primary" refuses it
+    (``contact_erased``), and ``trg_contacts_tombstone`` keeps its ``primary_set_by`` NULL."""
+    ops(world)
+    lead = world.lead()
+    ceo = add(world, lead, "Cy Ceo", "CEO")
+    coo = add(world, lead, "Ann Fox", "Chief Operating Officer", minutes=1)
+    assert select(world, lead) == PrimaryChoice(coo, PrimarySetBy.SYSTEM)
+
+    erase(world, coo)
+
+    assert flags(world, lead) == {"Cy Ceo": (False, None), "[erased]": (False, None)}
+    assert select(world, lead) == PrimaryChoice(ceo, PrimarySetBy.SYSTEM)
+    assert flags(world, lead) == {"Cy Ceo": (True, "system"), "[erased]": (False, None)}
+    with pytest.raises(PrimaryRefused) as refused:
+        make(world, lead, coo)
+    assert refused.value.reason is PrimaryRefusal.CONTACT_ERASED
+    assert flags(world, lead) == {"Cy Ceo": (True, "system"), "[erased]": (False, None)}
+    for set_by in ("system", "operator"):
+        with pytest.raises(IntegrityError, match="an erased Contact is a tombstone"):
+            world.sql(
+                "UPDATE contacts SET is_primary = 0, primary_set_by = ? WHERE id = ?",
+                (set_by, coo),
+            )
+
+    alone = world.lead(web_domain="alone-firm.com")  # a Lead whose only Contact is erased
+    only = add(world, alone, "Bo Day", "Chief Operating Officer")
+    erase(world, only)
+    assert select(world, alone) == PrimaryChoice(None, None)
+    assert flags(world, alone) == {"[erased]": (False, None)}
+    assert no_decision_maker(world, alone) == 1
 
 
 # The use case and the job -----------------------------------------------------------------------

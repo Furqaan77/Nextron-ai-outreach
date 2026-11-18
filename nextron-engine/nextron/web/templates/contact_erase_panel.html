@@ -1,0 +1,34 @@
+{#- The erase step's panel (nextron.web.erase_page): rendered inside contact_erase.html, and alone
+    as the answer to its POST, which HTMX swaps in for this whole panel. The Contact's values and
+    the notice are imported or typed text: they render through |plain inside hx-disable; the
+    form sits outside, so HTMX still posts it. An erased Contact shows no value of it. -#}
+<div id="erase-panel">
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}" hx-disable>{{ notice.text|plain }}</p>
+{%- endif %}
+{%- if erased_text %}
+<p class="erased-contact">{{ erased_text }}</p>
+{%- else %}
+<dl class="erase-contact" hx-disable>
+<dt>Name</dt>
+<dd>{{ contact.name|plain }}</dd>
+<dt>Role</dt>
+<dd>{{ contact.role|plain }}</dd>
+<dt>Email</dt>
+<dd>{{ contact.email|plain }}</dd>
+<dt>LinkedIn</dt>
+<dd>{{ contact.linkedin_url|plain }}</dd>
+</dl>
+<p>Erasing replaces this Contact's name, role, email address, LinkedIn URL and office, its Provenance Records, the Evidence about them and the text of the Lead's crawled pages with tombstones. Their address, name and LinkedIn keys stay on the Suppression List only as hashes, so they are never contacted again. The Lead and its other Contacts don't change.</p>
+<p class="erase-warning" role="note">This can't be undone.</p>
+<form method="post" hx-post="{{ action }}" hx-target="#erase-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<div class="field">
+<label for="erase-request-ref">Request reference</label>
+<input type="text" id="erase-request-ref" name="request_ref" value="{{ request_ref }}" maxlength="200" autocomplete="off" spellcheck="false" aria-describedby="erase-request-ref-hint">
+<p class="hint" id="erase-request-ref-hint">Enter a ticket or letter reference, never the person's name or address.</p>
+</div>
+<button type="submit">Erase permanently</button>
+</form>
+{%- endif %}
+</div>

@@ -10,8 +10,8 @@ nowhere else (``tests/contracts/test_eligibility_contracts.py``).
 ``cold_email_not_allowed``, ``uk_legal_form_ineligible``, ``uk_legal_form_unconfirmed``,
 ``uk_free_webmail``, ``address_not_sendable``, ``provenance_missing`` (Story 3.7),
 ``address_or_domain_suppressed``, ``asked_not_to_be_contacted``, ``recontact_not_allowed``,
-``not_now_until``, ``not_now_undated``, ``lead_closed``. ``Reason(kind, text, until=None)`` is
-one failing check:
+``not_now_until``, ``not_now_undated``, ``lead_closed``, ``contact_erased`` (Story 3.13).
+``Reason(kind, text, until=None)`` is one failing check:
 ``until`` is the re-contact ``date`` of a ``not_now_until`` reason (required there, refused on
 every other kind), and ``code`` is ``not_now_until_<YYYY-MM-DD>`` for that kind and the kind's
 value for every other. ``text`` is the Operator-facing sentence (the ``*_TEXT`` constants): it
@@ -76,7 +76,9 @@ every failing reason; the Contact is eligible only with none.
 5. **The Suppression List:** a ``Blocked`` answer maps each ``BlockReason`` through
    ``BLOCK_REASON_KINDS``: address and domain keys to ``address_or_domain_suppressed``, person
    and profile keys to ``asked_not_to_be_contacted``, a Lost or Disqualified Lead to
-   ``lead_closed``.
+   ``lead_closed``, and an erased Contact (Story 3.13: the gate blocks a tombstone whatever the
+   list holds) to ``contact_erased``, so an erased Contact is never eligible. Every
+   ``BlockReason`` gives a reason: a ``Blocked`` answer is never eligible.
 6. **FR-63:** ``recontact_not_allowed`` unless ``recontact_allowed(history, events_first_seen,
    now)``.
 7. **Not Now:** a ``not_now`` Lead gives ``not_now_undated`` with no ``recontact_on``, and
@@ -131,6 +133,7 @@ class ReasonKind(StrEnum):
     NOT_NOW_UNTIL = "not_now_until"
     NOT_NOW_UNDATED = "not_now_undated"
     LEAD_CLOSED = "lead_closed"
+    CONTACT_ERASED = "contact_erased"  # Story 3.13
 
 
 _KIND_ORDER: Final = {kind: index for index, kind in enumerate(ReasonKind)}
@@ -196,6 +199,7 @@ RECONTACT_TEXT: Final = (
 NOT_NOW_UNTIL_TEXT: Final = "Parked Not Now until {until}"
 NOT_NOW_UNDATED_TEXT: Final = "Parked Not Now with no re-contact date recorded"
 LEAD_CLOSED_TEXT: Final = "The Lead is closed ({stage})"
+CONTACT_ERASED_TEXT: Final = "This Contact was erased: it is never contacted"  # Story 3.13
 US_BASIS: Final = "US: cold email allowed (CAN-SPAM)"
 UK_BASIS: Final = "UK: corporate subscriber ({label}), legitimate interests"
 _UK_BASIS_PREFIX, _UK_BASIS_SUFFIX = UK_BASIS.split("{label}")
@@ -239,6 +243,7 @@ BLOCK_REASON_KINDS: Final[Mapping[BlockReason, ReasonKind]] = MappingProxyType(
         BlockReason.PROFILE_SUPPRESSED: ReasonKind.ASKED_NOT_TO_BE_CONTACTED,
         BlockReason.LEAD_LOST: ReasonKind.LEAD_CLOSED,
         BlockReason.LEAD_DISQUALIFIED: ReasonKind.LEAD_CLOSED,
+        BlockReason.CONTACT_ERASED: ReasonKind.CONTACT_ERASED,  # Story 3.13
     }
 )
 _BLOCK_STAGES: Final[Mapping[BlockReason, PipelineStage]] = MappingProxyType(
@@ -589,11 +594,12 @@ def _closed_reason(lead: EligibilityLead, blocked: tuple[BlockReason, ...]) -> R
 
 
 def _suppression_reasons(blocked: tuple[BlockReason, ...]) -> list[Reason]:
-    """The Suppression List reasons of the gate's answer (its closed-Lead reasons are
-    ``_closed_reason``'s)."""
+    """The Suppression List and erasure reasons of the gate's answer (its closed-Lead reasons
+    are ``_closed_reason``'s)."""
     texts = {
         ReasonKind.ADDRESS_OR_DOMAIN_SUPPRESSED: SUPPRESSED_TEXT,
         ReasonKind.ASKED_NOT_TO_BE_CONTACTED: ASKED_TEXT,
+        ReasonKind.CONTACT_ERASED: CONTACT_ERASED_TEXT,  # Story 3.13
     }
     kinds = {BLOCK_REASON_KINDS[reason] for reason in blocked}
     return [Reason(kind, text) for kind, text in texts.items() if kind in kinds]

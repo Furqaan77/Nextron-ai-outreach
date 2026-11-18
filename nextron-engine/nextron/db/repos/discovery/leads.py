@@ -17,6 +17,8 @@ nothing; ``nextron.app.discovery`` does.
   domain its website now lives on);
 - ``mark_merged(loser_id, survivor_id, cleared_keys)``: sets ``merged_into`` and clears each
   key column named in ``cleared_keys``, in one statement;
+- ``merged_from(lead_id)`` (Story 3.13): the ids of every Lead whose merge chain leads to
+  ``lead_id`` (merged into it, or into one of those, and so on), by id; a loop is followed once;
 - ``ListedLead``, ``listed(*, stage, segment_id, search, limit, offset)`` and
   ``count_listed(*, stage, segment_id, search)`` (Story 2.4): the Leads list's page of rows
   and their count. Both keep only Leads that aren't merged (``merged_into IS NULL``) and, for
@@ -172,6 +174,19 @@ _LISTED_COLUMNS = (
     LeadRecord.pipeline_stage,  # the pipeline group's column, read only
     LeadRecord.created_at,
 )
+
+
+def merged_from(lead_id: str) -> tuple[str, ...]:
+    """The ids of the Leads whose merge chain leads to ``lead_id``, by id."""
+    session = current().session
+    found: set[str] = set()
+    frontier = {lead_id}
+    while frontier:
+        statement = select(LeadRecord.id).where(LeadRecord.merged_into.in_(sorted(frontier)))
+        merged = set(session.execute(statement).scalars()) - found - {lead_id}
+        found |= merged
+        frontier = merged
+    return tuple(sorted(found))
 
 
 def _listed_where(

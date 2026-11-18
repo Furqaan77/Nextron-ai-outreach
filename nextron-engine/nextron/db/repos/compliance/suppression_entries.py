@@ -13,10 +13,15 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
   ``created_at``, then ``id``, descending), after skipping ``offset``; ``count_listed(kind=,
   source=, status=)``, how many match; ``by_ids(ids)``, the rows of those ids, in no set order;
   ``active_ids_for_cause(source=, cause_ref=)``, the ids of the ``active`` rows of that source
-  with that ``cause_ref``, by ``created_at``, then ``id``;
+  with that ``cause_ref``, by ``created_at``, then ``id``; ``voided_for(kind, value_hash)``
+  (Story 3.13), the ``voided`` rows of that key, by ``id``;
 - the writers: ``insert(...) -> id``, a new ``active`` row; ``void(entry_id, voided_at,
   void_reason) -> bool``, which sets one ``active`` row ``voided`` with its time and reason
-  (``UPDATE ... WHERE id = ? AND status = 'active'``) and says whether it did.
+  (``UPDATE ... WHERE id = ? AND status = 'active'``) and says whether it did;
+  ``redact_void_reason(entry_id)`` (Story 3.13), which replaces a ``voided`` entry's
+  ``void_reason`` (the Operator's free text) with its tombstone
+  (``nextron.db.erasure.tombstoned``: ``[erased]``), keeping its ``value_hash``; nothing for
+  an entry that isn't ``voided``.
 
 Nothing here removes a row or ages one out: entries are permanent (AD-16), and the table's
 triggers refuse it too (and refuse a void of any source but ``reply_rule``).
@@ -31,6 +36,7 @@ from sqlalchemy import ColumnElement, func, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
+from nextron.db.erasure import tombstoned
 from nextron.db.models.base import new_id
 from nextron.db.models.compliance import SuppressionEntryRecord
 from nextron.db.uow import current
@@ -38,6 +44,7 @@ from nextron.domain.suppression_entry import EntryStatus
 
 ACTIVE: Final = str(EntryStatus.ACTIVE)
 VOIDED: Final = str(EntryStatus.VOIDED)
+TABLE: Final = "suppression_entries"
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,3 +215,34 @@ def void(entry_id: str, voided_at: datetime, void_reason: str) -> bool:
         .values(status=VOIDED, voided_at=voided_at, void_reason=void_reason)
     )
     return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+
+def voided_for(kind: str, value_hash: str) -> tuple[StoredSuppressionEntry, ...]:
+    """The ``voided`` entries of the key (``kind``, ``value_hash``), by ``id``."""
+    statement = (
+        select(*_COLUMNS)
+        .where(
+            SuppressionEntryRecord.kind == kind,
+            SuppressionEntryRecord.value_hash == value_hash,
+            SuppressionEntryRecord.status == VOIDED,
+        )
+        .order_by(SuppressionEntryRecord.id)
+    )
+    return tuple(StoredSuppressionEntry(*row) for row in current().session.execute(statement))
+
+
+def redact_void_reason(entry_id: str) -> None:
+    """Replace the ``voided`` entry ``entry_id``'s ``void_reason`` with its tombstone."""
+    session = current().session
+    row = session.execute(
+        select(SuppressionEntryRecord.__table__).where(
+            SuppressionEntryRecord.id == entry_id, SuppressionEntryRecord.status == VOIDED
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        return
+    session.execute(
+        update_rows(SuppressionEntryRecord)
+        .where(SuppressionEntryRecord.id == entry_id)
+        .values(**tombstoned(TABLE, row))
+    )

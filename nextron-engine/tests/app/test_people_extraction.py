@@ -33,7 +33,7 @@ from nextron.domain.budget import AiCall
 from nextron.domain.contactability import ContactSubject, SuppressionScope
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource, provenance_recorded
 from nextron.domain.eligibility import ReasonKind
-from nextron.domain.notifications import EvidenceChanged
+from nextron.domain.notifications import ContactErased, EvidenceChanged
 from nextron.domain.suppression_entry import SuppressionSource
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import LlmFailed, LlmOk, LlmRefused, LlmResult, LlmUsage
@@ -263,6 +263,47 @@ def test_a_decision_maker_found_on_the_website_has_its_provenance(world: World) 
     assert [(r.subject, r.source_kind) for r in records] == [("contact", "website")]
     assert provenance_recorded(jane["email"], records) is True
     assert ReasonKind.PROVENANCE_MISSING not in decision.kinds
+
+
+def test_erasing_a_found_decision_maker_redacts_their_quote_evidence(world: World) -> None:
+    """Story 3.13 met Story 2.10 at the merge: erasing a Contact the people step found turns
+    the ``quote`` of their person Evidence into ``[erased]`` and nulls the Lead's page text;
+    the Lead's other Evidence (the lawyer count, which names nobody), every page's
+    ``tag_managers`` and the rows themselves stay."""
+    lead, run_id, pages = law_lead(world)
+    world.extract(lead, run_id, ok(), people=[law_people(pages)])
+    [jane] = contacts(world, lead)
+    [quote] = person_evidence(world, lead)
+    [count] = counts(world, lead)
+    tag_managers = world.sql(
+        "SELECT id, tag_managers FROM crawled_pages WHERE lead_id = ? ORDER BY id", (lead,)
+    )
+
+    world.transact(lambda: world.research.erase_pii(ContactErased(jane["id"], "dsr")))
+
+    [erased] = person_evidence(world, lead)
+    assert (erased["id"], erased["quote"], erased["person_contact_id"]) == (
+        quote["id"],
+        "[erased]",
+        jane["id"],
+    )
+    assert JANE not in json.dumps(world.evidence(lead))
+    assert counts(world, lead) == [count]
+    assert world.sql("SELECT DISTINCT text FROM crawled_pages WHERE lead_id = ?", (lead,)) == [
+        (None,)
+    ]
+    assert world.sql(
+        "SELECT id, tag_managers FROM crawled_pages WHERE lead_id = ? ORDER BY id", (lead,)
+    ) == tag_managers
+    [tombstone] = contacts(world, lead)
+    assert (tombstone["id"], tombstone["name"], tombstone["role"]) == (
+        jane["id"],
+        "[erased]",
+        "[erased]",
+    )
+    assert world.sql(
+        "SELECT source_detail FROM provenance_records WHERE contact_id = ?", (jane["id"],)
+    ) == [("[erased]",)]
 
 
 def test_a_person_already_on_the_lead_is_filled_not_duplicated(world: World) -> None:

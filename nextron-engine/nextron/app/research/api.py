@@ -132,8 +132,10 @@ cause ``selection`` with actor ``system:research``, or cause and actor ``operato
   Primary change (a new ``primary_set_by`` on the same Contact is a change).
 - ``@command make_primary(lead_id, contact_id)``: the operator's choice. Before any write it
   raises ``PrimaryRefused``: ``unknown_lead`` (a text that isn't a ULID included),
-  ``merged_lead``, ``not_on_lead`` (an unknown Contact, or another Lead's) or
-  ``address_invalid`` (its Address Class is ``invalid``). Otherwise the Contact becomes Primary
+  ``merged_lead``, ``not_on_lead`` (an unknown Contact, or another Lead's), ``contact_erased``
+  (Story 3.13: an erased Contact is a tombstone, which ``trg_contacts_tombstone`` would refuse
+  to make Primary) or ``address_invalid`` (its Address Class is ``invalid``). Otherwise the
+  Contact becomes Primary
   with ``primary_set_by`` ``operator`` (picking the engine's Primary pins it), any other Primary
   is cleared and ``no_decision_maker`` becomes false. Picking the operator's own Primary again
   writes nothing.
@@ -144,6 +146,31 @@ decision-makers and run the selection.
 - ``@use_case purge_page_text() -> int`` (the daily ``purge_page_text`` job, Story 2.5): in one
   transaction, nulls ``text`` on every page whose ``text_purge_after`` is now or earlier, keeping
   ``content_hash``; logs ``page_text_purged`` (``count``) and returns the count.
+
+- ``@command erase_pii(n: ContactErased)`` (Story 3.13, AD-17): research's erasure hook,
+  registered for ``ContactErased`` second, after compliance's
+  (``nextron.main.build_subscribers``). An unknown Contact (a text that isn't a ULID included)
+  raises ``LookupError``; an erased one (``erased_at`` set) returns, writing nothing. Otherwise,
+  in the publisher's transaction, each by registry class (``nextron.db.erasure.tombstoned``):
+
+  1. the Contact's Provenance Records (``source_detail`` and ``notes`` ``[erased]``,
+     ``address`` its address hash);
+  2. its Evidence, the rows whose ``person_contact_id`` is the Contact (``quote`` and ``value``
+     ``[erased]``);
+  3. the pages of its Lead and of every Lead merged into it
+     (``queries.discovery.merged_lead_ids``): ``text`` NULL, ``content_hash`` kept, and each
+     page's ``page_contact_methods.matched`` ``[erased]``;
+  4. last, the Contact itself (``name`` and ``role`` ``[erased]``, ``email`` its address hash,
+     ``linkedin_url`` and the office NULL; ``is_primary`` false, since a tombstone is nobody's
+     Primary; ``erased_at`` and ``updated_at`` now);
+  5. one ``events`` row: entity ``contacts``, ``None`` to ``erased``, cause ``n.cause``
+     (``dsr`` or ``retention``), no ``cause_ref``, actor ``system:research``.
+
+  ``ERASURE`` declares research's tables ``tombstoned``. Research's other paths skip an erased
+  Contact: ``add_contact``'s match never is one (a new candidate is gated and created on its
+  own), and resolving one (``_resolve``, through ``add_contact``, ``reparent_lead``,
+  ``resolve_market`` or the backfill) is a no-op, never a ``LookupError``. A merge still moves
+  it (``lead_id``, ``is_primary``, ``updated_at``), the only change the database allows.
 
 **Resolving a Contact's Market and timezone (Story 3.2, AD-11).** One routine, ``_resolve``,
 serves ``add_contact``, ``reparent_lead`` and ``resolve_market``. It reads the Contact, its Lead
@@ -306,9 +333,10 @@ Signals and Evidence sections.
 
 import logging
 import urllib.parse
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from types import MappingProxyType
 from typing import Final
 
 from nextron.app.compliance import api as compliance_api
@@ -375,6 +403,7 @@ from nextron.domain.crawl import (
     text_hash,
 )
 from nextron.domain.eligibility import Decision, basis_country
+from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
 from nextron.domain.geo import Location
@@ -383,7 +412,7 @@ from nextron.domain.ids import is_ulid
 from nextron.domain.job import VERSION_FIELD
 from nextron.domain.leads import is_shared_platform
 from nextron.domain.machines import Transition
-from nextron.domain.notifications import LeadsMerged
+from nextron.domain.notifications import ContactErased, LeadsMerged
 from nextron.domain.people import ROUTE as PEOPLE_ROUTE
 from nextron.domain.segments import SegmentDef, SignalClass
 from nextron.domain.settings_schema import Key
@@ -445,6 +474,36 @@ ABSENCE_CHECKED: Final = "absence_checked"  # Story 2.9: the "contact form only"
 UNKNOWN_RUN: Final = "unknown_run"
 OTHER_LEAD: Final = "other_lead"
 STALE_RUN: Final = "stale_run"
+ERASED: Final = "erased"  # the events row of an erased Contact (Story 3.13)
+
+# Story 3.13: what research's erase_pii does to each of its tables with personal data.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "contacts": TableErasure(
+            Coverage.TOMBSTONED,
+            "the Contact's name and role become [erased], its email its address hash, its "
+            "LinkedIn URL and office NULL, and it is no longer Primary; erased_at marks the "
+            "tombstone",
+        ),
+        "provenance_records": TableErasure(
+            Coverage.TOMBSTONED,
+            "each of the Contact's records: source detail and notes [erased], address its hash",
+        ),
+        "evidence": TableErasure(
+            Coverage.TOMBSTONED,
+            "each row whose person_contact_id is the Contact: quote and value [erased]",
+        ),
+        "crawled_pages": TableErasure(
+            Coverage.TOMBSTONED,
+            "the pages of the Contact's Lead and of the Leads merged into it: text NULL, "
+            "content hash kept",
+        ),
+        "page_contact_methods": TableErasure(
+            Coverage.TOMBSTONED,
+            "on those pages, matched becomes [erased]: it may hold a direct phone number",
+        ),
+    }
+)
 
 type Assignment = Transition[AddressClass, AddressCause]
 type RobotsRule = Callable[[str], bool]
@@ -574,14 +633,16 @@ def _name_key(contact: StoredContact) -> str | None:
 def _match(
     contacts: tuple[StoredContact, ...], candidate: ContactCandidate
 ) -> StoredContact | None:
-    """The first Contact with the candidate's email, else the first with its name key."""
+    """The first Contact with the candidate's email, else the first with its name key; an
+    erased Contact (a tombstone) is never a match."""
+    live = [contact for contact in contacts if contact.erased_at is None]
     if candidate.email is not None:
-        for contact in contacts:
+        for contact in live:
             if contact.email == candidate.email:
                 return contact
     key = candidate.name_key
     if key is not None:
-        for contact in contacts:
+        for contact in live:
             if _name_key(contact) == key:
                 return contact
     return None
@@ -778,6 +839,8 @@ class Research:
         contact = contacts_repo.get(contact_id) if is_ulid(contact_id) else None
         if contact is None:
             raise LookupError("resolve_market: the Contact is unknown")
+        if contact.erased_at is not None:  # a tombstone keeps no Market (Story 3.13)
+            return
         lead = discovery_queries.lead(contact.lead_id)
         stored = setup_queries.markets()
         office = (
@@ -917,6 +980,8 @@ class Research:
         contact = contacts_repo.get(contact_id) if is_ulid(contact_id) else None
         if contact is None or contact.lead_id != lead.id:
             raise PrimaryRefused(PrimaryRefusal.NOT_ON_LEAD)
+        if contact.erased_at is not None:  # Story 3.13: a tombstone is nobody's Primary
+            raise PrimaryRefused(PrimaryRefusal.CONTACT_ERASED)
         if contact.address_class == AddressClass.INVALID:
             raise PrimaryRefused(PrimaryRefusal.ADDRESS_INVALID)
         self._write_primary(
@@ -1038,6 +1103,34 @@ class Research:
             count = crawl_repo.purge_text(self._clock.now())
         log.info(PAGE_TEXT_PURGED, extra={"count": count})
         return count
+
+    @command
+    def erase_pii(self, n: ContactErased) -> None:
+        """Tombstone the Contact's Provenance, Evidence, pages and row; see the module
+        docstring."""
+        cause = ErasureCause(n.cause)
+        contact = contacts_repo.get(n.contact_id) if is_ulid(n.contact_id) else None
+        if contact is None:
+            raise LookupError("erase_pii: the Contact is unknown")
+        if contact.erased_at is not None:
+            return
+        provenance_repo.tombstone_for_contact(contact.id)
+        signals_repo.tombstone_person_evidence(contact.id)
+        crawl_repo.tombstone_pages(
+            (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id))
+        )
+        now = self._clock.now()
+        contacts_repo.tombstone(contact.id, now)
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=contact.id,
+            from_status=None,
+            to_status=ERASED,
+            cause=str(cause),
+            cause_ref=None,
+            actor=ACTOR,
+            at=now,
+        )
 
 
 class ContactMarkets:

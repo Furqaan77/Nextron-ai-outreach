@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{#- The erase confirmation step (nextron.web.erase_page): the Lead it is on, then the panel. The
+    Lead's name is imported text: it renders through |plain inside hx-disable. -#}
+{% block title %}Nextron: Erase a Contact{% endblock %}
+{% block content %}
+<h1>Erase a Contact</h1>
+<p class="erase-lead" hx-disable>On the Lead <a href="/leads/{{ lead_id }}">{{ lead_name|plain }}</a>.</p>
+{% include "contact_erase_panel.html" %}
+{% endblock %}

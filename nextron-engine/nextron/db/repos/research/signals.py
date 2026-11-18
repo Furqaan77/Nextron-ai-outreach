@@ -31,6 +31,11 @@ tuple of URLs.
   the Lead, by ``started_at``, then ``id``.
 - ``reparent(loser_id, survivor_id)``: moves every ``evidence`` and ``signals`` row of the Lead
   ``loser_id`` to ``survivor_id``; ``extraction_runs`` stay.
+- ``tombstone_person_evidence(contact_id) -> int`` (Story 3.13): replaces the ``quote`` and
+  ``value`` of every Evidence row whose ``person_contact_id`` is the Contact with their
+  tombstones (``nextron.db.erasure.tombstoned``: ``[erased]``; NULL stays NULL), one statement
+  per row, the only change the ``evidence`` triggers allow besides the four above; returns how
+  many rows it tombstoned.
 """
 
 import json
@@ -43,6 +48,7 @@ from sqlalchemy import Row, and_, exists, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
+from nextron.db.erasure import tombstoned
 from nextron.db.models.base import new_id
 from nextron.db.models.signals import (
     EvidenceRecord,
@@ -53,6 +59,7 @@ from nextron.db.models.signals import (
 from nextron.db.uow import current
 
 OK = "ok"  # nextron.domain.extraction.ExtractionOutcome.OK
+EVIDENCE_TABLE = "evidence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,3 +452,21 @@ def reparent(loser_id: str, survivor_id: str) -> None:
         .where(SignalRecord.lead_id == loser_id)
         .values(lead_id=survivor_id)
     )
+
+
+def tombstone_person_evidence(contact_id: str) -> int:
+    """Replace the personal data of every Evidence row about the Contact ``contact_id`` with
+    tombstones; the number of rows."""
+    session = current().session
+    rows = session.execute(
+        select(EvidenceRecord.__table__)
+        .where(EvidenceRecord.person_contact_id == contact_id)
+        .order_by(EvidenceRecord.id)
+    ).mappings().all()
+    for row in rows:
+        session.execute(
+            update_rows(EvidenceRecord)
+            .where(EvidenceRecord.id == row["id"])
+            .values(**tombstoned(EVIDENCE_TABLE, row))
+        )
+    return len(rows)

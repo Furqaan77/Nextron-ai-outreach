@@ -22,6 +22,7 @@ from nextron.domain.contact_market import MarketBasis
 from nextron.domain.contactability import Allowed, Blocked, BlockReason
 from nextron.domain.eligibility import (
     ASKED_TEXT,
+    CONTACT_ERASED_TEXT,
     BLOCK_REASON_KINDS,
     CLOSED_STAGE_LABELS,
     LEGAL_FORM_LABELS,
@@ -246,6 +247,14 @@ ONE_REASON: list[tuple[str, Callable[[], Decision], ReasonKind, str]] = [
         lambda: decide(us_contact(), us_lead(stage=PipelineStage.LOST)),
         ReasonKind.LEAD_CLOSED,
         "The Lead is closed (Lost)",
+    ),
+    (  # Story 3.13 met Story 3.6 at the merge: the gate blocks an erased Contact
+        "contact_erased",
+        lambda: decide(
+            us_contact(contactable=Blocked((BlockReason.CONTACT_ERASED,))), us_lead()
+        ),
+        ReasonKind.CONTACT_ERASED,
+        CONTACT_ERASED_TEXT,
     ),
 ]
 
@@ -586,6 +595,7 @@ def test_every_closed_stage_has_a_label() -> None:
             ReasonKind.LEAD_CLOSED,
             "The Lead is closed (Disqualified)",
         ),
+        (BlockReason.CONTACT_ERASED, ReasonKind.CONTACT_ERASED, CONTACT_ERASED_TEXT),
     ],
 )
 def test_each_gate_reason_gives_its_eligibility_reason(
@@ -597,6 +607,36 @@ def test_each_gate_reason_gives_its_eligibility_reason(
     assert texts(decision) == [text]
 
 
+@pytest.mark.parametrize("reason", list(BlockReason), ids=[str(r) for r in BlockReason])
+def test_every_gate_reason_alone_makes_an_otherwise_eligible_contact_ineligible(
+    reason: BlockReason,
+) -> None:
+    """Fail closed: whatever ``BlockReason`` the gate gives (an erased Contact's included, Story
+    3.13), the Contact that would otherwise be eligible isn't, and the reason says why."""
+    assert decide(us_contact(), us_lead()).eligible is True  # the control
+
+    decision = decide(us_contact(contactable=Blocked((reason,))), us_lead())
+
+    assert decision.eligible is False
+    assert decision.basis_rule is None
+    assert BLOCK_REASON_KINDS[reason] in decision.kinds
+
+
+def test_an_erased_contact_is_ineligible_with_every_other_reason_too() -> None:
+    """An erased Contact's gate answer is ``contact_erased`` whatever the list holds, and its
+    reason sits last, after any other one (Story 3.13)."""
+    blocked = Blocked((BlockReason.ADDRESS_SUPPRESSED, BlockReason.CONTACT_ERASED))
+
+    decision = decide(us_contact(contactable=blocked), us_lead(stage=PipelineStage.LOST))
+
+    assert decision.kinds == (
+        ReasonKind.ADDRESS_OR_DOMAIN_SUPPRESSED,
+        ReasonKind.LEAD_CLOSED,
+        ReasonKind.CONTACT_ERASED,
+    )
+    assert list(ReasonKind)[-1] is ReasonKind.CONTACT_ERASED
+
+
 def test_every_suppressed_key_gives_both_reasons_once() -> None:
     decision = decide(us_contact(contactable=Blocked(tuple(BlockReason))), us_lead())
 
@@ -604,6 +644,7 @@ def test_every_suppressed_key_gives_both_reasons_once() -> None:
         ReasonKind.ADDRESS_OR_DOMAIN_SUPPRESSED,
         ReasonKind.ASKED_NOT_TO_BE_CONTACTED,
         ReasonKind.LEAD_CLOSED,
+        ReasonKind.CONTACT_ERASED,  # Story 3.13's BlockReason, last in both orders
     )
 
 

@@ -47,6 +47,11 @@ status change appends an ``events`` row in the same transaction: entity ``alerts
 **Logs**, written after the transaction commits, carry ``alert_id``, ``kind``, ``channel`` and
 ``code`` or ``sink``, never text, a chat id or a token: ``alert_sent`` (INFO, with ``sink``),
 ``alert_unknown`` and ``alert_failed`` (WARNING, with ``code``).
+
+**Erasure (Story 3.13).** ``ERASURE`` declares ``alerts`` and ``notifications`` ``not_held``:
+they carry IDs and counts only, never a Contact's data. The module-level ``@command erase_pii(n:
+ContactErased)`` is notify's ``ContactErased`` subscriber (``nextron.main.build_subscribers``);
+it writes nothing.
 """
 
 import logging
@@ -54,6 +59,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Final
 
 from nextron.app.jobqueue.api import JobQueue
@@ -77,9 +83,11 @@ from nextron.domain.alert import (
     not_delivered_text,
     transition,
 )
+from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import Lane
 from nextron.domain.machines import Transition
+from nextron.domain.notifications import ContactErased
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
 from nextron.ports.alert import DELIVERY_UNKNOWN, AlertDelivery, AlertMessage, AlertPort
 from nextron.ports.clock import Clock
@@ -379,3 +387,29 @@ class Notify:
         now = self._clock.now()
         with current().transaction():
             return notifications_repo.dismiss(notification_id, now) == 1
+
+
+# Erasure (Story 3.13) -------------------------------------------------------------------------
+
+# What notify's erase_pii does to each of its tables with a personal-data column: none of them
+# ever holds a Contact's data.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "alerts": TableErasure(
+            Coverage.NOT_HELD,
+            "ops alerts carry IDs and counts only (AD-15); no alert kind that names a person "
+            "exists yet",
+        ),
+        "notifications": TableErasure(
+            Coverage.NOT_HELD,
+            "dashboard notices carry IDs and counts only; no kind that names a person exists "
+            "yet",
+        ),
+    }
+)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``notify``'s ``ContactErased`` subscriber (Story 3.13, AD-17): it writes nothing,
+    because no ``notify`` table holds a Contact's data (``ERASURE``)."""

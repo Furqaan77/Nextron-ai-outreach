@@ -57,6 +57,7 @@ PARAMETER_VALUES: Final = {
     "name": ["app.css", "htmx-2.0.11.min.js", "nope.js"],
     "grant": [*(str(spec.grant) for spec in GRANTS), "gmail", "start_grant"],
     "lead_id": ["01KA0000000000000000000000", "start_grant"],
+    "contact_id": ["01KA0000000000000000000000", "start_grant"],  # Story 3.13's erase step
 }
 QUERIES: Final = [b"", b"grant=internal_notify", b"grant=postmaster&confirm=yes&path=C:%5Cx.json"]
 
@@ -68,13 +69,14 @@ def get_paths(app: object) -> list[str]:
         if getattr(route, "methods", None) != {"GET"}:
             continue
         template = str(getattr(route, "path"))
-        names = PATH_PARAMETER.findall(template)
-        assert len(names) <= 1, template
-        if not names:
-            paths.append(template)
-            continue
-        [name] = names
-        paths += [template.replace(f"{{{name}}}", value) for value in PARAMETER_VALUES[name]]
+        filled = [template]
+        for name in PATH_PARAMETER.findall(template):  # every combination of the values
+            filled = [
+                path.replace(f"{{{name}}}", value)
+                for path in filled
+                for value in PARAMETER_VALUES[name]
+            ]
+        paths += filled
     return paths
 
 

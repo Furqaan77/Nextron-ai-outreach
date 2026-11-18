@@ -211,6 +211,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "created_at",
             "updated_at",
             "primary_set_by",  # Story 2.10
+            "erased_at",  # Story 3.13
         ),
     },
     "provenance_records": {
@@ -376,6 +377,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "om_id",
             "kid",
             "issued_at",
+        ),
+    },
+    "data_subject_requests": {  # Story 3.13
+        "compliance": (
+            "id",
+            "contact_id",
+            "kind",
+            "status",
+            "request_ref",
+            "opened_at",
+            "completed_at",
+            "receipt_id",
         ),
     },
     "evidence": {
