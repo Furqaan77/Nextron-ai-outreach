@@ -8,4 +8,5 @@ the repository of ``evidence``, ``signals``, ``signal_evidence`` and ``extractio
 ``profile`` (Stories 2.6 and 2.9) reads and writes the Lead's profile group, the ``research``
 columns of ``leads`` (``hq_tz``, ``hq_evidence_id`` and ``contact_methods``). ``export``
 (Story 3.15) reads, without writing, every column of the rows a subject access export needs.
+``postings`` (Story 2.11) is the repository of ``job_postings``.
 """

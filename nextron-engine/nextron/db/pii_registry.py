@@ -354,6 +354,16 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "pages_skipped_robots": PiiClass.NONE,
         "renders": PiiClass.NONE,
         "errors": PiiClass.NONE,
+        # Story 2.11: counts of the postings and hiring Events each check found
+        "careers_postings": PiiClass.NONE,
+        "careers_events": PiiClass.NONE,
+        "greenhouse_postings": PiiClass.NONE,
+        "greenhouse_events": PiiClass.NONE,
+        "lever_postings": PiiClass.NONE,
+        "lever_events": PiiClass.NONE,
+        "ashby_postings": PiiClass.NONE,
+        "ashby_events": PiiClass.NONE,
+        "board_errors": PiiClass.NONE,
     },
     "crawled_pages": {
         "id": PiiClass.NONE,
@@ -381,6 +391,25 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "tag": PiiClass.NONE,
         "first_seen_at": PiiClass.NONE,
         "last_seen_at": PiiClass.NONE,
+    },
+    # Story 2.11. A posting's title or description may name a person (a hiring manager, a
+    # recruiter to write to), so both are redacted; the URL is an organization's public posting,
+    # and the rest are IDs, codes, dates and times.
+    "job_postings": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "source": PiiClass.NONE,
+        "board_token": PiiClass.NONE,
+        "url": PiiClass.NONE,
+        "title": PiiClass.REDACT,
+        "description": PiiClass.REDACT,
+        "posted_date": PiiClass.NONE,
+        "first_seen_at": PiiClass.NONE,
+        "last_checked_at": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "closed_at": PiiClass.NONE,
+        "signal_id": PiiClass.NONE,
+        "evidence_id": PiiClass.NONE,
     },
     # Story 2.6. What matched may be a phone number or a page's own words, so it is redacted;
     # it is not purged with the page text. The rest are IDs, codes and times.

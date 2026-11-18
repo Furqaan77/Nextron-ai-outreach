@@ -47,6 +47,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "evidence": ("research", Coverage.TOMBSTONED),
     "crawled_pages": ("research", Coverage.TOMBSTONED),
     "page_contact_methods": ("research", Coverage.TOMBSTONED),
+    "job_postings": ("research", Coverage.TOMBSTONED),  # Story 2.11
     "suppression_entries": ("compliance", Coverage.TOMBSTONED),
     "data_subject_requests": ("compliance", Coverage.KEPT),
     "settings": ("setup", Coverage.NOT_HELD),

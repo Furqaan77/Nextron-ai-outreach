@@ -152,6 +152,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "DnsPort",
         "EmailSyntaxPort",
         "GoogleOAuthPort",
+        "JobBoardPort",
         "LlmPort",
         "MailPort",
         "RendererPort",
@@ -422,6 +423,7 @@ def test_every_adapter_package_is_classified_once() -> None:
 
     assert packages == {
         "ai",
+        "ats",
         "backup_target",
         "clock",
         "crawler",
@@ -460,6 +462,7 @@ def test_the_ai_package_is_guarded_and_a_gateway_reaches_no_claude_api() -> None
 def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None:
     names = (
         "ai",
+        "ats",
         "backup_target",
         "clock",
         "crawler",
@@ -477,6 +480,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
     (tmp_path / "ai" / "gateway.py").write_text("")
     modules = {
         "nextron.adapters.ai": [probe_module("nextron.adapters.ai", "route = 'haiku'")],
+        "nextron.adapters.ats": package_modules("nextron.adapters.ats"),
         "nextron.adapters.backup_target": package_modules("nextron.adapters.backup_target"),
         "nextron.adapters.clock": package_modules("nextron.adapters.clock"),
         "nextron.adapters.crawler": package_modules("nextron.adapters.crawler"),

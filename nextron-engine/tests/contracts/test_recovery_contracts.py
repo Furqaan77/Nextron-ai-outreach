@@ -223,6 +223,7 @@ def _main_registries() -> tuple[Triggers, JobTypes]:
         extractions=_never,
         primary=_never,
         test_runs=_never,
+        job_boards=_never,
     )
     triggers = main.build_triggers(
         job_types,

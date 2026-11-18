@@ -146,6 +146,7 @@ def world(db_engine: Engine) -> World:
         extractions=no_jobs,
         primary=no_jobs,
         test_runs=no_jobs,
+        job_boards=no_jobs,
     )
     found = World(
         dashboard,

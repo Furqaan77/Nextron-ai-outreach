@@ -50,6 +50,12 @@ Lead: empty, or ``None``):
   Evidence row as an ``EvidenceSupport(evidence, supports)``, ``supports`` being the names of
   the current Signals it supports, in the Signals' order.
 
+Story 2.11 adds ``job_postings(lead_id)``: the Lead's job postings as ``StoredPosting`` rows
+(title and description hidden from the ``repr``), the live ones first, then the newest first
+seen (then by ``id``); empty for an unknown Lead (a text that isn't a ULID included). A crawl
+run's ``StoredCrawlRun`` carries its posting counts (``careers_postings``, ...,
+``board_errors``; ``None`` until a check writes them).
+
 Story 2.10 adds ``no_decision_maker(lead_id)``: ``True`` when the Lead's last Primary Contact
 selection found no decision-maker, ``False`` when it found one, ``None`` before the first
 selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
@@ -76,7 +82,9 @@ Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
     (``contact_export.excerpts``); never a whole page, since the rest is the firm's and other
     people's data;
   - ``contact_methods``: the Lead's pages' contact methods whose ``matched`` text mentions the
-    Contact (the same terms), each with ``page_url`` and ``mentions``.
+    Contact (the same terms), each with ``page_url`` and ``mentions``;
+  - ``job_postings`` (Story 2.11): the Lead's postings whose ``title`` or ``description``
+    mentions the Contact (the same terms), every column plus ``mentions``.
 """
 
 import json
@@ -87,6 +95,7 @@ from datetime import datetime
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import export as export_repo
+from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -97,6 +106,7 @@ from nextron.db.repos.research.crawl import (
     StoredCrawlRun,
     StoredPage,
 )
+from nextron.db.repos.research.postings import StoredPosting
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.contact_export import address_history, excerpts, mention_terms, mentions
@@ -268,6 +278,16 @@ def no_decision_maker(lead_id: str) -> bool | None:
     return profile_repo.no_decision_maker(lead_id) if is_ulid(lead_id) else None
 
 
+def job_postings(lead_id: str) -> tuple[StoredPosting, ...]:
+    """The Lead's job postings: live first, then the newest first seen; see the module
+    docstring."""
+    if not is_ulid(lead_id):
+        return ()
+    found = postings_repo.for_lead(lead_id)
+    newest = sorted(found, key=lambda row: (row.first_seen_at, row.id), reverse=True)
+    return tuple(sorted(newest, key=lambda row: not row.live))
+
+
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:
     """Every extraction run of the Lead, oldest first."""
     return signals_repo.runs(lead_id) if is_ulid(lead_id) else ()
@@ -353,6 +373,12 @@ def export_pii(contact_id: str) -> dict[str, ExportRows]:
         named = mentions(_text_or_none(method.get("matched")), terms)
         if named:
             methods.append({**method, "mentions": list(named)})
+    postings: list[dict[str, object]] = []
+    for posting in export_repo.lead_postings(lead_id):
+        texts = (_text_or_none(posting.get(key)) for key in ("title", "description"))
+        named = mentions(" \n ".join(text for text in texts if text is not None), terms)
+        if named:
+            postings.append({**posting, "mentions": list(named)})
     return {
         "contact": (found,),
         "provenance_records": records,
@@ -361,4 +387,5 @@ def export_pii(contact_id: str) -> dict[str, ExportRows]:
         "signals": export_repo.signals_of([str(row["id"]) for row in evidence_rows]),
         "pages": tuple(pages),
         "contact_methods": tuple(methods),
+        "job_postings": tuple(postings),
     }

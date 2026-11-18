@@ -38,6 +38,7 @@ from nextron.db.models import Base
 from nextron.db.pii_registry import PII, PiiClass
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import Subscribers, UnitOfWorkFactory, command, current, use_case
 from nextron.domain import seed_yaml
@@ -81,6 +82,10 @@ PAGE_TEXT = "Plantpage: meet Jane, our partner. Call 0161 496 0000."
 MATCHED = "Plantmatch 0161 496 0000"
 VOID_REASON = "Plantvoid: Jane wrote back to say yes"
 OVERRIDE = "Plantreply: Jane asks what the audit costs."  # Story 4.6's override case
+# Story 2.11: two postings on one careers page (the same URL), each naming Jane
+POSTING_TITLE = "Plantposting: Assistant to Jane Plantdoe"
+POSTING_DESCRIPTION = "Plantdescription: write to Jane about the role."
+CAREERS_URL = "https://firm.co.uk/careers"
 ADDRESS = key_hash("address", EMAIL)
 PERSON = key_hash("person", (NAME, WEB))
 PROFILE = key_hash("profile", LINKEDIN)
@@ -293,6 +298,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         extractions=no_jobs,
         primary=no_jobs,
         test_runs=no_jobs,
+        job_boards=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -372,6 +378,19 @@ def plant(world: World) -> Planted:
         world.voided(entry_id, kind, value_hash)
     # a "remove us" on the firm's domain, voided with a reason that names the person
     world.voided("01JD3QZ8X5V9K2M7N4P6R8T0A4", "domain", DOMAIN, domain_plain=WEB)
+    for title in (POSTING_TITLE, POSTING_TITLE + " (part time)"):
+        world.transact(
+            lambda title=title: postings_repo.insert_posting(
+                lead_id=lead_id,
+                source="careers_page",
+                board_token=None,
+                url=CAREERS_URL,
+                title=title,
+                description=POSTING_DESCRIPTION,
+                posted_date=None,
+                checked_at=T0,
+            )
+        )
     world.transact(
         lambda: Playbook(world.clock).add_override_case(
             OVERRIDE, "question", contact_id=contact_id, names=(NAME,)
@@ -541,6 +560,8 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("page_contact_methods", "matched"),
         ("suppression_entries", "void_reason"),
         ("ai_test_cases", "input"),  # Story 4.6: playbook's hook erases it
+        ("job_postings", "title"),  # Story 2.11
+        ("job_postings", "description"),
     }
     not_planted = {
         (table, column)
@@ -819,6 +840,39 @@ def test_an_erasure_redacts_and_retires_the_contacts_override_cases(
     assert override_rows(world) == {planted.contact_id: (REDACTED, STAMP), bob: before[bob]}
     # no row is deleted: both cases are still stored
     assert world.sql("SELECT COUNT(*) FROM ai_test_cases WHERE origin = 'override'") == [(2,)]
+
+
+def test_an_erasure_tombstones_each_posting_of_the_lead_uniquely(world: World) -> None:
+    """Story 2.11's postings (title and description PII ``redact``): every posting of the
+    Contact's Lead is tombstoned (fail-safe, like its pages), each title ``[erased] <id>``,
+    so two postings of one careers page keep ``uq_job_postings_lead_id_url_title``; another
+    Lead's posting is left as it was."""
+    planted = plant(world)
+    other_lead = world.lead("other.co.uk", "Other LLP")
+    world.transact(
+        lambda: postings_repo.insert_posting(
+            lead_id=other_lead,
+            source="careers_page",
+            board_token=None,
+            url=CAREERS_URL,
+            title=POSTING_TITLE,
+            description=None,
+            posted_date=None,
+            checked_at=T0,
+        )
+    )
+
+    world.erase(planted.contact_id)
+
+    rows = world.sql(
+        "SELECT id, lead_id, url, title, description FROM job_postings ORDER BY lead_id, id"
+    )
+    ours = [row for row in rows if row[1] == planted.lead_id]
+    assert [(url, title, text) for posting_id, _, url, title, text in ours] == [
+        (CAREERS_URL, f"{REDACTED} {posting_id}", REDACTED) for posting_id, *_ in ours
+    ]
+    assert len(ours) == 2
+    assert [row[3:] for row in rows if row[1] == other_lead] == [(POSTING_TITLE, None)]
 
 
 def test_a_retention_erasure_takes_no_reference(world: World) -> None:

@@ -37,6 +37,7 @@ from nextron.db.models.base import new_id
 from nextron.db.repos.notify import alerts as alerts_repo
 from nextron.db.repos.notify import notifications as notifications_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import UnitOfWorkFactory
 from nextron.domain import seed_yaml
@@ -88,6 +89,9 @@ JANE_ALERT = "Contact needs review"
 BOB_ALERT = "Second Contact needs review"
 JANE_NOTICE = "A Contact needs a look"
 # Story 4.6: an Operator's Reply class override made from Jane's Reply, pseudonymised
+# Story 2.11: a posting naming Jane, and the firm's own
+JANE_POSTING = "Legal assistant to Jane Doe"
+FIRM_POSTING = "Paralegal, property team"
 JANE_REPLY = "Hi, Jane Doe here: what would the audit cost for our team?"
 JANE_OVERRIDE = "Hi, [name] here: what would the audit cost for our team?"
 REQUEST_COLUMNS = (
@@ -312,6 +316,20 @@ class Seeded:
                 kind="contact_review", subject=self.jane, text=JANE_NOTICE, at=T0
             )
         )
+        # Story 2.11: a posting naming Jane and the firm's own posting
+        for title in (JANE_POSTING, FIRM_POSTING):
+            world.transact(
+                lambda title=title: postings_repo.insert_posting(
+                    lead_id=self.lead,
+                    source="careers_page",
+                    board_token=None,
+                    url="https://firm.co.uk/careers",
+                    title=title,
+                    description=None,
+                    posted_date=None,
+                    checked_at=T0,
+                )
+            )
         # an override case made from Jane's Reply (Story 4.6)
         self.override = world.transact(
             lambda: Playbook(world.clock).add_override_case(
@@ -407,6 +425,8 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "Jane Doe is a partner in the property team.",
         "Write to jane.doe@firm.co.uk about leases.",
     ]
+    [posting] = research["job_postings"]  # never the firm's own posting
+    assert (posting["title"], posting["mentions"]) == (JANE_POSTING, ["name"])
     [contact_method] = research["contact_methods"]
     assert contact_method["page_url"] == "https://firm.co.uk/team"
     assert (contact_method["method"], contact_method["matched"]) == ("form", f"mailto:{EMAIL}")
@@ -668,7 +688,8 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     research = file["research"]
     assert [row["id"] for row in research["contact"]] == [contact]
     assert len(research["provenance_records"]) == 1
-    for section in ("addresses", "evidence", "signals", "pages", "contact_methods"):
+    sections = ("addresses", "evidence", "signals", "pages", "contact_methods", "job_postings")
+    for section in sections:
         assert research[section] == [], section
     assert file["compliance"]["suppression"] == []
     assert [row["status"] for row in file["compliance"]["requests"]] == ["completed"]
@@ -710,6 +731,7 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     }
     assert [row["quote"] for row in research["evidence"]] == [REDACTED]
     assert research["pages"] == [] and research["contact_methods"] == []
+    assert research["job_postings"] == []  # Story 2.11: tombstoned, so nothing mentions her
     # Story 4.6: playbook's hook erased and retired her override case
     [override] = file["playbook"]["override_cases"]
     assert (override["input"], override["retired_at"]) == (

@@ -32,6 +32,7 @@ from nextron.ports.crawler import CrawlerPort
 from nextron.ports.dns import DnsPort
 from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
+from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
 from nextron.ports.renderer import RendererPort
@@ -45,6 +46,7 @@ from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.dns import FakeDns
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
+from tests.fakes.job_board import ScriptedJobBoards
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.mail import InMemoryMail
 from tests.fakes.renderer import ScriptedRenderer
@@ -69,5 +71,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         TokenCodecPort: FakeTokenCodec,
         RendererPort: ScriptedRenderer,
         DnsPort: FakeDns,
+        JobBoardPort: ScriptedJobBoards,
     }
 )

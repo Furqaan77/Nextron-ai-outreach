@@ -61,6 +61,11 @@ handler runs in.
   (``{"v": 1}``) calls ``checks().queue_daily()`` once, which queues one per-domain job per
   listed Sending Domain. A retryable ``AdapterError`` (a DNS timeout) is retried by the runner;
   any other error fails the job, and nothing is recorded either way.
+- ``check_job_boards(job_boards)`` (Story 2.11): calls ``job_boards().check_job_boards(lead_id,
+  run_id)`` once (the research service's ``JobBoards``) and returns ``DEFERRED`` when it
+  returns ``False`` (the budget refused the check).
+- ``recheck_event(job_boards)`` (Story 2.11): calls ``job_boards().recheck_event(signal_id)``
+  once and returns ``None``; a retryable ``AdapterError`` it raises is retried by the runner.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -72,6 +77,7 @@ from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
 from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
+from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
 from nextron.domain.restore_test import RestoreTestKind
@@ -319,3 +325,37 @@ def check_domains(checks: Callable[[], DomainChecking]) -> Handler:
             checks().queue_daily()
 
     return handle_check_domains
+
+
+class CheckingJobBoards(Protocol):
+    """What ``check_job_boards`` and ``recheck_event`` need of the ``research`` service's
+    ``JobBoards``."""
+
+    def check_job_boards(self, lead_id: str, run_id: str) -> bool: ...
+
+    def recheck_event(self, signal_id: str) -> None: ...
+
+
+def check_job_boards(job_boards: Callable[[], CheckingJobBoards]) -> Handler:
+    """The ``check_job_boards`` job's handler: check the payload's Lead's ATS boards through
+    ``job_boards()``."""
+
+    def handle_check_job_boards(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        run_id = _ulid_field(job, RUN_ID_FIELD)
+        if not job_boards().check_job_boards(lead_id, run_id):
+            return DEFERRED
+        return None
+
+    return handle_check_job_boards
+
+
+def recheck_event(job_boards: Callable[[], CheckingJobBoards]) -> Handler:
+    """The ``recheck_event`` job's handler: re-check the payload's Event's posting through
+    ``job_boards()``."""
+
+    def handle_recheck_event(job: Job) -> None:
+        signal_id = _ulid_field(job, SIGNAL_ID_FIELD)
+        job_boards().recheck_event(signal_id)
+
+    return handle_recheck_event

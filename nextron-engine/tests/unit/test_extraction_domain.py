@@ -83,7 +83,10 @@ def answer(**lists: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def signal(
-    quote: str, signal_type: str = "law_hiring_legal_ops", block_id: str = TEAM, **more: Any
+    quote: str,
+    signal_type: str = "law_ai_confidentiality_post",
+    block_id: str = TEAM,
+    **more: Any,
 ) -> dict[str, Any]:
     return {
         "signal_type": signal_type,
@@ -340,7 +343,9 @@ def test_number_in_refuses_the_wrong_types() -> None:
 
 def test_valid_proposals_are_kept_in_order_with_normalised_quotes() -> None:
     parsed = answer(
-        signals=[signal("We are hiring a  Legal Operations\nManager.", " LAW_Hiring_Legal_Ops ")],
+        signals=[
+            signal("We are hiring a  Legal Operations\nManager.", " LAW_AI_Confidentiality_Post ")
+        ],
         profile_facts=[fact("Our head office is in Leeds, UK.", "  Leeds  ")],
         size_clues=[size("Smith & Jones LLP has 12 lawyers", 12)],
     )
@@ -350,7 +355,7 @@ def test_valid_proposals_are_kept_in_order_with_normalised_quotes() -> None:
     assert (found.discards, found.dropped_dates) == ((), ())
     assert found.observations == (
         Observation(
-            Claim(signal_type="law_hiring_legal_ops"),
+            Claim(signal_type="law_ai_confidentiality_post"),
             TEAM,
             TEAM_URL,
             "We are hiring a Legal Operations Manager.",
@@ -385,6 +390,9 @@ SIG, SIZE, FACT = Discarded.SIGNAL, Discarded.SIZE_CLUE, Discarded.PROFILE_FACT
         (signal(HIRED, "made_up"), SIG, "unknown_signal_type", TEAM),
         # a rule-only type (absence Evidence only) can't be quoted
         (signal(HIRED, "law_contact_form_only"), SIG, "unknown_signal_type", TEAM),
+        # Story 2.11: hiring Events come only from job postings
+        (signal(HIRED, "law_hiring_legal_ops"), SIG, "hiring_type", TEAM),
+        (signal(HIRED, " LAW_HIRING_LEGAL_OPS "), SIG, "hiring_type", TEAM),
         (signal(HIRED, block_id="signal_types"), SIG, "unknown_block", None),
         (signal(HIRED, block_id=OTHER_ULID), SIG, "unknown_block", None),
         (signal("We are hiring a robot"), SIG, "quote_not_in_page", TEAM),
@@ -505,7 +513,7 @@ def test_an_attribute_never_carries_a_date_and_dropping_it_is_not_recorded() -> 
 def test_a_repeat_is_dropped_without_a_record_and_job_postings_are_ignored() -> None:
     quote = "We are hiring a Legal Operations Manager."
     parsed = answer(
-        signals=[signal(quote), signal(f" {quote} "), signal(quote, "law_ai_confidentiality_post")],
+        signals=[signal(quote), signal(f" {quote} "), signal(quote, "law_expansion")],
         size_clues=[size("Smith & Jones LLP has 12 lawyers", 12)] * 2,
         job_postings=[
             {
@@ -521,8 +529,8 @@ def test_a_repeat_is_dropped_without_a_record_and_job_postings_are_ignored() -> 
     found = run(parsed)
 
     assert [o.claim for o in found.observations] == [
-        Claim(signal_type="law_hiring_legal_ops"),
-        Claim(signal_type="law_ai_confidentiality_post"),  # another claim: kept
+        Claim(signal_type="law_ai_confidentiality_post"),
+        Claim(signal_type="law_expansion"),  # another claim: kept
         Claim(fact=FactKind.LAWYERS_FIRM_WIDE),
     ]
     assert found.discards == ()

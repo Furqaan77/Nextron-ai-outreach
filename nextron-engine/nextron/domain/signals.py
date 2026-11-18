@@ -35,6 +35,22 @@ aware ``datetime``s; and ``ValueError`` for a Tier outside 1 to 3 or a negative 
   quotes of the Event's live Evidence) as a whole phrase: both normalised
   (``quotes.normalise``) and casefolded, with no letter or digit just before or after it. The
   roles keep the entries' order, each once (case-insensitive); no entry gives ``()``.
+
+``has_phrase(text, phrase)`` is that whole-phrase test: ``phrase`` is in ``text`` with no letter
+or digit just before or after it (an empty phrase is never in a text).
+
+**Hiring matches (Story 2.11)**, which turn a job posting into an Event:
+
+- ``HiringMatch(signal_type, in_title, term)``: the hiring Signal type a posting matched, whether
+  the term was found in its title, and the term (as the Segment writes it).
+- ``match_hiring(title, description, segment) -> HiringMatch | None``: the candidates are the
+  Segment's Signal types whose ``sources`` include ``careers_page`` or ``ats_board``
+  (``segments.HIRING_SOURCES``), in the Segment's order. Each type's ``match_terms`` are tried in
+  order; a term matches as a whole phrase (``has_phrase``), case-insensitively, on the
+  ``quotes.normalise``d and casefolded text. The title is searched for every type first, then
+  the description (``None`` or empty: not searched). No match gives ``None``. ``TypeError``
+  unless the title is a ``str``, the description a ``str`` or ``None`` and the Segment a
+  ``SegmentDef``.
 """
 
 from collections.abc import Iterable
@@ -43,7 +59,13 @@ from datetime import UTC, date, datetime
 from typing import Final
 
 from nextron.domain.quotes import normalise
-from nextron.domain.segments import TIERS, SignalClass, SignalType
+from nextron.domain.segments import (
+    HIRING_SOURCES,
+    TIERS,
+    SegmentDef,
+    SignalClass,
+    SignalType,
+)
 
 FULL_WEIGHT_DAYS: Final = 30  # a Tier 1 Event keeps its full weight through this day
 EVENT_LIFE_DAYS: Final = 90  # a Tier 1 Event is worth 0 from this day; others expire after it
@@ -141,7 +163,7 @@ def strongest_event(events: Iterable[EventSignal], now: datetime) -> EventSignal
     return best
 
 
-def _has_phrase(text: str, phrase: str) -> bool:
+def has_phrase(text: str, phrase: str) -> bool:
     """Whether ``phrase`` is in ``text`` with no letter or digit just before or after it."""
     if not phrase:
         return False
@@ -167,10 +189,56 @@ def preferred_roles(signal_type: SignalType, quotes: Iterable[str]) -> tuple[str
     seen: set[str] = set()
     for preferred in signal_type.preferred_roles:
         terms = [normalise(term).casefold() for term in preferred.when_terms]
-        if not any(_has_phrase(text, term) for term in terms for text in texts):
+        if not any(has_phrase(text, term) for term in terms for text in texts):
             continue
         for role in preferred.roles:
             if role.casefold() not in seen:
                 seen.add(role.casefold())
                 roles.append(role)
     return tuple(roles)
+
+
+# Hiring matches (Story 2.11) -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class HiringMatch:
+    """The hiring Signal type a posting matched, where, and the term matched."""
+
+    signal_type: SignalType
+    in_title: bool
+    term: str
+
+
+def _first_term(text: str, candidates: Iterable[SignalType]) -> tuple[SignalType, str] | None:
+    folded = normalise(text).casefold()
+    for signal_type in candidates:
+        for term in signal_type.match_terms:
+            if has_phrase(folded, normalise(term).casefold()):
+                return signal_type, term
+    return None
+
+
+def match_hiring(
+    title: str, description: str | None, segment: SegmentDef
+) -> HiringMatch | None:
+    """The hiring Signal type a posting matches, or ``None``; see the module docstring."""
+    if not isinstance(title, str):
+        raise TypeError("title must be a str")
+    if description is not None and not isinstance(description, str):
+        raise TypeError("description must be a str or None")
+    if not isinstance(segment, SegmentDef):
+        raise TypeError("segment must be a SegmentDef")
+    candidates = [
+        signal_type
+        for signal_type in segment.signal_types
+        if HIRING_SOURCES & set(signal_type.sources)
+    ]
+    found = _first_term(title, candidates)
+    if found is not None:
+        return HiringMatch(found[0], True, found[1])
+    if description:
+        found = _first_term(description, candidates)
+        if found is not None:
+            return HiringMatch(found[0], False, found[1])
+    return None

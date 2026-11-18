@@ -15,6 +15,10 @@ the running use case's transaction. It stores and returns what it is given and c
   ``update_page(page_id, ...)``: a new fetch of a stored page.
 - ``ats_link(lead_id, url)``; ``ats_links(lead_id)``, by URL; ``insert_ats_link(...) -> id``;
   ``touch_ats_link(link_id, run_id, page_id, at)``: seen again.
+- ``set_posting_counts(run_id, counts)`` (Story 2.11): writes the run's job posting counts, each
+  named in ``POSTING_COUNTS`` (``careers_postings``, ``careers_events``, ``<source>_postings``
+  and ``<source>_events`` for ``greenhouse``, ``lever`` and ``ashby``, and ``board_errors``);
+  ``StoredCrawlRun`` carries them (``None`` while unwritten).
 - ``purge_text(now) -> int``: nulls ``text`` where ``text_purge_after <= now``, keeping the
   hash; returns how many rows it changed.
 - ``reparent(loser_id, survivor_id)``: moves every run of the Lead ``loser_id``, and each page
@@ -94,6 +98,16 @@ class StoredCrawlRun:
     pages_skipped_robots: int
     renders: int
     errors: int
+    # Story 2.11: postings and hiring Events per source, NULL while the run hasn't checked it
+    careers_postings: int | None = None
+    careers_events: int | None = None
+    greenhouse_postings: int | None = None
+    greenhouse_events: int | None = None
+    lever_postings: int | None = None
+    lever_events: int | None = None
+    ashby_postings: int | None = None
+    ashby_events: int | None = None
+    board_errors: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +156,29 @@ _RUN_COLUMNS = (
     CrawlRunRecord.pages_skipped_robots,
     CrawlRunRecord.renders,
     CrawlRunRecord.errors,
+    CrawlRunRecord.careers_postings,
+    CrawlRunRecord.careers_events,
+    CrawlRunRecord.greenhouse_postings,
+    CrawlRunRecord.greenhouse_events,
+    CrawlRunRecord.lever_postings,
+    CrawlRunRecord.lever_events,
+    CrawlRunRecord.ashby_postings,
+    CrawlRunRecord.ashby_events,
+    CrawlRunRecord.board_errors,
+)
+# The crawl_runs counts set_posting_counts may write (Story 2.11)
+POSTING_COUNTS = frozenset(
+    {
+        "careers_postings",
+        "careers_events",
+        "greenhouse_postings",
+        "greenhouse_events",
+        "lever_postings",
+        "lever_events",
+        "ashby_postings",
+        "ashby_events",
+        "board_errors",
+    }
 )
 _PAGE_COLUMNS = (
     CrawledPageRecord.id,
@@ -249,6 +286,18 @@ def run(run_id: str) -> StoredCrawlRun | None:
 def latest_run(lead_id: str) -> StoredCrawlRun | None:
     """The Lead's run started last, or ``None``."""
     return _one_run(CrawlRunRecord.lead_id == lead_id)
+
+
+def set_posting_counts(run_id: str, counts: Mapping[str, int]) -> None:
+    """Write the job posting counts ``counts`` (each a name of ``POSTING_COUNTS``) on the run
+    ``run_id``; ``ValueError`` for any other name, before any write."""
+    unknown = set(counts) - POSTING_COUNTS
+    if unknown:
+        raise ValueError(f"not a posting count: {sorted(unknown)}")
+    if counts:
+        current().session.execute(
+            update_rows(CrawlRunRecord).where(CrawlRunRecord.id == run_id).values(**counts)
+        )
 
 
 def run_count(lead_id: str) -> int:

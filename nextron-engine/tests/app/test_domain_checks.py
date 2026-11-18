@@ -100,6 +100,7 @@ class World:
             extractions=no_jobs,
             primary=no_jobs,
             test_runs=no_jobs,
+            job_boards=no_jobs,
             domain_checks=lambda: self.checks,
         )
         self.queue = JobQueue(self.clock, job_types)

@@ -1595,6 +1595,7 @@ def create_app(
             lead_markets(),
             research_queries.no_decision_maker(found.id),
             lead_erasures(contacts),
+            postings=research_queries.job_postings(found.id),
         )
         return page(
             request,

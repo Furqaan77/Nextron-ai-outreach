@@ -56,18 +56,19 @@ robots.txt is decoded as ``utf-8-sig`` (a byte-order mark breaks protego) with r
 parsed by protego; ``allows(url)`` is protego's ``can_fetch(url, ROBOTS_TOKEN)`` (``False``
 when protego raises) and ``crawl_delay_s`` its ``crawl_delay(ROBOTS_TOKEN)``.
 
-**``fetch_resource(url, *, site, accepts, accept_header, operation, deadline, min_interval_s)
--> Resource(final_url, status, media_type, charset, headers, body)``** (Story 2.6, for the
-renderer) runs the same hops as a page fetch, every check, the pinned address, the redirects and
-``MAX_PAGE_BYTES`` included, with one ``ApiCall`` per request metered as ``("web",
-operation)``. ``min_interval_s=None`` means unpaced (no slot is taken); ``deadline`` (on
-``monotonic``, or ``None``) caps the fetch's own 30 s deadline and is checked before the first
-hop too; a 2xx media type must satisfy ``accepts`` (a predicate), else
-``fetch_unsupported_type``; ``accept_header`` is sent as ``Accept``. The answer's body is
-returned undecoded (a non-2xx answer's is empty, as for a page), and ``headers`` holds only
-``access-control-allow-origin`` and ``access-control-allow-credentials`` (``CORS_HEADERS``) of
-the final answer. ``check_target(url, site)`` is step 1 of a hop on its own: the ``FetchTarget``
-when the egress rules and the ``site`` pin accept ``url``, else ``fetch_refused``.
+**``fetch_resource(url, *, site, accepts, accept_header, operation, deadline, min_interval_s,
+provider="web") -> Resource(final_url, status, media_type, charset, headers, body)``** (Story
+2.6, for the renderer; Story 2.11's ATS boards pass ``provider="ats"``) runs the same hops as a
+page fetch, every check, the pinned address, the redirects and ``MAX_PAGE_BYTES`` included,
+with one ``ApiCall`` per request metered as ``(provider, operation)``.
+``min_interval_s=None`` means unpaced (no slot is taken); ``deadline`` (on ``monotonic``, or
+``None``) caps the fetch's own 30 s deadline and is checked before the first hop too; a 2xx
+media type must satisfy ``accepts`` (a predicate), else ``fetch_unsupported_type``;
+``accept_header`` is sent as ``Accept``. The answer's body is returned undecoded (a non-2xx
+answer's is empty, as for a page), and ``headers`` holds only ``access-control-allow-origin`` and
+``access-control-allow-credentials`` (``CORS_HEADERS``) of the final answer.
+``check_target(url, site)`` is step 1 of a hop on its own: the ``FetchTarget`` when the egress
+rules and the ``site`` pin accept ``url``, else ``fetch_refused``.
 
 **Errors.** A timeout (``httpx2.TimeoutException`` or the deadline) is retryable
 ``fetch_timeout``; ``httpx2.ConnectError`` (refused, unreachable, a TLS failure) is
@@ -389,11 +390,14 @@ class HttpCrawler:
         operation: str,
         deadline: float | None,
         min_interval_s: float | None,
+        provider: str = PROVIDER,
     ) -> Resource:
         """One resource inside the egress filter; see the module docstring."""
         interval = None if min_interval_s is None else request_interval(min_interval_s)
         kind = _Kind(operation, MAX_PAGE_BYTES, accepts, accept_header)
-        answer = self._fetch(url, site=site, interval=interval, kind=kind, limit=deadline)
+        answer = self._fetch(
+            url, site=site, interval=interval, kind=kind, limit=deadline, provider=provider
+        )
         return Resource(
             final_url=answer.final_url,
             status=answer.status,
@@ -413,9 +417,11 @@ class HttpCrawler:
         interval: float | None,
         kind: _Kind,
         limit: float | None = None,
+        provider: str = PROVIDER,
     ) -> _Answer:
         """The hops of one fetch: paced at ``interval`` (``None``: unpaced), within the 30 s
-        deadline and ``limit`` (a ``monotonic`` time, or ``None``)."""
+        deadline and ``limit`` (a ``monotonic`` time, or ``None``), each request metered as
+        ``(provider, kind.operation)``."""
         target = self._target(url, site)  # before any live part is built
         http = self._client()
         resolve = self._resolver()
@@ -432,7 +438,7 @@ class HttpCrawler:
                 if limit is not None:
                     deadline = min(deadline, limit)
             self._check_deadline(deadline)
-            with Metered(self._meter, PROVIDER, kind.operation):
+            with Metered(self._meter, provider, kind.operation):
                 outcome = self._request(http, target, address, kind, deadline)
             if isinstance(outcome, _Answer):
                 return outcome

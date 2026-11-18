@@ -16,6 +16,8 @@ a ``date``, an ``int``, a ``bool`` or a ``str`` (``evidence.pages_checked`` is i
   ``evidence_ids``, retracted ones included, by ``first_seen_at``, then ``id``, each with
   ``evidence_ids``: the linked ids among ``evidence_ids``, sorted;
 - ``lead_pages(lead_id)``: the Lead's ``crawled_pages``, by ``url``, then ``id``;
+- ``lead_postings(lead_id)`` (Story 2.11): the Lead's ``job_postings``, by ``first_seen_at``,
+  then ``id``;
 - ``lead_contact_methods(lead_id)``: the ``page_contact_methods`` of the Lead's pages, each
   with ``page_url``, its page's ``url``, by that URL, then ``method``, ``signature``,
   ``source`` and ``id``.
@@ -26,7 +28,11 @@ from typing import Final
 
 from sqlalchemy import Executable, select
 
-from nextron.db.models.crawl import CrawledPageRecord, PageContactMethodRecord
+from nextron.db.models.crawl import (
+    CrawledPageRecord,
+    JobPostingRecord,
+    PageContactMethodRecord,
+)
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.models.signals import EvidenceRecord, SignalEvidenceRecord, SignalRecord
 from nextron.db.uow import current
@@ -38,6 +44,7 @@ SIGNALS: Final = SignalRecord.__table__
 LINKS: Final = SignalEvidenceRecord.__table__
 PAGES: Final = CrawledPageRecord.__table__
 METHODS: Final = PageContactMethodRecord.__table__
+POSTINGS: Final = JobPostingRecord.__table__
 PAGE_URL: Final = "page_url"
 EVIDENCE_IDS: Final = "evidence_ids"
 
@@ -111,4 +118,13 @@ def lead_contact_methods(lead_id: str) -> tuple[dict[str, object], ...]:
             METHODS.c.source,
             METHODS.c.id,
         )
+    )
+
+
+def lead_postings(lead_id: str) -> tuple[dict[str, object], ...]:
+    """Every column of the Lead's job postings, first seen first."""
+    return _rows(
+        select(POSTINGS)
+        .where(POSTINGS.c.lead_id == lead_id)
+        .order_by(POSTINGS.c.first_seen_at, POSTINGS.c.id)
     )

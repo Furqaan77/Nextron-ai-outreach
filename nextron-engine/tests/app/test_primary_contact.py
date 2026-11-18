@@ -43,7 +43,6 @@ from tests.app.test_signal_extraction import (
     crawled,
     no_jobs,
     ok,
-    signal,
 )
 
 AP_CLERK = "We are hiring an Accounts Payable Clerk."
@@ -266,8 +265,10 @@ def test_the_strongest_events_ap_ar_quote_makes_the_controller_primary(
     lead, run_id, pages = crawled(
         world, team=f"<p>{COO}</p><p>{CONTROLLER}</p>", about=f"<p>{posting}</p>"
     )
-    answer = ok(signals=[signal(pages[ABOUT], posting, "ops_hiring_manual_entry")])
-    world.extract(lead, run_id, answer, people=[people_answer(pages)])
+    world.extract(lead, run_id, ok(), people=[people_answer(pages)])
+    # Story 2.11: a hiring Event comes from a job posting (tests/app/test_job_boards.py), so
+    # the posting's Event is stored here as the posting store stores it
+    insert_event(world, lead, posting, None)
 
     choice = select(world, lead)
 
@@ -703,11 +704,13 @@ def test_the_select_primary_contact_job_runs_the_selection(world: World) -> None
         extractions=no_jobs,
         primary=lambda: contacts,
         test_runs=no_jobs,
+        job_boards=no_jobs,
     ).get("select_primary_contact").handler
-    [(_, _, payload, _)] = world.jobs("select_primary_contact")
-    job = Job(
-        "01JD0000000000000000000099", "select_primary_contact", Lane.BULK, json.loads(payload), 1
-    )
+    # Story 2.11: extract_lead queues check_job_boards, which queues the selection with this
+    # payload (tests/app/test_job_boards.py)
+    [(_, _, queued, _)] = world.jobs("check_job_boards")
+    payload = {"v": 1, "lead_id": json.loads(queued)["lead_id"]}
+    job = Job("01JD0000000000000000000099", "select_primary_contact", Lane.BULK, payload, 1)
 
     with world.units.open():
         assert handler(job) is None

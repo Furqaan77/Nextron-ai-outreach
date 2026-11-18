@@ -10,12 +10,15 @@ the AI routes, so ``nextron.app`` never imports ``nextron.adapters.ai`` to learn
 - **The fact kinds.** ``FactKind`` is exactly the profile-fact and size-clue kinds of every
   ``extract_signals`` output schema: ``PROFILE_FACTS`` the ``profile_facts`` kinds and
   ``SIZE_FACTS`` the ``size_clues`` kinds.
+- **The job postings (Story 2.11).** Every ``extract_signals`` output schema still has the
+  ``job_postings`` list, each posting with exactly the ``title``, ``url``, ``posted_date``,
+  ``block_id`` and ``quote`` that ``nextron.domain.postings.validate_postings`` reads.
 """
 
 import typing
 
 from nextron.adapters.ai import routes
-from nextron.adapters.ai.schemas import Person, ProfileFact, SizeClue
+from nextron.adapters.ai.schemas import JobPosting, Person, ProfileFact, SizeClue
 from nextron.domain import people
 from nextron.domain.extraction import BUDGET_CLASS, PROFILE_FACTS, ROUTE, SIZE_FACTS
 
@@ -50,3 +53,9 @@ def test_every_extract_people_candidate_has_the_people_domains_budget_class() ->
     assert set(Person.model_fields) == {"name", "role", "block_id", "quote"}
     for candidate in candidates:  # every version still has the people list
         assert "people" in candidate.output_schema.model.model_fields
+
+
+def test_every_extract_signals_schema_has_the_job_postings_validate_postings_reads() -> None:
+    assert set(JobPosting.model_fields) == {"title", "url", "posted_date", "block_id", "quote"}
+    for candidate in routes.candidates(ROUTE):
+        assert "job_postings" in candidate.output_schema.model.model_fields

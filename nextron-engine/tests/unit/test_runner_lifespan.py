@@ -229,6 +229,8 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "select_primary_contact",
         "run_ai_test_sets",
         "check_domains",
+        "check_job_boards",
+        "recheck_event",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -271,6 +273,21 @@ def test_the_built_renderer_fetches_through_the_crawls_own_crawler(
     [renderer] = renderers
     assert renderer._fetcher is crawler  # noqa: SLF001 - the wiring under test
     assert renderer._browser is None  # noqa: SLF001 - default_browser, looked up per render
+
+
+def test_the_built_ats_boards_fetch_through_the_crawls_own_crawler(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 2.11: the ATS boards' requests go through the crawl's ``HttpCrawler`` (filtered,
+    paced and metered there, as ``ats``); building them fetches nothing."""
+    crawlers = spy(monkeypatch, "HttpCrawler")
+    boards = spy(monkeypatch, "AtsBoards")
+
+    build(units)
+
+    [crawler] = crawlers
+    [built] = boards
+    assert built._fetcher is crawler  # noqa: SLF001 - the wiring under test
 
 
 def test_the_built_runner_sweeps_dead_jobs_into_job_dead_alerts(
@@ -552,6 +569,7 @@ def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
         extractions=no_crawls,
         primary=no_crawls,
         test_runs=no_crawls,
+        job_boards=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -755,6 +773,7 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
         extractions=no_crawls,
         primary=no_crawls,
         test_runs=no_crawls,
+        job_boards=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 

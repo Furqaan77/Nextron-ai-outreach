@@ -19,6 +19,8 @@ Table                      Owner        Exported as / why not
 ``evidence``               research     ``evidence``
 ``crawled_pages``          research     ``pages`` (``text`` shown as ``text_excerpts``)
 ``page_contact_methods``   research     ``contact_methods``
+``job_postings``           research     ``job_postings`` (Story 2.11: title or description
+                                        mentions the Contact)
 ``suppression_entries``    compliance   ``suppression`` (``value_hash`` withheld)
 ``data_subject_requests``  compliance   ``requests``
 ``alerts``                 notify       ``alerts``
@@ -157,6 +159,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
             "research", "pages", shown_as=MappingProxyType({"text": "text_excerpts"})
         ),
         "page_contact_methods": Exported("research", "contact_methods"),
+        "job_postings": Exported("research", "job_postings"),
         "suppression_entries": Exported(
             "compliance",
             "suppression",

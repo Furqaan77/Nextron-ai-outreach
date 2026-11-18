@@ -78,10 +78,12 @@ work and opens its own transactions, in three phases:
    ``extraction_finished`` (``lead_id``, ``run_id``, ``outcome``, ``error_code``), as Story 2.9's
    do.
 
-Whenever it records a run (any outcome but the raise), the same transaction enqueues
-``select_primary_contact``: scope the Lead, discriminator ``tick`` (a live job absorbs a
-repeat), payload ``{v, lead_id}`` and, when the Lead has a ``web_domain``, the concurrency key
-``domain:<web_domain>``. A people run is an ``extraction_runs`` row with ``route``
+Whenever it records a run (any outcome but the raise), the same transaction enqueues the next
+stage, ``check_job_boards`` (Story 2.11, ``nextron.app.research.job_boards``, which enqueues
+``select_primary_contact`` when it is done, so the selection sees the hiring Events): scope the
+Lead, discriminator ``tick`` (a live job absorbs a repeat), payload ``{v, lead_id, run_id}``
+(``run_id`` the crawl run ``extract`` was given) and, when the Lead has a ``web_domain``, the
+concurrency key ``domain:<web_domain>``. A people run is an ``extraction_runs`` row with ``route``
 ``extract_people``, recorded like Story 2.9's (``actor``, ``crawl_run_id``, ``pages_sent``,
 ``pages_truncated``, ``started_at`` phase 1's now, ``ended_at``).
 
@@ -119,7 +121,13 @@ from nextron.db.uow import current, use_case
 from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import allow
 from nextron.domain.contacts import ContactCandidate, PrimaryChoice, ProvenanceSource
-from nextron.domain.crawl import DOMAIN_KEY_PREFIX, LEAD_ID_FIELD, PAYLOAD_VERSION, PageKind
+from nextron.domain.crawl import (
+    DOMAIN_KEY_PREFIX,
+    LEAD_ID_FIELD,
+    PAYLOAD_VERSION,
+    RUN_ID_FIELD,
+    PageKind,
+)
 from nextron.domain.extraction import (
     EXTRACTED_BY_RULE,
     PAGE_TEXT_BUDGET,
@@ -138,7 +146,6 @@ from nextron.domain.people import (
     PEOPLE_PAGE_KINDS,
     PERSON_DISCARDED,
     ROUTE,
-    SELECT_PRIMARY_CONTACT_JOB,
     LivePersonEvidence,
     PeoplePlan,
     PeopleValidation,
@@ -149,6 +156,7 @@ from nextron.domain.people import (
     reconcile_people,
     validate_people,
 )
+from nextron.domain.postings import CHECK_JOB_BOARDS_JOB
 from nextron.domain.segments import EvidenceType, SegmentDef, SizeUnit
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
@@ -175,6 +183,7 @@ class _PeopleCall:
 
     lead_id: str
     web_domain: str | None
+    run_id: str  # the payload's crawl run, passed down the chain (Story 2.11)
     crawl_run_id: str | None
     started_at: datetime
     route_tuple: RouteTuple
@@ -296,7 +305,7 @@ class PeopleExtractions:
         route_tuple = playbook_queries.active_tuple(ROUTE)
         if route_tuple is None:
             return self._recorded(
-                lead, crawl_run_id, ExtractionOutcome.NO_ACTIVATION, None, started_at
+                lead, run_id, crawl_run_id, ExtractionOutcome.NO_ACTIVATION, None, started_at
             )
         last = signals_repo.last_ok_run(lead.id, ROUTE)
         pages = sorted(
@@ -305,7 +314,12 @@ class PeopleExtractions:
         )
         if not any(last is None or page.changed_at > last.started_at for page in pages):
             return self._recorded(
-                lead, crawl_run_id, ExtractionOutcome.NO_PAGES, route_tuple.actor, started_at
+                lead,
+                run_id,
+                crawl_run_id,
+                ExtractionOutcome.NO_PAGES,
+                route_tuple.actor,
+                started_at,
             )
         full = [page.text or "" for page in pages]
         cut = allot(full, PAGE_TEXT_BUDGET)
@@ -313,6 +327,7 @@ class PeopleExtractions:
         return _PeopleCall(
             lead_id=lead.id,
             web_domain=lead.web_domain,
+            run_id=run_id,
             crawl_run_id=crawl_run_id,
             started_at=started_at,
             route_tuple=route_tuple,
@@ -334,15 +349,16 @@ class PeopleExtractions:
     def _recorded(
         self,
         lead: StoredLead,
+        run_id: str,
         crawl_run_id: str | None,
         outcome: ExtractionOutcome,
         actor: str | None,
         started_at: datetime,
     ) -> RecordedRun:
-        """Record a run that made no call, and enqueue the selection."""
-        run_id = self._record(lead.id, crawl_run_id, outcome, actor=actor, started_at=started_at)
-        self._select(lead.id, lead.web_domain)
-        return RecordedRun(lead.id, run_id, outcome, None)
+        """Record a run that made no call, and enqueue the next stage."""
+        recorded = self._record(lead.id, crawl_run_id, outcome, actor=actor, started_at=started_at)
+        self._next_stage(lead.id, run_id, lead.web_domain)
+        return RecordedRun(lead.id, recorded, outcome, None)
 
     # Runs and the selection ---------------------------------------------------------------------
 
@@ -383,7 +399,7 @@ class PeopleExtractions:
         *,
         select: bool = True,
     ) -> RecordedRun:
-        """Record a run that stored nothing after the call (and enqueue the selection, unless
+        """Record a run that stored nothing after the call (and enqueue the next stage, unless
         the run is followed by a raise)."""
         run_id = self._record(
             call.lead_id,
@@ -396,16 +412,17 @@ class PeopleExtractions:
             pages_truncated=call.pages_truncated,
         )
         if select:
-            self._select(call.lead_id, call.web_domain)
+            self._next_stage(call.lead_id, call.run_id, call.web_domain)
         return RecordedRun(call.lead_id, run_id, outcome, code)
 
-    def _select(self, lead_id: str, web_domain: str | None) -> None:
-        """Enqueue the Lead's ``select_primary_contact`` job in the caller's transaction."""
+    def _next_stage(self, lead_id: str, run_id: str, web_domain: str | None) -> None:
+        """Enqueue the Lead's ``check_job_boards`` job (Story 2.11), which enqueues the
+        Primary Contact's selection, in the caller's transaction."""
         self._queue.enqueue(
-            SELECT_PRIMARY_CONTACT_JOB,
+            CHECK_JOB_BOARDS_JOB,
             scope=lead_id,
             discriminator=TICK,
-            payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id},
+            payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id, RUN_ID_FIELD: run_id},
             concurrency_key=None if web_domain is None else f"{DOMAIN_KEY_PREFIX}{web_domain}",
         )
 
@@ -450,7 +467,7 @@ class PeopleExtractions:
             stored=applied.stored,
             discarded=applied.discarded,
         )
-        self._select(call.lead_id, call.web_domain)
+        self._next_stage(call.lead_id, call.run_id, call.web_domain)
         return applied
 
     def _log_refusals(self, call: _PeopleCall, validation: PeopleValidation, now: datetime) -> None:

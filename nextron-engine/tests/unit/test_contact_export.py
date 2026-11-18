@@ -66,6 +66,7 @@ def test_the_coverage_declares_every_section_once() -> None:
             "evidence",
             "pages",
             "contact_methods",
+            "job_postings",  # Story 2.11
             "addresses",
             "signals",
         ),
@@ -365,6 +366,7 @@ def test_every_declared_section_is_an_array_and_none_is_omitted() -> None:
             "evidence": [],
             "pages": [],
             "contact_methods": [],
+            "job_postings": [],
             "addresses": [],
             "signals": [],
         },

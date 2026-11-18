@@ -46,7 +46,7 @@ from nextron.domain.contacts import ContactCandidate, ProvenanceSource
 from nextron.domain.job import DEFERRED, Job, Lane
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import validate_markets
-from nextron.domain.notifications import EvidenceChanged, LeadsMerged
+from nextron.domain.notifications import EventClosed, EvidenceChanged, LeadsMerged
 from nextron.domain.playbook import PlaybookSnapshot
 from nextron.domain.segments import signal_catalogue, validate_segments
 from nextron.ports.errors import AdapterError
@@ -96,14 +96,20 @@ NEWS_HTML = f"<p>{OPENED}</p><p>Read more in our blog.</p>"
 
 
 class EvidenceRecorder:
-    """An ``EvidenceChanged`` subscriber that records what it is given."""
+    """An ``EvidenceChanged`` subscriber that records what it is given, and (Story 2.11) an
+    ``EventClosed`` one that records in ``closed``."""
 
     def __init__(self) -> None:
         self.seen: list[EvidenceChanged] = []
+        self.closed: list[EventClosed] = []
 
     @command
     def evidence_changed(self, n: EvidenceChanged) -> None:
         self.seen.append(n)
+
+    @command
+    def event_closed(self, n: EventClosed) -> None:
+        self.closed.append(n)
 
 
 def no_jobs() -> Any:
@@ -123,8 +129,13 @@ def ok(**lists: list[dict[str, Any]]) -> LlmOk:
     return LlmOk(parsed, model=HAIKU, usage=LlmUsage(requests=1))
 
 
+# The type these tests quote by default: Story 2.11 refuses a hiring type's Signal (hiring Events
+# come only from job postings), so the Legal Operations quote is read as an expansion here.
+QUOTED = "law_expansion"
+
+
 def signal(
-    page: str, quote: str, kind: str = "law_hiring_legal_ops", day: str | None = None
+    page: str, quote: str, kind: str = QUOTED, day: str | None = None
 ) -> Any:
     return {"signal_type": kind, "block_id": page, "quote": quote, "event_date": day}
 
@@ -314,6 +325,7 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
     subscribers.register_subscriber(LeadsMerged, Pipeline(clock).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Research(clock).reparent_lead)
     subscribers.register_subscriber(EvidenceChanged, recorder.evidence_changed)
+    subscribers.register_subscriber(EventClosed, recorder.event_closed)
     subscribers.freeze()
     units = UnitOfWorkFactory(engine, subscribers)
     segments = validate_segments(seed_yaml.parse(SEGMENTS.read_text(encoding="utf-8")))
@@ -341,6 +353,7 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
         extractions=no_jobs,
         primary=no_jobs,
         test_runs=no_jobs,
+        job_boards=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     research = Research(clock)
@@ -436,9 +449,9 @@ def test_the_first_extraction_sends_every_page_and_stores_what_validates(world: 
         world.signals(lead)
     )
     assert (kind, signal_class, tier, score_only, event_date, first_seen, retracted) == (
-        "law_hiring_legal_ops",
+        QUOTED,
         "event",
-        1,
+        2,
         0,
         None,
         utc(T0),
@@ -463,7 +476,7 @@ def test_the_queries_read_what_was_stored(world: World) -> None:
     evidence = world.read(lambda: research_queries.evidence(lead))
     last = world.read(lambda: research_queries.last_ok_extraction(lead))
 
-    assert [s.signal_type for s in signals] == ["law_hiring_legal_ops"]
+    assert [s.signal_type for s in signals] == [QUOTED]
     assert sorted(e.pages_checked for e in evidence) == [(ABOUT,), (TEAM,), (TEAM,)]
     assert world.read(lambda: research_queries.hq_tz(lead)) == "America/Chicago"
     assert last is not None and (last.outcome, last.started_at) == ("ok", T0)
@@ -633,7 +646,7 @@ def test_changed_quotes_supersede_vanished_ones_are_retracted_and_so_are_bare_si
     )
     old = {row["quote"]: row["id"] for row in world.evidence(lead)}
     by_type = {row[1]: row[0] for row in world.signals(lead)}
-    hiring_signal = by_type["law_hiring_legal_ops"]
+    hiring_signal = by_type[QUOTED]
     ai_signal = by_type["law_ai_confidentiality_post"]
     second_run = recrawl(world, lead, team=TEAM_V2)
     t1 = T0 + timedelta(days=1)
@@ -919,6 +932,7 @@ def test_the_handler_defers_when_the_budget_refuses(world: World) -> None:
         extractions=lambda: extractions,
         primary=no_jobs,
         test_runs=no_jobs,
+        job_boards=no_jobs,
     ).get("extract_lead").handler
     payload = {"v": 1, "lead_id": lead, "run_id": run_id}
     job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, payload, 1)
@@ -1120,6 +1134,7 @@ def test_the_extract_lead_job_runs_the_extraction(world: World) -> None:
         extractions=lambda: extractions,
         primary=no_jobs,
         test_runs=no_jobs,
+        job_boards=no_jobs,
     ).get("extract_lead").handler
     [(_, _, payload, _)] = world.jobs("extract_lead")
     job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, json.loads(payload), 1)
@@ -1140,7 +1155,7 @@ def test_lead_signals_reads_the_clock_once_and_names_the_types(world: World) -> 
         run_id,
         ok(
             signals=[
-                signal(pages[TEAM], HIRING),
+                signal(pages[TEAM], HIRING, "law_ai_confidentiality_post"),
                 signal(pages[NEWS], OPENED, "law_expansion", "2026-10-14"),
             ],
             profile_facts=[fact(pages[ABOUT], CHICAGO, "Chicago")],
@@ -1157,11 +1172,11 @@ def test_lead_signals_reads_the_clock_once_and_names_the_types(world: World) -> 
 
     assert len(reads) == 1
     assert view.hq_tz == "America/Chicago"
-    hiring = "Hiring intake, legal-ops, knowledge-management, or innovation staff"
+    hiring = "Post about AI or client confidentiality"
     expansion = "New office, merger, or practice-area expansion"
     assert sorted((s.name, s.age, s.live, s.signal.event_date) for s in view.signals) == [
-        (hiring, 40, True, None),
         (expansion, 75, True, date(2026, 10, 14)),
+        (hiring, 40, True, None),
     ]
     assert {row.evidence.quote: row.supports for row in view.evidence} == {
         HIRING: (hiring,),
@@ -1170,3 +1185,258 @@ def test_lead_signals_reads_the_clock_once_and_names_the_types(world: World) -> 
     }
     empty = world.read(lambda: LeadSignals(world.clock).view("not-a-ulid"))
     assert (empty.hq_tz, empty.signals, empty.evidence) == (None, (), ())
+
+
+# Careers postings (Story 2.11) -------------------------------------------------------------------
+
+CAREERS = f"{ORIGIN}/careers"
+GREENHOUSE_LINK = "https://boards.greenhouse.io/smithlaw/jobs/4012345"
+CAREERS_HOME = (
+    '<html><body><h1>Smith Law LLP</h1><a href="/careers">Careers</a> '
+    f'<a href="{GREENHOUSE_LINK}">Open roles</a></body></html>'
+)
+LEGAL_OPS = "Legal Operations Manager"
+POSTED = "Posted 10 November 2026. You will run our client intake."
+CAREERS_V1 = f"<h2>{LEGAL_OPS}</h2><p>{POSTED}</p><h2>Paralegal</h2>"
+RULE = "rule"
+
+
+def careers_site(world: World, careers: str = CAREERS_V1, *, home: str = CAREERS_HOME) -> None:
+    """A site whose homepage links its careers page (and a Greenhouse board)."""
+    world.crawler.robots[ROBOTS] = robots_txt(ROBOTS, "User-agent: *\nDisallow:\n")
+    world.crawler.pages[HOME] = html_page(HOME, home)
+    world.crawler.pages[CAREERS] = html_page(CAREERS, careers)
+
+
+def careers_lead(world: World, careers: str = CAREERS_V1) -> tuple[str, str, dict[str, str]]:
+    lead = world.lead()
+    careers_site(world, careers)
+    run_id = world.crawl(lead)
+    return lead, run_id, world.page_ids(lead)
+
+
+def recrawl_careers(world: World, lead: str, careers: str, *, days: int = 1) -> str:
+    world.clock.set(T0 + timedelta(days=days))
+    careers_site(world, careers)
+    return world.crawl(lead)
+
+
+def job(
+    page: str, title: str, quote: str = LEGAL_OPS, posted: str | None = None
+) -> dict[str, Any]:
+    return {"title": title, "url": None, "posted_date": posted, "block_id": page, "quote": quote}
+
+
+def postings_of(world: World, lead: str) -> list[dict[str, Any]]:
+    columns = (
+        "id, source, board_token, url, title, description, posted_date, first_seen_at, "
+        "last_checked_at, status, closed_at, signal_id, evidence_id"
+    )
+    rows = world.sql(
+        f"SELECT {columns} FROM job_postings WHERE lead_id = ? ORDER BY first_seen_at, title",
+        (lead,),
+    )
+    names = [name.strip() for name in columns.split(",")]
+    return [dict(zip(names, row, strict=True)) for row in rows]
+
+
+def careers_counts(world: World, run_id: str) -> tuple[Any, ...]:
+    [row] = world.sql(
+        "SELECT careers_postings, careers_events, greenhouse_postings, board_errors "
+        "FROM crawl_runs WHERE id = ?",
+        (run_id,),
+    )
+    return row
+
+
+def posting_events(world: World, lead: str) -> list[tuple[Any, ...]]:
+    return world.sql(
+        "SELECT to_status, cause, cause_ref, actor FROM events WHERE entity = 'leads' "
+        "AND entity_id = ? AND to_status LIKE 'job_posting%' ORDER BY rowid",
+        (lead,),
+    )
+
+
+def test_a_careers_title_in_the_page_becomes_a_posting_and_its_event(world: World) -> None:
+    lead, run_id, pages = careers_lead(world)
+    careers = pages[CAREERS]
+
+    answer = ok(
+        job_postings=[
+            job(careers, LEGAL_OPS, POSTED, "2026-11-10"),
+            job(careers, "Chief Innovation Officer"),  # the model adds a title not in the text
+        ]
+    )
+    assert world.extract(lead, run_id, answer) is True
+
+    [posting] = postings_of(world, lead)
+    assert {key: value for key, value in posting.items() if key != "id"} == {
+        "source": "careers_page",
+        "board_token": None,
+        "url": CAREERS,
+        "title": LEGAL_OPS,
+        "description": POSTED,
+        "posted_date": "2026-11-10",
+        "first_seen_at": utc(T0),
+        "last_checked_at": utc(T0),
+        "status": "live",
+        "closed_at": None,
+        "signal_id": posting["signal_id"],
+        "evidence_id": posting["evidence_id"],
+    }
+    [evidence] = [row for row in world.evidence(lead) if row["id"] == posting["evidence_id"]]
+    assert (evidence["type"], evidence["quote"], evidence["source"]) == (
+        "quote",
+        LEGAL_OPS,
+        "website",
+    )
+    assert (evidence["source_url"], json.loads(evidence["pages_checked"])) == (CAREERS, [CAREERS])
+    assert (evidence["extracted_by"], evidence["retrieved_at"]) == (RULE, utc(T0))
+    [signal_row] = world.signals(lead)
+    assert signal_row == (
+        posting["signal_id"],
+        "law_hiring_legal_ops",
+        "event",
+        1,
+        0,
+        "2026-11-10",
+        utc(T0),
+        None,
+    )
+    assert world.links() == {(posting["signal_id"], posting["evidence_id"])}
+    # the refusal is one events row, counted in the run's discarded
+    assert posting_events(world, lead) == [
+        ("job_posting_discarded", "title_not_in_page", careers, ACTOR)
+    ]
+    assert world.runs(lead) == [("ok", None, ACTOR, "extract_signals", 2, 0, 0, 1)]
+    assert careers_counts(world, run_id) == (1, 1, None, None)
+    assert world.recorder.seen == [] and world.recorder.closed == []
+
+
+def test_a_description_match_quotes_the_validated_quote(world: World) -> None:
+    owns = "You will own client intake for new matters."
+    lead, run_id, pages = careers_lead(world, f"<h2>Coordinator</h2><p>{owns}</p>")
+
+    world.extract(lead, run_id, ok(job_postings=[job(pages[CAREERS], "Coordinator", owns)]))
+
+    [posting] = postings_of(world, lead)
+    assert posting["description"] == owns
+    [evidence] = [row for row in world.evidence(lead) if row["id"] == posting["evidence_id"]]
+    assert evidence["quote"] == owns
+    assert [row[1] for row in world.signals(lead)] == ["law_hiring_legal_ops"]
+
+
+def test_other_pages_postings_dates_and_hiring_signals_are_refused(world: World) -> None:
+    lead, run_id, pages = careers_lead(world)
+    home, careers = pages[HOME], pages[CAREERS]
+
+    world.extract(
+        lead,
+        run_id,
+        ok(
+            signals=[signal(careers, LEGAL_OPS, "law_hiring_legal_ops")],  # hiring: postings only
+            job_postings=[
+                job(home, "Smith Law LLP", "Smith Law LLP"),  # not a careers page
+                job(careers, LEGAL_OPS, LEGAL_OPS, "2026-11-10"),  # the quote holds no date
+                job(careers, "Paralegal", "Paralegal"),
+            ],
+        ),
+    )
+
+    assert sorted(p["title"] for p in postings_of(world, lead)) == [LEGAL_OPS, "Paralegal"]
+    assert [p["posted_date"] for p in postings_of(world, lead)] == [None, None]
+    assert [row for row in world.events(lead) if row[2] == "signal_discarded"] == [
+        (lead, None, "signal_discarded", "hiring_type", careers, ACTOR)
+    ]
+    assert posting_events(world, lead) == [
+        ("job_posting_discarded", "not_careers_page", home, ACTOR),
+        ("job_posting_date_discarded", "date_not_in_quote", careers, ACTOR),
+    ]
+    # the run's discarded: the hiring Signal and the other page's posting (not the date)
+    assert world.runs(lead)[0][-1] == 2
+    # one posting matched (Legal Operations), so one Event; the Paralegal has none
+    assert [row[1] for row in world.signals(lead)] == ["law_hiring_legal_ops"]
+    assert careers_counts(world, run_id) == (2, 1, None, None)
+
+
+def test_the_page_rule_keeps_a_title_still_in_the_text_and_closes_one_gone(
+    world: World,
+) -> None:
+    lead, run_id, pages = careers_lead(world)
+    careers = pages[CAREERS]
+    world.extract(
+        lead,
+        run_id,
+        ok(job_postings=[job(careers, LEGAL_OPS), job(careers, "Paralegal", "Paralegal")]),
+    )
+    [(signal_id, *_)] = world.signals(lead)
+    first = {p["title"]: p for p in postings_of(world, lead)}
+    t1 = T0 + timedelta(days=1)
+    # the next crawl drops the Paralegal; the model proposes nothing
+    second = recrawl_careers(world, lead, f"<h2>{LEGAL_OPS}</h2><p>Apply by email.</p>")
+
+    world.extract(lead, second, ok())
+
+    found = {p["title"]: p for p in postings_of(world, lead)}
+    assert (found[LEGAL_OPS]["status"], found[LEGAL_OPS]["last_checked_at"]) == ("live", utc(t1))
+    assert (found["Paralegal"]["status"], found["Paralegal"]["closed_at"]) == ("closed", utc(t1))
+    assert found["Paralegal"]["last_checked_at"] == utc(T0)
+    evidence = {row["id"]: row for row in world.evidence(lead)}
+    assert evidence[first[LEGAL_OPS]["evidence_id"]]["last_confirmed_at"] == utc(t1)
+    assert world.recorder.closed == []  # the Paralegal had no Event
+    assert careers_counts(world, second) == (1, 0, None, None)
+    # a third crawl drops the Legal Operations Manager too: its Event closes
+    t2 = T0 + timedelta(days=2)
+    third = recrawl_careers(world, lead, "<p>No vacancies right now.</p>", days=2)
+
+    world.extract(lead, third, ok())
+
+    gone = {p["title"]: p for p in postings_of(world, lead)}[LEGAL_OPS]
+    assert (gone["status"], gone["closed_at"]) == ("closed", utc(t2))
+    evidence = {row["id"]: row for row in world.evidence(lead)}
+    assert evidence[gone["evidence_id"]]["retracted_at"] == utc(t2)
+    assert world.signals(lead)[0][-1] == utc(t2)  # the Signal is no longer live
+    assert world.recorder.seen == [EvidenceChanged(lead_id=lead, evidence_id=gone["evidence_id"])]
+    assert world.recorder.closed == [EventClosed(signal_id=signal_id, lead_id=lead)]
+    assert careers_counts(world, third) == (0, 0, None, None)
+
+
+def test_a_careers_page_not_sent_leaves_its_postings_alone(world: World) -> None:
+    lead, run_id, pages = careers_lead(world)
+    world.extract(lead, run_id, ok(job_postings=[job(pages[CAREERS], LEGAL_OPS)]))
+    before = postings_of(world, lead)
+    # only the homepage changed: the careers page isn't sent
+    world.clock.set(T0 + timedelta(days=1))
+    careers_site(world, home=CAREERS_HOME.replace("Smith Law LLP", "Smith Law"))
+    second = world.crawl(lead)
+
+    world.extract(lead, second, ok())
+
+    assert postings_of(world, lead) == before
+    assert careers_counts(world, second) == (None, None, None, None)
+
+
+def test_a_closed_careers_posting_listed_again_reopens_with_a_new_event(world: World) -> None:
+    lead, run_id, pages = careers_lead(world)
+    careers = pages[CAREERS]
+    world.extract(lead, run_id, ok(job_postings=[job(careers, LEGAL_OPS)]))
+    [old] = postings_of(world, lead)
+    second = recrawl_careers(world, lead, "<p>No vacancies right now.</p>")
+    world.extract(lead, second, ok())
+    t2 = T0 + timedelta(days=2)
+    third = recrawl_careers(world, lead, CAREERS_V1, days=2)
+
+    world.extract(lead, third, ok(job_postings=[job(careers, LEGAL_OPS)]))
+
+    [reopened] = postings_of(world, lead)
+    assert reopened["id"] == old["id"]
+    assert (reopened["status"], reopened["closed_at"]) == ("live", None)
+    assert (reopened["first_seen_at"], reopened["last_checked_at"]) == (utc(T0), utc(t2))
+    assert reopened["signal_id"] not in (None, old["signal_id"])
+    assert reopened["evidence_id"] not in (None, old["evidence_id"])
+    evidence = {row["id"]: row for row in world.evidence(lead)}
+    assert evidence[old["evidence_id"]]["retracted_at"] is not None  # the old one stays retracted
+    assert evidence[reopened["evidence_id"]]["retracted_at"] is None
+    current = [row for row in world.signals(lead) if row[-1] is None]
+    assert [row[0] for row in current] == [reopened["signal_id"]]
+    assert careers_counts(world, third) == (1, 1, None, None)
