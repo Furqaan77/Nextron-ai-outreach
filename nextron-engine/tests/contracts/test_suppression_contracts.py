@@ -1,19 +1,20 @@
-"""Suppression List contracts (FR-50, FR-63, AD-3, AD-16, AD-17, Story 3.3), with probes proving
-each check catches a violation.
+"""Suppression List contracts (FR-50, FR-63, AD-3, AD-16, AD-17, Stories 3.3 and 3.5), with probes
+proving each check catches a violation.
 
 - **The table at head.** ``suppression_entries`` has exactly the spec's columns (types and
   nullability), its six checks, the partial unique index ``uq_suppression_entries_active_key``
   and its four triggers; ``owners.py`` gives every column to ``compliance`` and
   ``pii_registry.py`` classifies ``value_hash`` ``keep_hash``, ``void_reason`` ``redact`` and the
   rest ``none``.
-- **One writer.** An AST scan of every module under ``nextron/`` finds the repository's writer
-  (``insert``) used (called or referenced, through any alias of
+- **One writer.** An AST scan of every module under ``nextron/`` finds the repository's writers
+  (``insert`` and, since Story 3.5, ``void``) used (called or referenced, through any alias of
   ``nextron.db.repos.compliance.suppression_entries``: ``import ... as x``, a plain dotted
   import, the package or the module imported from its parent, a relative import, or ``from
   ...suppression_entries import insert as y``) only in ``nextron/app/compliance/api.py``, so the
-  list changes only through ``Compliance.suppress``. Every public function of the repository is
-  classified as a reader (``get``, ``active_for``) or the writer (``insert``): a new one fails
-  until it is classified here.
+  list changes only through ``Compliance.suppress`` and ``Compliance.reverse_optout``. Every
+  public function of the repository is classified as a reader (``get``, ``active_for``,
+  ``listed``, ``count_listed``, ``by_ids``, ``active_ids_for_cause``) or a writer
+  (``insert``, ``void``): a new one fails until it is classified here.
 - **The model stays in the database layer.** ``SuppressionEntryRecord`` is named (as a name, an
   attribute, an import or in a string) only under ``nextron/db/models`` and
   ``nextron/db/repos/compliance``.
@@ -26,13 +27,14 @@ each check catches a violation.
   ``db/pii_registry.py``. So ``sqlalchemy.table("suppression_entries", ...)``,
   ``Base.metadata.tables["suppression_entries"]``, an f-string ``INSERT INTO {TABLE}`` and a
   ``DROP TABLE`` all fail elsewhere.
-- **Permanent.** The compliance repository, API and queries and the ``contactability`` and
-  ``suppression_entry`` domain modules hold no function, method, call or import whose name has
-  a word starting ``delet``, ``remov``, ``purg``, ``expir`` (expire, expiry), ``ttl``, ``prun``,
-  ``evict``, ``truncat`` or ``drop``; no SQL ``DELETE``; no ``timedelta`` or ``relativedelta``;
-  no comparison with ``created_at`` or ``voided_at`` (expiry by filtering); and no string, other
-  than a docstring, holding an SQL date modifier (``julianday(``, ``strftime(``, ``datetime(``,
-  ``date(``, ``'now'``, ``-30 days`` and the like): entries never expire and are never deleted.
+- **Permanent.** The compliance repository, API and queries and the ``contactability``,
+  ``suppression_entry`` and ``suppression_list`` domain modules hold no function, method, call
+  or import whose name has a word starting ``delet``, ``remov``, ``purg``, ``expir`` (expire,
+  expiry), ``ttl``, ``prun``, ``evict``, ``truncat`` or ``drop``; no SQL ``DELETE``; no
+  ``timedelta`` or ``relativedelta``; no comparison with ``created_at`` or ``voided_at`` (expiry
+  by filtering); and no string, other than a docstring, holding an SQL date modifier
+  (``julianday(``, ``strftime(``, ``datetime(``, ``date(``, ``'now'``, ``-30 days`` and the
+  like): entries never expire and are never deleted.
 """
 
 import ast
@@ -53,8 +55,10 @@ REPO_PACKAGE = f"{REPO_PARENT}.compliance"
 REPO_NAME = "suppression_entries"
 REPO_MODULE = f"{REPO_PACKAGE}.{REPO_NAME}"
 REPO_FILE = PACKAGE / "db" / "repos" / "compliance" / "suppression_entries.py"
-READERS = frozenset({"get", "active_for"})
-WRITERS = frozenset({"insert"})
+READERS = frozenset(
+    {"get", "active_for", "listed", "count_listed", "by_ids", "active_ids_for_cause"}
+)
+WRITERS = frozenset({"insert", "void"})
 ALLOWED_WRITER = "app/compliance/api.py"
 RECORD = "SuppressionEntryRecord"
 RECORD_HOMES = ("db/models/", "db/repos/compliance/")
@@ -75,6 +79,7 @@ GUARDED = (
     "app/queries/compliance.py",
     "domain/contactability.py",
     "domain/suppression_entry.py",
+    "domain/suppression_list.py",
 )
 DATE_COLUMNS = frozenset({"created_at", "voided_at"})
 DATE_ARITHMETIC = frozenset({"timedelta", "relativedelta"})
@@ -347,7 +352,7 @@ def test_only_the_compliance_api_writes_the_suppression_list() -> None:
     writes = suppression_repo_writes(PACKAGE)
 
     assert suppression_writer_problems(PACKAGE) == []
-    assert {writer for *_, writer in writes} == {"insert"}  # not vacuous
+    assert {writer for *_, writer in writes} == {"insert", "void"}  # not vacuous
     assert {path for path, *_ in writes} == {ALLOWED_WRITER}
 
 
@@ -395,6 +400,25 @@ WRITER_PROBES = [
         "    suppression_entries.insert()\n",
         "db/repos/compliance/helper.py:5 copy uses the suppression_entries repository's insert",
     ),
+    # Story 3.5: the void is a writer too
+    (
+        "web/suppression_page.py",
+        "from nextron.db.repos.compliance import suppression_entries as repo\n\n\n"
+        "def reverse(entry_id, at):\n    repo.void(entry_id, at, 'misread')\n",
+        "web/suppression_page.py:5 reverse uses the suppression_entries repository's void",
+    ),
+    (
+        "app/pipeline/api.py",
+        "from nextron.db.repos.compliance.suppression_entries import void as undo\n\n\n"
+        "def reopen(entry_id, at):\n    undo(entry_id, at, 'x')\n",
+        "app/pipeline/api.py:5 reopen uses the suppression_entries repository's undo",
+    ),
+    (
+        "app/queries/compliance.py",
+        "from nextron.db.repos.compliance import suppression_entries as repo\n\n\n"
+        "def entry(entry_id, at):\n    return repo.void(entry_id, at, 'x')\n",
+        "app/queries/compliance.py:5 entry uses the suppression_entries repository's void",
+    ),
 ]
 
 
@@ -415,17 +439,22 @@ def test_the_writer_check_allows_reads_and_the_one_writer(tmp_path: Path) -> Non
                 "from nextron.db.repos.compliance import suppression_entries as entries_repo\n"
                 "from sqlalchemy import insert\n\n\n"
                 "def suppress(at):\n    entries_repo.active_for('address', 'a')\n"
-                "    entries_repo.insert(kind='address')\n    insert('x')\n"
+                "    entries_repo.insert(kind='address')\n    insert('x')\n\n\n"
+                "def reverse_optout(entry_id, at):\n    entries_repo.void(entry_id, at, 'x')\n"
             ),
             "app/queries/compliance.py": (
                 "from nextron.db.repos.compliance import suppression_entries as repo\n\n\n"
-                "def entry(entry_id):\n    return repo.get(entry_id)\n"
+                "def entry(entry_id):\n    return repo.get(entry_id)\n\n\n"
+                "def page():\n    return repo.listed(kind=None, source=None, status=None, "
+                "limit=50, offset=0), repo.by_ids(['x']), repo.count_listed(kind=None, "
+                "source=None, status=None), repo.active_ids_for_cause(source='reply_rule', "
+                "cause_ref='x')\n"
             ),
         },
     )
 
     assert suppression_writer_problems(root) == []
-    assert len(suppression_repo_writes(root)) == 1
+    assert len(suppression_repo_writes(root)) == 2
 
 
 def repository_classification_problems(path: Path) -> list[str]:
@@ -456,8 +485,8 @@ def test_every_public_repository_function_is_a_reader_or_the_writer() -> None:
     ("extra", "found"),
     [
         (
-            "\n\ndef void(entry_id, at, reason):\n    pass\n",
-            "void is neither a reader nor the writer",
+            "\n\ndef reopen(entry_id, at, reason):\n    pass\n",
+            "reopen is neither a reader nor the writer",
         ),
         ("\n\ndef remove(entry_id):\n    pass\n", "remove is neither a reader nor the writer"),
         ("\n\nasync def touch(entry_id):\n    pass\n", "touch is neither a reader nor the writer"),
@@ -480,7 +509,12 @@ def test_the_classification_check_catches_a_missing_function(tmp_path: Path) -> 
 
     assert repository_classification_problems(path) == [
         "active_for is classified but missing",
+        "active_ids_for_cause is classified but missing",
+        "by_ids is classified but missing",
+        "count_listed is classified but missing",
         "insert is classified but missing",
+        "listed is classified but missing",
+        "void is classified but missing",
     ]
 
 
@@ -781,6 +815,7 @@ def test_the_compliance_code_never_deletes_or_expires_an_entry() -> None:
         "app/queries/compliance.py",
         "domain/contactability.py",
         "domain/suppression_entry.py",
+        "domain/suppression_list.py",
     } <= set(guarded)  # not vacuous
 
 
@@ -866,6 +901,16 @@ def test_the_compliance_code_never_deletes_or_expires_an_entry() -> None:
             "domain/contactability.py",
             "def purge_key(key):\n    pass\n",
             "domain/contactability.py:1 defines purge_key",
+        ),
+        (
+            "domain/suppression_list.py",
+            "def expire_values(plan):\n    pass\n",
+            "domain/suppression_list.py:1 defines expire_values",
+        ),
+        (
+            "app/compliance/api.py",
+            "def run():\n    entries_repo.remove(entry_id)\n",
+            "app/compliance/api.py:2 calls remove",
         ),
         # expiry by filtering
         (

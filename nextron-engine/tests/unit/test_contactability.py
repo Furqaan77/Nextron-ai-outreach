@@ -1,9 +1,11 @@
 """Suppression keys (``nextron.domain.contactability``, FR-50, FR-63, AD-16, Story 3.3): the AC's
 three hash cases; every kind's normalised value and exact SHA-256; the person pair; the argument
 errors (unknown kind ``ValueError``, wrong value type ``TypeError``, ``IdentityError``
-propagated); ``suppression_key`` and ``SuppressionKey``'s checks; ``ContactSubject``; and the
-key-set rules of ``person_keys`` and ``firm_domain_keys`` (order, partial keys, values that
-can't be normalised, free webmail never a key)."""
+propagated); ``suppression_key`` and ``SuppressionKey``'s checks; ``ContactSubject``; the key-set
+rules of ``person_keys`` and ``firm_domain_keys`` (order, partial keys, values that can't be
+normalised, free webmail never a key); and Story 3.5's ``AddressSubject`` and ``DomainSubject``
+(normalised values only, no free-webmail domain or shared platform, no value in a message or
+the repr)."""
 
 import hashlib
 
@@ -11,10 +13,13 @@ import pytest
 
 from nextron.domain.contactability import (
     HASH_LENGTH,
+    AddressSubject,
     ContactSubject,
+    DomainSubject,
     KeyKind,
     SuppressionKey,
     SuppressionScope,
+    SuppressionSubject,
     firm_domain_keys,
     is_hash,
     key_hash,
@@ -339,3 +344,91 @@ def test_firm_domain_keys_take_only_keyword_strings() -> None:
         firm_domain_keys(email=3, web_domain=None)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         firm_domain_keys("jane@firm.co.uk", "firm.co.uk")  # type: ignore[misc]
+
+
+# Story 3.5: the typed subjects ------------------------------------------------------------------
+
+
+def test_an_address_subject_takes_a_normalised_address_and_hides_it() -> None:
+    subject = AddressSubject("jane.doe+x@firm.co.uk")
+
+    assert subject.address == "jane.doe+x@firm.co.uk"
+    assert "jane" not in repr(subject)
+    assert isinstance(subject, SuppressionSubject)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Jane.Doe@firm.co.uk",  # not lowercased
+        " jane@firm.co.uk",  # not stripped
+        "jane@Firm.co.uk",
+        "jane@",
+        "jane",
+        "",
+        "jane@@firm.co.uk",
+        "jane doe@firm.co.uk",
+    ],
+)
+def test_an_address_subject_refuses_a_value_that_is_not_normalised(value: str) -> None:
+    with pytest.raises(ValueError) as caught:
+        AddressSubject(value)
+
+    assert str(caught.value) == "AddressSubject.address must be a normalised email address"
+
+
+@pytest.mark.parametrize("value", [None, 3, b"jane@firm.co.uk", ("jane@firm.co.uk",)])
+def test_an_address_subject_takes_only_a_str(value: object) -> None:
+    with pytest.raises(TypeError) as caught:
+        AddressSubject(value)  # type: ignore[arg-type]
+
+    assert "firm" not in str(caught.value)
+
+
+def test_a_domain_subject_takes_a_registrable_domain() -> None:
+    subject = DomainSubject("firm.co.uk")
+
+    assert subject.domain == "firm.co.uk"
+    assert isinstance(subject, SuppressionSubject)
+    assert DomainSubject("xn--bcher-kva.de").domain == "xn--bcher-kva.de"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("www.firm.co.uk", "DomainSubject.domain must be a registrable domain"),
+        ("mail.firm.co.uk", "DomainSubject.domain must be a registrable domain"),
+        ("Firm.co.uk", "DomainSubject.domain must be a registrable domain"),
+        ("https://firm.co.uk", "DomainSubject.domain must be a registrable domain"),
+        ("co.uk", "DomainSubject.domain must be a registrable domain"),
+        ("firm", "DomainSubject.domain must be a registrable domain"),
+        ("", "DomainSubject.domain must be a registrable domain"),
+        ("gmail.com", "DomainSubject.domain must not be a free webmail domain"),
+        ("yahoo.co.uk", "DomainSubject.domain must not be a free webmail domain"),
+        ("comcast.net", "DomainSubject.domain must not be a free webmail domain"),
+        ("rr.com", "DomainSubject.domain must not be a free webmail domain"),
+        ("facebook.com", "DomainSubject.domain must not be a shared platform"),
+        ("facebook.co.uk", "DomainSubject.domain must not be a shared platform"),
+        ("google.com", "DomainSubject.domain must not be a shared platform"),
+        ("lawsociety.org.uk", "DomainSubject.domain must not be a shared platform"),
+        ("wordpress.com", "DomainSubject.domain must not be a shared platform"),
+    ],
+)
+def test_a_domain_subject_refuses_anything_else_and_every_free_webmail_domain(
+    value: str, message: str
+) -> None:
+    with pytest.raises(ValueError) as caught:
+        DomainSubject(value)
+
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize("value", [None, 3, b"firm.co.uk"])
+def test_a_domain_subject_takes_only_a_str(value: object) -> None:
+    with pytest.raises(TypeError):
+        DomainSubject(value)  # type: ignore[arg-type]
+
+
+def test_the_contact_subject_is_a_suppression_subject_too() -> None:
+    assert isinstance(ContactSubject(ULID), SuppressionSubject)
+    assert not isinstance("jane@firm.co.uk", SuppressionSubject)

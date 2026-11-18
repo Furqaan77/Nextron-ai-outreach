@@ -128,6 +128,25 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   inbox through ``sending`` (``Sending.register_inbox``) in its own unit of work, then renders
   the panel again in a read-only one, with "Inbox registered." or the ``InboxRefused`` message
   and the typed values.
+- ``GET /suppression`` (``suppression_page``), ``POST /suppression/add`` (``suppression_add``),
+  ``POST /suppression/import`` (``suppression_import``), ``POST /suppression/search``
+  (``suppression_search``) and ``POST /suppression/reverse`` (``suppression_reverse``), all
+  ``@personal_data(True)``: the Suppression List panel (Story 3.5, FR-50, FR-41, UX-DR25),
+  linked from the Settings page; see ``nextron.web.suppression_page``. The GET reads its query
+  string through ``suppression_page.list_filters`` (a bad one is ``MalformedForm``, 400), then
+  ``queries.compliance.entry_list``. Each POST takes its form (anything else is
+  ``MalformedForm``, 400) and runs one use case of ``compliance`` (``Compliance``) in its own
+  unit of work: ``add_value``, ``import_list`` (the upload read through
+  ``nextron.web.forms.upload_form``; a body over the limit shows "The file is larger than 5 MB")
+  or ``reverse_entry``; the search runs no use case: it hashes the value
+  (``suppression_list.search_key``) and reads ``queries.compliance.active_entry``. Then it
+  renders the panel again in a read-only one, at page 1 with no filter, with the notice: the
+  ``SuppressionRefused`` message, or what was done ("Added to the Suppression List" with the
+  written entries' rows, read through ``queries.compliance.entries``; "Already on the list
+  (...)"; the import's counts and invalid lines; "On the list (...)" with the matching entry's
+  row, or "Not on the list"; "Opt-out reversed. ..." with the rows of the same opt-out's other
+  ``active`` entries, each with its Reverse form). Always 200, and nothing typed is rendered
+  back.
 - ``GET /leads`` (``pipeline_page``, the navigation's Leads/Pipeline section) and ``GET
   /leads/{lead_id}`` (``lead_page``, registered after ``/leads/import``), both
   ``@personal_data(True)``: the Leads list and the Lead page (Story 2.4); see
@@ -185,10 +204,12 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
+from nextron.app.compliance.api import Compliance
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
 from nextron.app.playbook.api import CompanyFacts, Playbook
+from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
@@ -223,6 +244,18 @@ from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
+from nextron.domain.suppression_list import (
+    ADDED,
+    FILE_TOO_LARGE,
+    NOT_ON_THE_LIST,
+    SuppressionRefused,
+    already_on_the_list,
+    import_message,
+    invalid_lines_message,
+    on_the_list,
+    reversed_message,
+    search_key,
+)
 from nextron.domain.unsub_token import UnsubKeyInUse
 from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
@@ -234,6 +267,7 @@ from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import leads_page as lead_rows
 from nextron.web import quotas_page as quota_rows
+from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
 from nextron.web.forms import (
@@ -405,6 +439,7 @@ def create_app(
     lead_imports: LeadImports,
     sending: Sending,
     lead_signals: LeadSignals,
+    compliance: Compliance,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -421,7 +456,8 @@ def create_app(
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
-    page its Signals, Evidence and headquarters zone.
+    page its Signals, Evidence and headquarters zone; ``compliance`` runs the Suppression List
+    panel's add, import and Reverse.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1101,6 +1137,139 @@ def create_app(
         with units.open(read_only=True):
             return inboxes_answer(
                 request, inbox_rows.PANEL_TEMPLATE, notice=inbox_rows.registered()
+            )
+
+    def suppression_answer(
+        request: Request,
+        template: str,
+        *,
+        filters: suppression_rows.ListFilters | None = None,
+        notice: credential_rows.Notice | None = None,
+        featured: tuple[str, ...] = (),
+        caption: str | None = None,
+        invalid_lines: str | None = None,
+    ) -> HTMLResponse:
+        shown = filters if filters is not None else suppression_rows.ListFilters()
+        found = compliance_queries.entry_list(
+            kind=shown.kind, source=shown.source, status=shown.status, page=shown.page
+        )
+        context = suppression_rows.panel_context(
+            found,
+            shown,
+            notice=notice,
+            featured=compliance_queries.entries(featured),
+            caption=caption,
+            invalid_lines=invalid_lines,
+        )
+        return page(request, template, **context)
+
+    def suppression_refused(request: Request, refusal: SuppressionRefused) -> HTMLResponse:
+        # 200, so HTMX swaps the panel in; nothing was written
+        with units.open(read_only=True):
+            return suppression_answer(
+                request, suppression_rows.PANEL_TEMPLATE, notice=suppression_rows.refused(refusal)
+            )
+
+    @app.get("/suppression", name="suppression_page")
+    @personal_data(True)  # hash prefixes, and a firm's domain that may be a sole trader's
+    def suppression_page(request: Request) -> HTMLResponse:
+        filters = suppression_rows.list_filters(request.query_params.multi_items())
+        return suppression_answer(request, suppression_rows.PAGE_TEMPLATE, filters=filters)
+
+    @app.post("/suppression/add", name="suppression_add")
+    @personal_data(True)
+    def suppression_add(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        text = suppression_rows.submitted_value(fields)
+        try:
+            with units.open():
+                added = compliance.add_value(text)
+        except SuppressionRefused as refusal:
+            return suppression_refused(request, refusal)
+        if added.written:
+            notice = suppression_rows.status(ADDED)
+        else:
+            notice = suppression_rows.status(already_on_the_list(added.since, added.source))
+        with units.open(read_only=True):
+            return suppression_answer(
+                request,
+                suppression_rows.PANEL_TEMPLATE,
+                notice=notice,
+                featured=added.written,
+                caption=suppression_rows.ADDED_CAPTION,
+            )
+
+    @app.post("/suppression/import", name="suppression_import")
+    @personal_data(True)
+    def suppression_import(
+        request: Request, form: Annotated[UploadForm, Depends(upload_form)]
+    ) -> HTMLResponse:
+        if form.too_large:  # the body was discarded unread
+            return suppression_refused(request, SuppressionRefused(FILE_TOO_LARGE))
+        data = suppression_rows.submitted_file(form)
+        try:
+            with units.open():
+                outcome = compliance.import_list(data)
+        except SuppressionRefused as refusal:
+            return suppression_refused(request, refusal)
+        notice = suppression_rows.status(
+            import_message(outcome.added, outcome.already, len(outcome.invalid_lines))
+        )
+        with units.open(read_only=True):
+            return suppression_answer(
+                request,
+                suppression_rows.PANEL_TEMPLATE,
+                notice=notice,
+                invalid_lines=invalid_lines_message(outcome.invalid_lines),
+            )
+
+    @app.post("/suppression/search", name="suppression_search")
+    @personal_data(True)
+    def suppression_search(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        text = suppression_rows.submitted_value(fields)
+        try:
+            key = search_key(text)  # hashed here; the value goes no further
+        except SuppressionRefused as refusal:
+            return suppression_refused(request, refusal)
+        with units.open(read_only=True):
+            found = (
+                None if key is None else compliance_queries.active_entry(key.kind, key.value_hash)
+            )
+            if found is None:
+                return suppression_answer(
+                    request,
+                    suppression_rows.PANEL_TEMPLATE,
+                    notice=suppression_rows.status(NOT_ON_THE_LIST),
+                )
+            return suppression_answer(
+                request,
+                suppression_rows.PANEL_TEMPLATE,
+                notice=suppression_rows.status(on_the_list(found.created_at, found.source)),
+                featured=(found.id,),
+                caption=suppression_rows.MATCHING_CAPTION,
+            )
+
+    @app.post("/suppression/reverse", name="suppression_reverse")
+    @personal_data(True)
+    def suppression_reverse(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        entry_id, reason = suppression_rows.submitted_reversal(fields)
+        try:
+            with units.open():
+                others = compliance.reverse_entry(entry_id, reason)
+        except SuppressionRefused as refusal:
+            return suppression_refused(request, refusal)
+        with units.open(read_only=True):
+            return suppression_answer(
+                request,
+                suppression_rows.PANEL_TEMPLATE,
+                notice=suppression_rows.status(reversed_message(len(others))),
+                featured=others,
+                caption=suppression_rows.SAME_OPT_OUT_CAPTION,
             )
 
     @app.get("/leads", name="pipeline_page")

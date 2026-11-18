@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Suppression List{% endblock %}
+{% block content %}
+<h1>Suppression List</h1>
+<p>Nobody on this list is ever contacted. Entries are permanent: they hold a hash, never the address, and they are never deleted. Only a rule-matched opt-out can be reversed, with a reason.</p>
+<p>Back to <a href="/settings">Settings</a>.</p>
+{% include "suppression_panel.html" %}
+{% endblock %}

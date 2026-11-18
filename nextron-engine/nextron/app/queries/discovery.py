@@ -6,6 +6,9 @@ current unit of work, read-only ones included.
 - ``lead(lead_id)``: the Lead's identity group as a ``StoredLead`` (a merged Lead included:
   its ``merged_into`` names the survivor), or ``None`` when no Lead has that id (a text that
   isn't a ULID included).
+- ``lead_by_web_domain(web_domain)`` (Story 3.5): the Lead whose stored ``web_domain`` (a
+  registrable domain) is exactly ``web_domain``, as a ``StoredLead``, or ``None`` (a value that
+  isn't a ``str`` included). ``Compliance.suppress`` reads it for a domain the Operator typed.
 - ``survivor_of(lead_id)`` (Story 2.4): the Lead that ``lead_id`` ends up as, following
   ``merged_into`` to the Lead that isn't merged through at most ``MAX_MERGE_HOPS`` (32) hops:
   the Lead itself when it isn't merged. ``None`` for a text that isn't a ULID, an unknown id,
@@ -41,6 +44,7 @@ __all__ = [
     "ListedLead",
     "StoredLead",
     "lead",
+    "lead_by_web_domain",
     "lead_list",
     "survivor_of",
 ]
@@ -65,6 +69,13 @@ def lead(lead_id: str) -> StoredLead | None:
     if not is_ulid(lead_id):
         return None
     return leads_repo.get(lead_id)
+
+
+def lead_by_web_domain(web_domain: str) -> StoredLead | None:
+    """The Lead holding ``web_domain``, or ``None``."""
+    if not isinstance(web_domain, str):
+        return None
+    return leads_repo.by_web_domain(web_domain)
 
 
 def survivor_of(lead_id: str) -> StoredLead | None:

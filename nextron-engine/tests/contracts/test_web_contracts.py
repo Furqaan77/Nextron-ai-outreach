@@ -182,6 +182,11 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/import",
         "/inboxes",
         "/inboxes",
+        "/suppression",
+        "/suppression/add",
+        "/suppression/import",
+        "/suppression/search",
+        "/suppression/reverse",
         "/leads",
         "/leads/{lead_id}",
     ]
@@ -302,6 +307,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /health/panel",
         "GET /health/panel/live",
         "GET /inboxes",
+        "GET /suppression",
     ):
         assert route in str(caught.value)
     for route in (
@@ -322,6 +328,10 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /health/jobs/dismiss",
         "POST /health/backup",
         "POST /inboxes",
+        "POST /suppression/add",
+        "POST /suppression/import",
+        "POST /suppression/search",
+        "POST /suppression/reverse",
     ):
         assert route in str(caught.value)
 
@@ -495,6 +505,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /health/panel",
         "GET /health/panel/live",
         "GET /inboxes",
+        "GET /suppression",
     ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
     for route in (
@@ -514,6 +525,10 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "POST /ai/check",
         "POST /health/jobs/dismiss",
         "POST /inboxes",
+        "POST /suppression/add",
+        "POST /suppression/import",
+        "POST /suppression/search",
+        "POST /suppression/reverse",
     ):
         assert f"{route}: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
@@ -629,6 +644,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "quotas.html",
         "settings.html",
         "settings_form.html",
+        "suppression.html",
+        "suppression_panel.html",
         "unsub_key_row.html",
     ]
     assert inline_code_problems(ENGINE_ROOT) == []

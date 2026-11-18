@@ -5,21 +5,31 @@ Every function runs one explicit Core statement through the current unit of work
 (``nextron.db.uow.current()``): reads work in a read-only unit of work too, writes only inside
 the running use case's transaction. It checks nothing; ``nextron.app.compliance`` does.
 
-- ``StoredSuppressionEntry``: one row;
+- ``StoredSuppressionEntry``: one row; ``ListedEntry``: one row as the Suppression List panel
+  lists it (Story 3.5), without its ``cause_ref``, ``voided_at`` or ``void_reason``;
 - readers: ``get(entry_id)``, the row or ``None``; ``active_for(kind, value_hash)``, the
-  ``active`` row of that key or ``None``;
-- the one writer: ``insert(...) -> id``, a new ``active`` row.
+  ``active`` row of that key or ``None``; ``listed(kind=, source=, status=, limit=, offset=)``,
+  at most ``limit`` rows matching the filters (each ``None`` for any), newest first (by
+  ``created_at``, then ``id``, descending), after skipping ``offset``; ``count_listed(kind=,
+  source=, status=)``, how many match; ``by_ids(ids)``, the rows of those ids, in no set order;
+  ``active_ids_for_cause(source=, cause_ref=)``, the ids of the ``active`` rows of that source
+  with that ``cause_ref``, by ``created_at``, then ``id``;
+- the writers: ``insert(...) -> id``, a new ``active`` row; ``void(entry_id, voided_at,
+  void_reason) -> bool``, which sets one ``active`` row ``voided`` with its time and reason
+  (``UPDATE ... WHERE id = ? AND status = 'active'``) and says whether it did.
 
-Nothing here removes a row, voids one or ages one out: entries are permanent (AD-16), and the
-table's triggers refuse it too. Story 3.5 adds the void.
+Nothing here removes a row or ages one out: entries are permanent (AD-16), and the table's
+triggers refuse it too (and refuse a void of any source but ``reply_rule``).
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy import insert as insert_rows
-from sqlalchemy import select
+from sqlalchemy import update as update_rows
 
 from nextron.db.models.base import new_id
 from nextron.db.models.compliance import SuppressionEntryRecord
@@ -27,6 +37,7 @@ from nextron.db.uow import current
 from nextron.domain.suppression_entry import EntryStatus
 
 ACTIVE: Final = str(EntryStatus.ACTIVE)
+VOIDED: Final = str(EntryStatus.VOIDED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +70,30 @@ _COLUMNS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ListedEntry:
+    """One ``suppression_entries`` row as the Suppression List panel lists it."""
+
+    id: str
+    kind: str
+    value_hash: str
+    domain_plain: str | None
+    status: str
+    source: str
+    created_at: datetime
+
+
+_LISTED_COLUMNS = (
+    SuppressionEntryRecord.id,
+    SuppressionEntryRecord.kind,
+    SuppressionEntryRecord.value_hash,
+    SuppressionEntryRecord.domain_plain,
+    SuppressionEntryRecord.status,
+    SuppressionEntryRecord.source,
+    SuppressionEntryRecord.created_at,
+)
+
+
 def get(entry_id: str) -> StoredSuppressionEntry | None:
     """The entry ``entry_id``, or ``None``."""
     statement = select(*_COLUMNS).where(SuppressionEntryRecord.id == entry_id)
@@ -75,6 +110,67 @@ def active_for(kind: str, value_hash: str) -> StoredSuppressionEntry | None:
     )
     row = current().session.execute(statement).one_or_none()
     return None if row is None else StoredSuppressionEntry(*row)
+
+
+def _listed_where(
+    *, kind: str | None, source: str | None, status: str | None
+) -> list[ColumnElement[bool]]:
+    conditions: list[ColumnElement[bool]] = []
+    if kind is not None:
+        conditions.append(SuppressionEntryRecord.kind == kind)
+    if source is not None:
+        conditions.append(SuppressionEntryRecord.source == source)
+    if status is not None:
+        conditions.append(SuppressionEntryRecord.status == status)
+    return conditions
+
+
+def listed(
+    *, kind: str | None, source: str | None, status: str | None, limit: int, offset: int
+) -> tuple[ListedEntry, ...]:
+    """At most ``limit`` entries matching the filters, newest first, after skipping
+    ``offset``."""
+    statement = (
+        select(*_LISTED_COLUMNS)
+        .where(*_listed_where(kind=kind, source=source, status=status))
+        .order_by(SuppressionEntryRecord.created_at.desc(), SuppressionEntryRecord.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return tuple(ListedEntry(*row) for row in current().session.execute(statement))
+
+
+def count_listed(*, kind: str | None, source: str | None, status: str | None) -> int:
+    """How many entries match the filters."""
+    statement = (
+        select(func.count())
+        .select_from(SuppressionEntryRecord)
+        .where(*_listed_where(kind=kind, source=source, status=status))
+    )
+    return int(current().session.execute(statement).scalar_one())
+
+
+def by_ids(ids: Collection[str]) -> tuple[ListedEntry, ...]:
+    """The entries whose id is in ``ids``, in no set order."""
+    if not ids:
+        return ()
+    statement = select(*_LISTED_COLUMNS).where(SuppressionEntryRecord.id.in_(list(ids)))
+    return tuple(ListedEntry(*row) for row in current().session.execute(statement))
+
+
+def active_ids_for_cause(*, source: str, cause_ref: str) -> tuple[str, ...]:
+    """The ids of the ``active`` entries of ``source`` with the ``cause_ref``, oldest first (by
+    ``created_at``, then ``id``)."""
+    statement = (
+        select(SuppressionEntryRecord.id)
+        .where(
+            SuppressionEntryRecord.source == source,
+            SuppressionEntryRecord.cause_ref == cause_ref,
+            SuppressionEntryRecord.status == ACTIVE,
+        )
+        .order_by(SuppressionEntryRecord.created_at, SuppressionEntryRecord.id)
+    )
+    return tuple(current().session.execute(statement).scalars())
 
 
 def insert(
@@ -101,3 +197,14 @@ def insert(
         )
     )
     return entry_id
+
+
+def void(entry_id: str, voided_at: datetime, void_reason: str) -> bool:
+    """Set the ``active`` entry ``entry_id`` ``voided`` at ``voided_at`` with ``void_reason``;
+    whether a row changed."""
+    result = current().session.execute(
+        update_rows(SuppressionEntryRecord)
+        .where(SuppressionEntryRecord.id == entry_id, SuppressionEntryRecord.status == ACTIVE)
+        .values(status=VOIDED, voided_at=voided_at, void_reason=void_reason)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]
