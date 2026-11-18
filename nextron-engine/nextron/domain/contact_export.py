@@ -28,6 +28,7 @@ Table                      Owner        Exported as / why not
 ``ai_test_cases``          playbook     ``override_cases`` (Story 4.6's override cases)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
+``channel_permissions``    pipeline     ``channel_permissions`` (Story 10.7)
 ``linkedin_accounts``      pipeline     Nextron's own LinkedIn account (Story 10.2)
 ``jobs``                   jobqueue     never linked to a Contact
 ``backups``                ops          never linked to a Contact
@@ -172,6 +173,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "alerts": Exported("notify", "alerts"),
         "notifications": Exported("notify", "notifications"),
         "ai_test_cases": Exported("playbook", "override_cases"),
+        "channel_permissions": Exported("pipeline", "channel_permissions"),  # Story 10.7
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

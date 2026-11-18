@@ -167,9 +167,15 @@ def withheld_values(world: World, coverage: Mapping[str, Coverage]) -> dict[str,
 
 def test_every_personal_data_table_is_covered_by_its_owner() -> None:
     assert coverage_problems(COVERAGE, PII, TABLES) == []
-    # Story 4.6's ai_test_cases, Story 2.11's job_postings and Story 10.2's linkedin_accounts
-    assert len(personal_columns(PII)) == len(COVERAGE) == 17
-    assert CONTACT_TABLES == {"provenance_records", "evidence", "data_subject_requests"}
+    # Story 4.6's ai_test_cases, Story 2.11's job_postings, Story 10.2's linkedin_accounts
+    # and Story 10.7's channel_permissions
+    assert len(personal_columns(PII)) == len(COVERAGE) == 18
+    assert CONTACT_TABLES == {
+        "provenance_records",
+        "evidence",
+        "data_subject_requests",
+        "channel_permissions",  # Story 10.7
+    }
 
 
 def test_every_exporting_owner_has_an_exporter() -> None:

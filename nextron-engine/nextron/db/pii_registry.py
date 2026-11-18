@@ -452,6 +452,25 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text": PiiClass.REDACT,
         "created_at": PiiClass.NONE,
     },
+    # Story 10.7. The prospect's WhatsApp number and Instagram handle are the Contact's
+    # personal data: erasure NULLs them. The Evidence is research's row (evidence.quote);
+    # every other column is an ID, a code or a time.
+    "channel_permissions": {
+        "id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "channel": PiiClass.NONE,
+        "prospect_action": PiiClass.NONE,
+        "occurred_at": PiiClass.NONE,
+        "evidence_id": PiiClass.NONE,
+        "whatsapp_number": PiiClass.NULL,
+        "instagram_handle": PiiClass.NULL,
+        "last_inbound_at": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "revoked_at": PiiClass.NONE,
+        "recorded_by": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Story 10.2. The account's label and owner name may name a Nextron staff member, never a
     # Contact; the role, status, caps and times hold no personal data.
     "linkedin_accounts": {

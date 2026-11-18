@@ -197,6 +197,11 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads",
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
+        "/leads/{lead_id}/contacts/{contact_id}/permissions",  # Story 10.7
+        "/leads/{lead_id}/contacts/{contact_id}/permissions",
+        "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/inbound",
+        "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/revoke",
+        "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/do-not-contact",
         "/leads/{lead_id}",
         "/leads/{lead_id}/primary",
     ]
@@ -649,6 +654,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "assist_accounts_panel.html",
         "base.html",
         "campaigns_panel.html",
+        "channel_permissions.html",  # Story 10.7
+        "channel_permissions_panel.html",
         "contact_erase.html",
         "contact_erase_panel.html",
         "contact_export_form.html",

@@ -25,7 +25,6 @@ from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.notify import api as notify_api
 from nextron.app.ops import api as ops_api
-from nextron.app.pipeline import api as pipeline_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
@@ -791,7 +790,7 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
     assert all(is_command(subscriber) for subscriber in erased)
     assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
-    compliance, research, playbook, *rest = erased
+    compliance, research, playbook, *rest, pipeline = erased
     assert type(getattr(compliance, "__self__", None)) is Erasures  # compliance first
     assert type(getattr(research, "__self__", None)) is Research  # then research
     assert type(getattr(playbook, "__self__", None)) is Playbook  # Story 4.6's override cases
@@ -801,8 +800,9 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
         jobqueue_api.erase_pii,
         ops_api.erase_pii,
         notify_api.erase_pii,
-        pipeline_api.erase_pii,  # Story 10.2
     ]
+    # Story 10.7: pipeline's hook, last, revokes and clears the Channel Permissions
+    assert type(getattr(pipeline, "__self__", None)) is Pipeline
     registered = (LeadsMerged, SubjectSuppressed, ContactErased)
     others = [kind for kind in NOTIFICATIONS if kind not in registered]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
@@ -815,11 +815,12 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     found = [
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
-        *subscribers.subscribers_of(ContactErased)[:3],  # the rest are module functions
+        *subscribers.subscribers_of(ContactErased)[:3],  # then module functions
+        subscribers.subscribers_of(ContactErased)[-1],  # Story 10.7: pipeline's
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 6
+    assert clocks == [clock] * 7
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 

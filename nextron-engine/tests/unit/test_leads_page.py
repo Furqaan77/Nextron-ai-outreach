@@ -664,13 +664,14 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "guessed",
         "https://www.linkedin.com/in/jane-doe",
         "No",
-        "Make primary",
+        "Make primary Channel permissions",  # Story 10.7's link
         ERASE,
     ]
     # Story 2.10: each untrusted cell carries hx-disable, the "Make primary" cell doesn't
     untrusted = [n for n in contact.children if isinstance(n, Node) and n.tag == "td"][:5]
     assert all("hx-disable" in cell.attrs for cell in untrusted)
-    linkedin, erase = contact.find_all("a")
+    linkedin, permissions, erase = contact.find_all("a")  # Story 10.7's link between
+    assert permissions.attrs["class"] == "permissions-link"
     [(contact_id,)] = world.sql("SELECT id FROM contacts")
     assert erase.attrs == {
         "class": "erase-link",
@@ -711,7 +712,16 @@ def test_the_empty_cases(world: World) -> None:
     assert nothing.find("section", class_="lead-evidence").text == "Evidence No Evidence yet."
     assert not nothing.find_all("table")
     first, second = page.find_all("tr", class_="contact-row")
-    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primary", ERASE]
+    assert cells(first) == [
+        "Jane Doe",
+        "—",
+        "—",
+        "—",
+        "—",
+        "No",
+        "Make primary Channel permissions",  # Story 10.7's link
+        ERASE,
+    ]
     assert cells(second) == [
         "—",
         "—",
@@ -719,7 +729,7 @@ def test_the_empty_cases(world: World) -> None:
         "guessed",
         "—",
         "No",
-        "Make primary",
+        "Make primary Channel permissions",
         ERASE,
     ]
     rows = page.find_all("tr", class_="provenance-row")
@@ -1512,7 +1522,7 @@ def test_a_contact_with_an_invalid_address_has_no_make_primary_form(world: World
     values = {n.attrs["name"]: n.attrs.get("value") for n in form_node.find_all("input")}
     assert values["contact_id"] == jane
     first, _ = page.find_all("tr", class_="contact-row")
-    assert cells(first)[6] == ""
+    assert cells(first)[6] == "Channel permissions"  # Story 10.7's link only
 
 
 def test_no_decision_maker_found_is_shown_only_after_a_selection_found_none(

@@ -892,3 +892,8 @@ button.secondary {
 .ai-cases td {
   overflow-wrap: anywhere;
 }
+
+.window-closed {
+  font-weight: 600;
+  color: var(--refused);
+}

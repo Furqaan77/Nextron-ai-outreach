@@ -5028,3 +5028,43 @@ volume safe. The Settings page has a **LinkedIn** section:
 Code outside `nextron.domain` names these "assist accounts" (`AssistAccounts`,
 `AssistAccountRecord`), because Story 10.1's contract forbids the platform's name there;
 `nextron.domain.linkedin_caps` is the one allowlisted module.
+
+### Channel Permissions for WhatsApp and Instagram (Story 10.7)
+
+A WhatsApp or Instagram Draft (Story 10.8) may exist only once the prospect opened that channel.
+The engine never sends, opens or fetches anything on either platform and builds no link to
+them. The Operator records each opening on the Contact's **Channel permissions** page, linked
+from the Action cell of the Lead page's Contacts table
+(`GET /leads/{lead_id}/contacts/{contact_id}/permissions`; `nextron/web/permissions_page.py`,
+`templates/channel_permissions*.html`):
+
+- **Record** (`POST` to the page): the channel, what the prospect did (WhatsApp:
+  `started_whatsapp_conversation` or `gave_number_for_whatsapp`; Instagram:
+  `started_instagram_conversation`; nothing else is offered), the date and time (local to
+  `sender_timezone`, not in the future; a time the clocks skipped is refused), the Evidence (1
+  to 300 characters) and the channel's identifier (a WhatsApp number as `+` and 8 to 15 digits,
+  or an Instagram handle, an optional leading `@` dropped). The form states "An email reply, or
+  a number in a signature or on a website, doesn't qualify". The contactability gate runs first
+  (`assert_contactable(ContactSubject, channel, follow_up)`): a blocked Contact is refused with
+  the reason. A second active permission on the same channel is refused. `research` stores the
+  Evidence as the Operator's Quote (`Research.record_operator_quote`: type `quote`, source and
+  `extracted_by` `operator`).
+- **Instagram's 24-hour window**: an active Instagram permission shows "24-hour window closes at
+  <time>", then "24-hour window closed at <time>: don't send"; "Update last inbound message"
+  moves `last_inbound_at` (later than the stored one, not in the future, gated again).
+- **Revoke** and **Opted out on this channel** are never gated. Opting out runs
+  `compliance.suppress(ContactSubject, person, operator, <permission id>)`, so every channel is
+  blocked from then on, and revokes every active permission of the Contact. A person with no
+  known key (no email address, profile URL or usable name) gets no suppression entry; the
+  permissions are still revoked, and the page says nothing was added to the Suppression List.
+- The table `channel_permissions` (migration `0038_10_7_channel_permissions`, owned by
+  `pipeline`) has CHECKs for the channel, the action per channel, the identifier, the inbound
+  time and the status, and a partial unique index (one active permission per Contact and
+  channel). Each write appends `events` rows (entity `channel_permissions`, actor `operator`,
+  no personal data); a refusal stores nothing.
+- Erasure revokes the Contact's active permissions (actor `system:pipeline`) and NULLs the
+  number and handle; research tombstones the Evidence. The subject access export includes the
+  rows (`pipeline.channel_permissions`).
+
+Story 10.8 adds the WhatsApp and Instagram Drafts: it must require an active permission and
+make revoke and opt-out cancel the Contact's `ready` channel Drafts in the same transaction.

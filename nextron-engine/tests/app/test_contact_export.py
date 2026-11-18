@@ -36,6 +36,7 @@ from nextron.db import eventlog
 from nextron.db.models.base import new_id
 from nextron.db.repos.notify import alerts as alerts_repo
 from nextron.db.repos.notify import notifications as notifications_repo
+from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -336,6 +337,33 @@ class Seeded:
                 JANE_REPLY, "question", contact_id=self.jane, names=("Jane Doe",)
             )
         )
+        # Story 10.7: a Channel Permission Jane gave on Instagram, and one Bob gave on WhatsApp
+        self.jane_permission = world.transact(
+            lambda: permissions_repo.insert(
+                contact_id=self.jane,
+                channel="instagram",
+                prospect_action="started_instagram_conversation",
+                occurred_at=T0,
+                evidence_id=self.jane_evidence,
+                whatsapp_number=None,
+                instagram_handle="jane.doe",
+                last_inbound_at=T0,
+                at=T0,
+            )
+        )
+        world.transact(
+            lambda: permissions_repo.insert(
+                contact_id=self.bob,
+                channel="whatsapp",
+                prospect_action="gave_number_for_whatsapp",
+                occurred_at=T0,
+                evidence_id=self.bob_evidence,
+                whatsapp_number="+447700900999",
+                instagram_handle=None,
+                last_inbound_at=None,
+                at=T0,
+            )
+        )
         # Bob's request and entries come first, so the file must leave them out by more than
         # time; then Jane's entries: every key with the firm's domain, and her old address
         world.clock.set(T0 + timedelta(hours=1))
@@ -369,6 +397,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "compliance",
         "notify",
         "playbook",
+        "pipeline",
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (

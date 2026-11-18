@@ -13,7 +13,9 @@ violation.
   built yet: ``find_contact_email``, ``verify_contact_email``, the Signal Inbox chain, replies,
   ``sequencing.enroll``, ``drafting.request_*``, ``approval.approve``, the pipeline Tasks and
   call sheets and ``compliance.assert_sendable``: their stories add a scenario here when they
-  build them.
+  build them. Story 10.7's ``pipeline.channel_permissions`` (``ChannelPermissions.record``
+  and ``update_inbound``) gates the Contact on ``whatsapp`` or ``instagram`` for
+  ``follow_up`` before any write; Blocked, it stores nothing, not even the Evidence.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -63,9 +65,11 @@ from sqlalchemy import Engine, event
 
 from nextron import main
 from nextron.app.compliance import api as compliance_api
+from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.people import PeopleExtractions
 from nextron.app.setup.api import Setup
@@ -82,6 +86,7 @@ from nextron.domain.contactability import (
     NewContactSubject,
     NewLeadSubject,
 )
+from nextron.domain.channel_permission import PermissionRefused
 from nextron.domain.contacts import LINKEDIN_URL_SOURCES, ContactCandidate, ProvenanceSource
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import validate_markets
@@ -177,6 +182,12 @@ MANIFEST: Final = (
         ("app/pipeline/",),
         ANY + r"(?!cancel_)\w*(?:task|call_sheet)\w*",
         inserts=frozenset({"linkedin_tasks"}),
+    ),
+    # Story 10.7: recording a Channel Permission and moving an Instagram one's last inbound
+    Caller(
+        "pipeline.channel_permissions",
+        ("app/pipeline/",),
+        r"ChannelPermissions\.(?:record|update_inbound)",
     ),
     Caller(
         "compliance.assert_sendable",
@@ -1030,9 +1041,79 @@ def _no_person_evidence_without_a_contact(world: World) -> None:
     )
 
 
+def _channel_permissions() -> ChannelPermissions:
+    clock = FrozenClock(T0)
+    return ChannelPermissions(clock, Research(clock), Compliance(clock))
+
+
+def _permission_contact(world: World, tag: str) -> str:
+    """A Contact on a new Lead, with ``sender_timezone`` set (permission times are local)."""
+    with world.units.open():
+        Setup(FrozenClock(T0)).save({"sender_timezone": "Europe/London"})
+    return world.contact(world.lead(f"firm-{tag}.co.uk"), ContactCandidate(name=NAME))
+
+
+def _quietly(run: Callable[[], object]) -> object:
+    """``run``, a refusal (the Blocked case) answered ``None``."""
+    try:
+        return run()
+    except PermissionRefused:
+        return None
+
+
+def _permission_record(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 10.7: recording an Instagram permission gates the Contact on its channel."""
+    contact_id = _permission_contact(world, tag)
+    service = _channel_permissions()
+
+    def action() -> object:
+        with world.units.open():
+            return _quietly(
+                lambda: service.record(
+                    contact_id,
+                    "instagram",
+                    "started_instagram_conversation",
+                    "2026-11-18T08:00",
+                    "They messaged us first on Instagram about the webinar",
+                    "",
+                    "jane.doe",
+                )
+            )
+
+    expected = (GateCall(ContactSubject(contact_id), "instagram", "follow_up"),)
+    return action, lambda: expected
+
+
+def _permission_inbound(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 10.7: moving an Instagram permission's last inbound message gates it again."""
+    contact_id = _permission_contact(world, tag)
+    service = _channel_permissions()
+    with world.units.open():
+        permission_id = service.record(
+            contact_id,
+            "instagram",
+            "started_instagram_conversation",
+            "2026-11-18T07:00",
+            "They messaged us first on Instagram",
+            "",
+            "jane.doe",
+        )
+
+    def action() -> object:
+        with world.units.open():
+            return _quietly(
+                lambda: service.update_inbound(contact_id, permission_id, "2026-11-18T08:30")
+            )
+
+    expected = (GateCall(ContactSubject(contact_id), "instagram", "follow_up"),)
+    return action, lambda: expected
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
         "discovery.upsert_lead": Scenario((_upsert,)),
+        # Story 10.7: Blocked stores nothing, not even the Evidence
+        "pipeline.channel_permissions": Scenario((_permission_record, _permission_inbound)),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1129,6 +1210,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "discovery.csv_import",
         *(f"research.add_contact[{source}]" for source in CONTACT_SOURCES),
         "research.people_extraction",
+        "pipeline.channel_permissions",  # Story 10.7
     }
     assert scenario_problems(package_index(), SCENARIOS) == []
 

@@ -77,6 +77,11 @@ Market fact or Provenance Record (Story 3.7's rows) and no "Make primary" form (
 the Lead and its other Contacts render unchanged. The erase link sits in its own "Erasure"
 column, the eighth of the Contacts table.
 
+**Channel Permissions (Story 10.7).** Each Contact that isn't erased also links, in its
+Action cell, to its Channel Permission page (``nextron.web.permissions_page
+.permissions_href``: "Channel permissions"), where the Operator records that the prospect
+opened WhatsApp or Instagram. The table keeps its eight columns.
+
 **Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
 ``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
 
@@ -202,6 +207,8 @@ from nextron.domain.segments import EvidenceType, SignalClass
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
 from nextron.web.erase_page import ERASE_LABEL, erase_href
+from nextron.web.permissions_page import LINK_LABEL as PERMISSIONS_LABEL
+from nextron.web.permissions_page import permissions_href
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
@@ -680,6 +687,8 @@ class ContactRow:
     can_make_primary: bool = True
     erase_href: str | None = None
     erase_label: str = ERASE_LABEL
+    permissions_href: str | None = None  # Story 10.7
+    permissions_label: str = PERMISSIONS_LABEL
     tombstone: str | None = None
 
 
@@ -1018,6 +1027,7 @@ def contact_row(
         can_make_primary=not _operators_primary(contact)
         and contact.address_class != INVALID_ADDRESS,
         erase_href=None if lead_id is None else erase_href(lead_id, contact.id),
+        permissions_href=None if lead_id is None else permissions_href(lead_id, contact.id),
     )
 
 

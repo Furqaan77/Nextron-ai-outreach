@@ -120,10 +120,12 @@ links the survivor lacks); ``SubjectSuppressed`` -> ``Pipeline(clock).close_supp
 stories add them); ``ContactErased`` -> each owner's ``erase_pii`` hook (Story 3.13, AD-17):
 compliance's first (``Erasures(clock, Compliance(clock)).erase_pii``, which reads the Contact
 while it still holds its values), then research's (``Research(clock).erase_pii``, which
-tombstones the Contact last), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
+tombstones the Contact; the hooks after it touch only their own tables), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
 erases the Contact's override cases, ``erase_override_cases``), then the no-op hooks of
 ``setup``, ``drafting``, ``jobqueue``, ``ops`` and ``notify``, whose tables never hold a
-Contact's data. Each uses ``SystemClock()`` when no clock is given.
+Contact's data, then pipeline's (``Pipeline(clock).erase_pii``, Story 10.7: it revokes the
+Contact's Channel Permissions and NULLs their number and handle). Each uses ``SystemClock()``
+when no clock is given.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance)``
 (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the dashboard gets too,
@@ -686,9 +688,9 @@ from nextron.app.ops.api import (
     clear_work_folders,
     remove_work_folder,
 )
-from nextron.app.pipeline import api as pipeline_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.assist_accounts import AssistAccounts
+from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
@@ -1169,6 +1171,8 @@ def build_app(
         compliance=compliance,
         primary_contacts=primary_contacts,
         erasures=Erasures(clock, compliance),  # Story 3.13: on the same Compliance
+        # Story 10.7: the Contact's Channel Permissions, on the same Research and Compliance
+        channel_permissions=ChannelPermissions(clock, research, compliance),
         domain_checks=domain_checks,
         units=units,
         lifespan=engine_lifespan(
@@ -1812,8 +1816,10 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)
     # Story 4.6: the Operator's override cases of the Contact (ai_test_cases.input)
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
-    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api, pipeline_api):
+    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
+    # Story 10.7: the Contact's Channel Permissions (revoked, number and handle NULL)
+    subscribers.register_subscriber(ContactErased, Pipeline(chosen).erase_pii)
     subscribers.freeze()
     return subscribers
 

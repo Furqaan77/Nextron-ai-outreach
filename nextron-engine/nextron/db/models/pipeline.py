@@ -13,15 +13,40 @@ most 100; ``ck_linkedin_accounts_daily_cap``: daily at most weekly); ``created_a
 
 ``label`` and ``owner_name`` may name a Nextron staff member, so both are classed ``redact``;
 every other column holds no personal data. No Contact's data is ever stored here.
+
+``channel_permissions`` (FR-24, FR-47, Story 10.7; migration ``0038_10_7_channel_permissions``),
+written only by ``nextron.db.repos.pipeline.channel_permissions``: one row per opening a
+prospect gave on WhatsApp or Instagram, recorded by the Operator. A ULID ``id``; ``contact_id``
+(FK ``contacts.id``, indexed); ``channel`` and ``prospect_action``
+(``nextron.domain.channel_permission``: ``ck_channel_permissions_channel`` and
+``ck_channel_permissions_action``, an action valid for the channel); ``occurred_at``;
+``evidence_id`` (FK ``evidence.id``, the operator Quote Evidence); ``whatsapp_number`` and
+``instagram_handle`` (``ck_channel_permissions_identifier``: only the channel's own, required
+while ``active``); ``last_inbound_at`` (``ck_channel_permissions_last_inbound``: exactly for
+Instagram, never before ``occurred_at``); ``status`` (``active`` or ``revoked``) with
+``revoked_at`` (``ck_channel_permissions_revoked_at``: set exactly when ``revoked``);
+``recorded_by`` (``operator``); ``created_at`` and ``updated_at``. The partial unique index
+``uq_channel_permissions_active`` allows one ``active`` permission per Contact and channel.
+``whatsapp_number`` and ``instagram_handle`` are the Contact's personal data, classed ``null``
+(erasure NULLs them); every other column is ``none``.
 """
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, Index, Integer, String, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from nextron.db.models.base import Base, UtcDateTime, ulid_pk
+from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
+from nextron.domain.channel_permission import (
+    MAX_HANDLE_LENGTH,
+    MAX_NUMBER_LENGTH,
+    RECORDED_BY,
+    VALID_ACTIONS,
+    PermissionChannel,
+    PermissionStatus,
+)
 from nextron.domain.linkedin_caps import (
     DEFAULT_DAILY_INVITES,
     DEFAULT_TASKS_PER_WEEKDAY,
@@ -73,5 +98,76 @@ class AssistAccountRecord(Base):
     weekly_invite_cap: Mapped[int] = mapped_column(
         Integer, server_default=text(str(DEFAULT_WEEKLY_INVITES))
     )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+PERMISSION_CHANNEL_LENGTH: Final = 16
+PROSPECT_ACTION_LENGTH: Final = 32
+PERMISSION_STATUS_LENGTH: Final = 8
+RECORDED_BY_LENGTH: Final = 16
+_W: Final = PermissionChannel.WHATSAPP
+_I: Final = PermissionChannel.INSTAGRAM
+
+
+def _quoted(values: Iterable[str]) -> str:
+    return ",".join(f"'{value}'" for value in values)
+
+
+PERMISSION_CHANNEL_CHECK: Final = f"channel IN ({_quoted(PermissionChannel)})"
+PERMISSION_ACTION_CHECK: Final = (
+    f"(channel = '{_W}' AND prospect_action IN ({_quoted(VALID_ACTIONS[_W])}))"
+    f" OR (channel = '{_I}' AND prospect_action IN ({_quoted(VALID_ACTIONS[_I])}))"
+)
+PERMISSION_IDENTIFIER_CHECK: Final = (
+    f"(channel = '{_W}' AND instagram_handle IS NULL"
+    f" AND (status = 'revoked' OR whatsapp_number IS NOT NULL))"
+    f" OR (channel = '{_I}' AND whatsapp_number IS NULL"
+    f" AND (status = 'revoked' OR instagram_handle IS NOT NULL))"
+)
+PERMISSION_INBOUND_CHECK: Final = (
+    f"(channel = '{_I}') = (last_inbound_at IS NOT NULL)"
+    " AND (last_inbound_at IS NULL OR last_inbound_at >= occurred_at)"
+)
+PERMISSION_STATUS_CHECK: Final = f"status IN ({_quoted(PermissionStatus)})"
+PERMISSION_REVOKED_CHECK: Final = "(status = 'revoked') = (revoked_at IS NOT NULL)"
+PERMISSION_RECORDED_BY_CHECK: Final = f"recorded_by = '{RECORDED_BY}'"
+ONE_ACTIVE_PERMISSION_WHERE: Final = f"status = '{PermissionStatus.ACTIVE}'"
+
+
+class ChannelPermissionRecord(Base):
+    """One opening a prospect gave on WhatsApp or Instagram; see the module docstring."""
+
+    __tablename__ = "channel_permissions"
+    __table_args__ = (
+        Index("ix_channel_permissions_contact_id", "contact_id"),
+        Index(
+            "uq_channel_permissions_active",
+            "contact_id",
+            "channel",
+            unique=True,
+            sqlite_where=text(ONE_ACTIVE_PERMISSION_WHERE),
+        ),
+        CheckConstraint(PERMISSION_CHANNEL_CHECK, name="channel"),
+        CheckConstraint(PERMISSION_ACTION_CHECK, name="action"),
+        CheckConstraint(PERMISSION_IDENTIFIER_CHECK, name="identifier"),
+        CheckConstraint(PERMISSION_INBOUND_CHECK, name="last_inbound"),
+        CheckConstraint(PERMISSION_STATUS_CHECK, name="status"),
+        CheckConstraint(PERMISSION_REVOKED_CHECK, name="revoked_at"),
+        CheckConstraint(PERMISSION_RECORDED_BY_CHECK, name="recorded_by"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    contact_id: Mapped[str] = mapped_column(Ulid, ForeignKey("contacts.id"))
+    channel: Mapped[str] = mapped_column(String(PERMISSION_CHANNEL_LENGTH))
+    prospect_action: Mapped[str] = mapped_column(String(PROSPECT_ACTION_LENGTH))
+    occurred_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    evidence_id: Mapped[str] = mapped_column(Ulid, ForeignKey("evidence.id"))
+    whatsapp_number: Mapped[str | None] = mapped_column(String(MAX_NUMBER_LENGTH))
+    instagram_handle: Mapped[str | None] = mapped_column(String(MAX_HANDLE_LENGTH))
+    last_inbound_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    status: Mapped[str] = mapped_column(String(PERMISSION_STATUS_LENGTH))
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    recorded_by: Mapped[str] = mapped_column(String(RECORDED_BY_LENGTH))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)

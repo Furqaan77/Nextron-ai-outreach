@@ -30,10 +30,19 @@ transaction: entity ``leads``, actor ``system:pipeline``, at the clock's now.
   ``reply_rule``, ``reply_class``, ``one_click``, ``mailto``) with a ``lead_id``, it calls
   ``close(n.lead_id, lost, n.suppression_entry_id)``; the ``operator``, ``import`` and ``dsr``
   sources leave the stage unchanged. A closed Lead is a no-op, so it is idempotent.
-- ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 10.2, AD-17): pipeline's
-  ``ContactErased`` subscriber writes nothing, because ``linkedin_accounts`` (its one table with
-  a personal-data column) holds a Nextron staff member's label and name, never a Contact's data.
-  The LinkedIn account commands are ``nextron.app.pipeline.assist_accounts.AssistAccounts``.
+- ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Stories 10.2 and 10.7, AD-17):
+  pipeline's ``ContactErased`` subscriber, registered after the other owners' hooks
+  (``nextron.main.build_subscribers``). ``linkedin_accounts`` holds a Nextron staff member's
+  label and name, never a Contact's data, so it is ``not_held``. ``channel_permissions`` is
+  ``tombstoned``: in the publisher's transaction, each of the Contact's ``active`` permissions
+  becomes ``revoked`` (``revoked_at`` now) through the Channel Permission machine (event
+  ``erase``), each with one ``events`` row (entity ``channel_permissions``, cause
+  ``contact_erased``, actor ``system:pipeline``), then every row's ``whatsapp_number`` and
+  ``instagram_handle`` (PII class ``null``) become NULL. Research's hook tombstones the linked
+  operator Evidence. A ``cause`` that isn't an ``ErasureCause`` raises ``ValueError``.
+  The LinkedIn account commands are ``nextron.app.pipeline.assist_accounts.AssistAccounts``;
+  the Channel Permission commands ``nextron.app.pipeline.channel_permissions
+  .ChannelPermissions``.
 """
 
 from collections.abc import Mapping
@@ -41,9 +50,12 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.db import eventlog
+from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.uow import command
-from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.channel_permission import PermissionEvent, PermissionStatus
+from nextron.domain.channel_permission import transition as permission_transition
+from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
 from nextron.domain.ids import is_ulid
 from nextron.domain.leads import LeadSource
 from nextron.domain.machines import IllegalTransition
@@ -61,6 +73,7 @@ from nextron.domain.suppression_entry import OPT_OUT_SOURCES
 from nextron.ports.clock import Clock
 
 ENTITY: Final = "leads"
+PERMISSIONS_ENTITY: Final = "channel_permissions"  # Story 10.7
 ACTOR: Final = "system:pipeline"
 CLOSE_EVENTS: Final[Mapping[PipelineStage, StageEvent]] = MappingProxyType(
     {
@@ -157,10 +170,35 @@ class Pipeline:
         self.close(n.lead_id, PipelineStage.LOST, n.suppression_entry_id)
 
 
-# Erasure (Story 10.2) -------------------------------------------------------------------------
+    @command
+    def erase_pii(self, n: ContactErased) -> None:
+        """``pipeline``'s ``ContactErased`` subscriber: revoke and clear the Contact's Channel
+        Permissions; see the module docstring."""
+        ErasureCause(n.cause)  # a data subject request or a retention erasure
+        if not is_ulid(n.contact_id):
+            return
+        now = self._clock.now()
+        for permission in permissions_repo.for_contact(n.contact_id):
+            if permission.status != PermissionStatus.ACTIVE.value:
+                continue
+            change = permission_transition(PermissionStatus.ACTIVE, PermissionEvent.ERASE)
+            permissions_repo.revoke(permission.id, now)
+            eventlog.append(
+                entity=PERMISSIONS_ENTITY,
+                entity_id=permission.id,
+                from_status=permission.status,
+                to_status=change.to.value,
+                cause=change.cause.value,
+                cause_ref=None,
+                actor=ACTOR,
+                at=now,
+            )
+        permissions_repo.clear_identifiers(n.contact_id, now)
 
-# What pipeline's erase_pii does to each of its tables with a personal-data column: none of them
-# ever holds a Contact's data.
+# Erasure (Stories 10.2 and 10.7) -------------------------------------------------------------
+
+
+# What pipeline's erase_pii does to each of its tables with a personal-data column.
 ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
     {
         "linkedin_accounts": TableErasure(
@@ -168,11 +206,10 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
             "the LinkedIn account a Nextron staff member sends Tasks from: its label and the "
             "owner's name and role, never a Contact's data",
         ),
+        "channel_permissions": TableErasure(
+            Coverage.TOMBSTONED,
+            "the Contact's WhatsApp number and Instagram handle become NULL and each active "
+            "permission is revoked; research tombstones the linked operator Evidence",
+        ),
     }
 )
-
-
-@command
-def erase_pii(n: ContactErased) -> None:
-    """``pipeline``'s ``ContactErased`` subscriber (Story 10.2, AD-17): it writes nothing,
-    because no ``pipeline`` table holds a Contact's data (``ERASURE``)."""

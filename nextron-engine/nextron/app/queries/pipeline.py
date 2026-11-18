@@ -15,16 +15,26 @@ current unit of work, read-only ones included.
 - ``health_issues()`` (Story 10.2): one ``linkedin_tasks_off`` issue (subject
   ``linkedin_tasks``, text ``nextron.domain.linkedin_caps.TASKS_OFF``) while ``assist_setup()``
   is ``None``; otherwise none.
+- ``sender_zone()`` (Story 10.7): the ``sender_timezone`` setting as a ``ZoneInfo``, or ``None``
+  while it is unset or its stored text no longer parses; Channel Permission times are read and
+  shown in it.
+- ``permissions(contact_id)`` (Story 10.7): the Contact's Channel Permissions, newest first, as
+  ``StoredPermission`` rows; none for a text that isn't a ULID.
+- ``export_pii(contact_id)`` (Story 10.7, FR-52): ``{"channel_permissions": rows}``, every
+  column of each of the Contact's permissions, oldest first (``contact_export.COVERAGE``).
 """
 
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Final
 
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.pipeline import assist_accounts as accounts_repo
 from nextron.db.repos.pipeline import stages as stages_repo
+from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline.assist_accounts import StoredAccount
+from nextron.db.repos.pipeline.channel_permissions import StoredPermission
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.linkedin_caps import TASKS_OFF, AccountCaps, AccountStatus
@@ -124,3 +134,31 @@ def health_issues() -> tuple[HealthIssue, ...]:
     if assist_setup() is not None:
         return ()
     return (HealthIssue(TASKS_OFF_KIND, TASKS_OFF_SUBJECT, TASKS_OFF, detail=TASKS_OFF_DETAIL),)
+
+
+# Channel Permissions (Story 10.7) -------------------------------------------------------------
+
+
+def sender_zone() -> ZoneInfo | None:
+    """The ``sender_timezone`` setting, or ``None`` when it is unset or no longer parses."""
+    try:
+        name = setup_queries.get(Key.SENDER_TIMEZONE)
+    except (InvalidSettingValue, SettingNotSet):
+        return None
+    try:
+        return ZoneInfo(str(name))
+    except (ValueError, LookupError):  # ZoneInfoNotFoundError is a KeyError
+        return None
+
+
+def permissions(contact_id: str) -> tuple[StoredPermission, ...]:
+    """The Contact's Channel Permissions, newest first."""
+    if not is_ulid(contact_id):
+        return ()
+    return tuple(permissions_repo.for_contact(contact_id))
+
+
+def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
+    """The Contact's Channel Permissions, every column; see the module docstring."""
+    rows = permissions_repo.export_rows(contact_id) if is_ulid(contact_id) else ()
+    return {"channel_permissions": rows}

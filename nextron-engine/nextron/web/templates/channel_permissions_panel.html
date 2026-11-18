@@ -1,0 +1,131 @@
+{#- The Channel Permission panel (nextron.web.permissions_page): rendered inside
+    channel_permissions.html, and alone as the answer to each of its POSTs, which HTMX swaps in
+    for this whole panel. Stored and typed text renders through |plain inside hx-disable; the
+    forms sit outside those elements, so HTMX still posts them. An erased Contact shows no value
+    and no form. Nothing here links to WhatsApp or Instagram. -#}
+{%- macro described(prefix, item) %}
+{%- if item.hint or item.error %} aria-describedby="
+{%- if item.hint %}{{ prefix }}-{{ item.name }}-hint{% endif %}
+{%- if item.hint and item.error %} {% endif %}
+{%- if item.error %}{{ prefix }}-{{ item.name }}-error{% endif %}"{% endif %}
+{%- if item.error %} aria-invalid="true"{% endif %}
+{%- endmacro %}
+{%- macro notes(prefix, item) %}
+{%- if item.hint %}
+<p class="hint" id="{{ prefix }}-{{ item.name }}-hint">{{ item.hint|plain }}</p>
+{%- endif %}
+{%- if item.error %}
+<p class="field-error" id="{{ prefix }}-{{ item.name }}-error">{{ item.error|plain }}</p>
+{%- endif %}
+{%- endmacro %}
+<section id="permissions-panel" class="campaigns" aria-labelledby="permissions-heading">
+<h2 id="permissions-heading">WhatsApp and Instagram</h2>
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}" hx-disable>{{ notice.text|plain }}</p>
+{%- endif %}
+{%- if erased_text %}
+<p class="erased-contact">{{ erased_text }}</p>
+{%- else %}
+<p>The engine never sends, opens or fetches anything on WhatsApp or Instagram. A Channel Permission records that the prospect opened the channel themselves; a WhatsApp or Instagram Draft needs an active one.</p>
+{%- if zone_unset %}
+<p class="notice notice-refused" role="note">{{ zone_unset }}</p>
+{%- endif %}
+{%- if not permissions %}
+<p>No Channel Permission yet.</p>
+{%- endif %}
+{%- for row in permissions %}
+<section class="campaign" aria-labelledby="permission-{{ row.id }}-heading">
+<h3 id="permission-{{ row.id }}-heading">{{ row.channel|plain }}: {{ row.status }}</h3>
+<dl class="erase-contact" hx-disable>
+<dt>What the prospect did</dt>
+<dd>{{ row.action|plain }}</dd>
+<dt>When</dt>
+<dd>{{ row.occurred }}</dd>
+<dt>{{ row.identifier_label }}</dt>
+<dd>{{ row.identifier|plain }}</dd>
+<dt>Evidence</dt>
+<dd>{{ row.evidence|plain }}</dd>
+{%- if row.revoked %}
+<dt>Revoked</dt>
+<dd>{{ row.revoked }}</dd>
+{%- endif %}
+</dl>
+{%- if row.window %}
+<p class="permission-window{% if row.window_closed %} window-closed{% endif %}">{{ row.window }}</p>
+{%- endif %}
+{%- if row.inbound %}
+<form method="post" action="{{ row.base_href }}/inbound" hx-post="{{ row.base_href }}/inbound" hx-target="#permissions-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<div class="field">
+<label for="permission-{{ row.id }}-{{ row.inbound.name }}">{{ row.inbound.label }}</label>
+<input type="datetime-local" id="permission-{{ row.id }}-{{ row.inbound.name }}" name="{{ row.inbound.name }}" value="{{ row.inbound.value|plain }}"{{ described('permission-' ~ row.id, row.inbound) }}>
+{{- notes('permission-' ~ row.id, row.inbound) }}
+</div>
+<button type="submit" class="secondary">Update last inbound message</button>
+</form>
+{%- endif %}
+{%- if row.can_revoke %}
+<form method="post" action="{{ row.base_href }}/revoke" hx-post="{{ row.base_href }}/revoke" hx-target="#permissions-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<button type="submit" class="secondary">Revoke</button>
+</form>
+{%- endif %}
+<form method="post" action="{{ row.base_href }}/do-not-contact" hx-post="{{ row.base_href }}/do-not-contact" hx-target="#permissions-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<button type="submit" class="secondary">Opted out on this channel</button>
+<p class="hint">Suppresses every key known for this person, so every channel is blocked from now on, and revokes every active permission.</p>
+</form>
+</section>
+{%- endfor %}
+<section class="campaign" aria-labelledby="permission-new-heading">
+<h3 id="permission-new-heading">Record a permission</h3>
+<p class="erase-warning" role="note">{{ not_qualifying }}.</p>
+<form method="post" action="{{ action }}" hx-post="{{ action }}" hx-target="#permissions-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<div class="field">
+<label for="permission-new-{{ form.channel.name }}">{{ form.channel.label }}</label>
+<select id="permission-new-{{ form.channel.name }}" name="{{ form.channel.name }}"{{ described('permission-new', form.channel) }}>
+{%- for option in form.channels %}
+<option value="{{ option.value }}"{% if form.channel.value == option.value %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+{{- notes('permission-new', form.channel) }}
+</div>
+<div class="field">
+<label for="permission-new-{{ form.action.name }}">{{ form.action.label }}</label>
+<select id="permission-new-{{ form.action.name }}" name="{{ form.action.name }}"{{ described('permission-new', form.action) }}>
+{%- for group in form.groups %}
+<optgroup label="{{ group.label }}">
+{%- for option in group.options %}
+<option value="{{ option.value }}"{% if form.action.value == option.value %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</optgroup>
+{%- endfor %}
+</select>
+{{- notes('permission-new', form.action) }}
+</div>
+<div class="field">
+<label for="permission-new-{{ form.occurred.name }}">{{ form.occurred.label }}</label>
+<input type="datetime-local" id="permission-new-{{ form.occurred.name }}" name="{{ form.occurred.name }}" value="{{ form.occurred.value|plain }}"{{ described('permission-new', form.occurred) }}>
+{{- notes('permission-new', form.occurred) }}
+</div>
+<div class="field">
+<label for="permission-new-{{ form.evidence.name }}">{{ form.evidence.label }}</label>
+<textarea id="permission-new-{{ form.evidence.name }}" name="{{ form.evidence.name }}" maxlength="{{ max_evidence }}" rows="3"{{ described('permission-new', form.evidence) }}>{{ form.evidence.value|plain }}</textarea>
+{{- notes('permission-new', form.evidence) }}
+</div>
+<div class="field">
+<label for="permission-new-{{ form.number.name }}">{{ form.number.label }}</label>
+<input type="text" id="permission-new-{{ form.number.name }}" name="{{ form.number.name }}" value="{{ form.number.value|plain }}" autocomplete="off" spellcheck="false"{{ described('permission-new', form.number) }}>
+{{- notes('permission-new', form.number) }}
+</div>
+<div class="field">
+<label for="permission-new-{{ form.handle.name }}">{{ form.handle.label }}</label>
+<input type="text" id="permission-new-{{ form.handle.name }}" name="{{ form.handle.name }}" value="{{ form.handle.value|plain }}" autocomplete="off" spellcheck="false"{{ described('permission-new', form.handle) }}>
+{{- notes('permission-new', form.handle) }}
+</div>
+<button type="submit">Record the permission</button>
+</form>
+</section>
+{%- endif %}
+</section>

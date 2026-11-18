@@ -123,7 +123,8 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
   ``queries.compliance.export_pii(contact_id, export_hashes(...))`` with the hashes of every
   key held for the Contact (its stored values, its Lead's ``web_domain`` through
   ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii``,
-  ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6) and
+  ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6),
+  ``queries.pipeline.export_pii`` (its Channel Permissions, Story 10.7) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -625,6 +626,7 @@ class Compliance:
                 "compliance": compliance_queries.export_pii(contact_id, hashes),
                 "notify": notify_queries.export_pii(contact_id),
                 "playbook": playbook_queries.export_pii(contact_id),
+                "pipeline": pipeline_queries.export_pii(contact_id),  # Story 10.7
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )
