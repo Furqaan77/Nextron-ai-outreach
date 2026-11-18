@@ -1939,6 +1939,90 @@ malformed or equal, so step 3 can't silently break new links. It reads the setti
 then the two keyring entries, the one check that reads Credential Manager after the database
 (their names depend on the setting); it runs last.
 
+## Unsubscribe Worker
+
+`workers/unsubscribe/` is the Cloudflare Worker behind every `List-Unsubscribe` URL (RFC 8058,
+FR-70, AD-14, AD-15, Story 3.10). It records an opt-out at once, even while the PC is off, and
+is the engine's only off-PC store: it keeps a token and the second it arrived, nothing else. It
+never decrypts (it holds `K_EDGE_<kid>` only, never `k_tok`), never removes a KV key (entries
+expire after 30 days), reads no header but `authorization`, never reads a request body, stores
+no IP address or User-Agent and logs nothing. Workers Logs, Logpush, `workers.dev` and preview
+URLs are off at the top level and in every env of `wrangler.jsonc`.
+
+**Routes** (every response has `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: no-referrer`; anything else, `HEAD` included, is 404 with an empty body):
+
+| Route | Behaviour |
+|---|---|
+| `POST /u/<token>` | The tag check: exactly 108 characters of `[A-Za-z0-9_-]`, `kid` 1 to 255, a canonical 32-byte `K_EDGE_<kid>` secret, and `raw[69:81]` equal to the first 12 bytes of HMAC-SHA256 over `raw[0:69]` (Web Crypto, constant time). Invalid: 400, empty, no KV call. Valid: `p:<token>` is `put` only if absent, value `""`, metadata `{"received_at": "YYYY-MM-DDTHH:MM:SSZ"}` (UTC, whole seconds), `expirationTtl` 2,592,000; then 200, empty, whatever the body (`List-Unsubscribe=One-Click` included). A repeat keeps the first `received_at`. A KV failure is an empty 500. |
+| `GET /u/<token>` | A self-contained page (inline style and one inline script, both allowed by `sha256-` hashes in a `default-src 'none'` CSP). Valid token: 200 and an Unsubscribe button whose script POSTs to the same URL and then shows "You're unsubscribed. You won't get further emails from this sender."; without script the form still POSTs. Invalid: 400, "This link isn't valid", no button. Never touches KV, so link scanners can't opt anyone out. |
+| `GET /pending` | For the engine's poll (Stories 3.11 and 3.12). `Authorization: Bearer <x>` must equal `PENDING_BEARER` or, during rotation, `PENDING_BEARER_NEXT` (SHA-256 digests compared in constant time; a configured secret under 43 characters counts as unset). Otherwise 401, empty. |
+
+**The `/pending` contract (for 3.11/3.12).** 200 with `Content-Type: application/json`:
+
+```json
+{"format": "nextron-unsub-pending/1",
+ "entries": [{"token": "<108 chars>", "received_at": "2026-11-18T09:30:15Z", "expiration": 1766050215}]}
+```
+
+`entries` is every `p:` key, following KV `list` cursors until `list_complete` (each page is one
+KV list call, which 3.11 meters as `kv_list`). `received_at` is `null` if the metadata is
+missing; `expiration` is KV's Unix seconds, `null` if missing. An entry's token may still fail
+in the engine: a token whose tag verifies but whose ciphertext doesn't (the vectors' `edge:
+accept` cases) is recorded here and rejected by `decode`. The Worker never removes entries; KV
+expires them after 30 days, so the poll must apply them well within that.
+
+KV is eventually consistent and takes about one write per second per key. So two POSTs of the
+same token close together can both see it absent: the second may overwrite `received_at` by a
+few seconds, or get a retryable 500. Nothing is lost, because 3.11 deduplicates by
+`token_hash`.
+
+**Local tests** (Node 24; `npm ci` in `workers/unsubscribe/` once):
+
+- `npm test` runs `node --test`: `test/handler.test.mjs` calls the handler directly against a
+  fake KV (every I/O case, every vector of `tests/fixtures/unsub_token_vectors.json`, read in
+  place, cursor paging, the rotation bearer, and `check-config`); `test/dev.test.mjs` starts
+  `wrangler dev --local --env test` on `127.0.0.1` free ports with a temporary persist dir,
+  secrets via `--var`, telemetry and the `cf.json` fetch off, and kills the whole process tree
+  afterwards.
+- The engine's `tests/contracts/test_unsub_worker_contracts.py` pins the config, the package
+  files and the source's banned calls without Node and, when `node` is on PATH, runs the handler
+  tests and proves `check-config` refuses the committed placeholders.
+
+**Deploying (Mac's step; nothing in the repo deploys).** The committed `wrangler.jsonc` uses
+the placeholder host `sending-domain-1.invalid` and placeholder KV ids until Story 3.9 (OQ-A7)
+names the Sending Domains, and `scripts/check-config.mjs` refuses it, so `npm run deploy:<env>`
+stops before wrangler starts. Once 3.9 is done, from `workers/unsubscribe/`:
+
+1. `npx wrangler login` with the Cloudflare account that holds the Sending Domains' zones.
+2. Create one KV namespace per env (`npx wrangler kv namespace create nextron-unsub-prod`, and
+   `-dev`, `-test`) and put each 32-hex id in its env's `kv_namespaces`.
+3. Replace each env's route with one custom-domain route per Sending Domain: `u.<domain>` for
+   `prod`, `u-dev.<domain>` and `u-test.<domain>` for `dev` and `test`. Add a route per further
+   Sending Domain. Never use `*.workers.dev`.
+4. `node scripts/check-config.mjs prod` (and `dev`, `test`) must print `ok`.
+5. Set the secrets, each typed at wrangler's prompt: `npm run secret:prod -- K_EDGE_1` (the
+   Credentials page's `k_edge` for kid 1; repeat per kid in use), `npm run secret:prod --
+   PENDING_BEARER` (the engine's `unsub/bearer`, at least 43 characters). `secret:<env>` accepts
+   only `K_EDGE_<1-255>`, `PENDING_BEARER` and `PENDING_BEARER_NEXT`. The `dev` and `test`
+   envs get their own `K_EDGE_<kid>` and bearer values, from their own env's keyring namespace,
+   never prod's.
+6. `npm run deploy:prod` (and `deploy:dev`, `deploy:test`). Always deploy through
+   `npm run deploy:<env>`. Never run a bare `wrangler deploy` without `--env`: it would deploy
+   the top-level config, which has no route or KV binding, and it skips the guard.
+7. After each deploy, check:
+   - `https://u.<domain>/pending` answers 401 without the bearer;
+   - a garbage `GET /u/x` gives the 400 "This link isn't valid" page;
+   - an unknown path, and `HEAD` on any path, give an empty 404;
+   - responses carry `Cache-Control: no-store`, and the page carries its
+     `Content-Security-Policy`;
+   - no `*.workers.dev` or preview host serves the Worker.
+
+**Rotating the bearer:** set the new value as `PENDING_BEARER_NEXT`, switch the engine's
+`unsub/bearer` to it, then set it as `PENDING_BEARER` too and replace `PENDING_BEARER_NEXT`
+with a fresh random value (or remove it from the dashboard). For a new token key id, add its
+`K_EDGE_<kid>` before switching `unsub_active_kid` (see "Rotating the keys" above).
+
 ## Eligibility
 
 Eligibility (FR-18, FR-2, FR-63, AD-16, NFR-5, NFR-7, Story 3.6) answers whether a Contact may

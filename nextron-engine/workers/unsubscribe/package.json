@@ -1,0 +1,22 @@
+{
+  "name": "nextron-unsubscribe-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Nextron's one-click unsubscribe Cloudflare Worker (Story 3.10).",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test",
+    "deploy:dev": "node scripts/check-config.mjs dev && wrangler deploy --env dev",
+    "deploy:test": "node scripts/check-config.mjs test && wrangler deploy --env test",
+    "deploy:prod": "node scripts/check-config.mjs prod && wrangler deploy --env prod",
+    "secret:dev": "node scripts/check-config.mjs dev && node scripts/secret.mjs dev",
+    "secret:test": "node scripts/check-config.mjs test && node scripts/secret.mjs test",
+    "secret:prod": "node scripts/check-config.mjs prod && node scripts/secret.mjs prod"
+  },
+  "devDependencies": {
+    "wrangler": "4.162.0"
+  }
+}

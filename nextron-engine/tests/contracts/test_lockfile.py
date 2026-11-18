@@ -1,11 +1,14 @@
 """Pins (SC-1): exact pins in ``pyproject.toml``, the same versions in ``uv.lock``, banned packages."""
 
+import json
 import re
 import tomllib
 
 import pytest
 
-from tests.contracts.support import LOCKFILE, pyproject
+from tests.contracts.support import ENGINE_ROOT, LOCKFILE, pyproject
+
+WORKER = ENGINE_ROOT / "workers" / "unsubscribe"
 
 STACK_PACKAGES = {
     "alembic",
@@ -111,3 +114,17 @@ def test_pytz_arrives_only_through_dateparser() -> None:
 
     assert dependents <= {"dateparser"}
     assert "pytz" not in _pins(pyproject()["project"]["dependencies"])
+
+
+def test_the_unsubscribe_worker_pins_wrangler_exactly_and_locks_it() -> None:
+    """Story 3.10: wrangler 4.162.0 is the Worker's only (dev) dependency, in the committed lock."""
+    package = json.loads((WORKER / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((WORKER / "package-lock.json").read_text(encoding="utf-8"))
+
+    assert package["devDependencies"] == {"wrangler": "4.162.0"}
+    assert "dependencies" not in package
+    assert lock["lockfileVersion"] == 3
+    assert lock["packages"][""]["devDependencies"] == {"wrangler": "4.162.0"}
+    assert "dependencies" not in lock["packages"][""]
+    assert lock["packages"]["node_modules/wrangler"]["version"] == "4.162.0"
+    assert lock["packages"]["node_modules/wrangler"]["integrity"].startswith("sha512-")
