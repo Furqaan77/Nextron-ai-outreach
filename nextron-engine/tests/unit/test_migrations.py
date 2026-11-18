@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0048_10_2_assist_accounts"
+HEAD = "0049_9_1_manual_stages"
 
 
 @pytest.fixture
@@ -1268,3 +1268,65 @@ def test_0047_creates_an_empty_discovery_runs_table_with_its_checks(tmp_path: Pa
         writer.commit()
     finally:
         writer.close()
+
+
+def test_0049_adds_the_deal_columns_in_place_and_the_call_outcomes_table(
+    tmp_path: Path,
+) -> None:
+    """A Lead stored before 0049 (Story 9.1) keeps its row with no deal value or notes; the two
+    columns are nullable, with no CHECK, at the end of the table; ``call_outcomes`` is created
+    with its foreign keys and its ``lead_id`` index."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0048_10_2_assist_accounts":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0048_10_2_assist_accounts",
+        )
+    at = "2026-11-18T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at, pipeline_stage) "
+        f"VALUES ('{lead}', 'Acme Accounting', 'acme.co.uk', '{segment}', '{at}', 'replied')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0048_10_2_assist_accounts", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute("SELECT id, pipeline_stage, deal_value, notes FROM leads").fetchall()
+        columns = [(row[1], row[2], row[3]) for row in reader.execute("PRAGMA table_info(leads)")]
+        outcomes = [
+            (row[1], row[2], row[3]) for row in reader.execute("PRAGMA table_info(call_outcomes)")
+        ]
+        keys = sorted(
+            (row[3], row[2], row[4])
+            for row in reader.execute("PRAGMA foreign_key_list(call_outcomes)")
+        )
+        indexes = [row[1] for row in reader.execute("PRAGMA index_list(call_outcomes)")]
+    finally:
+        reader.close()
+    assert rows == [(lead, "replied", None, None)]
+    assert columns[-2:] == [("deal_value", "BIGINT", 0), ("notes", "TEXT", 0)]
+    assert outcomes == [
+        ("id", "VARCHAR(26)", 1),
+        ("lead_id", "VARCHAR(26)", 1),
+        ("contact_id", "VARCHAR(26)", 1),
+        ("scheduled_at", "VARCHAR(27)", 1),
+        ("prospect_tz", "VARCHAR(64)", 1),
+        ("booked_at", "VARCHAR(27)", 1),
+        ("booked_by", "VARCHAR(64)", 1),
+        ("superseded_at", "VARCHAR(27)", 0),
+    ]
+    assert keys == [("contact_id", "contacts", "id"), ("lead_id", "leads", "id")]
+    assert "ix_call_outcomes_lead_id" in indexes
+    run_sql(  # any value fits: the code, not a CHECK, keeps the limits
+        path, f"UPDATE leads SET deal_value = -1, notes = 'x' WHERE id = '{lead}'"
+    )

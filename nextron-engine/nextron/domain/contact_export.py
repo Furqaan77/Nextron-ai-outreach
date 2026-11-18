@@ -32,6 +32,11 @@ Table                      Owner        Exported as / why not
                                         but each row references the Contact)
 ``draft_revisions``        drafting     ``draft_revisions`` (Story 4.12: the revisions of the
                                         Drafts of the Contact's Enrollments)
+``call_outcomes``          pipeline     ``call_bookings`` (Story 9.1: the Contact's booked
+                                        calls)
+``leads``                  pipeline     ``lead_notes`` (Story 9.1: ``notes`` shown as
+                                        ``notes_excerpts``, the lines of the Lead's notes
+                                        that mention the Contact)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``linkedin_accounts``      pipeline     Nextron's own LinkedIn account (Story 10.2)
@@ -181,6 +186,10 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "ai_test_cases": Exported("playbook", "override_cases"),
         "enrollments": Exported("sequencing", "enrollments"),
         "draft_revisions": Exported("drafting", "draft_revisions"),  # Story 4.12
+        "call_outcomes": Exported("pipeline", "call_bookings"),  # Story 9.1
+        "leads": Exported(
+            "pipeline", "lead_notes", shown_as=MappingProxyType({"notes": "notes_excerpts"})
+        ),
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

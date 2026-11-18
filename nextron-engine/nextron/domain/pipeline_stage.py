@@ -33,6 +33,17 @@ close_disqualified  every open stage, not_now           disqualified    closed_d
 
 Later stories add the commands that apply these moves; they add no status.
 
+**Operator moves (Story 9.1).** ``AUTOMATIC_STAGES`` (``new``, ``queued``, ``contacted``,
+``replied``, ``interested``, ``not_now`` and ``call_held``) are set only by the engine (a Call
+Outcome sets ``call_held``): the Operator never moves a Lead to one. ``OPERATOR_EVENTS`` maps
+each stage the Operator moves a Lead to onto its event: ``call_booked`` (``book_call``, through
+the call form), ``audit_proposed``, ``audit_won``, ``build_proposed``, ``won``, ``lost`` and
+``disqualified``. ``operator_moves(current)`` is the targets of ``OPERATOR_EVENTS`` whose event
+``TRANSITIONS`` allows from ``current``, in that order, then ``REOPEN`` (``"reopen"``) when
+``current`` is closed; a value that is no stage has none. Two more causes are Story 9.1's:
+``deal_details_saved`` (the same-stage ``leads`` row of a deal value and notes save) and
+``rebooked`` (a ``call_outcomes`` booking superseded by a new one).
+
 **Creation.** ``CREATION[source]`` is ``Transition(new, created_from_<source>)`` for each
 ``LeadSource``: the creation ``events`` row (no ``from`` status) records where the Lead came
 from.
@@ -170,6 +181,8 @@ class StageCause(StrEnum):
     REOPENED = "reopened"
     LEADS_MERGED = "leads_merged"
     SEGMENT_DISQUALIFIER = "segment_disqualifier"  # Story 2.15: the scoring service's close
+    DEAL_DETAILS_SAVED = "deal_details_saved"  # Story 9.1
+    REBOOKED = "rebooked"  # Story 9.1
 
 
 CREATION: Final[Mapping[LeadSource, Transition[PipelineStage, StageCause]]] = MappingProxyType(
@@ -249,6 +262,28 @@ AUTOMATIC_EVENTS: Final[Mapping[PipelineStage, StageEvent]] = MappingProxyType(
         PipelineStage.INTERESTED: StageEvent.HOT_REPLY,
     }
 )
+# Story 9.1: the stages only the engine sets, and the Operator's moves.
+AUTOMATIC_STAGES: Final = (
+    PipelineStage.NEW,
+    PipelineStage.QUEUED,
+    PipelineStage.CONTACTED,
+    PipelineStage.REPLIED,
+    PipelineStage.INTERESTED,
+    PipelineStage.NOT_NOW,
+    PipelineStage.CALL_HELD,
+)
+OPERATOR_EVENTS: Final[Mapping[PipelineStage, StageEvent]] = MappingProxyType(
+    {
+        PipelineStage.CALL_BOOKED: StageEvent.BOOK_CALL,
+        PipelineStage.AUDIT_PROPOSED: StageEvent.PROPOSE_AUDIT,
+        PipelineStage.AUDIT_WON: StageEvent.WIN_AUDIT,
+        PipelineStage.BUILD_PROPOSED: StageEvent.PROPOSE_BUILD,
+        PipelineStage.WON: StageEvent.WIN,
+        PipelineStage.LOST: StageEvent.CLOSE_LOST,
+        PipelineStage.DISQUALIFIED: StageEvent.CLOSE_DISQUALIFIED,
+    }
+)
+REOPEN: Final = "reopen"
 
 
 def transition(
@@ -286,6 +321,19 @@ def reopen(
     if closed is None or closed not in CLOSED_STAGES or target is None or target not in _REOPENABLE:
         raise IllegalTransition(MACHINE, "reopen", current)
     return Transition(target, StageCause.REOPENED)
+
+
+def operator_moves(current: PipelineStage) -> tuple[str, ...]:
+    """The Operator's legal moves from ``current``; see the module docstring."""
+    stage = _stage(current)
+    if stage is None:
+        return ()
+    moves: list[str] = [
+        target for target, event in OPERATOR_EVENTS.items() if (stage, event) in TRANSITIONS
+    ]
+    if stage in CLOSED_STAGES:
+        moves.append(REOPEN)
+    return tuple(moves)
 
 
 def merged(

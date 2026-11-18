@@ -147,6 +147,22 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "place_lat": PiiClass.NONE,
         "place_lng": PiiClass.NONE,
         "place_coords_at": PiiClass.NONE,
+        # Story 9.1: the deal value is the firm's; the Operator's notes are free text that may
+        # name a person, so erasing a Contact redacts its Lead's notes
+        "deal_value": PiiClass.NONE,
+        "notes": PiiClass.REDACT,
+    },
+    # Story 9.1. A booked call holds IDs, a zone, an actor code and times; the Contact is kept
+    # as its id only.
+    "call_outcomes": {
+        "id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "scheduled_at": PiiClass.NONE,
+        "prospect_tz": PiiClass.NONE,
+        "booked_at": PiiClass.NONE,
+        "booked_by": PiiClass.NONE,
+        "superseded_at": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.

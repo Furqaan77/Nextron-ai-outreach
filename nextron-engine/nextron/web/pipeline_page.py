@@ -21,7 +21,8 @@ Segments", then each by name, its value the key), a Market select ("All Markets"
 name, its value the code), "Entered stage from" and "Entered stage to" date inputs, a Filter
 button and, while a filter is set, "Clear filters" linking to ``/leads/pipeline``. Then one
 ``GroupView`` per ``PipelineStage`` in machine order, an empty one included: the stage's label,
-"<n> Leads" ("1 Lead"), "Deal value: —" (Story 9.1 adds deal values), and up to 50 rows (the
+"<n> Leads" ("1 Lead"), "Deal value: $12,000" (Story 9.1: the group's total in whole US
+dollars, thousands separated; "Deal value: —" when no Lead in it has one), and up to 50 rows (the
 name linked to ``/leads/<id>``, the Segment's name or "Unknown Segment", the day it entered the
 stage or "—"; a ``not_now`` row also shows "Re-contact: —" until Story 8.8 stores the date), or
 "No Leads at this stage." When a group has more than one page, its ``Pager`` ("Page <n> of
@@ -41,6 +42,7 @@ from nextron.app.queries.pipeline import BoardLead, PipelineBoard, StageGroup
 from nextron.app.queries.setup import SeededMarket, SeededSegment
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, MalformedForm
+from nextron.web.lead_pipeline import deal_line
 from nextron.web.leads_page import (
     LIST_PATH,
     NO_VALUE,
@@ -67,7 +69,6 @@ FILTER_FIELDS: Final = frozenset({SEGMENT_FIELD, MARKET_FIELD, FROM_FIELD, TO_FI
 DATE_PATTERN: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # matched with fullmatch
 DATE_FORMAT: Final = "%Y-%m-%d"
 RANGE_REFUSED: Final = "End date must be on or after start date"
-NO_DEAL_VALUE: Final = f"Deal value: {NO_VALUE}"  # Story 9.1 adds leads.deal_value
 NO_RECONTACT: Final = f"Re-contact: {NO_VALUE}"  # Story 8.8 adds leads.recontact_on
 EMPTY_GROUP: Final = "No Leads at this stage."
 ANCHOR_PREFIX: Final = "stage-"
@@ -279,7 +280,7 @@ def group_view(
         anchor=f"{ANCHOR_PREFIX}{group.stage.value}",
         label=STAGE_LABELS[group.stage],
         count_text=count_text(group.total),
-        deal_value=NO_DEAL_VALUE,  # group.deal_value is always None until Story 9.1
+        deal_value=deal_line(group.deal_value),  # Story 9.1's one formatter
         recontact=group.stage is PipelineStage.NOT_NOW,
         rows=tuple(board_row(lead, names) for lead in group.leads),
         pager=group_pager(group, filters, board),

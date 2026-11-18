@@ -113,21 +113,24 @@ at once, as before; a migration then rolls back and runs again at the next start
 that constructs ``Subscribers`` or registers a subscriber, frozen once filled. Each story that
 adds a subscriber registers its owner command there, in the order AD-3 lists. So far:
 ``LeadsMerged`` -> ``Pipeline(clock).reparent_lead`` (Story 2.2: the survivor of a merge gets
-the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
-Lead's Contacts move to the survivor; Story 2.5: so do its crawl runs, and its pages and ATS
-links the survivor lacks), then ``Sequencing(clock).reparent_lead`` (Story 4.8: the merged
-Lead's Enrollments move to the survivor); ``SubjectSuppressed`` ->
-``Sequencing(clock).stop_suppressed`` (Story 4.8: the live Enrollments the suppression blocks
-stop), then ``Pipeline(clock).close_suppressed`` (Story 3.3: an opt-out closes the Lead ``lost``;
-AD-3's other subscribers go between them when their stories add them); ``ContactErased`` -> each
-owner's ``erase_pii`` hook (Story 3.13, AD-17): compliance's first (``Erasures(clock,
-Compliance(clock)).erase_pii``, which reads the Contact while it still holds its values), then
-research's (``Research(clock).erase_pii``, which tombstones the Contact last), then playbook's
-(``Playbook(clock).erase_pii``, Story 4.6: it erases the Contact's override cases,
-``erase_override_cases``), then ``Sequencing(clock).erase_pii`` (Story 4.8: the erased
-Contact's live Enrollments stop with ``contact_erased``), then the hooks of ``setup``,
-``drafting`` (Story 4.12: it tombstones the text of the Contact's ``draft_revisions``),
-``jobqueue``, ``ops`` and ``notify`` (the others no-ops: their tables never hold a Contact's
+the more advanced Pipeline Stage; Story 9.1: and the merged Lead's booked calls), then
+``Research(clock).reparent_lead`` (Story 2.3: the merged Lead's Contacts move to the survivor;
+Story 2.5: so do its crawl runs, and its pages and ATS links the survivor lacks), then
+``Sequencing(clock).reparent_lead`` (Story 4.8: the merged Lead's Enrollments move to the
+survivor); ``SubjectSuppressed`` -> ``Sequencing(clock).stop_suppressed`` (Story 4.8: the live
+Enrollments the suppression blocks stop), then ``Pipeline(clock).close_suppressed`` (Story 3.3:
+an opt-out closes the Lead ``lost``; AD-3's other subscribers go between them when their stories
+add them); ``ContactErased`` -> each owner's ``erase_pii`` hook (Story 3.13, AD-17):
+compliance's first (``Erasures(clock, Compliance(clock)).erase_pii``, which reads the Contact
+while it still holds its values), then research's (``Research(clock).erase_pii``, which
+tombstones the Contact last), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
+erases the Contact's override cases, ``erase_override_cases``), then
+``Sequencing(clock).erase_pii`` (Story 4.8: the erased Contact's live Enrollments stop with
+``contact_erased``), then the hooks of ``setup``, ``drafting`` (Story 4.12: it tombstones the
+text of the Contact's ``draft_revisions``), ``jobqueue``, ``ops`` and ``notify`` (the others
+no-ops: their tables never hold a Contact's data), then pipeline's, last
+(``Pipeline(clock).erase_pii``, Stories 9.1 and 10.2: the Contact's Lead's notes, and those of
+every Lead merged into it, become ``[erased]``; ``linkedin_accounts`` never holds a Contact's
 data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
 ``queued``); ``FooterChanged`` -> ``Drafting(clock).recompose_ready`` (Story 4.12: the Market's
 ``ready`` Drafts get a ``footer_change`` revision). Each uses ``SystemClock()`` when no clock is
@@ -819,7 +822,6 @@ from nextron.app.ops.api import (
     clear_work_folders,
     remove_work_folder,
 )
-from nextron.app.pipeline import api as pipeline_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.assist_accounts import AssistAccounts
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
@@ -1419,6 +1421,7 @@ def build_app(
         compliance=compliance,
         primary_contacts=primary_contacts,
         erasures=erasures,  # Story 3.13: on the same Compliance, with the queue
+        pipeline=Pipeline(clock),  # Story 9.1: the Lead page's Pipeline panel
         domain_checks=domain_checks,
         email_finding=email_finding,
         lead_scores=lead_scores,
@@ -2273,8 +2276,11 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
     # Story 4.8: stop the erased Contact's live Enrollments, before the no-op hooks
     subscribers.register_subscriber(ContactErased, Sequencing(chosen).erase_pii)
-    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api, pipeline_api):
+    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
+    # Stories 9.1 and 10.2, last: the erased Contact's Lead's notes (linkedin_accounts never
+    # holds a Contact's data)
+    subscribers.register_subscriber(ContactErased, Pipeline(chosen).erase_pii)
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
     # Story 4.9: the next Step's due time, or the Enrollment's completion
     subscribers.register_subscriber(MessageSent, Sequencing(chosen).on_step_sent)

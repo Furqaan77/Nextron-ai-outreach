@@ -54,7 +54,7 @@ from nextron.db.models.ops import (
     RecoveryStateRecord,
     RestoreTestRecord,
 )
-from nextron.db.models.pipeline import AssistAccountRecord
+from nextron.db.models.pipeline import AssistAccountRecord, CallOutcomeRecord
 from nextron.db.models.playbook import (
     AiRouteActivationRecord,
     AiRouteTupleRecord,
@@ -97,6 +97,7 @@ __all__ = [
     "AtsLinkRecord",
     "BackupRecord",
     "Base",
+    "CallOutcomeRecord",
     "CampaignRecord",
     "CompanyFactRecord",
     "ContactRecord",

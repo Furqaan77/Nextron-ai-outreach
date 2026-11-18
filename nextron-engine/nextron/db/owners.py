@@ -123,7 +123,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "place_lng",
             "place_coords_at",
         ),
-        "pipeline": ("pipeline_stage",),
+        # the pipeline group (Stories 2.2 and 9.1)
+        "pipeline": ("pipeline_stage", "deal_value", "notes"),
         # the profile group (Stories 2.9, 2.6, 2.10 and 2.12)
         "research": (
             "hq_tz",
@@ -147,6 +148,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "score_factors",
             "disqualified_rule",
             "disqualified_evidence",
+        ),
+    },
+    "call_outcomes": {  # Story 9.1
+        "pipeline": (
+            "id",
+            "lead_id",
+            "contact_id",
+            "scheduled_at",
+            "prospect_tz",
+            "booked_at",
+            "booked_by",
+            "superseded_at",
         ),
     },
     "prompt_snapshots": {

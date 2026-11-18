@@ -7,7 +7,9 @@ a violation.
   a table it doesn't own or one with no personal-data column. Each such owner's ``erase_pii`` is
   registered for ``ContactErased`` in ``nextron.main.build_subscribers``, every subscriber there
   is an ``erase_pii``, compliance's runs first (it reads the Contact before it is tombstoned)
-  and research's second. The declarations are the I/O matrix's coverage row.
+  and research's second. The declarations are the I/O matrix's coverage row. A table several
+  owners write column group by column group (``leads``, Story 9.1) belongs to the single owner
+  of its personal-data columns (``owner_of``).
 - **Every hashed column knows its kind.** Every ``keep_hash`` column is in
   ``pii_registry.HASH_KINDS``, every entry there is a ``keep_hash`` column, and each kind is
   ``None`` (already a hash) or a single-value key kind.
@@ -37,6 +39,7 @@ from nextron import main
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.compliance.erasure_stores import MAILBOX_PLACEHOLDER, ErasureStores
+from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
 from nextron.db.models import Base
@@ -77,6 +80,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "notifications": ("notify", Coverage.NOT_HELD),
     "ai_test_cases": ("playbook", Coverage.TOMBSTONED),  # Story 4.6's override cases
     "linkedin_accounts": ("pipeline", Coverage.NOT_HELD),  # Story 10.2: staff, never a Contact
+    "leads": ("pipeline", Coverage.TOMBSTONED),  # Story 9.1: the notes
 }
 
 type Declarations = Mapping[str, object]  # owner -> its ERASURE (or None)
@@ -106,9 +110,24 @@ def personal_tables(pii: Mapping[str, Mapping[str, PiiClass]]) -> set[str]:
     }
 
 
-def owner_of(table: str, tables: Mapping[str, Mapping[str, Sequence[str]]]) -> str | None:
+def owner_of(
+    table: str,
+    tables: Mapping[str, Mapping[str, Sequence[str]]],
+    pii: Mapping[str, Mapping[str, PiiClass]] = PII,
+) -> str | None:
+    """The single owner of ``table``'s personal-data columns (Story 9.1: a table several owners
+    write, column group by column group, such as ``leads``); a table with one writer is that
+    writer's, as before. ``None`` when no single owner holds them."""
     owners = [writer for writer in tables.get(table, {}) if writer not in SHARED_WRITERS]
-    return owners[0] if len(owners) == 1 else None
+    if len(owners) == 1:
+        return owners[0]
+    personal = {
+        column
+        for column, pii_class in pii.get(table, {}).items()
+        if pii_class is not PiiClass.NONE
+    }
+    holders = [owner for owner in owners if personal & set(tables[table][owner])]
+    return holders[0] if personal and len(holders) == 1 else None
 
 
 def declaration_problems(
@@ -121,7 +140,7 @@ def declaration_problems(
     problems = []
     held = personal_tables(pii)
     for table in sorted(held):
-        owner = owner_of(table, tables)
+        owner = owner_of(table, tables, pii)
         found = declared.get(owner) if owner is not None else None
         if not isinstance(found, Mapping) or table not in found:
             problems.append(f"{table} ({owner}) has no ERASURE declaration")
@@ -134,7 +153,7 @@ def declaration_problems(
         for table, erasure in sorted(found.items()):
             if table not in held:
                 problems.append(f"{owner} declares {table}, which holds no personal data")
-            elif owner_of(table, tables) != owner:
+            elif owner_of(table, tables, pii) != owner:
                 problems.append(f"{owner} declares {table}, which it doesn't own")
             if not isinstance(erasure, TableErasure):
                 problems.append(f"{owner} declares {table} without a TableErasure")
@@ -160,7 +179,7 @@ def hook_problems(
         name = getattr(subscriber, "__name__", repr(subscriber))
         if name != HOOK:
             problems.append(f"{owner}'s {name} is registered for ContactErased")
-    owners = {owner_of(table, tables) for table in personal_tables(pii)}
+    owners = {owner_of(table, tables, pii) for table in personal_tables(pii)}
     for owner in sorted(str(owner) for owner in owners):
         if owner not in registered:
             problems.append(f"{owner} registers no erase_pii for ContactErased")
@@ -419,7 +438,12 @@ def test_each_declaring_owner_has_an_erase_pii_command(owner: str) -> None:
 
     hook = getattr(module, HOOK, None)
     if hook is None:  # compliance's, research's and playbook's are methods of their services
-        service = {"compliance": Erasures, "research": Research, "playbook": Playbook}[owner]
+        service = {
+            "compliance": Erasures,
+            "research": Research,
+            "playbook": Playbook,
+            "pipeline": Pipeline,  # Story 9.1
+        }[owner]
         hook = getattr(service, HOOK)
 
     assert is_command(hook)

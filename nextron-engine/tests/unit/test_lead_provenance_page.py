@@ -521,7 +521,14 @@ def test_everything_sits_inside_hx_disable_with_no_htmx_action(seeded: World) ->
     find_email = [
         form for form in forms if form.attrs.get("action") == f"/leads/{lead}/find-email"
     ]
-    primary = [form for form in forms if form not in exports + rescore + find_email]
+    # Story 9.1's Pipeline panel posts only to the Lead's stage, call and deal routes
+    panel = page.find("main").find("section", id="lead-pipeline")
+    staged = [form for form in forms if panel in list(form.ancestors())]
+    assert staged and all(
+        form.attrs["hx-post"] in {f"/leads/{lead}/{route}" for route in ("stage", "call", "deal")}
+        for form in staged
+    )
+    primary = [form for form in forms if form not in exports + rescore + find_email + staged]
     assert primary and all(form.attrs["action"] == f"/leads/{lead}/primary" for form in primary)
     actions = [  # base.html's own hx- attributes sit outside main
         node

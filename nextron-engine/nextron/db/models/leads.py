@@ -11,7 +11,11 @@ Three owners write it, column by column (``nextron.db.owners``):
   ``fk_leads_merged_into_leads``; ``ck_leads_not_self_merged``) and ``created_at``;
 - the pipeline group, owner ``pipeline`` (``nextron.db.repos.pipeline.stages``):
   ``pipeline_stage``, server default ``new``, one of the stages of
-  ``nextron.domain.pipeline_stage`` (``ck_leads_pipeline_stage``);
+  ``nextron.domain.pipeline_stage`` (``ck_leads_pipeline_stage``), and the deal details (Story
+  9.1, migration ``0049_9_1_manual_stages``): ``deal_value`` (BigInteger micro-dollars, a whole
+  number of US dollars from 0 to 1,000,000,000) and ``notes`` (plain text, at most 5,000
+  characters), both nullable with no CHECK (added in place; ``nextron.domain.manual_stages``
+  keeps the limits);
 - the profile group, owner ``research`` (``nextron.db.repos.research.profile``): ``hq_tz``,
   the IANA zone of the Lead's headquarters, and ``hq_evidence_id``, the ``evidence`` row it
   comes from (Story 2.9, migration ``0025_2_9_signals_evidence``), both nullable and kept NULL
@@ -43,13 +47,16 @@ keeps ``place_id``. No other column holds anything a Places search returned.
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
-organization data, PII class ``none``: erasing a Contact never touches the firm's Lead.
+organization data, PII class ``none``, except ``notes`` (Story 9.1: free text that may name a
+person, class ``redact``): erasing a Contact sets its Lead's notes to ``[erased]``
+(``Pipeline.erase_pii``) and touches nothing else of the firm's Lead.
 """
 
 from datetime import datetime
 from typing import Final
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Float,
@@ -136,3 +143,5 @@ class LeadRecord(Base):
     place_lat: Mapped[float | None] = mapped_column(Float)
     place_lng: Mapped[float | None] = mapped_column(Float)
     place_coords_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    deal_value: Mapped[int | None] = mapped_column(BigInteger)
+    notes: Mapped[str | None] = mapped_column(Text)

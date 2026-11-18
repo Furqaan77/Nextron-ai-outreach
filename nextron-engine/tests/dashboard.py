@@ -488,6 +488,7 @@ class Dashboard:
             lead_signals=LeadSignals(self.clock),
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,
+            pipeline=Pipeline(self.clock),
             erasures=self.erasures,
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,

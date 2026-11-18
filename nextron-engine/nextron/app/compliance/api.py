@@ -175,7 +175,10 @@ The two reapply writers (their caller is ``nextron.app.compliance.ledger.Erasure
   ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii``,
   ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6),
   ``queries.sequencing.export_pii`` (the Contact's Enrollments, Story 4.8),
-  ``queries.drafting.export_pii`` (the revisions of their Drafts, Story 4.12) and
+  ``queries.drafting.export_pii`` (the revisions of their Drafts, Story 4.12),
+  ``queries.pipeline.export_pii`` (Story 9.1: the Contact's booked calls, and the lines of the
+  notes of its Lead and of every Lead merged into it, ``queries.discovery.merged_lead_ids``,
+  that mention it, by ``mention_terms(name, email)``) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -282,6 +285,7 @@ from nextron.domain.contact_export import (
     assemble,
     export_hashes,
     filename,
+    mention_terms,
     render,
 )
 from nextron.domain.contactability import (
@@ -832,6 +836,11 @@ class Compliance:
                 "playbook": playbook_queries.export_pii(contact_id),
                 "sequencing": sequencing_queries.export_pii(contact_id),
                 "drafting": drafting_queries.export_pii(contact_id),
+                "pipeline": pipeline_queries.export_pii(
+                    contact_id,
+                    (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id)),
+                    mention_terms(contact.name, contact.email),
+                ),
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )

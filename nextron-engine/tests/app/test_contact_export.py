@@ -39,6 +39,7 @@ from nextron.db.models.base import new_id
 from nextron.db.repos.compliance import erasure_receipts as receipts_repo
 from nextron.db.repos.notify import alerts as alerts_repo
 from nextron.db.repos.notify import notifications as notifications_repo
+from nextron.db.repos.pipeline import bookings as bookings_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -96,6 +97,9 @@ JANE_NOTICE = "A Contact needs a look"
 JANE_POSTING = "Legal assistant to Jane Doe"
 FIRM_POSTING = "Paralegal, property team"
 JANE_REPLY = "Hi, Jane Doe here: what would the audit cost for our team?"
+LEAD_NOTES = (  # Story 9.1: only the line naming Jane is hers
+    "Budget agreed in principle.\nJane Doe wants the audit first.\nBob Smith is away until May."
+)
 JANE_OVERRIDE = "Hi, [name] here: what would the audit cost for our team?"
 REQUEST_COLUMNS = (
     "id",
@@ -391,6 +395,24 @@ class Seeded:
         if receipts:
             self.jane_receipt = receipt(world, self.jane, JANE_RECEIPT_REF)
             self.bob_receipt = receipt(world, self.bob, BOB_RECEIPT_REF)
+        # Story 9.1: the Lead's notes and a booked call with each of them
+        world.sql(
+            "UPDATE leads SET deal_value = 5000000000, notes = ? WHERE id = ?",
+            (LEAD_NOTES, self.lead),
+        )
+        self.jane_call, self.bob_call = (
+            world.transact(
+                lambda contact=contact: bookings_repo.insert(
+                    lead_id=self.lead,
+                    contact_id=contact,
+                    scheduled_at=T0 + timedelta(days=3),
+                    prospect_tz="Europe/London",
+                    booked_at=T0,
+                    booked_by="operator",
+                )
+            )
+            for contact in (self.jane, self.bob)
+        )
         # Bob's request and entries come first, so the file must leave them out by more than
         # time; then Jane's entries: every key with the firm's domain, and her old address
         world.clock.set(T0 + timedelta(hours=1))
@@ -492,6 +514,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "playbook",
         "sequencing",
         "drafting",
+        "pipeline",  # Story 9.1
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (
@@ -503,6 +526,14 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         assert list(file[owner]) == list(sections)
         for section in sections:
             assert file[owner][section], f"{owner}.{section} is empty"
+    [notes] = file["pipeline"]["lead_notes"]
+    assert notes == {"lead_id": seeded.lead, "notes_excerpts": ["Jane Doe wants the audit first."]}
+    [call] = file["pipeline"]["call_bookings"]
+    assert (call["id"], call["contact_id"], call["prospect_tz"]) == (
+        seeded.jane_call,
+        seeded.jane,
+        "Europe/London",
+    )
     research = file["research"]
     [contact] = research["contact"]
     assert contact["id"] == seeded.jane
@@ -1159,3 +1190,25 @@ def test_the_stored_times_are_utc_text(world: World) -> None:
     [row] = request_rows(world)
     assert row["opened_at"] == row["completed_at"] == NOW_STAMP
     assert datetime.fromisoformat(NOW_STAMP[:-1]).replace(tzinfo=UTC) == NOW
+
+
+def test_the_notes_of_a_lead_merged_into_the_contacts_lead_are_exported(world: World) -> None:
+    """Story 9.1 review: notes left on a Lead merged (twice over) into hers name her too."""
+    lead = world.lead()
+    jane = world.contact(lead, name="Jane Doe", email="jane@firm.co.uk")
+    older = world.lead("firm-old.co.uk")
+    oldest = world.lead("firm-oldest.co.uk")
+    world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (lead, older))
+    world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (older, oldest))
+    world.sql("UPDATE leads SET notes = ? WHERE id = ?", ("Jane Doe called.\nOther.", older))
+    world.sql("UPDATE leads SET notes = ? WHERE id = ?", ("Ask jane@firm.co.uk.", oldest))
+
+    file = document(export(world, jane))
+
+    assert sorted(file["pipeline"]["lead_notes"], key=lambda row: row["lead_id"]) == sorted(
+        [
+            {"lead_id": older, "notes_excerpts": ["Jane Doe called."]},
+            {"lead_id": oldest, "notes_excerpts": ["Ask jane@firm.co.uk."]},
+        ],
+        key=lambda row: row["lead_id"],
+    )

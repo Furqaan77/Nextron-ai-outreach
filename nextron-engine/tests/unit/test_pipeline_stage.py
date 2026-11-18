@@ -98,6 +98,8 @@ def test_the_events_and_causes_are_the_closed_lists() -> None:
         "reopened",
         "leads_merged",
         "segment_disqualifier",  # Story 2.15: the scoring service's close
+        "deal_details_saved",  # Story 9.1: a same-stage row
+        "rebooked",  # Story 9.1: a call_outcomes row
     }
 
 
