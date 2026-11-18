@@ -180,14 +180,14 @@ development_status:
   8-12-delete-contacts-personal-data-after-the-retention-period: backlog
   epic-8-retrospective: optional
 
-  epic-9: backlog
+  epic-9: in-progress
   9-1-move-leads-through-the-later-pipeline-stages-by-hand-with-de: backlog
   9-2-prepare-a-grounded-call-prep-sheet-for-each-hot-lead: backlog
   9-3-email-the-call-prep-sheet-to-furqaan-when-a-call-is-booked: backlog
   9-4-prompt-for-and-record-each-call-outcome: backlog
   9-5-draft-a-rebooking-email-after-a-no-show: backlog
   9-6-report-offer-validation-after-the-first-10-held-calls: backlog
-  9-7-view-the-pipeline-by-stage-with-filters: backlog
+  9-7-view-the-pipeline-by-stage-with-filters: review
   9-8-show-each-lead-s-complete-history: backlog
   epic-9-retrospective: optional
 

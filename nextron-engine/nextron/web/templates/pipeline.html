@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{#- The Pipeline board (nextron.web.pipeline_page, Story 9.7): the filter form, then one group per
+    Pipeline Stage in machine order, each with its count, its deal-value slot, its rows and its
+    pager. The filter form is a native GET form: no hx-post and no csrf_field(), so the
+    session's token never reaches a URL. A Lead's name is imported or crawled text: it renders
+    only through |plain, inside the group's hx-disable. -#}
+{% block title %}Nextron: Pipeline{% endblock %}
+{% block content %}
+<h1>Pipeline</h1>
+<p><a href="/leads">All Leads</a></p>
+<form class="lead-filters" method="get" action="/leads/pipeline" role="search">
+<div class="field">
+<label for="board-segment">Segment</label>
+<select id="board-segment" name="segment">
+<option value=""{% if not segment_options|selectattr("selected")|list %} selected{% endif %}>All Segments</option>
+{%- for option in segment_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="board-market">Market</label>
+<select id="board-market" name="market">
+<option value=""{% if not market_options|selectattr("selected")|list %} selected{% endif %}>All Markets</option>
+{%- for option in market_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="board-from">Entered stage from</label>
+<input type="date" id="board-from" name="from" value="{{ entered_from }}">
+</div>
+<div class="field">
+<label for="board-to">Entered stage to</label>
+<input type="date" id="board-to" name="to" value="{{ entered_to }}">
+</div>
+<div class="filter-actions">
+<button type="submit">Filter</button>
+{%- if filtered %}
+<a href="/leads/pipeline">Clear filters</a>
+{%- endif %}
+</div>
+</form>
+{%- if range_refused %}
+<p class="notice notice-refused" role="alert">{{ range_refused }}</p>
+{%- endif %}
+{%- for group in groups %}
+<section class="stage-group" id="{{ group.anchor }}" data-stage="{{ group.stage }}" aria-labelledby="{{ group.anchor }}-title">
+<h2 id="{{ group.anchor }}-title">{{ group.label }}</h2>
+<p class="stage-summary"><span class="stage-count">{{ group.count_text }}</span> <span class="stage-deal-value">{{ group.deal_value }}</span></p>
+{%- if group.rows %}
+<table class="lead-table" hx-disable>
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Segment</th><th scope="col">In stage since</th>{% if group.recontact %}<th scope="col">Re-contact</th>{% endif %}</tr>
+</thead>
+<tbody>
+{%- for row in group.rows %}
+<tr><td><a href="{{ row.href }}">{{ row.name|plain }}</a></td><td>{{ row.segment|plain }}</td><td>{{ row.entered }}</td>{% if group.recontact %}<td>{{ row.recontact }}</td>{% endif %}</tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="stage-empty">{{ empty_group }}</p>
+{%- endif %}
+{%- if group.pager %}
+<nav class="pager" aria-label="{{ group.label }} pages">
+{%- if group.pager.previous %}
+<a href="{{ group.pager.previous }}" rel="prev">Previous</a>
+{%- endif %}
+<span>Page {{ "{:,}".format(group.pager.page) }} of {{ "{:,}".format(group.pager.pages) }}</span>
+{%- if group.pager.next %}
+<a href="{{ group.pager.next }}" rel="next">Next</a>
+{%- endif %}
+</nav>
+{%- endif %}
+</section>
+{%- endfor %}
+{% endblock %}

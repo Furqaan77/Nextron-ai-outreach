@@ -2535,9 +2535,44 @@ The parameters are `stage` (a stage, such as `call_booked`), `segment` (a Segmen
 collapses to one. Any other parameter, a repeated one, an unknown stage or Segment, a `q` over
 200 characters or holding any other control character, or a bad `page` is refused with 400
 "Request refused: malformed form", so a hand-edited URL never shows an unfiltered list that looks
-filtered. The filter form is the dashboard's one GET form: it carries no CSRF token, because a
-token must never reach a URL (`tests/contracts/test_web_contracts.py` allows a GET form only
-without `hx-post`, without the token and with a local `action`).
+filtered. The filter form is a GET form, like the Pipeline board's: it carries no CSRF token,
+because a token must never reach a URL (`tests/contracts/test_web_contracts.py` allows a GET form
+only without `hx-post`, without the token and with a local `action`).
+
+**The Pipeline board (`/leads/pipeline`, Story 9.7, FR-46, UX-DR18).** Follow **View by Pipeline
+Stage** above the Leads list. The board shows every Lead that wasn't merged into another, grouped
+under each Pipeline Stage in machine order: New, Queued, Contacted, Replied, Interested, Call
+booked, Call held, Audit proposed, Audit won, Build proposed, Won, then Not Now, Lost and
+Disqualified. Every group shows, an empty one included, with its count ("12 Leads", "1 Lead",
+"0 Leads" and "No Leads at this stage."), "Deal value: —" (Story 9.1 adds deal values) and up to
+50 Leads, highest Lead Score first (unscored Leads last), then newest first (by created date,
+then id): the name (linked to the Lead page), the Segment
+and "In stage since", the UTC day of the Lead's latest `events` row moving it to its current
+stage ("—" without one). A Not Now Lead also shows "Re-contact: —" (Story 8.8 adds the date). A
+group with more than 50 Leads gets its own "Page 1 of 3" with **Previous** and **Next**; each
+link keeps the filters and the other groups' pages and returns to the group (`#stage-<stage>`),
+and a page past the end shows the last.
+
+**Board filters.** Choose a Segment, a Market (a Lead is in a Market when at least one of its
+Contacts is), and a range of days on which the Lead entered its current stage (**Entered stage
+from** and **Entered stage to**, UTC days, both inclusive; a Lead with no entry row is left out
+while either is set), then press **Filter**; every group and count follows the filters, and
+**Clear filters** shows the whole board. The filters live in the URL:
+
+    /leads/pipeline?segment=law_private_ai&market=uk&from=2026-11-01&to=2026-11-10&page_new=2
+
+The parameters are `segment` (a Segment key), `market` (a Market code), `from` and `to`
+(`YYYY-MM-DD`) and `page_<stage>` (such as `page_call_booked`, 1 to 7 digits), each at most once;
+a blank one is unset. Any other parameter, a repeated one, an unknown Segment or Market, a date
+that isn't `YYYY-MM-DD` or isn't a real day, or a bad page is refused with 400 "Request refused:
+malformed form". A start day after the end day answers 400 with the page, "End date must be on or
+after start date" and no groups; the form keeps what was typed. There is no Campaign filter yet
+(deferred until the board can read Enrollments). The board reads only `queries.pipeline.board(segment_id=,
+market_id=, entered_from=, entered_to=, pages=)`, which counts every group in one `GROUP BY` and
+reads each non-empty group's page in one statement (`nextron/db/repos/pipeline/board.py`, read
+only); 5,000 Leads render in under a second. It is personal data (a Lead's name can be a
+sole trader's name), so it sends `Cache-Control: no-store`, and each name renders through `|plain`
+inside `hx-disable`.
 
 **The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
 to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created
