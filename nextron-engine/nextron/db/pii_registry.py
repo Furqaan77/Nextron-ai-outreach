@@ -580,6 +580,20 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text_hash": PiiClass.KEEP_HASH,
         "created_at": PiiClass.NONE,
     },
+    # Story 10.2. The account's label and owner name may name a Nextron staff member, never a
+    # Contact; the role, status, caps and times hold no personal data.
+    "linkedin_accounts": {
+        "id": PiiClass.NONE,
+        "label": PiiClass.REDACT,
+        "owner_name": PiiClass.REDACT,
+        "owner_role": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "tasks_per_weekday": PiiClass.NONE,
+        "daily_invite_cap": PiiClass.NONE,
+        "weekly_invite_cap": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.
     "unsub_tokens": {

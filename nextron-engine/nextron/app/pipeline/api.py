@@ -48,6 +48,10 @@ clock's now.
   ``reply_rule``, ``reply_class``, ``one_click``, ``mailto``) with a ``lead_id``, it calls
   ``close(n.lead_id, lost, n.suppression_entry_id)``; the ``operator``, ``import`` and ``dsr``
   sources leave the stage unchanged. A closed Lead is a no-op, so it is idempotent.
+- ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 10.2, AD-17): pipeline's
+  ``ContactErased`` subscriber writes nothing, because ``linkedin_accounts`` (its one table with
+  a personal-data column) holds a Nextron staff member's label and name, never a Contact's data.
+  The LinkedIn account commands are ``nextron.app.pipeline.assist_accounts.AssistAccounts``.
 """
 
 from collections.abc import Mapping
@@ -59,10 +63,11 @@ from nextron.db import eventlog
 from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.uow import command
 from nextron.domain.enrollment import StopCause
+from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.ids import is_ulid
 from nextron.domain.leads import LeadSource
 from nextron.domain.machines import IllegalTransition
-from nextron.domain.notifications import Enrolled, LeadsMerged, SubjectSuppressed
+from nextron.domain.notifications import ContactErased, Enrolled, LeadsMerged, SubjectSuppressed
 from nextron.domain.pipeline_stage import (
     AUTOMATIC_EVENTS,
     CLOSED_STAGES,
@@ -226,3 +231,24 @@ class Pipeline:
     def on_enrolled(self, n: Enrolled) -> None:
         """Move a newly enrolled Lead to ``queued``."""
         self.advance_to_at_least(n.lead_id, PipelineStage.QUEUED, n.enrollment_id)
+
+
+# Erasure (Story 10.2) -------------------------------------------------------------------------
+
+# What pipeline's erase_pii does to each of its tables with a personal-data column: none of them
+# ever holds a Contact's data.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "linkedin_accounts": TableErasure(
+            Coverage.NOT_HELD,
+            "the LinkedIn account a Nextron staff member sends Tasks from: its label and the "
+            "owner's name and role, never a Contact's data",
+        ),
+    }
+)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``pipeline``'s ``ContactErased`` subscriber (Story 10.2, AD-17): it writes nothing,
+    because no ``pipeline`` table holds a Contact's data (``ERASURE``)."""

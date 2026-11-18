@@ -40,7 +40,7 @@ from tests.fakes.usage_meter import InMemoryUsageMeter
 HEALTH_ISSUES = Registry(
     "build_health_issues", "HealthIssues", "nextron.domain.health", "register_source"
 )
-SOURCES = (  # 4.4, 6.5, 3.14, 3.12
+SOURCES = (  # 4.4, 6.5, 3.14, 3.12, 10.2
     "jobqueue",
     "budget",
     "backups",
@@ -48,6 +48,7 @@ SOURCES = (  # 4.4, 6.5, 3.14, 3.12
     "sending",
     "erasure",
     "unsub_poll",
+    "pipeline",
 )
 STARTUP_CHECKS = "nextron/startup_checks.py"
 UNUSED = '"""unused"""\n'
@@ -123,7 +124,7 @@ def test_the_registry_check_catches_another_function_in_main(tmp_path: Path) -> 
     assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
-def test_the_registry_ships_frozen_with_the_seven_owner_sources(
+def test_the_registry_ships_frozen_with_the_eight_owner_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     meter = InMemoryUsageMeter(FrozenClock())
@@ -146,7 +147,10 @@ def test_the_registry_ships_frozen_with_the_seven_owner_sources(
     assert isinstance(issues, HealthIssues)
     assert issues.frozen
     assert tuple(source.name for source in issues.sources) == SOURCES
-    jobqueue, budget_source, backups, playbook, sending, erasure, unsub_poll = issues.sources
+    jobqueue, budget_source, backups, playbook, sending, erasure, unsub_poll, pipeline = (
+        issues.sources
+    )
+    assert pipeline.read is main.pipeline_queries.health_issues  # Story 10.2
     assert jobqueue.read is main.jobqueue_queries.health_issues
     assert budget_source.read == budget.health_issues
     assert backups.read is main.ops_queries.health_issues

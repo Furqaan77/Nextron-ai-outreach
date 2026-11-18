@@ -5857,3 +5857,35 @@ Instagram:
   fetched because every fetching adapter applies the FR-49 denylist to each first URL and
   redirect; the same file adds a syntactic tripwire that flags a port fetch call whose argument
   names LinkedIn or Instagram (it doesn't follow a URL bound to another name first).
+
+### The LinkedIn account, its owner's chat and its caps (Story 10.2)
+
+LinkedIn Tasks are sent by hand; the engine only keeps the account they go out from and the
+volume safe. The Settings page has a **LinkedIn** section:
+
+- `linkedin_owner_chat` (optional, blank by default): the numeric Telegram chat id that only the
+  account's owner reads. Tasks go there, never to `alert_chat_id`. The required settings are
+  still seven.
+- The **LinkedIn account** panel (`nextron/web/assist_accounts_page.py`,
+  `templates/assist_accounts_panel.html`): add an account (label, owner's name and role; the
+  caps blank for their defaults) with `POST /settings/linkedin/add`, and edit one (fields,
+  status `active` or `inactive`, caps) with `POST /settings/linkedin/save`. A new account is
+  `inactive`. There is no delete.
+- The caps, stored per account in `linkedin_accounts` (migration `0048_10_2_assist_accounts`,
+  owned by `pipeline`): `tasks_per_weekday` (10), `daily_invite_cap` (10) and `weekly_invite_cap`
+  (100, at most 100: "At most 100 invitations per account in a rolling week"); the daily cap is
+  at most the weekly one and every cap is 0 or more. v1 supports one active account; activating
+  a second is refused with "v1 supports one LinkedIn account; its Tasks go to
+  linkedin_owner_chat (PRD OQ-5)". The table's CHECKs and a partial unique index repeat these
+  rules, and a refusal stores nothing. Each add or save appends one `events` row (actor
+  `operator`).
+- `nextron.domain.linkedin_caps.remaining(account, tasks, now, tz)`: the invitations still
+  allowed at `now`, the smallest of the three headrooms and never below 0 (Story 10.4 uses it).
+- `nextron.app.queries.pipeline.assist_setup()` returns the active account and the chat id, or
+  `None`; while it is `None` the health panel shows "LinkedIn Tasks off: set up the LinkedIn
+  account and linkedin_owner_chat" (issue `linkedin_tasks_off`, source `pipeline`), and Story
+  10.4 prepares no Task.
+
+Code outside `nextron.domain` names these "assist accounts" (`AssistAccounts`,
+`AssistAccountRecord`), because Story 10.1's contract forbids the platform's name there;
+`nextron.domain.linkedin_caps` is the one allowlisted module.

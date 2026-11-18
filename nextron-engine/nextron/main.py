@@ -590,7 +590,8 @@ blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then ``IssueSource(
 queries.compliance.health_issues)`` (each open erase request and each failed erasure store,
 Story 3.14), then ``IssueSource("unsub_poll", lambda:
 queries.compliance.unsub_poll_issues(clock.now(), polling_on=unsub_polling_on()))`` (the
-unsubscribe poll failing for over 24 hours, Story 3.12), then, given ``ledger``,
+unsubscribe poll failing for over 24 hours, Story 3.12), then ``IssueSource("pipeline",
+queries.pipeline.health_issues)`` (LinkedIn Tasks off, Story 10.2), then, given ``ledger``,
 ``IssueSource("compliance", functools.partial(queries.compliance.ledger_health_issues,
 ledger))`` (a missing or unreapplied erasure ledger after a restore, Story 3.16), then freezes
 it; each later owner
@@ -818,11 +819,14 @@ from nextron.app.ops.api import (
     clear_work_folders,
     remove_work_folder,
 )
+from nextron.app.pipeline import api as pipeline_api
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.pipeline.assist_accounts import AssistAccounts
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
+from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
@@ -1396,6 +1400,7 @@ def build_app(
         entry=build_entry(config, secrets=secrets, clock=clock),
         setup=Setup(clock),
         campaigns=Campaigns(clock),
+        assist_accounts=AssistAccounts(clock),  # Story 10.2: the LinkedIn account
         facts=CompanyFacts(clock),
         playbook=Playbook(clock),
         ai_content=functools.partial(load_ai_content, config.playbook_path),
@@ -1875,10 +1880,11 @@ def build_health_issues(
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
     Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
     ``clock`` is ``None``), then the erasures' open requests and failed stores, then the
-    unsubscribe poll failing for over 24 hours (Story 3.12, also read at ``clock.now()``), then,
-    given the erasure ledger's path ``ledger`` (``build_app`` always gives it), compliance's
-    missing or unreapplied ledger (Story 3.16). Each later owner registers its
-    ``queries.<owner>.health_issues`` here, before ``freeze()``."""
+    unsubscribe poll failing for over 24 hours (Story 3.12, also read at ``clock.now()``), then
+    the LinkedIn Tasks setup (Story 10.2), then, given the erasure ledger's path ``ledger``
+    (``build_app`` always gives it), compliance's missing or unreapplied ledger (Story 3.16).
+    Each later owner registers its ``queries.<owner>.health_issues`` here, before
+    ``freeze()``."""
     now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
@@ -1893,6 +1899,7 @@ def build_health_issues(
             lambda: compliance_queries.unsub_poll_issues(now(), polling_on=unsub_polling_on()),
         )
     )
+    issues.register_source(IssueSource("pipeline", pipeline_queries.health_issues))  # Story 10.2
     if ledger is not None:
         issues.register_source(
             IssueSource(
@@ -2266,7 +2273,7 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
     # Story 4.8: stop the erased Contact's live Enrollments, before the no-op hooks
     subscribers.register_subscriber(ContactErased, Sequencing(chosen).erase_pii)
-    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
+    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api, pipeline_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
     # Story 4.9: the next Step's due time, or the Enrollment's completion

@@ -32,6 +32,14 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``campaigns`` (``Campaigns``, the ``setup`` service) in its own unit of work, then renders the
   panel alone in a read-only one; a refused one (``CampaignRefused``) answers 200 with the
   refusal re-rendered and nothing changed.
+- The Settings page also includes the LinkedIn account panel (``assist_accounts_panel.html``,
+  Story 10.2), built from ``queries.pipeline.accounts()`` in the GET's read-only unit of work;
+  see ``nextron.web.assist_accounts_page``. ``POST /settings/linkedin/add``
+  (``assist_account_add``) and ``POST /settings/linkedin/save`` (``assist_account_save``), both
+  ``@personal_data(True)`` (the owner's name), run ``assist_accounts`` (``AssistAccounts``, the
+  ``pipeline`` service) in their own unit of work, then render the panel alone in a read-only
+  one; a refused one (``AccountRefused``) answers 200 with the refusal re-rendered and nothing
+  stored.
 - ``GET /credentials`` (``credentials_page``, ``@personal_data(True)``, because its Google
   section shows each grant's account address), ``POST /credentials/save`` (``credential_save``)
   and ``POST /credentials/remove`` (``credential_remove``): the write-only Credentials page and
@@ -320,6 +328,7 @@ from nextron.app.discovery.place_ingest import (
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
+from nextron.app.pipeline.assist_accounts import AssistAccounts
 from nextron.app.playbook.api import (
     ActivationRefused,
     ActivationTrigger,
@@ -361,6 +370,7 @@ from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
+from nextron.domain.linkedin_caps import LABEL, OWNER_NAME, OWNER_ROLE, STATUS, AccountRefused
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.offers import InvalidOffers
 from nextron.domain.open_code import CodeCheck
@@ -386,6 +396,7 @@ from nextron.domain.suppression_list import (
 )
 from nextron.domain.unsub_token import UnsubKeyInUse, UnsubKeysHeldInRecovery
 from nextron.web import ai_content_page as ai_rows
+from nextron.web import assist_accounts_page as assist_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import discovery_page as discovery_rows
@@ -557,6 +568,7 @@ def create_app(
     entry: DashboardEntry,
     setup: Setup,
     campaigns: Campaigns,
+    assist_accounts: AssistAccounts,
     facts: CompanyFacts,
     playbook: Playbook,
     ai_content: ai_rows.ContentLoader,
@@ -586,7 +598,8 @@ def create_app(
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
     ``units.open()``. ``setup`` stores the settings, ``campaigns`` runs the Settings page's
-    Campaign controls (activate, pause, resume, save the LIA), ``facts`` the Approved Company Facts,
+    Campaign controls (activate, pause, resume, save the LIA), ``assist_accounts`` its
+    LinkedIn account panel's add and save (Story 10.2), ``facts`` the Approved Company Facts,
     ``playbook`` the AI content view's "Check for changes" with the inputs ``ai_content`` loads
     and its rollback, ``test_runs`` queues the test runs of new tuples after a check,
     ``credentials`` the external credentials and ``google`` the Google client and grants (both
@@ -705,7 +718,8 @@ def create_app(
             panel = campaigns_context()
         except STORED_ROW_REFUSED as refused:  # the settings stay reachable
             panel = campaign_rows.unavailable_context(refused.message)
-        return page(request, PAGE_TEMPLATE, **context, **panel)
+        accounts = assist_rows.panel_context(pipeline_queries.accounts())
+        return page(request, PAGE_TEMPLATE, **context, **panel, **accounts)
 
     @app.post("/settings", name="settings_save")
     @personal_data(True)
@@ -801,6 +815,68 @@ def create_app(
                 campaign_rows.SAVE_LIA, campaign_id, refused.problems, lia_ref, lia_date
             ),
         )
+
+    def assist_answer(
+        request: Request,
+        action: str,
+        submitted: Mapping[str, str],
+        run: Callable[[], str],
+    ) -> HTMLResponse:
+        """Run a LinkedIn account use case in its own unit of work, then render the panel alone
+        in a read-only one: with the outcome's notice, or, refused, with the refusal (200, so
+        HTMX swaps the panel in; nothing was stored)."""
+        account_id = submitted.get(assist_rows.ACCOUNT)
+        try:
+            with units.open():
+                result = run()
+        except AccountRefused as refused:
+            refusal = assist_rows.Refusal(action, account_id, refused.problems, submitted)
+            with units.open(read_only=True):
+                context = assist_rows.panel_context(pipeline_queries.accounts(), refusal=refusal)
+                return page(request, assist_rows.PANEL_TEMPLATE, **context)
+        outcome = assist_rows.Outcome(action, result)
+        with units.open(read_only=True):
+            context = assist_rows.panel_context(pipeline_queries.accounts(), outcome=outcome)
+            return page(request, assist_rows.PANEL_TEMPLATE, **context)
+
+    @app.post("/settings/linkedin/add", name="assist_account_add")
+    @personal_data(True)  # the owner's name is a Nextron staff member's
+    def assist_account_add(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        submitted = assist_rows.submitted_add(fields)
+        return assist_answer(
+            request,
+            assist_rows.ADD,
+            submitted,
+            lambda: assist_accounts.add_account(
+                submitted[LABEL],
+                submitted[OWNER_NAME],
+                submitted[OWNER_ROLE],
+                assist_rows.caps_of(submitted),
+            ),
+        )
+
+    @app.post("/settings/linkedin/save", name="assist_account_save")
+    @personal_data(True)
+    def assist_account_save(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        submitted = assist_rows.submitted_save(fields)
+        account_id = submitted[assist_rows.ACCOUNT]
+
+        def save() -> str:
+            assist_accounts.save_account(
+                account_id,
+                submitted[LABEL],
+                submitted[OWNER_NAME],
+                submitted[OWNER_ROLE],
+                submitted[STATUS],
+                assist_rows.caps_of(submitted),
+            )
+            return account_id
+
+        return assist_answer(request, assist_rows.SAVE, submitted, save)
 
     def facts_answer(
         request: Request,

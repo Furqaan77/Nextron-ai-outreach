@@ -76,6 +76,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "alerts": ("notify", Coverage.NOT_HELD),
     "notifications": ("notify", Coverage.NOT_HELD),
     "ai_test_cases": ("playbook", Coverage.TOMBSTONED),  # Story 4.6's override cases
+    "linkedin_accounts": ("pipeline", Coverage.NOT_HELD),  # Story 10.2: staff, never a Contact
 }
 
 type Declarations = Mapping[str, object]  # owner -> its ERASURE (or None)
@@ -279,7 +280,7 @@ def test_the_hook_check_names_a_missing_hook_a_stranger_and_a_wrong_order() -> N
     ]
     # notify's hook (the last) left out
     assert hook_problems(PII, TABLES, real[:-1]) == [
-        "notify registers no erase_pii for ContactErased"
+        "pipeline registers no erase_pii for ContactErased"  # Story 10.2's, registered last
     ]
 
 

@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0047_8_3_discovery_runs"
+HEAD = "0048_10_2_assist_accounts"
 
 
 @pytest.fixture

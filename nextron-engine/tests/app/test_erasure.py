@@ -605,6 +605,8 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("draft_revisions", "body"),
         ("draft_revisions", "instruction"),
         ("draft_revisions", "text_hash"),
+        ("linkedin_accounts", "label"),  # Story 10.2: a staff member's, never a Contact's
+        ("linkedin_accounts", "owner_name"),
     }
     assert world.sql(
         "SELECT office_country FROM contacts WHERE id = ?", (planted.contact_id,)

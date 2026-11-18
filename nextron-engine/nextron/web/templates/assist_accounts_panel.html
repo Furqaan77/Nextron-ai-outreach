@@ -1,0 +1,71 @@
+{#- The LinkedIn account panel of the Settings page (nextron.web.assist_accounts_page): rendered
+    inside settings.html, and alone as the answer to POST /settings/linkedin/add and /save, each
+    swapped in for this whole panel. Stored text is escaped with |plain. -#}
+{%- macro account_field(form, item) %}
+<div class="field">
+<label for="{{ form.prefix }}-{{ item.name }}">{{ item.label }}</label>
+<input type="text" id="{{ form.prefix }}-{{ item.name }}" name="{{ item.name }}" value="{{ item.value|plain }}"
+{%- if item.hint or item.error %} aria-describedby="
+{%- if item.hint %}{{ form.prefix }}-{{ item.name }}-hint{% endif %}
+{%- if item.hint and item.error %} {% endif %}
+{%- if item.error %}{{ form.prefix }}-{{ item.name }}-error{% endif %}"{% endif %}
+{%- if item.error %} aria-invalid="true"{% endif %}>
+{%- if item.hint %}
+<p class="hint" id="{{ form.prefix }}-{{ item.name }}-hint">{{ item.hint|plain }}</p>
+{%- endif %}
+{%- if item.error %}
+<p class="field-error" id="{{ form.prefix }}-{{ item.name }}-error">{{ item.error|plain }}</p>
+{%- endif %}
+</div>
+{%- endmacro -%}
+{%- set panel = assist_accounts_panel -%}
+<section id="assist-accounts-panel" class="campaigns" aria-labelledby="assist-accounts-heading">
+<h2 id="assist-accounts-heading">LinkedIn account</h2>
+<p>The engine never signs in to LinkedIn or sends anything there: the account's owner sends each
+Task by hand. Tasks go only to the LinkedIn owner's Telegram chat id set above, never to the alert
+chat. v1 supports one active account.</p>
+{%- if panel.notice %}
+<p class="notice" role="status">{{ panel.notice|plain }}</p>
+{%- endif %}
+{%- if panel.alert %}
+<p class="notice notice-refused" role="alert">{{ panel.alert|plain }}</p>
+{%- endif %}
+{%- if not panel.accounts %}
+<p>No LinkedIn account yet.</p>
+{%- endif %}
+{%- for form in panel.accounts %}
+<section class="campaign" aria-labelledby="{{ form.prefix }}-heading">
+<h3 id="{{ form.prefix }}-heading">{{ form.title|plain }}</h3>
+<form method="post" hx-post="/settings/linkedin/save" hx-target="#assist-accounts-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="account" value="{{ form.account_id }}">
+{%- for item in form.fields %}
+{{- account_field(form, item) }}
+{%- endfor %}
+<div class="field">
+<label for="{{ form.prefix }}-status">{{ form.status.label }}</label>
+<select id="{{ form.prefix }}-status" name="status"
+{%- if form.status.error %} aria-describedby="{{ form.prefix }}-status-error" aria-invalid="true"{% endif %}>
+{%- for status in form.statuses %}
+<option value="{{ status }}"{% if form.status.value == status %} selected{% endif %}>{{ status }}</option>
+{%- endfor %}
+</select>
+{%- if form.status.error %}
+<p class="field-error" id="{{ form.prefix }}-status-error">{{ form.status.error|plain }}</p>
+{%- endif %}
+</div>
+<button type="submit" aria-label="Save {{ form.title|plain }}">Save</button>
+</form>
+</section>
+{%- endfor %}
+<section class="campaign" aria-labelledby="{{ panel.add.prefix }}-heading">
+<h3 id="{{ panel.add.prefix }}-heading">{{ panel.add.title }}</h3>
+<form method="post" hx-post="/settings/linkedin/add" hx-target="#assist-accounts-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+{%- for item in panel.add.fields %}
+{{- account_field(panel.add, item) }}
+{%- endfor %}
+<button type="submit">Add the account</button>
+</form>
+</section>
+</section>

@@ -1364,7 +1364,8 @@ def test_the_health_report_shows_the_last_restore_test(world: World) -> None:
     report = world.read(health.report)
     assert report.restore_test is not None
     assert (report.restore_test.id, report.restore_test.result) == (test_id, "fail")
-    assert [issue.subject for issue in report.issues] == [test_id]
+    # Story 10.2's linkedin_tasks_off is raised too: no LinkedIn account is set up here
+    assert [issue.subject for issue in report.issues] == [test_id, "linkedin_tasks"]
 
 
 def _no_budget() -> Any:

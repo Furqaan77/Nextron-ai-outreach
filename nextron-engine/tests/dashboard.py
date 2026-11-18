@@ -1,9 +1,10 @@
 """Build the dashboard with fakes and open a session on it, as ``nextron open`` would.
 
 ``Dashboard`` reads through ``FakeUnits`` unless a test passes real units of work (the
-``units`` fixture); its ``Setup``, ``Campaigns`` (``campaigns``, Story 4.2) and ``CompanyFacts``
-(``facts``, Story 4.3) use the dashboard's frozen clock, and its ``Credentials`` the dashboard's
-in-memory secrets and that clock. ``post``
+``units`` fixture); its ``Setup``, ``Campaigns`` (``campaigns``, Story 4.2), ``AssistAccounts``
+(``assist_accounts``, Story 10.2) and ``CompanyFacts`` (``facts``, Story 4.3) use the
+dashboard's frozen clock, and its ``Credentials`` the dashboard's in-memory secrets and that
+clock. ``post``
 sends a POST from the dashboard's own origin by default; ``csrf_token(cookie)`` reads the
 session's CSRF token from ``GET /``'s ``<body hx-headers>``, as HTMX would; ``form(**fields)``
 builds an urlencoded body.
@@ -109,6 +110,7 @@ from nextron.app.ops.api import (
     RestoreTests,
 )
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.pipeline.assist_accounts import AssistAccounts
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
@@ -329,6 +331,7 @@ class Dashboard:
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
     campaigns: Campaigns = field(init=False)
+    assist_accounts: AssistAccounts = field(init=False)
     facts: CompanyFacts = field(init=False)
     playbook: Playbook = field(init=False)
     credentials: Credentials = field(init=False)
@@ -360,6 +363,7 @@ class Dashboard:
         self.entry = DashboardEntry(self.secrets, self.clock)
         self.setup = Setup(self.clock)
         self.campaigns = Campaigns(self.clock)
+        self.assist_accounts = AssistAccounts(self.clock)  # Story 10.2
         self.facts = CompanyFacts(self.clock)
         self.playbook = Playbook(self.clock)
         self.credentials = Credentials(self.secrets, self.clock)
@@ -466,6 +470,7 @@ class Dashboard:
             entry=self.entry,
             setup=self.setup,
             campaigns=self.campaigns,
+            assist_accounts=self.assist_accounts,
             facts=self.facts,
             playbook=self.playbook,
             ai_content=self.ai_content,

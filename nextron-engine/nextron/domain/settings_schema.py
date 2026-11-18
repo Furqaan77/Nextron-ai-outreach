@@ -164,6 +164,7 @@ class Section(StrEnum):
     FOOTER_AND_BOOKING = "Footer and booking"
     SENDER = "Sender"
     ALERTS_AND_RECIPIENTS = "Alerts and recipients"
+    LINKEDIN = "LinkedIn"  # Story 10.2
     SENDING = "Sending"
     BUDGET_AND_LIMITS = "Budget and limits"
     ENGINE = "Engine"
@@ -205,6 +206,7 @@ class Key(StrEnum):
     LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
+    LINKEDIN_OWNER_CHAT = "linkedin_owner_chat"  # Story 10.2
 
 
 class _Required(Enum):
@@ -874,6 +876,12 @@ TELEGRAM_CHAT_ID_RULE: Final = Rule(
     "must be a numeric Telegram chat id, such as -1001234567890",
     is_telegram_chat_id,
 )
+# The same check, for an optional chat id whose default is blank (Story 10.2).
+OPTIONAL_TELEGRAM_CHAT_ID_RULE: Final = Rule(
+    TELEGRAM_CHAT_ID_RULE.name,
+    TELEGRAM_CHAT_ID_RULE.message,
+    lambda value: value == "" or is_telegram_chat_id(value),
+)
 
 # The Sender's name (Story 4.7, FR-32, NFR-1): the From name of every cold email, so it must
 # read as a real person's name. Letters (category L*), combining marks (M*), the space, the
@@ -1406,6 +1414,21 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(max_length(MAX_HOST_LENGTH), WORKER_HOST_RULE),
+    ),
+    # The Telegram chat that receives the LinkedIn account owner's Tasks (Story 10.2, PRD OQ-5),
+    # never alert_chat_id. Blank (the default) keeps LinkedIn Tasks off, with a health issue.
+    Setting(
+        key=Key.LINKEDIN_OWNER_CHAT,
+        type=SettingType.STRING,
+        section=Section.LINKEDIN,
+        label="LinkedIn owner's Telegram chat id",
+        unit=(
+            "The numeric id of the Telegram chat only the LinkedIn account's owner reads, such "
+            "as 123456789; each LinkedIn Task goes there, never to the alert chat. Blank keeps "
+            "LinkedIn Tasks off."
+        ),
+        default="",
+        rules=(OPTIONAL_TELEGRAM_CHAT_ID_RULE,),
     ),
 )
 

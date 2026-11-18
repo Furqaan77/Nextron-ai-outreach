@@ -34,6 +34,7 @@ Table                      Owner        Exported as / why not
                                         Drafts of the Contact's Enrollments)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
+``linkedin_accounts``      pipeline     Nextron's own LinkedIn account (Story 10.2)
 ``jobs``                   jobqueue     never linked to a Contact
 ``backups``                ops          never linked to a Contact
 ``restore_tests``          ops          never linked to a Contact
@@ -185,6 +186,9 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         ),
         "footer_snapshots": NotAboutAContact(
             "drafting", "Nextron's own footer text: the sender's name and the postal address"
+        ),
+        "linkedin_accounts": NotAboutAContact(
+            "pipeline", "Nextron's own LinkedIn account: its label and the staff owner's name"
         ),
         "jobs": NotAboutAContact("jobqueue", UNLINKED),
         "backups": NotAboutAContact("ops", UNLINKED),
