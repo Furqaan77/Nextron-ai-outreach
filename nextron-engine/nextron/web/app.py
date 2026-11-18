@@ -138,8 +138,19 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   chain) answers 404 with ``lead_missing.html``, a merged Lead a 303 ``RedirectResponse`` to
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts``,
-  ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
-  Evidence and the headquarters zone).
+  ``queries.research.lead_provenance``, ``lead_signals.view`` (Story 2.9: the Signals, the
+  Evidence and the headquarters zone) and ``queries.compliance.completed_erasures`` (Story
+  3.13: an erased Contact's tombstone line names its request).
+- ``GET /leads/{lead_id}/contacts/{contact_id}/erase`` (``contact_erase_page``) and ``POST`` to
+  the same path (``contact_erase``), both ``@personal_data(True)`` and registered before
+  ``/leads/{lead_id}``: the erase confirmation step (Story 3.13, FR-52); see
+  ``nextron.web.erase_page``. A Contact that isn't on the Lead's survivor
+  (``queries.discovery.survivor_of``) answers 404 with ``lead_missing.html``. The POST's fields,
+  apart from ``csrf_token``, must be exactly one ``request_ref`` (anything else is
+  ``MalformedForm``, 400); it checks the reference, runs ``erasures.erase_on_request``
+  (``Erasures``, the ``compliance`` service) in its own unit of work, then renders the panel
+  again in a read-only one, always 200: the refusal, the outcome, or, for any exception, the
+  failure (logged as ``contact_erasure_failed`` with ``contact_id`` and ``error_type``).
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -184,11 +195,13 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
 from nextron.app.playbook.api import CompanyFacts, Playbook
+from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
@@ -209,6 +222,7 @@ from nextron.app.setup.api import (
 )
 from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.company_facts import InvalidFact
+from nextron.domain.data_subject_request import check_request_ref
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
@@ -227,6 +241,7 @@ from nextron.domain.unsub_token import UnsubKeyInUse
 from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
+from nextron.web import erase_page as erase_rows
 from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
@@ -405,6 +420,7 @@ def create_app(
     lead_imports: LeadImports,
     sending: Sending,
     lead_signals: LeadSignals,
+    erasures: Erasures,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -421,7 +437,8 @@ def create_app(
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
-    page its Signals, Evidence and headquarters zone.
+    page its Signals, Evidence and headquarters zone; ``erasures`` erases a Contact from the
+    Lead page's erase step.
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1117,24 +1134,117 @@ def create_app(
         context = lead_rows.list_context(filters, found, segments)
         return page(request, lead_rows.LIST_TEMPLATE, **context)
 
+    def missing_lead(request: Request) -> HTMLResponse:
+        missing = page(request, lead_rows.MISSING_TEMPLATE)  # never echoes an id
+        missing.status_code = 404
+        return missing
+
+    def erase_target(
+        lead_id: str, contact_id: str
+    ) -> tuple[discovery_queries.StoredLead, research_queries.StoredContact] | None:
+        """The Lead's survivor and the Contact, when the Contact is on it."""
+        lead = discovery_queries.survivor_of(lead_id)
+        contact = research_queries.contact(contact_id)
+        if lead is None or contact is None or contact.lead_id != lead.id:
+            return None
+        return lead, contact
+
+    def erase_answer(
+        request: Request,
+        template: str,
+        lead_id: str,
+        contact_id: str,
+        *,
+        notice: erase_rows.Notice | None = None,
+        request_ref: str = "",
+    ) -> HTMLResponse:
+        found = erase_target(lead_id, contact_id)
+        if found is None:
+            return missing_lead(request)
+        lead, contact = found
+        context = erase_rows.panel_context(
+            lead, contact, notice=notice, request_ref=request_ref
+        )
+        return page(request, template, **context)
+
+    # before /leads/{lead_id}, like every /leads/<word> path
+    @app.get("/leads/{lead_id}/contacts/{contact_id}/erase", name="contact_erase_page")
+    @personal_data(True)  # it names the Contact
+    def contact_erase_page(request: Request, lead_id: str, contact_id: str) -> HTMLResponse:
+        return erase_answer(request, erase_rows.PAGE_TEMPLATE, lead_id, contact_id)
+
+    @app.post("/leads/{lead_id}/contacts/{contact_id}/erase", name="contact_erase")
+    @personal_data(True)
+    def contact_erase(
+        request: Request,
+        lead_id: str,
+        contact_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> HTMLResponse:
+        request_ref = erase_rows.submitted_ref(fields)
+        with units.open(read_only=True):
+            found = erase_target(lead_id, contact_id)
+            if found is None:
+                return missing_lead(request)
+            _, contact = found
+            name = contact.name if contact.erased_at is None else None  # a tombstone is no name
+            try:
+                check_request_ref(request_ref, name=name)
+            except ValueError as refused:  # 200, so HTMX swaps the panel in; nothing ran
+                return erase_answer(
+                    request,
+                    erase_rows.PANEL_TEMPLATE,
+                    lead_id,
+                    contact_id,
+                    notice=erase_rows.refused(str(refused)),
+                    request_ref=request_ref,
+                )
+        try:
+            with units.open():
+                result = erasures.erase_on_request(contact_id, request_ref)
+        except Exception as error:  # rolled back: the request stays open
+            error_type = type(error).__name__
+            log.warning(
+                erase_rows.FAILED_EVENT,
+                extra={"contact_id": contact_id, "error_type": error_type},
+            )
+            with units.open(read_only=True):
+                return erase_answer(
+                    request,
+                    erase_rows.PANEL_TEMPLATE,
+                    lead_id,
+                    contact_id,
+                    notice=erase_rows.failed(error_type),
+                    request_ref=request_ref,
+                )
+        notice = (
+            erase_rows.erased(request_ref) if result.erased else erase_rows.already_erased()
+        )
+        with units.open(read_only=True):
+            return erase_answer(
+                request, erase_rows.PANEL_TEMPLATE, lead_id, contact_id, notice=notice
+            )
+
     # after /leads/import, so that path stays the import page
     @app.get("/leads/{lead_id}", name="lead_page")
     @personal_data(True)
     def lead_page(request: Request, lead_id: str) -> Response:
         found = discovery_queries.survivor_of(lead_id)
         if found is None:  # never echoes the id
-            missing = page(request, lead_rows.MISSING_TEMPLATE)
-            missing.status_code = 404
-            return missing
+            return missing_lead(request)
         if found.id != lead_id:
             return RedirectResponse(f"/leads/{found.id}", status_code=303, headers=NO_STORE)
+        contacts = research_queries.contacts(found.id)
         context = lead_rows.lead_context(
             found,
             pipeline_queries.stage(found.id),
             setup_queries.segments(),
-            research_queries.contacts(found.id),
+            contacts,
             research_queries.lead_provenance(found.id),
             lead_signals.view(found.id),
+            compliance_queries.completed_erasures(
+                contact.id for contact in contacts if contact.erased_at is not None
+            ),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 

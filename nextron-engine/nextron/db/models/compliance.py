@@ -1,6 +1,6 @@
-"""The ``compliance`` service's tables (FR-50, FR-63, FR-70, AD-3, AD-4, AD-15, AD-16, AD-17;
-migrations ``0022_3_3_suppression_entries`` and ``0024_3_8_unsub_tokens``), owned by
-``compliance`` (``nextron.db.repos.compliance``).
+"""The ``compliance`` service's tables (FR-50, FR-52, FR-63, FR-70, AD-3, AD-4, AD-15, AD-16,
+AD-17; migrations ``0022_3_3_suppression_entries``, ``0024_3_8_unsub_tokens`` and
+``0028_3_13_erase_contacts``), owned by ``compliance`` (``nextron.db.repos.compliance``).
 
 **``suppression_entries``**: the Suppression List, one row per suppressed key.
 
@@ -55,16 +55,35 @@ key check can't be defeated by deleting rows: ``trg_unsub_tokens_no_delete`` abo
 ``INSERT`` whose ``id``, ``token_hash`` or ``om_id`` exists (so ``INSERT OR REPLACE`` can't
 replace one), each with "unsubscribe token records are permanent". Every column is PII class
 ``none``.
+
+**``data_subject_requests``** (Story 3.13): one row per data subject request, the proof that
+an erasure (or, from Story 3.15, an export) ran.
+
+- ``id``; ``contact_id`` (``fk_data_subject_requests_contact_id_contacts``, no cascade,
+  ``ix_data_subject_requests_contact_id``); ``kind`` (``ck_data_subject_requests_kind``: one of
+  ``nextron.domain.data_subject_request.RequestKind``); ``status``
+  (``ck_data_subject_requests_status``: one of ``RequestStatus``); ``request_ref``, the
+  Operator's ticket or letter reference (``ck_data_subject_requests_request_ref``: 1 to 200
+  characters); ``opened_at``; ``completed_at``, set exactly on a ``completed`` request
+  (``ck_data_subject_requests_completed``); ``receipt_id`` (a ULID, nullable, no foreign key
+  until Story 3.14).
+- Three triggers (migration ``0028_3_13_erase_contacts``): no ``DELETE``; an ``INSERT`` is
+  ``open`` with a new ``id``; an ``UPDATE`` changes only ``status`` (``open`` to
+  ``completed``) with ``completed_at``, and sets ``receipt_id`` at most once.
+
+PII classes: ``request_ref`` is ``redact`` (free text, though ``check_request_ref`` refuses an
+address or the person's name); every other column is ``none``.
 """
 
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, Index, Integer, String, Text, text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.contactability import KeyKind
+from nextron.domain.data_subject_request import RequestKind, RequestStatus
 from nextron.domain.suppression_entry import EntryStatus, SuppressionSource
 
 KIND_LENGTH: Final = 16
@@ -74,7 +93,10 @@ STATUS_LENGTH: Final = 16
 SOURCE_LENGTH: Final = 16
 
 
-def _one_of(column: str, values: type[KeyKind | EntryStatus | SuppressionSource]) -> str:
+def _one_of(
+    column: str,
+    values: type[KeyKind | EntryStatus | SuppressionSource | RequestKind | RequestStatus],
+) -> str:
     return "{} IN ({})".format(column, ",".join(f"'{value}'" for value in values))
 
 
@@ -92,6 +114,13 @@ TOKEN_HASH_LENGTH: Final = 64  # nextron.domain.unsub_token.token_hash
 TOKEN_HASH_CHECK: Final = "length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'"
 KID_CHECK: Final = "kid BETWEEN 1 AND 255"  # nextron.domain.unsub_token.MIN_KID, MAX_KID
 WHOLE_SECONDS_CHECK: Final = "issued_at LIKE '%.000000Z'"
+REQUEST_KIND_LENGTH: Final = 8
+REQUEST_STATUS_LENGTH: Final = 16
+REQUEST_REF_LENGTH: Final = 200  # nextron.domain.data_subject_request.MAX_REF_LENGTH
+REQUEST_KIND_CHECK: Final = _one_of("kind", RequestKind)
+REQUEST_STATUS_CHECK: Final = _one_of("status", RequestStatus)
+REQUEST_REF_CHECK: Final = "length(request_ref) BETWEEN 1 AND 200"
+REQUEST_COMPLETED_CHECK: Final = "(status = 'completed') = (completed_at IS NOT NULL)"
 
 
 class SuppressionEntryRecord(Base):
@@ -144,3 +173,25 @@ class UnsubTokenRecord(Base):
     om_id: Mapped[str] = mapped_column(Ulid)
     kid: Mapped[int] = mapped_column(Integer)
     issued_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class DataSubjectRequestRecord(Base):
+    """One data subject request: its Contact, kind, status and reference."""
+
+    __tablename__ = "data_subject_requests"
+    __table_args__ = (
+        Index("ix_data_subject_requests_contact_id", "contact_id"),
+        CheckConstraint(REQUEST_KIND_CHECK, name="kind"),
+        CheckConstraint(REQUEST_STATUS_CHECK, name="status"),
+        CheckConstraint(REQUEST_REF_CHECK, name="request_ref"),
+        CheckConstraint(REQUEST_COMPLETED_CHECK, name="completed"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    contact_id: Mapped[str] = mapped_column(Ulid, ForeignKey("contacts.id"))
+    kind: Mapped[str] = mapped_column(String(REQUEST_KIND_LENGTH))
+    status: Mapped[str] = mapped_column(String(REQUEST_STATUS_LENGTH))
+    request_ref: Mapped[str] = mapped_column(String(REQUEST_REF_LENGTH))
+    opened_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    receipt_id: Mapped[str | None] = mapped_column(Ulid)

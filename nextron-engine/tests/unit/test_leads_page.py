@@ -58,7 +58,8 @@ ORIGIN = "Law Society directory, Manchester"
 UNKNOWN = "01KA0000000000000000000000"  # a ULID no Lead has
 VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"})
 LIST_HEADER = ["Name", "Website", "Segment", "Country", "Stage", "Created"]
-CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary"]
+CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary", "Erasure"]
+ERASE = "Erase (data subject request)"  # Story 3.13
 RECORD_HEADER = ["Record", "Source", "Detail", "Retrieved", "Address Class"]
 SIGNAL_HEADER = ["Signal", "Class", "Tier", "Date", "Age", "Status", "Score only"]
 EVIDENCE_HEADER = ["Type", "Evidence", "Supports", "Source", "Retrieved", "Extraction"]
@@ -634,8 +635,14 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "guessed",
         "https://www.linkedin.com/in/jane-doe",
         "No",
+        ERASE,
     ]
-    linkedin = contact.find("a")
+    linkedin, erase = contact.find_all("a")
+    [(contact_id,)] = world.sql("SELECT id FROM contacts")
+    assert erase.attrs == {
+        "class": "erase-link",
+        "href": f"{href}/contacts/{contact_id}/erase",
+    }
     assert linkedin.attrs["href"] == "https://www.linkedin.com/in/jane-doe"
     assert linkedin.attrs["rel"] == "noopener noreferrer"
     records = table_rows(table.find("table", class_="provenance-table"))
@@ -671,8 +678,8 @@ def test_the_empty_cases(world: World) -> None:
     assert nothing.find("section", class_="lead-evidence").text == "Evidence No Evidence yet."
     assert not nothing.find_all("table")
     first, second = page.find_all("tr", class_="contact-row")
-    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No"]
-    assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No"]
+    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", ERASE]
+    assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No", ERASE]
     rows = page.find_all("tr", class_="provenance-row")
     assert rows[0].text == "No Provenance Record."
     assert rows[1].find_all("table", class_="provenance-table")

@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {#- The Lead page (nextron.web.leads_page): the header facts, the Signals, the live Evidence,
-    then each Contact with its Provenance Records. Every Lead, Signal, Evidence, Contact and
+    then each Contact with its Provenance Records and its erase link (Story 3.13), or, for an
+    erased Contact, its tombstone line only. Every Lead, Signal, Evidence, Contact and
     Provenance text is imported, crawled or extracted: it renders only through |plain or
-    safe_link, inside an element carrying hx-disable. The Signals and Evidence sections hold no
-    HTMX action. -#}
+    safe_link, inside an element carrying hx-disable. No section holds an HTMX action. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}
@@ -70,12 +70,15 @@
 {%- else %}
 <table class="lead-table contact-table" hx-disable>
 <thead>
-<tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Email</th><th scope="col">Address Class</th><th scope="col">LinkedIn</th><th scope="col">Primary</th></tr>
+<tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Email</th><th scope="col">Address Class</th><th scope="col">LinkedIn</th><th scope="col">Primary</th><th scope="col">Erasure</th></tr>
 </thead>
 <tbody>
 {%- for contact in contacts %}
-<tr class="contact-row"><td>{{ or_dash(contact.name) }}</td><td>{{ or_dash(contact.role) }}</td><td>{{ or_dash(contact.email) }}</td><td>{{ or_dash(contact.address_class) }}</td><td>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td></tr>
-<tr class="provenance-row"><td colspan="6">
+{%- if contact.tombstone %}
+<tr class="contact-row contact-erased"><td colspan="7">{{ contact.tombstone|plain }}</td></tr>
+{%- else %}
+<tr class="contact-row"><td>{{ or_dash(contact.name) }}</td><td>{{ or_dash(contact.role) }}</td><td>{{ or_dash(contact.email) }}</td><td>{{ or_dash(contact.address_class) }}</td><td>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td><td>{% if contact.erase_href %}<a class="erase-link" href="{{ contact.erase_href }}">{{ contact.erase_label }}</a>{% else %}—{% endif %}</td></tr>
+<tr class="provenance-row"><td colspan="7">
 {%- if contact.records %}
 <table class="provenance-table">
 <thead>
@@ -91,6 +94,7 @@
 <p class="no-provenance">No Provenance Record.</p>
 {%- endif %}
 </td></tr>
+{%- endif %}
 {%- endfor %}
 </tbody>
 </table>

@@ -22,7 +22,10 @@ unsubscribe tokens (``unsub_tokens``) through ``codec``, a ``TokenCodecPort``.
      ``web_domain``, then, for scope ``firm``, ``firm_domain_keys`` of the email and the web
      domain (``nextron.domain.contactability``), each (``kind``, ``value_hash``) once. A value
      that can't be normalised is no key, so a Contact with no known key gives
-     ``SuppressResult((), ())``: nothing is written or published.
+     ``SuppressResult((), ())``: nothing is written or published. An erased Contact (Story
+     3.13: ``erased_at`` set) holds tombstones, never keys: its keys are
+     ``erased_person_keys(email)`` (the stored address hash as the address key) and, for scope
+     ``firm``, ``firm_domain_keys`` of the web domain alone, so a later opt-out still lands.
   4. **Writes.** A key that already has an ``active`` entry adds that entry's id to
      ``existing`` and writes nothing. Each other key gets a new ``active`` entry (its
      ``domain_plain`` only for a domain key) and one ``events`` row: entity
@@ -77,7 +80,13 @@ inside a caller's transaction and in a read-only unit of work alike. Callers rea
 3. **The answer** is ``nextron.domain.contactability.check(facts, channel, purpose,
    queries.compliance.active_keys(lookup_keys(facts)))``: ``Blocked(reasons)`` or
    ``Allowed()``. Nothing is written, cached or logged, and a ``Blocked`` answer is returned,
-   never raised, so a caller's transaction stays usable.
+   never raised, so a caller's transaction stays usable. An erased Contact (Story 3.13) gives
+   ``ContactFacts(lead, erased=True)`` with no values, so it is always ``Blocked`` with
+   ``contact_erased``.
+
+**Erasure (Story 3.13).** ``nextron.app.compliance.erasure`` holds ``Erasures`` (``open_dsr``,
+``erase_contact``, compliance's ``erase_pii`` hook and the ``erase_on_request`` use case) and
+compliance's ``ERASURE`` declarations.
 """
 
 from collections.abc import Mapping
@@ -108,6 +117,7 @@ from nextron.domain.contactability import (
     SuppressionScope,
     channel_of,
     check,
+    erased_person_keys,
     firm_domain_keys,
     lookup_keys,
     person_keys,
@@ -197,14 +207,19 @@ class Compliance:
         lead = discovery_queries.lead(contact.lead_id)
         if lead is None:
             raise LookupError("suppress: the Contact's Lead is unknown")
-        keys = person_keys(
-            email=contact.email,
-            name=contact.name,
-            linkedin_url=contact.linkedin_url,
-            web_domain=lead.web_domain,
-        )
-        if scope is SuppressionScope.FIRM:
-            keys += firm_domain_keys(email=contact.email, web_domain=lead.web_domain)
+        if contact.erased_at is not None:  # tombstones are no keys (Story 3.13)
+            keys = erased_person_keys(contact.email)
+            if scope is SuppressionScope.FIRM:
+                keys += firm_domain_keys(email=None, web_domain=lead.web_domain)
+        else:
+            keys = person_keys(
+                email=contact.email,
+                name=contact.name,
+                linkedin_url=contact.linkedin_url,
+                web_domain=lead.web_domain,
+            )
+            if scope is SuppressionScope.FIRM:
+                keys += firm_domain_keys(email=contact.email, web_domain=lead.web_domain)
         keys = _unique(keys)
         if not keys:
             return SuppressResult((), ())
@@ -301,6 +316,8 @@ def _facts(subject: Subject) -> LeadFacts | ContactFacts:
     contact = research_queries.contact(subject.contact_id)
     if contact is None:
         raise LookupError("assert_contactable: the Contact is unknown")
+    if contact.erased_at is not None:  # a tombstone: blocked, and its values are no keys
+        return ContactFacts(_lead_facts(contact.lead_id), erased=True)
     return ContactFacts(
         _lead_facts(contact.lead_id),
         email=contact.email,

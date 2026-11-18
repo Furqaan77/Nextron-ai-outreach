@@ -1,4 +1,4 @@
-"""Read API of the ``compliance`` service (AD-3, AD-16; Stories 3.4 and 3.8).
+"""Read API of the ``compliance`` service (AD-3, AD-16, AD-17; Stories 3.4, 3.8 and 3.13).
 
 Import rule: ``nextron.domain`` and ``nextron.db.repos.compliance`` only. All read through the
 current unit of work, read-only ones included; nothing here writes, caches or logs.
@@ -13,22 +13,33 @@ current unit of work, read-only ones included; nothing here writes, caches or lo
   ``kid`` was issued, or ``None`` when ``kid`` has none (Story 3.8).
 - ``newest_unsub_tokens() -> Mapping[int, datetime]``: the same for every kid with a token, by
   kid.
+- ``open_request(contact_id, kind, request_ref)`` (Story 3.13): the ``open`` data subject
+  request of that Contact, kind and reference, as a ``StoredRequest``, or ``None``.
+- ``completed_erasures(contact_ids) -> Mapping[str, StoredRequest]``: for each of those Contacts
+  with a ``completed`` ``erase`` request, its first completed erase request (the one that erased
+  it, or, after a retention erasure, the first request completed afterwards), by Contact id;
+  the Lead page shows its reference on the erased Contact's row.
 """
 
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 
+from nextron.db.repos.compliance import data_subject_requests as requests_repo
 from nextron.db.repos.compliance import suppression_entries as entries_repo
 from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
+from nextron.db.repos.compliance.data_subject_requests import StoredRequest
 from nextron.db.repos.compliance.suppression_entries import StoredSuppressionEntry
 from nextron.domain.contactability import SuppressionKey
 
 __all__ = [
+    "StoredRequest",
     "StoredSuppressionEntry",
     "active_entry",
     "active_keys",
+    "completed_erasures",
     "newest_unsub_token",
     "newest_unsub_tokens",
+    "open_request",
 ]
 
 
@@ -57,3 +68,15 @@ def newest_unsub_token(kid: int) -> datetime | None:
 def newest_unsub_tokens() -> Mapping[int, datetime]:
     """``{kid: when its newest unsubscribe token was issued}`` for every kid with a token."""
     return unsub_tokens_repo.newest_by_kid()
+
+
+def open_request(contact_id: str, kind: str, request_ref: str) -> StoredRequest | None:
+    """The ``open`` data subject request of the Contact with that kind and reference, or
+    ``None``."""
+    return requests_repo.open_for(contact_id, kind, request_ref)
+
+
+def completed_erasures(contact_ids: Iterable[str]) -> Mapping[str, StoredRequest]:
+    """``{contact_id: the first completed erase request}`` for each of ``contact_ids`` with
+    one."""
+    return requests_repo.completed_erasures(contact_ids)

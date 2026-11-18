@@ -32,9 +32,10 @@ and contact method detected on it, by signature and source
 (``ck_page_contact_methods_source``: one of ``nextron.domain.widgets.MatchSource``), ``matched``
 and ``detected_at``. It has no ``lead_id``: on a merge its rows follow their page.
 
-A page's text may quote a person, so ``crawled_pages.text`` is PII class ``redact``; so is
-``page_contact_methods.matched``, which may hold a phone number. Every other column (IDs, URLs
-of public pages, codes, counts, hashes and times) is ``none``.
+A page's text may quote a person, so ``crawled_pages.text`` is PII class ``null`` (Story 3.13:
+an erasure nulls it and keeps ``content_hash``, as ``purge_page_text`` does);
+``page_contact_methods.matched``, which may hold a phone number, is ``redact``. Every other
+column (IDs, URLs of public pages, codes, counts, hashes and times) is ``none``.
 """
 
 from datetime import datetime

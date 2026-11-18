@@ -23,6 +23,9 @@ current unit of work, read-only ones included.
   ``segment_id`` or ``search`` that isn't a ``str`` raises ``TypeError``; a ``page`` below 1
   raises ``ValueError``. It reads the pipeline group's ``pipeline_stage`` column of the same
   rows, read-only.
+- ``merged_lead_ids(lead_id)`` (Story 3.13): the ids of every Lead whose merge chain leads to
+  ``lead_id``, by id; ``()`` for a text that isn't a ULID. An erasure nulls their pages' text
+  too, since a merge leaves a page whose URL the survivor holds on the merged Lead.
 """
 
 from dataclasses import dataclass
@@ -42,6 +45,7 @@ __all__ = [
     "StoredLead",
     "lead",
     "lead_list",
+    "merged_lead_ids",
     "survivor_of",
 ]
 
@@ -110,3 +114,10 @@ def lead_list(
         offset=(shown - 1) * LEADS_PER_PAGE,
     )
     return LeadListPage(leads=rows, total=total, page=shown, pages=pages)
+
+
+def merged_lead_ids(lead_id: str) -> tuple[str, ...]:
+    """The ids of the Leads whose merge chain leads to ``lead_id``, by id."""
+    if not is_ulid(lead_id):
+        return ()
+    return leads_repo.merged_from(lead_id)

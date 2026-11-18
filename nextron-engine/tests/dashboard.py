@@ -57,6 +57,9 @@ for changes" runs it on what ``ai_content`` loads (``shipped_ai_content`` unless
 another loader: the shipped prompt files and defaults, and ``TEST_PLAYBOOK``, a synthetic
 Sales Playbook, so no test reads or edits the real one).
 
+Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(clock))``; the
+Lead page's erase step runs it, on real units of work.
+
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
@@ -75,6 +78,8 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron import main
+from nextron.app.compliance.api import Compliance
+from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -305,6 +310,7 @@ class Dashboard:
     sending: Sending = field(init=False)
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
+    erasures: Erasures = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -379,6 +385,7 @@ class Dashboard:
             self.research,
             self.email_syntax,
         )
+        self.erasures = Erasures(self.clock, Compliance(self.clock))
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -401,6 +408,7 @@ class Dashboard:
             lead_imports=self.lead_imports,
             sending=self.sending,
             lead_signals=LeadSignals(self.clock),
+            erasures=self.erasures,
             units=self.units,
             **extra,
         )

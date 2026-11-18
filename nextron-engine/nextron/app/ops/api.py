@@ -336,6 +336,11 @@ the signals.
 
 Logs carry IDs, kinds, codes, counts and file names only, never a full path (the off-PC
 folder included) or an error's text.
+
+**Erasure (Story 3.13).** ``ERASURE`` declares ``backups`` and ``restore_tests`` ``not_held``:
+they hold codes, counts and error text, never a Contact's data. The module-level ``@command
+erase_pii(n: ContactErased)`` is ops's ``ContactErased`` subscriber
+(``nextron.main.build_subscribers``); it writes nothing.
 """
 
 import contextlib
@@ -344,7 +349,7 @@ import os
 import secrets
 import tempfile
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -411,6 +416,7 @@ from nextron.domain.backup import (
 from nextron.domain.budget import Assessment, Threshold, assess, budget_issues, thresholds
 from nextron.domain.campaign import CampaignDef
 from nextron.domain.company_facts import SeedFact
+from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.health import (
     GroupRuns,
     HealthIssue,
@@ -421,6 +427,7 @@ from nextron.domain.health import (
 )
 from nextron.domain.job import GLOBAL_SCOPE, JobTypes
 from nextron.domain.markets import MarketDef
+from nextron.domain.notifications import ContactErased
 from nextron.domain.offers import OfferDef
 from nextron.domain.open_code import CodeCheck, check, encode
 from nextron.domain.readiness import CheckResult
@@ -1638,3 +1645,27 @@ class Recovery:
             recovery_repo.end(row.id, now)
         log.info(RECOVERY_MODE_ENDED, extra={"recovery_id": row.id})
         return False
+
+
+# Erasure (Story 3.13) -------------------------------------------------------------------------
+
+# What ops's erase_pii does to each of its tables with a personal-data column: none of them
+# ever holds a Contact's data.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "backups": TableErasure(
+            Coverage.NOT_HELD,
+            "a backup's outcome, error text and counts, never a Contact's data",
+        ),
+        "restore_tests": TableErasure(
+            Coverage.NOT_HELD,
+            "a restore test's codes, revisions and counts, never a Contact's data",
+        ),
+    }
+)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``ops``'s ``ContactErased`` subscriber (Story 3.13, AD-17): it writes nothing,
+    because no ``ops`` table holds a Contact's data (``ERASURE``)."""

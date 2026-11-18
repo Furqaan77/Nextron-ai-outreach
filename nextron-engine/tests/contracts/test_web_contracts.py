@@ -183,6 +183,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/inboxes",
         "/inboxes",
         "/leads",
+        "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
+        "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}",
     ]
     assert async_route_handlers(app) == []
@@ -607,6 +609,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "ai_content_panel.html",
         "base.html",
         "campaigns_panel.html",
+        "contact_erase.html",
+        "contact_erase_panel.html",
         "credential_row.html",
         "credentials.html",
         "facts.html",

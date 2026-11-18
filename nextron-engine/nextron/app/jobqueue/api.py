@@ -72,6 +72,12 @@ the transaction commits: ``job_retry_scheduled`` (WARNING), ``job_dead`` (ERROR,
 ``dead``), ``job_claim_lost``, ``job_lease_expired`` and ``job_released`` (WARNING),
 ``job_deferred`` (INFO), ``job_dismissed`` (INFO) and ``jobs_purged`` (INFO, with ``count``,
 only when it is above 0).
+
+**Erasure (Story 3.13).** ``ERASURE`` declares ``jobs`` ``not_held``: payloads and keys hold IDs
+and scalars only (AD-10), and ``last_error`` is a redacted, truncated exception message that by
+convention holds codes, not values (AD-17, Story 1.2). The module-level ``@command
+erase_pii(n: ContactErased)`` is jobqueue's ``ContactErased`` subscriber
+(``nextron.main.build_subscribers``); it writes nothing.
 """
 
 import logging
@@ -84,6 +90,7 @@ from typing import Final
 from nextron.db import eventlog
 from nextron.db.repos.jobqueue import jobs as jobs_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.errors import DomainError
 from nextron.domain.job import (
     CREATION,
@@ -111,6 +118,7 @@ from nextron.domain.job import (
     transition,
 )
 from nextron.domain.machines import Transition
+from nextron.domain.notifications import ContactErased
 from nextron.domain.redaction import redact
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
@@ -512,3 +520,25 @@ class JobQueue:
                 return False
         log.info(JOB_DISMISSED, extra=_fields(row.id, row.type, row.lane, row.attempts))
         return True
+
+
+# Erasure (Story 3.13) -------------------------------------------------------------------------
+
+# What jobqueue's erase_pii does to each of its tables with a personal-data column: none of them
+# ever holds a Contact's data.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "jobs": TableErasure(
+            Coverage.NOT_HELD,
+            "payloads and keys hold IDs and scalars only (AD-10); last_error is a redacted, "
+            "truncated exception message that by convention holds codes, not values (AD-17, "
+            "Story 1.2)",
+        ),
+    }
+)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``jobqueue``'s ``ContactErased`` subscriber (Story 3.13, AD-17): it writes nothing,
+    because no ``jobqueue`` table holds a Contact's data (``ERASURE``)."""

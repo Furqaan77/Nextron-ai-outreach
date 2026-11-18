@@ -38,6 +38,16 @@ source's label; the detail; the retrieval date; the Address Class or "—"). A m
 answers 303 to its survivor's; a text that isn't a ULID, an unknown id or a broken merge chain
 answers 404 with ``lead_missing.html``, which never echoes the id.
 
+**Erasure (Story 3.13).** Each Contact that isn't erased also links to its erase step
+(``nextron.web.erase_page.erase_href``: "Erase (data subject request)"). An erased Contact
+(``erased_at`` set) shows only its ``tombstone`` line, "[erased], erased <YYYY-MM-DD> (request
+<reference>)", the reference being its first completed erase request (the one that erased it,
+or, after a retention erasure, the first request completed afterwards;
+``queries.compliance.completed_erasures``, passed in as ``erasures``); a retention erasure with
+no request since leaves out " (request <reference>)". Its row holds no other value (no
+name, role, address, Address Class, LinkedIn URL or Primary flag) and no Provenance Record;
+the Lead and its other Contacts render unchanged.
+
 **Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
 ``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
 
@@ -72,6 +82,7 @@ from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlencode
 
+from nextron.app.queries.compliance import StoredRequest
 from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
 from nextron.app.queries.research import (
     EvidenceSupport,
@@ -85,6 +96,7 @@ from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
 from nextron.domain.extraction import FactKind
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import EvidenceType, SignalClass
+from nextron.web.erase_page import ERASE_LABEL, erase_href
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
@@ -114,6 +126,7 @@ SCORE_ONLY: Final = "Score only"
 AI_EXTRACTED: Final = "AI-extracted"
 AI_ACTOR_PREFIX: Final = "ai:"
 SUPPORTS_SEPARATOR: Final = "; "
+TOMBSTONE_LABEL: Final = "[erased]"  # the erased Contact's row, never its stored values
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -425,7 +438,8 @@ class ProvenanceRow:
 
 @dataclass(frozen=True, slots=True)
 class ContactRow:
-    """One Contact as the Lead page shows it, with its Provenance Records."""
+    """One Contact as the Lead page shows it, with its Provenance Records and the link to its
+    erase step; an erased Contact has only its ``tombstone`` line."""
 
     name: str | None
     role: str | None
@@ -434,6 +448,9 @@ class ContactRow:
     linkedin_url: str | None
     primary: str
     records: tuple[ProvenanceRow, ...]
+    erase_href: str | None = None
+    erase_label: str = ERASE_LABEL
+    tombstone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -566,8 +583,34 @@ def provenance_row(record: StoredProvenance) -> ProvenanceRow:
     )
 
 
-def contact_row(contact: StoredContact, records: Iterable[StoredProvenance]) -> ContactRow:
-    """One Contact as the Lead page shows it."""
+def tombstone_line(erased_at: datetime, request_ref: str | None) -> str:
+    """An erased Contact's row: "[erased], erased <date>", then " (request <ref>)" for a data
+    subject request."""
+    line = f"{TOMBSTONE_LABEL}, erased {day(erased_at)}"
+    return line if request_ref is None else f"{line} (request {request_ref})"
+
+
+def contact_row(
+    contact: StoredContact,
+    records: Iterable[StoredProvenance],
+    *,
+    lead_id: str | None = None,
+    erasure: StoredRequest | None = None,
+) -> ContactRow:
+    """One Contact as the Lead page shows it: an erased one by its tombstone line only."""
+    if contact.erased_at is not None:
+        return ContactRow(
+            name=None,
+            role=None,
+            email=None,
+            address_class=None,
+            linkedin_url=None,
+            primary="",
+            records=(),
+            tombstone=tombstone_line(
+                contact.erased_at, None if erasure is None else erasure.request_ref
+            ),
+        )
     return ContactRow(
         name=contact.name,
         role=contact.role,
@@ -576,6 +619,7 @@ def contact_row(contact: StoredContact, records: Iterable[StoredProvenance]) -> 
         linkedin_url=contact.linkedin_url,
         primary=YES if contact.is_primary else NO,
         records=tuple(provenance_row(record) for record in records),
+        erase_href=None if lead_id is None else erase_href(lead_id, contact.id),
     )
 
 
@@ -586,15 +630,23 @@ def lead_context(
     contacts: Iterable[StoredContact],
     provenance: Mapping[str, Iterable[StoredProvenance]],
     signals: LeadSignalsView,
+    erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
     given), and the Contacts (in the order given, oldest first), each with its Provenance
-    Records from ``provenance`` (by Contact id)."""
+    Records from ``provenance`` (by Contact id) and its erase link, or, for an erased one, its
+    tombstone line with its request from ``erasures`` (by Contact id)."""
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
         "evidence": tuple(evidence_row(row) for row in signals.evidence),
         "contacts": tuple(
-            contact_row(contact, provenance.get(contact.id, ())) for contact in contacts
+            contact_row(
+                contact,
+                provenance.get(contact.id, ()),
+                lead_id=lead.id,
+                erasure=erasures.get(contact.id),
+            )
+            for contact in contacts
         ),
     }

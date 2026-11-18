@@ -44,6 +44,10 @@ out of these functions.
   registrable domain of the address's domain part; then the Lead's web domain, when it differs.
   A domain that ``nextron.domain.markets.is_free_webmail`` matches is never a key, so a whole
   free-webmail domain is never suppressed.
+- ``erased_person_keys(email_hash)`` (Story 3.13): an erased Contact's only key. Its stored
+  ``email`` is the address key's hash (``nextron.domain.erasure.tombstone_hash``), so the key is
+  ``SuppressionKey(address, email_hash, None)`` when ``is_hash(email_hash)``, and ``()``
+  otherwise (no address, or a value that isn't a hash). Its name tombstone is no key.
 
 **The subject and the scope.** ``ContactSubject(contact_id)`` names a stored Contact (a
 non-ULID ``contact_id`` raises ``ValueError``); ``SuppressionScope`` is ``person`` (the person's
@@ -61,12 +65,13 @@ the facts and the active keys; everything it decides is here.
   blocks every channel.
 - ``BlockReason``, a closed enum, in this order: ``address_suppressed``,
   ``address_domain_suppressed``, ``lead_domain_suppressed``, ``person_suppressed``,
-  ``profile_suppressed``, ``lead_lost``, ``lead_disqualified``. ``SUPPRESSION_REASONS`` are the
-  first five.
+  ``profile_suppressed``, ``lead_lost``, ``lead_disqualified``, ``contact_erased`` (Story
+  3.13). ``SUPPRESSION_REASONS`` are the first five.
 - **Facts.** ``LeadFacts(web_domain, mail_domains=(), stage=None)``: the Lead's web domain
   (``None`` when it has none), its mail domains and its ``PipelineStage`` (``None`` for a Lead
-  not stored yet). ``ContactFacts(lead, email=None, name=None, linkedin_url=None)``: a Contact's
-  values with its Lead's facts. A wrong type raises ``TypeError``.
+  not stored yet). ``ContactFacts(lead, email=None, name=None, linkedin_url=None,
+  erased=False)``: a Contact's values with its Lead's facts; ``erased`` says the Contact was
+  erased (Story 3.13). A wrong type (a non-``bool`` ``erased`` included) raises ``TypeError``.
 - **Subjects** of the app gate, besides ``ContactSubject`` (a stored Contact):
   ``NewContactSubject(lead_id, email=None, name=None, linkedin_url=None)``, a Contact about to
   be stored on the stored Lead ``lead_id`` (a non-ULID ``lead_id`` raises ``ValueError``), and
@@ -77,13 +82,15 @@ the facts and the active keys; everything it decides is here.
   the Lead's web domain, then each mail domain (``lead_domain_suppressed``); the person key, the
   name with the Lead's web domain (``person_suppressed``); the profile key
   (``profile_suppressed``). A free-webmail domain is never a key, and a value that can't be
-  normalised gives no key, exactly as for ``person_keys`` and ``firm_domain_keys``.
-  ``lookup_keys(facts)`` gives the distinct keys to look up, in that order.
+  normalised gives no key, exactly as for ``person_keys`` and ``firm_domain_keys``. An erased
+  Contact's values are tombstones, never keys: for ``erased`` facts only the Lead's domains are
+  checked. ``lookup_keys(facts)`` gives the distinct keys to look up, in that order.
 - ``check(facts, channel, purpose, active) -> Allowed() | Blocked(reasons)``: ``active`` is a
   collection of the active (``kind``, ``value_hash``) pairs. Each checked key whose pair is in
   ``active`` gives its reason; a Lead at ``lost`` gives ``lead_lost`` and one at
-  ``disqualified`` ``lead_disqualified``. The reasons are distinct and in ``BlockReason``
-  order; with none, the answer is ``Allowed()``. A wrong ``facts`` or ``active`` type raises
+  ``disqualified`` ``lead_disqualified``, and an erased Contact ``contact_erased`` (whatever the
+  Suppression List holds: fail closed). The reasons are distinct and in ``BlockReason`` order;
+  with none, the answer is ``Allowed()``. A wrong ``facts`` or ``active`` type raises
   ``TypeError``.
 - ``Blocked(reasons)`` refuses a ``reasons`` that isn't a tuple (``TypeError``), and an empty
   one, one holding a value that isn't a ``BlockReason``, a repeat or reasons out of order
@@ -241,6 +248,14 @@ def person_keys(
     return tuple(key for key in candidates if key is not None)
 
 
+def erased_person_keys(email_hash: str | None) -> tuple[SuppressionKey, ...]:
+    """An erased Contact's address key, straight from its stored hash; see the module
+    docstring."""
+    if not isinstance(email_hash, str) or not is_hash(email_hash):
+        return ()
+    return (SuppressionKey(KeyKind.ADDRESS, email_hash, None),)
+
+
 def _firm_domain(text: str) -> str | None:
     """The registrable domain of ``text``, or ``None`` when it isn't one or is free webmail."""
     try:
@@ -307,6 +322,7 @@ class BlockReason(StrEnum):
     PROFILE_SUPPRESSED = "profile_suppressed"
     LEAD_LOST = "lead_lost"
     LEAD_DISQUALIFIED = "lead_disqualified"
+    CONTACT_ERASED = "contact_erased"
 
 
 SUPPRESSION_REASONS: Final = frozenset(
@@ -389,6 +405,7 @@ class ContactFacts:
     email: str | None = field(default=None, repr=False)
     name: str | None = field(default=None, repr=False)
     linkedin_url: str | None = field(default=None, repr=False)
+    erased: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.lead, LeadFacts):
@@ -398,6 +415,10 @@ class ContactFacts:
         _optional_text(self.email, "ContactFacts.email")
         _optional_text(self.name, "ContactFacts.name")
         _optional_text(self.linkedin_url, "ContactFacts.linkedin_url")
+        if not isinstance(self.erased, bool):
+            raise TypeError(
+                f"ContactFacts.erased must be a bool, not {type(self.erased).__name__}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,7 +498,8 @@ def _domain_key(text: str) -> SuppressionKey | None:
 def _checked_keys(facts: object) -> tuple[tuple[BlockReason, SuppressionKey], ...]:
     """Each checked key with the reason it gives, in the module docstring's order."""
     lead = _lead_of(facts)
-    contact = facts if isinstance(facts, ContactFacts) else None
+    # an erased Contact's values are tombstones, never keys: only its Lead's domains are checked
+    contact = facts if isinstance(facts, ContactFacts) and not facts.erased else None
     candidates: list[tuple[BlockReason, SuppressionKey | None]] = []
     if contact is not None and contact.email is not None:
         candidates.append(
@@ -532,5 +554,7 @@ def check(
     reasons = {reason for reason, key in _checked_keys(facts) if _pair(key) in active}
     if lead.stage in _STAGE_REASONS:
         reasons.add(_STAGE_REASONS[lead.stage])
+    if isinstance(facts, ContactFacts) and facts.erased:
+        reasons.add(BlockReason.CONTACT_ERASED)
     ordered = tuple(reason for reason in BlockReason if reason in reasons)
     return Blocked(ordered) if ordered else Allowed()

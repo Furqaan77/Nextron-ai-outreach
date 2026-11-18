@@ -1349,9 +1349,11 @@ if isinstance(answer, Blocked):
   `address_domain_suppressed` (the address's registrable domain), `lead_domain_suppressed`
   (the Lead's web domain, or any of its mail domains), `person_suppressed` (the name at the
   Lead's web domain), `profile_suppressed` (the LinkedIn profile), `lead_lost` and
-  `lead_disqualified` (the Lead's Pipeline Stage). Only `active` entries count: a voided
-  `reply_rule` entry no longer blocks. A free-webmail domain is never looked up, and a value
-  that can't be normalised gives no key.
+  `lead_disqualified` (the Lead's Pipeline Stage), and `contact_erased` (Story 3.13: an erased
+  Contact is always blocked, even after a retention erasure that wrote no entry; its tombstone
+  values are never looked up). Only `active` entries count: a voided `reply_rule` entry no
+  longer blocks. A free-webmail domain is never looked up, and a value that can't be
+  normalised gives no key.
 - **The pure core** is `domain.contactability.check(facts, channel, purpose, active)`, with
   `lookup_keys(facts)` naming the keys to read; `queries.compliance.active_keys(keys)` reads
   which of them are `active` (and `active_entry(kind, value_hash)` one entry).
@@ -1395,6 +1397,100 @@ if isinstance(answer, Blocked):
   `insert(table("leads"))`, or `bulk_insert_mappings`/`bulk_save_objects` of a model) may be
   used only by its own module or a manifest caller that lists the table, and no string outside
   the migrations may hold `INSERT INTO` one of them (a quoted or bracketed schema included).
+
+## Erasing a Contact
+
+Story 3.13 (FR-52, FR-50, AD-16, AD-17) erases a Contact when the person asks (UK GDPR
+Art. 17). An erasure **never deletes a row**: every personal-data column the registry marks
+(`nextron/db/pii_registry.py`) becomes its tombstone, and for a data subject request the
+person's hashed keys stay on the Suppression List, so they are never contacted again. It runs
+in one transaction and fails closed: if any step raises, nothing is erased.
+
+**On the dashboard.** Each Contact on the Lead page has an "Erase (data subject request)" link
+(the new "Erasure" column). It opens a confirmation step
+(`GET /leads/<lead id>/contacts/<contact id>/erase`) that names the Contact (name, role, email
+and LinkedIn URL), says what erasure does and that it can't be undone, and asks for a
+**request reference**: a ticket or letter reference, never the person's name or address (a
+reference holding an `@`, or every word of the Contact's name, is refused with a message, and
+nothing runs). "Erase permanently" posts it. The answers, all on the same panel:
+
+- "Erased. Request <ref> completed." The step then shows only "This Contact was erased on
+  <date>.", and the Lead page shows the Contact's row as "[erased], erased <date> (request
+  <ref>)" (no "(request ...)" after a retention erasure with no request since; the reference
+  is the first erase request completed for it), with no other value and no Provenance
+  Records. The Lead and its other Contacts don't change.
+- "This Contact was already erased; nothing changed." (the new request is completed anyway).
+- "Erasure failed and was rolled back: nothing was erased, and the request stays open
+  (<ErrorType>)." The log has `contact_erasure_failed` with `contact_id` and `error_type`.
+  The person stays suppressed (the `dsr` entries were committed with the request). Erasing
+  again with the same reference reuses the open request.
+
+**What an erasure writes** (`nextron/app/compliance/erasure.py`, `Erasures(clock, compliance)`):
+
+1. `open_dsr(contact_id, "erase", request_ref)` opens a `data_subject_requests` row (`open`,
+   one `events` row `None → open`, cause `opened`, actor `operator`), or finds the open one
+   with the same Contact and reference. The page's use case (`erase_on_request`) also
+   suppresses the person (`dsr` entries for the request) and commits both first, so the
+   request and the suppression survive a failed erasure.
+2. `erase_contact(contact_id, request_ref, cause)`, `cause` `dsr` or `retention`, in one
+   transaction: for `dsr`, `compliance.suppress(ContactSubject, PERSON, DSR, cause_ref=<the
+   request>)` writes every key known for the person (address, person and profile, while
+   OQ-A10 is open; for a Contact already erased, by retention say, its stored address hash);
+   `retention` (Epic 8) writes none and opens no request. Then
+   `ContactErased` runs each owner's `erase_pii` hook, compliance's first:
+   - **compliance**: the `void_reason` of every voided entry on the person's keys and on the
+     firm's domain keys (a "remove us" reason may name the person) becomes `[erased]`; the
+     hashes stay;
+   - **research**: the Contact's Provenance Records (`source_detail` and `notes` `[erased]`,
+     `address` its hash), its Evidence (rows whose `person_contact_id` is the Contact: `quote`
+     and `value` `[erased]`), the page text of its Lead and of every Lead merged into it (NULL,
+     `content_hash` kept; each page's `page_contact_methods.matched` `[erased]`), then the
+     Contact itself (`name` and `role` `[erased]`, `email` its address hash, `linkedin_url`
+     and the office NULL, no longer Primary, `erased_at` now) and one `events` row `None →
+     erased`;
+   - **setup, drafting, jobqueue, ops, notify**: nothing; their tables never hold a Contact's
+     data.
+   The Contact must be erased afterwards, or the transaction rolls back
+   (`RuntimeError("erasure incomplete")`). Last, the request is `completed` (one `events` row
+   `open → completed`).
+
+The address hash is the Suppression List's own `key_hash("address", …)`, so a later opt-out of
+the erased Contact (`suppress`) still lands on the address key (plus the web domain for "remove
+us"), and the gate still matches it. A re-import or a crawl that finds the same address, or the
+same name at the same Lead when the Lead has a web domain (a person key needs one), is blocked
+by `add_contact`'s gate (`address_suppressed`, `person_suppressed`). Nothing logged, published or written to `events` holds a name, an
+address, a URL or the reference; the log line after an erasure is `contact_erased`
+(`contact_id`, `request_id`, `erased`).
+
+**The database keeps it final** (migration `0028_3_13_erase_contacts`):
+
+- `data_subject_requests` (owner `compliance`): `id`, `contact_id`, `kind` (`erase`,
+  `export`), `status` (`open`, `completed`), `request_ref` (1–200 characters, PII class
+  `redact`), `opened_at`, `completed_at` (set exactly when `completed`) and `receipt_id`
+  (Story 3.14). Its triggers refuse any `DELETE`, an `INSERT` that isn't `open` (or reuses an
+  id), and any `UPDATE` but `open → completed` with `completed_at` and one `receipt_id`.
+- `contacts.erased_at`: `trg_contacts_tombstone` refuses setting it on a row that still holds a
+  name, role, LinkedIn URL, office or a plaintext address, and any later change of an erased
+  Contact except a merge's (`lead_id`, `is_primary`, `updated_at`). A later migration that adds
+  a `contacts` column must recreate this trigger with it.
+- The Provenance Records of an erased Contact can't be updated or added to.
+- `trg_evidence_immutable` now also allows a `quote` or `value` to become `[erased]`, once, on a
+  row with `person_contact_id` set; nothing else changes on Evidence.
+- `crawled_pages.text` is now PII class `null` (it is nulled, as the purge job does);
+  `pii_registry.HASH_KINDS` names the key kind each `keep_hash` column is hashed as.
+
+**Contracts** (`tests/contracts/test_erasure_contracts.py`): every table with a personal-data
+column is declared in its owner's `ERASURE` (`tombstoned`, `kept` or `not_held`, with a
+reason), and that owner's `erase_pii` is registered for `ContactErased` in
+`main.build_subscribers` (compliance first, research second); every `keep_hash` column is in
+`HASH_KINDS`; and no foreign key, in the models or at the migrated head, has `ON DELETE
+CASCADE`. A new personal-data table fails until its owner declares it. `tests/app/
+test_erasure.py` plants a value in every personal-data column a Contact's data can reach and
+checks that none survives anywhere in the database, that no `DELETE` runs and no row is lost.
+
+Not yet (later stories): files and stores outside the database, receipts and `erase_external`
+jobs (3.14), export (3.15), the erasure ledger (3.16). Until Story 3.16's ledger, restoring a
+backup taken before an erasure brings the Contact back: erase it again after any restore.
 
 ## Unsubscribe tokens
 
@@ -1932,6 +2028,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0025_2_9_signals_evidence` | `evidence` (shape checks and two triggers, `trg_evidence_no_delete` and `trg_evidence_immutable`), `signals`, `signal_evidence` (unique on `signal_id` and `evidence_id`) and `extraction_runs`, each with foreign keys and no cascade; adds `leads.hq_tz` and `leads.hq_evidence_id` in place (`add_column`) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
 | `0026_4_4_playbook_snapshots` | `playbook_snapshots` (unique `sha256`, version and hash checks), `ai_route_tuples` (foreign keys to `prompt_snapshots` and `playbook_snapshots`, two partial unique indexes, one row per tuple) and `playbook_checks` (trigger, problem and outcome checks); rebuilds `ai_route_activations` from 0014's exact table with a nullable `playbook_sha256` (a foreign key to `playbook_snapshots`, no cascade, and a check) (see [The Sales Playbook snapshot and the candidate tuples (Story 4.4)](#the-sales-playbook-snapshot-and-the-candidate-tuples-story-44)) | `playbook` |
 | `0027_2_6_contact_methods` | `page_contact_methods` (a foreign key to `crawled_pages` with no cascade, `ix_page_contact_methods_page_id`, unique on `page_id`, `method`, `signature` and `source`, method and source checks); adds `leads.contact_methods` in place (`add_column`) (see [Rendering and contact methods](#rendering-and-contact-methods)) | `research` |
+| `0028_3_13_erase_contacts` | `data_subject_requests` (a foreign key to `contacts` with no cascade, `ix_data_subject_requests_contact_id`, kind, status, reference-length and completed checks, and three triggers: no delete, insert `open`, update only `open` to `completed`); `contacts.erased_at`, added in place, with `trg_contacts_tombstone`; `trg_provenance_records_erased_update` and `_insert`; and `trg_evidence_immutable` recreated to allow the erasure tombstone (see [Erasing a Contact](#erasing-a-contact)) | `compliance`, `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

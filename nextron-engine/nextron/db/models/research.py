@@ -1,6 +1,7 @@
 """The ``research`` service's tables (FR-2, FR-14, FR-15, FR-51, AD-3, AD-7, AD-11, AD-17;
-migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). Owner
-``research`` writes every column (``nextron.db.repos.research``). No foreign key cascades.
+migrations ``0015_2_3_contacts_provenance``, ``0019_3_2_contact_markets`` and
+``0028_3_13_erase_contacts``). Owner ``research`` writes every column
+(``nextron.db.repos.research``). No foreign key cascades.
 
 **``contacts``**: one person on a Lead.
 
@@ -20,7 +21,11 @@ migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). O
 - ``office_country`` and ``office_region`` (Story 3.2, each nullable, two capitals): the place
   the Contact's office is in; a region needs a country (``ck_contacts_office_country``,
   ``ck_contacts_office_region``);
-- ``created_at`` and ``updated_at``.
+- ``created_at`` and ``updated_at``;
+- ``erased_at`` (Story 3.13, nullable): when the Contact was erased. Once it is set the row is a
+  tombstone: the trigger ``trg_contacts_tombstone`` (which no model declares) refuses setting it
+  on a row that still holds a value, and any later change but a merge's (``lead_id``,
+  ``is_primary``, ``updated_at``).
 
 ``ck_contacts_identity``: a Contact has a name or an email.
 
@@ -41,10 +46,14 @@ migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). O
   ``basis_rule``, ``basis_campaign_id`` (a ULID; no foreign key until ``campaigns`` exists),
   ``lia_ref``, ``lia_date`` (a calendar date) and ``basis_recorded_at``.
 
+Two triggers (Story 3.13) refuse an ``UPDATE`` or ``INSERT`` of a record whose Contact is
+erased.
+
 PII classes (``nextron.db.pii_registry``): a Contact's ``name`` and ``role`` and a record's
 ``source_detail`` and ``notes`` are ``redact``; ``email`` and a record's ``address`` are
 ``keep_hash``, so suppression still matches after an erasure; ``linkedin_url``,
-``office_country`` and ``office_region`` are ``null``; the bases are ``none``.
+``office_country`` and ``office_region`` are ``null``; the bases and ``erased_at`` are
+``none``.
 """
 
 from datetime import date, datetime
@@ -141,6 +150,7 @@ class ContactRecord(Base):
     office_region: Mapped[str | None] = mapped_column(String(COUNTRY_LENGTH))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    erased_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class ProvenanceRecord(Base):

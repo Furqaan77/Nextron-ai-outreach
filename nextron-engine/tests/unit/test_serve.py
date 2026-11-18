@@ -19,8 +19,14 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron import main
+from nextron.app.compliance.erasure import Erasures
+from nextron.app.drafting import api as drafting_api
+from nextron.app.jobqueue import api as jobqueue_api
+from nextron.app.notify import api as notify_api
+from nextron.app.ops import api as ops_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import Research
+from nextron.app.setup import api as setup_api
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
 from nextron.db import migrations
 from nextron.db.migrations import ensure_current, head_revision
@@ -28,7 +34,12 @@ from nextron.db.repos.ops import backups as backups_repo
 from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, is_command
 from nextron.domain.backup import BackupKind, BackupNotVerified
 from nextron.domain.ai import RouteSpec
-from nextron.domain.notifications import NOTIFICATIONS, LeadsMerged, SubjectSuppressed
+from nextron.domain.notifications import (
+    NOTIFICATIONS,
+    ContactErased,
+    LeadsMerged,
+    SubjectSuppressed,
+)
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
     PlaybookProblem,
@@ -752,7 +763,7 @@ def test_the_database_engine_is_disposed_when_a_migration_fails(
     assert_disposed(engine, dev / "nextron.db")
 
 
-def test_build_subscribers_registers_reparent_lead_and_close_suppressed_only() -> None:
+def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pii_only() -> None:
     subscribers = main.build_subscribers()
 
     assert subscribers.frozen
@@ -765,7 +776,21 @@ def test_build_subscribers_registers_reparent_lead_and_close_suppressed_only() -
     assert is_command(suppressed)
     assert suppressed.__name__ == "close_suppressed"
     assert type(getattr(suppressed, "__self__", None)) is Pipeline
-    others = [kind for kind in NOTIFICATIONS if kind not in (LeadsMerged, SubjectSuppressed)]
+    erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
+    assert all(is_command(subscriber) for subscriber in erased)
+    assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
+    compliance, research, *rest = erased
+    assert type(getattr(compliance, "__self__", None)) is Erasures  # compliance first
+    assert type(getattr(research, "__self__", None)) is Research  # then research
+    assert rest == [
+        setup_api.erase_pii,
+        drafting_api.erase_pii,
+        jobqueue_api.erase_pii,
+        ops_api.erase_pii,
+        notify_api.erase_pii,
+    ]
+    registered = (LeadsMerged, SubjectSuppressed, ContactErased)
+    others = [kind for kind in NOTIFICATIONS if kind not in registered]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
 
 
@@ -776,10 +801,13 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     found = [
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
+        *subscribers.subscribers_of(ContactErased)[:2],  # the rest are module functions
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock, clock, clock]
+    assert clocks == [clock] * 5
+    erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
+    assert erasures._compliance._clock is clock
 
 
 def test_cli_dispatches_serve(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -830,7 +858,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0028_more", create_table("more")))
+    extend(location, ("0029_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -844,7 +872,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0028_more"
+    assert spy.calls[0]["db_revision"] == "0029_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade

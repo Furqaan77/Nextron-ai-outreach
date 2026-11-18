@@ -14,7 +14,11 @@ the running use case's transaction. It checks nothing; ``nextron.app.research`` 
   ``retrieved_at``, then ``id``), or ``None``;
 - ``set_notes(record_id, notes)``: sets the record's ``notes`` (``None`` clears them);
 - ``clear_other_contact_notes(contact_id, keep_id)``: clears the ``notes`` of every other
-  ``contact``-subject record of the Contact that holds some, in one statement.
+  ``contact``-subject record of the Contact that holds some, in one statement;
+- ``tombstone_for_contact(contact_id) -> int`` (Story 3.13): replaces each personal-data column
+  of every record of the Contact with its tombstone (``nextron.db.erasure.tombstoned``:
+  ``source_detail`` and ``notes`` ``[erased]``, ``address`` its address hash), one statement
+  per record; returns how many records it tombstoned.
 """
 
 from dataclasses import dataclass
@@ -24,10 +28,13 @@ from sqlalchemy import insert as insert_rows
 from sqlalchemy import select
 from sqlalchemy import update as update_rows
 
+from nextron.db.erasure import tombstoned
 from nextron.db.models.base import new_id
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.uow import current
 from nextron.domain.contacts import ProvenanceSubject
+
+TABLE = "provenance_records"
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,3 +160,21 @@ def clear_other_contact_notes(contact_id: str, keep_id: str) -> None:
         )
         .values(notes=None)
     )
+
+
+def tombstone_for_contact(contact_id: str) -> int:
+    """Replace the personal data of every Provenance Record of the Contact ``contact_id`` with
+    tombstones; the number of records."""
+    session = current().session
+    rows = session.execute(
+        select(ProvenanceRecord.__table__)
+        .where(ProvenanceRecord.contact_id == contact_id)
+        .order_by(ProvenanceRecord.id)
+    ).mappings().all()
+    for row in rows:
+        session.execute(
+            update_rows(ProvenanceRecord)
+            .where(ProvenanceRecord.id == row["id"])
+            .values(**tombstoned(TABLE, row))
+        )
+    return len(rows)

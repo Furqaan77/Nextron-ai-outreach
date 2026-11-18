@@ -343,6 +343,10 @@ over a revoke. When both are taken, the store lock comes first.
 
 Its log records carry only ``grant``, ``reason`` and ``code``: never a token, the client
 secret, a code, the verifier, the state, a URL, a path or an account address.
+
+**Erasure (Story 3.13).** ``ERASURE`` declares ``settings`` ``not_held``: it holds Nextron's own
+settings, never a Contact's data. The module-level ``@command erase_pii(n: ContactErased)`` is
+setup's ``ContactErased`` subscriber (``nextron.main.build_subscribers``); it writes nothing.
 """
 
 import functools
@@ -356,6 +360,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from enum import StrEnum
 from secrets import token_urlsafe
+from types import MappingProxyType
 from typing import Final, NoReturn
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -403,6 +408,7 @@ from nextron.domain.credentials import (
     encode_updated_at,
     unsub_key,
 )
+from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.google_oauth import (
     CLIENT_META_NAME,
     CLIENT_SECRET_NAME,
@@ -443,7 +449,7 @@ from nextron.domain.markets import (
     placeholders,
     validate_markets,
 )
-from nextron.domain.notifications import FooterChanged
+from nextron.domain.notifications import ContactErased, FooterChanged
 from nextron.domain.offers import OfferDef, offer_form, validate_offers
 from nextron.domain.render import FOOTER_SETTING_KEYS, PLACEHOLDER_OF
 from nextron.domain.segments import (
@@ -2422,3 +2428,24 @@ def _log_store_failed(spec: GrantSpec, reason: str, failed: AdapterError) -> Non
 def _google_store_failed(spec: GrantSpec, reason: str, failed: AdapterError) -> NoReturn:
     _log_store_failed(spec, reason, failed)
     raise CredentialStoreFailed(f"google_{spec.grant}") from None
+
+
+# Erasure (Story 3.13) -------------------------------------------------------------------------
+
+# What setup's erase_pii does to each of its tables with a personal-data column: none of them
+# ever holds a Contact's data.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "settings": TableErasure(
+            Coverage.NOT_HELD,
+            "Nextron's own settings: the Sender's details, staff addresses and the postal "
+            "address, never a Contact's data",
+        ),
+    }
+)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``setup``'s ``ContactErased`` subscriber (Story 3.13, AD-17): it writes nothing,
+    because no ``setup`` table holds a Contact's data (``ERASURE``)."""

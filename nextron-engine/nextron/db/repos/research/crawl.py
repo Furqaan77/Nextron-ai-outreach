@@ -34,11 +34,18 @@ Story 2.6:
   signature, source)`` the page doesn't hold yet and returns how many;
   ``contact_methods_of(lead_id)`` lists the rows of every page of the Lead, by the page's URL,
   then method, signature and source.
+
+Story 3.13: ``tombstone_pages(lead_ids) -> int`` replaces the personal-data columns of every page
+of those Leads (``text``, class ``null``: NULL; ``content_hash`` kept) and of every
+``page_contact_methods`` row of those pages (``matched``, class ``redact``: ``[erased]``) with
+their tombstones (``nextron.db.erasure.tombstoned``), one statement per row that changes;
+returns how many pages it held.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy import delete as delete_rows
@@ -46,6 +53,7 @@ from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 from sqlalchemy.orm import aliased
 
+from nextron.db.erasure import tombstoned
 from nextron.db.models.base import new_id
 from nextron.db.models.crawl import (
     AtsLinkRecord,
@@ -55,6 +63,9 @@ from nextron.db.models.crawl import (
 )
 from nextron.db.uow import current
 from nextron.domain.widgets import Detection
+
+PAGES_TABLE = "crawled_pages"
+METHODS_TABLE = "page_contact_methods"
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,3 +545,41 @@ def reparent(loser_id: str, survivor_id: str) -> None:
         .where(AtsLinkRecord.lead_id == survivor_id, AtsLinkRecord.page_id.in_(loser_pages))
         .values(page_id=survivors_page)
     )
+
+
+# Erasure (Story 3.13) -------------------------------------------------------------------------
+
+
+def _tombstone_rows(table: str, record: type, rows: Iterable[Mapping[str, Any]]) -> None:
+    """Write the tombstone of each of ``rows`` of ``table`` whose values change."""
+    session = current().session
+    for row in rows:
+        values = tombstoned(table, row)
+        if all(row[column] == value for column, value in values.items()):
+            continue
+        session.execute(
+            update_rows(record).where(getattr(record, "id") == row["id"]).values(**values)
+        )
+
+
+def tombstone_pages(lead_ids: Iterable[str]) -> int:
+    """Tombstone the page text and the matched contact methods of every page of the Leads
+    ``lead_ids``; the number of pages they hold."""
+    session = current().session
+    wanted = tuple(lead_ids)
+    if not wanted:
+        return 0
+    pages = session.execute(
+        select(CrawledPageRecord.__table__)
+        .where(CrawledPageRecord.lead_id.in_(wanted))
+        .order_by(CrawledPageRecord.id)
+    ).mappings().all()
+    _tombstone_rows(PAGES_TABLE, CrawledPageRecord, pages)
+    methods = session.execute(
+        select(PageContactMethodRecord.__table__)
+        .join(CrawledPageRecord, CrawledPageRecord.id == PageContactMethodRecord.page_id)
+        .where(CrawledPageRecord.lead_id.in_(wanted))
+        .order_by(PageContactMethodRecord.id)
+    ).mappings().all()
+    _tombstone_rows(METHODS_TABLE, PageContactMethodRecord, methods)
+    return len(pages)
