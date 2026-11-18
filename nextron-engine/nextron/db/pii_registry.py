@@ -133,6 +133,10 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "legal_form_status": PiiClass.NONE,
         "legal_form_site_evidence_id": PiiClass.NONE,
         "legal_form_registry_evidence_id": PiiClass.NONE,
+        # Story 8.2: an organization's location from Google Places, kept at most 30 days
+        "place_lat": PiiClass.NONE,
+        "place_lng": PiiClass.NONE,
+        "place_coords_at": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.

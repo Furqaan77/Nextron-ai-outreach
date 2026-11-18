@@ -184,9 +184,11 @@ retry limit 2, ``handlers.canonicalize_lead(discovery)``, ``enrichment``),
 Story 2.6's ``render_pages`` (bulk only, priority 40, the ``enrich_lead`` chain's, 5 minutes,
 retry limit 2, ``handlers.render_pages(crawls)``, ``enrichment``) and ``purge_page_text`` (bulk
 only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(research)``,
-``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
-minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``), Story
-2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
+``other``), Story 8.2's ``purge_place_coords`` (registered after ``purge_page_text``, with
+its spec, ``handlers.purge_place_coords(discovery)``), Story 2.9's ``extract_lead`` (bulk by
+default, or interactive, priority 45, 15 minutes, retry limit 3,
+``handlers.extract_lead(extractions)``, ``enrichment``), Story 2.10's
+``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
 retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), registered after
 Story 2.12's ``check_legal_form`` (the same lanes, priority, runtime, retry limit and group,
 ``handlers.check_legal_form(legal_forms)``), Story 4.5's
@@ -242,6 +244,15 @@ a ``job_board=`` is injected; building it fetches nothing.
 ``check_job_boards`` enqueues, reached through ``legal_forms=lambda: legal_forms``; each enqueues
 ``select_primary_contact``.
 
+**Google Places (Story 8.2).** ``build_places(env, secrets, meter)`` chooses the Places port once,
+when the app is built: ``GooglePlaces(secrets, meter=meter)`` (``nextron.adapters.places``) in
+``prod``; in ``dev`` and ``test`` only when the ``google_places`` keyring entry exists (its value
+read and discarded), else ``OfflinePlaces()``, which makes no request, and also when the keyring
+can't be read. ``build_app(..., places=None)`` uses it unless a ``places=`` is injected, builds
+``PlaceSearches(clock, meter, places)`` (``nextron.app.discovery.places``) and keeps it on
+``app.state.place_searches`` for Story 8.3's discovery runs. The daily ``purge_place_coords``
+job nulls Places coordinates older than 30 days.
+
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
 ``notifications`` tables and sends each Telegram alert as a ``send_alert`` job. Its Telegram
@@ -279,6 +290,7 @@ fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``, then ``check_recovery`` 
 but the scheduler enqueues it only while ``recovery_active()`` returns ``True``, so no job row is
 made once recovery is over, then ``purge_page_text`` (Story 2.5), ``Every(1 day,
 at_startup=True)``: the PC is not on at fixed times, so it also runs at every start, then
+``purge_place_coords`` (Story 8.2), ``Every(1 day, at_startup=True)`` for the same reason, then
 ``check_domains`` (Story 6.5), a ``DailyAt(domain_check_schedule,
 fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``.
 ``build_app``
@@ -655,6 +667,7 @@ from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.dns import DnspythonDns
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
+from nextron.adapters.places import GooglePlaces, OfflinePlaces
 from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
@@ -663,6 +676,7 @@ from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
+from nextron.app.discovery.places import PlaceSearches
 from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
@@ -754,6 +768,7 @@ from nextron.domain.crawl import (
     PURGE_PAGE_TEXT_JOB,
     RENDER_PAGES_JOB,
 )
+from nextron.domain.credentials import CredentialKey
 from nextron.domain.domain_auth import CHECK_DOMAINS_JOB, DOMAIN_CHECK_TIME
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
@@ -763,6 +778,7 @@ from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import ContactErased, LeadsMerged, SubjectSuppressed
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
+from nextron.domain.places import PURGE_PLACE_COORDS_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
@@ -816,9 +832,10 @@ from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
+from nextron.ports.places import PlacesPort
 from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
-from nextron.ports.secrets import SecretsPort
+from nextron.ports.secrets import SecretsPort, read_credential
 from nextron.ports.usage_meter import UsageMeterPort
 from nextron.startup_checks import (
     BACKUP_DIR_SEPARATE,
@@ -876,6 +893,8 @@ PROMPTS_CHECK: Final = "prompts"
 AI_SETS_CHECK: Final = "ai_sets"
 FALLBACK_TIMEZONE: Final = "UTC"
 PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
+PURGE_PLACE_COORDS_PERIOD: Final = timedelta(days=1)
+PLACES_PORT_CHOSEN: Final = "places_port_chosen"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -959,6 +978,22 @@ def open_in_browser(url: str) -> bool:
     return bool(webbrowser.open(url))
 
 
+def build_places(env: str, secrets: SecretsPort, meter: UsageMeterPort) -> PlacesPort:
+    """The Places port the engine searches through, chosen once at startup: ``GooglePlaces`` in
+    ``prod``; in any other environment ``GooglePlaces`` only when the ``google_places`` key is
+    stored (its value read and discarded), else ``OfflinePlaces``, which also stands in when
+    the keyring can't be read. So paid use never starts on its own outside ``prod``. Logs
+    ``places_port_chosen`` (``live``: whether it is ``GooglePlaces``), never the key."""
+    if env != "prod":
+        try:
+            read_credential(secrets, CredentialKey.GOOGLE_PLACES)
+        except Exception:  # noqa: BLE001 - no key, or no keyring: stay offline
+            log.info(PLACES_PORT_CHOSEN, extra={"live": False})
+            return OfflinePlaces()
+    log.info(PLACES_PORT_CHOSEN, extra={"live": True})
+    return GooglePlaces(secrets, meter=meter)
+
+
 def build_app(
     config: BootstrapConfig,
     *,
@@ -976,6 +1011,7 @@ def build_app(
     dns: DnsPort | None = None,
     job_board: JobBoardPort | None = None,
     registry: RegistryPort | None = None,
+    places: PlacesPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -1015,7 +1051,9 @@ def build_app(
     fetcher=<that same HttpCrawler>)`` unless injected), and a careers posting's recheck fetches
     through the crawl's ``crawler``. The legal-form check reads the Companies House register
     through ``registry`` (``CompaniesHouseRegistry(secrets, meter=meter)`` unless injected), which
-    builds its HTTP client on its first call."""
+    builds its HTTP client on its first call. Google Places is searched through ``places``
+    (``build_places(config.env, secrets, meter)`` unless injected), kept with its
+    ``PlaceSearches`` on ``app.state.place_searches``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1092,6 +1130,9 @@ def build_app(
         research,
         queue,
     )
+    place_searches = PlaceSearches(
+        clock, meter, places if places is not None else build_places(config.env, secrets, meter)
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1140,7 +1181,7 @@ def build_app(
         issues=build_health_issues(budget=budget, clock=clock),
         readiness=functools.partial(run_checks, build_doctor_checks(), context),
     )
-    return create_app(
+    app = create_app(
         env=config.env,
         version=__version__,
         port=config.port,
@@ -1175,6 +1216,8 @@ def build_app(
             startup=functools.partial(run_startup_steps, startup_steps),
         ),
     )
+    app.state.place_searches = place_searches  # Story 8.2: Story 8.3's discovery runs use it
+    return app
 
 
 def queue_contact_markets(units: Units, contact_markets: ContactMarkets) -> None:
@@ -1232,7 +1275,7 @@ def build_job_types(
     recovery: Callable[[], handlers.RecoveryChecking],
     contact_markets: Callable[[], handlers.MarketBackfilling],
     crawls: Callable[[], handlers.Crawling],
-    discovery: Callable[[], handlers.Canonicalizing],
+    discovery: Callable[[], handlers.DiscoveryJobs],
     research: Callable[[], handlers.PurgingPageText],
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
@@ -1372,6 +1415,18 @@ def build_job_types(
             max_runtime=timedelta(minutes=10),
             retry_limit=2,
             handler=handlers.purge_page_text(research),
+            group=JobGroup.OTHER,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=PURGE_PLACE_COORDS_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=20,
+            max_runtime=timedelta(minutes=10),
+            retry_limit=2,
+            handler=handlers.purge_place_coords(discovery),
             group=JobGroup.OTHER,
         )
     )
@@ -1523,6 +1578,9 @@ def build_triggers(
     # the PC is not on at fixed times: purge at every start too
     triggers.register_trigger(
         Trigger.PURGE_PAGE_TEXT, Every(PURGE_PAGE_TEXT_PERIOD, at_startup=True)
+    )
+    triggers.register_trigger(
+        Trigger.PURGE_PLACE_COORDS, Every(PURGE_PLACE_COORDS_PERIOD, at_startup=True)
     )
     triggers.register_trigger(
         Trigger.CHECK_DOMAINS,

@@ -9,10 +9,11 @@
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, ``run_ai_test_sets``,
   Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
-  2.11, and ``check_legal_form``, Story 2.12, with their settings); the triggers
-  are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
-  ``Every`` with ``active``, ``purge_page_text``'s daily ``Every`` at startup and
-  ``check_domains``'s daily schedule: the one-off ``resolve_contact_markets`` has no trigger.
+  2.11, ``check_legal_form``, Story 2.12, and ``purge_place_coords``, Story 8.2, with their
+  settings); the triggers are exactly ``backup_db``'s and ``restore_test``'s daily schedules,
+  ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s and
+  ``purge_place_coords``'s daily ``Every`` at startup and ``check_domains``'s daily schedule:
+  the one-off ``resolve_contact_markets`` has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -348,10 +349,15 @@ class RecordingDiscovery:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.coord_purges = 0
 
     def canonicalize_lead(self, lead_id: str, run_id: str) -> str:
         self.calls.append((lead_id, run_id))
         return "kept"
+
+    def purge_place_coords(self) -> int:
+        self.coord_purges += 1
+        return 0
 
 
 class RecordingResearch:
@@ -516,6 +522,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "canonicalize_lead",
         "render_pages",
         "purge_page_text",
+        "purge_place_coords",
         "extract_lead",
         "check_legal_form",
         "select_primary_contact",
@@ -626,6 +633,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "canonicalize_lead",
             "render_pages",
             "purge_page_text",
+            "purge_place_coords",
             "extract_lead",
             "check_legal_form",
             "select_primary_contact",
@@ -665,6 +673,14 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             JobGroup.ENRICHMENT,
         ),
         "purge_page_text": (
+            Lane.BULK,
+            frozenset({Lane.BULK}),
+            20,
+            timedelta(minutes=10),
+            2,
+            JobGroup.OTHER,
+        ),
+        "purge_place_coords": (  # Story 8.2: purge_page_text's spec
             Lane.BULK,
             frozenset({Lane.BULK}),
             20,
@@ -780,8 +796,11 @@ def test_canonicalize_lead_and_purge_page_text_call_their_services_once() -> Non
         Job(RUN, "canonicalize_lead", Lane.BULK, payload, 1)
     )
     job_types.get("purge_page_text").handler(Job(RUN, "purge_page_text", Lane.BULK, {"v": 1}, 1))
+    job_types.get("purge_place_coords").handler(
+        Job(RUN, "purge_place_coords", Lane.BULK, {"v": 1}, 1)
+    )
 
-    assert (discovery.calls, research.purges) == ([(LEAD, RUN)], 1)
+    assert (discovery.calls, research.purges, discovery.coord_purges) == ([(LEAD, RUN)], 1, 1)
 
 
 def test_extract_lead_calls_its_service_once_and_is_deferred_when_the_budget_refuses() -> None:
@@ -997,7 +1016,7 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore, recovery, purge, domains] = triggers.specs()
+    [spec, restore, recovery, purge, coords, domains] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
@@ -1009,6 +1028,8 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
     )
     assert (purge.trigger, purge.job_type) == (Trigger.PURGE_PAGE_TEXT, "purge_page_text")
     assert purge.schedule == Every(timedelta(days=1), at_startup=True)
+    assert (coords.trigger, coords.job_type) == (Trigger.PURGE_PLACE_COORDS, "purge_place_coords")
+    assert coords.schedule == Every(timedelta(days=1), at_startup=True)
     assert (domains.trigger, domains.job_type) == (Trigger.CHECK_DOMAINS, "check_domains")
     assert domains.schedule == DailyAt(domain_schedule, fallback=DailyRun(time(7, 0), "UTC"))
     built_again = main.build_triggers(

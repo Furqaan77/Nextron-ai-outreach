@@ -225,6 +225,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "canonicalize_lead",
         "render_pages",
         "purge_page_text",
+        "purge_place_coords",
         "extract_lead",
         "check_legal_form",
         "select_primary_contact",
@@ -553,7 +554,9 @@ def test_building_the_app_runs_no_readiness_check(units: UnitOfWorkFactory) -> N
     )
 
     assert probed == []
-    assert secrets.calls == []  # no credential or grant was read
+    # no credential or grant was read, but for Story 8.2's one Places key presence check
+    # (main.build_places, outside prod: its value is discarded)
+    assert secrets.calls == [("read", "google_places/api_key")]
 
 
 def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
@@ -920,8 +923,9 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    # backup_db, restore_test, check_recovery, purge_page_text and check_domains
-    assert scheduled.triggers == 5  # type: ignore[attr-defined]
+    # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords and
+    # check_domains
+    assert scheduled.triggers == 6  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1286,6 +1290,7 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         "check_domains",
         "check_recovery",
         "purge_page_text",
+        "purge_place_coords",
         "restore_test",
     ]
     [check] = [job for job in jobs if job.id == "check_recovery"]
@@ -1293,7 +1298,11 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     assert check.trigger.interval == timedelta(minutes=1)
     assert (check.misfire_grace_time, check.coalesce, check.max_instances) == (60, True, 1)
     dailies = sorted(
-        (job for job in jobs if job.id not in {"check_recovery", "purge_page_text"}),
+        (
+            job
+            for job in jobs
+            if job.id not in {"check_recovery", "purge_page_text", "purge_place_coords"}
+        ),
         key=lambda job: job.id,
     )
     for job, hour in zip(dailies, ("10", "7", "11"), strict=True):  # check_domains at 07:00

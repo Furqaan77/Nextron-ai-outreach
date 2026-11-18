@@ -330,3 +330,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-12-confirm-a-uk-lead-s-legal-form-through-companies-house.md`
   summary: Let the name path link a UK firm whose registered office (often its accountant's or a formation agent's address) isn't on its site, for example with the officers or the trading address, without weakening FR-12's Evidence rule.
   evidence: Story 2.12 review pass 1 (BH14, low). The name path needs the registered office postcode to appear on the site, so many small firms that quote no company number stay `unconfirmed` and can't be emailed.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-2-places-search-adapter-that-keeps-only-what-the-maps-terms-allow.md`
+  summary: The per-call budget/quota check and the metered request are not atomic, so concurrent blockable calls (e.g. several `discover_places` or `check_legal_form` jobs on the bulk lane) can each pass the check at 999/1,000 and overshoot a quota by the number of threads.
+  evidence: `PlaceSearches.search_page` and `LegalFormChecks.check_legal_form` read `meter.snapshot` in one transaction and record usage only when `Metered` exits after the request; nothing reserves a unit or serializes calls. Story 8.1 (per-call checks for every blockable job) or 8.3 (the concurrent caller) should serialize or reserve.

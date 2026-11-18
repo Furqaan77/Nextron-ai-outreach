@@ -2477,6 +2477,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0034_4_6_ai_test_sets` | rebuilds `ai_test_cases` (from 0030's exact table, which 0031 to 0033 leave unchanged; every row, both checks and `uq_ai_test_cases_live_key` kept) with `origin` (server default `fixture`, or `override`), a nullable `contact_id` (no foreign key) and `ck_ai_test_cases_origin_contact`, and `ai_test_runs` (from 0030's exact table; every row, check, foreign key and `ix_ai_test_runs_tuple_id_test_set` kept) with a nullable `cases_sha256` and `ck_ai_test_runs_cases_sha256` (see [The AI Test Sets](#the-ai-test-sets-story-46)) | `playbook` |
 | `0035_2_11_job_postings` | `job_postings` (foreign keys to `leads`, `signals` and `evidence` with no cascade; `ix_job_postings_lead_id`, `ix_job_postings_signal_id`; unique on `lead_id`, `url` and `title`; `ck_job_postings_source`, `ck_job_postings_board_token`, `ck_job_postings_status` and `ck_job_postings_closed_at`); adds nine nullable counts to `crawl_runs` in place (`add_column`, no check): `careers_postings`, `careers_events`, `<source>_postings` and `<source>_events` for `greenhouse`, `lever` and `ashby`, and `board_errors` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)) | `research` |
 | `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
+| `0037_8_2_place_coords` | adds to `leads`, in place with no check, the nullable `place_lat` and `place_lng` (floats) and `place_coords_at` (UTC text), purged after 30 days (see [Google Places search](#google-places-search)) | `discovery` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2560,8 +2561,9 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 `resolve_contact_markets` (bulk lane, priority 40, 30 minutes, retry limit 3,
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
 `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
-crawling](#website-crawling)), `extract_lead` (see [Signals and
-Evidence](#signals-and-evidence)), `check_legal_form` (see [Companies House legal
+crawling](#website-crawling)), `purge_place_coords` (bulk only, priority 20, 10 minutes, retry
+limit 2, group `other`; see [Google Places search](#google-places-search)), `extract_lead`
+(see [Signals and Evidence](#signals-and-evidence)), `check_legal_form` (see [Companies House legal
 form](#companies-house-legal-form)), `select_primary_contact` (see [Decision-makers and the
 Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` (see [The AI
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
@@ -3076,13 +3078,14 @@ table (`tests/unit/test_triggers.py` checks it against the spine). A trigger onl
 firing enqueues one job of the job type with the trigger's own name, with the key
 `<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
 still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
-job. So far five triggers are registered: `backup_db`, daily (see [Backups](#backups)),
+job. So far six triggers are registered: `backup_db`, daily (see [Backups](#backups)),
 `restore_test`, daily an hour later, whose job tests once per calendar month (see [The restore
 test](#the-restore-test)), `check_recovery`, every minute and at start, but only while
 recovery mode is on (see [Restore and recovery mode](#restore-and-recovery-mode)),
-`purge_page_text`, every 24 hours and at start (see [Website crawling](#website-crawling)), and
-`check_domains`, daily at 07:00 in `sender_timezone`, and once at start when a listed Sending
-Domain missed it (see [Sending Domain authentication](#sending-domain-authentication)).
+`purge_page_text`, every 24 hours and at start (see [Website crawling](#website-crawling)),
+`purge_place_coords`, every 24 hours and at start (see [Google Places
+search](#google-places-search)), and `check_domains`, daily at 07:00 in `sender_timezone`, and
+once at start when a listed Sending Domain missed it (see [Sending Domain authentication](#sending-domain-authentication)).
 
 **Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
@@ -3573,7 +3576,8 @@ token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_messag
 OAuth (`google_oauth`/`code_exchange`, `token_refresh` and `token_revocation`; a revoke answered
 `invalid_token` is `ok`) and Companies House (`companies_house`/`search_companies` and
 `get_company`; a lookup answered 404 is `ok`, and a request its own rate limit refuses records
-nothing). The Claude gateway records an `AiCall` per request instead.
+nothing) and Google Places (`places`/`text_search`, with SKU `enterprise`, or `pro` for a mask
+without the website). The Claude gateway records an `AiCall` per request instead.
 `tests/contracts/test_adapter_boundary.py` checks every such adapter.
 
 **Quotas and the budget** are settings (Settings, Budget and limits), each counted over the UTC
@@ -4686,6 +4690,56 @@ Evidence rows read "Legal form" under Supports.
 
 **Not yet:** discovering Leads from the register by SIC code (S2), officers, accounts and the
 periodic re-checks (FR-61).
+
+## Google Places search
+
+Discovery finds candidate organizations through Google Places Text Search (New) (Story 8.2;
+FR-5, FR-49). The Maps Platform terms forbid storing what Places returns, so the engine keeps
+only the place ID for good, and a place's coordinates for at most 30 days.
+
+**The port.** `PlacesPort.text_search(query, location, page_token=None)`
+(`nextron/ports/places.py`) returns a `PlaceSearchPage(candidates, next_page_token)` of
+transient `PlaceCandidate(place_id, website_uri, display_name, lat, lng)` values. A candidate's
+display name and website never reach the database, an `events` row, a job payload, a log line
+or an AI prompt, and are left out of its `repr`; a Lead's name and domain come from its own
+website (Story 8.3).
+
+**The adapter** (`nextron/adapters/places`, `GooglePlaces`) sends one POST to
+`https://places.googleapis.com/v1/places:searchText` with the body `{"textQuery": "<query> in
+<location>", "pageSize": 20}` (plus `pageToken` for a later page). The API key (`google_places`,
+read from the keyring on every call) goes only in the `X-Goog-Api-Key` header. The field mask is
+exactly `places.id,places.websiteUri,places.displayName,places.location,nextPageToken`: never an
+address, phone number, rating or review. Asking for the website makes each request an
+**Enterprise** SKU request (a mask without it would be Pro); each attempted request is metered
+once as provider `places`, operation `text_search`, with that SKU, so Pro and Enterprise are
+counted separately on the Quotas and cost page. A 429 is the retryable `places_rate_limited`, a
+5xx or a transport failure the retryable `places_unavailable`, a 401 or 403
+`places_unauthorized`, any other status `places_refused`, and a body over 2 MB or of the wrong
+shape `places_bad_response`; a blank query or location is refused with no request. No error
+holds the key or a response body.
+
+**Paid use never starts on its own.** `PlaceSearches.search_page(query, location, page_token)`
+(`nextron/app/discovery/places.py`) runs the budget's per-call check before every request: the
+AI budget, and the quota of the mask's SKU (`quota_places_enterprise`, default 1,000, Google's
+free monthly allowance; `quota_places_pro`, default 0). A refusal returns `None` with no request
+and logs `places_search_refused` (the quota and the reason); a page logs `places_page_fetched`
+with its candidate count only. The request runs outside any transaction. Outside `prod` the
+engine searches through `OfflinePlaces` (no request, an empty page) unless a `google_places`
+key is stored; `prod` always uses `GooglePlaces`. The search seam is on
+`app.state.place_searches`. Story 8.3's discovery runs will page through it and create the
+Leads.
+
+**Coordinates.** `leads.place_lat`, `place_lng` and `place_coords_at` hold a place's location
+(Story 8.3 fills them). The daily `purge_place_coords` job (every 24 hours and at start) nulls
+all three on every Lead whose coordinates were stored more than 30 days ago (or that holds a
+coordinate with no storage time), logs `place_coords_purged` with the count, and keeps
+`place_id`.
+`tests/contracts/test_places_storage_terms.py` checks that no table has a column for a Places
+field, that only the allowed modules import the Places port, and that a search with planted
+names stores and logs none of them.
+
+**Not yet:** paging through results, creating Leads from candidates and a location bias (Story
+8.3); the job budget class and deferred jobs (Story 8.1).
 
 ## Engine health
 

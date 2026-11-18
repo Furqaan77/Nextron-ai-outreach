@@ -138,12 +138,13 @@ def usage_counts(path: Path) -> tuple[int, int]:
         reader.close()
 
 
-def purge_jobs(path: Path) -> list[tuple[str]]:
-    """The idempotency keys of the running engine's ``purge_page_text`` jobs."""
+def purge_jobs(path: Path, job_type: str = "purge_page_text") -> list[tuple[str]]:
+    """The idempotency keys of the running engine's ``job_type`` jobs (``purge_page_text``
+    unless given)."""
     reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     try:
         return reader.execute(
-            "SELECT idempotency_key FROM jobs WHERE type = 'purge_page_text'"
+            "SELECT idempotency_key FROM jobs WHERE type = ?", (job_type,)
         ).fetchall()
     finally:
         reader.close()
@@ -343,7 +344,9 @@ def test_guarded_health_page_and_second_instance(
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        5,  # backup_db, restore_test, check_recovery, purge_page_text and check_domains
+        # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords and
+        # check_domains
+        6,
     )
     assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
     assert lines.index(daily) < lines.index(restore) < lines.index(scheduler_started)
@@ -360,12 +363,19 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0036_2_12_legal_form"
+    assert HEAD == "0037_8_2_place_coords"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]
     assert purge["count"] == 0
     assert purge_jobs(data_dir / "nextron.db") == [("purge_page_text:global:tick",)]
+    # so does purge_place_coords (Story 8.2)
+    coords = wait_for_log_line(data_dir, "nextron.app.discovery.api", "place_coords_purged")
+    [coords_purge] = [line for line in coords if line["event"] == "place_coords_purged"]
+    assert coords_purge["count"] == 0
+    assert purge_jobs(data_dir / "nextron.db", "purge_place_coords") == [
+        ("purge_place_coords:global:tick",)
+    ]
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
