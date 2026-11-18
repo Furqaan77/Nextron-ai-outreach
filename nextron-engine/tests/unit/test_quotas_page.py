@@ -242,3 +242,45 @@ def test_without_a_session_the_page_is_locked() -> None:
     assert reply.status == 401
     assert "nextron open" in reply.text
     assert "Quotas" not in reply.text
+
+
+# The unsubscribe Worker's KV list calls (Story 3.12) --------------------------------------------
+
+
+def kv_calls(dashboard: Dashboard, count: int, at: datetime) -> None:
+    assert dashboard.meter is not None
+    clock = dashboard.meter.clock
+    dashboard.meter.clock = FrozenClock(at)
+    for _ in range(count):
+        dashboard.meter.record(ApiCall("unsub_worker", "kv_list", ok=True))
+    dashboard.meter.clock = clock
+
+
+def kv_line(dashboard: Dashboard, cookie: bytes) -> tuple[str, bool]:
+    reply = dashboard.get("/quotas", cookie=cookie)
+    page = Page(reply.text)
+    [line] = [text for text in page.texts if text.startswith("Unsubscribe Worker KV list")]
+    return line, '<p class="kv-list quota-warning">' in reply.text
+
+
+def test_the_page_counts_today_s_kv_list_calls_and_warns_at_80_percent(
+    dashboard: Dashboard, cookie: bytes
+) -> None:
+    assert kv_line(dashboard, cookie) == (
+        "Unsubscribe Worker KV list calls today: 0 of 1,000",
+        False,
+    )
+    kv_calls(dashboard, 300, datetime(2026, 11, 16, 23, 59, tzinfo=UTC))  # yesterday (UTC)
+    kv_calls(dashboard, 799, T)
+    assert dashboard.meter is not None
+    dashboard.meter.record(ApiCall("hunter", "find", ok=True))  # another provider
+
+    assert kv_line(dashboard, cookie) == (
+        "Unsubscribe Worker KV list calls today: 799 of 1,000",
+        False,
+    )
+    kv_calls(dashboard, 1, T)
+    assert kv_line(dashboard, cookie) == (
+        "Unsubscribe Worker KV list calls today: 800 of 1,000",
+        True,
+    )

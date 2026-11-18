@@ -272,6 +272,10 @@ read.
 - ``remove_unsub_key(kid, key)`` reads ``newest_unsub_token(kid)``; while ``key_in_use`` holds
   it raises ``UnsubKeyInUse`` and deletes nothing. Otherwise it deletes the entry, then its
   meta entry, logs ``unsub_key_removed`` and returns the ``not set`` status.
+- While recovery mode is on (``queries.ops.recovery_mode()``, Story 3.12), ``remove_unsub_key``
+  and a ``save_unsub_key`` that would replace a valid stored key raise
+  ``UnsubKeysHeldInRecovery``, naming recovery mode, before the in-use rule, and change
+  nothing: the restored ``unsub_tokens`` can't be rebuilt, so the keys must stay.
 - A keyring failure while saving or removing logs ``unsub_key_store_failed`` (``credential``,
   ``kid``, ``operation`` and the error's ``code``) and raises ``CredentialStoreFailed`` (its
   ``key`` is the keyring entry's name); a failed read logs ``unsub_key_read_failed``.
@@ -375,6 +379,7 @@ from typing import Final, NoReturn
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nextron.app.queries import compliance as compliance_queries
+from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.setup import campaigns as campaigns_repo
@@ -488,6 +493,7 @@ from nextron.domain.sink import sink_applies
 from nextron.domain.unsub_token import (
     MAX_KID,
     UnsubKeyInUse,
+    UnsubKeysHeldInRecovery,
     check_kid,
     encode_key,
     key_in_use,
@@ -1787,6 +1793,7 @@ class Credentials:
         if raw is None:
             raise InvalidCredentialValue(found.key, NOT_A_KEY)
         newest = compliance_queries.newest_unsub_token(kid)
+        recovering = ops_queries.recovery_mode()
         name = found.secret_name(kid)
         with self._lock:
             now = self._clock.now()
@@ -1798,6 +1805,8 @@ class Credentials:
                 _unsub_store_failed(found, kid, SAVE, failed)
             if other_raw is not None and hmac.compare_digest(other_raw, raw):
                 raise InvalidCredentialValue(found.key, SAME_KEY)  # Cloudflare holds k_edge
+            if stored and recovering:
+                raise UnsubKeysHeldInRecovery(kid)
             if stored and key_in_use(newest, now):
                 raise UnsubKeyInUse(kid)
             stamp = encode_updated_at(now)
@@ -1815,6 +1824,8 @@ class Credentials:
         found = unsub_key(key)
         kid = check_kid(kid)
         newest = compliance_queries.newest_unsub_token(kid)
+        if ops_queries.recovery_mode():
+            raise UnsubKeysHeldInRecovery(kid)
         with self._lock:
             if key_in_use(newest, self._clock.now()):
                 raise UnsubKeyInUse(kid)

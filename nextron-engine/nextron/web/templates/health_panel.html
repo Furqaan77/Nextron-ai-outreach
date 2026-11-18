@@ -50,6 +50,10 @@
 {%- endif %}
 </section>
 {%- endif %}
+<section aria-labelledby="health-unsub-heading">
+<h2 id="health-unsub-heading">Unsubscribe polling</h2>
+<p class="health-unsub{% if unsub_poll_failing %} health-unsub-failing{% endif %}">{{ unsub_poll }}</p>
+</section>
 <section aria-labelledby="health-errors-heading">
 <h2 id="health-errors-heading">Errors needing attention ({{ issues|length }})</h2>
 {%- if issues %}

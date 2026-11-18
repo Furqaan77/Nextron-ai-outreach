@@ -4,13 +4,15 @@
 the fake's clock (``clock``, a ``FrozenClock`` unless one is given). ``calls`` lists just the
 calls. ``snapshot(now)`` sums the records of ``now``'s UTC calendar month the way
 ``nextron.db.metering.UsageMeter`` does: one line per provider, operation and SKU (calls,
-failed calls, units), plus the AI call count and spend. It never touches a database.
+failed calls, units), plus the AI call count and spend. ``day_calls(now, provider, operation)``
+(Story 3.12) counts the ``ApiCall`` records of that provider and operation on ``now``'s UTC
+day. It never touches a database.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 
-from nextron.domain.budget import AiCall, ApiCall, ApiUse, Usage, month_of
+from nextron.domain.budget import AiCall, ApiCall, ApiUse, Usage, day_bounds, month_of
 from nextron.ports.clock import Clock
 from tests.fakes.clock import FrozenClock
 
@@ -59,4 +61,15 @@ class InMemoryUsageMeter:
             ),
             ai_calls=ai_calls,
             ai_cost_micros=ai_cost,
+        )
+
+    def day_calls(self, now: datetime, provider: str, operation: str) -> int:
+        start, end = day_bounds(now)
+        return sum(
+            1
+            for recorded in self.records
+            if isinstance(recorded.call, ApiCall)
+            and recorded.call.provider == provider
+            and recorded.call.operation == operation
+            and start <= recorded.at < end
         )

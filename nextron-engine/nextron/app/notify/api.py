@@ -48,6 +48,10 @@ status change appends an ``events`` row in the same transaction: entity ``alerts
   writes nothing, joins no unit of work and must be called outside any transaction (AD-3);
   the port's ``AdapterError`` propagates. An erasure's Telegram store calls it for each recent
   alert about the Contact.
+- ``@command clear(kind, subject) -> bool`` (Story 3.12) dismisses, in the caller's
+  transaction, the ``(kind, subject)`` notification when it exists and is undismissed, as
+  ``dismiss`` does; otherwise it is ``False`` and changes nothing. The row stays, so a repeat of
+  ``alert`` with that kind and subject is still a no-op.
 
 **Logs**, written after the transaction commits, carry ``alert_id``, ``kind``, ``channel`` and
 ``code`` or ``sink``, never text, a chat id or a token: ``alert_sent`` (INFO, with ``sink``),
@@ -389,6 +393,15 @@ class Notify:
         self.alert(NOT_DELIVERED, alert_id, text, (Channel.DASHBOARD,))
 
     # The notification area -------------------------------------------------------------------
+
+    @command
+    def clear(self, kind: str, subject: str) -> bool:
+        """Dismiss the ``(kind, subject)`` notification in the caller's transaction; ``False``
+        when there is none or it is already dismissed."""
+        found = notifications_repo.find(kind, subject)
+        if found is None or found.dismissed_at is not None:
+            return False
+        return notifications_repo.dismiss(found.id, self._clock.now()) == 1
 
     @use_case
     def dismiss(self, notification_id: str) -> bool:

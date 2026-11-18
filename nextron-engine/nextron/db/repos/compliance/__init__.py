@@ -9,6 +9,8 @@ Only ``nextron.app.compliance`` and ``nextron.app.queries.compliance`` import th
   (Story 3.8).
 - ``unsub_requests``: the ``unsub_requests`` table, every applied unsubscribe request (Story
   3.11).
+- ``unsub_poll_state``: the ``unsub_poll_state`` table, the one row recording how the
+  unsubscribe poll went (Story 3.12).
 - ``data_subject_requests``: the ``data_subject_requests`` table, every data subject request
   (Story 3.13; Story 3.15 adds ``for_contact``). Story 3.15 also adds
   ``suppression_entries.for_export``.

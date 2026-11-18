@@ -103,6 +103,15 @@ The doctor checks here, in the order ``doctor`` runs them:
   key (``nextron.domain.unsub_token.parse_key``) or can't be read, naming each such keyring
   entry, or when the two are the same key (Cloudflare would then hold the decryption key);
   otherwise it is ``ok``.
+- ``unsub_worker`` (Story 3.12, FR-70, AD-15): the unsubscribe Worker answers. It reads the
+  ``unsub_worker_host`` setting first (``host()``): blank is ``ok``, "polling is off"; a read
+  error fails by type name. Then the bearer's keyring entry (``unsub/bearer``, the value
+  dropped at once): missing or blank fails, "polling on but bearer not set"; unreadable fails.
+  With ``in_engine`` it is then ``ok``, "not probed in the engine", with no network call.
+  Otherwise ``probe(host)`` (``UnsubscribePort.probe`` with ``DOCTOR_DEADLINE_S``) returning is
+  ``ok``, "reachable"; a retryable ``AdapterError`` or ``unsub_unreachable`` (an answer slower
+  than the deadline) is ``warn``; any other ``AdapterError`` fails. Messages carry codes only,
+  never the host, the bearer or a body.
 """
 
 import hmac
@@ -164,6 +173,7 @@ ERASURE_LEDGER: Final = "erasure_ledger"
 REQUIRED_SETTINGS: Final = "required_settings"
 DATABASE_REVISION: Final = "database_revision"
 UNSUB_TOKEN_KEYS: Final = "unsub_token_keys"
+UNSUB_WORKER: Final = "unsub_worker"
 ENGINE_PROBE_TIMEOUT_S: Final = 1.0
 
 ENV_VARIABLE: Final = "NEXTRON_ENV"
@@ -642,6 +652,83 @@ def check_unsub_token_keys(
         Status.OK,
         f"the unsubscribe token keys of key id {kid} ({names}) are set and differ",
     )
+
+
+UNSUB_UNREACHABLE: Final = "unsub_unreachable"  # nextron.ports.unsubscribe.UNSUB_UNREACHABLE
+UNSUB_BEARER_FIX: Final = "enter the Unsubscribe Endpoint bearer secret on the Credentials page"
+
+
+def check_unsub_worker(
+    read: Callable[[str], str | None],
+    host: Callable[[], object],
+    probe: Callable[[str], None],
+    *,
+    in_engine: bool,
+    deadline_s: float,
+) -> CheckResult:
+    """Whether the unsubscribe Worker answers; see the module docstring. ``host`` reads the
+    ``unsub_worker_host`` setting (called first), ``read`` is ``SecretsPort.read`` and ``probe``
+    calls ``UnsubscribePort.probe`` with the deadline."""
+    try:
+        found = str(host())
+    except Exception as exc:  # noqa: BLE001 - any read failure fails the check, not a crash
+        return CheckResult(
+            UNSUB_WORKER,
+            Status.FAIL,
+            f"the Unsub Worker host setting (unsub_worker_host) could not be read "
+            f"({type(exc).__name__}); set it on the Settings page",
+        )
+    if not found:
+        return CheckResult(
+            UNSUB_WORKER, Status.OK, "unsubscribe polling is off (no Unsub Worker host set)"
+        )
+    state = _credential_state(
+        read, credentials.credential(CredentialKey.UNSUBSCRIBE_BEARER).secret_name
+    )
+    if state == "unreadable":
+        return CheckResult(
+            UNSUB_WORKER,
+            Status.FAIL,
+            "unsubscribe polling on but the bearer could not be read (Windows Credential "
+            "Manager failed); run doctor again",
+        )
+    if state == "not set":
+        return CheckResult(
+            UNSUB_WORKER,
+            Status.FAIL,
+            f"unsubscribe polling on but bearer not set; {UNSUB_BEARER_FIX}",
+        )
+    if in_engine:
+        return CheckResult(
+            UNSUB_WORKER,
+            Status.OK,
+            "unsubscribe polling on; the Worker is not probed in the engine (nextron doctor "
+            "probes it)",
+        )
+    try:
+        probe(found)
+    except AdapterError as exc:
+        if exc.code == UNSUB_UNREACHABLE:
+            return CheckResult(
+                UNSUB_WORKER,
+                Status.WARN,
+                f"the unsubscribe Worker was slower than {deadline_s:g} s ({exc.code}); "
+                "polling retries every period",
+            )
+        if exc.retryable:
+            return CheckResult(
+                UNSUB_WORKER,
+                Status.WARN,
+                f"the unsubscribe Worker is down, unreachable or rate-limited ({exc.code}); "
+                "polling retries every period",
+            )
+        return CheckResult(
+            UNSUB_WORKER,
+            Status.FAIL,
+            f"the unsubscribe Worker refused the check ({exc.code}); check the bearer and the "
+            "Unsub Worker host",
+        )
+    return CheckResult(UNSUB_WORKER, Status.OK, "the unsubscribe Worker is reachable")
 
 
 OFFPC_NOT_CONFIGURED: Final = "off-PC backup not configured (OQ-A3): backups are local only"

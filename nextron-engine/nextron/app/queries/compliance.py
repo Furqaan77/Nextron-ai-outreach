@@ -1,4 +1,4 @@
-"""Read API of the ``compliance`` service (AD-3, AD-16, AD-17; Stories 3.4, 3.5, 3.8, 3.13,
+"""Read API of the ``compliance`` service (AD-3, AD-16, AD-17; Stories 3.4, 3.5, 3.8, 3.12, 3.13,
 3.14, 3.15 and 3.16).
 
 Import rule: ``nextron.domain`` and ``nextron.db.repos.compliance`` only, plus
@@ -33,6 +33,18 @@ entry is a ``ListedEntry`` (``id``, ``kind``, ``value_hash``, ``domain_plain``, 
   with a ``completed`` ``erase`` request, its first completed erase request (the one that erased
   it, or, after a retention erasure, the first request completed afterwards), by Contact id;
   the Lead page shows its reference on the erased Contact's row.
+
+Story 3.12 adds the unsubscribe poll's state (FR-70, FR-58, AD-20). This module can't read the
+``unsub_worker_host`` setting (``setup``'s), so its callers pass ``polling_on``: whether the host
+is set.
+
+- ``unsub_poll_status(polling_on) -> UnsubPollStatus(polling_on, state)``: ``state`` is the
+  ``unsub_poll_state`` row as a ``PollState`` (``last_success_at``, ``failing_since``,
+  ``last_failure_at``, ``last_failure_code``), or ``None`` before the first recorded poll.
+- ``unsub_poll_issues(now, *, polling_on)``: one ``HealthIssue("unsub_poll_failing", "unsub_poll",
+  failing_text(failing_since))`` while polling is on and
+  ``nextron.domain.unsub_requests.polling_failing(...)`` holds at ``now``; else none. A blank
+  host is "off", never an issue.
 
 Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
 
@@ -93,16 +105,19 @@ from nextron.app.queries import ops as ops_queries
 from nextron.db.repos.compliance import data_subject_requests as requests_repo
 from nextron.db.repos.compliance import erasure_receipts as receipts_repo
 from nextron.db.repos.compliance import suppression_entries as entries_repo
+from nextron.db.repos.compliance import unsub_poll_state as poll_state_repo
 from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
 from nextron.db.repos.compliance.data_subject_requests import StoredRequest
 from nextron.db.repos.compliance.erasure_receipts import StoredReceipt, StoredReceiptStore
 from nextron.db.repos.compliance.suppression_entries import ListedEntry
+from nextron.db.repos.compliance.unsub_poll_state import PollState
 from nextron.domain.contactability import KeyKind, SuppressionKey, is_hash
 from nextron.domain.erasure_receipt import ErasureStore
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.recovery import RecoveryMode, StepStatus
 from nextron.domain.suppression_entry import EntryStatus, SuppressionSource
+from nextron.domain.unsub_requests import POLL_FAILING, failing_text, polling_failing
 
 ERASURE_OPEN: Final = "erasure_open"
 ERASURE_FAILED: Final = "erasure_failed"
@@ -111,9 +126,11 @@ __all__ = [
     "ENTRIES_PER_PAGE",
     "EntryListPage",
     "ListedEntry",
+    "PollState",
     "StoredReceipt",
     "StoredReceiptStore",
     "StoredRequest",
+    "UnsubPollStatus",
     "active_entry",
     "active_keys",
     "completed_erasures",
@@ -127,6 +144,8 @@ __all__ = [
     "open_request",
     "pending_reapply",
     "receipts",
+    "unsub_poll_issues",
+    "unsub_poll_status",
 ]
 
 ENTRIES_PER_PAGE: Final = 50
@@ -137,6 +156,16 @@ LEDGER_NOT_REAPPLIED_TEXT: Final = "Erasure ledger not yet reapplied; sending st
 LEDGER_NOT_REAPPLIED_DETAIL: Final = (
     "Restart the engine to retry; the log has recovery_step_failed"
 )
+POLL_ISSUE_SUBJECT: Final = "unsub_poll"
+
+
+@dataclass(frozen=True, slots=True)
+class UnsubPollStatus:
+    """The unsubscribe poll as the health panel shows it: whether the Worker host is set, and
+    the recorded state (``None`` before the first recorded poll)."""
+
+    polling_on: bool
+    state: PollState | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +257,24 @@ def newest_unsub_token(kid: int) -> datetime | None:
 def newest_unsub_tokens() -> Mapping[int, datetime]:
     """``{kid: when its newest unsubscribe token was issued}`` for every kid with a token."""
     return unsub_tokens_repo.newest_by_kid()
+
+
+def unsub_poll_status(polling_on: bool) -> UnsubPollStatus:
+    """Whether polling is on (the caller read the host) and the recorded poll state."""
+    return UnsubPollStatus(bool(polling_on), poll_state_repo.get())
+
+
+def unsub_poll_issues(now: datetime, *, polling_on: bool) -> tuple[HealthIssue, ...]:
+    """One ``unsub_poll_failing`` issue while polling is on and has failed for over 24 hours;
+    else none."""
+    if not polling_on:
+        return ()
+    state = poll_state_repo.get()
+    if state is None or state.failing_since is None:
+        return ()
+    if not polling_failing(state.last_success_at, state.failing_since, now):
+        return ()
+    return (HealthIssue(POLL_FAILING, POLL_ISSUE_SUBJECT, failing_text(state.failing_since)),)
 
 
 def open_request(contact_id: str, kind: str, request_ref: str) -> StoredRequest | None:

@@ -3,8 +3,9 @@
 - **One step registry.** Only ``build_recovery_steps()`` in ``nextron/main.py`` constructs
   ``RecoverySteps`` or calls ``register_step``, under any alias (the same AST check as the job,
   trigger, doctor and health registries, ``tests/contracts/test_job_contracts.py``). It ships
-  frozen; with no argument it is empty, and with ``reapply`` it holds Story 3.16's one startup
-  step, ``reapply_erasure_ledger`` (owner ``compliance``), until Stories 3.12 and 6.12 register
+  frozen; with no argument it is empty, with ``reapply`` it holds Story 3.16's one startup
+  step, ``reapply_erasure_ledger`` (owner ``compliance``), and given ``repoll`` it holds Story
+  3.12's ``repoll_unsubscribes`` (owner ``compliance``, not a startup step). Story 6.12 adds
   theirs.
 - **The gate.** ``nextron.app.queries.ops.recovery_mode`` exists with the signature
   ``() -> bool``: every later send path calls it and holds its sends while it is true.
@@ -149,6 +150,17 @@ def test_with_reapply_the_registry_holds_the_ledger_step_as_a_startup_step() -> 
     handler = steps.get(RecoveryStep.REAPPLY_ERASURE_LEDGER)
     assert handler is not None
     assert (handler.owner, handler.run, handler.startup) == ("compliance", reapply, True)
+def test_with_repoll_the_registry_holds_the_unsubscribe_step_as_a_job_step() -> None:
+    def repoll(context: object) -> bool:
+        return True
+
+    steps = main.build_recovery_steps(repoll=repoll)
+
+    assert steps.frozen
+    assert steps.registered() == frozenset({RecoveryStep.REPOLL_UNSUBSCRIBES})
+    handler = steps.get(RecoveryStep.REPOLL_UNSUBSCRIBES)
+    assert handler is not None
+    assert (handler.owner, handler.run, handler.startup) == ("compliance", repoll, False)
 
 
 # The gate ---------------------------------------------------------------------------------------

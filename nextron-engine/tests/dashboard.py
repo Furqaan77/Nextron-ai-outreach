@@ -28,7 +28,7 @@ reads the settings, so it needs real units of work (``Dashboard(units=units)``).
 
 Its ``EngineHealth`` (``health``) uses the same clock and job types, the real health-issue
 registry (``nextron.main.build_health_issues(budget=budget)``) and ``readiness``, a callable
-returning a fixed list (``READINESS``, the thirteen doctor checks, all ``ok``) unless a test
+returning a fixed list (``READINESS``, the fifteen doctor checks, all ``ok``) unless a test
 passes another; the health panel and the notification area's error count read it, and the
 panel's Dismiss goes through ``queue``. They read the database, so they need real units of
 work too.
@@ -159,9 +159,11 @@ READINESS = tuple(
         "required_credentials",
         "internal_notify_grant",
         "offpc_backup",
+        "erasure_ledger",
         "required_settings",
         "database_revision",
         "unsub_token_keys",
+        "unsub_worker",
     )
 )
 

@@ -30,6 +30,10 @@ error ``code``, never another field value. The meter writes no ``events`` row.
 unit of work's session, a read-only one included, in two ``SELECT``s: ``api_usage`` grouped by
 provider, operation and SKU (the row count, the failed count and the sum of units), and
 ``ai_usage`` (the row count and the sum of ``cost_micros``).
+
+**day_calls(now, provider, operation)** (Story 3.12) is one ``SELECT count(*)`` of the
+``api_usage`` rows of that provider and operation in ``now``'s UTC calendar day, read the same
+way: the unsubscribe poll's KV list count.
 """
 
 import contextvars
@@ -43,7 +47,15 @@ from sqlalchemy import Executable, case, func, insert, select
 
 from nextron.db.models.metering import AiUsageRecord, ApiUsageRecord
 from nextron.db.uow import current, in_transaction, use_case
-from nextron.domain.budget import AiCall, ApiCall, ApiUse, Usage, month_bounds, month_of
+from nextron.domain.budget import (
+    AiCall,
+    ApiCall,
+    ApiUse,
+    Usage,
+    day_bounds,
+    month_bounds,
+    month_of,
+)
 from nextron.domain.errors import DomainError
 
 INSIDE_TRANSACTION: Final = "inside_transaction"
@@ -189,3 +201,13 @@ class UsageMeter:
             ai_calls=int(calls),
             ai_cost_micros=int(cost),
         )
+
+    def day_calls(self, now: datetime, provider: str, operation: str) -> int:
+        """The ``api_usage`` rows of ``provider`` and ``operation`` on ``now``'s UTC day, read
+        in the current unit of work."""
+        start, end = day_bounds(now)
+        api = ApiUsageRecord
+        statement = select(func.count()).where(
+            api.provider == provider, api.operation == operation, api.at >= start, api.at < end
+        )
+        return int(current().session.execute(statement).scalar_one())

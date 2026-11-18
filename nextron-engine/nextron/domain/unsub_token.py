@@ -54,6 +54,9 @@ anything else; ``encode_key(raw)`` is the canonical unpadded text of 32 bytes.
 newest token is younger than that (or in the future); ``None`` (no token) is never in use.
 While it holds, the Credentials page refuses to replace or remove the kid's keys with
 ``UnsubKeyInUse`` (code ``unsub_key_in_use``, "Key <kid> still has tokens under 2 years old").
+After a restore, while recovery mode is on (Story 3.12), replacing or removing a key is refused
+with ``UnsubKeysHeldInRecovery`` (code ``unsub_keys_held_in_recovery``): the restored
+``unsub_tokens`` can't be rebuilt, so the keys of the tokens already sent must stay as they are.
 ``TokenAlreadyIssued`` (code ``unsub_token_already_issued``) is ``Compliance.issue_unsub_token``
 refusing a second token for one message. No message here ever holds a token, a key, an address
 or an address hash.
@@ -144,6 +147,18 @@ class UnsubKeyInUse(DomainError):
 
     def __init__(self, kid: int) -> None:
         super().__init__(f"Key {kid} still has tokens under 2 years old")
+        self.kid = kid
+
+
+class UnsubKeysHeldInRecovery(DomainError):
+    """A key can't be replaced or removed while recovery mode is on (Story 3.12)."""
+
+    code = "unsub_keys_held_in_recovery"
+
+    def __init__(self, kid: int) -> None:
+        super().__init__(
+            f"Key {kid} can't be replaced or removed while recovery mode is on after a restore"
+        )
         self.kid = kid
 
 

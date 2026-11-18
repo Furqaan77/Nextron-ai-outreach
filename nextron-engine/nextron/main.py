@@ -398,9 +398,10 @@ calendar month, and a month's slot missed while the engine was off is made up on
 **Recovery mode (Story 1.19; AD-2, AD-5, AD-17, AD-20, OP-8).** ``build_recovery_steps()`` is
 the recovery step registry (``nextron.domain.recovery.RecoverySteps``): the only code that
 constructs one or calls ``register_step`` (``tests/contracts/test_recovery_contracts.py``). It
-ships empty and frozen with no argument; ``build_recovery_steps(reapply=...)`` registers Story
-3.16's ``reapply_erasure_ledger`` (owner ``compliance``, a startup step), and Stories 3.12 and
-6.12 register their ``RecoveryHandler``s there.
+ships empty and frozen with no argument; ``build_recovery_steps(reapply=..., repoll=...)``
+registers Story 3.16's ``reapply_erasure_ledger`` (owner ``compliance``, a startup step) and Story
+3.12's ``repoll_unsubscribes`` (owner ``compliance``, a job step), and Story 6.12 registers its
+``RecoveryHandler``s there.
 ``build_app(..., recovery_steps=None)`` builds one ``Recovery(clock)`` (``nextron.app.ops.api``)
 and one ``RecoveryRunner(units, recovery, recovery_steps or build_recovery_steps())``
 (``nextron.jobs.recovery``), passes ``recovery=lambda: recovery_runner`` to
@@ -507,9 +508,12 @@ units of work ``build_app`` is given.
 **The unsubscribe poll (Story 3.11; FR-70, AD-10, AD-15).** ``build_app(..., unsubscribe=None)``
 builds one ``WorkerUnsubscribe(secrets, meter=meter)`` (``nextron.adapters.unsubscribe``) unless
 an ``unsubscribe=`` is injected; building it builds no HTTP client and reads no bearer.
-``UnsubscribePolls(clock, compliance, unsubscribe, notify)``
+``UnsubscribePolls(clock, compliance, unsubscribe, notify, meter)``
 (``nextron.app.compliance.unsub_poll``), on that same ``Compliance``, runs the
-``poll_unsubscribes`` jobs, reached through ``unsubscribes=lambda: unsubscribes``.
+``poll_unsubscribes`` jobs, reached through ``unsubscribes=lambda: unsubscribes``. Its
+``repolled`` is the ``repoll_unsubscribes`` recovery step (Story 3.12): ``build_app`` builds
+``build_recovery_steps(reapply=erasure_ledger.reapply, repoll=lambda context:
+unsubscribes.repolled(context))`` unless ``recovery_steps`` is injected.
 
 **The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer,
 recovery_runner.startup, startup=...)`` to ``create_app``, so all three start when the server
@@ -555,9 +559,13 @@ nothing is sent to Google. Its browser always refuses and its allowlist is empty
 doctor never starts a consent flow.
 
 ``DoctorContext.database`` is a ``ReadinessDatabase`` (``exists``, ``revision``,
-``required_unset``, ``offpc_dir`` and ``unsub_active_kid``): ``DoctorDatabase`` for ``doctor``
-(``offpc_dir`` is blank and ``unsub_active_kid`` the schema default with no database file),
-``EngineDatabase`` in the engine.
+``required_unset``, ``offpc_dir``, ``unsub_active_kid`` and ``unsub_worker_host``):
+``DoctorDatabase`` for ``doctor`` (``offpc_dir`` and ``unsub_worker_host`` are blank and
+``unsub_active_kid`` the schema default with no database file), ``EngineDatabase`` in the
+engine. ``DoctorContext.unsubscribe`` (Story 3.12) is the ``UnsubscribePort`` the
+``unsub_worker`` check probes the Worker through: ``doctor`` builds
+``WorkerUnsubscribe(secrets, meter=DoctorMeter())`` unless one is injected (``unsubscribe=``),
+so the probe writes no usage row; the engine passes none and never probes.
 
 **Health (AD-10, AD-20, FR-58, OP-9).** ``build_health_issues(*, budget, clock=None)`` is the
 health-issue registry: the only code that constructs ``HealthIssues`` or calls
@@ -571,9 +579,12 @@ Sales Playbook check's problem, Story 4.4), then ``IssueSource("sending", lambda
 queries.sending.health_issues(clock.now()))`` (each listed Sending Domain whose cold sends are
 blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then ``IssueSource("erasure",
 queries.compliance.health_issues)`` (each open erase request and each failed erasure store,
-Story 3.14), then, given ``ledger``, ``IssueSource("compliance",
-functools.partial(queries.compliance.ledger_health_issues, ledger))`` (a missing or unreapplied
-erasure ledger after a restore, Story 3.16), then freezes it; each later owner
+Story 3.14), then ``IssueSource("unsub_poll", lambda:
+queries.compliance.unsub_poll_issues(clock.now(), polling_on=unsub_polling_on()))`` (the
+unsubscribe poll failing for over 24 hours, Story 3.12), then, given ``ledger``,
+``IssueSource("compliance", functools.partial(queries.compliance.ledger_health_issues,
+ledger))`` (a missing or unreapplied erasure ledger after a restore, Story 3.16), then freezes
+it; each later owner
 registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock,
 ledger=<the ledger's path>),
@@ -587,8 +598,9 @@ the notification area its error count.
 ``DoctorContext(config, ENV_SOURCE_VARIABLE, probes, secrets, google,
 EngineDatabase(<data dir>\\nextron.db), in_engine=True)``, where ``probes`` is
 ``build_app``'s ``probes`` (``Probes.system()`` unless injected). The ids and their order are
-doctor's; with ``in_engine`` only two checks change form: ``port_free`` probes nothing and is
-``ok`` (the engine serving the page holds the port), and ``internal_notify_grant`` calls
+doctor's; with ``in_engine`` only three checks change form: ``port_free`` probes nothing and is
+``ok`` (the engine serving the page holds the port), ``unsub_worker`` (Story 3.12) never probes
+the Worker, and ``internal_notify_grant`` calls
 ``GoogleAccess.check_stored_grant`` with ``refresh=False``, which reads Credential Manager and
 never calls Google, so a GET makes no refresh, no ``api_usage`` row and no re-consent mark
 (``nextron doctor`` tests the refresh). ``EngineDatabase`` reads the revision
@@ -597,9 +609,11 @@ never calls Google, so a GET makes no refresh, no ``api_usage`` row and no re-co
 GET's read-only one; ``offpc_backup`` reads the Backup passphrase before that setting, and the
 checks that read the database come last, so the Credential Manager and registry reads before
 them never hold the read transaction (``build_doctor_checks`` states the order rule). The one
-exception is the last check, ``unsub_token_keys`` (Story 3.8): its keyring entries' names
-depend on the ``unsub_active_kid`` setting, so it reads that first and then its two Credential
-Manager entries under the read lock. Building the app runs no check.
+exceptions are the last two checks, ``unsub_token_keys`` (Story 3.8): its keyring entries'
+names depend on the ``unsub_active_kid`` setting, so it reads that first and then its two
+Credential Manager entries under the read lock; and ``unsub_worker`` (Story 3.12), which reads
+the bearer's entry only when the ``unsub_worker_host`` setting is set. Building the app runs no
+check.
 
 ``build_app`` wires the dashboard (AD-13): one ``KeyringSecrets(<env>)`` (Windows Credential
 Manager, namespace ``nextron-engine/<env>``) serves its ``DashboardEntry``, which reads the
@@ -928,7 +942,12 @@ from nextron.domain.segments import InvalidSegments, validate_segments
 from nextron.domain.sequences import InvalidSequences, validate_sequences
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
-from nextron.domain.unsub_requests import POLL_PERIOD_OTHER, POLL_UNSUBSCRIBES_JOB, poll_period
+from nextron.domain.unsub_requests import (
+    DOCTOR_DEADLINE_S,
+    POLL_PERIOD_OTHER,
+    POLL_UNSUBSCRIBES_JOB,
+    poll_period,
+)
 from nextron.jobs import handlers
 from nextron.jobs.heartbeat import HeartbeatWriter
 from nextron.jobs.recovery import RecoveryRunner
@@ -969,6 +988,7 @@ from nextron.startup_checks import (
     SQLITE_VERSION,
     TZDATA,
     UNSUB_TOKEN_KEYS,
+    UNSUB_WORKER,
     CheckFailed,
     CheckResult,
     DoctorCheck,
@@ -989,6 +1009,7 @@ from nextron.startup_checks import (
     check_sqlite_version,
     check_tzdata,
     check_unsub_token_keys,
+    check_unsub_worker,
     engine_is_running,
     environment_checks,
     format_json,
@@ -1306,7 +1327,10 @@ def build_app(
         (
             recovery_steps
             if recovery_steps is not None
-            else build_recovery_steps(reapply=erasure_ledger.reapply)
+            else build_recovery_steps(
+                reapply=erasure_ledger.reapply,
+                repoll=lambda context: unsubscribes.repolled(context),
+            )
         ),
     )
     unsubscribes = UnsubscribePolls(
@@ -1314,6 +1338,7 @@ def build_app(
         compliance,
         unsubscribe if unsubscribe is not None else WorkerUnsubscribe(secrets, meter=meter),
         notify,
+        meter,
     )
     test_runs = AiTestRuns(clock, meter, llm, queue)
     startup_steps = (
@@ -1810,9 +1835,10 @@ def build_health_issues(
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
     Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
-    ``clock`` is ``None``), then the erasures' open requests and failed stores, then, given the
-    erasure ledger's path ``ledger`` (``build_app`` always gives it), compliance's missing or
-    unreapplied ledger (Story 3.16). Each later owner registers its
+    ``clock`` is ``None``), then the erasures' open requests and failed stores, then the
+    unsubscribe poll failing for over 24 hours (Story 3.12, also read at ``clock.now()``), then,
+    given the erasure ledger's path ``ledger`` (``build_app`` always gives it), compliance's
+    missing or unreapplied ledger (Story 3.16). Each later owner registers its
     ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
@@ -1822,6 +1848,12 @@ def build_health_issues(
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
     issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
     issues.register_source(IssueSource("erasure", compliance_queries.health_issues))
+    issues.register_source(
+        IssueSource(
+            "unsub_poll",
+            lambda: compliance_queries.unsub_poll_issues(now(), polling_on=unsub_polling_on()),
+        )
+    )
     if ledger is not None:
         issues.register_source(
             IssueSource(
@@ -1830,6 +1862,12 @@ def build_health_issues(
         )
     issues.freeze()
     return issues
+
+
+def unsub_polling_on() -> bool:
+    """Whether unsubscribe polling is on: the ``unsub_worker_host`` setting is set, read in the
+    current unit of work."""
+    return bool(setup_queries.get(Key.UNSUB_WORKER_HOST))
 
 
 def build_triggers(
@@ -1945,19 +1983,29 @@ def read_restore_test_schedule(units: Units, tests: RestoreTests) -> DailyRun:
 
 def build_recovery_steps(
     reapply: Callable[[RecoveryContext], bool] | None = None,
+    repoll: Callable[[RecoveryContext], bool] | None = None,
 ) -> RecoverySteps:
     """The recovery step registry (Story 1.19), frozen: the only code that constructs
     ``RecoverySteps`` or calls ``register_step``. Given ``reapply`` (``build_app`` passes
     ``ErasureLedger.reapply``), Story 3.16 registers ``reapply_erasure_ledger`` (owner
-    ``compliance``, a ``startup`` step: it runs before the job runner); with no argument the
-    registry is empty. Story 6.12 adds ``mark_oms_unknown`` and ``reingest_mailboxes``, and
-    Story 3.12 ``repoll_unsubscribes``, each with ``register_step(RecoveryHandler(step, owner,
-    run, startup))`` before ``freeze()``. A step with no handler becomes ``not_applicable``."""
+    ``compliance``, a ``startup`` step: it runs before the job runner); given ``repoll``
+    (``build_app`` passes ``UnsubscribePolls.repolled``), Story 3.12 registers
+    ``repoll_unsubscribes`` (owner ``compliance``, not a ``startup`` step: the
+    ``check_recovery`` job runs it); with no argument the registry is empty. Story 6.12 adds
+    ``mark_oms_unknown`` and ``reingest_mailboxes`` with ``register_step(RecoveryHandler(step,
+    owner, run, startup))`` before ``freeze()``. A step with no handler becomes
+    ``not_applicable``."""
     steps = RecoverySteps()
     if reapply is not None:
         steps.register_step(
             RecoveryHandler(
                 RecoveryStep.REAPPLY_ERASURE_LEDGER, "compliance", reapply, startup=True
+            )
+        )
+    if repoll is not None:
+        steps.register_step(
+            RecoveryHandler(
+                RecoveryStep.REPOLL_UNSUBSCRIBES, "compliance", repoll, startup=False
             )
         )
     steps.freeze()
@@ -2540,7 +2588,8 @@ def record_pre_migrate(units: UnitOfWorkFactory, local: LocalBackups, taken: Tak
 class DoctorMeter:
     """``doctor``'s ``UsageMeterPort``: it keeps each recorded call in memory (``calls``) and
     writes nothing, so doctor's own Google refresh never reaches ``api_usage`` or the Quotas
-    page. ``snapshot`` returns an empty ``Usage``."""
+    page. ``snapshot`` returns an empty ``Usage`` and ``day_calls`` 0. Doctor's unsubscribe
+    Worker probe (Story 3.12) is metered here too."""
 
     def __init__(self) -> None:
         self.calls: list[ApiCall | AiCall] = []
@@ -2551,13 +2600,16 @@ class DoctorMeter:
     def snapshot(self, now: datetime) -> Usage:
         return Usage(month=month_of(now), api=(), ai_calls=0, ai_cost_micros=0)
 
+    def day_calls(self, now: datetime, provider: str, operation: str) -> int:
+        return 0
+
 
 class ReadinessDatabase(Protocol):
-    """What the ``offpc_backup``, ``required_settings``, ``database_revision`` and
-    ``unsub_token_keys`` checks read: whether the database file exists, its revision (``None``
-    when empty; a database that isn't this engine's raises ``CheckFailed``), the required
-    settings that are unset or no longer valid, the ``backup_offpc_dir`` setting and the
-    ``unsub_active_kid`` setting."""
+    """What the ``offpc_backup``, ``required_settings``, ``database_revision``,
+    ``unsub_token_keys`` and ``unsub_worker`` checks read: whether the database file exists, its
+    revision (``None`` when empty; a database that isn't this engine's raises ``CheckFailed``),
+    the required settings that are unset or no longer valid, the ``backup_offpc_dir`` setting,
+    the ``unsub_active_kid`` setting and the ``unsub_worker_host`` setting."""
 
     def exists(self) -> bool: ...
 
@@ -2568,6 +2620,8 @@ class ReadinessDatabase(Protocol):
     def offpc_dir(self) -> str: ...
 
     def unsub_active_kid(self) -> int: ...
+
+    def unsub_worker_host(self) -> str: ...
 
 
 class DoctorDatabase:
@@ -2627,6 +2681,14 @@ class DoctorDatabase:
         with self._read_only_units().open(read_only=True):
             return int(setup_queries.get(Key.UNSUB_ACTIVE_KID))
 
+    def unsub_worker_host(self) -> str:
+        """The ``unsub_worker_host`` setting (Story 3.12): blank when there is no database
+        file, else read in a read-only unit of work (an error propagates)."""
+        if not self.exists():
+            return ""
+        with self._read_only_units().open(read_only=True):
+            return str(setup_queries.get(Key.UNSUB_WORKER_HOST))
+
     def close(self) -> None:
         """Dispose the read-only engine, if one was built."""
         units, self._units = self._units, None
@@ -2667,14 +2729,19 @@ class EngineDatabase:
         """The ``unsub_active_kid`` setting, read in the current unit of work."""
         return int(setup_queries.get(Key.UNSUB_ACTIVE_KID))
 
+    def unsub_worker_host(self) -> str:
+        """The ``unsub_worker_host`` setting, read in the current unit of work."""
+        return str(setup_queries.get(Key.UNSUB_WORKER_HOST))
+
 
 @dataclass(frozen=True, slots=True)
 class DoctorContext:
     """What the doctor checks read: the bootstrap config, where its environment came from
     (``--env`` or ``NEXTRON_ENV``), the machine probes, the environment's secrets, its Google
     access and its database, read-only. ``in_engine`` is set when the engine runs the checks
-    for its health panel: ``port_free`` then probes nothing and ``internal_notify_grant`` reads
-    only what is stored, never refreshing at Google."""
+    for its health panel: ``port_free`` then probes nothing, ``internal_notify_grant`` reads
+    only what is stored, never refreshing at Google, and ``unsub_worker`` never calls
+    ``unsubscribe`` (the ``UnsubscribePort`` doctor probes the Worker through, Story 3.12)."""
 
     config: BootstrapConfig
     env_source: str
@@ -2683,16 +2750,17 @@ class DoctorContext:
     google: GoogleAccess
     database: ReadinessDatabase = field(repr=False)
     in_engine: bool = False
+    unsubscribe: UnsubscribePort | None = field(default=None, repr=False)
 
 
 def build_doctor_checks() -> DoctorChecks[DoctorContext]:
     """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, Story 1.17's
     ``offpc_backup`` (after ``internal_notify_grant``), Story 3.16's ``erasure_ledger`` (after
-    ``offpc_backup``; it only looks at the file, never at the database's contents) and Story
-    3.8's ``unsub_token_keys`` (last, after ``database_revision``), fourteen in all, in the
-    order doctor prints them (the health panel shows the same list). With
-    ``DoctorContext.in_engine``, ``port_free`` and ``internal_notify_grant`` take their
-    no-probe, no-network forms. Later stories register their checks here, before
+    ``offpc_backup``; it only looks at the file, never at the database's contents), Story 3.8's
+    ``unsub_token_keys`` (after ``database_revision``) and Story 3.12's ``unsub_worker`` (last),
+    fifteen in all, in the order doctor prints them (the health panel shows the same list). With
+    ``DoctorContext.in_engine``, ``port_free``, ``internal_notify_grant`` and ``unsub_worker``
+    take their no-probe, no-network forms. Later stories register their checks here, before
     ``freeze()``.
 
     The order rule: the health panel runs this registry inside a GET's read-only unit of work,
@@ -2702,8 +2770,10 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
     goes before them, and ``offpc_backup`` reads the Backup passphrase before its setting, so
     none of those reads runs while that lock is held. The one exception is
     ``unsub_token_keys``: its two keyring entries' names depend on the ``unsub_active_kid``
-    setting, so it can't read Credential Manager first. It runs last, so only its own two local
-    Credential Manager reads happen under the read lock. A check that calls the network (or the
+    setting, so it can't read Credential Manager first. It runs near the end, so only its own
+    two local Credential Manager reads happen under the read lock; ``unsub_worker`` follows it
+    for the same reason (the bearer is read only when the ``unsub_worker_host`` setting is set,
+    and in the engine it makes no network call). A check that calls the network (or the
     off-PC folder) also needs an in-engine form (``c.in_engine``) that doesn't, because a GET
     makes no network call; ``offpc_backup`` touches no folder at all."""
     checks: DoctorChecks[DoctorContext] = DoctorChecks()
@@ -2763,6 +2833,7 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
             UNSUB_TOKEN_KEYS,
             lambda c: check_unsub_token_keys(c.secrets.read, c.database.unsub_active_kid),
         ),
+        DoctorCheck(UNSUB_WORKER, _unsub_worker),
     ):
         checks.register_check(check)
     checks.freeze()
@@ -2774,6 +2845,23 @@ def _internal_notify_grant(c: DoctorContext) -> CheckResult:
     if c.in_engine:
         return check_internal_notify_grant(c.google.check_stored_grant, refresh=False)
     return check_internal_notify_grant(c.google.access_token)
+
+
+def _unsub_worker(c: DoctorContext) -> CheckResult:
+    """``doctor`` probes the unsubscribe Worker; the engine never calls it."""
+
+    def probe(host: str) -> None:
+        if c.unsubscribe is None:
+            raise RuntimeError("doctor was given no unsubscribe port")
+        c.unsubscribe.probe(host, deadline_s=DOCTOR_DEADLINE_S)
+
+    return check_unsub_worker(
+        c.secrets.read,
+        c.database.unsub_worker_host,
+        probe,
+        in_engine=c.in_engine,
+        deadline_s=DOCTOR_DEADLINE_S,
+    )
 
 
 def _never_open_browser(url: str) -> bool:
@@ -2789,13 +2877,15 @@ def doctor(
     secrets: SecretsPort | None = None,
     google_oauth: GoogleOAuthPort | None = None,
     clock: Clock | None = None,
+    unsubscribe: UnsubscribePort | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
 ) -> int:
     """Run every doctor check for ``env`` (``NEXTRON_ENV`` unless given) and print the results
     as a table, or as JSON with ``as_json``; return 0 when nothing is ``fail``, 1 otherwise and
     2 for an invalid bootstrap config. Secrets are keyring, Google is ``GoogleOAuthClient`` with
-    a ``DoctorMeter`` and the clock is the system clock, unless injected."""
+    a ``DoctorMeter``, the unsubscribe Worker is reached through ``WorkerUnsubscribe`` with a
+    ``DoctorMeter`` (Story 3.12) and the clock is the system clock, unless injected."""
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     try:
@@ -2824,6 +2914,11 @@ def doctor(
         secrets=secrets,
         google=google,
         database=database,
+        unsubscribe=(
+            unsubscribe
+            if unsubscribe is not None
+            else WorkerUnsubscribe(secrets, meter=DoctorMeter())
+        ),
     )
     try:
         results = run_checks(build_doctor_checks(), context)

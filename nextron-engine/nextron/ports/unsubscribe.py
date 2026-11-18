@@ -12,11 +12,16 @@ pending list.
 - ``fetch_pending(host) -> PendingFetch``: every entry the Worker at ``host`` still holds (the
   Worker never deletes one; KV lets each go after 30 days), so the same token comes back on each
   poll until then.
+- ``probe(host, *, deadline_s) -> None`` (Story 3.12, ``nextron doctor``): one request like
+  ``fetch_pending``'s, with the same refusals, headers and metering, that returns when the
+  Worker answers well within ``deadline_s`` seconds. A good answer slower than that, or no
+  answer by then, raises ``unsub_unreachable`` (retryable).
 
-A failed call raises ``AdapterError`` (``nextron.ports.errors``): ``unsub_unavailable`` is
-retryable; ``unsub_refused``, ``unsub_bearer_invalid``, ``unsub_unauthorized`` and
-``unsub_bad_response`` aren't, nor are the credential codes (``credential_not_set``,
-``keyring_failed``). No message holds the bearer, a token, the host or a body.
+A failed call raises ``AdapterError`` (``nextron.ports.errors``): ``unsub_unavailable`` and
+``unsub_unreachable`` are retryable; ``unsub_refused``, ``unsub_bearer_invalid``,
+``unsub_unauthorized`` and ``unsub_bad_response`` aren't, nor are the credential codes
+(``credential_not_set``, ``keyring_failed``). No message holds the bearer, a token, the host or
+a body.
 """
 
 from dataclasses import dataclass, field
@@ -28,6 +33,7 @@ UNSUB_BEARER_INVALID: Final = "unsub_bearer_invalid"
 UNSUB_UNAUTHORIZED: Final = "unsub_unauthorized"
 UNSUB_UNAVAILABLE: Final = "unsub_unavailable"
 UNSUB_BAD_RESPONSE: Final = "unsub_bad_response"
+UNSUB_UNREACHABLE: Final = "unsub_unreachable"  # Story 3.12: the probe's answer was too slow
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,4 +71,8 @@ class UnsubscribePort(Protocol):
 
     def fetch_pending(self, host: str) -> PendingFetch:
         """Every pending request the Worker at ``host`` holds."""
+        ...
+
+    def probe(self, host: str, *, deadline_s: float) -> None:
+        """Return when the Worker at ``host`` answers well within ``deadline_s`` seconds."""
         ...

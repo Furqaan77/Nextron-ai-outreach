@@ -43,5 +43,9 @@
 <p>{{ no_usage }}</p>
 {%- endif %}
 </section>
+<section aria-labelledby="unsub-worker-heading">
+<h2 id="unsub-worker-heading">Unsubscribe Worker</h2>
+<p class="kv-list{% if kv_list_warning %} quota-warning{% endif %}">{{ kv_list }}</p>
+</section>
 <p>Quotas and the AI budget are set on the <a href="/settings">Settings page</a> (Budget and limits).</p>
 {% endblock %}

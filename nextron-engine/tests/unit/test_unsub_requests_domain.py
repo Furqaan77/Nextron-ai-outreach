@@ -1,7 +1,7 @@
 """``nextron.domain.unsub_requests`` (Story 3.11): the pending format, the poll periods, the
 Worker host rule, the outcomes, and the ``unsub_worker_host`` setting built on them."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -145,3 +145,77 @@ def test_the_module_imports_only_the_standard_library() -> None:
             if line.startswith(("import ", "from "))
         ]
     assert all(not name.startswith("nextron") for name in imports)
+
+
+# Monitoring the poll (Story 3.12) ---------------------------------------------------------------
+
+NOW = datetime(2026, 11, 18, 9, 0, tzinfo=UTC)
+
+
+def test_the_monitoring_constants() -> None:
+    assert unsub_requests.FAILING_AFTER == timedelta(hours=24)
+    assert (unsub_requests.KV_LIST_DAILY_LIMIT, unsub_requests.KV_LIST_ALERT_PCT) == (1000, 80)
+    assert unsub_requests.DOCTOR_DEADLINE_S == 10.0
+    assert (unsub_requests.KV_PROVIDER, unsub_requests.KV_LIST_OPERATION) == (
+        "unsub_worker",
+        "kv_list",
+    )
+
+
+@pytest.mark.parametrize(
+    ("last_success", "since", "failing"),
+    [
+        (None, None, False),
+        (NOW - timedelta(days=9), None, False),  # no episode open
+        (None, NOW - timedelta(hours=24), False),  # exactly 24 hours is not over it
+        (None, NOW - timedelta(hours=24, seconds=1), True),
+        (NOW - timedelta(hours=3), NOW - timedelta(hours=2), False),
+        (NOW - timedelta(hours=30), NOW - timedelta(hours=2), True),  # 30 h since the success
+    ],
+)
+def test_polling_failing(
+    last_success: datetime | None, since: datetime | None, failing: bool
+) -> None:
+    assert unsub_requests.polling_failing(last_success, since, NOW) is failing
+
+
+@pytest.mark.parametrize(
+    ("code", "failure"),
+    [
+        ("unsub_refused", "unsub_refused"),
+        ("unsub_bearer_invalid", "unsub_bearer_invalid"),
+        ("unsub_unauthorized", "unsub_unauthorized"),
+        ("unsub_unavailable", "unsub_unavailable"),
+        ("unsub_bad_response", "unsub_bad_response"),
+        ("unsub_unreachable", "unsub_unreachable"),
+        ("credential_not_set", "unsub_bearer_invalid"),  # no bearer stored
+        ("keyring_failed", "internal_error"),
+        ("internal_error", "internal_error"),
+        (None, "internal_error"),
+        (7, "internal_error"),
+    ],
+)
+def test_failure_code_maps_an_error_code_to_a_closed_one(code: object, failure: str) -> None:
+    assert unsub_requests.failure_code(code) == failure
+
+
+def test_the_kv_warning_starts_at_800() -> None:
+    assert not unsub_requests.kv_list_warning(799)
+    assert unsub_requests.kv_list_warning(800)
+    assert unsub_requests.kv_list_warning(1200)
+
+
+def test_the_texts_and_subjects_hold_only_times_codes_and_counts() -> None:
+    since = datetime(2026, 11, 18, 14, 30, 59, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+
+    assert unsub_requests.failing_text(since) == (
+        "Unsubscribe polling failing since 2026-11-18 09:00 UTC"
+    )
+    assert unsub_requests.failing_alert_text(since, "unsub_unauthorized") == (
+        "Unsubscribe polling failing since 2026-11-18 09:00 UTC (unsub_unauthorized)"
+    )
+    assert unsub_requests.kv_list_text(800) == (
+        "Unsubscribe Worker KV list calls today: 800 of 1,000"
+    )
+    assert unsub_requests.failing_subject(NOW) == f"unsub_poll_failing:{int(NOW.timestamp())}"
+    assert unsub_requests.kv_list_subject(since) == "kv_list:2026-11-18"

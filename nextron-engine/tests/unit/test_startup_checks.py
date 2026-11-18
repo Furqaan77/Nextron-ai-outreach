@@ -1338,3 +1338,139 @@ def test_a_setting_that_cant_be_read_fails_with_no_keyring_read(
         f"({type_name}); set it on the Settings page",
     )
     assert keys.order == ["active_kid"]
+
+
+# unsub_worker (Story 3.12) --------------------------------------------------------------------
+
+WORKER_HOST = "u.example-sender.com"
+WORKER_BEARER = "Ub4Xq8Lm2Vz6Np1Rt5Hk9Jc3Wd7Gs0Fy4Tb8Mn2Qe6Ah"
+
+
+class Worker:
+    """The ``unsub_worker`` check's inputs: the setting, the keyring and the probe, recording
+    the order they are used in."""
+
+    def __init__(
+        self,
+        host: object = WORKER_HOST,
+        bearer: str | None | AdapterError = WORKER_BEARER,
+        answer: AdapterError | None = None,
+    ) -> None:
+        self.host, self.bearer, self.answer = host, bearer, answer
+        self.order: list[str] = []
+        self.probed: list[str] = []
+
+    def read_host(self) -> object:
+        self.order.append("host")
+        if isinstance(self.host, BaseException):
+            raise self.host
+        return self.host
+
+    def read(self, name: str) -> str | None:
+        self.order.append(name)
+        if isinstance(self.bearer, AdapterError):
+            raise self.bearer
+        return self.bearer
+
+    def probe(self, host: str) -> None:
+        self.order.append("probe")
+        self.probed.append(host)
+        if self.answer is not None:
+            raise self.answer
+
+    def check(self, *, in_engine: bool = False) -> CheckResult:
+        return checks.check_unsub_worker(
+            self.read, self.read_host, self.probe, in_engine=in_engine, deadline_s=10.0
+        )
+
+
+def test_unsub_worker_is_ok_and_off_with_no_host_reading_nothing_else() -> None:
+    worker = Worker(host="")
+
+    assert worker.check() == CheckResult(
+        "unsub_worker", Status.OK, "unsubscribe polling is off (no Unsub Worker host set)"
+    )
+    assert worker.order == ["host"]
+
+
+@pytest.mark.parametrize("bearer", [None, ""])
+def test_unsub_worker_fails_when_polling_is_on_and_the_bearer_is_not_set(
+    bearer: str | None,
+) -> None:
+    worker = Worker(bearer=bearer)
+
+    assert worker.check() == CheckResult(
+        "unsub_worker",
+        Status.FAIL,
+        "unsubscribe polling on but bearer not set; enter the Unsubscribe Endpoint bearer "
+        "secret on the Credentials page",
+    )
+    assert worker.order == ["host", "unsub/bearer"]
+
+
+def test_unsub_worker_fails_when_the_bearer_cannot_be_read() -> None:
+    worker = Worker(bearer=AdapterError(True, "keyring_failed", "keyring"))
+
+    result = worker.check()
+
+    assert (result.status, worker.probed) == (Status.FAIL, [])
+    assert "could not be read" in result.message
+
+
+def test_unsub_worker_in_the_engine_never_probes() -> None:
+    worker = Worker()
+
+    assert worker.check(in_engine=True) == CheckResult(
+        "unsub_worker",
+        Status.OK,
+        "unsubscribe polling on; the Worker is not probed in the engine (nextron doctor "
+        "probes it)",
+    )
+    assert worker.probed == []
+
+
+def test_unsub_worker_is_ok_when_the_probe_returns() -> None:
+    worker = Worker()
+
+    assert worker.check() == CheckResult(
+        "unsub_worker", Status.OK, "the unsubscribe Worker is reachable"
+    )
+    assert worker.order == ["host", "unsub/bearer", "probe"]
+    assert worker.probed == [WORKER_HOST]
+
+
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [
+        (AdapterError(True, "unsub_unreachable", "slow"), Status.WARN),
+        (AdapterError(True, "unsub_unavailable", "down"), Status.WARN),
+        (AdapterError(False, "unsub_unreachable", "slow"), Status.WARN),
+        (AdapterError(False, "unsub_unauthorized", "refused"), Status.FAIL),
+        (AdapterError(False, "unsub_bearer_invalid", "short"), Status.FAIL),
+        (AdapterError(False, "unsub_bad_response", "garbage"), Status.FAIL),
+    ],
+)
+def test_unsub_worker_warns_on_a_slow_or_down_worker_and_fails_on_a_refusal(
+    answer: AdapterError, status: Status
+) -> None:
+    result = Worker(answer=answer).check()
+
+    assert result.status is status
+    assert answer.code in result.message
+    if answer.code == "unsub_unreachable":
+        assert "slower than 10 s" in result.message
+    elif status is Status.WARN:
+        assert "down, unreachable or rate-limited" in result.message
+    assert WORKER_HOST not in result.message and WORKER_BEARER not in result.message
+
+
+def test_unsub_worker_fails_when_the_host_cannot_be_read() -> None:
+    worker = Worker(host=RuntimeError("no database"))
+
+    assert worker.check() == CheckResult(
+        "unsub_worker",
+        Status.FAIL,
+        "the Unsub Worker host setting (unsub_worker_host) could not be read (RuntimeError); "
+        "set it on the Settings page",
+    )
+    assert worker.order == ["host"]

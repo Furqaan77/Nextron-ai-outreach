@@ -71,9 +71,10 @@ has an id, a status (`ok`, `warn` or `fail`) and a one-line message:
 | `internal_notify_grant` | the Google `internal_notify` grant is stored and Google refreshed it | Google can't be reached: run doctor again later | the Desktop client is not imported, the grant is missing or needs re-consent, Credential Manager fails, or another error (by its code) |
 | `offpc_backup` | "Off-PC backup folder" (`backup_offpc_dir`) is set, on another drive than the data dir, and the Backup passphrase is set (see [Backups](#backups)) | `off-PC backup not configured (OQ-A3): backups are local only; ...`, listing every reason with its fix: the folder is blank, is the data dir or the backup dir (or inside either), or can't be read; the passphrase is not set, too long or unreadable. Or the folder is on the data dir's drive (a lost disk would take both) | |
 | `erasure_ledger` | `<backup dir>\erasure-ledger.jsonl` exists and is writable (see [The erasure ledger](#the-erasure-ledger)) | it is missing and there is no database yet: it is created at the first engine start | it is missing while the database exists (start the engine, or after a restore put the ledger's copy there), or it isn't writable |
-| `required_settings` | every required setting (`sender_name`, `sender_timezone`, `alert_chat_id`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
+| `required_settings` | every required setting (`sender_name`, `sender_timezone`, `alert_chat_id`, `sender_signature`, `legal_name`, `postal_address`, `privacy_notice_url`) is set and still valid | | lists `<label> (<key>)` for each one that isn't, or the settings can't be read |
 | `database_revision` | the database is at the code's head revision | no database file, an empty one, or one behind head: "will migrate on next start" | a revision this code doesn't know ("newer than this code"), or not this engine's database |
 | `unsub_token_keys` | the active key id's two unsubscribe token keys (see [Unsubscribe tokens](#unsubscribe-tokens)) are set, are 32-byte base64url keys and differ | | either is missing, malformed or unreadable (naming its keyring entry, such as `unsub/k_tok/1`), the two are the same key, or the `unsub_active_kid` setting can't be read |
+| `unsub_worker` (Story 3.12) | no Unsub Worker host is set ("polling is off"); or the Worker answered one `GET /pending` within 10 seconds ("reachable"); in the health panel's copy, the host and bearer are set ("not probed in the engine") | the Worker is down (a retryable error) or answered after 10 seconds (`unsub_unreachable`) | polling is on but the bearer is not set or unreadable; the Worker refused (`unsub_unauthorized`, `unsub_bearer_invalid`, `unsub_bad_response`, `unsub_refused`); or the host setting can't be read |
 
 The table looks like this (some rows left out):
 
@@ -83,7 +84,8 @@ ok      python_version             Python 3.14.8 (needs 3.14.8 or later)
 ...
 warn    database_revision          no database file yet; it will be created and migrated on next start
 ok      unsub_token_keys           the unsubscribe token keys of key id 1 (unsub/k_tok/1 and unsub/k_edge/1) are set and differ
-12 ok, 1 warn, 0 fail
+ok      unsub_worker               unsubscribe polling is off (no Unsub Worker host set)
+13 ok, 1 warn, 0 fail
 ```
 
 `--json` prints the same list as `[{"id", "status", "message"}, ...]` (ASCII-only), and
@@ -2146,10 +2148,11 @@ poll, in `UnsubscribePolls.poll` (`nextron/app/compliance/unsub_poll.py`):
    following a redirect, metered as provider `unsub_worker`, operation `kv_list`. The answer is
    `{"format": "nextron-unsub-pending/1", "entries": [{"token", "received_at", ...}]}`; an entry
    without a text token or an ISO 8601 `received_at` with an offset is counted as malformed.
-   Errors: `unsub_unavailable` (429, a 5xx or a transport failure) is retried;
+   Errors: `unsub_unavailable` (429, a 5xx or a transport failure) is retryable;
    `unsub_unauthorized` (401/403), `unsub_refused` (a bad host or any other status),
    `unsub_bad_response` (over 10 MB, not JSON, the wrong format) and `unsub_bearer_invalid`
-   aren't. Nothing is applied when the fetch fails;
+   aren't. Nothing is applied when the fetch fails; since Story 3.12 the failure is recorded
+   and the next firing is the retry (see [Monitoring the poll](#monitoring-the-poll-story-312));
 3. in **one transaction**, applies every entry through `Compliance.unsubscribe_by_token(token,
    "one_click", received_at)`: a token already recorded in `unsub_requests` (by its
    `token_hash`) is a duplicate; a token that doesn't decode is invalid; otherwise the address
@@ -2168,6 +2171,48 @@ the unsubscribe token keys"). No token, address, address hash, bearer or host is
 stored, notified or put in a job payload; `unsub_requests` holds only the token's hash.
 
 Mailto opt-outs (Epic 7) call the same `unsubscribe_by_token` with source `mailto`.
+
+### Monitoring the poll (Story 3.12)
+
+Each poll's outcome is kept in the one-row `unsub_poll_state` table (migration
+`0046_3_12_unsub_poll_state`; owner `compliance`; times and a closed code only): the last
+successful poll, and while polling fails, when the failures began (`failing_since`), the newest
+failure and its code (`unsub_refused`, `unsub_bearer_invalid`, `unsub_unauthorized`,
+`unsub_unavailable`, `unsub_bad_response`, `unsub_unreachable` or `internal_error`; a missing
+bearer is recorded as `unsub_bearer_invalid`). A blank host is "off": nothing is recorded.
+
+- **A failed fetch or apply no longer kills the job.** It is recorded, logged as
+  `unsub_poll_failed` (WARNING, the code) and the job ends `done`; the next firing (5 minutes in
+  `prod`) is the retry. So a broken bearer or a Worker that is down raises no `job_dead` alerts.
+  Only a bug (any other exception) is recorded as `internal_error` and re-raised; a dead
+  `poll_unsubscribes` job then raises at most one `job_dead` alert a day (subject
+  `poll_unsubscribes:<UTC date>`).
+- **After 24 hours of failures** (counted from the last success, or from the first failure when
+  there was none) polling is "failing": the health panel lists the error "Unsubscribe polling
+  failing since <YYYY-MM-DD HH:MM UTC>", and one `unsub_poll_failing` alert goes to Telegram and
+  the dashboard for the whole episode. The first good poll ends the episode and dismisses its
+  dashboard notification only: no "recovered" message is sent to Telegram.
+- **Health panel**: an "Unsubscribe polling" section always shows one line: "Off (no Worker host
+  set)", or "Last successful poll: <time>" (or "never"), followed by "; failing since <time>
+  (<code>)" as soon as a poll fails.
+- **`nextron doctor`** has a fifteenth check, `unsub_worker`: ok "polling is off" with no host;
+  fail "polling on but bearer not set"; otherwise doctor calls the Worker once (10 s deadline,
+  metered in memory only): ok "reachable", warn when it is down or answers after 10 s, fail on a
+  refusal (401/403, a bad bearer or a bad answer). The health panel's copy never calls the
+  Worker ("not probed in the engine").
+- **Quotas page**: "Unsubscribe Worker KV list calls today: N of 1,000" (Cloudflare KV's daily
+  list limit on the free plan; the engine counts its own polls' `unsub_worker`/`kv_list` calls
+  of the UTC day). `nextron doctor`'s probe makes a real KV list call that isn't counted, and
+  neither are the Worker's internal KV pages. At 80% the line is marked and one dashboard
+  notification is raised for the day. Polling never stops.
+- **After a restore** the recovery step "Re-poll the unsubscribe Worker"
+  (`repoll_unsubscribes`) is done once a poll succeeds after the restore: the poll runs at
+  startup and the Worker still holds every request of the last 30 days, so whatever the restore
+  rolled back is applied again (deduplicated by `token_hash`). While the host is blank the step
+  stays pending, so recovery mode keeps sending held.
+- **Unsubscribe token keys in recovery mode**: while recovery mode is on, the Credentials page
+  refuses to remove a token key, or to replace a stored valid one ("Key <kid> can't be replaced
+  or removed while recovery mode is on after a restore"); a missing key can still be entered.
 
 ## Eligibility
 
@@ -5456,7 +5501,10 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
    <time> UTC: sending is held. Restored from <file name>, backed up at <time> UTC." (marked),
    then a table of the four steps and their status (pending, done or not applicable);
    afterwards "Last restore: <time> UTC, from <file name>; recovery mode ended at <time> UTC.".
-6. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
+6. **Unsubscribe polling** (Story 3.12): "Off (no Worker host set)", or "Last successful poll:
+   <time>" (or "never") and, while a poll is failing, "; failing since <time> (<code>)" (see
+   [Monitoring the poll](#monitoring-the-poll-story-312)).
+7. **Errors needing attention (<n>)**: each error's text and detail, or "No errors need
    attention." The errors are:
    - each `dead` job, oldest first: "Job dead: <type> <ULID>, attempts: <n>", with "Last error:
      <redacted last_error>" and a **Dismiss** button;
@@ -5477,14 +5525,17 @@ doesn't go unnoticed until work stops. `GET /health` keeps its JSON; the panel i
      not found; sending stays blocked" ("Put the ledger at <path> and restart the engine") or
      "Erasure ledger not yet reapplied; sending stays blocked" ("Restart the engine to retry;
      the log has recovery_step_failed"); see [The erasure ledger](#the-erasure-ledger);
+   - "Unsubscribe polling failing since <YYYY-MM-DD HH:MM UTC>" (Story 3.12) once polling has
+     failed for over 24 hours with the Unsub Worker host set; it clears at the next good poll,
+     which dismisses only the dashboard notice (no Telegram "recovered" message);
    - "The <name> health check could not be read (<ExceptionType>)" when one source of errors
      fails to read (logged as `health_check_failed`, ERROR, with `source`, `code` and the
      traceback); the other sources still show.
-7. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
+8. **Last successful runs**: a table per group (Discovery, Enrichment, Re-check, Sending, Reply
    check, Unsubscribe Endpoint poll, Backup, Other, as those types exist) with each job type's
    latest `done` time, or "never". The purge keeps each type's newest `done` row for this.
-8. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
-   the same fourteen ids in the same order, with "<n> ok, <n> warn, <n> fail".
+9. **Readiness (nextron doctor)**: the doctor checks (see [Check readiness](#check-readiness)),
+   the same fifteen ids in the same order, with "<n> ok, <n> warn, <n> fail".
 
 **The poll.** The panel re-fetches itself every 30 seconds through HTMX
 (`GET /health/panel/live`, the panel alone) while the page is open. Every answer is
@@ -5612,7 +5663,7 @@ uv run lint-imports                      # the import contracts on their own
   each unit opened. `tests/dashboard.py`'s `Dashboard` builds `GoogleAccess` on these fakes with
   a recording browser and an `allowlist` field, and keeps each consent flow's job in `jobs`
   until a test calls `run_jobs()`. Its `EngineHealth` (`health`) reads the real health-issue
-  registry and a fixed `readiness` list (all thirteen doctor checks `ok`) unless a test passes
+  registry and a fixed `readiness` list (all fifteen doctor checks `ok`) unless a test passes
   its own. Its `Backups` (`backups`) queues the panel's "Back up now"; its snapshot takes no
   copy unless a test passes one (`snapshot=`), and its off-PC copies go to an
   `InMemoryBackupTarget` (`offpc_target`).

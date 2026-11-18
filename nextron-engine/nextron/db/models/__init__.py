@@ -28,6 +28,7 @@ from nextron.db.models.compliance import (
     ErasureReceiptRecord,
     ErasureReceiptStoreRecord,
     SuppressionEntryRecord,
+    UnsubPollStateRecord,
     UnsubRequestRecord,
     UnsubTokenRecord,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "StepBriefRecord",
     "SuppressionEntryRecord",
     "Ulid",
+    "UnsubPollStateRecord",
     "UnsubRequestRecord",
     "UnsubTokenRecord",
     "UtcDateTime",

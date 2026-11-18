@@ -24,6 +24,10 @@ from pathlib import Path
 import pytest
 
 from nextron.app.ops.api import DeadJobAlerts, Heartbeat, OffpcOutcome, Recovery, TakenBackup
+from nextron.app.queries.compliance import UnsubPollStatus
+from nextron.app.setup.api import Setup
+from nextron.db.repos.compliance import unsub_poll_state as poll_state_repo
+from nextron.db.repos.compliance.unsub_poll_state import PollState
 from nextron.db.repos.ops.snapshot import Snapshot
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain.alert import Channel
@@ -33,6 +37,7 @@ from nextron.domain.job import Lane
 from nextron.domain.readiness import CheckResult, Status
 from nextron.domain.recovery import RecoveryStep
 from nextron.domain.restore_test import RestoreTestKind
+from nextron.web import health_page as health_rows
 from nextron.web.guard import LOCKED_TEXT
 from tests.asgi import DEFAULT_HOST, Reply, request
 from tests.dashboard import FORM, READINESS, Dashboard, form
@@ -355,6 +360,8 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Restore test",
         "No restore test yet.",
         "Run restore test now",
+        "Unsubscribe polling",
+        "Off (no Worker host set)",
         "Errors needing attention (0)",
         "No errors need attention.",
         "Last successful runs",
@@ -365,7 +372,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
-        "13 ok, 0 warn, 0 fail",
+        "15 ok, 0 warn, 0 fail",
     ]
     assert panel.tables == [*NEVER_RUN, READINESS_TABLE]
     assert panel.forms == [
@@ -377,6 +384,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "health-worker-heading",
         "health-backup-heading",
         "health-restore-heading",
+        "health-unsub-heading",
         "health-errors-heading",
         "health-runs-heading",
         "health-readiness-heading",
@@ -409,6 +417,8 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Restore test",
         "No restore test yet.",
         "Run restore test now",
+        "Unsubscribe polling",
+        "Off (no Worker host set)",
         "Errors needing attention (1)",
         f"Job dead: send_alert {dead}, attempts: 1",
         "Last error: ValueError: broken",
@@ -421,7 +431,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
-        "13 ok, 0 warn, 0 fail",
+        "15 ok, 0 warn, 0 fail",
     ]
     assert panel.tables[:6] == [
         NEVER_RUN[0],
@@ -492,7 +502,7 @@ def test_budget_issues_are_listed_without_a_dismiss_form(
 
     panel = panel_of(dashboard, session[0])
 
-    assert panel.texts[9:11] == [
+    assert panel.texts[11:13] == [
         "Errors needing attention (1)",
         "AI spend at 80% of $20: $16 spent in 2026-11",
     ]
@@ -532,7 +542,7 @@ def test_a_hostile_last_error_renders_as_escaped_text(
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in reply.text
     assert reply.text.count('hx-post="') == 3  # only the three forms' own
     assert "mac@example.com" not in reply.text  # redacted when read
-    assert panel.texts[11] == (
+    assert panel.texts[13] == (
         'Last error: ValueError: <script>alert(1)</script><img src=x onerror="alert(2)"> '
         'hx-post="/health/jobs/dismiss" for <email>'
     )
@@ -554,7 +564,7 @@ def test_dismiss_deletes_the_dead_job_and_answers_with_the_panel(
     assert dead not in jobs.ids() and done in jobs.ids()
     panel = Panel(reply.text)
     assert panel.attrs == PANEL_ATTRS
-    assert panel.texts[9:11] == ["Errors needing attention (0)", "No errors need attention."]
+    assert panel.texts[11:13] == ["Errors needing attention (0)", "No errors need attention."]
 
 
 @pytest.mark.parametrize("which", ["queued", "done", "unknown"])
@@ -583,7 +593,7 @@ def test_dismissing_twice_is_a_no_op_the_second_time(
     reply = dismiss(dashboard, session, form(job=dead))
 
     assert reply.status == 200
-    assert Panel(reply.text).texts[9] == "Errors needing attention (0)"
+    assert Panel(reply.text).texts[11] == "Errors needing attention (0)"
 
 
 @pytest.mark.parametrize(
@@ -846,7 +856,7 @@ def a_failed_backup_shows_in_the_error_list(
 
     texts = panel_of(dashboard, session[0]).texts
 
-    assert texts[9:12] == [
+    assert texts[11:14] == [
         "Errors needing attention (1)",
         f"Backup failed: manual {backup_id}",
         "Error: OSError: disk full",
@@ -862,7 +872,7 @@ def test_a_failed_backup_shows_in_the_error_list_until_a_later_one_verifies(
         dashboard, units, BackupKind.DAILY, verified=True, started_at=T + timedelta(minutes=1)
     )
 
-    assert panel_of(dashboard, session[0]).texts[9:11] == [
+    assert panel_of(dashboard, session[0]).texts[11:13] == [
         "Errors needing attention (0)",
         "No errors need attention.",
     ]
@@ -922,7 +932,7 @@ def test_the_backups_line_shows_the_off_pc_outcome(
     text, classes = backup_line(reply)
     assert text == f"Last backup: 2026-11-17 09:00:00 UTC, verified (daily), {suffix}"
     assert classes == (["health-backup", "health-backup-failed"] if failed else ["health-backup"])
-    issues = Panel(reply.text).texts[9:12]
+    issues = Panel(reply.text).texts[11:14]
     if failed:
         assert issues == [
             "Errors needing attention (1)",
@@ -1146,7 +1156,7 @@ def test_the_restore_test_section_shows_the_last_test(
     texts = Panel(reply.text).texts
     assert texts[6:9] == ["Restore test", text, "Run restore test now"]
     if failed:
-        assert texts[9:12] == [
+        assert texts[11:14] == [
             "Errors needing attention (1)",
             f"Restore test failed: {kind} {SUBJECTS[1]}, {reason}",
             f"Error: {reason}",
@@ -1168,7 +1178,7 @@ def test_a_failed_test_lists_its_redacted_detail_until_a_later_one_passes(
 
     reply = get(dashboard, LIVE, session[0])
 
-    assert Panel(reply.text).texts[9:12] == [
+    assert Panel(reply.text).texts[11:14] == [
         "Errors needing attention (1)",
         f"Restore test failed: monthly {SUBJECTS[0]}, suppression_fewer",
         "Error: suppression_entries: copy 1, backup 5 <b><email></b>",
@@ -1178,7 +1188,7 @@ def test_a_failed_test_lists_its_redacted_detail_until_a_later_one_passes(
     record_restore_test(dashboard, units, SUBJECTS[1], RestoreTestKind.MANUAL,
                         started_at=T + timedelta(minutes=1))
 
-    assert panel_of(dashboard, session[0]).texts[9:11] == [
+    assert panel_of(dashboard, session[0]).texts[11:13] == [
         "Errors needing attention (0)",
         "No errors need attention.",
     ]
@@ -1356,6 +1366,7 @@ def test_while_recovery_mode_is_on_the_section_lists_the_steps(
         "health-backup-heading",
         "health-restore-heading",
         "health-recovery-heading",
+        "health-unsub-heading",
         "health-errors-heading",
         "health-runs-heading",
         "health-readiness-heading",
@@ -1395,3 +1406,104 @@ def test_a_hostile_source_name_renders_as_escaped_text(
 
     assert "<img src=x" not in reply.text
     assert "&lt;img src=x onerror=alert(1)&gt;.db" in reply.text
+
+
+# Unsubscribe polling (Story 3.12) ---------------------------------------------------------------
+
+
+def poll_status(
+    on: bool = True,
+    success: datetime | None = None,
+    since: datetime | None = None,
+    code: str | None = None,
+) -> UnsubPollStatus:
+    state = None
+    if success is not None or since is not None:
+        state = PollState(success, since, since, code)
+    return UnsubPollStatus(on, state)
+
+
+@pytest.mark.parametrize(
+    ("status", "line", "failing"),
+    [
+        (None, "Off (no Worker host set)", False),
+        (poll_status(on=False), "Off (no Worker host set)", False),
+        (
+            poll_status(on=False, since=T, code="unsub_unavailable"),  # stale state, host blank
+            "Off (no Worker host set)",
+            False,
+        ),
+        (poll_status(), "Last successful poll: never", False),
+        (poll_status(success=T), "Last successful poll: 2026-11-17 09:00:00 UTC", False),
+        (
+            poll_status(since=T, code="unsub_bearer_invalid"),
+            "Last successful poll: never; failing since 2026-11-17 09:00:00 UTC "
+            "(unsub_bearer_invalid)",
+            True,
+        ),
+        (
+            poll_status(
+                success=T - timedelta(hours=3),
+                since=T - timedelta(hours=1),
+                code="unsub_unavailable",
+            ),
+            "Last successful poll: 2026-11-17 06:00:00 UTC; failing since 2026-11-17 "
+            "08:00:00 UTC (unsub_unavailable)",
+            True,
+        ),
+    ],
+)
+def test_the_unsubscribe_polling_line(
+    status: UnsubPollStatus | None, line: str, failing: bool
+) -> None:
+    assert health_rows.unsub_poll_text(status) == line
+    assert health_rows.unsub_poll_failing(status) is failing
+
+
+def test_the_panel_shows_the_polling_line_and_marks_a_failure(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    with units.open():
+        Setup(FrozenClock(T)).save({"unsub_worker_host": "u.example-sender.com"})
+    write_state(units, PollState(None, T, T, "unsub_unauthorized"))
+
+    reply = get(dashboard, LIVE, session[0])
+
+    texts = Panel(reply.text).texts
+    at = texts.index("Unsubscribe polling")
+    assert texts[at + 1] == (
+        "Last successful poll: never; failing since 2026-11-17 09:00:00 UTC (unsub_unauthorized)"
+    )
+    assert 'class="health-unsub health-unsub-failing"' in reply.text
+    assert "u.example-sender.com" not in reply.text
+
+
+def write_state(units: UnitOfWorkFactory, state: PollState) -> None:
+    @use_case
+    def save() -> None:
+        with current().transaction():
+            poll_state_repo.save(state)
+
+    with units.open():
+        save()
+
+
+@pytest.mark.parametrize("host", ["u.example-sender.com", ""])
+def test_polling_failing_for_over_24_hours_is_an_error_only_while_the_host_is_set(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, host: str
+) -> None:
+    since = T - timedelta(hours=25)  # the dashboard's clock reads T
+    with units.open():
+        Setup(FrozenClock(T)).save({"unsub_worker_host": host})
+    write_state(units, PollState(None, since, T, "unsub_unauthorized"))
+
+    texts = panel_of(dashboard, session[0]).texts
+
+    failing = "Unsubscribe polling failing since 2026-11-16 08:00 UTC"
+    if host:
+        at = texts.index("Errors needing attention (1)")
+        assert texts[at + 1] == failing
+    else:
+        assert "Errors needing attention (0)" in texts
+        assert failing not in texts
+        assert "Off (no Worker host set)" in texts
