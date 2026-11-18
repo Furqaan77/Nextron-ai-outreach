@@ -200,6 +200,7 @@ def world(db_engine: Engine) -> World:
         primary=no_service,
         test_runs=no_service,
         job_boards=no_service,
+        legal_forms=no_service,
     )
     queue = JobQueue(clock, job_types)
     built["markets"] = ContactMarkets(clock, research, queue)

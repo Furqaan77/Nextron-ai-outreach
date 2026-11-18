@@ -208,12 +208,13 @@ def test_a_boards_postings_become_live_postings_and_a_hiring_event(world: World)
         "ashby_events": 0,
         "board_errors": 0,
     }
-    # the selection is queued, and it prefers the Controller for an AP/AR Event
-    [(key, concurrency, payload, lane)] = world.jobs("select_primary_contact")
+    # the chain's next stage is queued (Story 2.12's legal-form check, which then queues the
+    # selection), and the selection prefers the Controller for an AP/AR Event
+    [(key, concurrency, payload, lane)] = world.jobs("check_legal_form")
     assert (key, concurrency, json.loads(payload), lane) == (
-        f"select_primary_contact:{lead}:tick",
+        f"check_legal_form:{lead}:tick",
         f"domain:{SITE}",
-        {"v": 1, "lead_id": lead},
+        {"v": 1, "lead_id": lead, "run_id": run_id},
         "bulk",
     )
     add(world, lead, "Ann Fox", "COO")
@@ -356,7 +357,7 @@ def test_a_host_removed_from_ats_hosts_is_never_called(world: World) -> None:
 
     assert scripted.calls == [] and postings_of(world, lead) == []
     assert counts(world, run_id)["greenhouse_postings"] == 0
-    assert len(world.jobs("select_primary_contact")) == 1  # the selection still follows
+    assert len(world.jobs("check_legal_form")) == 1  # the chain still follows
 
 
 def test_an_unmapped_host_or_a_job_site_is_never_called(world: World) -> None:
@@ -483,7 +484,7 @@ def test_when_the_budget_refuses_nothing_is_called_or_written(world: World) -> N
     assert check(world, scripted, lead, run_id) is False
 
     assert scripted.calls == [] and postings_of(world, lead) == []
-    assert world.jobs("select_primary_contact") == []
+    assert world.jobs("check_legal_form") == []
     assert counts(world, run_id)["board_errors"] is None
 
 
@@ -499,7 +500,7 @@ def test_an_unknown_or_merged_lead_is_skipped(
         assert check(world, scripted, lead, run_id) is True
         assert check(world, scripted, "01KA0000000000000000000000", run_id) is True
 
-    assert scripted.calls == [] and world.jobs("select_primary_contact") == []
+    assert scripted.calls == [] and world.jobs("check_legal_form") == []
     records = [r for r in caplog.records if r.getMessage() == "job_boards_skipped"]
     assert [getattr(r, "reason") for r in records] == ["merged_lead", "unknown_lead"]
 
@@ -517,7 +518,7 @@ def test_a_lead_merged_during_the_calls_stores_nothing(world: World) -> None:
     check(world, boards({ACME: merge_then_list}), lead, run_id)
 
     assert world.sql("SELECT COUNT(*) FROM job_postings") == [(0,)]
-    assert world.jobs("select_primary_contact") == []
+    assert world.jobs("check_legal_form") == []
 
 
 def test_extract_lead_queues_check_job_boards_which_the_handler_runs(world: World) -> None:
@@ -530,7 +531,7 @@ def test_extract_lead_queues_check_job_boards_which_the_handler_runs(world: Worl
         {"v": 1, "lead_id": lead, "run_id": run_id},
         "bulk",
     )
-    assert world.jobs("select_primary_contact") == []  # the boards come first
+    assert world.jobs("check_legal_form") == []  # the boards come first
     scripted = boards({SMITHLAW: listing()})
     service = job_boards(world, scripted)
     handler = main.build_job_types(
@@ -544,14 +545,16 @@ def test_extract_lead_queues_check_job_boards_which_the_handler_runs(world: Worl
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        test_runs=no_jobs,
         job_boards=lambda: service,
+        legal_forms=no_jobs,
     ).get("check_job_boards").handler
 
     with world.units.open():
         assert handler(Job(run_id, "check_job_boards", Lane.BULK, json.loads(payload), 1)) is None
 
     assert scripted.calls == [SMITHLAW]
-    assert len(world.jobs("select_primary_contact")) == 1
+    assert len(world.jobs("check_legal_form")) == 1
     # the careers posting and its Event are untouched by the board's empty answer
     assert {row["source"]: row["status"] for row in postings_of(world, lead)} == {
         "careers_page": "live"
@@ -606,7 +609,7 @@ def test_recheck_of_an_ats_posting_rechecks_its_board_with_the_same_rule(world: 
     assert by_title(world, lead)[AP_CLERK]["status"] == "closed"
     assert world.recorder.closed == [EventClosed(signal_id=ap["signal_id"], lead_id=lead)]
     assert counts(world, run_id)["greenhouse_postings"] == 2  # a recheck writes no counts
-    assert len(world.jobs("select_primary_contact")) == 1  # nor queues a selection
+    assert len(world.jobs("check_legal_form")) == 1  # nor queues the next stage
 
 
 def test_a_recheck_that_still_lists_the_posting_confirms_it(world: World) -> None:
@@ -845,7 +848,9 @@ def test_the_recheck_event_handler_checks_the_signal_id(world: World) -> None:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        test_runs=no_jobs,
         job_boards=lambda: service,
+        legal_forms=no_jobs,
     ).get("recheck_event").handler
     payload = {"v": 1, "signal_id": ap["signal_id"]}
 

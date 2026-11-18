@@ -37,8 +37,9 @@ and the endpoints are the adapter's, in code.
    ``EventClosed`` is published for each closed posting's Event. When the crawl run ``run_id``
    exists, its ``greenhouse_*``, ``lever_*`` and ``ashby_*`` counts (``_postings``: listed;
    ``_events``: created; 0 for a source with no board) and ``board_errors`` are written. Last,
-   it enqueues ``select_primary_contact`` (scope the Lead, discriminator ``tick``, payload
-   ``{v, lead_id}``, concurrency key ``domain:<web_domain>`` when the Lead has one).
+   it enqueues the chain's next stage, ``check_legal_form`` (Story 2.12, which enqueues
+   ``select_primary_contact``): scope the Lead, discriminator ``tick``, payload ``{v, lead_id,
+   run_id}``, concurrency key ``domain:<web_domain>`` when the Lead has one.
 
    After the commit it logs ``job_boards_checked`` (``lead_id``, ``run_id``, ``boards``,
    ``board_errors``, ``listed``, ``events``, ``reopened``, ``closed``) and returns ``True``.
@@ -100,6 +101,7 @@ from nextron.domain.crawl import (
     LEAD_ID_FIELD,
     MIN_INTERVAL_S,
     PAYLOAD_VERSION,
+    RUN_ID_FIELD,
     http_code,
     is_retryable,
     needs_render,
@@ -107,7 +109,7 @@ from nextron.domain.crawl import (
 from nextron.domain.identity import IdentityError, registrable_domain
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import TICK, VERSION_FIELD
-from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
+from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.postings import (
     ATS_SOURCES,
     Board,
@@ -304,11 +306,15 @@ class JobBoards:
             counts = dict(postings.tally_counts(tally, ATS_SOURCES))
             counts[BOARD_ERRORS] = errors
             crawl_repo.set_posting_counts(run_id, counts)
-        self._queue.enqueue(
-            SELECT_PRIMARY_CONTACT_JOB,
+        self._queue.enqueue(  # the chain's next stage (Story 2.12), then the Primary Contact's
+            CHECK_LEGAL_FORM_JOB,
             scope=check.lead_id,
             discriminator=TICK,
-            payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: check.lead_id},
+            payload={
+                VERSION_FIELD: PAYLOAD_VERSION,
+                LEAD_ID_FIELD: check.lead_id,
+                RUN_ID_FIELD: run_id,
+            },
             concurrency_key=(
                 None if lead.web_domain is None else f"{DOMAIN_KEY_PREFIX}{lead.web_domain}"
             ),

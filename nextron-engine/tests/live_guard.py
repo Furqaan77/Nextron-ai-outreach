@@ -20,7 +20,9 @@ a real external system to raise ``LiveAdapterInTests``:
   ``nextron.adapters.renderer.default_browser`` (Playwright's Chromium), so a
   ``PlaywrightRenderer`` without an injected ``browser`` launches nothing: its render fails as
   ``render_unavailable``, and ``nextron.adapters.dns.default_resolver`` (the system's DNS
-  servers), so a ``DnspythonDns`` without an injected ``resolver`` raises on its first query;
+  servers), so a ``DnspythonDns`` without an injected ``resolver`` raises on its first query,
+  and ``nextron.adapters.companies_house.default_http_client`` (the Companies House API), so a
+  ``CompaniesHouseRegistry`` without an injected ``http`` raises on its first call;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
 
@@ -113,6 +115,7 @@ LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.renderer", "default_browser"),
     ("nextron.adapters.dns", "default_resolver"),
     ("nextron.adapters.ats", "default_fetcher"),
+    ("nextron.adapters.companies_house", "default_http_client"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -177,6 +180,7 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "renderer": Guarded(("default_browser",)),
     "dns": Guarded(("default_resolver",)),
     "ats": Guarded(("default_fetcher",)),
+    "companies_house": Guarded(("default_http_client",)),
 }
 
 

@@ -126,6 +126,7 @@ class World:
             primary=lambda: None,  # type: ignore[arg-type,return-value]
             test_runs=lambda: None,  # type: ignore[arg-type,return-value]
             job_boards=lambda: None,  # type: ignore[arg-type,return-value]
+            legal_forms=lambda: None,  # type: ignore[arg-type,return-value]
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(
@@ -1195,6 +1196,7 @@ def test_the_backup_job_type_is_registered_as_specified() -> None:
         primary=lambda: None,  # type: ignore[arg-type,return-value]
         test_runs=lambda: None,  # type: ignore[arg-type,return-value]
         job_boards=lambda: None,  # type: ignore[arg-type,return-value]
+        legal_forms=lambda: None,  # type: ignore[arg-type,return-value]
     )
 
     found = job_types.get("backup_db")

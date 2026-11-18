@@ -1,14 +1,15 @@
 {% extends "base.html" %}
-{#- The Lead page (nextron.web.leads_page): the header facts, the Signals, the live Evidence,
-    then the Contacts panel (lead_contacts.html: the Primary Contact and each Contact with its
-    live Eligibility, evaluated on this render and never stored, and its recorded bases, then its
-    Market and timezone facts, its Provenance Records and its erase link (Story 3.13), or, for an
-    erased Contact, its tombstone line only), then the Job postings section (Story 2.11), then the
-    Data subject requests section (Story 3.15): one "Export data (JSON)" form per Contact,
-    outside any hx-disable so HTMX posts it.
+{#- The Lead page (nextron.web.leads_page): the header facts, a GB Lead's legal form
+    (lead_legal_form.html, Story 2.12), the Signals, the live Evidence, then the Contacts panel
+    (lead_contacts.html: the Primary Contact and each Contact with its live Eligibility,
+    evaluated on this render and never stored, and its recorded bases, then its Market and
+    timezone facts, its Provenance Records and its erase link (Story 3.13), or, for an erased
+    Contact, its tombstone line only), then the Job postings section (Story 2.11), then the Data
+    subject requests section (Story 3.15): one "Export data (JSON)" form per Contact, outside any
+    hx-disable so HTMX posts it.
     Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
     it renders only through |plain or safe_link, inside an element carrying hx-disable. The
-    Signals, Evidence and Job postings sections hold no HTMX action. -#}
+    legal-form, Signals, Evidence and Job postings sections hold no HTMX action. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}
@@ -29,6 +30,9 @@
 <dd>{{ lead.created }}</dd>
 </dl>
 </header>
+{%- if legal_form %}
+{% include "lead_legal_form.html" %}
+{%- endif %}
 <p><a href="/leads">All Leads</a></p>
 <section class="lead-signals" aria-labelledby="signals-heading" hx-disable>
 <h2 id="signals-heading">Signals</h2>

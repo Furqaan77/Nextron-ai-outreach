@@ -178,6 +178,7 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``queries.setup.segments``, ``queries.research.contacts``,
   ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
   Evidence and the headquarters zone), ``queries.research.no_decision_maker`` (Story 2.10),
+  ``queries.research.legal_form`` (Story 2.12: a GB Lead's legal-form section),
   each Contact's live Eligibility from ``compliance.evaluate_eligibility`` (Story 3.6), evaluated
   on every render and never stored, the stored Markets (``lead_markets``:
   ``queries.setup.markets``, or none when one no longer decodes: ``InvalidMarkets``), which name
@@ -1596,6 +1597,7 @@ def create_app(
             research_queries.no_decision_maker(found.id),
             lead_erasures(contacts),
             postings=research_queries.job_postings(found.id),
+            legal_form=research_queries.legal_form(found.id),
         )
         return page(
             request,

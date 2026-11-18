@@ -705,6 +705,7 @@ def test_the_select_primary_contact_job_runs_the_selection(world: World) -> None
         primary=lambda: contacts,
         test_runs=no_jobs,
         job_boards=no_jobs,
+        legal_forms=no_jobs,
     ).get("select_primary_contact").handler
     # Story 2.11: extract_lead queues check_job_boards, which queues the selection with this
     # payload (tests/app/test_job_boards.py)

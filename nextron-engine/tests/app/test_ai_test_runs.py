@@ -218,6 +218,7 @@ def world(db_engine: Engine) -> World:
         extractions=no_jobs,
         primary=no_jobs,
         job_boards=no_jobs,
+        legal_forms=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     runs = AiTestRuns(clock, meter, llm, queue)

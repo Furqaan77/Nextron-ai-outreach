@@ -85,7 +85,8 @@ every failing reason; the Contact is eligible only with none.
    ``not_now_until`` while ``recontact_on`` is after ``now``'s UTC date.
 8. **Closed:** ``lead_closed`` for a ``lost`` or ``disqualified`` Lead.
 9. **The basis** of an eligible Contact: ``US_BASIS`` in a US Market; ``UK_BASIS`` with the legal
-   form's ``LEGAL_FORM_LABELS`` label (or its code) in a GB Market.
+   form's ``LEGAL_FORM_LABELS`` label (``nextron.domain.legal_form``, Story 2.12) or its code
+   in a GB Market.
 
 **``recontact_allowed(history, events_first_seen, now)``** (FR-63) is true when every
 ``EndedSequence`` that ended without a Reply had its last Step at least ``RECONTACT_WAIT`` (90
@@ -104,10 +105,10 @@ from nextron.domain.address_class import AddressClass
 from nextron.domain.contact_market import MarketBasis, resolve_contact_market
 from nextron.domain.contactability import Allowed, Blocked, BlockReason
 from nextron.domain.geo import InvalidLocation, Location
+from nextron.domain.legal_form import LEGAL_FORM_LABELS, LEGAL_FORM_PATTERN
 from nextron.domain.markets import (
     COLD_EMAIL_COUNTRIES,
     GB,
-    LEGAL_FORM_PATTERN,
     US,
     MarketDef,
     is_free_webmail,
@@ -215,23 +216,6 @@ ADDRESS_CLASS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
 )
 CLOSED_STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {PipelineStage.LOST: "Lost", PipelineStage.DISQUALIFIED: "Disqualified"}
-)
-# The Companies House company types a GB Market may list (``markets._GB_CORPORATE_FORMS``).
-LEGAL_FORM_LABELS: Final[Mapping[str, str]] = MappingProxyType(
-    {
-        "ltd": "private limited company",
-        "plc": "public limited company",
-        "llp": "limited liability partnership",
-        "private-unlimited": "private unlimited company",
-        "private-unlimited-nsc": "private unlimited company without share capital",
-        "private-limited-guarant-nsc": "private company limited by guarantee",
-        "private-limited-guarant-nsc-limited-exemption": (
-            "private company limited by guarantee, exempt from 'Limited'"
-        ),
-        "private-limited-shares-section-30-exemption": (
-            "private company limited by shares, exempt under section 30"
-        ),
-    }
 )
 # Every ``BlockReason`` of the contactability gate, as the reason it gives here.
 BLOCK_REASON_KINDS: Final[Mapping[BlockReason, ReasonKind]] = MappingProxyType(

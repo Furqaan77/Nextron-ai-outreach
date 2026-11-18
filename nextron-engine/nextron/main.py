@@ -187,7 +187,9 @@ only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(researc
 ``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
 minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``), Story
 2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
-retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), Story 4.5's
+retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), registered after
+Story 2.12's ``check_legal_form`` (the same lanes, priority, runtime, retry limit and group,
+``handlers.check_legal_form(legal_forms)``), Story 4.5's
 ``run_ai_test_sets`` (bulk only, priority 30, ``max_runtime`` 2 hours, retry limit 3,
 ``handlers.run_ai_test_sets(test_runs)``, ``other``), and Story 6.5's ``check_domains``
 (the interactive lane only, priority 60, 2 minutes, retry limit 3,
@@ -225,12 +227,20 @@ last argument), on the same gateway. ``PrimaryContacts(clock, research)`` runs t
 Lead page's "Make primary" (``create_app(..., primary_contacts=...)``).
 
 **Hiring Signals and job postings (Story 2.11).** ``JobBoards(clock, meter, boards, crawler,
-queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (between the
-people step and the Primary Contact's selection) and the ``recheck_event`` jobs, reached through
+queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (after the
+people step; each enqueues the legal-form check) and the ``recheck_event`` jobs, reached through
 ``job_boards=lambda: job_boards``. ``build_app(..., job_board=None)`` reads the boards through
 ``AtsBoards(meter=meter, fetcher=http_crawler)`` (``nextron.adapters.ats``, on the crawl's own
 ``HttpCrawler``, so every board request is filtered, paced and metered as ``ats`` there) unless
 a ``job_board=`` is injected; building it fetches nothing.
+
+**The legal form (Story 2.12).** ``build_app(..., registry=None)`` builds one
+``CompaniesHouseRegistry(secrets, meter=meter)`` (``nextron.adapters.companies_house``) unless a
+``registry=`` is injected; building it builds no HTTP client and reads no key.
+``LegalFormChecks(clock, meter, registry, discovery, research, queue)``
+(``nextron.app.discovery.legal_form``) runs the ``check_legal_form`` jobs that each finished
+``check_job_boards`` enqueues, reached through ``legal_forms=lambda: legal_forms``; each enqueues
+``select_primary_contact``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -640,6 +650,7 @@ from nextron import __version__
 from nextron.adapters.ats import AtsBoards
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
+from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.dns import DnspythonDns
 from nextron.adapters.email_syntax import EmailValidatorSyntax
@@ -651,6 +662,7 @@ from nextron.adapters.telegram import TelegramAlert
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
@@ -746,6 +758,7 @@ from nextron.domain.domain_auth import CHECK_DOMAINS_JOB, DOMAIN_CHECK_TIME
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
+from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import ContactErased, LeadsMerged, SubjectSuppressed
 from nextron.domain.offers import InvalidOffers, validate_offers
@@ -803,6 +816,7 @@ from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
+from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
@@ -961,6 +975,7 @@ def build_app(
     renderer: RendererPort | None = None,
     dns: DnsPort | None = None,
     job_board: JobBoardPort | None = None,
+    registry: RegistryPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -998,7 +1013,9 @@ def build_app(
     (``DnspythonDns(meter=meter)`` unless injected), which builds its resolver on its first
     query. The ATS boards are read through ``job_board`` (``AtsBoards(meter=meter,
     fetcher=<that same HttpCrawler>)`` unless injected), and a careers posting's recheck fetches
-    through the crawl's ``crawler``."""
+    through the crawl's ``crawler``. The legal-form check reads the Companies House register
+    through ``registry`` (``CompaniesHouseRegistry(secrets, meter=meter)`` unless injected), which
+    builds its HTTP client on its first call."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1018,8 +1035,8 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions, primary_contacts, test_runs, domain_checks and job_boards are bound just
-    # below
+    # extractions, primary_contacts, test_runs, domain_checks, job_boards and legal_forms are
+    # bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1034,6 +1051,7 @@ def build_app(
         test_runs=lambda: test_runs,
         domain_checks=lambda: domain_checks,
         job_boards=lambda: job_boards,
+        legal_forms=lambda: legal_forms,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1064,6 +1082,14 @@ def build_app(
         meter,
         job_board if job_board is not None else AtsBoards(meter=meter, fetcher=http_crawler),
         site_crawler,
+        queue,
+    )
+    legal_forms = LegalFormChecks(
+        clock,
+        meter,
+        registry if registry is not None else CompaniesHouseRegistry(secrets, meter=meter),
+        discovery,
+        research,
         queue,
     )
     telegram = functools.partial(
@@ -1212,6 +1238,7 @@ def build_job_types(
     primary: Callable[[], handlers.SelectingPrimary],
     test_runs: Callable[[], handlers.AiTestRunning],
     job_boards: Callable[[], handlers.CheckingJobBoards],
+    legal_forms: Callable[[], handlers.CheckingLegalForm],
     domain_checks: Callable[[], handlers.DomainChecking] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
@@ -1227,10 +1254,11 @@ def build_job_types(
     ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
     ``select_primary_contact`` jobs call, ``test_runs`` the ``playbook`` service's
     ``AiTestRuns`` that ``run_ai_test_sets`` jobs call, ``job_boards`` the ``research``
-    service's ``JobBoards`` that ``check_job_boards`` and ``recheck_event`` jobs call, and
-    ``domain_checks`` the ``sending`` service's ``DomainChecks`` that ``check_domains`` jobs
-    call (when it is ``None``, a provider that raises ``RuntimeError`` when a job calls it:
-    ``build_app`` always passes the real one)."""
+    service's ``JobBoards`` that ``check_job_boards`` and ``recheck_event`` jobs call,
+    ``legal_forms`` the ``discovery`` service's ``LegalFormChecks`` that ``check_legal_form``
+    jobs call, and ``domain_checks`` the ``sending`` service's ``DomainChecks`` that
+    ``check_domains`` jobs call (when it is ``None``, a provider that raises ``RuntimeError``
+    when a job calls it: ``build_app`` always passes the real one)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     job_types = JobTypes()
     job_types.register_job_type(
@@ -1357,6 +1385,18 @@ def build_job_types(
             max_runtime=timedelta(minutes=15),
             retry_limit=3,
             handler=handlers.extract_lead(extractions),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_LEGAL_FORM_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            max_runtime=timedelta(minutes=5),  # at most five registry calls, 15 s per phase
+            retry_limit=3,
+            handler=handlers.check_legal_form(legal_forms),
             group=JobGroup.ENRICHMENT,
         )
     )

@@ -195,6 +195,7 @@ def world(db_engine: Engine) -> AbsenceWorld:
         primary=no_jobs,
         test_runs=no_jobs,
         job_boards=no_jobs,
+        legal_forms=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     found = AbsenceWorld(

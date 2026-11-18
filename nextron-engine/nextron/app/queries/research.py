@@ -61,6 +61,11 @@ selection found no decision-maker, ``False`` when it found one, ``None`` before 
 selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
 ``primary_set_by`` (``system`` or ``operator``) beside ``is_primary``.
 
+Story 2.12 adds ``legal_form(lead_id)``: the Lead's legal form as a ``StoredLegalForm``
+(``legal_form``, ``company_status``, ``legal_form_status``, ``site_evidence_id``,
+``registry_evidence_id``, each ``None`` until the Lead is first checked), or ``None`` for an
+unknown Lead (a text that isn't a ULID included).
+
 Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
 
 - ``export_pii(contact_id) -> {section: tuple[dict, ...]}``: everything ``research`` holds on
@@ -107,6 +112,7 @@ from nextron.db.repos.research.crawl import (
     StoredPage,
 )
 from nextron.db.repos.research.postings import StoredPosting
+from nextron.db.repos.research.profile import StoredLegalForm
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.contact_export import address_history, excerpts, mention_terms, mentions
@@ -126,6 +132,7 @@ __all__ = [
     "StoredCrawlRun",
     "StoredEvidence",
     "StoredExtractionRun",
+    "StoredLegalForm",
     "StoredPage",
     "StoredProvenance",
     "StoredSignal",
@@ -143,6 +150,7 @@ __all__ = [
     "last_ok_extraction",
     "latest_crawl_run",
     "lead_provenance",
+    "legal_form",
     "lead_signals",
     "no_decision_maker",
     "page_contact_methods",
@@ -286,6 +294,11 @@ def job_postings(lead_id: str) -> tuple[StoredPosting, ...]:
     found = postings_repo.for_lead(lead_id)
     newest = sorted(found, key=lambda row: (row.first_seen_at, row.id), reverse=True)
     return tuple(sorted(newest, key=lambda row: not row.live))
+
+
+def legal_form(lead_id: str) -> StoredLegalForm | None:
+    """The Lead's legal form, or ``None`` for an unknown Lead."""
+    return profile_repo.legal_form(lead_id) if is_ulid(lead_id) else None
 
 
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:

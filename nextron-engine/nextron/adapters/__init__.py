@@ -28,7 +28,10 @@ the off-PC folder, through ``crypto``) and ``ai`` (the Claude gateway, ``ClaudeG
 request builder and prices; live constructor ``default_http_client``) and ``crawler``
 (``HttpCrawler``, the ``CrawlerPort``: robots.txt and pages inside the egress filter, over
 ``httpx2``, ``selectolax`` and ``protego``; live constructors ``default_http_client``,
-``default_resolver`` and ``default_own_addresses``).
+``default_resolver`` and ``default_own_addresses``) and ``companies_house``
+(``CompaniesHouseRegistry``, the ``RegistryPort``: company search and lookup through the
+Companies House API over ``httpx2``, self rate-limited to 600 requests per 5 minutes; live
+constructor ``default_http_client``).
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
 port calls, whatever the transport raises or answers, and never carries a secret into an error.

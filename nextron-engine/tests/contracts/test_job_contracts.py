@@ -8,8 +8,8 @@
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, ``run_ai_test_sets``,
-  Story 4.5, ``check_domains``, Story 6.5, and ``check_job_boards`` and ``recheck_event``,
-  Story 2.11, with their settings); the triggers
+  Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
+  2.11, and ``check_legal_form``, Story 2.12, with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active``, ``purge_page_text``'s daily ``Every`` at startup and
   ``check_domains``'s daily schedule: the one-off ``resolve_contact_markets`` has no trigger.
@@ -433,6 +433,19 @@ class RecordingJobBoards:
         self.rechecks.append(signal_id)
 
 
+class RecordingLegalForms:
+    """Stands in for the ``discovery`` service's ``LegalFormChecks``; ``allowed`` is what
+    ``check_legal_form`` returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[str] = []
+
+    def check_legal_form(self, lead_id: str) -> bool:
+        self.calls.append(lead_id)
+        return self.allowed
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -449,6 +462,7 @@ def registry(**overrides: object) -> JobTypes:
         "test_runs": RecordingTestRuns,
         "job_boards": RecordingJobBoards,
         "domain_checks": RecordingDomainChecks,
+        "legal_forms": RecordingLegalForms,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -503,6 +517,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "render_pages",
         "purge_page_text",
         "extract_lead",
+        "check_legal_form",
         "select_primary_contact",
         "run_ai_test_sets",
         "check_domains",
@@ -612,6 +627,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "render_pages",
             "purge_page_text",
             "extract_lead",
+            "check_legal_form",
             "select_primary_contact",
             "check_job_boards",
             "recheck_event",
@@ -630,6 +646,14 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             40,
             timedelta(minutes=5),
             2,
+            JobGroup.ENRICHMENT,
+        ),
+        "check_legal_form": (  # Story 2.12: select_primary_contact's spec
+            Lane.BULK,
+            both,
+            45,
+            timedelta(minutes=5),
+            3,
             JobGroup.ENRICHMENT,
         ),
         "select_primary_contact": (
@@ -717,6 +741,7 @@ def test_a_registry_built_without_domain_checks_fails_a_check_domains_job() -> N
         "primary": RecordingPrimary,
         "test_runs": RecordingTestRuns,
         "job_boards": RecordingJobBoards,
+        "legal_forms": RecordingLegalForms,
     }
     job_types = main.build_job_types(**services)  # type: ignore[arg-type]
     handler = job_types.get("check_domains").handler
@@ -796,6 +821,26 @@ def test_select_primary_contact_calls_its_service_once() -> None:
 
     assert result is None
     assert primary.calls == [LEAD]
+
+
+def test_check_legal_form_calls_its_service_once_and_is_deferred_when_the_budget_refuses() -> None:
+    legal_forms = RecordingLegalForms()
+    refused = RecordingLegalForms(allowed=False)
+    job = Job(RUN, "check_legal_form", Lane.BULK, {"v": 1, "lead_id": LEAD}, 1)
+
+    assert registry(legal_forms=lambda: legal_forms).get("check_legal_form").handler(job) is None
+    assert registry(legal_forms=lambda: refused).get("check_legal_form").handler(job) is DEFERRED
+    assert (legal_forms.calls, refused.calls) == ([LEAD], [LEAD])
+
+
+@pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])
+def test_a_check_legal_form_job_without_its_lead_is_invalid(payload: dict[str, object]) -> None:
+    legal_forms = RecordingLegalForms()
+    handler = registry(legal_forms=lambda: legal_forms).get("check_legal_form").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "check_legal_form", Lane.BULK, payload, 1))
+    assert legal_forms.calls == []
 
 
 @pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])

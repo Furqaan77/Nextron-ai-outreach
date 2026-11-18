@@ -1915,13 +1915,18 @@ Market; Eligibility re-checks it against the current Markets on every call. So `
 sync` disabling a Market blocks its Contacts at once, and a Contact resolved as blocked stays
 blocked when its country's Market is enabled later, until something re-resolves it.
 
-**Not yet.** No legal form, Event history, Enrollment history or re-contact date is recorded,
-so `evaluate_eligibility` passes none: **no UK Contact is eligible** until Story 2.12 confirms
-the legal form (each fails with `uk_legal_form_unconfirmed`), every `not_now` Lead fails with
-`not_now_undated` until Epic 7 records the date, and the FR-63 history is empty until Story 4.8
-(Enrollments) and 2.9 (Events) pass it. Story 3.7 widened `provenance_records.basis_rule` to 128
-characters for the UK basis; `basis_country(rule)` names the country a basis rule is for (`US`,
-`GB` or `None`), which `Research.record_eligibility_basis` checks against the Campaign's Market.
+**The UK legal form (Story 2.12).** `evaluate_eligibility` reads the Lead's stored legal form
+(`queries.research.legal_form`) through `domain.legal_form.eligibility_facts`: a `confirmed`
+corporate type passes, a `not_corporate` type gives `uk_legal_form_ineligible`, and anything
+else (a Lead never checked, no link, a record that isn't active) `uk_legal_form_unconfirmed`;
+see [Companies House legal form](#companies-house-legal-form).
+
+**Not yet.** No Event history, Enrollment history or re-contact date is recorded, so
+`evaluate_eligibility` passes none: every `not_now` Lead fails with `not_now_undated` until
+Epic 7 records the date, and the FR-63 history is empty until Story 4.8 (Enrollments) and 2.9
+(Events) pass it. Story 3.7 widened `provenance_records.basis_rule` to 128 characters for the
+UK basis; `basis_country(rule)` names the country a basis rule is for (`US`, `GB` or `None`),
+which `Research.record_eligibility_basis` checks against the Campaign's Market.
 
 **Contract tests** (`tests/contracts/test_eligibility_contracts.py`), each with probes: no POST
 route names `eligib` in its path, name or endpoint; `eligib` is a protected settings stem and no
@@ -2158,8 +2163,9 @@ Then its Provenance (FR-51, Story 3.7):
   anything else plain text), the retrieval date and the Address Class at the time. An address's
   records, in time order, are its Address Class history.
 
-The header's **HQ timezone**, and the **Signals** and **Evidence** sections above Contacts, are
-Story 2.9's (see [Signals and Evidence](#signals-and-evidence)), and the Primary Contact line
+A GB Lead's **UK legal form** section, after the header, is Story 2.12's (see [Companies House
+legal form](#companies-house-legal-form)). The header's **HQ timezone**, and the **Signals**
+and **Evidence** sections above Contacts, are Story 2.9's (see [Signals and Evidence](#signals-and-evidence)), and the Primary Contact line
 and the **Make primary** buttons Story 2.10's (see [Decision-makers and the Primary
 Contact](#decision-makers-and-the-primary-contact)), and the **Erasure** column's "Erase (data
 subject request)" link and an erased Contact's tombstone line Story 3.13's (see [Erasing a
@@ -2470,6 +2476,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0033_6_5_domain_checks` | `domain_checks`: one append-only row per Sending Domain authentication check that ran (a foreign key to `sending_domains` with no cascade, `ix_domain_checks_sending_domain_id_checked_at`, and `ck_domain_checks_passed`: `passed` is the AND of the four item flags) (see [Sending Domain authentication](#sending-domain-authentication)) | `sending` |
 | `0034_4_6_ai_test_sets` | rebuilds `ai_test_cases` (from 0030's exact table, which 0031 to 0033 leave unchanged; every row, both checks and `uq_ai_test_cases_live_key` kept) with `origin` (server default `fixture`, or `override`), a nullable `contact_id` (no foreign key) and `ck_ai_test_cases_origin_contact`, and `ai_test_runs` (from 0030's exact table; every row, check, foreign key and `ix_ai_test_runs_tuple_id_test_set` kept) with a nullable `cases_sha256` and `ck_ai_test_runs_cases_sha256` (see [The AI Test Sets](#the-ai-test-sets-story-46)) | `playbook` |
 | `0035_2_11_job_postings` | `job_postings` (foreign keys to `leads`, `signals` and `evidence` with no cascade; `ix_job_postings_lead_id`, `ix_job_postings_signal_id`; unique on `lead_id`, `url` and `title`; `ck_job_postings_source`, `ck_job_postings_board_token`, `ck_job_postings_status` and `ck_job_postings_closed_at`); adds nine nullable counts to `crawl_runs` in place (`add_column`, no check): `careers_postings`, `careers_events`, `<source>_postings` and `<source>_events` for `greenhouse`, `lever` and `ashby`, and `board_errors` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)) | `research` |
+| `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2554,7 +2561,8 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
 `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
 crawling](#website-crawling)), `extract_lead` (see [Signals and
-Evidence](#signals-and-evidence)), `select_primary_contact` (see [Decision-makers and the
+Evidence](#signals-and-evidence)), `check_legal_form` (see [Companies House legal
+form](#companies-house-legal-form)), `select_primary_contact` (see [Decision-makers and the
 Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` (see [The AI
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
 authentication](#sending-domain-authentication)), and `check_job_boards` and `recheck_event`
@@ -3561,9 +3569,11 @@ never runs inside a transaction).
 **Adapters.** Every adapter whose `__init__` takes an `http` client takes a required keyword
 `meter` and wraps its one request in `Metered(meter, provider, operation)`, which records
 exactly one `ApiCall`: `ok`, or the `AdapterError`'s code. A call refused before any request (no
-token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_message`) and Google
+token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_message`), Google
 OAuth (`google_oauth`/`code_exchange`, `token_refresh` and `token_revocation`; a revoke answered
-`invalid_token` is `ok`). The Claude gateway records an `AiCall` per request instead.
+`invalid_token` is `ok`) and Companies House (`companies_house`/`search_companies` and
+`get_company`; a lookup answered 404 is `ok`, and a request its own rate limit refuses records
+nothing). The Claude gateway records an `AiCall` per request instead.
 `tests/contracts/test_adapter_boundary.py` checks every such adapter.
 
 **Quotas and the budget** are settings (Settings, Budget and limits), each counted over the UTC
@@ -4587,6 +4597,95 @@ first, then the newest first seen; "No job postings yet." when there are none.
 
 **Not yet:** the EU boards (`job-boards.eu.greenhouse.io`, `jobs.eu.lever.co`) aren't read
 (their endpoints and terms are unchecked); see `deferred-work.md`.
+
+The chain after the people step is `check_job_boards`, then Story 2.12's `check_legal_form` (see
+[Companies House legal form](#companies-house-legal-form)), which queues
+`select_primary_contact` when it is done: a finished board check queues the legal-form check
+(payload `{v, lead_id, run_id}`).
+
+## Companies House legal form
+
+UK cold email may go only to corporate subscribers (PECR, NFR-3), so each GB Lead's legal form
+is confirmed against Companies House, and only when Evidence on the Lead's own website links
+the Lead to the record (FR-12, FR-9, AD-3, AD-7, AD-9, INT-5; Story 2.12). The rules are in
+`nextron/domain/legal_form.py` (the one list of corporate-subscriber company types, also read
+by the Market rules and Eligibility); the stage is `LegalFormChecks` in
+`nextron/app/discovery/legal_form.py`; the register is reached through the `RegistryPort`
+(`nextron/ports/registry.py`) and its adapter `CompaniesHouseRegistry`
+(`nextron/adapters/companies_house`).
+
+**The adapter** searches companies by name (`/search/companies`, 20 hits) and looks a company up
+by number (`/company/<number>`; a 404 is "no such company"). It reads the Companies House API
+key from the keyring (`nextron credentials`, key `companies_house`) on every call and sends it
+as HTTP Basic auth. It keeps itself under the API's limit, 600 requests per 5 minutes, with a
+sliding window: the 601st request is refused as the retryable `registry_rate_limited` with no
+request made, and it never sleeps. Every request is metered as provider `companies_house`
+(operations `search_companies` and `get_company`). Errors: `registry_rate_limited` (also a
+429) and `registry_unavailable` (a 5xx or a transport failure) are retryable;
+`registry_unauthorized` (401/403), `registry_refused` (any other status) and
+`registry_bad_response` (a body over 1 MB or not the expected JSON) aren't.
+
+**The `check_legal_form` job** (bulk lane by default, or interactive; priority 45; 5 minutes;
+retry limit 3; group Enrichment; keyed `check_legal_form:<lead>:tick`, one site at a time) runs
+after Story 2.11's `check_job_boards` (itself queued by the people step of `extract_lead`) and
+before `select_primary_contact`, which it queues when it is done. It checks the budget first (a refusal defers it). A Lead whose country isn't
+`GB` makes no call and goes straight to the selection. For a GB Lead:
+
+1. **The number path.** It reads the Lead's stored pages for a company number near "Company
+   No.", "Company number", "Company registration number", "Company reg no", "Registered
+   number"/"Registered no." or "Registered in England/Wales/Scotland/Northern Ireland": the
+   first `AB123456` or 6-to-8-digit number within 40 characters after the phrase, with no digit
+   and no sentence break (`.`, `!`, `?`, except a "No.") in between, zero-padded to 8. Bare
+   "registration number" doesn't count (it is used for FCA, VAT and SRA numbers). Up to three
+   distinct numbers are looked up, in page order. A record links the Lead only when its
+   registered name, normalised (ignoring case, punctuation, `&`/"and" and a trailing Ltd,
+   Limited, LLP or plc), equals the Lead's or appears in that page's text, so an unrelated
+   number on the page links nothing. Exactly one linking record is the link; two are ambiguous.
+2. **The name path**, when the number path gave no link. It needs a UK postcode quoted on the
+   site; with none there is no call. It searches by the Lead's name and accepts a hit only when
+   the normalised registered name equals the Lead's and its registered office postcode equals a
+   postcode on the site. Exactly one such hit is looked up and checked again; two or more are
+   ambiguous, and nothing is linked. The name path needs the registered office postcode to appear
+   on the site, so a firm registered at its accountant's or a formation agent's address that
+   quotes no company number stays `unconfirmed`.
+3. **Applying it**, in one transaction: with a link, discovery sets the Lead's `ch_number`
+   (FR-9: a Lead that already holds the number survives and this Lead merges into it; a Lead
+   holding a different number is never overwritten, and the result is `unconfirmed`, logged as
+   `legal_form_conflict`); `research.record_legal_form` stores `legal_form` (the company type),
+   `company_status` and `legal_form_status` on the Lead's survivor, with two Quote Evidence rows
+   (`extracted_by rule`): the site quote (the phrase and the number, or the postcode with up to
+   80 characters before it; `source website`, re-checked against the stored page) and the
+   registry record ("Companies House record <number>: company type <type>, company status
+   <status>, registered office postcode <postcode>, registered name <name>", `source registry`,
+   linked to the company's Companies House page); then `select_primary_contact` is queued.
+
+**The status fails closed.** `confirmed` only when the link is to exactly one record, its
+company status is `active` and its type is a corporate subscriber (`ltd`, `plc`, `llp`,
+`private-unlimited`, `private-unlimited-nsc` and the three guarantee/exemption types);
+`not_corporate` when it is active with any other type (a limited partnership, say);
+`unconfirmed` otherwise (no link, ambiguity, or a record that isn't active, whose number is
+still set). A Lead never checked has no status, which Eligibility reads as unconfirmed. A
+re-run's finding replaces the old one: the same quote confirms its row (`last_confirmed_at`), a
+changed one supersedes it, and a lost link retracts both rows. A `ch_number` from a CSV is never
+Evidence. A retryable registry error fails the job for the runner to retry, with nothing
+recorded or queued; any other keeps the Lead's earlier legal form and still queues the
+selection. Log lines (`legal_form_checked`, `legal_form_skipped`, `legal_form_conflict`) hold
+IDs and codes only.
+
+**Eligibility** reads the stored legal form live: `confirmed` with a corporate type passes the
+UK legal-form rule, `not_corporate` gives `uk_legal_form_ineligible`, anything else
+`uk_legal_form_unconfirmed`.
+
+**The Lead page** of a GB Lead shows a "UK legal form" section after the header: the status
+("Confirmed: corporate subscriber", "Not a corporate subscriber", "Unconfirmed" or "Not checked
+yet"), the legal form ("private limited company (ltd)"), the company status, the company number
+linked to its Companies House page, and the two Evidence quotes with their sources. A Lead that
+isn't confirmed says "This Lead stays researchable; UK cold email waits for a confirmed
+corporate legal form.": it stays on the Leads list and is researched like any other. Those two
+Evidence rows read "Legal form" under Supports.
+
+**Not yet:** discovering Leads from the register by SIC code (S2), officers, accounts and the
+periodic re-checks (FR-61).
 
 ## Engine health
 

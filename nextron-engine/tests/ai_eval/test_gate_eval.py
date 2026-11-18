@@ -90,6 +90,7 @@ def test_the_gate_runs_the_extraction_tuples_and_activates_nothing(
         extractions=no_jobs,
         primary=no_jobs,
         job_boards=no_jobs,
+        legal_forms=no_jobs,
     )
     runs = AiTestRuns(clock, meter, ClaudeGateway(secrets, meter=meter), JobQueue(clock, job_types))
     before = activation_rows(db_engine)

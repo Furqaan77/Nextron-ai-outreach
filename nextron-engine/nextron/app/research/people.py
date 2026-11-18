@@ -78,12 +78,15 @@ work and opens its own transactions, in three phases:
    ``extraction_finished`` (``lead_id``, ``run_id``, ``outcome``, ``error_code``), as Story 2.9's
    do.
 
-Whenever it records a run (any outcome but the raise), the same transaction enqueues the next
-stage, ``check_job_boards`` (Story 2.11, ``nextron.app.research.job_boards``, which enqueues
-``select_primary_contact`` when it is done, so the selection sees the hiring Events): scope the
-Lead, discriminator ``tick`` (a live job absorbs a repeat), payload ``{v, lead_id, run_id}``
-(``run_id`` the crawl run ``extract`` was given) and, when the Lead has a ``web_domain``, the
-concurrency key ``domain:<web_domain>``. A people run is an ``extraction_runs`` row with ``route``
+Whenever it records a run (any outcome but the raise), the same transaction enqueues the
+chain's next stage through ``_enqueue_next_stage``, the one insertion point for the stages
+between the people step and the Primary Contact's selection: ``check_job_boards`` (Story 2.11,
+``nextron.app.research.job_boards``), whose finish enqueues ``check_legal_form`` (Story 2.12,
+``nextron.app.discovery.legal_form``), which enqueues ``select_primary_contact``, so the
+selection sees the hiring Events and the legal form. Scope the Lead, discriminator ``tick``
+(a live job absorbs a repeat), payload ``{v, lead_id, run_id}`` (``run_id`` the crawl run
+``extract`` was given) and, when the Lead has a ``web_domain``, the concurrency key
+``domain:<web_domain>``. A people run is an ``extraction_runs`` row with ``route``
 ``extract_people``, recorded like Story 2.9's (``actor``, ``crawl_run_id``, ``pages_sent``,
 ``pages_truncated``, ``started_at`` phase 1's now, ``ended_at``).
 
@@ -357,10 +360,10 @@ class PeopleExtractions:
     ) -> RecordedRun:
         """Record a run that made no call, and enqueue the next stage."""
         recorded = self._record(lead.id, crawl_run_id, outcome, actor=actor, started_at=started_at)
-        self._next_stage(lead.id, run_id, lead.web_domain)
+        self._enqueue_next_stage(lead.id, run_id, lead.web_domain)
         return RecordedRun(lead.id, recorded, outcome, None)
 
-    # Runs and the selection ---------------------------------------------------------------------
+    # Runs and the next stage --------------------------------------------------------------------
 
     def _record(
         self,
@@ -412,12 +415,14 @@ class PeopleExtractions:
             pages_truncated=call.pages_truncated,
         )
         if select:
-            self._next_stage(call.lead_id, call.run_id, call.web_domain)
+            self._enqueue_next_stage(call.lead_id, call.run_id, call.web_domain)
         return RecordedRun(call.lead_id, run_id, outcome, code)
 
-    def _next_stage(self, lead_id: str, run_id: str, web_domain: str | None) -> None:
-        """Enqueue the Lead's ``check_job_boards`` job (Story 2.11), which enqueues the
-        Primary Contact's selection, in the caller's transaction."""
+    def _enqueue_next_stage(self, lead_id: str, run_id: str, web_domain: str | None) -> None:
+        """Enqueue the chain's next stage for the Lead, in the caller's transaction: the one
+        insertion point between the people step and ``select_primary_contact``. It is
+        ``check_job_boards`` (Story 2.11), whose finish enqueues ``check_legal_form`` (Story
+        2.12), which enqueues the Primary Contact's selection."""
         self._queue.enqueue(
             CHECK_JOB_BOARDS_JOB,
             scope=lead_id,
@@ -467,7 +472,7 @@ class PeopleExtractions:
             stored=applied.stored,
             discarded=applied.discarded,
         )
-        self._next_stage(call.lead_id, call.run_id, call.web_domain)
+        self._enqueue_next_stage(call.lead_id, call.run_id, call.web_domain)
         return applied
 
     def _log_refusals(self, call: _PeopleCall, validation: PeopleValidation, now: datetime) -> None:

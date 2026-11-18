@@ -127,6 +127,12 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         # Story 2.6: the methods a firm's website offers and the URLs of its public pages
         "contact_methods": PiiClass.NONE,
         "no_decision_maker": PiiClass.NONE,  # Story 2.10: a flag about the firm
+        # Story 2.12: the firm's Companies House type and status, and two Evidence ids
+        "legal_form": PiiClass.NONE,
+        "company_status": PiiClass.NONE,
+        "legal_form_status": PiiClass.NONE,
+        "legal_form_site_evidence_id": PiiClass.NONE,
+        "legal_form_registry_evidence_id": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.

@@ -306,6 +306,7 @@ def test_the_health_report_carries_the_newest_recovery_row(
         primary=lambda: None,  # type: ignore[arg-type,return-value]
         test_runs=lambda: None,  # type: ignore[arg-type,return-value]
         job_boards=lambda: None,  # type: ignore[arg-type,return-value]
+        legal_forms=lambda: None,  # type: ignore[arg-type,return-value]
     )
     issues = main.build_health_issues(budget=_NoBudget())  # type: ignore[arg-type]
     health = EngineHealth(

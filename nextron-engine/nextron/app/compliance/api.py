@@ -180,12 +180,17 @@ the send gate, 6.9) calls it, and it is the only caller of
    queries.research.provenance(contact.id))`` (``nextron.domain.contacts``): false, which gives
    ``provenance_missing``, when no source record shows where the Contact or its email address
    came from.
-5. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code,
-   stage), market_rules, clock.now())``. No Enrollment history, Event times, legal form or
-   re-contact date is read yet (Stories 4.8, 2.9, 2.12 and Epic 7 pass them), so ``history``
-   and ``events_first_seen`` are empty, ``legal_form`` is ``None`` (every UK Contact fails
-   with ``uk_legal_form_unconfirmed``) and ``recontact_on`` is ``None`` (every ``not_now`` Lead
-   fails with ``not_now_undated``).
+5. **The legal form** (Story 2.12): ``queries.research.legal_form(lead.id)``, through
+   ``nextron.domain.legal_form.eligibility_facts(legal_form, legal_form_status)``, gives
+   ``EligibilityLead``'s ``legal_form`` and ``legal_form_confirmed``: ``(code, True)`` for a
+   ``confirmed`` corporate code and for a ``not_corporate`` code (so the reason is
+   ``uk_legal_form_ineligible``); anything else, a Lead never checked included, is unconfirmed
+   (``uk_legal_form_unconfirmed`` in a GB Market).
+6. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code, stage,
+   legal_form=, legal_form_confirmed=), market_rules, clock.now())``. No Enrollment history,
+   Event times or re-contact date is read yet (Stories 4.8, 2.9 and Epic 7 pass them), so
+   ``history`` and ``events_first_seen`` are empty and ``recontact_on`` is ``None`` (every
+   ``not_now`` Lead fails with ``not_now_undated``).
 
 Nothing is written, cached or logged: each call reads the current facts again, so an edit to a
 Market, a suppression or a stage change shows in the very next Decision.
@@ -249,6 +254,7 @@ from nextron.domain.contactability import (
 from nextron.domain.contacts import provenance_recorded
 from nextron.domain.eligibility import Decision, EligibilityContact, EligibilityLead, evaluate
 from nextron.domain.ids import is_ulid
+from nextron.domain.legal_form import eligibility_facts
 from nextron.domain.markets import InvalidMarkets, MarketDef
 from nextron.domain.notifications import SubjectSuppressed
 from nextron.domain.suppression_entry import (
@@ -671,6 +677,11 @@ class Compliance:
             raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
         # a global looked up at call time: a fake of compliance_api.assert_contactable sees it
         contactable = assert_contactable(ContactSubject(contact.id), "email", "cold")
+        stored = research_queries.legal_form(lead.id)
+        legal_form, confirmed = eligibility_facts(
+            None if stored is None else stored.legal_form,
+            None if stored is None else stored.legal_form_status,
+        )
         return evaluate(
             EligibilityContact(
                 email=contact.email,
@@ -684,7 +695,12 @@ class Compliance:
                     contact.email, research_queries.provenance(contact.id)
                 ),
             ),
-            EligibilityLead(country_code=lead.country_code, stage=stage),
+            EligibilityLead(
+                country_code=lead.country_code,
+                stage=stage,
+                legal_form=legal_form,
+                legal_form_confirmed=confirmed,
+            ),
             _market_rules(),
             self._clock.now(),
         )

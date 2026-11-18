@@ -85,6 +85,7 @@ _NO_SERVICES: Final[dict[str, Any]] = {
     "primary": _no_backups,
     "test_runs": _no_backups,
     "job_boards": _no_backups,
+    "legal_forms": _no_backups,
 }
 
 

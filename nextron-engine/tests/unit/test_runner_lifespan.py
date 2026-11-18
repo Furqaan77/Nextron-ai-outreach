@@ -226,6 +226,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "render_pages",
         "purge_page_text",
         "extract_lead",
+        "check_legal_form",
         "select_primary_contact",
         "run_ai_test_sets",
         "check_domains",
@@ -570,6 +571,7 @@ def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
         primary=no_crawls,
         test_runs=no_crawls,
         job_boards=no_crawls,
+        legal_forms=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -774,6 +776,7 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
         primary=no_crawls,
         test_runs=no_crawls,
         job_boards=no_crawls,
+        legal_forms=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 

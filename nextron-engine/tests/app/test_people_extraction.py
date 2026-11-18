@@ -23,8 +23,10 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron.app.compliance.api import Compliance
+from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.queries import research as research_queries
 from nextron.app.research.extraction import SignalExtractions
+from nextron.app.research.job_boards import JobBoards
 from nextron.app.research import people as people_module
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.db.repos.research import signals as signals_repo
@@ -52,7 +54,9 @@ from tests.app.test_signal_extraction import (
     utc,
 )
 from tests.fakes.crawler import html_page
+from tests.fakes.job_board import ScriptedJobBoards
 from tests.fakes.llm import ScriptedLlm
+from tests.fakes.registry import ScriptedRegistry
 
 PEOPLE_ACTOR = "ai:extract_people@v1"
 SITE = "smith-law.com"
@@ -967,3 +971,53 @@ def test_no_people_and_no_decision_maker_still_records_an_ok_run(world: World) -
 
     assert people_runs(world, lead) == [("ok", None, PEOPLE_ACTOR, 2, 0, 0, 0)]
     assert counts(world, lead) == []  # a zero would falsely disqualify the Lead
+
+
+# The chain after the people step (Stories 2.11 and 2.12 at their merge) -------------------------
+
+
+def test_the_chain_runs_people_then_job_boards_then_legal_form_then_the_selection(
+    world: World,
+) -> None:
+    """End to end on real units of work: the people step queues ``check_job_boards``; the board
+    check's finish queues ``check_legal_form`` with the same ``{v, lead_id, run_id}``; the
+    legal-form check (a US Lead: no registry call) queues ``select_primary_contact``. Each stage
+    is queued only once the one before it has run."""
+    lead, run_id, pages = law_lead(world)
+    world.extract(lead, run_id, ok(), people=[law_people(pages)])
+    chain_payload = {"v": 1, "lead_id": lead, "run_id": run_id}
+
+    [(key, concurrency, payload, _)] = world.jobs("check_job_boards")
+    assert (key, concurrency, json.loads(payload)) == (
+        f"check_job_boards:{lead}:tick",
+        f"domain:{SITE}",
+        chain_payload,
+    )
+    assert world.jobs("check_legal_form") == [] and world.jobs("select_primary_contact") == []
+
+    boards = ScriptedJobBoards(boards={})
+    with world.units.open():
+        assert JobBoards(world.clock, world.meter, boards, world.crawler, world.queue)\
+            .check_job_boards(lead, run_id)
+
+    [(key, concurrency, payload, _)] = world.jobs("check_legal_form")
+    assert (key, concurrency, json.loads(payload)) == (
+        f"check_legal_form:{lead}:tick",
+        f"domain:{SITE}",
+        chain_payload,
+    )
+    assert world.jobs("select_primary_contact") == []
+
+    registry = ScriptedRegistry()
+    with world.units.open():
+        assert LegalFormChecks(
+            world.clock, world.meter, registry, world.discovery, world.research, world.queue
+        ).check_legal_form(lead)
+
+    assert registry.calls == []  # a US Lead never reaches the register
+    [(key, concurrency, payload, _)] = world.jobs("select_primary_contact")
+    assert (key, concurrency, json.loads(payload)) == (
+        f"select_primary_contact:{lead}:tick",
+        f"domain:{SITE}",
+        {"v": 1, "lead_id": lead},
+    )

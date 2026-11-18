@@ -21,7 +21,12 @@ Three owners write it, column by column (``nextron.db.owners``):
   ``nextron.domain.widgets.ContactMethods``: how the Lead's website lets a visitor get in
   touch, and every page checked; and ``no_decision_maker`` (Story 2.10, migration
   ``0028_2_10_primary_contact``), a nullable Boolean: NULL until the Primary Contact's
-  selection first runs, then whether it found no decision-maker.
+  selection first runs, then whether it found no decision-maker; and the legal form (Story
+  2.12, migration ``0036_2_12_legal_form``): ``legal_form`` (the linked Companies House
+  record's company type), ``company_status``, ``legal_form_status`` (``confirmed``,
+  ``not_corporate`` or ``unconfirmed``; NULL until first checked) and the two ``evidence`` rows
+  the finding rests on, ``legal_form_site_evidence_id`` and ``legal_form_registry_evidence_id``
+  (no foreign key, like ``hq_evidence_id``), all nullable with no CHECK (added in place).
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
@@ -44,6 +49,9 @@ PLACE_ID_LENGTH: Final = 512
 COUNTRY_CODE_LENGTH: Final = 2
 STAGE_LENGTH: Final = 32
 HQ_TZ_LENGTH: Final = 64
+LEGAL_FORM_LENGTH: Final = 64  # nextron.domain.legal_form.LEGAL_FORM_PATTERN
+COMPANY_STATUS_LENGTH: Final = 32  # nextron.domain.legal_form.COMPANY_STATUS_PATTERN
+LEGAL_FORM_STATUS_LENGTH: Final = 16
 
 STAGE_CHECK: Final = "pipeline_stage IN ({})".format(
     ",".join(f"'{stage}'" for stage in PipelineStage)
@@ -86,3 +94,8 @@ class LeadRecord(Base):
     hq_evidence_id: Mapped[str | None] = mapped_column(Ulid)
     contact_methods: Mapped[str | None] = mapped_column(Text)
     no_decision_maker: Mapped[bool | None] = mapped_column(Boolean)
+    legal_form: Mapped[str | None] = mapped_column(String(LEGAL_FORM_LENGTH))
+    company_status: Mapped[str | None] = mapped_column(String(COMPANY_STATUS_LENGTH))
+    legal_form_status: Mapped[str | None] = mapped_column(String(LEGAL_FORM_STATUS_LENGTH))
+    legal_form_site_evidence_id: Mapped[str | None] = mapped_column(Ulid)
+    legal_form_registry_evidence_id: Mapped[str | None] = mapped_column(Ulid)

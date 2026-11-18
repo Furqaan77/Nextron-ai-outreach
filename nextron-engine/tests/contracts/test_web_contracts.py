@@ -661,6 +661,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_contacts.html",
         "lead_import.html",
         "lead_import_form.html",
+        "lead_legal_form.html",
         "lead_missing.html",
         "leads.html",
         "locked.html",

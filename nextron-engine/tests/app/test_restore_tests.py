@@ -148,6 +148,7 @@ class World:
             primary=no_crawls,
             test_runs=no_crawls,
             job_boards=no_crawls,
+            legal_forms=no_crawls,
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(

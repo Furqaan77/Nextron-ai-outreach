@@ -224,6 +224,7 @@ def _main_registries() -> tuple[Triggers, JobTypes]:
         primary=_never,
         test_runs=_never,
         job_boards=_never,
+        legal_forms=_never,
     )
     triggers = main.build_triggers(
         job_types,

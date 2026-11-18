@@ -3,8 +3,8 @@ transport raises or answers, only ``AdapterError`` comes out of a port call, and
 secret is in the error.
 
 - **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__``
-  takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway`` and
-  ``HttpCrawler`` today) has a driver in
+  takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway``,
+  ``HttpCrawler`` and ``CompaniesHouseRegistry`` today) has a driver in
   ``DRIVERS``: it builds the adapter on a client whose transport is the probe's, with secrets
   planted where the adapter reads them, and makes each of its port calls. The coverage check
   fails for a new such class until it gets one.
@@ -41,6 +41,7 @@ import pytest
 
 import nextron.adapters
 from nextron.adapters.ai import LLM_INVALID, LLM_TRUNCATED, ClaudeGateway
+from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.adapters.telegram import TelegramAlert
@@ -61,6 +62,7 @@ AUTH_CODE: Final = "Ac7Wm3Kq9Jz2Pv5Tx8Ns"
 REFRESH_TOKEN: Final = "Rt8Gh2Mc5Vb9Xq3Nz7Lp"
 REVOKED_TOKEN: Final = "Rv3Jd7Ks1Wq5Pz9Lm2Xc"
 CLAUDE_KEY: Final = "Ck5Wn9Qx2Lr6Tz3Hv8Mb"
+COMPANIES_HOUSE_KEY: Final = "Kh6Tp1Zc8Wm4Rq2Nx7Lv"
 PLANTED: Final = (
     BOT_TOKEN,
     BOT_TOKEN.split(":")[1],
@@ -69,6 +71,7 @@ PLANTED: Final = (
     REFRESH_TOKEN,
     REVOKED_TOKEN,
     CLAUDE_KEY,
+    COMPANIES_HOUSE_KEY,
 )
 CHAT: Final = "-1001234567890"
 ALERT_TEXT: Final = "Job dead: send_alert 01JD3QZ8X5V9K2M7N4P6R8T0WY, attempts: 6"
@@ -214,12 +217,23 @@ def crawler_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tu
     )
 
 
+def companies_house_calls(
+    http: httpx2.Client, meter: InMemoryUsageMeter
+) -> Iterator[tuple[str, Call]]:
+    secrets = InMemorySecrets()
+    secrets.write("companies_house/api_key", COMPANIES_HOUSE_KEY)
+    adapter = CompaniesHouseRegistry(secrets, meter=meter, http=http)
+    yield "search_companies", lambda: adapter.search_companies("Smith & Jones LLP")
+    yield "company", lambda: adapter.company("01234567")
+
+
 # Every adapter class whose __init__ takes an http client, with its driver.
 DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
     GoogleOAuthClient: google_calls,
     ClaudeGateway: claude_calls,
     HttpCrawler: crawler_calls,
+    CompaniesHouseRegistry: companies_house_calls,
 }
 # What each adapter records per request: an ApiCall, unless it is listed here.
 RECORDS: Final[dict[type, type]] = {ClaudeGateway: AiCall}
