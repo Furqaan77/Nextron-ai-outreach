@@ -1,0 +1,18 @@
+{#- One erasure receipt (nextron.web.erase_page.receipt_view, Story 3.14): on the Lead page under
+    an erased Contact's tombstone line, and on its erase step. Every text is built by code from
+    labels, counts, dates, ids and codes, but for the request reference the Operator typed; the
+    reference and the details render through |plain inside hx-disable. -#}
+<section class="erasure-receipt" id="{{ receipt.anchor }}" hx-disable>
+<h3>{{ receipt.heading }}</h3>
+<p class="receipt-request">{{ receipt.request|plain }}</p>
+<table class="receipt-table">
+<thead>
+<tr><th scope="col">Store</th><th scope="col">Status</th><th scope="col">Detail</th><th scope="col">Time</th></tr>
+</thead>
+<tbody>
+{%- for line in receipt.stores %}
+<tr><td>{{ line.label }}</td><td>{{ line.status }}</td><td>{{ line.detail|plain }}</td><td>{{ line.at }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+</section>

@@ -89,6 +89,11 @@ the Contact's override cases (Story 4.6: an Operator's pseudonymised Reply, live
 retired; ``[erased]`` once the Contact is erased), read with a generic select, by
 ``loaded_at``, then ``id``. A ``contact_id`` that isn't a ULID has none. A fixture case is
 synthetic and never about a Contact.
+
+``override_case_counts(contact_id) -> (cases, erased)`` (the merge of Stories 3.14 and 4.6):
+the number of the Contact's override cases, live or retired, and how many of them hold
+``[erased]``; ``(0, 0)`` for a ``contact_id`` that isn't a ULID. The erasure's AI Test Sets
+store reads it.
 """
 
 from collections.abc import Iterable
@@ -150,6 +155,7 @@ __all__ = [
     "export_pii",
     "fact",
     "health_issues",
+    "override_case_counts",
     "playbook_status",
     "route_tuples",
     "tuple_of",
@@ -596,6 +602,13 @@ def allowed_facts(segment_id: str, market_id: str) -> tuple[FactVersion, ...]:
         ):
             found.append(current)
     return tuple(found)
+
+
+def override_case_counts(contact_id: str) -> tuple[int, int]:
+    """``(cases, erased)``: the Contact's override cases, live or retired, and how many of them
+    are erased; see the module docstring."""
+    rows = cases_repo.override_rows(contact_id) if is_ulid(contact_id) else ()
+    return len(rows), sum(1 for row in rows if row.input == cases_repo.ERASED)
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:

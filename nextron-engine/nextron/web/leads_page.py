@@ -75,7 +75,10 @@ no request since leaves out " (request <reference>)". Its row holds no other val
 name, role, address, Address Class, LinkedIn URL or Primary flag), no Eligibility, basis,
 Market fact or Provenance Record (Story 3.7's rows) and no "Make primary" form (Story 2.10);
 the Lead and its other Contacts render unchanged. The erase link sits in its own "Erasure"
-column, the eighth of the Contacts table.
+column, the eighth of the Contacts table. Story 3.14: the tombstone line is followed by the
+Contact's erasure receipts (``queries.compliance.receipts``, passed in as ``receipts``),
+oldest first, each through ``nextron.web.erase_page.receipt_view`` and
+``erasure_receipt.html``, in a row spanning the table's eight columns.
 
 **Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
 ``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
@@ -165,7 +168,7 @@ from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlencode
 
-from nextron.app.queries.compliance import StoredRequest
+from nextron.app.queries.compliance import StoredReceipt, StoredRequest
 from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
 from nextron.app.queries.research import (
     EvidenceSupport,
@@ -201,7 +204,7 @@ from nextron.domain.postings import PostingSource, PostingStatus
 from nextron.domain.segments import EvidenceType, SignalClass
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
-from nextron.web.erase_page import ERASE_LABEL, erase_href
+from nextron.web.erase_page import ERASE_LABEL, ReceiptView, erase_href, receipt_view
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
@@ -681,6 +684,7 @@ class ContactRow:
     erase_href: str | None = None
     erase_label: str = ERASE_LABEL
     tombstone: str | None = None
+    receipts: tuple[ReceiptView, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,11 +978,13 @@ def contact_row(
     *,
     lead_id: str | None = None,
     erasure: StoredRequest | None = None,
+    receipts: Iterable[StoredReceipt] = (),
 ) -> ContactRow:
     """One Contact as the Lead page shows it; ``names`` are the stored Markets' names by
     id. The records table holds the source records only; a basis record is in ``bases``. An
     erased Contact (Story 3.13) shows by its ``tombstone`` line only, with ``erasure`` the
-    request that erased it: no value, basis, fact, record, form or link."""
+    request that erased it: no value, basis, fact, record, form or link,
+    only its ``receipts`` (Story 3.14)."""
     if contact.erased_at is not None:
         return ContactRow(
             contact_id=contact.id,
@@ -997,6 +1003,7 @@ def contact_row(
             tombstone=tombstone_line(
                 contact.erased_at, None if erasure is None else erasure.request_ref
             ),
+            receipts=tuple(receipt_view(receipt) for receipt in receipts),
         )
     found = tuple(records)
     sources = tuple(
@@ -1061,12 +1068,14 @@ def contacts_context(
     notice: Notice | None = None,
     *,
     erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
+    receipts: Mapping[str, Iterable[StoredReceipt]] = MappingProxyType({}),
 ) -> dict[str, object]:
     """What ``lead_contacts.html`` renders: the Lead's id (for the forms' path), the Primary
     line, the Contacts (in the order given, oldest first), each with its live Eligibility from
     ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id), its
     Market named from ``markets`` and its erase link, or, for an erased one, its tombstone line
-    with its request from ``erasures`` (by Contact id), and the POST's notice. A Contact without
+    with its request from ``erasures`` and its receipts from ``receipts`` (both by Contact id),
+    and the POST's notice. A Contact without
     a Decision raises ``KeyError``: the panel never shows a Contact whose Eligibility wasn't
     evaluated."""
     found = tuple(contacts)
@@ -1082,6 +1091,7 @@ def contacts_context(
                 names,
                 lead_id=lead_id,
                 erasure=erasures.get(contact.id),
+                receipts=receipts.get(contact.id, ()),
             )
             for contact in found
         ),
@@ -1151,6 +1161,7 @@ def lead_context(
     erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
     postings: Iterable[StoredPosting] = (),
     legal_form: StoredLegalForm | None = None,
+    receipts: Mapping[str, Iterable[StoredReceipt]] = MappingProxyType({}),
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the legal-form section for a GB Lead
     (``legal_form_view``, Story 2.12), the Signals and the live Evidence (in the order given),
@@ -1158,7 +1169,7 @@ def lead_context(
     (``contacts_context``), each Contact with its live Eligibility from ``decisions`` (by
     Contact id), its Market named from ``markets`` (the route passes ``()`` when the Markets
     can't be read) and its erase link, or, for an erased one, its tombstone line with its
-    request from ``erasures`` (by Contact id)."""
+    request from ``erasures`` and its receipts from ``receipts`` (both by Contact id)."""
     found = tuple(contacts)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     legal_form_ids = _legal_form_ids(legal_form)
@@ -1176,5 +1187,6 @@ def lead_context(
             markets,
             no_decision_maker,
             erasures=erasures,
+            receipts=receipts,
         ),
     }

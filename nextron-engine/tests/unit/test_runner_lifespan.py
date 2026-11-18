@@ -83,7 +83,7 @@ from nextron.domain.google_oauth import (
     encode_client_config,
     encode_grant_meta,
 )
-from nextron.domain.job import Lane
+from nextron.domain.job import Job, Lane
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.playbook import PlaybookSnapshot
 from nextron.domain.recovery import (
@@ -106,6 +106,7 @@ from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import CLIENT_ID, FakeGoogleOAuth
 from tests.fakes.probes import PortProbe, fake_probes
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.units import FakeUnits
 from tests.live_guard import allow_live_constructor
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -232,6 +233,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "check_domains",
         "check_job_boards",
         "recheck_event",
+        "erase_external",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -249,6 +251,53 @@ def spy[T](monkeypatch: pytest.MonkeyPatch, name: str) -> list[Any]:
 
     monkeypatch.setattr(main, name, build_and_keep)
     return built
+
+
+@pytest.mark.parametrize("env", ["test", "prod"])
+def test_build_app_wires_the_erasure_queue_stores_and_sink(
+    env: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 3.14: ``Erasures`` enqueues on the app's own queue; ``ErasureStores`` gets the dev
+    and test sink's ``SinkRecorder`` (``<data dir>\\sink``) outside ``prod`` and none in
+    ``prod``; and the registry's ``erase_external`` handler reaches that ``ErasureStores``."""
+    queues = spy(monkeypatch, "JobQueue")
+    erasures = spy(monkeypatch, "Erasures")
+    recorders = spy(monkeypatch, "SinkRecorder")
+    registries = spy(monkeypatch, "build_job_types")
+    given: list[tuple[Any, ...]] = []
+    built: list[Any] = []
+    real_stores = main.ErasureStores
+
+    def stores(*args: Any) -> Any:
+        given.append(args)
+        built.append(real_stores(*args))
+        return built[-1]
+
+    monkeypatch.setattr(main, "ErasureStores", stores)
+    config = load_bootstrap().model_copy(update={"env": env, "data_dir": tmp_path / env})
+
+    main.build_app(config, units=FakeUnits(), secrets=InMemorySecrets(env), clock=FrozenClock(T))
+
+    [queue] = queues
+    [erasure] = erasures
+    assert erasure._queue is queue
+    [(clock, notify, sink)] = given
+    if env == "prod":
+        assert (sink, recorders) == (None, [])
+    else:
+        [recorder] = recorders
+        assert sink is recorder and recorder.folder == tmp_path / env / "sink"
+    calls: list[tuple[Any, ...]] = []
+    [store] = built
+    monkeypatch.setattr(store, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    [job_types] = registries
+    handler = job_types.get("erase_external").handler
+    payload = {"v": 1, "contact_id": "01JD0000000000000000000001", "store": "logs"}
+
+    handler(Job("01JD0000000000000000000002", "erase_external", Lane.BULK, payload, 1))
+
+    assert calls == [(("01JD0000000000000000000001", "logs"), {"last_attempt": False})]
+    assert clock is store._clock and notify is not None
 
 
 def raw_query(units: UnitOfWorkFactory, statement: str, params: tuple[object, ...] = ()) -> Any:

@@ -1,7 +1,9 @@
 """``TelegramAlert`` on ``httpx2.MockTransport`` (``nextron.adapters.telegram``): the exact URL
 path and JSON body, every outcome row, the token read on each send, no secret or response text
 in any error, one usage record per attempted request (none for a send refused before it), and
-the lazy default client (refused in tests). Nothing here reaches Telegram."""
+the lazy default client (refused in tests). Story 3.14's ``delete``: the exact ``deleteMessage``
+request, every outcome row, one ``delete_message`` usage record per attempted request, and the
+refusals before any request. Nothing here reaches Telegram."""
 
 import json
 import sys
@@ -13,6 +15,7 @@ import pytest
 import nextron.adapters.telegram as adapter
 from nextron.adapters.telegram import (
     TELEGRAM_BAD_CHAT_ID,
+    TELEGRAM_BAD_MESSAGE_ID,
     TELEGRAM_BAD_TOKEN,
     TELEGRAM_REFUSED,
     TELEGRAM_UNAVAILABLE,
@@ -421,3 +424,92 @@ def test_the_client_is_built_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> N
     telegram.send(AlertMessage(CHAT, TEXT))
 
     assert len(built) == 1 and len(recorder.requests) == 2
+
+
+# deleteMessage (Story 3.14) ---------------------------------------------------------------------
+
+
+def deleted(result: object = True) -> httpx2.Response:
+    return httpx2.Response(200, json={"ok": True, "result": result})
+
+
+def test_a_delete_posts_exactly_the_chat_id_and_the_message_id_to_delete_message() -> None:
+    recorder = Recorder(deleted())
+    meter = InMemoryUsageMeter()
+
+    assert alert_on(recorder, meter=meter).delete(CHAT, "42") is True
+
+    [request] = recorder.requests
+    assert request.method == "POST"
+    assert str(request.url) == f"https://api.telegram.org/bot{TOKEN}/deleteMessage"
+    assert json.loads(request.content) == {"chat_id": -1001234567890, "message_id": 42}
+    assert meter.calls == [ApiCall("telegram", "delete_message", ok=True, error_code=None)]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx2.Response(400, json={"ok": False, "description": "message can't be deleted"}),
+        deleted(False),
+        httpx2.Response(200, json={"ok": False}),
+        httpx2.Response(204),
+        httpx2.Response(200, text="not json"),
+    ],
+    ids=["400", "result_false", "ok_false", "204", "not_json"],
+)
+def test_a_refusal_or_an_unconfirmed_answer_is_not_deleted(response: httpx2.Response) -> None:
+    meter = InMemoryUsageMeter()
+
+    assert alert_on(Recorder(response), meter=meter).delete(CHAT, "42") is False
+    assert meter.calls == [ApiCall("telegram", "delete_message", ok=True, error_code=None)]
+
+
+@pytest.mark.parametrize(
+    ("response", "retryable", "code"),
+    [
+        (httpx2.Response(429, text=LEAK), True, TELEGRAM_UNAVAILABLE),
+        (httpx2.Response(502, text=LEAK), True, TELEGRAM_UNAVAILABLE),
+        (httpx2.ConnectError("refused"), True, TELEGRAM_UNAVAILABLE),
+        (httpx2.ReadTimeout("read timed out"), True, TELEGRAM_UNAVAILABLE),  # idempotent
+        (httpx2.Response(401, text=LEAK), False, TELEGRAM_REFUSED),
+        (httpx2.Response(403, text=LEAK), False, TELEGRAM_REFUSED),
+        (httpx2.Response(302, text=LEAK), False, TELEGRAM_REFUSED),
+    ],
+    ids=["429", "502", "connect_error", "read_timeout", "401", "403", "302"],
+)
+def test_a_failed_delete_raises_a_clean_error_and_is_recorded(
+    response: httpx2.Response | BaseException, retryable: bool, code: str
+) -> None:
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as failed:
+        alert_on(Recorder(response), meter=meter).delete(CHAT, "42")
+
+    assert (failed.value.retryable, failed.value.code) == (retryable, code)
+    assert_clean(failed.value)
+    assert meter.calls == [ApiCall("telegram", "delete_message", ok=False, error_code=code)]
+
+
+@pytest.mark.parametrize(
+    ("token", "chat", "message_id", "code"),
+    [
+        ("not-a-token", CHAT, "42", TELEGRAM_BAD_TOKEN),
+        (TOKEN, "@channel", "42", TELEGRAM_BAD_CHAT_ID),
+        (TOKEN, CHAT, "", TELEGRAM_BAD_MESSAGE_ID),
+        (TOKEN, CHAT, "0", TELEGRAM_BAD_MESSAGE_ID),
+        (TOKEN, CHAT, "-4", TELEGRAM_BAD_MESSAGE_ID),
+        (TOKEN, CHAT, "42a", TELEGRAM_BAD_MESSAGE_ID),
+        (TOKEN, CHAT, "1" * 20, TELEGRAM_BAD_MESSAGE_ID),
+    ],
+)
+def test_a_delete_refused_before_any_request_records_nothing(
+    token: str, chat: str, message_id: str, code: str
+) -> None:
+    recorder = Recorder(deleted())
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as refused:
+        alert_on(recorder, secrets_with(token), meter).delete(chat, message_id)
+
+    assert (refused.value.retryable, refused.value.code) == (False, code)
+    assert recorder.requests == [] and meter.records == []

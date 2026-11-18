@@ -40,6 +40,7 @@ from nextron.ports.mail import MailPort
 from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
+from nextron.ports.sink import SinkFilesPort
 from nextron.ports.token_codec import TokenCodecPort
 from nextron.ports.usage_meter import UsageMeterPort
 from tests.fakes.alert import InMemoryAlert
@@ -55,6 +56,7 @@ from tests.fakes.mail import InMemoryMail
 from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.sink import InMemorySinkFiles
 from tests.fakes.token_codec import FakeTokenCodec
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
@@ -77,5 +79,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         DnsPort: FakeDns,
         JobBoardPort: ScriptedJobBoards,
         RegistryPort: ScriptedRegistry,
+        SinkFilesPort: InMemorySinkFiles,
     }
 )

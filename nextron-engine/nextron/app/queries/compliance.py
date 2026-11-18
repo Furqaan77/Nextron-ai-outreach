@@ -1,5 +1,5 @@
-"""Read API of the ``compliance`` service (AD-3, AD-16, AD-17; Stories 3.4, 3.5, 3.8, 3.13 and
-3.15).
+"""Read API of the ``compliance`` service (AD-3, AD-16, AD-17; Stories 3.4, 3.5, 3.8, 3.13,
+3.14 and 3.15).
 
 Import rule: ``nextron.domain`` and ``nextron.db.repos.compliance`` only. All read through the
 current unit of work, read-only ones included; nothing here writes, caches or logs. Each listed
@@ -48,10 +48,26 @@ Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
     Operator's free text about whoever opted the firm out, who may be a colleague. A person's own
     entry keeps its reason;
   - ``requests``: every column of each of the Contact's data subject requests, by
-    ``opened_at``, then ``id``.
+    ``opened_at``, then ``id``;
+  - ``erasure_receipts`` (Story 3.14): every column of each of the Contact's erasure receipts,
+    oldest first, each with ``stores``, every column of its store rows (the store, action,
+    status, detail and time: codes, counts, dates and ids only).
 
   An item of ``value_hashes`` that isn't a key hash (``contactability.is_hash``) is ignored; a
   ``contact_id`` that isn't a ULID has no requests.
+
+Story 3.14:
+
+- ``receipts(contact_ids) -> Mapping[str, tuple[StoredReceipt, ...]]``: each of those Contacts'
+  erasure receipts, oldest first, each with its store rows in ``ErasureStore`` order, by
+  Contact id (a Contact with none is left out). The Lead page and the erase step show them.
+- ``health_issues()``: the erasures' health issues (``nextron.main.build_health_issues``
+  registers it last, as the ``erasure`` source), oldest first: one ``erasure_open`` issue per
+  ``open`` erase request (subject the request; "Erasure request still open: Contact <id>; erase
+  it again from the Lead page"), then one ``erasure_failed`` issue per ``failed`` store row
+  (subject the receipt; "Erasure failed: <store label>, Contact <id>, receipt <id>", detail the
+  row's detail). There is no Dismiss: an open request clears when an erasure completes it, and a
+  failed store stays (retrying or acknowledging one is deferred).
 """
 
 from collections.abc import Iterable, Mapping
@@ -61,18 +77,27 @@ from math import ceil
 from typing import Final
 
 from nextron.db.repos.compliance import data_subject_requests as requests_repo
+from nextron.db.repos.compliance import erasure_receipts as receipts_repo
 from nextron.db.repos.compliance import suppression_entries as entries_repo
 from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
 from nextron.db.repos.compliance.data_subject_requests import StoredRequest
+from nextron.db.repos.compliance.erasure_receipts import StoredReceipt, StoredReceiptStore
 from nextron.db.repos.compliance.suppression_entries import ListedEntry
 from nextron.domain.contactability import KeyKind, SuppressionKey, is_hash
+from nextron.domain.erasure_receipt import ErasureStore
+from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.suppression_entry import EntryStatus, SuppressionSource
+
+ERASURE_OPEN: Final = "erasure_open"
+ERASURE_FAILED: Final = "erasure_failed"
 
 __all__ = [
     "ENTRIES_PER_PAGE",
     "EntryListPage",
     "ListedEntry",
+    "StoredReceipt",
+    "StoredReceiptStore",
     "StoredRequest",
     "active_entry",
     "active_keys",
@@ -80,9 +105,11 @@ __all__ = [
     "entries",
     "entry_list",
     "export_pii",
+    "health_issues",
     "newest_unsub_token",
     "newest_unsub_tokens",
     "open_request",
+    "receipts",
 ]
 
 ENTRIES_PER_PAGE: Final = 50
@@ -205,4 +232,43 @@ def export_pii(
             for entry in entries
         ),
         "requests": requests,
+        "erasure_receipts": receipts_repo.for_export(contact_id) if is_ulid(contact_id) else (),
     }
+
+
+def receipts(contact_ids: Iterable[str]) -> Mapping[str, tuple[StoredReceipt, ...]]:
+    """``{contact_id: its erasure receipts, oldest first}`` for each of ``contact_ids`` with
+    one."""
+    return receipts_repo.receipts_for(contact_ids)
+
+
+def _label(store: str) -> str:
+    try:
+        return ErasureStore(store).label
+    except ValueError:  # a code the domain no longer knows shows as itself
+        return store
+
+
+def health_issues() -> tuple[HealthIssue, ...]:
+    """One ``erasure_open`` issue per open erase request, then one ``erasure_failed`` issue per
+    failed store, each oldest first."""
+    still_open = tuple(
+        HealthIssue(
+            ERASURE_OPEN,
+            request.id,
+            f"Erasure request still open: Contact {request.contact_id}; erase it again from "
+            "the Lead page",
+        )
+        for request in requests_repo.open_erase_requests()
+    )
+    failed = tuple(
+        HealthIssue(
+            ERASURE_FAILED,
+            row.receipt_id,
+            f"Erasure failed: {_label(row.store)}, Contact {row.contact_id}, receipt "
+            f"{row.receipt_id}",
+            detail=row.detail,
+        )
+        for row in receipts_repo.failed_rows()
+    )
+    return still_open + failed

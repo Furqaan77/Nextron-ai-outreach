@@ -13,9 +13,18 @@ a violation.
   ``None`` (already a hash) or a single-value key kind.
 - **No cascade.** No foreign key of ``Base.metadata``, and none of the migrated database at head
   (``PRAGMA foreign_key_list``), has ``ON DELETE CASCADE``: an erasure deletes no row.
+- **A handler for every store** (Story 3.14). ``ErasureStores(...).handlers`` has exactly the
+  ``EXTERNAL_STORES`` as keys, in order, and every ``AD17_STORES`` store is one of them.
+- **The mailbox handler arrives with the threads.** While ``threads`` is a table of
+  ``Base.metadata`` (Story 6.x), the ``mailboxes`` handler must not be ``MAILBOX_PLACEHOLDER``
+  and a ``MailboxPort`` in ``nextron.ports`` must have ``trash_thread`` (the Contact's Threads
+  are moved to Trash, AD-17).
+- **One number per store.** Every external store has a ``STORE_NUMBERS`` entry, no two share
+  one, and no other store has one: a number is a job key's discriminator.
 """
 
 import importlib
+import pkgutil
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -27,6 +36,7 @@ from sqlalchemy import Column, Engine, ForeignKey, MetaData, Table, Text
 from nextron import main
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
+from nextron.app.compliance.erasure_stores import MAILBOX_PLACEHOLDER, ErasureStores
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
 from nextron.db.models import Base
@@ -35,6 +45,12 @@ from nextron.db.owners import OWNERS, SHARED_WRITERS, TABLES
 from nextron.db.pii_registry import HASH_KINDS, PII, PiiClass
 from nextron.db.uow import is_command
 from nextron.domain.erasure import HASHABLE_KINDS, Coverage, TableErasure
+from nextron.domain.erasure_receipt import (
+    AD17_STORES,
+    EXTERNAL_STORES,
+    STORE_NUMBERS,
+    ErasureStore,
+)
 from nextron.domain.notifications import ContactErased
 from tests.fakes.clock import FrozenClock
 
@@ -50,6 +66,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "job_postings": ("research", Coverage.TOMBSTONED),  # Story 2.11
     "suppression_entries": ("compliance", Coverage.TOMBSTONED),
     "data_subject_requests": ("compliance", Coverage.KEPT),
+    "erasure_receipts": ("compliance", Coverage.KEPT),  # Story 3.14
     "settings": ("setup", Coverage.NOT_HELD),
     "footer_snapshots": ("drafting", Coverage.NOT_HELD),
     "jobs": ("jobqueue", Coverage.NOT_HELD),
@@ -397,3 +414,147 @@ def test_each_declaring_owner_has_an_erase_pii_command(owner: str) -> None:
         hook = getattr(service, HOOK)
 
     assert is_command(hook)
+
+
+# A handler for every store (Story 3.14) ---------------------------------------------------------
+
+
+def handler_problems(
+    handlers: Mapping[object, object],
+    external: Sequence[object] = EXTERNAL_STORES,
+    ad17: Sequence[object] = AD17_STORES,
+) -> list[str]:
+    """Each store without a handler, each handler of no external store, a different order, and
+    each AD-17 store that isn't external."""
+    problems = [f"{store} has no handler" for store in external if store not in handlers]
+    problems += [f"{store} isn't an external store" for store in handlers if store not in external]
+    if not problems and tuple(handlers) != tuple(external):
+        problems.append("the handlers aren't in EXTERNAL_STORES order")
+    problems += [
+        f"AD-17's {store} isn't an external store" for store in ad17 if store not in external
+    ]
+    return problems
+
+
+def test_every_external_store_has_a_handler() -> None:
+    stores = ErasureStores(FrozenClock(), None, None)  # type: ignore[arg-type]
+
+    assert handler_problems(stores.handlers) == []
+    assert set(AD17_STORES) <= set(EXTERNAL_STORES)
+
+
+def test_the_handler_check_catches_a_missing_an_extra_and_a_stray_store() -> None:
+    handlers = dict(ErasureStores(FrozenClock(), None, None).handlers)  # type: ignore[arg-type]
+    del handlers[ErasureStore.TELEGRAM]
+    handlers[ErasureStore.DATABASE] = MAILBOX_PLACEHOLDER
+
+    assert handler_problems(handlers, ad17=(*AD17_STORES, "fax_machine")) == [
+        "telegram has no handler",
+        "database isn't an external store",
+        "AD-17's fax_machine isn't an external store",
+    ]
+    built = ErasureStores(FrozenClock(), None, None)  # type: ignore[arg-type]
+    reordered = dict(reversed(built.handlers.items()))
+    assert handler_problems(reordered) == ["the handlers aren't in EXTERNAL_STORES order"]
+
+
+# The mailbox handler arrives with the threads --------------------------------------------------
+
+
+THREADS = "threads"
+MAILBOX_PORT = "MailboxPort"
+TRASH = "trash_thread"
+
+
+def mailbox_ports() -> list[type]:
+    """Every class named ``MailboxPort`` in ``nextron.ports``."""
+    import nextron.ports  # noqa: PLC0415 - only this check walks the ports package
+
+    found = []
+    for info in pkgutil.walk_packages(nextron.ports.__path__, "nextron.ports."):
+        module = importlib.import_module(info.name)
+        port = getattr(module, MAILBOX_PORT, None)
+        if isinstance(port, type) and port.__module__ == module.__name__:
+            found.append(port)
+    return found
+
+
+def mailbox_problems(
+    tables: Sequence[str], mailboxes: object, ports: Sequence[type]
+) -> list[str]:
+    """While a ``threads`` table exists: the placeholder mailbox handler, and no
+    ``MailboxPort.trash_thread``."""
+    if THREADS not in tables:
+        return []
+    problems = []
+    if mailboxes is MAILBOX_PLACEHOLDER:
+        problems.append("threads exists, but the mailboxes handler is still MAILBOX_PLACEHOLDER")
+    if not any(callable(getattr(port, TRASH, None)) for port in ports):
+        problems.append("threads exists, but no MailboxPort has trash_thread")
+    return problems
+
+
+def test_a_threads_table_needs_a_mailbox_handler_that_trashes_threads() -> None:
+    stores = ErasureStores(FrozenClock(), None, None)  # type: ignore[arg-type]
+
+    assert mailbox_problems(
+        sorted(Base.metadata.tables), stores.handlers[ErasureStore.MAILBOXES], mailbox_ports()
+    ) == []
+
+
+def test_the_mailbox_check_catches_threads_without_the_handler_or_the_port() -> None:
+    class MailboxPort:
+        def list_threads(self) -> None: ...
+
+    class TrashingPort:
+        def trash_thread(self, thread_id: str) -> None: ...
+
+    tables = [*sorted(Base.metadata.tables), THREADS]
+
+    assert mailbox_problems(tables, MAILBOX_PLACEHOLDER, [MailboxPort]) == [
+        "threads exists, but the mailboxes handler is still MAILBOX_PLACEHOLDER",
+        "threads exists, but no MailboxPort has trash_thread",
+    ]
+    assert mailbox_problems(tables, object(), [TrashingPort]) == []
+    assert mailbox_problems(sorted(Base.metadata.tables), MAILBOX_PLACEHOLDER, []) == []
+
+
+# One number per store ---------------------------------------------------------------------------
+
+
+def number_problems(
+    numbers: Mapping[object, object], external: Sequence[object] = EXTERNAL_STORES
+) -> list[str]:
+    """Each external store without a number, each number shared, and each number of a store
+    that isn't external or isn't a positive int."""
+    problems = [f"{store} has no number" for store in external if store not in numbers]
+    seen: dict[object, object] = {}
+    for store, number in numbers.items():
+        if store not in external:
+            problems.append(f"{store} isn't an external store")
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            problems.append(f"{store}'s number isn't a positive int")
+        elif number in seen:
+            problems.append(f"{store} reuses {seen[number]}'s number {number}")
+        else:
+            seen[number] = store
+    return problems
+
+
+def test_every_external_store_has_its_own_number() -> None:
+    assert number_problems(STORE_NUMBERS) == []
+    assert sorted(STORE_NUMBERS.values()) == list(range(1, len(EXTERNAL_STORES) + 1))
+
+
+def test_the_number_check_catches_a_missing_a_shared_and_a_stray_number() -> None:
+    numbers = dict(STORE_NUMBERS)
+    del numbers[ErasureStore.LOGS]
+    numbers[ErasureStore.SINK_FILES] = 1
+    numbers[ErasureStore.DATABASE] = 0
+
+    assert number_problems(numbers) == [
+        "logs has no number",
+        "sink_files reuses mailboxes's number 1",
+        "database isn't an external store",
+        "database's number isn't a positive int",
+    ]

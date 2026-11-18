@@ -65,8 +65,9 @@ Its ``AiTestRuns`` (``test_runs``, Story 4.5) uses the same clock, ``meter`` and
 and ``llm``, a ``ScriptedLlm`` (empty unless a test passes one, so a test that runs a set
 scripts every answer); Check for changes queues its runs and the jobs run them.
 
-Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(clock))``; the
-Lead page's erase step runs it, on real units of work.
+Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(clock),
+queue=queue)`` (Story 3.14: an erasure enqueues its ``erase_external`` jobs on the dashboard's
+queue, which nothing runs here); the Lead page's erase step runs it, on real units of work.
 
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
@@ -420,7 +421,7 @@ class Dashboard:
             self.research,
             self.email_syntax,
         )
-        self.erasures = Erasures(self.clock, Compliance(self.clock))
+        self.erasures = Erasures(self.clock, Compliance(self.clock), queue=self.queue)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,

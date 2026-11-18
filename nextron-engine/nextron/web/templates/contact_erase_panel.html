@@ -1,13 +1,17 @@
 {#- The erase step's panel (nextron.web.erase_page): rendered inside contact_erase.html, and alone
     as the answer to its POST, which HTMX swaps in for this whole panel. The Contact's values and
     the notice are imported or typed text: they render through |plain inside hx-disable; the
-    form sits outside, so HTMX still posts it. An erased Contact shows no value of it. -#}
+    form sits outside, so HTMX still posts it. An erased Contact shows no value of it, only its
+    erasure receipts (Story 3.14). -#}
 <div id="erase-panel">
 {%- if notice %}
-<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}" hx-disable>{{ notice.text|plain }}</p>
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}" hx-disable>{{ notice.text|plain }}{% if notice.receipt_href %} <a class="receipt-link" href="{{ notice.receipt_href }}">{{ notice.receipt_label }}</a>{% endif %}</p>
 {%- endif %}
 {%- if erased_text %}
 <p class="erased-contact">{{ erased_text }}</p>
+{%- for receipt in receipts %}
+{% include "erasure_receipt.html" %}
+{%- endfor %}
 {%- else %}
 <dl class="erase-contact" hx-disable>
 <dt>Name</dt>

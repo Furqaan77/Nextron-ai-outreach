@@ -90,10 +90,20 @@ Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
     Contact (the same terms), each with ``page_url`` and ``mentions``;
   - ``job_postings`` (Story 2.11): the Lead's postings whose ``title`` or ``description``
     mentions the Contact (the same terms), every column plus ``mentions``.
+
+Story 3.14 (an erasure's receipt):
+
+- ``evidence_history(lead_id)``: every Evidence row of the Lead, live, superseded or retracted,
+  oldest first (a stored quote is held whether or not it is live).
+- ``other_contacts_with_keys(contact_id, keys)``: the ids, sorted, of the Contacts other than
+  ``contact_id``, on any Lead, that aren't erased and whose address key or profile key
+  (``contactability.person_keys`` of their email and LinkedIn URL) is one of the address or
+  profile ``SuppressionKey`` items in ``keys`` (others are ignored). It scans every Contact that
+  isn't erased and has an email or a LinkedIn URL.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -116,6 +126,7 @@ from nextron.db.repos.research.profile import StoredLegalForm
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.contact_export import address_history, excerpts, mention_terms, mentions
+from nextron.domain.contactability import KeyKind, SuppressionKey, person_keys
 from nextron.domain.extraction import ROUTE as SIGNALS_ROUTE
 from nextron.domain.ids import is_ulid
 from nextron.domain.segments import SignalClass
@@ -267,6 +278,36 @@ def signals(lead_id: str) -> tuple[StoredSignal, ...]:
 def evidence(lead_id: str) -> tuple[StoredEvidence, ...]:
     """The Lead's live Evidence, oldest first."""
     return signals_repo.evidence(lead_id, live_only=True) if is_ulid(lead_id) else ()
+
+
+def evidence_history(lead_id: str) -> tuple[StoredEvidence, ...]:
+    """Every Evidence row of the Lead, live or not, oldest first."""
+    return signals_repo.evidence(lead_id, live_only=False) if is_ulid(lead_id) else ()
+
+
+_MATCHED_KINDS = (KeyKind.ADDRESS, KeyKind.PROFILE)
+
+
+def other_contacts_with_keys(contact_id: str, keys: Iterable[SuppressionKey]) -> tuple[str, ...]:
+    """The other Contacts that aren't erased and share an address or profile key in ``keys``,
+    by id."""
+    wanted = {
+        (key.kind, key.value_hash)
+        for key in keys
+        if isinstance(key, SuppressionKey) and key.kind in _MATCHED_KINDS
+    }
+    if not wanted:
+        return ()
+    found = []
+    for other in contacts_repo.with_address_or_profile():
+        if other.id == contact_id:
+            continue
+        theirs = person_keys(
+            email=other.email, name=None, linkedin_url=other.linkedin_url, web_domain=None
+        )
+        if any((key.kind, key.value_hash) in wanted for key in theirs):
+            found.append(other.id)
+    return tuple(sorted(found))
 
 
 def hq_tz(lead_id: str) -> str | None:

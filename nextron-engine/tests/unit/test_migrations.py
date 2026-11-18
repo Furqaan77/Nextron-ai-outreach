@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0036_2_12_legal_form"
+HEAD = "0037_3_14_erasure_receipts"
 
 
 @pytest.fixture

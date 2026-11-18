@@ -25,6 +25,8 @@ nothing; ``nextron.app.research`` does.
   updated_at)``: makes it not Primary (``is_primary`` false, ``primary_set_by`` NULL). The
   partial unique index ``uq_contacts_one_primary`` refuses a second Primary on a Lead, so the
   caller clears the old one first;
+- ``with_address_or_profile()`` (Story 3.14): every Contact that isn't erased and has an email
+  or a LinkedIn URL, by id;
 - ``move_to_lead(from_lead, to_lead, updated_at, clear_primary)``: gives every Contact of
   ``from_lead`` to ``to_lead`` (and, when ``clear_primary``, clears their Primary flags and
   ``primary_set_by``), in one statement;
@@ -42,7 +44,7 @@ nothing; ``nextron.app.research`` does.
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
@@ -191,6 +193,19 @@ def has_unresolved() -> bool:
         exists().where(ContactRecord.market_basis.is_(None), ContactRecord.erased_at.is_(None))
     )
     return bool(current().session.execute(statement).scalar_one())
+
+
+def with_address_or_profile() -> tuple[StoredContact, ...]:
+    """Every Contact that isn't erased and has an email or a LinkedIn URL, by id."""
+    statement = (
+        select(*_COLUMNS)
+        .where(
+            ContactRecord.erased_at.is_(None),
+            or_(ContactRecord.email.is_not(None), ContactRecord.linkedin_url.is_not(None)),
+        )
+        .order_by(ContactRecord.id)
+    )
+    return tuple(StoredContact(*row) for row in current().session.execute(statement))
 
 
 def has_primary(lead_id: str) -> bool:

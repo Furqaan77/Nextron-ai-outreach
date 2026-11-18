@@ -125,10 +125,20 @@ erases the Contact's override cases, ``erase_override_cases``), then the no-op h
 ``setup``, ``drafting``, ``jobqueue``, ``ops`` and ``notify``, whose tables never hold a
 Contact's data. Each uses ``SystemClock()`` when no clock is given.
 
-**Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance)``
-(``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the dashboard gets too,
-and hands it to the dashboard (``create_app(..., erasures=...)``) for the Lead page's "Erase
-(data subject request)".
+**Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance,
+queue=queue)`` (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the
+dashboard gets too, and hands it to the dashboard (``create_app(..., erasures=...)``) for the
+Lead page's "Erase (data subject request)". The ``ContactErased`` hook's instance
+(``build_subscribers``) has no queue: it only runs ``erase_pii``, and its ``erase_contact``
+would fail closed.
+
+**Erasure outside the database (Story 3.14).** Each erasure writes a receipt and enqueues one
+``erase_external`` job per external store on that queue. ``build_app`` builds one
+``ErasureStores(clock, notify, sink)`` (``nextron.app.compliance.erasure_stores``), ``sink``
+being ``SinkRecorder(<data dir>\\sink, clock)`` (the ``SinkFilesPort`` of the dev and test sink
+files) outside ``prod`` and ``None`` in ``prod``; the registry reaches it through
+``erasure_stores=lambda: erasure_stores``. ``build_health_issues`` registers
+``queries.compliance.health_issues`` last (open erase requests and failed stores).
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
 ``LeadImports(clock, discovery, research, EmailValidatorSyntax())``, on the same ``discovery =
@@ -193,8 +203,11 @@ Story 2.12's ``check_legal_form`` (the same lanes, priority, runtime, retry limi
 ``run_ai_test_sets`` (bulk only, priority 30, ``max_runtime`` 2 hours, retry limit 3,
 ``handlers.run_ai_test_sets(test_runs)``, ``other``), and Story 6.5's ``check_domains``
 (the interactive lane only, priority 60, 2 minutes, retry limit 3,
-``handlers.check_domains(domain_checks)``, ``sending``). ``domain_checks`` is the one optional
-service: it defaults to a provider that raises ``RuntimeError`` when called, so a registry built
+``handlers.check_domains(domain_checks)``, ``sending``); Story 3.14's ``erase_external`` (bulk
+only, priority 60, 5 minutes, retry limit 5 (``handlers.ERASE_EXTERNAL_RETRIES``),
+``handlers.erase_external(erasure_stores)``, ``other``) is registered last, and with
+``erasure_stores`` unwired its handler raises a ``RuntimeError``, which isn't retried.
+``domain_checks`` is the one optional service: it defaults to a provider that raises ``RuntimeError`` when called, so a registry built
 without it (only tests do) fails a ``check_domains`` job; ``build_app`` always passes the real
 one. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
@@ -477,7 +490,9 @@ health-issue registry: the only code that constructs ``HealthIssues`` or calls
 verified one), then ``IssueSource("playbook", queries.playbook.health_issues)`` (the newest
 Sales Playbook check's problem, Story 4.4), then ``IssueSource("sending", lambda:
 queries.sending.health_issues(clock.now()))`` (each listed Sending Domain whose cold sends are
-blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then freezes it; each later owner
+blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then ``IssueSource("erasure",
+queries.compliance.health_issues)`` (each open erase request and each failed erasure store,
+Story 3.14), then freezes it; each later owner
 registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
@@ -661,6 +676,7 @@ from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
+from nextron.app.compliance.erasure_stores import ErasureStores
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.drafting import api as drafting_api
@@ -688,6 +704,7 @@ from nextron.app.ops.api import (
 )
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
+from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import playbook as playbook_queries
@@ -755,6 +772,7 @@ from nextron.domain.crawl import (
     RENDER_PAGES_JOB,
 )
 from nextron.domain.domain_auth import CHECK_DOMAINS_JOB, DOMAIN_CHECK_TIME
+from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
@@ -1035,8 +1053,8 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions, primary_contacts, test_runs, domain_checks, job_boards and legal_forms are
-    # bound just below
+    # extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms and
+    # erasure_stores are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1052,6 +1070,7 @@ def build_app(
         domain_checks=lambda: domain_checks,
         job_boards=lambda: job_boards,
         legal_forms=lambda: legal_forms,
+        erasure_stores=lambda: erasure_stores,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1096,6 +1115,10 @@ def build_app(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
+    sink_files = (
+        SinkRecorder(config.data_dir / SINK_DIR_NAME, clock) if sink_applies(config.env) else None
+    )
+    erasure_stores = ErasureStores(clock, notify, sink_files)
     targets = (
         backup_targets
         if backup_targets is not None
@@ -1164,7 +1187,7 @@ def build_app(
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,
-        erasures=Erasures(clock, compliance),  # Story 3.13: on the same Compliance
+        erasures=Erasures(clock, compliance, queue=queue),  # Story 3.13: on the same Compliance
         domain_checks=domain_checks,
         units=units,
         lifespan=engine_lifespan(
@@ -1240,6 +1263,7 @@ def build_job_types(
     job_boards: Callable[[], handlers.CheckingJobBoards],
     legal_forms: Callable[[], handlers.CheckingLegalForm],
     domain_checks: Callable[[], handlers.DomainChecking] | None = None,
+    erasure_stores: Callable[[], handlers.StoreErasing] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1256,9 +1280,11 @@ def build_job_types(
     ``AiTestRuns`` that ``run_ai_test_sets`` jobs call, ``job_boards`` the ``research``
     service's ``JobBoards`` that ``check_job_boards`` and ``recheck_event`` jobs call,
     ``legal_forms`` the ``discovery`` service's ``LegalFormChecks`` that ``check_legal_form``
-    jobs call, and ``domain_checks`` the ``sending`` service's ``DomainChecks`` that
+    jobs call, ``domain_checks`` the ``sending`` service's ``DomainChecks`` that
     ``check_domains`` jobs call (when it is ``None``, a provider that raises ``RuntimeError``
-    when a job calls it: ``build_app`` always passes the real one)."""
+    when a job calls it: ``build_app`` always passes the real one), and ``erasure_stores``
+    the ``compliance`` service's ``ErasureStores`` that ``erase_external`` jobs call (``None``:
+    unwired, so such a job fails with a ``RuntimeError``, which isn't retried)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     job_types = JobTypes()
     job_types.register_job_type(
@@ -1463,6 +1489,21 @@ def build_job_types(
             group=JobGroup.RECHECK,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=ERASE_EXTERNAL_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=60,
+            # one store: a few Telegram deletes, a sink file rewrite or a few reads
+            max_runtime=timedelta(minutes=5),
+            retry_limit=handlers.ERASE_EXTERNAL_RETRIES,  # the last attempt settles it failed
+            handler=handlers.erase_external(
+                erasure_stores if erasure_stores is not None else _no_erasure_stores
+            ),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1473,11 +1514,16 @@ def no_domain_checks() -> handlers.DomainChecking:
     raise RuntimeError("this job type registry was built without domain_checks")
 
 
+def _no_erasure_stores() -> handlers.StoreErasing:
+    """``erase_external`` with no ``ErasureStores`` wired: fail the job, without a retry."""
+    raise RuntimeError("erase_external has no ErasureStores wired")
+
+
 def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
     Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
-    ``clock`` is ``None``). Each later owner registers its ``queries.<owner>.health_issues``
+    ``clock`` is ``None``), then the erasures' open requests and failed stores. Each later owner registers its ``queries.<owner>.health_issues``
     here, before ``freeze()``."""
     now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
@@ -1486,6 +1532,7 @@ def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> Health
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
     issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
+    issues.register_source(IssueSource("erasure", compliance_queries.health_issues))
     issues.freeze()
     return issues
 
@@ -1801,7 +1848,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
     subscribers.register_subscriber(SubjectSuppressed, Pipeline(chosen).close_suppressed)
-    # Story 3.13: compliance's hook first (it reads the Contact before research tombstones it)
+    # Story 3.13: compliance's hook first (it reads the Contact before research tombstones it);
+    # hook-only, so no queue (its erase_contact fails closed)
     erasures = Erasures(chosen, Compliance(chosen))
     subscribers.register_subscriber(ContactErased, erasures.erase_pii)
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)

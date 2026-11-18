@@ -24,6 +24,8 @@ from nextron.db.models import (
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
 from nextron.db.models.compliance import (
     DataSubjectRequestRecord,
+    ErasureReceiptRecord,
+    ErasureReceiptStoreRecord,
     SuppressionEntryRecord,
     UnsubTokenRecord,
 )
@@ -93,6 +95,8 @@ __all__ = [
     "CrawledPageRecord",
     "DataSubjectRequestRecord",
     "DomainCheckRecord",
+    "ErasureReceiptRecord",
+    "ErasureReceiptStoreRecord",
     "EventRecord",
     "EvidenceRecord",
     "ExtractionRunRecord",

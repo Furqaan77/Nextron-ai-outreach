@@ -23,6 +23,8 @@ Table                      Owner        Exported as / why not
                                         mentions the Contact)
 ``suppression_entries``    compliance   ``suppression`` (``value_hash`` withheld)
 ``data_subject_requests``  compliance   ``requests``
+``erasure_receipts``       compliance   ``erasure_receipts`` (Story 3.14: with their store
+                                        rows; ``request_ref`` is kept by the erasure)
 ``alerts``                 notify       ``alerts``
 ``notifications``          notify       ``notifications``
 ``ai_test_cases``          playbook     ``override_cases`` (Story 4.6's override cases)
@@ -168,6 +170,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
             ),
         ),
         "data_subject_requests": Exported("compliance", "requests"),
+        "erasure_receipts": Exported("compliance", "erasure_receipts"),
         "alerts": Exported("notify", "alerts"),
         "notifications": Exported("notify", "notifications"),
         "ai_test_cases": Exported("playbook", "override_cases"),

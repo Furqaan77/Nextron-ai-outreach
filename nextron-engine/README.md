@@ -1553,7 +1553,8 @@ nothing runs). "Erase permanently" posts it. The answers, all on the same panel:
   <ref>)" (no "(request ...)" after a retention erasure with no request since; the reference
   is the first erase request completed for it), with no other value and no Provenance
   Records. The Lead and its other Contacts don't change.
-- "This Contact was already erased; nothing changed." (the new request is completed anyway).
+- "This Contact was already erased; nothing more was erased, and this request has its own
+  receipt." (the new request is completed, with a receipt of its own: Story 3.14).
 - "Erasure failed and was rolled back: nothing was erased, and the request stays open
   (<ErrorType>)." The log has `contact_erasure_failed` with `contact_id` and `error_type`.
   The person stays suppressed (the `dsr` entries were committed with the request). Erasing
@@ -1629,9 +1630,84 @@ CASCADE`. A new personal-data table fails until its owner declares it. `tests/ap
 test_erasure.py` plants a value in every personal-data column a Contact's data can reach and
 checks that none survives anywhere in the database, that no `DELETE` runs and no row is lost.
 
-Not yet (later stories): files and stores outside the database, receipts and `erase_external`
-jobs (3.14), the erasure ledger (3.16). Until Story 3.16's ledger, restoring a backup taken
-before an erasure brings the Contact back: erase it again after any restore.
+Not yet (later stories): the erasure ledger (3.16). Until Story 3.16's
+ledger, restoring a backup taken before an erasure brings the Contact back: erase it again after
+any restore. The stores outside the database and the receipt are Story 3.14 (next section).
+
+### Erasure receipts and the stores outside the database
+
+Story 3.14 (FR-52, AD-10, AD-15, AD-17) makes each erasure reach every store outside the
+database that may hold the Contact's data, and gives the requester a **receipt** of what was
+erased and what remains.
+
+**The receipt.** In the erasure's own transaction, after the hooks, `erase_contact` writes one
+`erasure_receipts` row (the request reference, none for retention; the cause; the outcome
+`erased`, or `already_erased` for a repeat request on an erased Contact) with one row per store
+(`erasure_receipt_stores`: action, status, detail, time), one `events` row (`None → written`),
+sets the request's `receipt_id`, and enqueues one `erase_external` job per external store (key
+`erase_external:<contact id>:<n>`, `n` the store's fixed number from 1 to 12, payload
+`{"v": 1, "contact_id", "store"}`). A retention call on a Contact already erased writes
+nothing. `ErasureResult.receipt_id` names the receipt. A repeat request's receipt copies the
+Evidence quotes, Page addresses and Other Contacts rows of the Contact's first `erased` receipt
+("As at the erasure on <date>: <its detail>"), so what the erasure left stays listed; a Contact
+erased before receipts were kept shows those three as `residual` ("Erased on <date>, before
+receipts were kept: what remains here wasn't recorded").
+
+The 17 stores, in the order a receipt shows them:
+
+| Store | Status and detail |
+|---|---|
+| Database | `done`: the tombstones of Story 3.13 (no row deleted) |
+| Suppression List | `dsr`: `done` "N keys (address, person, profile) stay suppressed"; `residual` with no key, or when the Contact has a name but no person key was formed (no web domain on the Lead, or a name that doesn't key); retention: `none_held` |
+| Evidence quotes | `residual` with the count of Evidence rows (live or not) on the Lead and the Leads merged into it that name the person in full but aren't linked to them (the firm's public pages), else `none_held` |
+| Page addresses | `residual` with the count of stored page and Evidence source URLs whose path names the person (`/people/jane-doe`, `/people/janedoe`), else `none_held` |
+| Other Contacts | `residual` listing the ids of other Contacts, on any Lead, that share the address or LinkedIn URL and weren't erased (erase each from its Lead page), else `none_held` |
+| Sending Inbox mailboxes | `none_held`: the Contact has no Campaign Threads yet (Story 6.7 moves them to Trash) |
+| Crawled page text | `done` with the count of pages nulled (content hash kept) when every page's text is NULL; `residual` with both counts when a page crawled since (or merged in later) holds text again (kept at most 30 days); no page: `none_held` |
+| Telegram | messages about the Contact under 48 hours old are deleted (`deleteMessage`); older ones, unconfirmed ones and ones Telegram refuses are `residual`; no alert: `none_held` |
+| AI Test Sets | the Reply override cases made from the Contact (Story 4.6), which playbook's hook erased and retired: `done` with their count, `residual` while one still holds text, else `none_held` (the other cases are synthetic or pseudonymised) |
+| Anthropic, Worker KV, nextronai.com inbox | `residual` with the AD-17 text |
+| Backups | always `residual`: the recorded local and off-PC copies taken while the database held the Contact and the dates they age out (or that no recorded copy holds it), and the bound every copy taken before the erasure ages out by (the erasure date plus 35 days, which also covers a backup still running); a restore brings the Contact back until the ledger exists (erase it again after a restore) |
+| Logs, restore work copies, erasure ledger | `none_held` (ids and codes only; work copies deleted; hashes only) |
+| Dev and test sink files | `done` with the recorded messages tombstoned, or `none_held` (none, or `prod`, which records none) |
+
+A store starts `pending` and settles once (the triggers refuse any other change): `done`,
+`residual`, `none_held` or `failed`. The receipt reads "Complete" when none is pending or failed,
+"In progress" while one is pending, and "Incomplete: N failed" when any failed. Every detail is
+built by code from counts, dates, ids and codes, and the table refuses an `@`.
+
+**The jobs** (`erase_external`, bulk lane, priority 60, 5 minutes, retry limit 5) run
+`ErasureStores(clock, notify, sink).run(contact_id, store, last_attempt=...)`
+(`nextron/app/compliance/erasure_stores.py`): it reads in one transaction, calls the store
+(Telegram, the sink files) outside any transaction, then settles every `pending` row of that
+store on the Contact's receipts, with one `events` row each. Before the last attempt, a
+retryable adapter error, and any error that isn't an adapter error (a locked database, say, in
+any step), retry the job (the latter as `erasure_store_retry`), the rows still `pending`. A
+non-retryable adapter error (Telegram refusing with 401, say), or any error on the last
+attempt, settles the store `failed` ("Failed: <code>", the original error's code), and the log
+has `erasure_store_failed` (`contact_id`, `store`, `code`). A repeat request's jobs are
+absorbed by ones still queued, which then settle both receipts.
+
+**On the dashboard.** The Lead page shows each erased Contact's receipts under its tombstone
+line, oldest first: "Receipt <date>: <state>", the request it answers ("Request <ref>", or
+"Retention", then ", already erased" for a repeat request) and one line per store (label,
+status, detail, time). The erase step shows the same receipts for an erased Contact, and its answers ("Erased.
+Request <ref> completed." and "This Contact was already erased; nothing more was erased, and
+this request has its own receipt.") link to the
+receipt on the Lead page. The health panel lists each erase request still `open` ("Erasure
+request still open: Contact <id>; erase it again from the Lead page") and each `failed` store
+("Erasure failed: <store>, Contact <id>, receipt <id>"); there is no retry or acknowledge yet.
+
+**The database** (migration `0037_3_14_erasure_receipts`): `erasure_receipts` (no `DELETE`, no
+`UPDATE`), `erasure_receipt_stores` (no `DELETE`; an `INSERT` with a new id and a new store per
+receipt; an `UPDATE` only from `pending`, with the store and action unchanged) and
+`trg_data_subject_requests_receipt` (a request's `receipt_id` must name a receipt of the same
+Contact: "a request's receipt must exist and be its own Contact's"). `request_ref` is PII class `redact`; every other new column is `none`.
+
+**Contracts** (`tests/contracts/test_erasure_contracts.py`): every external store has a handler
+and the AD-17 stores are among them; while a `threads` table exists, the mailbox handler must not
+be the placeholder and a `MailboxPort` must have `trash_thread`; and every external store has its
+own number.
 
 ## Export everything held on a Contact
 
@@ -1708,6 +1784,8 @@ is exported without code.
     that firm, and its reason is the Operator's note about whoever opted the firm out, who may
     be a colleague. A person's own entry keeps its reason.
   - `requests`: every data subject request on the Contact.
+  - `erasure_receipts` (Story 3.14): every erasure receipt of the Contact, with its store rows
+    (`stores`: store, action, status, detail and time).
 - **`notify`:** `alerts` and `notifications` whose subject is the Contact's id.
 - **`playbook`:** `override_cases`, the Contact's Reply class override cases (Story 4.6: the
   pseudonymised Reply, live or retired, `[erased]` once the Contact is erased).
@@ -2477,6 +2555,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0034_4_6_ai_test_sets` | rebuilds `ai_test_cases` (from 0030's exact table, which 0031 to 0033 leave unchanged; every row, both checks and `uq_ai_test_cases_live_key` kept) with `origin` (server default `fixture`, or `override`), a nullable `contact_id` (no foreign key) and `ck_ai_test_cases_origin_contact`, and `ai_test_runs` (from 0030's exact table; every row, check, foreign key and `ix_ai_test_runs_tuple_id_test_set` kept) with a nullable `cases_sha256` and `ck_ai_test_runs_cases_sha256` (see [The AI Test Sets](#the-ai-test-sets-story-46)) | `playbook` |
 | `0035_2_11_job_postings` | `job_postings` (foreign keys to `leads`, `signals` and `evidence` with no cascade; `ix_job_postings_lead_id`, `ix_job_postings_signal_id`; unique on `lead_id`, `url` and `title`; `ck_job_postings_source`, `ck_job_postings_board_token`, `ck_job_postings_status` and `ck_job_postings_closed_at`); adds nine nullable counts to `crawl_runs` in place (`add_column`, no check): `careers_postings`, `careers_events`, `<source>_postings` and `<source>_events` for `greenhouse`, `lever` and `ashby`, and `board_errors` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)) | `research` |
 | `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
+| `0037_3_14_erasure_receipts` | `erasure_receipts` (a foreign key to `contacts` with no cascade, `ix_erasure_receipts_contact_id`, reference, `dsr` reference, cause and outcome checks; `trg_erasure_receipts_no_delete` and `trg_erasure_receipts_immutable`), `erasure_receipt_stores` (a foreign key to `erasure_receipts` with no cascade, `ix_erasure_receipt_stores_receipt_id`, store, status, detail and no-`@` checks, unique on `receipt_id` and `store`; triggers: no delete, insert never replaces, update only from `pending` with the store and action unchanged) and `trg_data_subject_requests_receipt` (a request's `receipt_id` must name a receipt of its own Contact) (see [Erasure receipts and the stores outside the database](#erasure-receipts-and-the-stores-outside-the-database)) | `compliance` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

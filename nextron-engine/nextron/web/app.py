@@ -183,15 +183,17 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   on every render and never stored, the stored Markets (``lead_markets``:
   ``queries.setup.markets``, or none when one no longer decodes: ``InvalidMarkets``), which name
   each Contact's Market (Story 3.7), and ``queries.compliance.completed_erasures``
-  (``lead_erasures``, Story 3.13: an erased Contact's tombstone line names its request),
+  (``lead_erasures``, Story 3.13: an erased Contact's tombstone line names its request) and
+  ``queries.compliance.receipts`` (``lead_receipts``, Story 3.14: an erased Contact's erasure
+  receipts follow its tombstone line),
   with one "Export data (JSON)" form per Contact (``export_page.lead_forms``, Story 3.15).
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
   ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
   ``contact_id`` (``leads_page.submitted_contact``). It runs
   ``primary_contacts.make_primary(lead_id, contact_id)`` in its own unit of work, then answers
   200 with the Contacts panel (``lead_contacts.html``, read in a read-only unit of work, each
-  Contact's live Eligibility evaluated and the Markets and erasures read there too) and the
-  notice "Primary Contact set.", or, when it was refused (nothing written), the refusal's
+  Contact's live Eligibility evaluated and the Markets, erasures and receipts read there too)
+  and the notice "Primary Contact set.", or, when it was refused (nothing written), the refusal's
   notice. An unknown Lead (a text that isn't a ULID included) answers 404 with the plain text
   "That Lead doesn't exist.", which never echoes the id.
 - ``GET /leads/{lead_id}/contacts/{contact_id}/erase`` (``contact_erase_page``) and ``POST`` to
@@ -202,8 +204,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   apart from ``csrf_token``, must be exactly one ``request_ref`` (anything else is
   ``MalformedForm``, 400); it checks the reference, runs ``erasures.erase_on_request``
   (``Erasures``, the ``compliance`` service) in its own unit of work, then renders the panel
-  again in a read-only one, always 200: the refusal, the outcome, or, for any exception, the
-  failure (logged as ``contact_erasure_failed`` with ``contact_id`` and ``error_type``).
+  again in a read-only one, always 200: the refusal, the outcome (linked to its receipt on the
+  Lead page, Story 3.14), or, for any exception, the failure (logged as
+  ``contact_erasure_failed`` with ``contact_id`` and ``error_type``). For an erased Contact both
+  show its erasure receipts (``queries.compliance.receipts``).
 - ``POST /contacts/{contact_id}/export`` (``contact_export``) and ``GET /exports/{ticket}``
   (``contact_export_download``), both ``@personal_data(True)``: the subject access export
   (Story 3.15, FR-52); see ``nextron.web.export_page``. The POST's fields, apart from
@@ -1482,6 +1486,14 @@ def create_app(
             contact.id for contact in contacts if contact.erased_at is not None
         )
 
+    def lead_receipts(
+        contacts: Iterable[research_queries.StoredContact],
+    ) -> Mapping[str, tuple[compliance_queries.StoredReceipt, ...]]:
+        """Each erased Contact's erasure receipts, oldest first (Story 3.14)."""
+        return compliance_queries.receipts(
+            contact.id for contact in contacts if contact.erased_at is not None
+        )
+
     def missing_lead(request: Request) -> HTMLResponse:
         missing = page(request, lead_rows.MISSING_TEMPLATE)  # never echoes an id
         missing.status_code = 404
@@ -1510,8 +1522,11 @@ def create_app(
         if found is None:
             return missing_lead(request)
         lead, contact = found
+        receipts = ()
+        if contact.erased_at is not None:  # Story 3.14: an erased Contact shows its receipts
+            receipts = compliance_queries.receipts([contact.id]).get(contact.id, ())
         context = erase_rows.panel_context(
-            lead, contact, notice=notice, request_ref=request_ref
+            lead, contact, notice=notice, request_ref=request_ref, receipts=receipts
         )
         return page(request, template, **context)
 
@@ -1534,7 +1549,7 @@ def create_app(
             found = erase_target(lead_id, contact_id)
             if found is None:
                 return missing_lead(request)
-            _, contact = found
+            survivor, contact = found
             name = contact.name if contact.erased_at is None else None  # a tombstone is no name
             try:
                 check_request_ref(request_ref, name=name)
@@ -1565,8 +1580,15 @@ def create_app(
                     notice=erase_rows.failed(error_type),
                     request_ref=request_ref,
                 )
+        href = (
+            None
+            if result.receipt_id is None
+            else erase_rows.receipt_href(survivor.id, result.receipt_id)
+        )
         notice = (
-            erase_rows.erased(request_ref) if result.erased else erase_rows.already_erased()
+            erase_rows.erased(request_ref, href)
+            if result.erased
+            else erase_rows.already_erased(href)
         )
         with units.open(read_only=True):
             return erase_answer(
@@ -1598,6 +1620,7 @@ def create_app(
             lead_erasures(contacts),
             postings=research_queries.job_postings(found.id),
             legal_form=research_queries.legal_form(found.id),
+            receipts=lead_receipts(contacts),
         )
         return page(
             request,
@@ -1634,6 +1657,7 @@ def create_app(
                 research_queries.no_decision_maker(lead_id),
                 notice,
                 erasures=lead_erasures(contacts),
+                receipts=lead_receipts(contacts),
             )
             return page(request, lead_rows.CONTACTS_TEMPLATE, **context)
 

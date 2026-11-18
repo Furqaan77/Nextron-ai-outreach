@@ -34,6 +34,7 @@ from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
 from nextron.db import eventlog
 from nextron.db.models.base import new_id
+from nextron.db.repos.compliance import erasure_receipts as receipts_repo
 from nextron.db.repos.notify import alerts as alerts_repo
 from nextron.db.repos.notify import notifications as notifications_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -105,6 +106,11 @@ REQUEST_COLUMNS = (
     "receipt_id",
 )
 SUPPRESSION_KEYS = {"kind", "status", "source", "created_at", "voided_at", "void_reason"}
+# Story 3.14: an erasure receipt each, written directly (the export only reads them)
+JANE_RECEIPT_REF = "Earlier erase request"
+BOB_RECEIPT_REF = "Older erase request"
+RECEIPT_COLUMNS = ("id", "contact_id", "request_ref", "cause", "outcome", "created_at", "stores")
+RECEIPT_STORE_COLUMNS = ("id", "receipt_id", "store", "action", "status", "detail", "at")
 
 
 @pytest.fixture
@@ -128,8 +134,9 @@ def world(db_engine: Engine) -> World:
 
 
 def erasures(world: World) -> Erasures:
-    """Story 3.13's ``Erasures`` on the world's clock and ``Compliance``."""
-    return Erasures(world.clock, world.compliance)
+    """Story 3.13's ``Erasures`` on the world's clock and ``Compliance``, with a job queue for
+    an erasure's ``erase_external`` jobs (Story 3.14)."""
+    return Erasures(world.clock, world.compliance, queue=queue_on(world.clock))
 
 
 def export(world: World, contact_id: str, reference: str = JANE_REF) -> ContactExport:
@@ -238,7 +245,9 @@ def address_record(world: World, contact_id: str, address: str, at: datetime) ->
 class Seeded:
     """Jane (the Contact exported) and Bob (another Contact on her Lead), and what each holds."""
 
-    def __init__(self, world: World, *, jane_entries: bool = True) -> None:
+    def __init__(
+        self, world: World, *, jane_entries: bool = True, receipts: bool = True
+    ) -> None:
         self.lead = world.lead()
         self.jane = world.contact(
             self.lead, name="Jane Doe", role="Partner", email=EMAIL, linkedin_url=LINKEDIN
@@ -336,6 +345,9 @@ class Seeded:
                 JANE_REPLY, "question", contact_id=self.jane, names=("Jane Doe",)
             )
         )
+        if receipts:
+            self.jane_receipt = receipt(world, self.jane, JANE_RECEIPT_REF)
+            self.bob_receipt = receipt(world, self.bob, BOB_RECEIPT_REF)
         # Bob's request and entries come first, so the file must leave them out by more than
         # time; then Jane's entries: every key with the firm's domain, and her old address
         world.clock.set(T0 + timedelta(hours=1))
@@ -349,6 +361,24 @@ class Seeded:
             )
         with world.units.open():
             world.compliance.add_value(OLD_ADDRESS)
+
+
+def receipt(world: World, contact_id: str, request_ref: str) -> str:
+    """Store an erasure receipt with two store rows for ``contact_id`` (Story 3.14)."""
+    stores = [
+        receipts_repo.NewStore("database", "Tombstone the rows", "done", "Rows tombstoned"),
+        receipts_repo.NewStore("backups", "Age the copies out", "residual", "2 copies held"),
+    ]
+    return world.transact(
+        lambda: receipts_repo.insert_receipt(
+            contact_id=contact_id,
+            request_ref=request_ref,
+            cause="dsr",
+            outcome="erased",
+            created_at=T0,
+            stores=stores,
+        )
+    )
 
 
 # The full export --------------------------------------------------------------------------------
@@ -455,6 +485,20 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         NOW_STAMP,
     )
     assert request["receipt_id"] is None
+    # Story 3.14: her receipt, every column, with its store rows in store order
+    [stored_receipt] = file["compliance"]["erasure_receipts"]
+    assert tuple(stored_receipt) == RECEIPT_COLUMNS
+    assert (stored_receipt["id"], stored_receipt["contact_id"]) == (seeded.jane_receipt, seeded.jane)
+    assert (stored_receipt["request_ref"], stored_receipt["cause"]) == (JANE_RECEIPT_REF, "dsr")
+    assert stored_receipt["created_at"] == "2026-11-18T09:00:00.000000Z"
+    assert [tuple(row) for row in stored_receipt["stores"]] == [RECEIPT_STORE_COLUMNS] * 2
+    assert [
+        (row["receipt_id"], row["store"], row["status"], row["detail"])
+        for row in stored_receipt["stores"]
+    ] == [
+        (seeded.jane_receipt, "database", "done", "Rows tombstoned"),
+        (seeded.jane_receipt, "backups", "residual", "2 copies held"),
+    ]
     [alert] = file["notify"]["alerts"]
     assert (alert["subject"], alert["text"]) == (seeded.jane, JANE_ALERT)
     [notice] = file["notify"]["notifications"]
@@ -508,6 +552,8 @@ def test_no_other_contacts_data_or_any_hash_id_or_cause_is_in_the_file(world: Wo
         "calendly",
         JANE_CAUSE,
         BOB_CAUSE,
+        BOB_RECEIPT_REF,  # Story 3.14: Bob's receipt
+        seeded.bob_receipt,
     ):
         assert value not in text, value
     assert TEAM_TEXT not in json.loads(text)["research"]["pages"][0].values()
@@ -693,6 +739,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
         assert research[section] == [], section
     assert file["compliance"]["suppression"] == []
     assert [row["status"] for row in file["compliance"]["requests"]] == ["completed"]
+    assert file["compliance"]["erasure_receipts"] == []
     assert file["notify"] == {"alerts": [], "notifications": []}
     assert file["playbook"] == {"override_cases": []}
     assert file["event_log"] == {"contact_history": []}
@@ -704,7 +751,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
 def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     world: World,
 ) -> None:
-    seeded = Seeded(world, jane_entries=False)
+    seeded = Seeded(world, jane_entries=False, receipts=False)
     world.clock.set(T0 + timedelta(hours=3))
     with world.units.open():
         erased = erasures(world).erase_on_request(seeded.jane, ERASE_REF)
@@ -752,6 +799,12 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     assert [
         (row["kind"], row["status"], row["request_ref"]) for row in file["compliance"]["requests"]
     ] == [("erase", "completed", ERASE_REF), ("export", "completed", "Second request")]
+    # Story 3.14: the erasure's own receipt, its reference kept, with every store's row
+    [erase_request, _] = file["compliance"]["requests"]
+    [stored_receipt] = file["compliance"]["erasure_receipts"]
+    assert erase_request["receipt_id"] == stored_receipt["id"]
+    assert (stored_receipt["request_ref"], stored_receipt["outcome"]) == (ERASE_REF, "erased")
+    assert len(stored_receipt["stores"]) == 17
 
 
 def test_an_entry_found_only_by_a_request_is_exported(world: World) -> None:
@@ -926,6 +979,9 @@ def test_the_readers_return_every_column(world: World) -> None:
     assert contact["created_at"] == T0 and contact["is_primary"] is False
     assert compliance["suppression"] == ()  # no valid hash given, and Bob's request caused none
     assert [row["request_ref"] for row in compliance["requests"]] == [BOB_REF]
+    [bob_receipt] = compliance["erasure_receipts"]  # Story 3.14
+    assert set(bob_receipt) == set(RECEIPT_COLUMNS)
+    assert bob_receipt["id"] == seeded.bob_receipt and bob_receipt["created_at"] == T0
     assert set(notify) == {"alerts", "notifications"}
     [override] = playbook["override_cases"]
     assert set(override) == {
@@ -942,6 +998,7 @@ def test_the_readers_return_every_column(world: World) -> None:
     assert world.read(lambda: compliance_queries.export_pii("nope", [])) == {
         "suppression": (),
         "requests": (),
+        "erasure_receipts": (),
     }
 
 

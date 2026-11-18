@@ -22,6 +22,10 @@ breaks it.
 - **The sink reads every field.** ``AlertMessage`` and ``MailMessage`` have exactly the fields the
   sink checks and records. A new field (a CC recipient, say) fails here until the sink is
   reviewed: the sink would otherwise pass it on unchecked.
+- **The alert sink wraps every port method** (Story 3.14). ``AlertSink`` implements every
+  member of ``AlertPort``; its ``delete`` passes to the wrapped adapter unchanged, reading no
+  allowlist and recording nothing (a deletion sends nothing). A new ``AlertPort`` method fails
+  here until the sink is reviewed.
 """
 
 import ast
@@ -44,7 +48,7 @@ from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.bootstrap import load_bootstrap
 from nextron.main import AdapterContext, RoleAdapter, SinkRole, build_role_adapter
-from nextron.ports.alert import AlertDelivery, AlertMessage
+from nextron.ports.alert import AlertDelivery, AlertMessage, AlertPort
 from nextron.ports.mail import MailDelivery, MailMessage
 from tests.contracts.support import PACKAGE
 from tests.fakes.alert import InMemoryAlert
@@ -726,3 +730,43 @@ def test_the_field_check_catches_a_field_the_sink_would_ignore(tmp_path: Path) -
     message: Any = ProbeMailMessage("boss@nextron.example", "s", "t", "ann@prospect.example")
     sink.send(message)
     assert fake.sent == [message]  # delivered, cc and all, with the cc never checked
+
+
+# The alert sink wraps every port method (Story 3.14) --------------------------------------------
+
+
+def sink_member_problems(sink: type, port: type) -> list[str]:
+    """Each member of ``port`` that ``sink`` doesn't implement."""
+    return [
+        f"{sink.__name__} lacks {port.__name__}.{member}"
+        for member in sorted(typing.get_protocol_members(port))
+        if not callable(getattr(sink, member, None))
+    ]
+
+
+def test_the_alert_sink_wraps_every_alert_port_method(tmp_path: Path) -> None:
+    assert sink_member_problems(AlertSink, AlertPort) == []
+    assert typing.get_protocol_members(AlertPort) == {"send", "delete"}
+    fake = InMemoryAlert()
+    fake.delete_outcomes.append(False)
+    reads: list[str] = []
+
+    def allowlist() -> list[str]:
+        reads.append("read")
+        return []
+
+    folder = tmp_path / "sink"
+    sink = AlertSink(fake, allowlist, SinkRecorder(folder, FrozenClock()))
+
+    assert sink.delete("-100123", "42") is False
+    assert sink.delete("-100123", "43") is True
+    assert fake.deleted == [("-100123", "42"), ("-100123", "43")]
+    assert reads == [] and not folder.exists()  # no allowlist read, nothing recorded
+
+
+def test_the_member_check_catches_a_sink_without_delete() -> None:
+    class SendOnlySink:
+        def send(self, message: AlertMessage) -> AlertDelivery:
+            return AlertDelivery(None, sink=True)
+
+    assert sink_member_problems(SendOnlySink, AlertPort) == ["SendOnlySink lacks AlertPort.delete"]

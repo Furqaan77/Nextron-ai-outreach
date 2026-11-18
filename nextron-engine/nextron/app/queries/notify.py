@@ -8,7 +8,9 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.notify`` only.
   can raise each subject's alert once (the ``job_dead`` sweep);
 - ``open_notifications(limit)``: ``OpenNotifications(count, newest)``, the number of
   undismissed notifications and the newest ``limit`` of them, newest first (the dashboard's
-  notification area).
+  notification area);
+- ``alerts_about(subject)`` (Story 3.14): every ``telegram`` alert whose subject is ``subject``
+  (a Contact's ULID, for an erasure), of any kind and status, oldest first.
 
 - ``export_pii(contact_id)`` (Story 3.15, the subject access exporter): ``alerts`` and
   ``notifications``, every column of each alert and notification whose ``subject`` is the
@@ -23,6 +25,7 @@ from nextron.db.repos.notify import alerts as alerts_repo
 from nextron.db.repos.notify import notifications as notifications_repo
 from nextron.db.repos.notify.alerts import AlertRow
 from nextron.db.repos.notify.notifications import NotificationRow
+from nextron.domain.alert import Channel
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,11 @@ class OpenNotifications:
 def alert(alert_id: str) -> AlertRow | None:
     """The alert ``alert_id``, or ``None``."""
     return alerts_repo.get(alert_id)
+
+
+def alerts_about(subject: str) -> tuple[AlertRow, ...]:
+    """Every Telegram alert about ``subject``, oldest first."""
+    return alerts_repo.about_on_channel(subject, str(Channel.TELEGRAM))
 
 
 def subjects(kind: str) -> frozenset[str]:

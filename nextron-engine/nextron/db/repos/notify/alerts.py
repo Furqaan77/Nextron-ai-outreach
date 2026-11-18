@@ -12,7 +12,9 @@ applies the Alert machine. Rows come back as ``AlertRow``, a frozen copy of ever
   only while the alert still has the status the caller saw (the fence); returns the row count;
 - ``subjects(kind)``: the subjects of every alert of ``kind``;
 - ``about(subject)`` (Story 3.15): every column of each alert about ``subject``, of any
-  kind, as a ``dict`` (a generic ``select`` of the table), by ``created_at``, then ``id``.
+  kind, as a ``dict`` (a generic ``select`` of the table), by ``created_at``, then ``id``;
+- ``about_on_channel(subject, channel)`` (Story 3.14): every alert about ``subject`` on
+  ``channel``, of any kind and status, oldest first (``created_at``, then id).
 """
 
 from dataclasses import dataclass, fields
@@ -120,3 +122,13 @@ def about(subject: str) -> tuple[dict[str, object], ...]:
         .order_by(table.c.created_at, table.c.id)
     )
     return tuple(dict(row._mapping) for row in current().session.execute(statement))
+
+
+def about_on_channel(subject: str, channel: str) -> tuple[AlertRow, ...]:
+    """Every alert about ``subject`` on ``channel``, oldest first."""
+    statement = (
+        select(*_COLUMNS)
+        .where(AlertRecord.subject == subject, AlertRecord.channel == channel)
+        .order_by(AlertRecord.created_at, AlertRecord.id)
+    )
+    return tuple(AlertRow(*row) for row in current().session.execute(statement))

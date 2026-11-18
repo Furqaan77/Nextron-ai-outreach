@@ -1,5 +1,5 @@
 """The Telegram adapter (AD-9, AD-15, INT-8): plain-text alerts through the Bot API's
-``sendMessage``, over ``httpx2``.
+``sendMessage``, and their deletion through ``deleteMessage`` (Story 3.14), over ``httpx2``.
 
 Import rule: ``nextron.ports``, ``nextron.domain``, ``httpx2`` and the standard library. Nothing
 here logs.
@@ -49,6 +49,26 @@ any other exception (the request may have been sent)
 ``notify`` service re-sends such an alert once, 60 s later. Every error is an ``AdapterError``
 whose message is this module's own text, raised ``from None``: none carries the token, the URL,
 the text, the chat id or a response body, in its message, ``repr`` or traceback.
+
+**``delete(recipient, message_id) -> bool``** (Story 3.14: an erasure deletes the bot's
+messages about the Contact) reads the token and checks it and the chat id as ``send`` does
+(steps 1 and 2); a ``message_id`` that isn't a positive decimal number is
+``telegram_bad_message_id`` (non-retryable, no request). It then POSTs
+``https://api.telegram.org/bot<token>/deleteMessage`` with the JSON body ``{"chat_id": <int>,
+"message_id": <int>}``, recorded as exactly one ``ApiCall("telegram", "delete_message")``:
+
+=====================================================  =========================================
+Result                                                 Outcome
+=====================================================  =========================================
+2xx, JSON ``{"ok": true, "result": true}``             ``True`` (deleted)
+any other 2xx, or 400 (too old, or already gone)       ``False`` (Telegram didn't delete it)
+429 or 5xx                                             retryable ``telegram_unavailable``
+any other status (401, 403, 404, a 3xx)                ``telegram_refused``, naming the status
+any exception from the request                         retryable ``telegram_unavailable``
+=====================================================  =========================================
+
+A delete is idempotent, so a request that may have gone out is retried: a repeat answers 400,
+which counts as not deleted (the conservative direction).
 """
 
 import re
@@ -73,8 +93,12 @@ TELEGRAM_BAD_TOKEN: Final = "telegram_bad_token"
 TELEGRAM_BAD_CHAT_ID: Final = "telegram_bad_chat_id"
 TELEGRAM_UNAVAILABLE: Final = "telegram_unavailable"
 TELEGRAM_REFUSED: Final = "telegram_refused"
+TELEGRAM_BAD_MESSAGE_ID: Final = "telegram_bad_message_id"
 PROVIDER: Final = "telegram"  # the usage meter's provider and operation
 SEND_MESSAGE: Final = "send_message"
+DELETE_MESSAGE: Final = "delete_message"
+BAD_REQUEST: Final = 400  # deleteMessage's answer for a message too old or already gone
+MESSAGE_ID_PATTERN: Final = re.compile(r"[1-9][0-9]{0,18}")  # matched with fullmatch
 
 # The failures that mean nothing reached Telegram, so a retry can't send the alert twice.
 NOT_SENT: Final = (
@@ -114,6 +138,17 @@ def _message_id(response: httpx2.Response) -> int | None:
     return message_id
 
 
+def _deleted(response: httpx2.Response) -> bool:
+    """Whether a 2xx ``deleteMessage`` answer says the message was deleted."""
+    try:
+        document = response.json()
+    except Exception:  # noqa: BLE001 - any body that isn't JSON confirms nothing
+        return False
+    return isinstance(document, dict) and document.get("ok") is True and (
+        document.get("result") is True
+    )
+
+
 class TelegramAlert:
     """``AlertPort`` over the Telegram Bot API; see the module docstring."""
 
@@ -135,20 +170,64 @@ class TelegramAlert:
                 self._http = default_http_client()  # looked up now, so tests can refuse it
             return self._http
 
-    def send(self, message: AlertMessage) -> AlertDelivery:
+    def _token(self) -> str:
         token = read_credential(self._secrets, CredentialKey.TELEGRAM_BOT)
         if not TOKEN_PATTERN.fullmatch(token):
             raise AdapterError(
                 False, TELEGRAM_BAD_TOKEN, "the Telegram bot token is not <digits>:<key>"
             ) from None
-        recipient = message.recipient
+        return token
+
+    @staticmethod
+    def _chat_id(recipient: str) -> int:
         if not is_telegram_chat_id(recipient):
             raise AdapterError(
                 False, TELEGRAM_BAD_CHAT_ID, "the alert's chat id is not a numeric Telegram id"
             ) from None
+        return int(recipient)
+
+    def send(self, message: AlertMessage) -> AlertDelivery:
+        token = self._token()
+        chat_id = self._chat_id(message.recipient)
         http = self._client()
         with Metered(self._meter, PROVIDER, SEND_MESSAGE):  # one ApiCall, whatever the outcome
-            return self._post(http, token, int(recipient), message.text)
+            return self._post(http, token, chat_id, message.text)
+
+    def delete(self, recipient: str, message_id: str) -> bool:
+        token = self._token()
+        chat_id = self._chat_id(recipient)
+        if not (isinstance(message_id, str) and MESSAGE_ID_PATTERN.fullmatch(message_id)):
+            raise AdapterError(
+                False, TELEGRAM_BAD_MESSAGE_ID, "the message id is not a Telegram message id"
+            ) from None
+        http = self._client()
+        with Metered(self._meter, PROVIDER, DELETE_MESSAGE):  # one ApiCall, whatever the outcome
+            return self._delete(http, token, chat_id, int(message_id))
+
+    @staticmethod
+    def _delete(http: httpx2.Client, token: str, chat_id: int, message_id: int) -> bool:
+        """The one ``deleteMessage`` request and its outcome; only ``AdapterError`` gets out."""
+        try:
+            response = http.post(
+                f"{API_BASE}/bot{token}/deleteMessage",
+                json={"chat_id": chat_id, "message_id": message_id},
+            )
+        except Exception:  # noqa: BLE001 - a delete is idempotent, so any failure is retried
+            raise AdapterError(
+                True, TELEGRAM_UNAVAILABLE, "the Telegram request could not be completed"
+            ) from None
+        status = response.status_code
+        if 200 <= status < 300:
+            return _deleted(response)
+        if status == BAD_REQUEST:
+            return False
+        if status == 429 or 500 <= status < 600:
+            raise AdapterError(
+                True, TELEGRAM_UNAVAILABLE, f"Telegram answered with HTTP {status}"
+            ) from None
+        raise AdapterError(
+            False, TELEGRAM_REFUSED, f"Telegram refused the deletion with HTTP {status}"
+        ) from None
 
     def _post(self, http: httpx2.Client, token: str, chat_id: int, text: str) -> AlertDelivery:
         """The one ``sendMessage`` request and its outcome; only ``AdapterError`` gets out."""

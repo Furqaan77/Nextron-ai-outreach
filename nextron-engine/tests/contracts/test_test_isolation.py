@@ -158,6 +158,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "RegistryPort",
         "RendererPort",
         "SecretsPort",
+        "SinkFilesPort",
         "TokenCodecPort",
         "UsageMeterPort",
     }

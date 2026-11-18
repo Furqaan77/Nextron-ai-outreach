@@ -305,6 +305,7 @@ NEVER_RUN = [
         ["resolve_contact_markets", "never"],  # Story 3.2's one-off, group Other
         ["purge_page_text", "never"],
         ["run_ai_test_sets", "never"],  # Story 4.5, group Other
+        ["erase_external", "never"],  # Story 3.14
     ],
 ]
 
@@ -431,6 +432,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
             ["resolve_contact_markets", "never"],
             ["purge_page_text", "never"],
             ["run_ai_test_sets", "never"],
+            ["erase_external", "never"],
         ],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms

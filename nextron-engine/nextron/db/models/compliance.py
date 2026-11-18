@@ -1,6 +1,7 @@
 """The ``compliance`` service's tables (FR-50, FR-52, FR-63, FR-70, AD-3, AD-4, AD-15, AD-16,
-AD-17; migrations ``0022_3_3_suppression_entries``, ``0024_3_8_unsub_tokens`` and
-``0032_3_13_erase_contacts``), owned by ``compliance`` (``nextron.db.repos.compliance``).
+AD-17; migrations ``0022_3_3_suppression_entries``, ``0024_3_8_unsub_tokens``,
+``0032_3_13_erase_contacts`` and ``0037_3_14_erasure_receipts``), owned by ``compliance``
+(``nextron.db.repos.compliance``).
 
 **``suppression_entries``**: the Suppression List, one row per suppressed key.
 
@@ -65,25 +66,63 @@ an erasure (or, from Story 3.15, an export) ran.
   (``ck_data_subject_requests_status``: one of ``RequestStatus``); ``request_ref``, the
   Operator's ticket or letter reference (``ck_data_subject_requests_request_ref``: 1 to 200
   characters); ``opened_at``; ``completed_at``, set exactly on a ``completed`` request
-  (``ck_data_subject_requests_completed``); ``receipt_id`` (a ULID, nullable, no foreign key
-  until Story 3.14).
+  (``ck_data_subject_requests_completed``); ``receipt_id`` (a ULID, nullable; a trigger
+  rather than a foreign key checks it, Story 3.14).
 - Three triggers (migration ``0032_3_13_erase_contacts``): no ``DELETE``; an ``INSERT`` is
   ``open`` with a new ``id``; an ``UPDATE`` changes only ``status`` (``open`` to
-  ``completed``) with ``completed_at``, and sets ``receipt_id`` at most once.
+  ``completed``) with ``completed_at``, and sets ``receipt_id`` at most once. A fourth
+  (``0037_3_14_erasure_receipts``) refuses a ``receipt_id`` that names no receipt of the same
+  Contact.
 
 PII classes: ``request_ref`` is ``redact`` (free text, though ``check_request_ref`` refuses an
 address or the person's name); every other column is ``none``.
+
+**``erasure_receipts``** (Story 3.14): one row per erasure, or per repeat erase request on a
+Contact erased before: the receipt that tells the requester what was erased and what remains.
+
+- ``id``; ``contact_id`` (``fk_erasure_receipts_contact_id_contacts``, no cascade,
+  ``ix_erasure_receipts_contact_id``); ``request_ref`` (nullable, 1 to 200 characters), set
+  exactly on a ``dsr`` receipt (``ck_erasure_receipts_dsr_ref``); ``cause`` (one of
+  ``nextron.domain.erasure.ErasureCause``); ``outcome`` (one of
+  ``nextron.domain.erasure_receipt.ReceiptOutcome``); ``created_at``.
+- Two triggers: no ``DELETE``, no ``UPDATE``.
+
+**``erasure_receipt_stores``** (Story 3.14): one row per store of a receipt.
+
+- ``id``; ``receipt_id`` (``fk_erasure_receipt_stores_receipt_id_erasure_receipts``, no
+  cascade, ``ix_erasure_receipt_stores_receipt_id``); ``store`` (one of
+  ``nextron.domain.erasure_receipt.ErasureStore``); ``action`` (its fixed text); ``status`` (one
+  of ``StoreStatus``); ``detail`` (1 to 1000 characters, no ``@``); ``at``. One row per store of
+  a receipt (``uq_erasure_receipt_stores_receipt_id_store``).
+- Three triggers: no ``DELETE``; an ``INSERT`` with a new ``id`` and a new (``receipt_id``,
+  ``store``); an ``UPDATE`` only from ``pending`` to another status, with ``id``,
+  ``receipt_id``, ``store`` and ``action`` unchanged (each store settles once).
+
+PII classes: ``erasure_receipts.request_ref`` is ``redact``; every other column of both tables
+is ``none`` (each detail is built by ``nextron.domain.erasure_receipt`` from counts, dates, ids
+and codes, and holds no ``@``).
 """
 
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.contactability import KeyKind
 from nextron.domain.data_subject_request import RequestKind, RequestStatus
+from nextron.domain.erasure import ErasureCause
+from nextron.domain.erasure_receipt import ErasureStore, ReceiptOutcome, StoreStatus
 from nextron.domain.suppression_entry import EntryStatus, SuppressionSource
 
 KIND_LENGTH: Final = 16
@@ -95,7 +134,17 @@ SOURCE_LENGTH: Final = 16
 
 def _one_of(
     column: str,
-    values: type[KeyKind | EntryStatus | SuppressionSource | RequestKind | RequestStatus],
+    values: type[
+        KeyKind
+        | EntryStatus
+        | SuppressionSource
+        | RequestKind
+        | RequestStatus
+        | ErasureCause
+        | ReceiptOutcome
+        | ErasureStore
+        | StoreStatus
+    ],
 ) -> str:
     return "{} IN ({})".format(column, ",".join(f"'{value}'" for value in values))
 
@@ -121,6 +170,19 @@ REQUEST_KIND_CHECK: Final = _one_of("kind", RequestKind)
 REQUEST_STATUS_CHECK: Final = _one_of("status", RequestStatus)
 REQUEST_REF_CHECK: Final = "length(request_ref) BETWEEN 1 AND 200"
 REQUEST_COMPLETED_CHECK: Final = "(status = 'completed') = (completed_at IS NOT NULL)"
+RECEIPT_CAUSE_LENGTH: Final = 16
+RECEIPT_OUTCOME_LENGTH: Final = 16
+RECEIPT_REF_CHECK: Final = "length(request_ref) BETWEEN 1 AND 200"
+RECEIPT_DSR_REF_CHECK: Final = "(cause = 'dsr') = (request_ref IS NOT NULL)"
+RECEIPT_CAUSE_CHECK: Final = _one_of("cause", ErasureCause)
+RECEIPT_OUTCOME_CHECK: Final = _one_of("outcome", ReceiptOutcome)
+STORE_LENGTH: Final = 16
+ACTION_LENGTH: Final = 300  # nextron.domain.erasure_receipt.MAX_ACTION_LENGTH
+STORE_STATUS_LENGTH: Final = 16
+STORE_CHECK: Final = _one_of("store", ErasureStore)
+STORE_STATUS_CHECK: Final = _one_of("status", StoreStatus)
+DETAIL_CHECK: Final = "length(detail) BETWEEN 1 AND 1000"  # MAX_DETAIL_LENGTH
+DETAIL_ADDRESS_CHECK: Final = "instr(detail, '@') = 0"
 
 
 class SuppressionEntryRecord(Base):
@@ -195,3 +257,45 @@ class DataSubjectRequestRecord(Base):
     opened_at: Mapped[datetime] = mapped_column(UtcDateTime)
     completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     receipt_id: Mapped[str | None] = mapped_column(Ulid)
+
+
+class ErasureReceiptRecord(Base):
+    """One erasure receipt: its Contact, its request reference, its cause and its outcome."""
+
+    __tablename__ = "erasure_receipts"
+    __table_args__ = (
+        Index("ix_erasure_receipts_contact_id", "contact_id"),
+        CheckConstraint(RECEIPT_REF_CHECK, name="request_ref"),
+        CheckConstraint(RECEIPT_DSR_REF_CHECK, name="dsr_ref"),
+        CheckConstraint(RECEIPT_CAUSE_CHECK, name="cause"),
+        CheckConstraint(RECEIPT_OUTCOME_CHECK, name="outcome"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    contact_id: Mapped[str] = mapped_column(Ulid, ForeignKey("contacts.id"))
+    request_ref: Mapped[str | None] = mapped_column(String(REQUEST_REF_LENGTH))
+    cause: Mapped[str] = mapped_column(String(RECEIPT_CAUSE_LENGTH))
+    outcome: Mapped[str] = mapped_column(String(RECEIPT_OUTCOME_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class ErasureReceiptStoreRecord(Base):
+    """One store of an erasure receipt: its action, status, detail and time."""
+
+    __tablename__ = "erasure_receipt_stores"
+    __table_args__ = (
+        Index("ix_erasure_receipt_stores_receipt_id", "receipt_id"),
+        UniqueConstraint("receipt_id", "store"),
+        CheckConstraint(STORE_CHECK, name="store"),
+        CheckConstraint(STORE_STATUS_CHECK, name="status"),
+        CheckConstraint(DETAIL_CHECK, name="detail"),
+        CheckConstraint(DETAIL_ADDRESS_CHECK, name="detail_address"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    receipt_id: Mapped[str] = mapped_column(Ulid, ForeignKey("erasure_receipts.id"))
+    store: Mapped[str] = mapped_column(String(STORE_LENGTH))
+    action: Mapped[str] = mapped_column(String(ACTION_LENGTH))
+    status: Mapped[str] = mapped_column(String(STORE_STATUS_LENGTH))
+    detail: Mapped[str] = mapped_column(Text)
+    at: Mapped[datetime] = mapped_column(UtcDateTime)

@@ -38,6 +38,9 @@ proving each check catches a violation.
   by filtering); and no string, other than a docstring, holding an SQL date modifier
   (``julianday(``, ``strftime(``, ``datetime(``, ``date(``, ``'now'``, ``-30 days`` and the
   like): entries never expire and are never deleted.
+  ``ALLOWED`` names the one exception, which deletes no entry: Story 3.14's Telegram store
+  (``app/compliance/erasure_stores.py``) calls ``notify``'s ``delete_message`` to delete the
+  bot's messages about an erased Contact (AD-17). The same call anywhere else still fails.
 """
 
 import ast
@@ -101,6 +104,8 @@ GUARDED = (
     "domain/suppression_list.py",
 )
 DATE_COLUMNS = frozenset({"created_at", "voided_at"})
+# (module, verb, name) uses that delete no entry: AD-17's Telegram deletion (Story 3.14)
+ALLOWED = frozenset({("app/compliance/erasure_stores.py", "calls", "delete_message")})
 DATE_ARITHMETIC = frozenset({"timedelta", "relativedelta"})
 FORBIDDEN_STEMS = (
     "delet",
@@ -857,6 +862,8 @@ def permanence_problems(root: Path) -> list[str]:
                 if named in DATE_ARITHMETIC:
                     problems.append(f"{relative}:{line} uses {named}")
             for verb, name in names:
+                if (relative, verb, name) in ALLOWED:
+                    continue
                 if name in DATE_ARITHMETIC:
                     problems.append(f"{relative}:{line} uses {name}")
                 elif _forbidden(name):
@@ -1041,6 +1048,23 @@ def test_the_permanence_check_catches_a_delete_or_an_expiry(
     root = probe_tree(tmp_path, {relative: source})
 
     assert found in permanence_problems(root)
+
+
+def test_the_permanence_check_allows_only_the_named_telegram_deletion(tmp_path: Path) -> None:
+    call = "def run(notify):\n    notify.delete_message('1', '2')\n"
+    root = probe_tree(
+        tmp_path,
+        {
+            "app/compliance/erasure_stores.py": call,
+            "app/compliance/api.py": call,
+            "app/compliance/erasure.py": "def delete_message():\n    pass\n",
+        },
+    )
+
+    assert permanence_problems(root) == [
+        "app/compliance/api.py:2 calls delete_message",
+        "app/compliance/erasure.py:1 defines delete_message",
+    ]
 
 
 def test_the_permanence_check_looks_only_at_compliance(tmp_path: Path) -> None:

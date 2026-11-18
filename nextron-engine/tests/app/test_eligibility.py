@@ -440,7 +440,8 @@ def test_a_confirmed_corporate_uk_contact_is_eligible_and_still_fails_closed(
     erased = world.contact(confirmed_lead, email="ann.lee@acmelaw.co.uk", name="Ann Lee")
     assert world.evaluate(erased).eligible
     with world.units.open():
-        Erasures(world.clock, world.compliance).erase_on_request(erased, "DSR-2026-0099")
+        erasures = Erasures(world.clock, world.compliance, queue=queue_on(world.clock))
+        erasures.erase_on_request(erased, "DSR-2026-0099")  # Story 3.14: it queues its jobs
     decision = world.evaluate(erased)
     assert not decision.eligible and ReasonKind.CONTACT_ERASED in decision.kinds
 
