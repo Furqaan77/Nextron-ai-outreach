@@ -38,13 +38,15 @@ normaliser).
 
 - ``@command merge(survivor_id, loser_id)`` raises ``MergeRefused`` (code ``merge_refused``,
   which dooms the caller's transaction) when the two ids are the same, either Lead is unknown or
-  already merged, or the survivor is newer than the loser (by ``created_at``, then ``id``).
-  Otherwise, in order: ``mark_merged`` sets the loser's ``merged_into`` and clears each key the
-  survivor lacks; ``set_keys`` gives those keys to the survivor; and ``LeadsMerged(survivor,
-  loser)`` is published, so ``pipeline.reparent_lead`` (and every later owner of Lead-scoped
-  rows) runs in the same transaction: ``pipeline.reparent_lead``, then
-  ``research.reparent_lead``. A key the survivor holds with another value stays on the loser,
-  where a lookup still finds it and follows ``merged_into``. The merge itself appends no
+  already merged, the survivor is newer than the loser (by ``created_at``, then ``id``), or
+  both Leads have a live (``active`` or ``paused``) Enrollment (AD-3, Story 4.8; read through
+  ``queries.sequencing.live_enrollment``). Otherwise, in order: ``mark_merged`` sets the
+  loser's ``merged_into`` and clears each key the survivor lacks; ``set_keys`` gives those keys
+  to the survivor; and ``LeadsMerged(survivor, loser)`` is published, so every owner of
+  Lead-scoped rows reparents them in the same transaction: ``pipeline.reparent_lead``, then
+  ``research.reparent_lead``, then ``sequencing.reparent_lead`` (the loser's Enrollments move
+  to the survivor). A key the survivor holds with another value stays on the loser, where a
+  lookup still finds it and follows ``merged_into``. The merge itself appends no
   ``events`` row: ``merged_into`` is the record. Non-``str`` ids raise ``TypeError``.
 
 - ``@use_case canonicalize_lead(lead_id, run_id) -> str`` (the ``canonicalize_lead`` job, Story
@@ -117,6 +119,7 @@ from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
 from nextron.db.repos.discovery import leads as leads_repo
@@ -343,6 +346,11 @@ class Discovery:
             raise MergeRefused("the Lead to merge is already merged into another Lead")
         if _age(survivor) > _age(loser):
             raise MergeRefused("the survivor is newer than the Lead to merge")
+        if (
+            sequencing_queries.live_enrollment(survivor.id) is not None
+            and sequencing_queries.live_enrollment(loser.id) is not None
+        ):
+            raise MergeRefused("both Leads have a live Enrollment")
         moved = {
             field: value
             for field in KEY_FIELDS

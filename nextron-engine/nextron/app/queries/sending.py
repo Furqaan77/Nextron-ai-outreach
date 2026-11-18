@@ -10,11 +10,19 @@ status, created_at)`` tuples, oldest first (by ``created_at``, then ``id``):
   and ``active``): the inboxes a new Sequence may bind to (AD-21). Enrollment (Story 4.8) picks
   from these.
 
-Both read through the current unit of work, read-only ones included.
+``cold_daily_caps(local_date) -> Mapping[str, int]`` (Story 4.8) is each bindable inbox's cold
+Daily Cap on ``local_date`` (a calendar day in the ``sender_timezone``), by inbox id. It is a
+placeholder until Epic 6's warm-up ramp: every bindable inbox has cap 0, so
+``domain.sending_policy.pick_inbox`` falls back to the fewest live Enrollments. ``local_date``
+must be a ``date`` (a ``datetime`` is refused with ``TypeError``).
+
+All read through the current unit of work, read-only ones included.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from types import MappingProxyType
 from typing import Final
 
 from nextron.db.repos.sending import inboxes as inboxes_repo
@@ -61,3 +69,10 @@ def inboxes() -> tuple[SendingInboxView, ...]:
 def inboxes_for_binding() -> tuple[SendingInboxView, ...]:
     """The Sending Inboxes a new Sequence may bind to (``BINDABLE_STATUSES``), oldest first."""
     return tuple(_view(row) for row in inboxes_repo.listed(BINDABLE_STATUSES))
+
+
+def cold_daily_caps(local_date: date) -> Mapping[str, int]:
+    """Each bindable inbox's cold Daily Cap on ``local_date``: 0 until Epic 6's ramp."""
+    if isinstance(local_date, datetime) or not isinstance(local_date, date):
+        raise TypeError("cold_daily_caps takes a date")
+    return MappingProxyType({inbox.id: 0 for inbox in inboxes_for_binding()})

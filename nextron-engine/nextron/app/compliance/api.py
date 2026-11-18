@@ -161,12 +161,14 @@ the send gate, 6.9) calls it, and it is the only caller of
    queries.research.provenance(contact.id))`` (``nextron.domain.contacts``): false, which gives
    ``provenance_missing``, when no source record shows where the Contact or its email address
    came from.
-5. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code,
-   stage), market_rules, clock.now())``. No Enrollment history, Event times, legal form or
-   re-contact date is read yet (Stories 4.8, 2.9, 2.12 and Epic 7 pass them), so ``history``
-   and ``events_first_seen`` are empty, ``legal_form`` is ``None`` (every UK Contact fails
-   with ``uk_legal_form_unconfirmed``) and ``recontact_on`` is ``None`` (every ``not_now`` Lead
-   fails with ``not_now_undated``).
+5. **History (FR-63, Story 4.8).** ``history`` is ``queries.sequencing.ended_sequences(
+   contact.id)``: the Contact's ended Enrollments that sent a Step, so a Sequence that ended
+   without a Reply blocks a re-contact (``recontact_not_allowed``) until FR-63 allows it.
+6. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code,
+   stage), market_rules, clock.now())``. No Event times, legal form or re-contact date is read
+   yet (Stories 2.9, 2.12 and Epic 7 pass them), so ``events_first_seen`` is empty,
+   ``legal_form`` is ``None`` (every UK Contact fails with ``uk_legal_form_unconfirmed``) and
+   ``recontact_on`` is ``None`` (every ``not_now`` Lead fails with ``not_now_undated``).
 
 Nothing is written, cached or logged: each call reads the current facts again, so an edit to a
 Market, a suppression or a stage change shows in the very next Decision.
@@ -187,6 +189,7 @@ from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
@@ -626,6 +629,7 @@ class Compliance:
                 provenance_recorded=provenance_recorded(
                     contact.email, research_queries.provenance(contact.id)
                 ),
+                history=sequencing_queries.ended_sequences(contact.id),
             ),
             EligibilityLead(country_code=lead.country_code, stage=stage),
             _market_rules(),

@@ -18,6 +18,7 @@ from nextron.db.models import (
     playbook,
     research,
     sending,
+    sequencing,
     setup,
     signals,
 )
@@ -57,6 +58,7 @@ from nextron.db.models.playbook import (
 )
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
+from nextron.db.models.sequencing import EnrollmentRecord, VariantCounterRecord
 from nextron.db.models.setup import (
     CampaignRecord,
     MarketRecord,
@@ -91,6 +93,7 @@ __all__ = [
     "CrawlRunRecord",
     "CrawledPageRecord",
     "DataSubjectRequestRecord",
+    "EnrollmentRecord",
     "EventRecord",
     "EvidenceRecord",
     "ExtractionRunRecord",
@@ -120,6 +123,7 @@ __all__ = [
     "Ulid",
     "UnsubTokenRecord",
     "UtcDateTime",
+    "VariantCounterRecord",
     "VariantRecord",
     "compliance",
     "crawl",
@@ -134,6 +138,7 @@ __all__ = [
     "playbook",
     "research",
     "sending",
+    "sequencing",
     "setup",
     "signals",
     "ulid_pk",

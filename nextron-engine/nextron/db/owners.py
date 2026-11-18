@@ -296,6 +296,31 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "created_at",
         ),
     },
+    # Story 4.8
+    "enrollments": {
+        "sequencing": (
+            "id",
+            "lead_id",
+            "contact_id",
+            "campaign_id",
+            "variant_id",
+            "sending_inbox_id",
+            "sequence_id",
+            "sequence_version",
+            "offer_id",
+            "origin",
+            "status",
+            "pause_cause",
+            "stop_cause",
+            "created_at",
+            "updated_at",
+            "last_step_sent_at",
+            "ended_at",
+        ),
+    },
+    "variant_counters": {
+        "sequencing": ("id", "campaign_id", "last_variant_id", "updated_at"),
+    },
     "crawl_runs": {
         "research": (
             "id",

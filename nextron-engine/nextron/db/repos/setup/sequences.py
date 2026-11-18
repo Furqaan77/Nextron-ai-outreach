@@ -15,6 +15,8 @@ longer validates (a JSON column that isn't JSON, or Steps that aren't numbered 1
 
 - ``all_sequences()``: every Sequence as a ``StoredSequence``, by key;
 - ``by_key(key)``: the Sequence ``key``, or ``None``;
+- ``by_id(sequence_id)``: the Sequence with that row id, or ``None`` (Story 4.8: a Campaign names
+  its Sequence by id);
 - ``insert(sequence, at) -> id``: a new Sequence at version 1 and one brief row per Step, all
   created and updated at ``at``;
 - ``update(sequence_id, sequence, version, at)``: sets the Sequence's ``name``, ``version`` and
@@ -190,6 +192,15 @@ def all_sequences() -> tuple[StoredSequence, ...]:
 def by_key(key: str) -> StoredSequence | None:
     """The stored Sequence ``key``, or ``None`` when it has no row."""
     statement = select(*_SEQUENCE_COLUMNS).where(SequenceRecord.key == str(key))
+    row = current().session.execute(statement).one_or_none()
+    if row is None:
+        return None
+    return _stored(row, _briefs_of([row.id]).get(row.id, []))
+
+
+def by_id(sequence_id: str) -> StoredSequence | None:
+    """The stored Sequence with the row id ``sequence_id``, or ``None`` when it has no row."""
+    statement = select(*_SEQUENCE_COLUMNS).where(SequenceRecord.id == str(sequence_id))
     row = current().session.execute(statement).one_or_none()
     if row is None:
         return None

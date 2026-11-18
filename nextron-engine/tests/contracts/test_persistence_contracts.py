@@ -55,6 +55,7 @@ from sqlalchemy.types import TypeDecorator
 from nextron import main
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import Research
+from nextron.app.sequencing.api import Sequencing
 from nextron.db.migrations import SCRIPT_LOCATION, alembic_config
 from nextron.db.models import Base, Ulid, UtcDateTime
 from nextron.db.owners import OWNERS, SHARED_WRITERS, TABLES
@@ -78,7 +79,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0032_3_13_erase_contacts"
+HEAD = "0033_4_8_enrollments"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -542,11 +543,12 @@ def test_every_owner_of_a_lead_scoped_row_reparents_it_on_a_merge() -> None:
         "crawled_pages.lead_id",
         "ats_links.lead_id",
         "contacts.lead_id",  # Story 2.3
+        "enrollments.lead_id",  # Story 4.8
         "evidence.lead_id",  # Story 2.9
         "signals.lead_id",
         "extraction_runs.lead_id",
     ]
-    assert reparenting_owners(subscribers) == {"pipeline", "research"}
+    assert reparenting_owners(subscribers) == {"pipeline", "research", "sequencing"}
     assert reparent_problems(Base.metadata, subscribers) == []
 
 
@@ -570,7 +572,11 @@ def test_the_reparent_check_names_a_table_whose_owner_registers_nothing() -> Non
 def test_the_reparent_check_names_a_missing_registration() -> None:
     clock = FrozenClock()
     # research's other command is no reparent_lead
-    subscribers = [Pipeline(clock).reparent_lead, Research(clock).add_contact]
+    subscribers = [
+        Pipeline(clock).reparent_lead,
+        Research(clock).add_contact,
+        Sequencing(clock).reparent_lead,
+    ]
 
     assert reparent_problems(Base.metadata, subscribers) == [
         f"{column} references leads.id, but research registers no reparent_lead for LeadsMerged"
@@ -801,19 +807,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0033_next"}], None),
-        ([{"revision": "0033-next"}], "the chain does not load"),
-        ([{"revision": "0033_Next"}], "the id does not match"),
+        ([{"revision": "0034_next"}], None),
+        ([{"revision": "0034-next"}], "the chain does not load"),
+        ([{"revision": "0034_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0034_next"}], "the id starts 0034, but it is revision 33"),
-        ([{"revision": "0033_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0033_next", "file": "0033_other"}], "the id is not its file name"),
-        ([{"revision": "0033_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0033_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0033_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0033_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0035_next"}], "the id starts 0035, but it is revision 34"),
+        ([{"revision": "0034_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0034_next", "file": "0034_other"}], "the id is not its file name"),
+        ([{"revision": "0034_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0034_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0034_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0034_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0033_a"}, {"revision": "0034_b", "down": HEAD}],
+            [{"revision": "0034_a"}, {"revision": "0035_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],
