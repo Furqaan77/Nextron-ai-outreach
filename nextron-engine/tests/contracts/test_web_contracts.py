@@ -193,6 +193,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/contacts/{contact_id}/export",
         "/exports/{ticket}",
         "/leads",
+        "/leads/pipeline",  # Story 9.7
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}",
@@ -667,6 +668,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "locked.html",
         "macros.html",
         "notifications.html",
+        "pipeline.html",
         "quotas.html",
         "settings.html",
         "settings_form.html",

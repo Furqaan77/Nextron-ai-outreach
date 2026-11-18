@@ -166,6 +166,12 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   row, or "Not on the list"; "Opt-out reversed. ..." with the rows of the same opt-out's other
   ``active`` entries, each with its Reverse form). Always 200, and nothing typed is rendered
   back.
+- ``GET /leads/pipeline`` (``pipeline_board``, ``@personal_data(True)``, Story 9.7,
+  registered before ``/leads/{lead_id}``): the Pipeline board; see ``nextron.web.pipeline_page``.
+  It reads its query string through ``pipeline_page.board_filters`` against
+  ``queries.setup.segments`` and the stored Markets (``lead_markets``; a bad parameter is
+  ``MalformedForm``, 400), then ``queries.pipeline.board``; a start date after the end date
+  answers 400 with the page, its alert and no groups.
 - ``GET /leads`` (``pipeline_page``, the navigation's Leads/Pipeline section) and ``GET
   /leads/{lead_id}`` (``lead_page``, registered after ``/leads/import``), both
   ``@personal_data(True)``: the Leads list and the Lead page (Story 2.4); see
@@ -343,6 +349,7 @@ from nextron.web import health_page as health_rows
 from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import leads_page as lead_rows
+from nextron.web import pipeline_page as board_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
@@ -1514,6 +1521,30 @@ def create_app(
             lead, contact, notice=notice, request_ref=request_ref
         )
         return page(request, template, **context)
+
+    # before /leads/{lead_id}, like every /leads/<word> path
+    @app.get(board_rows.BOARD_PATH, name="pipeline_board")
+    @personal_data(True)  # a Lead's name can be a sole trader's name
+    def pipeline_board(request: Request) -> HTMLResponse:
+        segments = setup_queries.segments()
+        markets = lead_markets()
+        filters = board_rows.board_filters(
+            request.query_params.multi_items(), segments, markets
+        )
+        board = None
+        if not filters.range_refused:
+            board = pipeline_queries.board(
+                segment_id=filters.segment_id,
+                market_id=filters.market_id,
+                entered_from=filters.entered_from,
+                entered_to=filters.entered_to,
+                pages=filters.pages,
+            )
+        context = board_rows.board_context(filters, board, segments, markets)
+        answer = page(request, board_rows.TEMPLATE, **context)
+        if board is None:
+            answer.status_code = 400
+        return answer
 
     # before /leads/{lead_id}, like every /leads/<word> path
     @app.get("/leads/{lead_id}/contacts/{contact_id}/erase", name="contact_erase_page")
