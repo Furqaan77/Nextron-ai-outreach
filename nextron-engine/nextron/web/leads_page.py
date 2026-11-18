@@ -236,6 +236,7 @@ from nextron.app.queries.research import (
 from nextron.app.queries.scoring import StoredScore
 from nextron.app.queries.setup import SeededMarket, SeededSegment
 from nextron.domain import render
+from nextron.domain.address_class import AddressClass
 from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import (
     INVALID_ADDRESS,
@@ -247,6 +248,7 @@ from nextron.domain.contacts import (
     provenance_recorded,
 )
 from nextron.domain.eligibility import Decision
+from nextron.domain.email_checks import REASON_TEXT, CheckResult
 from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.extraction import EvidenceSource, FactKind
 from nextron.domain.legal_form import (
@@ -302,6 +304,10 @@ SEARCH_NOTES: Final[Mapping[str, str]] = MappingProxyType(
         EmailSearchOutcome.LEAD_CLOSED: "not searched: the Lead is Lost or Disqualified",
     }
 )
+# Story 2.14: the address's last check, under the Email cell
+CHECK_SUPPRESSED: Final = "On the Suppression List"
+CHECK_QUOTA: Final = "verification pending: quota reached"
+CHECK_INVALID: Final = "invalid"
 # The "Find email" answers, by the queue_search result
 SEARCH_NOTICES: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -815,6 +821,7 @@ class ContactRow:
     receipts: tuple[ReceiptView, ...] = ()
     search_note: str | None = None  # Story 2.13: no usable address, by the search's outcome
     can_find_email: bool = False  # Story 2.13: "Find email" (no usable address)
+    check_note: str | None = None  # Story 2.14: the address's last check
 
 
 @dataclass(frozen=True, slots=True)
@@ -1102,6 +1109,37 @@ def tombstone_line(erased_at: datetime, request_ref: str | None) -> str:
     return line if request_ref is None else f"{line} (request {request_ref})"
 
 
+def check_note(contact: StoredContact) -> str | None:
+    """The note of the address's last check (Story 2.14), or ``None``: "On the Suppression
+    List"; "invalid: <reason> (<date>)" ("invalid (<date>)" for a reason without a text);
+    "verified <date>"; "checks passed <date>"; and, for a ``guessed`` address only,
+    "verification pending: quota reached" or "verification: <status> (<date>)" for another
+    verifier status."""
+    result = contact.email_check_result
+    if contact.email is None or result is None:
+        return None
+    checked = contact.email_checked_at
+    if result == CheckResult.SUPPRESSED:
+        return CHECK_SUPPRESSED
+    if contact.address_class == INVALID_ADDRESS:
+        reason = contact.email_invalid_reason
+        if reason in REASON_TEXT and checked:
+            return f"invalid: {REASON_TEXT[reason]} ({day(checked)})"
+        return CHECK_INVALID if checked is None else f"{CHECK_INVALID} ({day(checked)})"
+    verified_at = contact.email_verifier_at or checked
+    if contact.address_class == AddressClass.VERIFIED and verified_at is not None:
+        return f"verified {day(verified_at)}"
+    if result == CheckResult.CHECKS_PASSED and checked is not None:
+        return f"checks passed {day(checked)}"
+    if contact.address_class != AddressClass.GUESSED:
+        return None  # a quota or verifier note is stale once the class moved (find-on-site)
+    if result == CheckResult.QUOTA_REACHED:
+        return CHECK_QUOTA
+    if contact.email_verifier_at is not None and result != CheckResult.INVALID:
+        return f"verification: {result} ({day(contact.email_verifier_at)})"
+    return None
+
+
 def contact_row(
     contact: StoredContact,
     records: Iterable[StoredProvenance],
@@ -1160,6 +1198,7 @@ def contact_row(
         erase_href=None if lead_id is None else erase_href(lead_id, contact.id),
         search_note=None if usable else SEARCH_NOTES.get(contact.email_search_outcome or ""),
         can_find_email=not usable,
+        check_note=check_note(contact),
     )
 
 

@@ -1426,8 +1426,9 @@ if isinstance(answer, Blocked):
 **The contract** (`tests/contracts/test_ad16_callers.py`) keeps every path gated:
 
 - a **manifest** of every AD-16 caller: `upsert_lead`, the CSV import, `add_contact` for each
-  source, Story 2.10's people step and Story 2.13's `find_contact_email` (every `EmailFinding`
-  method), then (not built yet, skipped by name) `verify_contact_email`, the Signal Inbox chain,
+  source, Story 2.10's people step, Story 2.13's `find_contact_email` (every `EmailFinding`
+  method) and Story 2.14's `verify_contact_email`, then (not built yet, skipped by name) the
+  Signal Inbox chain,
   replies, `sequencing.enroll`, `drafting.request_*` and Call Prep,
   `approval.approve`, the pipeline Tasks and call sheets, and `compliance.assert_sendable`. A
   caller that exists without a scenario fails;
@@ -1437,8 +1438,9 @@ if isinstance(answer, Blocked):
   each insert into `leads`, `contacts`, `enrollments`, `drafts`, `linkedin_tasks`,
   `call_preps` or `outbound_messages`; with `Blocked`, no table gains a row, no job is queued
   and no `INSERT`, `UPDATE`, `DELETE` or `REPLACE` runs (except `add_contact`'s
-  `contact_blocked` event, and `find_contact_email`'s `email_search_blocked` event and the
-  Contact's search outcome);
+  `contact_blocked` event, `find_contact_email`'s `email_search_blocked` event and the
+  Contact's search outcome, and `verify_contact_email`'s `suppressed` result, written with no
+  DNS or Hunter call and no class change);
 - every use of `upsert_lead` or `add_contact` must sit inside a manifest caller;
 - a repository function that inserts into one of those tables (`insert(Model)` or
   `insert(Model.__table__)`, `Model(...)`, `Model.__table__.insert()`,
@@ -3130,6 +3132,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0047_8_3_discovery_runs` | `discovery_runs` (foreign keys to `campaigns` and `segments` with no cascade; `ix_discovery_runs_started_at`; `ck_discovery_runs_source`, `ck_discovery_runs_status`, `ck_discovery_runs_country_code`, `ck_discovery_runs_finished_at` and `ck_discovery_runs_counts`) (see [Places discovery](#places-discovery)) | `discovery` |
 | `0048_10_2_assist_accounts` | `linkedin_accounts` (the LinkedIn account a person sends Tasks from by hand: `label` unique as `uq_linkedin_accounts_label`, `owner_name`, `owner_role`, `status`, the caps `tasks_per_weekday`, `daily_invite_cap` and `weekly_invite_cap` with server defaults 10, 10 and 100; status and cap checks; the partial unique index `uq_linkedin_accounts_active` lets at most one be active) | `pipeline` |
 | `0049_9_1_manual_stages` | adds to `leads`, in place with no check, the nullable `deal_value` (BigInteger micro-dollars) and `notes` (Text, PII class `redact`), and creates `call_outcomes` (one row per booked discovery call: foreign keys to `leads` and `contacts` with no cascade, `ix_call_outcomes_lead_id`) | `pipeline` |
+| `0050_2_14_email_checks` | adds to `contacts`, in place with no check, the nullable `email_check_result`, `email_checked_at`, `email_invalid_reason` and `email_verifier_at` (codes and times only), and creates `trg_contacts_tombstone` again with the four columns fixed on an erased Contact (22 fixed columns; see [Validating addresses](#validating-addresses)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -3221,7 +3224,8 @@ Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` 
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
 authentication](#sending-domain-authentication)), `check_job_boards` and `recheck_event`
 (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)), and
-`find_contact_email` (see [Finding email addresses](#finding-email-addresses)), and `score_lead` and
+`find_contact_email` (see [Finding email addresses](#finding-email-addresses)),
+`verify_contact_email` (see [Validating addresses](#validating-addresses)), and `score_lead` and
 `recompute_tiers` (see [Scores and the Lead Tier](#scores-and-the-lead-tier)), and `discover_places`
 (bulk only, priority 30, 1 hour, retry limit 2, group `discovery`; see [Places
 discovery](#places-discovery)); the stories that add
@@ -4240,7 +4244,8 @@ token, a bad chat id) records nothing. So far: Telegram (`telegram`/`send_messag
 OAuth (`google_oauth`/`code_exchange`, `token_refresh` and `token_revocation`; a revoke answered
 `invalid_token` is `ok`), Companies House (`companies_house`/`search_companies` and
 `get_company`; a lookup answered 404 is `ok`, and a request its own rate limit refuses records
-nothing), Hunter (`hunter`/`domain_search` and `find`, 2 units each), Prospeo
+nothing), Hunter (`hunter`/`domain_search` and `find`, 2 units each, and `verify`, 1 unit;
+a 202 "still verifying" counts 0), Prospeo
 (`prospeo`/`find`), whose calls count 1 only when answered 2xx, and Google Places
 (`places`/`text_search`, with SKU `enterprise`, or `pro` for a mask without the website). The
 Claude gateway records an `AiCall` per request instead.
@@ -5410,8 +5415,60 @@ searched: on the Suppression List" or "not searched: the Lead is Lost or Disqual
 search, and a **Find email** button on each Contact without a usable address, which answers
 "Looking for an email address. Reload the page in a minute."
 
-**Not yet:** verifying an address and changing its class (Story 2.14); obfuscated addresses
-("jane [at] firm") aren't read.
+Each address found is checked next ([Validating addresses](#validating-addresses)).
+Obfuscated addresses ("jane [at] firm") aren't read.
+
+## Validating addresses
+
+Story 2.14 checks every new address and keeps its Address Class (`published`, `guessed`,
+`verified`, `invalid`) current. `nextron/domain/email_checks.py` holds the codes and the
+disposable-domain list, and `nextron/app/research/verification.py` (`EmailVerification`) runs
+the checks.
+
+**When it runs.** The `verify_contact_email` job (bulk lane by default, or interactive; priority
+45; 5 minutes; retry limit 3; group Enrichment; keyed `verify_contact_email:<contact>:tick`) is
+queued when the email search assigns an address, when the CSV import creates a Contact with an
+address, and when the selection or **Make primary** leaves a Primary Contact whose address is
+`guessed` and not yet verified.
+
+**The checks, in order; the first that decides wins:**
+
+1. **The contactability gate.** An address on the Suppression List isn't looked up at all: the
+   result is `suppressed`, the class stays as it was, and no DNS or Hunter call is made.
+2. **Syntax** (offline, `email-validator` without deliverability checks): a malformed address is
+   `invalid` (reason `syntax`).
+3. **Disposable domains**: an address whose domain (or its registrable domain) is on the
+   vendored list `nextron/domain/data/disposable_domains.txt` (the CC0
+   `disposable-email-domains` project, pinned at commit `f4cad16`, with its SHA-256 in the header
+   and in a test) is `invalid` (reason `disposable`), with no DNS query.
+4. **MX**: a domain with no MX record is `invalid` (`no_mx`), and one with only a null MX
+   (RFC 7505) is `invalid` (`null_mx`). The A-record fallback isn't used. A DNS timeout retries
+   the job; nothing is written.
+5. A `published` or `verified` address, a `guessed` address on a Contact that isn't the Primary,
+   or one Hunter already answered for, is done: `checks passed`.
+6. **Hunter Email Verifier**, only for the Primary Contact's `guessed` address and only once per
+   address (1 credit counted as 1 unit, after the month's Hunter quota is checked): `valid`
+   makes it `verified`, `invalid` makes it `invalid` (`verifier_invalid`), and any other answer
+   (`accept_all`, `unknown`, `webmail`, `disposable`) leaves it `guessed` with the answer
+   recorded. At the quota, the job is deferred and the Lead page says "verification pending:
+   quota reached". A 202 (Hunter still verifying) retries the job and isn't counted.
+
+No check ever connects to a mail server (no SMTP probing).
+
+**Each class change** appends an `events` row (IDs and codes only) and an `address` Provenance
+Record holding the new class: `finder`/"Hunter Email Verifier" for Hunter's answers, and a copy
+of the address's latest record's source for a failed offline check. When the Primary Contact's
+address becomes `invalid` and a finder is still untried for it (Hunter or Prospeo, or the
+domain's Domain Search), the email search is queued again. The Primary isn't re-chosen.
+
+**Found on the site.** After each crawl (and each render) stores pages, a `guessed` address of
+any Contact on the Lead that appears literally on a stored page, in its text or a `mailto:`
+link, becomes `published`, with Quote Evidence (the line, or `mailto:<address>`) and a `website`
+Provenance Record naming the page.
+
+**The Lead page** shows the last check under the Email cell: "verified <date>", "invalid:
+<reason> (<date>)", "checks passed <date>", "verification: <status> (<date>)", "verification
+pending: quota reached" or "On the Suppression List". A new address clears the old one's checks.
 
 ## Scores and the Lead Tier
 

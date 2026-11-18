@@ -18,9 +18,15 @@ nothing; ``nextron.app.research`` does.
   resolves it;
 - ``fill(contact_id, updated_at, **fields)``: sets the named columns and ``updated_at``;
 - ``set_address(contact_id, *, email, address_class, at)`` (Story 2.13): gives a Contact that
-  has no address one (the ``find_contact_email`` job's); ``set_email_search(contact_id, *,
-  tried, outcome, at)``: records the email search's finders tried and, unless
-  ``outcome`` is ``None``, its outcome and time;
+  has no address one (the ``find_contact_email`` job's), and clears the four ``email_check*``
+  / ``email_invalid_reason`` / ``email_verifier_at`` columns of the old one (Story 2.14);
+  ``set_email_search(contact_id, *, tried, outcome, at)``: records the email search's finders
+  tried and, unless ``outcome`` is ``None``, its outcome and time;
+- ``set_email_check(contact_id, *, result, reason, at, verifier_at=None)`` (Story 2.14):
+  records the address's last check (``email_check_result``, ``email_invalid_reason``,
+  ``email_checked_at``) and, unless ``verifier_at`` is ``None``, when the verifier answered;
+  ``updated_at`` is left alone. ``set_address_class(contact_id, *, address_class, at)``: moves
+  the address to another class (verified, found on the site, invalid), updated at ``at``;
 - ``unresolved_ids(after, limit)``: up to ``limit`` ids of Contacts not yet resolved
   (``market_basis`` NULL) and not erased (``erased_at`` NULL, Story 3.13) with an id after
   ``after`` (``None``: from the first), by id;
@@ -90,6 +96,10 @@ class StoredContact:
     email_search_tried: str | None = None  # Story 2.13
     email_search_outcome: str | None = None
     email_search_at: datetime | None = None
+    email_check_result: str | None = None  # Story 2.14
+    email_checked_at: datetime | None = None
+    email_invalid_reason: str | None = None
+    email_verifier_at: datetime | None = None
 
 
 _COLUMNS = (
@@ -114,6 +124,10 @@ _COLUMNS = (
     ContactRecord.email_search_tried,
     ContactRecord.email_search_outcome,
     ContactRecord.email_search_at,
+    ContactRecord.email_check_result,
+    ContactRecord.email_checked_at,
+    ContactRecord.email_invalid_reason,
+    ContactRecord.email_verifier_at,
 )
 
 
@@ -307,11 +321,53 @@ def tombstone(contact_id: str, at: datetime) -> None:
 
 def set_address(contact_id: str, *, email: str, address_class: str, at: datetime) -> None:
     """Give the Contact ``contact_id`` the address ``email`` of class ``address_class``, updated
-    at ``at`` (Story 2.13: an address the email search found)."""
+    at ``at`` (Story 2.13: an address the email search found); the old address's checks are
+    cleared (Story 2.14)."""
     current().session.execute(
         update_rows(ContactRecord)
         .where(ContactRecord.id == contact_id)
-        .values(email=email, address_class=address_class, updated_at=at)
+        .values(
+            email=email,
+            address_class=address_class,
+            updated_at=at,
+            email_check_result=None,
+            email_checked_at=None,
+            email_invalid_reason=None,
+            email_verifier_at=None,
+        )
+    )
+
+
+def set_address_class(contact_id: str, *, address_class: str, at: datetime) -> None:
+    """Move the Contact ``contact_id``'s address to the class ``address_class``, updated at
+    ``at`` (Story 2.14: verified, found on the site or invalid)."""
+    current().session.execute(
+        update_rows(ContactRecord)
+        .where(ContactRecord.id == contact_id)
+        .values(address_class=address_class, updated_at=at)
+    )
+
+
+def set_email_check(
+    contact_id: str,
+    *,
+    result: str,
+    reason: str | None,
+    at: datetime,
+    verifier_at: datetime | None = None,
+) -> None:
+    """Record the Contact ``contact_id``'s last address check: its result, the reason an address
+    is invalid (or ``None``) and when; and, unless ``verifier_at`` is ``None``, when the verifier
+    answered. ``updated_at`` is left alone."""
+    values: dict[str, object] = {
+        "email_check_result": result,
+        "email_invalid_reason": reason,
+        "email_checked_at": at,
+    }
+    if verifier_at is not None:
+        values["email_verifier_at"] = verifier_at
+    current().session.execute(
+        update_rows(ContactRecord).where(ContactRecord.id == contact_id).values(values)
     )
 
 

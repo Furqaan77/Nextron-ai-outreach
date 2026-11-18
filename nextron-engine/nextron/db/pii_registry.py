@@ -276,6 +276,12 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "email_search_tried": PiiClass.NONE,
         "email_search_outcome": PiiClass.NONE,
         "email_search_at": PiiClass.NONE,
+        # Story 2.14: the address's last check (codes) and when it ran, and when the verifier
+        # answered
+        "email_check_result": PiiClass.NONE,
+        "email_checked_at": PiiClass.NONE,
+        "email_invalid_reason": PiiClass.NONE,
+        "email_verifier_at": PiiClass.NONE,
     },
     # Story 2.13. What the engine learned about a mail domain: a firm's domain, a pattern code
     # and Evidence ids, never a person's name or address.

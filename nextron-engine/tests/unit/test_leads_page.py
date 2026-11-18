@@ -2069,6 +2069,103 @@ def test_a_contact_with_a_usable_address_has_no_note_and_no_find_email(world: Wo
     assert find_email_forms(page) == []
 
 
+# Story 2.14: the address check's note -----------------------------------------------------------
+
+CHECKED_AT = "2026-11-17T09:00:00.000000Z"
+VERIFIER_AT = "2026-11-16T09:00:00.000000Z"
+
+
+@pytest.mark.parametrize(
+    ("address_class", "result", "reason", "verifier_at", "note"),
+    [
+        ("guessed", "checks_passed", None, None, "checks passed 2026-11-17"),
+        ("published", "checks_passed", None, VERIFIER_AT, "checks passed 2026-11-17"),
+        ("verified", "valid", None, VERIFIER_AT, "verified 2026-11-16"),
+        (
+            "invalid",
+            "invalid",
+            "no_mx",
+            None,
+            "invalid: the domain has no mail server (no MX record) (2026-11-17)",
+        ),
+        (
+            "invalid",
+            "invalid",
+            "null_mx",
+            None,
+            "invalid: the domain accepts no mail (null MX) (2026-11-17)",
+        ),
+        (
+            "invalid",
+            "invalid",
+            "disposable",
+            None,
+            "invalid: a disposable-address domain (2026-11-17)",
+        ),
+        (
+            "invalid",
+            "invalid",
+            "syntax",
+            None,
+            "invalid: the address isn't well-formed (2026-11-17)",
+        ),
+        (
+            "invalid",
+            "invalid",
+            "verifier_invalid",
+            VERIFIER_AT,
+            "invalid: Hunter says the address doesn't exist (2026-11-17)",
+        ),
+        ("guessed", "accept_all", None, VERIFIER_AT, "verification: accept_all (2026-11-16)"),
+        ("guessed", "quota_reached", None, None, "verification pending: quota reached"),
+        ("guessed", "suppressed", None, None, "On the Suppression List"),
+        ("guessed", None, None, None, None),
+        ("invalid", None, None, None, None),  # invalid without a check (a hard bounce, later)
+        ("invalid", "invalid", "hard_bounce", None, "invalid (2026-11-17)"),  # no text for it
+        # found on the site after a quota refusal or a verifier answer: the note is stale
+        ("published", "quota_reached", None, None, None),
+        ("published", "accept_all", None, VERIFIER_AT, None),
+    ],
+)
+def test_an_address_shows_its_check_note(
+    world: World,
+    address_class: str,
+    result: str | None,
+    reason: str | None,
+    verifier_at: str | None,
+    note: str | None,
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", email="jane@smith-law.co.uk"))
+    world.sql(
+        "UPDATE contacts SET address_class = ?, email_check_result = ?, "
+        "email_invalid_reason = ?, email_checked_at = ?, email_verifier_at = ? WHERE id = ?",
+        (address_class, result, reason, None if result is None else CHECKED_AT, verifier_at, jane),
+    )
+
+    page = world.page(f"/leads/{lead}")
+
+    notes = page.find_all("p", class_="email-check-note")
+    assert [found.text for found in notes] == ([] if note is None else [note])
+    rows = page.find_all("tr", class_="contact-row")
+    assert len(rows[0].find_all("td")) == 8  # the table keeps its 8 columns
+
+
+def test_the_check_note_is_escaped(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", email="jane@smith-law.co.uk"))
+    world.sql(
+        "UPDATE contacts SET email_check_result = '<b>x</b>', email_checked_at = ?, "
+        "email_verifier_at = ? WHERE id = ?",
+        (CHECKED_AT, VERIFIER_AT, jane),
+    )
+
+    reply = world.dashboard.get(f"/leads/{lead}", cookie=world.cookie)
+
+    assert "<b>x</b>" not in reply.text
+    assert "verification: &lt;b&gt;x&lt;/b&gt; (2026-11-16)" in reply.text
+
+
 def test_find_email_queues_the_search_and_answers_the_panel(world: World) -> None:
     lead = world.lead("Smith Law", "smith-law.co.uk")
     jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))

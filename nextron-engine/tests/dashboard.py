@@ -452,7 +452,7 @@ class Dashboard:
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.discovery = Discovery(self.clock, Pipeline(self.clock), self.queue)
         self.lead_imports = LeadImports(
-            self.clock, self.discovery, self.research, self.email_syntax
+            self.clock, self.discovery, self.research, self.email_syntax, self.queue
         )
         self.place_discovery = PlaceDiscovery(
             self.clock,

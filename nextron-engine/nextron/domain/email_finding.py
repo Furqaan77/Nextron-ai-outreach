@@ -66,6 +66,9 @@ around the address (rule A) or around the address and the name (rule B), cut on 
 text. Every text quote passes ``quotes.quote_in`` against the page's text and normalises to at
 most ``MAX_QUOTE`` characters; a candidate whose quote doesn't is dropped. For an address only
 in the mailto list the quote is ``mailto:<address>``. An address in both uses the text quote.
+``address_quote(address, text, mailto)`` (Story 2.14's find-on-site) is that quote for one
+stored address: its first occurrence in ``text`` (``None`` for purged text) by the same rule,
+else ``mailto:<address>`` when the mailto list holds it, else ``None``.
 
 ``published_matches(tokens, name, pages, *, mail_domain)``: one ``PublishedMatch(address,
 page_id, url, fetched_at, rule, quote)`` per address, its best, ordered by rule A first, then
@@ -747,3 +750,23 @@ def tried_text(tried: Sequence[str]) -> str | None:
         if name not in FINDER_PROVIDERS:
             raise ValueError("tried holds a name that isn't a finder provider")
     return SEARCH_SEPARATOR.join(names) or None
+
+
+def address_quote(address: str, text: str | None, mailto: Sequence[str]) -> str | None:
+    """The quote that shows ``address`` on a page: its first occurrence in ``text`` (its line,
+    or the window around it), else ``mailto:<address>`` when ``mailto`` holds it, else
+    ``None``; see the module docstring."""
+    wanted = _normalized(_check_str(address, "address"))
+    if wanted is None:
+        return None
+    if text is not None:
+        _check_str(text, "text")
+        lines = _lines(text)
+        for found, start, end in _occurrences(text):
+            if found == wanted:
+                quote = _quote(text, _line_of(lines, start), (start, end))
+                if quote is not None:
+                    return quote
+    if any(_normalized(_check_str(item, "mailto")) == wanted for item in mailto):
+        return MAILTO_QUOTE_PREFIX + wanted
+    return None

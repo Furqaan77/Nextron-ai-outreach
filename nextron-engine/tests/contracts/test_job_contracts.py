@@ -10,8 +10,9 @@
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, ``run_ai_test_sets``,
   Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
   2.11, ``check_legal_form``, Story 2.12, ``purge_place_coords``, Story 8.2, ``erase_external``,
-  Story 3.14, ``find_contact_email``, Story 2.13, ``score_lead`` and ``recompute_tiers``, Story
-  2.15, and ``poll_unsubscribes``, Story 3.11, with their settings); the triggers are exactly
+  Story 3.14, ``find_contact_email``, Story 2.13, ``verify_contact_email``, Story 2.14,
+  ``score_lead`` and ``recompute_tiers``, Story 2.15, ``poll_unsubscribes``, Story 3.11, and
+  ``discover_places``, Story 8.3, with their settings); the triggers are exactly
   ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s ``Every`` with
   ``active``, ``purge_page_text``'s and ``purge_place_coords``'s daily ``Every`` at startup,
   ``check_domains``'s daily schedule, ``recompute_tiers``' daily ``Every`` at startup and
@@ -469,6 +470,18 @@ class RecordingFinding:
         return self.answer
 
 
+class RecordingVerification:
+    """Stands in for the ``research`` service's ``EmailVerification``."""
+
+    def __init__(self, answer: str | None = "checks_passed") -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, str]] = []
+
+    def verify_contact_email(self, lead_id: str, contact_id: str) -> str | None:
+        self.calls.append((lead_id, contact_id))
+        return self.answer
+
+
 class RecordingScores:
     """Stands in for the ``scoring`` service's ``LeadScores``."""
 
@@ -512,6 +525,7 @@ def registry(**overrides: object) -> JobTypes:
         "domain_checks": RecordingDomainChecks,
         "legal_forms": RecordingLegalForms,
         "finding": RecordingFinding,
+        "verification": RecordingVerification,
         "scores": RecordingScores,
         "unsubscribes": RecordingUnsubscribes,
     }
@@ -537,6 +551,7 @@ def _services() -> dict[str, object]:
         "domain_checks": RecordingDomainChecks,
         "legal_forms": RecordingLegalForms,
         "finding": RecordingFinding,
+        "verification": RecordingVerification,
         "scores": RecordingScores,
     }
 
@@ -599,6 +614,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "recheck_event",
         "erase_external",
         "find_contact_email",
+        "verify_contact_email",
         "score_lead",
         "recompute_tiers",
         "poll_unsubscribes",
@@ -722,6 +738,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "check_job_boards",
             "recheck_event",
             "find_contact_email",
+            "verify_contact_email",
             "score_lead",
             "recompute_tiers",
         )
@@ -758,6 +775,14 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             JobGroup.ENRICHMENT,
         ),
         "find_contact_email": (Lane.BULK, both, 45, timedelta(minutes=5), 3, JobGroup.ENRICHMENT),
+        "verify_contact_email": (
+            Lane.BULK,
+            both,
+            45,
+            timedelta(minutes=5),
+            3,
+            JobGroup.ENRICHMENT,
+        ),
         "purge_page_text": (
             Lane.BULK,
             frozenset({Lane.BULK}),
@@ -1051,6 +1076,50 @@ def test_find_contact_email_without_a_finding_fails_when_it_runs() -> None:
 
     with pytest.raises(RuntimeError, match="no EmailFinding"):
         handler(Job(RUN, "find_contact_email", Lane.BULK, payload, 1))
+
+
+@pytest.mark.parametrize(
+    ("answer", "result"),
+    [("checks_passed", None), ("valid", None), (None, None), ("quota_reached", DEFERRED)],
+)
+def test_verify_contact_email_calls_its_service_once_and_defers_on_a_quota(
+    answer: str | None, result: object
+) -> None:
+    verification = RecordingVerification(answer)
+    handler = registry(verification=lambda: verification).get("verify_contact_email").handler
+    payload = {"v": 1, "lead_id": LEAD, "contact_id": RUN}
+
+    assert handler(Job(RUN, "verify_contact_email", Lane.BULK, payload, 1)) == result
+    assert verification.calls == [(LEAD, RUN)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "contact_id": RUN},
+        {"v": 1, "lead_id": LEAD},
+        {"v": 1, "lead_id": LEAD, "contact_id": "not-a-ulid"},
+    ],
+)
+def test_a_verify_contact_email_job_without_its_ids_is_invalid(
+    payload: dict[str, object],
+) -> None:
+    verification = RecordingVerification()
+    handler = registry(verification=lambda: verification).get("verify_contact_email").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "verify_contact_email", Lane.BULK, payload, 1))
+    assert verification.calls == []
+
+
+def test_verify_contact_email_without_a_verification_fails_when_it_runs() -> None:
+    handler = main.build_job_types(
+        **{k: v for k, v in _services().items() if k != "verification"}  # type: ignore[arg-type]
+    ).get("verify_contact_email").handler
+    payload = {"v": 1, "lead_id": LEAD, "contact_id": RUN}
+
+    with pytest.raises(RuntimeError, match="no EmailVerification"):
+        handler(Job(RUN, "verify_contact_email", Lane.BULK, payload, 1))
 
 
 @pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])

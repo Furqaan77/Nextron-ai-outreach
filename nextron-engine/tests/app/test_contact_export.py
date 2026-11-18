@@ -1146,6 +1146,8 @@ def test_the_readers_return_every_column(world: World) -> None:
         "tz", "market_id", "market_basis", "tz_basis", "office_country", "office_region",
         "created_at", "updated_at", "primary_set_by", "erased_at",
         "email_search_tried", "email_search_outcome", "email_search_at",  # Story 2.13
+        "email_check_result", "email_checked_at", "email_invalid_reason",  # Story 2.14
+        "email_verifier_at",
     }  # fmt: skip
     assert contact["created_at"] == T0 and contact["is_primary"] is False
     assert compliance["suppression"] == ()  # no valid hash given, and Bob's request caused none

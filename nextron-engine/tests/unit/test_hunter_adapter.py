@@ -3,7 +3,9 @@
 people, Email Finder's address, 404 and 451, every status mapping, bad shapes, the key read on
 each call, one usage record per request (``count`` 1 for a 2xx, so 2 units, else 0), nothing for
 a call refused before any request, no key, URL, domain, name, address or body in any error, and
-the lazy default client (refused in tests). Nothing here reaches Hunter."""
+the lazy default client (refused in tests). Story 2.14: the Email Verifier's GET, every status
+(200, 222 as ``unknown``, 202 as retryable and unbilled), its bad shapes and its metering.
+Nothing here reaches Hunter."""
 
 import sys
 import traceback
@@ -20,6 +22,7 @@ from nextron.adapters.hunter import (
     HUNTER_REFUSED,
     HUNTER_UNAVAILABLE,
     PROVIDER,
+    VERIFY,
     HunterFinder,
 )
 from nextron.domain.budget import AiCall, ApiCall
@@ -28,8 +31,10 @@ from nextron.ports.email_finder import (
     DomainSearchAnswer,
     DomainSearchPort,
     EmailFinderPort,
+    EmailVerifierPort,
     FinderAnswer,
     FinderQuery,
+    VerifierAnswer,
 )
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import CREDENTIAL_NOT_SET, KEYRING_FAILED
@@ -120,11 +125,18 @@ def assert_clean(error: BaseException) -> None:
     assert error.__cause__ is None and error.__suppress_context__
 
 
-def test_it_implements_both_ports() -> None:
+def verified(status: object = "valid") -> httpx2.Response:
+    """An Email Verifier answer, shaped as Hunter's."""
+    data = {"status": status, "result": "deliverable", "score": 100, "email": ADDRESS}
+    return httpx2.Response(200, json={"data": data, "meta": {"params": {"email": ADDRESS}}})
+
+
+def test_it_implements_all_three_ports() -> None:
     hunter = HunterFinder(InMemorySecrets(), meter=InMemoryUsageMeter())
 
     assert isinstance(hunter, EmailFinderPort)
     assert isinstance(hunter, DomainSearchPort)
+    assert isinstance(hunter, EmailVerifierPort)
 
 
 # Domain Search ----------------------------------------------------------------------------------
@@ -307,6 +319,94 @@ def test_a_find_2xx_of_another_shape_is_a_bad_answer(response: httpx2.Response) 
 # Statuses (both calls) --------------------------------------------------------------------------
 
 
+# Email Verifier ---------------------------------------------------------------------------------
+
+
+def test_a_verification_gets_the_address_with_the_key_in_the_header() -> None:
+    recorder = Recorder(verified())
+
+    answer = hunter_on(recorder).verify_email(ADDRESS)
+
+    assert answer == VerifierAnswer("valid")
+    (request,) = recorder.requests
+    assert request.method == "GET"
+    assert str(request.url).split("?")[0] == "https://api.hunter.io/v2/email-verifier"
+    assert dict(request.url.params) == {"email": ADDRESS}
+    assert request.headers["x-api-key"] == KEY
+    assert KEY not in str(request.url)
+
+
+@pytest.mark.parametrize(
+    "status", ["valid", "invalid", "accept_all", "webmail", "disposable", "unknown", "Odd Thing"]
+)
+def test_a_verification_passes_hunters_status_on_as_it_is(status: str) -> None:
+    assert hunter_on(Recorder(verified(status))).verify_email(ADDRESS) == VerifierAnswer(status)
+
+
+def test_a_222_is_unknown_and_billed() -> None:
+    meter = InMemoryUsageMeter()
+    response = httpx2.Response(222, json={"errors": [{"details": LEAK}]})
+
+    answer = hunter_on(Recorder(response), meter=meter).verify_email(ADDRESS)
+
+    assert answer == VerifierAnswer("unknown")
+    assert meter.calls == [ApiCall(PROVIDER, VERIFY, ok=True, error_code=None, count=1)]
+    assert meter.calls[0].units == 1
+
+
+def test_a_202_is_retryable_and_not_billed() -> None:
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as raised:
+        hunter_on(Recorder(httpx2.Response(202, json={"data": {}})), meter=meter).verify_email(
+            ADDRESS
+        )
+
+    error = raised.value
+    assert (error.retryable, error.code) == (True, HUNTER_UNAVAILABLE)
+    assert_clean(error)
+    assert meter.calls == [
+        ApiCall(PROVIDER, VERIFY, ok=False, error_code=HUNTER_UNAVAILABLE, count=0)
+    ]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx2.Response(200, text=f"not json {LEAK}"),
+        httpx2.Response(200, json=[ADDRESS]),
+        httpx2.Response(200, json={"data": None}),
+        httpx2.Response(200, json={"data": {"result": "deliverable"}}),
+        verified(None),
+        verified(""),
+        verified("  "),
+        verified(7),
+        verified([ADDRESS]),
+    ],
+)
+def test_a_verification_2xx_of_another_shape_is_a_bad_answer(response: httpx2.Response) -> None:
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as raised:
+        hunter_on(Recorder(response), meter=meter).verify_email(ADDRESS)
+
+    error = raised.value
+    assert (error.retryable, error.code) == (False, HUNTER_BAD_ANSWER)
+    assert_clean(error)
+    assert meter.calls == [
+        ApiCall(PROVIDER, VERIFY, ok=False, error_code=HUNTER_BAD_ANSWER, count=1)
+    ]
+
+
+def test_a_verification_stores_one_unit() -> None:
+    meter = InMemoryUsageMeter()
+
+    hunter_on(Recorder(verified()), meter=meter).verify_email(ADDRESS)
+
+    assert meter.calls == [ApiCall(PROVIDER, VERIFY, ok=True, error_code=None, count=1)]
+    assert meter.snapshot(meter.clock.now()).units("hunter") == 1
+
+
 def domain_search(hunter: HunterFinder) -> object:
     return hunter.domain_search(DOMAIN)
 
@@ -315,8 +415,12 @@ def find(hunter: HunterFinder) -> object:
     return hunter.find_email(QUERY)
 
 
+def verify(hunter: HunterFinder) -> object:
+    return hunter.verify_email(ADDRESS)
+
+
 type Call = Callable[[HunterFinder], object]
-CALLS: list[Call] = [domain_search, find]
+CALLS: list[Call] = [domain_search, find, verify]
 
 
 @pytest.mark.parametrize("call", CALLS)
@@ -347,12 +451,14 @@ def test_any_other_status_is_refused_naming_only_the_status(call: Call, status: 
     assert_clean(error)
 
 
+@pytest.mark.parametrize("call", [domain_search, verify])
 @pytest.mark.parametrize("status", [404, 451])
-def test_a_domain_search_404_or_451_is_refused(status: int) -> None:
+def test_a_domain_search_or_verification_404_or_451_is_refused(call: Call, status: int) -> None:
     with pytest.raises(AdapterError) as raised:
-        hunter_on(Recorder(httpx2.Response(status, json=errors_body(status)))).domain_search(DOMAIN)
+        call(hunter_on(Recorder(httpx2.Response(status, json=errors_body(status)))))
 
     assert (raised.value.retryable, raised.value.code) == (False, HUNTER_REFUSED)
+    assert_clean(raised.value)
 
 
 @pytest.mark.parametrize("call", CALLS)
@@ -483,6 +589,53 @@ def test_each_request_records_one_call_counting_only_a_2xx(
     assert len(recorder.requests) == 1
     assert meter.calls == [ApiCall("hunter", operation, ok=ok, error_code=code, count=count)]
     assert meter.calls[0].units == 2 * count  # Hunter's credits are stored doubled
+
+
+@pytest.mark.parametrize(
+    ("response", "ok", "code", "count"),
+    [
+        (verified(), True, None, 1),
+        (httpx2.Response(222, json={}), True, None, 1),
+        (httpx2.Response(202, json={"data": {}}), False, HUNTER_UNAVAILABLE, 0),
+        (httpx2.Response(403), False, HUNTER_UNAVAILABLE, 0),
+        (httpx2.Response(429), False, HUNTER_UNAVAILABLE, 0),
+        (httpx2.Response(500), False, HUNTER_UNAVAILABLE, 0),
+        (httpx2.Response(401), False, HUNTER_REFUSED, 0),
+        (httpx2.Response(404), False, HUNTER_REFUSED, 0),
+        (httpx2.ConnectError("x"), False, HUNTER_UNAVAILABLE, 0),
+        (httpx2.Response(200, text="nope"), False, HUNTER_BAD_ANSWER, 1),
+    ],
+    ids=[
+        "verify_200",
+        "verify_222",
+        "verify_202",
+        "verify_403",
+        "verify_429",
+        "verify_500",
+        "verify_401",
+        "verify_404",
+        "verify_connect_error",
+        "verify_bad_answer",
+    ],
+)
+def test_each_verification_records_one_call_counting_a_200_or_222(
+    response: httpx2.Response | BaseException,
+    ok: bool,
+    code: str | None,
+    count: int,
+) -> None:
+    meter = InMemoryUsageMeter()
+    recorder = Recorder(response)
+
+    try:
+        verify(hunter_on(recorder, meter=meter))
+    except AdapterError as error:
+        assert error.code == code
+        assert_clean(error)
+
+    assert len(recorder.requests) == 1
+    assert meter.calls == [ApiCall("hunter", VERIFY, ok=ok, error_code=code, count=count)]
+    assert meter.calls[0].units == count  # a verification is one unit
 
 
 def test_a_2xx_find_and_domain_search_each_store_two_units() -> None:

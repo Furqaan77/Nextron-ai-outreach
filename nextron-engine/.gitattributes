@@ -3,6 +3,7 @@
 nextron/web/static/** -text
 nextron/domain/psl/** -text
 nextron/domain/geodata/** -text
+nextron/domain/data/** -text
 # Prompt files are hash-locked (nextron/adapters/ai/prompts/manifest.lock). Their hash is taken
 # with universal newlines, but keep them byte-identical anyway.
 nextron/adapters/ai/prompts/** -text

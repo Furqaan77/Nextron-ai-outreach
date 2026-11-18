@@ -113,6 +113,10 @@ APPROVED_EXTRA_PORTS: Final[dict[str, str]] = {
     "ClientFilePort": "Story 2.3: reading the Google client secrets file",
     "DomainSearchPort": "Story 2.13: AD-9's EmailFinderPort Domain Search, its own Protocol",
     "SinkFilesPort": "Story 3.14: erasing a person's lines from the dev and test sink files",
+    "EmailVerifierPort": (  # in nextron/ports/email_finder.py, next to EmailFinderPort
+        "Story 2.14: AD-9's EmailFinderPort address verification (Hunter's Email Verifier), "
+        "its own Protocol"
+    ),
 }
 
 

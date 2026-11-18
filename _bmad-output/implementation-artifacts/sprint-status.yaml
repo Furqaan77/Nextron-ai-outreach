@@ -73,7 +73,7 @@ development_status:
   2-11-collect-hiring-signals-from-careers-pages-and-ats-boards: review
   2-12-confirm-a-uk-lead-s-legal-form-through-companies-house: review
   2-13-find-the-primary-contact-s-email-address-in-the-cheapest-ord: review
-  2-14-validate-each-address-and-assign-its-address-class: backlog
+  2-14-validate-each-address-and-assign-its-address-class: review
   2-15-score-and-tier-every-enriched-lead: review
   2-16-turn-pasted-signals-into-researched-leads-through-the-signal: backlog
   epic-2-retrospective: optional

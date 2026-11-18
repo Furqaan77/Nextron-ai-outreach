@@ -257,6 +257,10 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "email_search_tried",  # Story 2.13
             "email_search_outcome",
             "email_search_at",
+            "email_check_result",  # Story 2.14
+            "email_checked_at",
+            "email_invalid_reason",
+            "email_verifier_at",
         ),
     },
     "email_domains": {  # Story 2.13

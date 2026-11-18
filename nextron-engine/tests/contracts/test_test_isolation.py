@@ -153,6 +153,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "DomainSearchPort",
         "EmailFinderPort",
         "EmailSyntaxPort",
+        "EmailVerifierPort",
         "GoogleOAuthPort",
         "JobBoardPort",
         "LlmPort",

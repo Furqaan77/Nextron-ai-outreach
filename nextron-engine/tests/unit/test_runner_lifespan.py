@@ -100,11 +100,14 @@ from nextron.jobs import scheduler as scheduler_module
 from nextron.jobs.runner import Runner
 from nextron.main import AdapterContext
 from nextron.ports.alert import AlertMessage
+from nextron.ports.dns import MxRecord
+from nextron.ports.email_finder import VerifierAnswer
 from tests.asgi import request
 from tests.dashboard import body_hx_headers
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
-from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
+from tests.fakes.dns import FakeDns
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder, ScriptedVerifier
 from tests.fakes.google_oauth import CLIENT_ID, FakeGoogleOAuth
 from tests.fakes.probes import PortProbe, fake_probes
 from tests.fakes.secrets import InMemorySecrets
@@ -238,6 +241,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "recheck_event",
         "erase_external",
         "find_contact_email",
+        "verify_contact_email",
         "score_lead",
         "recompute_tiers",
         "poll_unsubscribes",
@@ -1915,3 +1919,37 @@ def test_the_built_app_wires_the_email_search_to_its_job_and_to_find_email(
         "smith.co.uk",
         "smith.co.uk",
     ]
+
+
+def test_the_built_app_wires_the_address_checks_to_their_job(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 2.14: ``build_app`` gives its ``EmailVerification`` (on the injected DNS and
+    verifier) to the ``verify_contact_email`` job."""
+    registries = spy(monkeypatch, "build_job_types")
+    dns = FakeDns(mx={"smith.co.uk": (MxRecord(10, "mx.smith.co.uk"),)})
+    verifier = ScriptedVerifier(VerifierAnswer("valid"))
+    main.build_app(
+        load_bootstrap(),
+        units=units,
+        secrets=InMemorySecrets("test"),
+        clock=FrozenClock(T),
+        dns=dns,
+        verifier=verifier,
+    )
+    [job_types] = registries
+    store_unresolved_contact(units)
+    raw_query(
+        units,
+        "UPDATE contacts SET email = 'jane@smith.co.uk', address_class = 'guessed', "
+        "is_primary = 1, primary_set_by = 'operator'",
+    )
+    [(lead_id, contact_id)] = raw_query(units, "SELECT lead_id, id FROM contacts")
+    handler = job_types.get("verify_contact_email").handler
+    payload = {"v": 1, "lead_id": lead_id, "contact_id": contact_id}
+    with units.open():
+        handler(Job("01JD3QZ8X5V9K2M7N4P6R8T0ZZ", "verify_contact_email", Lane.BULK, payload, 1))
+
+    assert dns.queries == [("mx", "smith.co.uk")]
+    assert verifier.calls == ["jane@smith.co.uk"]
+    assert raw_query(units, "SELECT address_class FROM contacts") == [("verified",)]

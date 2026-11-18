@@ -3,7 +3,7 @@ a paid finder, and a domain's people and address pattern asked of Hunter's Domai
 
 AD-9's ``EmailFinderPort`` names three operations (find, verify and Domain Search), but not
 every provider serves all three, so each is its own Protocol here: a Protocol method a provider
-can't honour would only fail at run time. Story 2.14 adds verification to this module.
+can't honour would only fail at run time.
 
 - **``EmailFinderPort.find_email(query) -> FinderAnswer``** asks for one person's address at a
   domain. ``nextron.adapters.hunter.HunterFinder`` (Hunter's Email Finder) and
@@ -12,6 +12,9 @@ can't honour would only fail at run time. Story 2.14 adds verification to this m
 - **``DomainSearchPort.domain_search(domain) -> DomainSearchAnswer``** asks for a domain's
   address pattern and the people the provider knows there. ``HunterFinder`` implements it;
   tests use ``tests.fakes.email_finder.ScriptedDomainSearch``.
+- **``EmailVerifierPort.verify_email(email) -> VerifierAnswer``** (Story 2.14) asks a provider
+  whether one address can receive mail. ``HunterFinder`` (Hunter's Email Verifier) implements
+  it; tests use ``tests.fakes.email_finder.ScriptedVerifier``.
 
 **Values.** Every value is frozen and checks its fields when built (``TypeError`` for a wrong
 type, ``ValueError`` for a wrong value; neither message shows the value):
@@ -26,8 +29,12 @@ type, ``ValueError`` for a wrong value; neither message shows the value):
 - ``DomainSearchAnswer(pattern, people)``: ``pattern`` is the provider's raw pattern text (such
   as Hunter's ``"{first}.{last}"``; ``nextron.domain.email_finding`` maps it) or ``None``, and
   ``people`` a tuple of ``DomainPerson``.
+- ``VerifierAnswer(status)``: the provider's raw status text (Hunter's ``valid``, ``invalid``,
+  ``accept_all``, ``webmail``, ``disposable`` or ``unknown``), a non-blank ``str``;
+  ``nextron.domain.email_checks.normalise_status`` reads it.
 
-Names and addresses never show in a ``repr``; a query's domain and an answer's pattern do.
+Names and addresses never show in a ``repr``; a query's domain, an answer's pattern and a
+verifier's status do.
 
 **Failures.** Every failure is an ``AdapterError`` whose message carries no key, URL, domain,
 name, address or response body: ``<provider>_unavailable`` (retryable: no answer, a rate
@@ -119,6 +126,16 @@ class DomainSearchAnswer:
             raise TypeError("a domain search's people must be a tuple of DomainPerson")
 
 
+@dataclass(frozen=True, slots=True)
+class VerifierAnswer:
+    """A verifier's answer: the provider's raw status text."""
+
+    status: str
+
+    def __post_init__(self) -> None:
+        _text(self.status, "a verifier answer's status")
+
+
 @runtime_checkable
 class EmailFinderPort(Protocol):
     """Finds one person's address at a domain."""
@@ -135,4 +152,13 @@ class DomainSearchPort(Protocol):
 
     def domain_search(self, domain: str) -> DomainSearchAnswer:
         """The pattern and people known at ``domain``; see the module docstring."""
+        ...
+
+
+@runtime_checkable
+class EmailVerifierPort(Protocol):
+    """Asks whether one address can receive mail."""
+
+    def verify_email(self, email: str) -> VerifierAnswer:
+        """The provider's status for ``email``; see the module docstring."""
         ...

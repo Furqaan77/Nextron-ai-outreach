@@ -164,8 +164,9 @@ the recovery pass; ``build_health_issues(..., ledger=<path>)`` registers the ``c
 source; and the doctor registry checks the file (``erasure_ledger``).
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
-``LeadImports(clock, discovery, research, EmailValidatorSyntax())``, on the same ``discovery =
-Discovery(clock, Pipeline(clock), queue)`` as the ``canonicalize_lead`` jobs
+``LeadImports(clock, discovery, research, EmailValidatorSyntax(), queue)`` (the queue for Story
+2.14's ``verify_contact_email``), on the same ``discovery = Discovery(clock, Pipeline(clock),
+queue)`` as the ``canonicalize_lead`` jobs
 (``nextron.app.discovery.api``; the syntax adapter is ``nextron.adapters.email_syntax``,
 offline), and hands it to the dashboard (``create_app(..., lead_imports=...)``) for the
 ``/leads/import`` page. A Lead the import creates with a website gets its ``enrich_lead`` job
@@ -234,7 +235,10 @@ only, priority 60, 5 minutes, retry limit 5 (``handlers.ERASE_EXTERNAL_RETRIES``
 ``erasure_stores`` unwired its handler raises a ``RuntimeError``, which isn't retried; Story
 2.13's ``find_contact_email`` (bulk by default, or interactive, priority 45, 5 minutes, retry
 limit 3, ``handlers.find_contact_email(finding)``, ``enrichment``) after it, and with
-``finding`` left out its handler raises a ``RuntimeError``; Story 2.15's ``score_lead`` (bulk by
+``finding`` left out its handler raises a ``RuntimeError``; Story 2.14's
+``verify_contact_email`` (bulk by default, or interactive, priority 45, 5 minutes, retry limit
+3, ``handlers.verify_contact_email(verification)``, ``enrichment``) after it, likewise with
+``verification`` left out; Story 2.15's ``score_lead`` (bulk by
 default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score_lead(scores)``,
 ``enrichment``) and ``recompute_tiers`` (bulk only, priority 20, 10 minutes, retry limit 2,
 ``handlers.recompute_tiers(scores)``, ``enrichment``) after them, and Story 3.11's
@@ -321,6 +325,12 @@ discovery, queue)`` (``nextron.app.discovery.place_ingest``) runs the ``discover
 (reached through ``place_discovery=lambda: place_discovery``) on the crawl's own crawler, and
 the Discovery page's "Run Places discovery" (``create_app(..., place_discovery=...)``); it is
 also kept on ``app.state.place_discovery``.
+**Validating addresses (Story 2.14).** ``EmailVerification(clock, meter, queue, dns=,
+email_syntax=, verifier=)`` (``nextron.app.research.verification``) runs the
+``verify_contact_email`` jobs, reached through ``verification=lambda: email_verification``. It
+looks up MX records through the same ``dns`` as ``DomainChecks``, checks syntax with the offline
+``EmailValidatorSyntax`` and verifies through ``verifier`` (the same ``HunterFinder`` unless
+injected).
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -837,6 +847,7 @@ from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
+from nextron.app.research.verification import EmailVerification
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sending.api import Sending
@@ -901,6 +912,7 @@ from nextron.domain.crawl import (
 )
 from nextron.domain.credentials import CredentialKey
 from nextron.domain.domain_auth import CHECK_DOMAINS_JOB, DOMAIN_CHECK_TIME
+from nextron.domain.email_checks import VERIFY_CONTACT_EMAIL_JOB
 from nextron.domain.email_finding import FIND_CONTACT_EMAIL_JOB
 from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
@@ -978,7 +990,7 @@ from nextron.ports.backup_target import BackupTargets
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
 from nextron.ports.dns import DnsPort
-from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort
+from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort, EmailVerifierPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.job_board import JobBoardPort
@@ -1174,6 +1186,7 @@ def build_app(
     prospeo: EmailFinderPort | None = None,
     unsubscribe: UnsubscribePort | None = None,
     places: PlacesPort | None = None,
+    verifier: EmailVerifierPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -1222,7 +1235,9 @@ def build_app(
     it through a ``Compliance`` with the ``TokenCodec``. Google Places is
     searched through ``places`` (``build_places(config.env, secrets, meter)`` unless injected),
     kept with its ``PlaceSearches`` on ``app.state.place_searches``; ``PlaceDiscovery`` runs the
-    Places discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``."""
+    Places discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``. The address checks (Story 2.14) look up MX records
+    through that same ``dns`` and call Hunter's Email Verifier through ``verifier`` (that same
+    ``HunterFinder`` unless injected)."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1238,8 +1253,8 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding, lead_scores, unsubscribes and place_discovery are bound just
-    # below
+    # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes and
+    # place_discovery are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1257,6 +1272,7 @@ def build_app(
         legal_forms=lambda: legal_forms,
         erasure_stores=lambda: erasure_stores,
         finding=lambda: email_finding,
+        verification=lambda: email_verification,
         scores=lambda: lead_scores,
         unsubscribes=lambda: unsubscribes,
         place_discovery=lambda: place_discovery,
@@ -1282,9 +1298,8 @@ def build_app(
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
-    domain_checks = DomainChecks(
-        clock, dns if dns is not None else DnspythonDns(meter=meter), queue
-    )
+    site_dns = dns if dns is not None else DnspythonDns(meter=meter)
+    domain_checks = DomainChecks(clock, site_dns, queue)
     lead_scores = LeadScores(clock, Scoring(clock, Pipeline(clock), research), queue)
     job_boards = JobBoards(
         clock,
@@ -1315,6 +1330,14 @@ def build_app(
         clock, meter, places if places is not None else build_places(config.env, secrets, meter)
     )
     place_discovery = PlaceDiscovery(clock, place_searches, site_crawler, discovery, queue)
+    email_verification = EmailVerification(
+        clock,
+        meter,
+        queue,
+        dns=site_dns,
+        email_syntax=EmailValidatorSyntax(),
+        verifier=verifier if verifier is not None else hunter_finder,
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1415,7 +1438,7 @@ def build_app(
         queue=queue,
         backups=backups,
         restore_tests=restore_tests,
-        lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
+        lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax(), queue),
         sending=Sending(clock, env=config.env),
         lead_signals=LeadSignals(clock),
         compliance=compliance,
@@ -1504,6 +1527,12 @@ def _no_finding() -> handlers.FindingEmail:
     raise RuntimeError("no EmailFinding was given to build_job_types")
 
 
+def _no_verification() -> handlers.VerifyingEmail:
+    """``build_job_types``' ``verification`` when none is given: a ``verify_contact_email`` job
+    fails."""
+    raise RuntimeError("no EmailVerification was given to build_job_types")
+
+
 def build_job_types(
     *,
     alerts: Callable[[], handlers.AlertSending],
@@ -1525,6 +1554,7 @@ def build_job_types(
     finding: Callable[[], handlers.FindingEmail] | None = None,
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
     place_discovery: Callable[[], handlers.DiscoveringPlaces] | None = None,
+    verification: Callable[[], handlers.VerifyingEmail] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1548,13 +1578,16 @@ def build_job_types(
     unwired, so such a job fails with a ``RuntimeError``, which isn't retried), and ``finding``
     the ``research`` service's ``EmailFinding`` that ``find_contact_email`` jobs call (left
     out, as in tests that never run one, the handler raises ``RuntimeError`` when a job
-    runs), and ``scores`` the ``scoring`` service's ``LeadScores`` that ``score_lead`` and
-    ``recompute_tiers`` jobs call, and ``unsubscribes`` the ``compliance`` service's
-    ``UnsubscribePolls`` that ``poll_unsubscribes`` jobs call (``None``: a provider that raises
-    ``RuntimeError``, as for ``domain_checks``), and ``place_discovery`` the ``discovery``
-    service's ``PlaceDiscovery`` that ``discover_places`` jobs call (``None``: the same)."""
+    runs), ``verification`` the ``research`` service's ``EmailVerification`` that
+    ``verify_contact_email`` jobs call (left out, likewise), and ``scores`` the ``scoring``
+    service's ``LeadScores`` that ``score_lead`` and ``recompute_tiers`` jobs call, and
+    ``unsubscribes`` the ``compliance`` service's ``UnsubscribePolls`` that ``poll_unsubscribes``
+    jobs call (``None``: a provider that raises ``RuntimeError``, as for ``domain_checks``), and
+    ``place_discovery`` the ``discovery`` service's ``PlaceDiscovery`` that ``discover_places``
+    jobs call (``None``: the same)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
+    verifying = verification if verification is not None else _no_verification
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     discovering = place_discovery if place_discovery is not None else no_place_discovery
     job_types = JobTypes()
@@ -1796,6 +1829,18 @@ def build_job_types(
             max_runtime=timedelta(minutes=5),  # four paid calls at 15 s each, database waits
             retry_limit=3,
             handler=handlers.find_contact_email(found),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=VERIFY_CONTACT_EMAIL_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            max_runtime=timedelta(minutes=5),  # one MX lookup and one 15 s call, database waits
+            retry_limit=3,
+            handler=handlers.verify_contact_email(verifying),
             group=JobGroup.ENRICHMENT,
         )
     )
