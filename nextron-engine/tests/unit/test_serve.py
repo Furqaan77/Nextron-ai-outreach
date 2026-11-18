@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron import main
+from nextron.app.approval.api import Approval
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
@@ -44,6 +45,7 @@ from nextron.domain.notifications import (
     ContactErased,
     Enrolled,
     LeadsMerged,
+    MessageSent,
     SubjectSuppressed,
 )
 from nextron.domain.playbook import (
@@ -785,14 +787,15 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert [subscriber.__name__ for subscriber in found] == ["reparent_lead"] * 3
     owners = [type(getattr(subscriber, "__self__", None)) for subscriber in found]
     assert owners == [Pipeline, Research, Sequencing]  # pipeline, research, then sequencing
-    suppressed = subscribers.subscribers_of(SubjectSuppressed)  # Stories 4.8 and 3.3
+    suppressed = subscribers.subscribers_of(SubjectSuppressed)  # Stories 4.8, 4.9 and 3.3
     assert all(is_command(subscriber) for subscriber in suppressed)
     assert [subscriber.__name__ for subscriber in suppressed] == [
         "stop_suppressed",
+        "cancel_pending_suppressed",
         "close_suppressed",
     ]
     owners = [type(getattr(subscriber, "__self__", None)) for subscriber in suppressed]
-    assert owners == [Sequencing, Pipeline]
+    assert owners == [Sequencing, Approval, Pipeline]
     erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
     assert all(is_command(subscriber) for subscriber in erased)
     assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
@@ -812,7 +815,11 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert is_command(enrolled)
     assert enrolled.__name__ == "on_enrolled"
     assert type(getattr(enrolled, "__self__", None)) is Pipeline
-    registered = (LeadsMerged, SubjectSuppressed, ContactErased, Enrolled)
+    [sent] = subscribers.subscribers_of(MessageSent)  # Story 4.9
+    assert is_command(sent)
+    assert sent.__name__ == "on_step_sent"
+    assert type(getattr(sent, "__self__", None)) is Sequencing
+    registered = (LeadsMerged, SubjectSuppressed, ContactErased, Enrolled, MessageSent)
     others = [kind for kind in NOTIFICATIONS if kind not in registered]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
 
@@ -826,10 +833,11 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
         *subscribers.subscribers_of(SubjectSuppressed),
         *subscribers.subscribers_of(ContactErased)[:4],  # the rest are module functions
         *subscribers.subscribers_of(Enrolled),
+        *subscribers.subscribers_of(MessageSent),
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 10
+    assert clocks == [clock] * 12
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 
@@ -882,7 +890,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0042_more", create_table("more")))
+    extend(location, ("0043_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -896,7 +904,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0042_more"
+    assert spy.calls[0]["db_revision"] == "0043_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade

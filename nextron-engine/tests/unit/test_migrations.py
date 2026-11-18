@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0041_2_15_scoring"
+HEAD = "0042_4_9_drafts"
 
 
 @pytest.fixture

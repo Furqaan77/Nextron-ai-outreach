@@ -341,8 +341,9 @@ def test_an_enroll_binds_variant_a_then_b_and_the_least_loaded_inbox(two_inboxes
         first.enrollment_id, lead_a, contact_a, campaign_id, variants["A"], first_inbox
     )
     assert gained(before, world.counts()) == {
+        "drafts": 1,  # Story 4.9: the Step 1 slot
         "enrollments": 1,
-        "events": 2,  # the Enrollment's creation and the Lead's move to queued
+        "events": 3,  # the Enrollment's and the slot's creation, and the Lead's move to queued
         "provenance_records": 1,
         "variant_counters": 1,
     }
@@ -785,10 +786,11 @@ def test_the_repository_has_no_setter_for_a_bound_column() -> None:
         "live_counts_by_inbox",
         "insert",
         "set_status",
+        "record_step_sent",  # Story 4.9
         "move_lead",
         "for_export",  # a read for the subject access export (merge of Stories 3.15 and 4.8)
     }
-    # the two updates write the status group and lead_id only
+    # the three updates write the status group, the send times and lead_id only
     assert list(inspect.signature(functions["set_status"]).parameters) == [
         "enrollment_id",
         "status",
@@ -800,6 +802,12 @@ def test_the_repository_has_no_setter_for_a_bound_column() -> None:
     assert list(inspect.signature(functions["move_lead"]).parameters) == [
         "from_lead_id",
         "to_lead_id",
+        "at",
+    ]
+    assert list(inspect.signature(functions["record_step_sent"]).parameters) == [
+        "enrollment_id",
+        "sent_at",
+        "ended_at",
         "at",
     ]
 

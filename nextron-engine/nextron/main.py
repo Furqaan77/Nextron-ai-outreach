@@ -730,6 +730,7 @@ from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.app.approval.api import Approval
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.compliance.erasure_stores import ErasureStores
@@ -842,7 +843,13 @@ from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.markets import InvalidMarkets, validate_markets
-from nextron.domain.notifications import ContactErased, Enrolled, LeadsMerged, SubjectSuppressed
+from nextron.domain.notifications import (
+    ContactErased,
+    Enrolled,
+    LeadsMerged,
+    MessageSent,
+    SubjectSuppressed,
+)
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
@@ -2036,6 +2043,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(LeadsMerged, Sequencing(chosen).reparent_lead)
     # Story 4.8: stop the Enrollments first, then close an opted-out Lead (AD-3's order)
     subscribers.register_subscriber(SubjectSuppressed, Sequencing(chosen).stop_suppressed)
+    # Story 4.9: then cancel the ready Drafts of every ended Enrollment (the backstop)
+    subscribers.register_subscriber(SubjectSuppressed, Approval(chosen).cancel_pending_suppressed)
     subscribers.register_subscriber(SubjectSuppressed, Pipeline(chosen).close_suppressed)
     # Story 3.13: compliance's hook first (it reads the Contact before research tombstones it);
     # hook-only, so no queue (its erase_contact fails closed)
@@ -2049,6 +2058,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
+    # Story 4.9: the next Step's due time, or the Enrollment's completion
+    subscribers.register_subscriber(MessageSent, Sequencing(chosen).on_step_sent)
     subscribers.freeze()
     return subscribers
 

@@ -37,7 +37,7 @@ from nextron.db.models.crawl import (
     JobPostingRecord,
     PageContactMethodRecord,
 )
-from nextron.db.models.drafting import FooterSnapshotRecord
+from nextron.db.models.drafting import DraftRecord, FooterSnapshotRecord
 from nextron.db.models.events import EventRecord
 from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.leads import LeadRecord
@@ -98,6 +98,7 @@ __all__ = [
     "CrawledPageRecord",
     "DataSubjectRequestRecord",
     "DomainCheckRecord",
+    "DraftRecord",
     "EnrollmentRecord",
     "ErasureReceiptRecord",
     "ErasureReceiptStoreRecord",

@@ -11,12 +11,15 @@ violation.
   the AST finds such a def; the patterns are loose (``*find*email*``, ``*verify*email*``,
   ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever.
   ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method. Not built yet:
-  ``verify_contact_email``, the Signal Inbox chain, replies, ``drafting.request_*``,
-  ``approval.approve``, the pipeline Tasks and call sheets and ``compliance.assert_sendable``:
-  their stories add a scenario here when they build them. ``sequencing.enroll`` (Story 4.8)
-  runs on the shipped seeds with Law-PrivateAI x US active and one Sending Inbox: an eligible
-  US Contact's two gate calls (``enroll``'s own and ``evaluate_eligibility``'s) come before its
-  first write, and ``Blocked`` writes nothing.
+  ``verify_contact_email``, the Signal Inbox chain, replies, ``approval.approve``, the pipeline
+  Tasks and call sheets and ``compliance.assert_sendable``: their stories add a scenario here
+  when they build them. ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with
+  Law-PrivateAI x US active and one Sending Inbox: an eligible US Contact's first two gate calls
+  (``enroll``'s own and ``evaluate_eligibility``'s) come before its first write, the third
+  (``drafting.request_steps``, Story 4.9) before its ``drafts`` insert, and ``Blocked`` writes
+  nothing. ``drafting.request_*`` (Story 4.9: ``Drafting.request_steps``) asks for Step 2 of an
+  Enrollment made with Step 1 only: its gate call comes before its one ``drafts`` insert, and
+  ``Blocked`` adds no row.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -77,6 +80,7 @@ from sqlalchemy import Engine, event
 from nextron import main
 from nextron.app.compliance import api as compliance_api
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
+from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import AddedContact, Research
@@ -91,6 +95,7 @@ from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.address_class import ASSIGNMENT
+from nextron.domain.ai import Urgency
 from nextron.domain.contactability import (
     Allowed,
     Blocked,
@@ -103,7 +108,7 @@ from nextron.domain.contacts import ContactCandidate, ProvenanceSource
 from nextron.domain.crawl import CrawlOutcome, PageKind
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.campaign import validate_campaigns
-from nextron.domain.enrollment import EnrollmentOrigin
+from nextron.domain.enrollment import EnrollmentOrigin, NewEnrollment
 from nextron.domain.markets import validate_markets
 from nextron.domain.offers import validate_offers
 from nextron.domain.segments import validate_segments
@@ -833,6 +838,19 @@ def gates_first_problems(log: Iterable[GateCall | Write]) -> list[str]:
     return [f"a gate call comes after {first.verb} {first.table}"]
 
 
+def leading_gates_problems(log: Iterable[GateCall | Write], count: int) -> list[str]:
+    """Fewer than ``count`` gate calls before the first write (Story 4.8's enroll: its own
+    gate call and ``evaluate_eligibility``'s both come before any write)."""
+    leading = 0
+    for entry in log:
+        if isinstance(entry, Write):
+            break
+        leading += 1
+    if leading >= count:
+        return []
+    return [f"only {leading} of {count} gate calls come before the first write"]
+
+
 # The scenarios ----------------------------------------------------------------------------------
 
 T0 = datetime(2026, 11, 18, 9, 0, tzinfo=UTC)
@@ -967,12 +985,14 @@ class Scenario:
     it needs (unrecorded) and returns the action to record and, called after it, the gate calls
     the action must make with ``Allowed``, compared by value. ``gates_first``: every gate call
     comes before the first write (one unit of work per action; not the CSV import, which gates
-    row by row). With ``Blocked``: the rows a run may still add (``blocked_rows``), the writes
+    row by row). ``gates_before_first_write``: with ``gates_first`` off, how many gate calls must
+    still come before the first write. With ``Blocked``: the rows a run may still add (``blocked_rows``), the writes
     it may still make, as (verb, table) (``blocked_writes``), and a check of them
     (``after_blocked``)."""
 
     cases: tuple[Prepare, ...]
     gates_first: bool = True
+    gates_before_first_write: int = 0
     blocked_rows: Mapping[str, int] = field(default_factory=dict)
     blocked_writes: frozenset[tuple[str, str]] = frozenset()
     after_blocked: Callable[[World], None] | None = None
@@ -1151,9 +1171,8 @@ def _enrollable(world: World) -> str:
     return campaign_id
 
 
-def _enroll(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
-    """Story 4.8: an eligible US Contact enrolled in the active US Campaign. Its gate call, then
-    the one ``evaluate_eligibility`` makes, both before the first write."""
+def _enrollable_contact(world: World, tag: str) -> tuple[str, str]:
+    """An eligible US Contact and the active US Campaign; their ids."""
     campaign_id = _enrollable(world)
     domain = f"firm-{tag}.com"
     identity = LeadIdentity(f"Firm {tag}", world.segment, web_domain=domain, country_code="US")
@@ -1165,6 +1184,14 @@ def _enroll(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
         ProvenanceSource.WEBSITE,
     )().contact_id
     assert contact_id is not None
+    return contact_id, campaign_id
+
+
+def _enroll(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.8: an eligible US Contact enrolled in the active US Campaign. Its gate call, then
+    the one ``evaluate_eligibility`` makes, both before the first write; then (Story 4.9)
+    ``request_steps``' before its ``drafts`` insert."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
     sequencing = Sequencing(FrozenClock(T0))
 
     def action() -> object:
@@ -1173,7 +1200,37 @@ def _enroll(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
         )
 
     gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
-    return action, lambda: (gate, gate)
+    return action, lambda: (gate, gate, gate)
+
+
+def _request_steps(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.9: Step 2 requested for an Enrollment made (unrecorded) with Step 1 only: one
+    gate call before its one ``drafts`` insert."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
+    clock = FrozenClock(T0)
+    enrolled = world.transact(
+        lambda: Sequencing(clock).enroll(
+            contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
+        )
+    )
+    assert isinstance(enrolled, NewEnrollment)
+    drafting = Drafting(clock)
+
+    def action() -> object:
+        return world.transact(
+            lambda: drafting.request_steps(enrolled.enrollment_id, (2,), Urgency.SOON)
+        )
+
+    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+def _requested(world: World) -> None:
+    """An allowed request added a Step 2 slot (the scenario isn't vacuous)."""
+    with world.engine.connect() as connection:
+        steps = connection.exec_driver_sql(
+            "SELECT step_no FROM drafts ORDER BY step_no, id"
+        ).all()
+    assert [row[0] for row in steps].count(2) == 1
 
 
 def _enrolled(world: World) -> None:
@@ -1271,8 +1328,13 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             after_blocked=_email_search_blocked,
         ),
         "discovery.upsert_lead": Scenario((_upsert,)),
-        # Story 4.8: Blocked returns the refusal before any write, so nothing at all is added
-        "sequencing.enroll": Scenario((_enroll,), after_blocked=_enrolled),
+        # Story 4.8: Blocked returns the refusal before any write, so nothing at all is added;
+        # Story 4.9: request_steps gates again, after enroll's writes, before its drafts insert
+        "sequencing.enroll": Scenario(
+            (_enroll,), gates_first=False, gates_before_first_write=2, after_blocked=_enrolled
+        ),
+        # Story 4.9: Blocked answers before any write, so nothing at all is added
+        "drafting.request_*": Scenario((_request_steps,), after_blocked=_requested),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1324,6 +1386,7 @@ def run_case(
         problems += order_problems(recorder.log)
         if scenario.gates_first:
             problems += gates_first_problems(recorder.log)
+        problems += leading_gates_problems(recorder.log, scenario.gates_before_first_write)
         return recorder, problems
     problems = gained_rows(before, after, scenario.blocked_rows)
     problems += blocked_write_problems(recorder.log, scenario.blocked_writes)
@@ -1371,6 +1434,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "research.people_extraction",
         "sequencing.enroll",  # Story 4.8
         "find_contact_email",
+        "drafting.request_*",  # Story 4.9
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
@@ -1500,15 +1564,18 @@ def test_the_insert_scan_finds_the_guarded_repository_inserts() -> None:
     assert found[("db/repos/discovery/leads.py", "insert")] == {"leads"}
     assert found[("db/repos/research/contacts.py", "insert")] == {"contacts"}
     assert found[("db/repos/sequencing/enrollments.py", "insert")] == {"enrollments"}  # 4.8
+    assert found[("db/repos/drafting/drafts.py", "insert_slots")] == {"drafts"}  # 4.9
     assert set(found.values()) <= {
         frozenset({"leads"}),
         frozenset({"contacts"}),
         frozenset({"enrollments"}),
+        frozenset({"drafts"}),
     }
     assert guarded_models(package_index()) == {
         "LeadRecord": "leads",
         "ContactRecord": "contacts",
         "EnrollmentRecord": "enrollments",
+        "DraftRecord": "drafts",
     }
 
 
@@ -1980,6 +2047,18 @@ def test_the_gates_first_check_catches_a_write_between_gate_calls(
 
     assert order_problems(log) == []
     assert gates_first_problems(log) == ["a gate call comes after UPDATE notes"]
+
+
+def test_the_leading_gates_check_names_a_second_gate_call_after_a_write() -> None:
+    gate = GateCall(None, EMAIL, "cold")
+    late = [gate, Write("INSERT", "enrollments"), gate, Write("INSERT", "drafts")]
+    early = [gate, gate, Write("INSERT", "enrollments"), gate, Write("INSERT", "drafts")]
+
+    assert leading_gates_problems(late, 2) == [
+        "only 1 of 2 gate calls come before the first write"
+    ]
+    assert leading_gates_problems(early, 2) == []
+    assert leading_gates_problems(late, 0) == []
 
 
 def test_the_scenario_checks_pass_a_caller_that_gates_first(
