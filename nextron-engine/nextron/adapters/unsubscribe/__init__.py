@@ -39,18 +39,32 @@ in ISO 8601 with an offset, is counted in ``malformed`` and skipped; ``expiratio
 ignored. Every error is an ``AdapterError`` whose message is this module's own text, raised
 ``from None``: none carries the bearer, a token, the host or a body, in its message, ``repr`` or
 traceback.
+
+**``probe(host, *, deadline_s)``** (Story 3.12, ``nextron doctor``'s ``unsub_worker`` check)
+runs steps 1 to 3 the same way (the same refusals, headers and one metered ``kv_list`` call),
+with ``deadline_s`` as the request's httpx timeout, and maps the answer by the same table. It
+measures the request on a monotonic clock (``monotonic``, ``time.monotonic`` unless injected):
+a good answer that took longer than ``deadline_s``, or an httpx timeout, raises
+``unsub_unreachable`` (retryable).
+Otherwise it returns ``None``; the entries are read and dropped.
 """
 
 import json
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any, Final
 
 import httpx2
 
 from nextron.domain.credentials import CredentialKey
-from nextron.domain.unsub_requests import PENDING_FORMAT, is_worker_host
+from nextron.domain.unsub_requests import (
+    KV_LIST_OPERATION,
+    KV_PROVIDER,
+    PENDING_FORMAT,
+    is_worker_host,
+)
 from nextron.ports.errors import AdapterError
 from nextron.ports.secrets import SecretsPort, read_credential
 from nextron.ports.unsubscribe import (
@@ -59,6 +73,7 @@ from nextron.ports.unsubscribe import (
     UNSUB_REFUSED,
     UNSUB_UNAUTHORIZED,
     UNSUB_UNAVAILABLE,
+    UNSUB_UNREACHABLE,
     PendingFetch,
     PendingUnsub,
 )
@@ -66,8 +81,8 @@ from nextron.ports.usage_meter import Metered, UsageMeterPort
 
 TIMEOUT_S: Final = 15.0
 CONNECT_TIMEOUT_S: Final = 10.0
-PROVIDER: Final = "unsub_worker"  # the usage meter's provider and operation
-KV_LIST: Final = "kv_list"
+PROVIDER: Final = KV_PROVIDER  # the usage meter's provider and operation
+KV_LIST: Final = KV_LIST_OPERATION
 PENDING_PATH: Final = "/pending"
 MIN_BEARER_LENGTH: Final = 43  # 32 random bytes as base64url
 MAX_BODY_BYTES: Final = 10_000_000
@@ -95,10 +110,12 @@ class WorkerUnsubscribe:
         *,
         meter: UsageMeterPort,
         http: httpx2.Client | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._secrets = secrets
         self._meter = meter
         self._http = http
+        self._monotonic = monotonic
         self._lock = threading.Lock()
 
     def _client(self) -> httpx2.Client:
@@ -107,7 +124,8 @@ class WorkerUnsubscribe:
                 self._http = default_http_client()  # looked up now, so tests can refuse it
             return self._http
 
-    def fetch_pending(self, host: str) -> PendingFetch:
+    def _headers(self, host: str) -> dict[str, str]:
+        """Steps 1 and 2: refuse a bad host, then read and check the bearer."""
         if not isinstance(host, str) or host == "" or not is_worker_host(host):
             raise AdapterError(
                 False, UNSUB_REFUSED, "the unsubscribe Worker host isn't a valid u. host"
@@ -119,18 +137,58 @@ class WorkerUnsubscribe:
                 UNSUB_BEARER_INVALID,
                 "the unsubscribe Worker bearer secret must be at least 43 visible characters",
             ) from None
-        headers = {"Authorization": f"Bearer {bearer}", "Accept": "application/json"}
-        http = self._client()
-        with Metered(self._meter, PROVIDER, KV_LIST):  # one ApiCall, whatever the outcome
-            try:
-                response = http.get(
-                    f"https://{host}{PENDING_PATH}", headers=headers, follow_redirects=False
-                )
-            except Exception:  # noqa: BLE001 - any transport failure: a GET is safe to retry
+        return {"Authorization": f"Bearer {bearer}", "Accept": "application/json"}
+
+    def _get(
+        self,
+        http: httpx2.Client,
+        host: str,
+        headers: Mapping[str, str],
+        timeout: float | None = None,
+    ) -> httpx2.Response:
+        """Step 3's one GET; ``timeout`` (seconds) replaces the client's own when given, and
+        then an httpx timeout is ``unsub_unreachable`` (the probe's deadline passed)."""
+        try:
+            return http.get(
+                f"https://{host}{PENDING_PATH}",
+                headers=dict(headers),
+                follow_redirects=False,
+                timeout=httpx2.USE_CLIENT_DEFAULT if timeout is None else timeout,
+            )
+        except httpx2.TimeoutException:
+            if timeout is None:
                 raise AdapterError(
                     True, UNSUB_UNAVAILABLE, "the unsubscribe Worker request failed"
                 ) from None
-            return _pending(_answer(response))
+            raise AdapterError(
+                True,
+                UNSUB_UNREACHABLE,
+                f"the unsubscribe Worker did not answer within {timeout:g} s",
+            ) from None
+        except Exception:  # noqa: BLE001 - any transport failure: a GET is safe to retry
+            raise AdapterError(
+                True, UNSUB_UNAVAILABLE, "the unsubscribe Worker request failed"
+            ) from None
+
+    def fetch_pending(self, host: str) -> PendingFetch:
+        headers = self._headers(host)
+        http = self._client()
+        with Metered(self._meter, PROVIDER, KV_LIST):  # one ApiCall, whatever the outcome
+            return _pending(_answer(self._get(http, host, headers)))
+
+    def probe(self, host: str, *, deadline_s: float) -> None:
+        headers = self._headers(host)
+        http = self._client()
+        with Metered(self._meter, PROVIDER, KV_LIST):  # one ApiCall, whatever the outcome
+            started = self._monotonic()
+            response = self._get(http, host, headers, deadline_s)
+            _pending(_answer(response))
+            if self._monotonic() - started > deadline_s:
+                raise AdapterError(
+                    True,
+                    UNSUB_UNREACHABLE,
+                    f"the unsubscribe Worker answered, but slower than {deadline_s:g} s",
+                ) from None
 
 
 def _answer(response: httpx2.Response) -> Mapping[str, Any]:

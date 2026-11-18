@@ -440,6 +440,15 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "processed_at",
         ),
     },
+    "unsub_poll_state": {  # Story 3.12
+        "compliance": (
+            "id",
+            "last_success_at",
+            "failing_since",
+            "last_failure_at",
+            "last_failure_code",
+        ),
+    },
     "data_subject_requests": {  # Story 3.13
         "compliance": (
             "id",

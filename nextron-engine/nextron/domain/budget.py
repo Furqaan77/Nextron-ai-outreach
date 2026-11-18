@@ -27,7 +27,7 @@ No field can hold ``@`` or a space, so no free text or address fits.
 
 **Months.** Usage counts the UTC calendar month. ``month_of(now)`` is ``"YYYY-MM"`` and
 ``month_bounds(now)`` the month's ``[start, end)``, both of an aware ``now`` (a naive one raises
-``ValueError``).
+``ValueError``); ``day_bounds(now)`` (Story 3.12) is the UTC calendar day's ``[start, end)``.
 
 **Usage.** ``Usage(month, api, ai_calls, ai_cost_micros)`` is what ``UsageMeterPort.snapshot``
 returns: one ``ApiUse(provider, operation, sku, calls, failed, units)`` line per provider,
@@ -75,7 +75,7 @@ panel shows a provider's units in: its quota's (Hunter's 2), else 1.
 import re
 from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -240,6 +240,13 @@ def month_of(now: datetime) -> str:
     """The UTC calendar month of ``now`` as ``YYYY-MM``."""
     utc = _utc(now)
     return f"{utc.year:04d}-{utc.month:02d}"
+
+
+def day_bounds(now: datetime) -> tuple[datetime, datetime]:
+    """The UTC calendar day of ``now`` (Story 3.12): its first instant and the next day's."""
+    utc = _utc(now)
+    start = datetime(utc.year, utc.month, utc.day, tzinfo=UTC)
+    return start, start + timedelta(days=1)
 
 
 def month_bounds(now: datetime) -> tuple[datetime, datetime]:

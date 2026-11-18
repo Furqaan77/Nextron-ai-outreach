@@ -416,3 +416,100 @@ def test_the_client_is_built_once(monkeypatch: pytest.MonkeyPatch) -> None:
     worker.fetch_pending(HOST)
 
     assert len(built) == 1 and len(recorder.requests) == 2
+
+
+
+# The doctor probe (Story 3.12) ----------------------------------------------------------------
+
+
+class Ticks:
+    """A monotonic clock that advances ``step`` seconds on each read, so the two reads around
+    the request are ``step`` apart."""
+
+    def __init__(self, step: float) -> None:
+        self.step = step
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def prober(recorder: Recorder, step: float, meter: InMemoryUsageMeter) -> WorkerUnsubscribe:
+    return WorkerUnsubscribe(
+        secrets_with(),
+        meter=meter,
+        http=httpx2.Client(transport=httpx2.MockTransport(recorder)),
+        monotonic=Ticks(step),
+    )
+
+
+def test_a_probe_answered_in_time_returns_with_one_metered_get_and_the_deadline_timeout() -> None:
+    entry = {"token": TOKEN_1, "received_at": "2026-11-17T22:15:30Z"}
+    recorder = Recorder(answer(200, document(entry)))
+    meter = InMemoryUsageMeter()
+
+    assert prober(recorder, 2.0, meter).probe(HOST, deadline_s=10.0) is None
+
+    [request] = recorder.requests
+    assert (request.method, str(request.url)) == ("GET", f"https://{HOST}/pending")
+    assert request.headers["authorization"] == f"Bearer {BEARER}"
+    assert request.extensions["timeout"] == {
+        "connect": 10.0,
+        "read": 10.0,
+        "write": 10.0,
+        "pool": 10.0,
+    }
+    assert meter.calls == [OK_CALL]
+
+
+def test_a_probe_answered_after_the_deadline_is_retryable_unreachable() -> None:
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as raised:
+        prober(Recorder(answer(200, document())), 11.0, meter).probe(HOST, deadline_s=10.0)
+
+    assert (raised.value.retryable, raised.value.code) == (True, "unsub_unreachable")
+    assert_clean(raised.value)
+    assert meter.calls == [
+        ApiCall("unsub_worker", "kv_list", ok=False, error_code="unsub_unreachable")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("response", "code", "retryable"),
+    [
+        (answer(401), "unsub_unauthorized", False),
+        (answer(503), "unsub_unavailable", True),
+        (answer(200, {"format": "other"}), "unsub_bad_response", False),
+        (httpx2.ReadTimeout("timed out"), "unsub_unreachable", True),  # the deadline passed
+        (httpx2.ConnectTimeout("timed out"), "unsub_unreachable", True),
+        (httpx2.ConnectError("refused"), "unsub_unavailable", True),
+    ],
+)
+def test_a_probe_maps_the_answer_as_a_fetch_does(
+    response: httpx2.Response | BaseException, code: str, retryable: bool
+) -> None:
+    with pytest.raises(AdapterError) as raised:
+        prober(Recorder(response), 1.0, InMemoryUsageMeter()).probe(HOST, deadline_s=10.0)
+
+    assert (raised.value.code, raised.value.retryable) == (code, retryable)
+    assert_clean(raised.value)
+
+
+def test_a_probe_refuses_a_bad_host_and_a_missing_bearer_with_no_request() -> None:
+    recorder = Recorder(answer(200, document()))
+    meter = InMemoryUsageMeter()
+    worker = WorkerUnsubscribe(
+        secrets_with(None),
+        meter=meter,
+        http=httpx2.Client(transport=httpx2.MockTransport(recorder)),
+    )
+
+    with pytest.raises(AdapterError) as bad_host:
+        worker.probe("example.com", deadline_s=10.0)
+    with pytest.raises(AdapterError) as no_bearer:
+        worker.probe(HOST, deadline_s=10.0)
+
+    assert (bad_host.value.code, no_bearer.value.code) == ("unsub_refused", CREDENTIAL_NOT_SET)
+    assert recorder.requests == [] and meter.calls == []

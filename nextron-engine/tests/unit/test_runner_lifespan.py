@@ -17,7 +17,7 @@ through the ASGI lifespan by hand: startup starts the named threads, beats once 
 shutdown stops them, and building the app starts none.
 
 The health panel (Story 1.15), on the real ``build_app`` with injected secrets, fake probes and
-``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the thirteen
+``FakeGoogleOAuth``: building runs no readiness check; ``GET /health/panel`` shows the fourteen
 doctor rows in order (``port_free`` ok without a probe, the grant ok without a refresh) and the
 dead job, and writes nothing; a wiring that ran doctor's own forms would be caught.
 
@@ -486,6 +486,7 @@ DOCTOR_IDS = [
     "required_settings",
     "database_revision",
     "unsub_token_keys",
+    "unsub_worker",
 ]
 REFRESH_TOKEN = "1//stored-refresh-token"
 
@@ -689,6 +690,51 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
             "unsubscribe token keys of key id 1: unsub/k_tok/1 is not set; unsub/k_edge/1 is "
             "not set; enter them in Unsubscribe token keys on the Credentials page",
         )
+    finally:
+        units.engine.dispose()
+
+
+def test_the_built_health_panel_never_probes_the_unsubscribe_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.fakes.unsubscribe import ScriptedUnsubscribe  # noqa: PLC0415
+
+    config = load_bootstrap()
+    config.data_dir.mkdir(parents=True)
+    units, _ = main.open_database(config)
+    try:
+        clock, secrets, port = FrozenClock(T), InMemorySecrets("test"), ScriptedUnsubscribe()
+        secrets.write("unsub/bearer", "Ub4Xq8Lm2Vz6Np1Rt5Hk9Jc3Wd7Gs0Fy4Tb8Mn2Qe6Ah")
+        with units.open():
+            Setup(clock).save({"unsub_worker_host": "u.example-sender.com"})
+        app = main.build_app(
+            config,
+            units=units,
+            secrets=secrets,
+            clock=clock,
+            google_oauth=FakeGoogleOAuth(),
+            probes=fake_probes(),
+            unsubscribe=port,
+        )
+        code = main.build_entry(config, secrets=secrets, clock=clock).issue_code()
+        host = f"127.0.0.1:{config.port}".encode()
+        entered = request(app, "/enter", query=b"t=" + code.encode(), headers=[(b"host", host)])
+        cookie = entered.header(b"set-cookie")
+        assert entered.status == 303 and cookie is not None
+
+        reply = request(
+            app, "/health/panel", headers=[(b"host", host), (b"cookie", cookie.split(b";")[0])]
+        )
+
+        assert reply.status == 200
+        statuses = {row[1]: (row[0], row[2]) for row in Rows(reply.text).rows if len(row) == 3}
+        assert statuses["unsub_worker"] == (
+            "ok",
+            "unsubscribe polling on; the Worker is not probed in the engine (nextron doctor "
+            "probes it)",
+        )
+        assert (port.probes, port.hosts) == ([], [])  # no probe and no request
+        assert raw_query(units, "SELECT COUNT(*) FROM api_usage") == [(0,)]
     finally:
         units.engine.dispose()
 
@@ -1609,7 +1655,9 @@ def test_an_on_row_with_no_handlers_ends_after_the_start(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    engine = real_engine(monkeypatch)
+    # no handlers: build_app's own registry holds Story 3.12's repoll_unsubscribes, which stays
+    # pending while no Unsub Worker host is set
+    engine = real_engine(monkeypatch, recovery_steps=main.build_recovery_steps())
     recovery_id = turn_recovery_on(engine)
     try:
         with serving(engine.app):

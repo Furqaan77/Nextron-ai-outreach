@@ -20,6 +20,7 @@ from sqlalchemy import Engine
 from nextron import main
 from nextron.adapters.crypto.unsub_token import TokenCodec
 from nextron.app.compliance.api import Compliance
+from nextron.app.ops.api import Recovery
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.setup import api as setup_api
 from nextron.app.setup.api import (
@@ -41,6 +42,7 @@ from nextron.domain.unsub_token import (
     DecodedToken,
     TokenAlreadyIssued,
     UnsubKeyInUse,
+    UnsubKeysHeldInRecovery,
     encode_key,
     token_hash,
 )
@@ -738,3 +740,39 @@ def test_the_keyring_writes_run_inside_the_read_only_units_transaction(
         ("delete", "unsub/k_tok/3", True),
         ("delete", "meta/unsub/k_tok/3", True),
     ]
+
+
+# Recovery mode (Story 3.12) ---------------------------------------------------------------------
+
+
+def turn_recovery_on(world: World) -> None:
+    with world.units.open():
+        Recovery(world.clock).begin(
+            backup_at=T0 - timedelta(days=1), source_name="nextron-test.db", pre_restore_name=None
+        )
+
+
+def test_while_recovery_mode_is_on_a_key_is_neither_removed_nor_replaced(world: World) -> None:
+    turn_recovery_on(world)
+    world.secrets.calls.clear()
+    held = "Key 1 can't be replaced or removed while recovery mode is on after a restore"
+
+    for key in ("k_tok", "k_edge"):
+        with pytest.raises(UnsubKeysHeldInRecovery, match=held) as refused:
+            world.read(lambda key=key: world.credentials.remove_unsub_key(1, key))
+        assert refused.value.code == "unsub_keys_held_in_recovery"
+    assert world.secrets.calls == []  # nothing read, nothing deleted
+    with pytest.raises(UnsubKeysHeldInRecovery):
+        world.read(lambda: world.credentials.save_unsub_key(1, "k_tok", GOOD_KEY))
+
+    assert world.secrets.store[(SERVICE, "unsub/k_tok/1")] == KEYS[(1, "k_tok")]
+    assert all(state.state is CredentialState.SET for state in statuses(world, 1))
+
+
+def test_while_recovery_mode_is_on_a_missing_key_can_still_be_entered(world: World) -> None:
+    turn_recovery_on(world)
+    del world.secrets.store[(SERVICE, "unsub/k_tok/1")]
+
+    world.read(lambda: world.credentials.save_unsub_key(1, "k_tok", KEYS[(1, "k_tok")]))
+
+    assert world.secrets.store[(SERVICE, "unsub/k_tok/1")] == KEYS[(1, "k_tok")]

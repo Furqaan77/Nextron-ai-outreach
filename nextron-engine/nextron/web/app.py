@@ -331,7 +331,7 @@ from nextron.domain.suppression_list import (
     reversed_message,
     search_key,
 )
-from nextron.domain.unsub_token import UnsubKeyInUse
+from nextron.domain.unsub_token import UnsubKeyInUse, UnsubKeysHeldInRecovery
 from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
@@ -975,7 +975,7 @@ def create_app(
             return unsub_row_answer(
                 request, kid, key, notice=credential_rows.refused(refused.reason)
             )
-        except UnsubKeyInUse as in_use:
+        except (UnsubKeyInUse, UnsubKeysHeldInRecovery) as in_use:
             return unsub_row_answer(request, kid, key, notice=credential_rows.refused(str(in_use)))
         except CredentialStoreFailed:
             return unsub_row_answer(request, kid, key, notice=credential_rows.store_failed())
@@ -993,7 +993,7 @@ def create_app(
         try:
             with units.open(read_only=True):
                 status = credentials.remove_unsub_key(kid, key)
-        except UnsubKeyInUse as in_use:
+        except (UnsubKeyInUse, UnsubKeysHeldInRecovery) as in_use:
             return unsub_row_answer(
                 request, kid, key, notice=credential_rows.not_removed(str(in_use))
             )
@@ -1102,7 +1102,9 @@ def create_app(
     @app.get("/quotas", name="quotas_page")
     @personal_data(False)  # usage rows hold codes and counts, never personal data
     def quotas_page(request: Request) -> HTMLResponse:
-        context = quota_rows.page_context(budget.status())
+        context = quota_rows.page_context(
+            budget.status(), kv_list_calls=budget.kv_list_calls()
+        )
         return page(request, quota_rows.PAGE_TEMPLATE, **context)
 
     def health_answer(

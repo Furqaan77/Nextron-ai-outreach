@@ -469,6 +469,15 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "received_at": PiiClass.NONE,
         "processed_at": PiiClass.NONE,
     },
+    # Story 3.12. How the unsubscribe poll went: times and a closed code, never a token, an
+    # address, the Worker host or the bearer.
+    "unsub_poll_state": {
+        "id": PiiClass.NONE,
+        "last_success_at": PiiClass.NONE,
+        "failing_since": PiiClass.NONE,
+        "last_failure_at": PiiClass.NONE,
+        "last_failure_code": PiiClass.NONE,
+    },
     # Story 3.13. A data subject request is kept as the proof of erasure; its reference is the
     # Operator's free text (check_request_ref refuses an address or the person's name), and the
     # rest are IDs, codes and times.

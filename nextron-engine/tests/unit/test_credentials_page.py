@@ -1257,3 +1257,34 @@ def test_the_unsubscribe_key_posts_declare_no_personal_data(dashboard: Dashboard
     }
 
     assert (declared["unsub_key_save"], declared["unsub_key_remove"]) == (False, False)
+
+
+HELD = "Key 1 can't be replaced or removed while recovery mode is on after a restore"
+
+
+def test_while_recovery_mode_is_on_a_key_is_neither_replaced_nor_removed(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    secrets: InMemorySecrets,
+    units: UnitOfWorkFactory,
+) -> None:
+    from nextron.app.ops.api import Recovery  # noqa: PLC0415
+
+    unsub_post(dashboard, session, "save", kid="1", key="k_tok", value=KEY_TEXT)
+    unsub_post(dashboard, session, "save", kid="1", key="k_edge", value=OTHER_KEY)
+    with units.open():  # Story 3.12: a restore turned recovery mode on
+        Recovery(FrozenClock(T)).begin(
+            backup_at=T - timedelta(days=1), source_name="nextron-test.db", pre_restore_name=None
+        )
+
+    replaced = unsub_post(dashboard, session, "save", kid="1", key="k_edge", value=THIRD_KEY)
+    removed = unsub_post(dashboard, session, "remove", kid="1", key="k_tok", confirm="yes")
+
+    assert unsub_row(replaced, "unsub-key-1-k_edge").notices("unsub-key-1-k_edge") == [
+        ("alert", f"Nothing was saved: {HELD}.")
+    ]
+    assert unsub_row(removed, "unsub-key-1-k_tok").notices("unsub-key-1-k_tok") == [
+        ("alert", f"Nothing was removed: {HELD}.")
+    ]
+    assert stored(secrets)["unsub/k_tok/1"] == KEY_TEXT
+    assert stored(secrets)["unsub/k_edge/1"] == OTHER_KEY

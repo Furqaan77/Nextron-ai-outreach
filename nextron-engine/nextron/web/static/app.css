@@ -385,6 +385,20 @@ button.secondary {
   color: var(--muted);
 }
 
+/* The Unsubscribe polling section (Story 3.12): the last successful poll, marked while a failure
+   episode is open. */
+.health-unsub {
+  max-width: 48rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--ink);
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}
+
+.health-unsub-failing {
+  border-left-color: var(--refused);
+}
+
 .health-issues {
   max-width: 48rem;
   margin: 0;

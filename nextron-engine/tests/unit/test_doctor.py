@@ -43,6 +43,7 @@ from tests.fakes.clock import FrozenClock
 from tests.fakes.google_oauth import CLIENT_ID, FakeGoogleOAuth
 from tests.fakes.probes import PortProbe, fake_probes
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.unsubscribe import ScriptedUnsubscribe
 from tests.migration_chains import run_sql, sha256, stored_revisions
 
 CHECKS = [
@@ -59,6 +60,7 @@ CHECKS = [
     "required_settings",
     "database_revision",
     "unsub_token_keys",
+    "unsub_worker",
 ]
 ALL_OK = dict.fromkeys(CHECKS, "ok")
 
@@ -215,7 +217,7 @@ def table_rows(out: str) -> list[tuple[str, str, str]]:
 # Row: All ok ------------------------------------------------------------------------------------
 
 
-def test_all_ok_prints_thirteen_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
+def test_all_ok_prints_fourteen_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
     before = sha256(healthy)
     oauth = FakeGoogleOAuth()
 
@@ -228,8 +230,8 @@ def test_all_ok_prints_thirteen_ok_rows_and_changes_no_database_byte(healthy: Pa
     assert [(status, check) for status, check, _ in table_rows(out)] == [
         ("ok", check) for check in CHECKS
     ]
-    assert lines[-1] == "13 ok, 0 warn, 0 fail"
-    assert len(lines) == 15
+    assert lines[-1] == "14 ok, 0 warn, 0 fail"
+    assert len(lines) == 16
     assert out.endswith("\n") and not out.endswith("\n\n")
     assert sha256(healthy) == before
     assert stored_revisions(healthy) == [head_revision()]
@@ -1053,3 +1055,87 @@ def test_the_doctor_database_reads_revision_and_settings(healthy: Path) -> None:
         assert database.required_unset() == ()
     finally:
         database.close()
+
+
+# Row: the unsubscribe Worker (Story 3.12) -------------------------------------------------------
+
+WORKER_HOST = "u.example-sender.com"
+
+
+def worker_database(data_dir: Path) -> Path:
+    return make_database(data_dir, {**SETTINGS, "unsub_worker_host": WORKER_HOST})
+
+
+def test_a_reachable_worker_is_ok_through_the_injected_port(data_dir: Path) -> None:
+    worker_database(data_dir)
+    port = ScriptedUnsubscribe()
+    out, err = io.StringIO(), io.StringIO()
+
+    code = main.doctor(
+        as_json=True,
+        probes=fake_probes(),
+        secrets=healthy_secrets(),
+        google_oauth=FakeGoogleOAuth(),
+        clock=FrozenClock(),
+        unsubscribe=port,
+        out=out,
+        err=err,
+    )
+
+    results = {row["id"]: (row["status"], row["message"]) for row in json.loads(out.getvalue())}
+    assert (code, err.getvalue()) == (0, "")
+    assert results["unsub_worker"] == ("ok", "the unsubscribe Worker is reachable")
+    assert port.probes == [(WORKER_HOST, 10.0)]
+
+
+def test_a_worker_answering_after_11_seconds_warns(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_database(data_dir)
+    meters: list[Any] = []
+    real = main.WorkerUnsubscribe
+    reads = iter([100.0, 111.0])
+
+    def worker(secrets: Any, *, meter: Any) -> Any:
+        meters.append(meter)
+        transport = httpx2.MockTransport(
+            lambda request: httpx2.Response(
+                200, json={"format": "nextron-unsub-pending/1", "entries": []}
+            )
+        )
+        return real(
+            secrets,
+            meter=meter,
+            http=httpx2.Client(transport=transport),
+            monotonic=lambda: next(reads),
+        )
+
+    monkeypatch.setattr(main, "WorkerUnsubscribe", worker)
+    secrets = healthy_secrets()
+    secrets.write("unsub/bearer", "Ub4Xq8Lm2Vz6Np1Rt5Hk9Jc3Wd7Gs0Fy4Tb8Mn2Qe6Ah")
+
+    code, results = run_doctor(secrets=secrets)
+
+    assert code == 0  # a warning doesn't fail doctor
+    assert results["unsub_worker"] == (
+        "warn",
+        "the unsubscribe Worker was slower than 10 s (unsub_unreachable); polling retries "
+        "every period",
+    )
+    [meter] = meters
+    assert isinstance(meter, main.DoctorMeter)  # the probe writes no usage row
+    assert meter.calls == [
+        ApiCall("unsub_worker", "kv_list", ok=False, error_code="unsub_unreachable")
+    ]
+
+
+def test_polling_on_without_a_bearer_fails(data_dir: Path) -> None:
+    worker_database(data_dir)
+    secrets = healthy_secrets()
+    secrets.delete("unsub/bearer")
+
+    code, results = run_doctor(secrets=secrets)
+
+    assert code == 1
+    assert results["unsub_worker"][0] == "fail"
+    assert "polling on but bearer not set" in results["unsub_worker"][1]

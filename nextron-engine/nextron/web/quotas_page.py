@@ -18,7 +18,11 @@ are fixed (UX-DR), so it isn't listed there. In order, the page shows:
 - **a usage table**: Provider, Operation, SKU, Calls, Failed and Units, one row per line of the
   month; a scaled provider's units are in its quota's unit, named ("1.5 credits" for Hunter),
   every other provider's are plain numbers; with no lines, "No external calls recorded this
-  month."
+  month.";
+- **the unsubscribe Worker** (Story 3.12): "Unsubscribe Worker KV list calls today: N of
+  1,000" (``nextron.domain.unsub_requests.kv_list_text`` of ``Budget.kv_list_calls()``, the UTC
+  day's ``unsub_worker``/``kv_list`` calls), with the ``quota-warning`` class at 80% or more.
+  It is information only: polling never stops.
 """
 
 from dataclasses import dataclass
@@ -38,6 +42,7 @@ from nextron.domain.budget import (
     dollars,
     quantity,
 )
+from nextron.domain.unsub_requests import kv_list_text, kv_list_warning
 
 PAGE_TEMPLATE: Final = "quotas.html"
 RUNNING: Final = "Non-essential work is running."
@@ -132,8 +137,8 @@ def stopped_text(assessment: Assessment) -> str:
     return RUNNING
 
 
-def page_context(assessment: Assessment) -> dict[str, object]:
-    """What ``quotas.html`` renders for ``assessment``."""
+def page_context(assessment: Assessment, *, kv_list_calls: int = 0) -> dict[str, object]:
+    """What ``quotas.html`` renders for ``assessment`` and today's ``kv_list_calls``."""
     ai = assessment.ai
     usage = [
         UsageRow(
@@ -155,4 +160,6 @@ def page_context(assessment: Assessment) -> dict[str, object]:
         "quotas": [quota_row(line) for line in assessment.quotas],
         "usage": usage,
         "no_usage": NO_USAGE,
+        "kv_list": kv_list_text(kv_list_calls),
+        "kv_list_warning": kv_list_warning(kv_list_calls),
     }

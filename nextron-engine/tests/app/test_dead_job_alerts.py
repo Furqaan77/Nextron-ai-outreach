@@ -392,3 +392,27 @@ def test_without_a_sweep_the_runner_alerts_nothing(
 
     assert world.job_status(job_id) == ("dead", 1)
     assert world.notifications() == []
+
+
+def test_a_dead_poll_job_alerted_under_its_id_before_the_upgrade_is_not_alerted_again(
+    world: World,
+) -> None:
+    job_id = "01JD3QZ8X5V9K2M7N4P6R8T0C1"
+    at = "2026-11-17T09:00:00.000000Z"
+    world.query(
+        "INSERT INTO jobs (id, type, lane, status, priority, payload, idempotency_key, "
+        "run_after, attempts, created_at, updated_at) VALUES (?, 'poll_unsubscribes', "
+        "'realtime', 'dead', 80, '{}', ?, ?, 3, ?, ?)",
+        (job_id, job_id, at, at, at),
+    )
+    world.query(  # alerted under its id, as Story 3.11 did
+        "INSERT INTO notifications (id, kind, subject, text, created_at) "
+        "VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0C2', 'job_dead', ?, 'Job dead', ?)",
+        (job_id, at),
+    )
+
+    with world.units.open():
+        assert DeadJobAlerts(world.notify).alert_dead_jobs() == 0
+
+    assert [subject for _, subject, _ in world.notifications()] == [job_id]
+    assert world.alerts() == []

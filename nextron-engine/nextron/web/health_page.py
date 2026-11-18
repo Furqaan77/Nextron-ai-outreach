@@ -54,12 +54,17 @@ In order, the panel shows:
    (Step, Status) with each step's label and status label, in step order. Otherwise: "Last
    restore: <restored_at>, from <source_name>; recovery mode ended at <ended_at>.". Times are
    ``YYYY-MM-DD HH:MM:SS UTC``;
-6. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
+6. **Unsubscribe polling** (Story 3.12; ``unsub_poll_text``), always one line: "Off (no Worker
+   host set)" while the ``unsub_worker_host`` setting is blank, else "Last successful poll:
+   <time>" (or "never"), followed by "; failing since <time> (<code>)" while a failure episode
+   is open (the ``health-unsub-failing`` class). The line shows a failure at once; the health
+   issue and the alert wait 24 hours;
+7. **Errors needing attention (<n>)**: each issue's text and its detail (escaped with
    ``|plain``); a ``job_dead`` issue has a Dismiss form. With none: "No errors need
    attention.";
-7. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
+8. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
    type that has not succeeded;
-8. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
+9. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
    fail".
 """
 
@@ -68,6 +73,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 from nextron.app.ops.api import HealthReport, Worker
+from nextron.app.queries.compliance import UnsubPollStatus
 from nextron.app.queries.ops import BackupRow, RecoveryRow, RestoreTestRow
 from nextron.domain.alert import JOB_DEAD
 from nextron.domain.backup import BackupKind, BackupStatus, OffpcStatus
@@ -91,6 +97,7 @@ BACKUP_ALREADY_QUEUED: Final = "A backup is already queued or running."
 NO_RESTORE_TEST: Final = "No restore test yet."
 RESTORE_TEST_QUEUED: Final = "Restore test queued; its result shows here when it finishes."
 RESTORE_TEST_ALREADY_QUEUED: Final = "A restore test is already queued or running."
+UNSUB_POLL_OFF: Final = "Off (no Worker host set)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +227,29 @@ def recovery_steps(recovery: RecoveryRow | None) -> list[StepRow]:
     return [StepRow(step.label, status.label) for step, status in recovery.steps]
 
 
+def unsub_poll_text(status: UnsubPollStatus | None) -> str:
+    """The Unsubscribe polling line: off, or the last success and any open failure."""
+    if status is None or not status.polling_on:
+        return UNSUB_POLL_OFF
+    state = status.state
+    last = None if state is None else state.last_success_at
+    text = f"Last successful poll: {NEVER if last is None else shown_time(last)}"
+    if unsub_poll_failing(status):
+        assert state is not None and state.failing_since is not None  # unsub_poll_failing
+        text += f"; failing since {shown_time(state.failing_since)} ({state.last_failure_code})"
+    return text
+
+
+def unsub_poll_failing(status: UnsubPollStatus | None) -> bool:
+    """Whether the Unsubscribe polling line shows an open failure episode."""
+    return (
+        status is not None
+        and status.polling_on
+        and status.state is not None
+        and status.state.failing_since is not None
+    )
+
+
 def panel_context(
     report: HealthReport, *, notice: str | None = None, restore_notice: str | None = None
 ) -> dict[str, object]:
@@ -260,6 +290,8 @@ def panel_context(
         "recovery": recovery_text(report.recovery),
         "recovery_on": recovery_on(report.recovery),
         "recovery_steps": recovery_steps(report.recovery),
+        "unsub_poll": unsub_poll_text(report.unsub_poll),
+        "unsub_poll_failing": unsub_poll_failing(report.unsub_poll),
         "issues": issues,
         "no_errors": NO_ERRORS,
         "groups": groups,

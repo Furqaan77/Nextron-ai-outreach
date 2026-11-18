@@ -1,6 +1,7 @@
 """The ``compliance`` service's tables (FR-50, FR-52, FR-63, FR-70, AD-3, AD-4, AD-15, AD-16,
 AD-17; migrations ``0022_3_3_suppression_entries``, ``0024_3_8_unsub_tokens``,
-``0032_3_13_erase_contacts`` and ``0037_3_11_unsub_requests``), owned by ``compliance``
+``0032_3_13_erase_contacts``, ``0037_3_11_unsub_requests`` and ``0038_3_12_unsub_poll_state``),
+owned by ``compliance``
 (``nextron.db.repos.compliance``).
 
 **``suppression_entries``**: the Suppression List, one row per suppressed key.
@@ -72,6 +73,20 @@ holds the token, the address or the address hash.
   exists, each with "unsubscribe request records are permanent". Every column is PII class
   ``none``.
 
+**``unsub_poll_state``** (Story 3.12): the one row recording how the unsubscribe poll went, for
+the health panel, its health issue and alert, and the ``repoll_unsubscribes`` recovery step.
+
+- ``id`` is always ``UNSUB_POLL_STATE_ID``, the ULID whose value is 1
+  (``00000000000000000000000001``; ``ck_unsub_poll_state_singleton``), so the table holds at
+  most one row (the engine's rule that every primary key is one ULID ``id`` is kept);
+- ``last_success_at``: the last poll whose apply committed; ``failing_since``: the first failure
+  since then; ``last_failure_at`` and ``last_failure_code``, the newest failure and its code
+  (``ck_unsub_poll_state_last_failure_code``: one of
+  ``nextron.domain.unsub_requests.PollFailure``). All four are nullable, and the three failure
+  columns are set or NULL together (``ck_unsub_poll_state_failure``).
+
+Every column is PII class ``none``: times and a code, never a token, address, host or bearer.
+
 **``data_subject_requests``** (Story 3.13): one row per data subject request, the proof that
 an erasure (or, from Story 3.15, an export) ran.
 
@@ -101,6 +116,7 @@ from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.contactability import KeyKind
 from nextron.domain.data_subject_request import RequestKind, RequestStatus
 from nextron.domain.suppression_entry import EntryStatus, SuppressionSource
+from nextron.domain.unsub_requests import PollFailure
 
 KIND_LENGTH: Final = 16
 VALUE_HASH_LENGTH: Final = 64  # nextron.domain.contactability.HASH_LENGTH
@@ -137,6 +153,16 @@ REQUEST_KIND_CHECK: Final = _one_of("kind", RequestKind)
 REQUEST_STATUS_CHECK: Final = _one_of("status", RequestStatus)
 REQUEST_REF_CHECK: Final = "length(request_ref) BETWEEN 1 AND 200"
 REQUEST_COMPLETED_CHECK: Final = "(status = 'completed') = (completed_at IS NOT NULL)"
+UNSUB_POLL_STATE_ID: Final = "00000000000000000000000001"  # the one row: the ULID of value 1
+FAILURE_CODE_LENGTH: Final = 32
+SINGLETON_CHECK: Final = f"id = '{UNSUB_POLL_STATE_ID}'"
+FAILURE_CODE_CHECK: Final = "last_failure_code IS NULL OR last_failure_code IN ({})".format(
+    ",".join(f"'{code}'" for code in PollFailure)
+)
+FAILURE_CHECK: Final = (
+    "(failing_since IS NULL) = (last_failure_at IS NULL) "
+    "AND (failing_since IS NULL) = (last_failure_code IS NULL)"
+)
 
 
 class SuppressionEntryRecord(Base):
@@ -204,6 +230,24 @@ class UnsubRequestRecord(Base):
     token_hash: Mapped[str] = mapped_column(String(TOKEN_HASH_LENGTH))
     received_at: Mapped[datetime] = mapped_column(UtcDateTime)
     processed_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class UnsubPollStateRecord(Base):
+    """The one row recording how the unsubscribe poll went: the last success and the failure
+    episode."""
+
+    __tablename__ = "unsub_poll_state"
+    __table_args__ = (
+        CheckConstraint(SINGLETON_CHECK, name="singleton"),
+        CheckConstraint(FAILURE_CODE_CHECK, name="last_failure_code"),
+        CheckConstraint(FAILURE_CHECK, name="failure"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    last_success_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    failing_since: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_failure_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_failure_code: Mapped[str | None] = mapped_column(String(FAILURE_CODE_LENGTH))
 
 
 class DataSubjectRequestRecord(Base):

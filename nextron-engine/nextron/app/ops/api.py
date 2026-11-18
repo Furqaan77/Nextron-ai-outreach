@@ -40,8 +40,11 @@ whose job died and on every keeper tick.
   it calls ``notify.alert("job_dead", <job id>, job_dead_text(type, id, attempts), channels)``
   with ``{telegram, dashboard}``, or ``{dashboard}`` for a dead ``send_alert`` job, so a broken
   Telegram can't feed itself. Each job is alerted once, a crash between a job's death and the
-  sweep included. It returns how many it alerted and logs ``dead_jobs_alerted`` (``count``)
-  when that is above 0.
+  sweep included. A dead ``poll_unsubscribes`` job (Story 3.12: only a bug kills one now) is
+  alerted under the subject ``poll_unsubscribes:<UTC date of updated_at>`` instead of its id
+  (``dead_job_subject``), so that type raises at most one ``job_dead`` alert a day; a job
+  already alerted under its id (before the upgrade) is never alerted again. It
+  returns how many it alerted and logs ``dead_jobs_alerted`` (``count``) when that is above 0.
 
 ``Budget(clock, meter, notify)`` (AD-8, FR-57, NFR-11, NFR-12, UX-DR28) reads the month's usage
 against the quotas and the AI budget (``nextron.domain.budget``) and raises the threshold
@@ -51,6 +54,9 @@ notices. ``nextron.main`` builds it and runs ``check`` right after each usage ro
 - ``status() -> Assessment`` is a plain read, with no use case or transaction, so a dashboard
   GET can call it in its read-only unit of work: it reads the clock once, then returns
   ``assess(meter.snapshot(now), queries.setup.budget_limits())``.
+- ``kv_list_calls() -> int`` (Story 3.12) is read the same way: ``meter.day_calls(now,
+  "unsub_worker", "kv_list")``, today's (UTC) unsubscribe Worker KV list calls, for the
+  Quotas page.
 - ``@use_case check() -> tuple[Threshold, ...]``: in one transaction, ``notify.alert(kind,
   subject, text, {dashboard})`` for each of ``thresholds(status())``. Each notice is unique per
   kind and subject, and its subject names the month, so it comes once a month (the AI warning,
@@ -75,7 +81,7 @@ transaction, for a dashboard GET's read-only unit of work:
   the traceback); the other sources still run.
 - ``issue_count() -> int`` is ``len(issues())``: the notification area's error count.
 - ``report() -> HealthReport(checked_at, worker, groups, issues, readiness, backup,
-  restore_test, recovery)`` reads
+  restore_test, recovery, unsub_poll)`` reads
   the clock once, then runs ``readiness()`` before its own database reads. Readiness ends with the
   checks that read the database (``offpc_backup``'s setting, ``required_settings``,
   ``database_revision``), which begin the read transaction; the checks that reach Credential
@@ -90,7 +96,9 @@ transaction, for a dashboard GET's read-only unit of work:
   readiness (``None`` before the first one); ``restore_test`` is
   ``queries.ops.last_restore_test()``, the newest restore test of either kind and result
   (``None`` before the first one); ``recovery`` is ``queries.ops.recovery_state()``: the ``on``
-  recovery row, else the newest of any mode (``None`` before the first restore).
+  recovery row, else the newest of any mode (``None`` before the first restore); ``unsub_poll``
+  (Story 3.12) is ``queries.compliance.unsub_poll_status(polling_on)``, ``polling_on`` being
+  whether the ``unsub_worker_host`` setting is set.
 
 **The seed sync (FR-1, FR-2, FR-3, FR-4, FR-72, AD-3, AD-12; Stories 2.1, 3.1, 4.1, 4.2 and
 4.3).** ``Seeds(clock)`` is what ``nextron seed sync`` calls. ``setup`` (the Segments, Markets,
@@ -365,10 +373,12 @@ from nextron.app.playbook.api import (
     latest_allowed,
     log_fact_sync,
 )
+from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.queries.compliance import UnsubPollStatus
 from nextron.app.setup.api import (
     CampaignSync,
     MarketSync,
@@ -458,6 +468,7 @@ from nextron.domain.restore_test import (
 from nextron.domain.segments import SegmentDef
 from nextron.domain.sequences import SequenceDef
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
+from nextron.domain.unsub_requests import KV_LIST_OPERATION, KV_PROVIDER, POLL_UNSUBSCRIBES_JOB
 from nextron.ports.backup_target import (
     BACKUP_BAD_FORMAT,
     BACKUP_COPY_MISSING,
@@ -590,6 +601,15 @@ class Heartbeat:
         self._file.touch()
 
 
+def dead_job_subject(job_type: str, job_id: str, died_at: datetime) -> str:
+    """The ``job_dead`` alert's subject: the job's id, or for ``poll_unsubscribes`` (Story
+    3.12) ``poll_unsubscribes:<UTC date of its death>``, so that type alerts at most once a
+    day."""
+    if job_type == POLL_UNSUBSCRIBES_JOB:
+        return f"{POLL_UNSUBSCRIBES_JOB}:{died_at.astimezone(UTC).date().isoformat()}"
+    return job_id
+
+
 class DeadJobAlerts:
     """The ``job_dead`` sweep: one ops alert per dead job; see the module docstring."""
 
@@ -601,13 +621,15 @@ class DeadJobAlerts:
         """Alert every dead job not yet alerted; how many were alerted."""
         count = 0
         with current().transaction():
-            alerted = notify_queries.subjects(JOB_DEAD)
+            alerted = set(notify_queries.subjects(JOB_DEAD))
             for job in jobqueue_queries.dead_jobs():
-                if job.id in alerted:
+                subject = dead_job_subject(job.type, job.id, job.updated_at)
+                if subject in alerted or job.id in alerted:  # alerted by id before Story 3.12
                     continue
                 channels = DASHBOARD_ONLY if job.type == SEND_ALERT_JOB else ALL_CHANNELS
                 text = job_dead_text(job.type, job.id, job.attempts)
-                self._notify.alert(JOB_DEAD, job.id, text, channels)
+                self._notify.alert(JOB_DEAD, subject, text, channels)
+                alerted.add(subject)
                 count += 1
         if count > 0:
             log.info("dead_jobs_alerted", extra={"count": count})
@@ -681,6 +703,11 @@ class Budget:
         now = self._clock.now()
         return assess(self._meter.snapshot(now), setup_queries.budget_limits())
 
+    def kv_list_calls(self) -> int:
+        """Today's (UTC) unsubscribe Worker KV list calls (Story 3.12), read in the current
+        unit of work (a read-only one included)."""
+        return self._meter.day_calls(self._clock.now(), KV_PROVIDER, KV_LIST_OPERATION)
+
     @use_case
     def check(self) -> tuple[Threshold, ...]:
         """Raise each threshold notice not yet raised this month; the ones it raised."""
@@ -725,6 +752,7 @@ class HealthReport:
     backup: BackupRow | None
     restore_test: RestoreTestRow | None
     recovery: RecoveryRow | None
+    unsub_poll: UnsubPollStatus | None = None  # Story 3.12
 
 
 def _source_failed(source: IssueSource, error: Exception) -> HealthIssue:
@@ -794,6 +822,9 @@ class EngineHealth:
         backup = ops_queries.last_backup()
         restore_test = ops_queries.last_restore_test()
         recovery = ops_queries.recovery_state()
+        unsub_poll = compliance_queries.unsub_poll_status(
+            bool(setup_queries.get(Key.UNSUB_WORKER_HOST))
+        )
         beat = ops_queries.heartbeat()
         worker = Worker(
             beat is not None and worker_running(beat.beat_at, now),
@@ -802,7 +833,15 @@ class EngineHealth:
         pairs = [(name, self._job_types.get(name).group) for name in self._job_types.names()]
         groups = job_group_runs(pairs, jobqueue_queries.last_successes())
         return HealthReport(
-            now, worker, groups, self.issues(), readiness, backup, restore_test, recovery
+            now,
+            worker,
+            groups,
+            self.issues(),
+            readiness,
+            backup,
+            restore_test,
+            recovery,
+            unsub_poll,
         )
 
 

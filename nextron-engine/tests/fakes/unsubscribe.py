@@ -8,6 +8,10 @@ Worker's list stays the same until a test changes it; with no answer at all the 
 
 ``hosts`` records the host of every call, in order. Unlike the real adapter it checks no host,
 reads no bearer and meters nothing.
+
+``probe(host, *, deadline_s)`` (Story 3.12) records ``(host, deadline_s)`` in ``probes`` and
+answers with ``probe_answer``: ``None`` (the Worker is reachable) or an ``AdapterError``
+(raised).
 """
 
 from collections.abc import Callable
@@ -29,6 +33,8 @@ class ScriptedUnsubscribe:
     def __init__(self, *answers: FetchAnswer) -> None:
         self.answers: list[FetchAnswer] = list(answers)
         self.hosts: list[str] = []
+        self.probes: list[tuple[str, float]] = []
+        self.probe_answer: AdapterError | None = None
 
     def fetch_pending(self, host: str) -> PendingFetch:
         self.hosts.append(host)
@@ -42,3 +48,8 @@ class ScriptedUnsubscribe:
         if not isinstance(answer, PendingFetch):
             raise AssertionError("ScriptedUnsubscribe: an answer must be a PendingFetch")
         return answer
+
+    def probe(self, host: str, *, deadline_s: float) -> None:
+        self.probes.append((host, deadline_s))
+        if self.probe_answer is not None:
+            raise self.probe_answer

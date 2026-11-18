@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0037_3_11_unsub_requests"
+HEAD = "0038_3_12_unsub_poll_state"
 
 
 @pytest.fixture
