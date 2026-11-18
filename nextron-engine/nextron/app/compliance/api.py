@@ -174,7 +174,8 @@ The two reapply writers (their caller is ``nextron.app.compliance.ledger.Erasure
   key held for the Contact (its stored values, its Lead's ``web_domain`` through
   ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii``,
   ``queries.playbook.export_pii`` (the Contact's override cases, Story 4.6),
-  ``queries.sequencing.export_pii`` (the Contact's Enrollments, Story 4.8) and
+  ``queries.sequencing.export_pii`` (the Contact's Enrollments, Story 4.8),
+  ``queries.drafting.export_pii`` (the revisions of their Drafts, Story 4.12) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -263,6 +264,7 @@ from typing import Final, Protocol
 from nextron.app.compliance.unsub_kid import active_unsub_kid
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import playbook as playbook_queries
@@ -829,6 +831,7 @@ class Compliance:
                 "notify": notify_queries.export_pii(contact_id),
                 "playbook": playbook_queries.export_pii(contact_id),
                 "sequencing": sequencing_queries.export_pii(contact_id),
+                "drafting": drafting_queries.export_pii(contact_id),
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )

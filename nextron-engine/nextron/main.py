@@ -125,9 +125,12 @@ Compliance(clock)).erase_pii``, which reads the Contact while it still holds its
 research's (``Research(clock).erase_pii``, which tombstones the Contact last), then playbook's
 (``Playbook(clock).erase_pii``, Story 4.6: it erases the Contact's override cases,
 ``erase_override_cases``), then ``Sequencing(clock).erase_pii`` (Story 4.8: the erased
-Contact's live Enrollments stop with ``contact_erased``), then the no-op hooks of ``setup``,
-``drafting``, ``jobqueue``, ``ops`` and ``notify``, whose tables never hold a Contact's data; ``Enrolled`` -> ``Pipeline(clock).on_enrolled``
-(Story 4.8: a ``new`` Lead moves to ``queued``). Each uses ``SystemClock()`` when no clock is
+Contact's live Enrollments stop with ``contact_erased``), then the hooks of ``setup``,
+``drafting`` (Story 4.12: it tombstones the text of the Contact's ``draft_revisions``),
+``jobqueue``, ``ops`` and ``notify`` (the others no-ops: their tables never hold a Contact's
+data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
+``queued``); ``FooterChanged`` -> ``Drafting(clock).recompose_ready`` (Story 4.12: the Market's
+``ready`` Drafts get a ``footer_change`` revision). Each uses ``SystemClock()`` when no clock is
 given.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance,
@@ -768,6 +771,7 @@ from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.drafting import api as drafting_api
+from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify import api as notify_api
@@ -877,6 +881,7 @@ from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import (
     ContactErased,
     Enrolled,
+    FooterChanged,
     LeadsMerged,
     MessageSent,
     SubjectSuppressed,
@@ -2179,6 +2184,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
     # Story 4.9: the next Step's due time, or the Enrollment's completion
     subscribers.register_subscriber(MessageSent, Sequencing(chosen).on_step_sent)
+    # Story 4.12: a footer change recomposes the Market's ready Drafts
+    subscribers.register_subscriber(FooterChanged, Drafting(chosen).recompose_ready)
     subscribers.freeze()
     return subscribers
 

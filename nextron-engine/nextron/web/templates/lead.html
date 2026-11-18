@@ -7,7 +7,8 @@
     Market and timezone facts, its Provenance Records and its erase link (Story 3.13), or, for
     an erased Contact, its tombstone line only), then the Job postings section (Story 2.11), then
     the Data subject requests section (Story 3.15): one "Export data (JSON)" form per Contact,
-    outside any hx-disable so HTMX posts it.
+    outside any hx-disable so HTMX posts it, then the Drafts section (lead_drafts.html, Story
+    4.12).
     Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
     it renders only through |plain or safe_link, inside an element carrying hx-disable. The
     legal-form, Signals, Evidence and Job postings sections hold no HTMX action. -#}
@@ -101,4 +102,5 @@
 {%- endfor %}
 </section>
 {%- endif %}
+{% include "lead_drafts.html" %}
 {% endblock %}

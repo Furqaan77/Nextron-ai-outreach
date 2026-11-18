@@ -35,14 +35,58 @@ always from ``nextron.domain.sending_policy.step_due_at``) of a ``ready`` or ``a
 Draft; any other status is a no-op ``False``. A non-``str`` id or a naive or
 non-``datetime`` time raises ``TypeError``, an unknown Draft ``LookupError``.
 
-- ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 3.13, AD-17): drafting's
-  ``ContactErased`` subscriber writes nothing, because ``footer_snapshots`` (its one table with
-  a personal-data column) holds the Sender's name and Nextron's postal address, never a
-  Contact's data; ``drafts`` holds none at all.
+**A Draft's text** (FR-20, FR-23, AD-6; Story 4.12) lives in immutable ``draft_revisions``
+(``nextron.db.repos.drafting.revisions``); ``drafts.current_rev`` names the latest. Every
+revision is appended by one private writer, ``_append(draft, subject, body, origin,
+traceability, at)``, which checks before any write, then writes in the caller's unit:
+
+0. The text, whatever the origin (``_check_text``): a subject of 1 to ``MAX_SUBJECT`` (200)
+   characters after strip, with no line break and no control character (Unicode category
+   ``Cc``; it becomes one header line), and a body of at most ``MAX_BODY`` (10,000) characters
+   (``ValueError``).
+1. The Draft's Enrollment and its Contact must exist (``LookupError``), and the Contact must
+   have an email and not be erased (``ValueError``). The Contact's Market (``market_id``, read
+   with ``queries.setup.market_by_id``) must be stored (``LookupError``).
+2. The footer is ``render.footer(queries.setup.footer_settings(), the Market, source)``, where
+   ``source`` is the ``source_kind`` of the Contact's earliest Provenance record with subject
+   ``contact`` (``None`` without one). A Market that needs a privacy line and a source with no
+   phrase raises ``ValueError`` (``render.NO_PHRASE``): a UK footer never states a false source.
+   A blank footer raises ``ValueError``.
+3. ``render.compose`` of the subject and body with that footer for the Contact's email, and
+   ``render.text_hash`` of the result with the Enrollment's ``sending_inbox_id``.
+4. ``footer_snapshots.ensure`` (identical footer text reuses its row), one revision at
+   ``current_rev + 1`` (1 when there is none) with the traceability given, and
+   ``drafts.current_rev`` moved to it (``updated_at`` the clock's now).
+
+**``@command revise(draft_id, subject, body) -> int``** (the Operator's edit; Epic 5 calls it
+through ``approval``). ``draft_id``, ``subject`` and ``body`` must be ``str`` (``TypeError``).
+``subject`` is stored stripped; both are checked against step 0's rules before the Draft is
+looked up (``ValueError``; the body may be empty). An unknown Draft raises ``LookupError``; one that
+isn't ``ready`` or has no revision yet ``ValueError``. It appends origin ``operator_edit`` with
+the previous revision's traceability (evidence, facts, cited Signal, route tuple, Playbook,
+prompt version) and no ``instruction``, and returns the new ``rev``. Its grounding stays pending
+(Stories 4.13 and 4.14 add grounding).
+
+**``@command recompose_ready(n: FooterChanged)``**, ``FooterChanged``'s subscriber
+(``main.build_subscribers``): for each ``ready`` Draft with a revision whose Contact's
+``market_id`` is ``n.market_id``, by ``id``, it appends origin ``footer_change`` with the same
+subject, body and traceability, only when the new ``text_hash`` differs from the current one
+(so a repeat is a no-op). A Draft whose footer can't be composed (``ValueError``,
+``LookupError`` or ``InvalidMarkets`` from the checks) is logged (``recompose_skipped``, with
+the Draft id and the error type) and skipped, before any write. ``approved``, ``sent`` and every
+other status are untouched.
+
+- ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 3.13, AD-17): ``draft_revisions``
+  is tombstoned: every revision of every Draft of each of the Contact's Enrollments gets
+  ``subject``, ``body`` and a set ``instruction`` ``[erased]`` (rows, hashes and traceability
+  kept; the triggers allow only that). ``footer_snapshots`` holds the Sender's name and
+  Nextron's postal address, never a Contact's data; ``drafts`` holds none at all.
 """
 
 import logging
+import unicodedata
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Final
@@ -52,16 +96,23 @@ from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.queries.drafting import DraftView, RevisionView
 from nextron.db import eventlog
 from nextron.db.repos.drafting import drafts as drafts_repo
+from nextron.db.repos.drafting import footer_snapshots as footer_snapshots_repo
+from nextron.db.repos.drafting import revisions as revisions_repo
 from nextron.db.repos.drafting.drafts import NewSlot
+from nextron.db.repos.drafting.revisions import NewRevision
 from nextron.db.uow import command
+from nextron.domain import render
 from nextron.domain.ai import Urgency, check_urgency
 from nextron.domain.contactability import Blocked, ContactSubject
-from nextron.domain.draft import CREATION, DraftKind
+from nextron.domain.contacts import ProvenanceSubject
+from nextron.domain.draft import CREATION, DraftKind, DraftStatus, RevisionOrigin
 from nextron.domain.enrollment import LIVE_STATUSES, EnrollmentOrigin, EnrollmentStatus
 from nextron.domain.erasure import Coverage, TableErasure
-from nextron.domain.notifications import ContactErased
+from nextron.domain.markets import InvalidMarkets
+from nextron.domain.notifications import ContactErased, FooterChanged
 from nextron.domain.sending_policy import step_due_at
 from nextron.ports.clock import Clock
 
@@ -72,6 +123,117 @@ ACTOR: Final = "system:drafting"
 CHANNEL: Final = "email"
 PURPOSE: Final = "cold"
 FIRST_STEP: Final = 1
+MAX_SUBJECT: Final = 200
+MAX_BODY: Final = 10_000
+LINE_BREAKS: Final = frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85  ")
+RECOMPOSE_SKIPPED: Final = "recompose_skipped"
+
+
+@dataclass(frozen=True, slots=True)
+class Traceability:
+    """What a revision records of how its text was made (copied by an edit or a footer
+    change)."""
+
+    evidence_ids: tuple[str, ...]
+    fact_versions: tuple[tuple[str, int], ...]
+    cited_signal_id: str | None
+    route_tuple_id: str | None
+    playbook_sha256: str | None
+    playbook_version: str | None
+    prompt_version: str | None
+    instruction: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Text:
+    subject: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Footer:
+    text: str
+
+
+def _copied(revision: RevisionView) -> Traceability:
+    """The traceability of ``revision``, without its regenerate instruction."""
+    return Traceability(
+        evidence_ids=revision.evidence_ids,
+        fact_versions=revision.fact_versions,
+        cited_signal_id=revision.cited_signal_id,
+        route_tuple_id=revision.route_tuple_id,
+        playbook_sha256=revision.playbook_sha256,
+        playbook_version=revision.playbook_version,
+        prompt_version=revision.prompt_version,
+        instruction=None,
+    )
+
+
+def _checked_text(subject: object, body: object) -> tuple[str, str]:
+    """``revise``'s subject (stripped) and body; ``TypeError`` or ``ValueError``."""
+    if not isinstance(subject, str) or not isinstance(body, str):
+        raise TypeError("revise takes the subject and the body as str")
+    chosen = subject.strip()
+    _check_text(chosen, body)
+    return chosen, body
+
+
+def _check_text(subject: str, body: str) -> None:
+    """Every revision's text rules, whatever its origin: a subject of 1 to ``MAX_SUBJECT``
+    characters after strip with no control character or line break (it becomes one header
+    line), and a body of at most ``MAX_BODY`` characters; else ``ValueError``."""
+    if not 1 <= len(subject.strip()) <= MAX_SUBJECT:
+        raise ValueError(f"the subject must be 1 to {MAX_SUBJECT} characters")
+    if any(
+        character in LINE_BREAKS or unicodedata.category(character) == "Cc"
+        for character in subject
+    ):
+        raise ValueError("the subject must be one line without control characters")
+    if len(body) > MAX_BODY:
+        raise ValueError(f"the body must be at most {MAX_BODY:,} characters")
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    """What ``_append`` checked and computed before any write."""
+
+    market_id: str
+    footer_text: str
+    text_hash: str
+
+
+def _prepare(draft: DraftView, subject: str, body: str) -> _Prepared:
+    """``_append``'s checks and computation, before any write; see the module docstring."""
+    _check_text(subject, body)
+    if draft.enrollment_id is None:
+        raise LookupError("the Draft has no Enrollment")
+    enrollment = sequencing_queries.enrollment(draft.enrollment_id)
+    if enrollment is None:
+        raise LookupError("the Draft's Enrollment is unknown")
+    contact = research_queries.contact(enrollment.contact_id)
+    if contact is None:
+        raise LookupError("the Draft's Contact is unknown")
+    if contact.erased_at is not None or not contact.email:
+        raise ValueError("the Draft's Contact has no email address")
+    market = None if contact.market_id is None else setup_queries.market_by_id(contact.market_id)
+    if market is None:
+        raise LookupError("the Draft's Contact has no stored Market")
+    source = next(
+        (
+            record.source_kind
+            for record in research_queries.provenance(contact.id)
+            if record.subject == ProvenanceSubject.CONTACT
+        ),
+        None,
+    )
+    footer_text = render.footer(setup_queries.footer_settings(), market.definition, source)
+    if not footer_text.strip():
+        raise ValueError("the footer is blank")
+    composed = render.compose(_Text(subject, body), _Footer(footer_text), contact.email)
+    digest = render.text_hash(
+        composed.to_address, enrollment.sending_inbox_id, composed.subject, composed.body
+    )
+    return _Prepared(market.id, footer_text, digest)
 
 
 def _checked_steps(steps: object) -> tuple[int, ...]:
@@ -180,11 +342,111 @@ class Drafting:
             raise LookupError("set_due: the Draft is unknown")
         return drafts_repo.set_due(draft_id, due_at, self._clock.now())
 
+    def _append(
+        self,
+        draft: DraftView,
+        subject: str,
+        body: str,
+        origin: RevisionOrigin,
+        traceability: Traceability,
+        at: datetime,
+        prepared: _Prepared | None = None,
+    ) -> int:
+        """Append a revision of ``draft`` and point the Draft at it; its ``rev``. ``prepared``
+        is ``_prepare``'s result for this text when the caller already has it. See the module
+        docstring."""
+        if prepared is None:
+            prepared = _prepare(draft, subject, body)
+        snapshot_id = footer_snapshots_repo.ensure(prepared.market_id, prepared.footer_text, at)
+        rev = (draft.current_rev or 0) + 1
+        revisions_repo.insert(
+            NewRevision(
+                draft_id=draft.id,
+                rev=rev,
+                subject=subject,
+                body=body,
+                footer_snapshot_id=snapshot_id,
+                evidence_ids=traceability.evidence_ids,
+                fact_versions=traceability.fact_versions,
+                cited_signal_id=traceability.cited_signal_id,
+                origin=str(origin),
+                route_tuple_id=traceability.route_tuple_id,
+                playbook_sha256=traceability.playbook_sha256,
+                playbook_version=traceability.playbook_version,
+                prompt_version=traceability.prompt_version,
+                instruction=traceability.instruction,
+                text_hash=prepared.text_hash,
+            ),
+            at,
+        )
+        drafts_repo.set_current_rev(draft.id, rev, at)
+        return rev
+
+    @command
+    def revise(self, draft_id: str, subject: str, body: str) -> int:
+        """Append the Operator's edit of a ``ready`` Draft; the new ``rev``. See the module
+        docstring."""
+        if not isinstance(draft_id, str):
+            raise TypeError("revise takes the Draft id as str")
+        chosen_subject, chosen_body = _checked_text(subject, body)
+        draft = drafting_queries.draft(draft_id)
+        if draft is None:
+            raise LookupError("revise: the Draft is unknown")
+        if draft.status is not DraftStatus.READY:
+            raise ValueError("revise: only a ready Draft can be edited")
+        previous = drafting_queries.current_revision(draft)
+        if previous is None:
+            raise ValueError("revise: the Draft has no text yet")
+        return self._append(
+            draft,
+            chosen_subject,
+            chosen_body,
+            RevisionOrigin.OPERATOR_EDIT,
+            _copied(previous),
+            self._clock.now(),
+        )
+
+    @command
+    def recompose_ready(self, n: FooterChanged) -> None:
+        """``FooterChanged``'s subscriber: recompose the Market's ``ready`` Drafts; see the
+        module docstring."""
+        now = self._clock.now()
+        for draft in drafting_queries.ready_with_text():
+            if draft.enrollment_id is None:
+                continue
+            enrollment = sequencing_queries.enrollment(draft.enrollment_id)
+            contact = (
+                None if enrollment is None else research_queries.contact(enrollment.contact_id)
+            )
+            if contact is None or contact.market_id != n.market_id:
+                continue
+            previous = drafting_queries.current_revision(draft)
+            if previous is None:
+                continue
+            try:
+                prepared = _prepare(draft, previous.subject, previous.body)
+            except (ValueError, LookupError, InvalidMarkets) as error:  # before any write
+                log.warning(
+                    RECOMPOSE_SKIPPED,
+                    extra={"draft_id": draft.id, "error_type": type(error).__name__},
+                )
+                continue
+            if prepared.text_hash == previous.text_hash:
+                continue  # the same message: a repeat is a no-op
+            self._append(
+                draft,
+                previous.subject,
+                previous.body,
+                RevisionOrigin.FOOTER_CHANGE,
+                _copied(previous),
+                now,
+                prepared,
+            )
+
 
 # Erasure (Story 3.13) -------------------------------------------------------------------------
 
-# What drafting's erase_pii does to each of its tables with a personal-data column: none of them
-# ever holds a Contact's data.
+# What drafting's erase_pii does to each of its tables with a personal-data column.
 ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
     {
         "footer_snapshots": TableErasure(
@@ -192,11 +454,22 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
             "a Market footer's text: the Sender's name and Nextron's postal address, never a "
             "Contact's data",
         ),
+        "draft_revisions": TableErasure(
+            Coverage.TOMBSTONED,
+            "the text of every revision of the Contact's Drafts becomes [erased]; the rows and "
+            "their hashes stay (Story 4.12)",
+        ),
     }
 )
 
 
 @command
 def erase_pii(n: ContactErased) -> None:
-    """``drafting``'s ``ContactErased`` subscriber (Story 3.13, AD-17): it writes nothing,
-    because no ``drafting`` table holds a Contact's data (``ERASURE``)."""
+    """``drafting``'s ``ContactErased`` subscriber (Story 3.13, AD-17; Story 4.12): tombstone
+    the text of every revision of the Contact's Drafts (``ERASURE``)."""
+    draft_ids = [
+        draft.id
+        for enrollment in sequencing_queries.enrollments_of_contact(n.contact_id)
+        for draft in drafting_queries.drafts_of(enrollment.id)
+    ]
+    revisions_repo.tombstone(draft_ids)

@@ -10,7 +10,8 @@ into its form and validated again through ``market_from_form``, so a row that no
 validates (or whose list column isn't a JSON list) raises ``InvalidMarkets``.
 
 - ``all_markets()``: every row as a ``StoredMarket``, by code;
-- ``by_code(code)``: the row of ``code``, or ``None``;
+- ``by_code(code)``: the row of ``code``, or ``None``; ``by_id(market_id)`` (Story 4.12): the
+  row of ``market_id``, or ``None``;
 - ``footer_templates()``: each row's ``id`` and its ``footer_template`` lines, by code, without
   validating anything else (Story 4.11's ``FooterChanged`` reads it): the lines are ``None``
   when the column isn't a JSON list of ``str`` (``Setup`` treats such a row, or one whose lines
@@ -181,6 +182,13 @@ def footer_templates() -> tuple[tuple[str, tuple[str, ...] | None], ...]:
 def by_code(code: str) -> StoredMarket | None:
     """The stored Market ``code``, or ``None`` when it has no row."""
     statement = select(*_COLUMNS).where(MarketRecord.code == str(code))
+    row = current().session.execute(statement).one_or_none()
+    return None if row is None else _stored(row)
+
+
+def by_id(market_id: str) -> StoredMarket | None:
+    """The stored Market ``market_id``, or ``None`` when it has no row."""
+    statement = select(*_COLUMNS).where(MarketRecord.id == str(market_id))
     row = current().session.execute(statement).one_or_none()
     return None if row is None else _stored(row)
 

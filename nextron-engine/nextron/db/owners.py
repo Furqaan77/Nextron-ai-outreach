@@ -510,6 +510,28 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "footer_snapshots": {
         "drafting": ("id", "market_id", "sha256", "text", "created_at"),
     },
+    # Story 4.12: a Draft's text, one immutable row per revision
+    "draft_revisions": {
+        "drafting": (
+            "id",
+            "draft_id",
+            "rev",
+            "subject",
+            "body",
+            "footer_snapshot_id",
+            "evidence_ids",
+            "fact_versions",
+            "cited_signal_id",
+            "origin",
+            "route_tuple_id",
+            "playbook_sha256",
+            "playbook_version",
+            "prompt_version",
+            "instruction",
+            "text_hash",
+            "created_at",
+        ),
+    },
     "unsub_tokens": {
         "compliance": (
             "id",

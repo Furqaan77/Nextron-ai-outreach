@@ -1,0 +1,51 @@
+{#- The Lead page's Drafts section (nextron.web.leads_page, Story 4.12): included in lead.html.
+    Each Draft of the Lead's Enrollments shows its kind, Step, status and due time, the current
+    composed message exactly as the prospect would receive it (plain text, autoescaped through
+    |plain), "Sending blocked: footer incomplete (...)" when its Market's footer check fails, the
+    Playbook version and the revision history. A Draft's text is AI-written from crawled data:
+    the whole section carries hx-disable and holds no HTMX action. -#}
+<section class="lead-drafts" id="lead-drafts" aria-labelledby="drafts-heading" hx-disable>
+<h2 id="drafts-heading">Drafts</h2>
+{%- if not drafts %}
+<p>No Drafts yet.</p>
+{%- else %}
+{%- for draft in drafts %}
+<article class="draft" data-draft="{{ draft.draft_id|plain }}">
+<h3>{{ draft.kind|plain }}{% if draft.step %}: {{ draft.step|plain }}{% endif %}</h3>
+<dl class="draft-facts">
+<dt>Status</dt>
+<dd>{{ draft.status|plain }}</dd>
+<dt>Due</dt>
+<dd>{{ draft.due|plain }}</dd>
+<dt>Playbook version</dt>
+<dd>{{ draft.playbook_version|plain }}</dd>
+</dl>
+{%- if draft.blocked %}
+<p class="draft-blocked" role="alert">{{ draft.blocked|plain }}</p>
+{%- endif %}
+{%- if draft.message %}
+<div class="draft-message">
+<p class="draft-to">To: {{ draft.message.to_address|plain }}</p>
+<p class="draft-subject">Subject: {{ draft.message.subject|plain }}</p>
+<pre class="draft-body">{{ draft.message.body|plain }}</pre>
+</div>
+{%- else %}
+<p class="draft-no-text">No text yet</p>
+{%- endif %}
+{%- if draft.revisions %}
+<table class="lead-table revision-table">
+<caption>Revision history</caption>
+<thead>
+<tr><th scope="col">Revision</th><th scope="col">Origin</th><th scope="col">Time</th><th scope="col">Hash</th></tr>
+</thead>
+<tbody>
+{%- for revision in draft.revisions %}
+<tr class="revision-row"><td>{{ revision.rev }}</td><td>{{ revision.origin|plain }}</td><td>{{ revision.at|plain }}</td><td><code>{{ revision.short_hash|plain }}</code></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</article>
+{%- endfor %}
+{%- endif %}
+</section>

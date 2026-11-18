@@ -6,6 +6,9 @@ current unit of work, read-only ones included.
 - ``enrollment(enrollment_id)``: the Enrollment as a ``StoredEnrollment``, or ``None`` (a text
   that isn't a ULID included);
 - ``live_enrollment(lead_id)``: the Lead's ``active`` or ``paused`` Enrollment, or ``None``;
+- ``enrollments_of_lead(lead_id)`` and ``enrollments_of_contact(contact_id)`` (Story 4.12):
+  every Enrollment of the Lead or the Contact, whatever its status, oldest first (``()`` for a
+  text that isn't a ULID);
 - ``ended_sequences(contact_id) -> tuple[EndedSequence, ...]``: the Contact's Enrollment
   history for FR-63 (``compliance.evaluate_eligibility``): one
   ``EndedSequence(last_step_at, ended_at, replied)`` per ``stopped`` or ``completed``
@@ -42,6 +45,20 @@ def live_enrollment(lead_id: str) -> StoredEnrollment | None:
     if not is_ulid(lead_id):
         return None
     return enrollments_repo.live_for_lead(lead_id)
+
+
+def enrollments_of_lead(lead_id: str) -> tuple[StoredEnrollment, ...]:
+    """Every Enrollment of the Lead, oldest first."""
+    if not is_ulid(lead_id):
+        return ()
+    return tuple(enrollments_repo.for_lead(lead_id))
+
+
+def enrollments_of_contact(contact_id: str) -> tuple[StoredEnrollment, ...]:
+    """Every Enrollment of the Contact, oldest first."""
+    if not is_ulid(contact_id):
+        return ()
+    return tuple(enrollments_repo.for_contact(contact_id))
 
 
 def _replied(stop_cause: str | None) -> bool:

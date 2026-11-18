@@ -30,6 +30,8 @@ Table                      Owner        Exported as / why not
 ``ai_test_cases``          playbook     ``override_cases`` (Story 4.6's override cases)
 ``enrollments``            sequencing   ``enrollments`` (Story 4.8: no personal-data column,
                                         but each row references the Contact)
+``draft_revisions``        drafting     ``draft_revisions`` (Story 4.12: the revisions of the
+                                        Drafts of the Contact's Enrollments)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``jobs``                   jobqueue     never linked to a Contact
@@ -177,6 +179,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "notifications": Exported("notify", "notifications"),
         "ai_test_cases": Exported("playbook", "override_cases"),
         "enrollments": Exported("sequencing", "enrollments"),
+        "draft_revisions": Exported("drafting", "draft_revisions"),  # Story 4.12
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

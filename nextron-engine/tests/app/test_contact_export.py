@@ -27,6 +27,7 @@ from nextron.app.discovery.api import Discovery
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.queries import compliance as compliance_queries
+from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
@@ -127,6 +128,20 @@ ENROLLMENT_COLUMNS = (
     "id", "lead_id", "contact_id", "campaign_id", "variant_id", "sending_inbox_id", "sequence_id",
     "sequence_version", "offer_id", "origin", "status", "pause_cause", "stop_cause", "created_at",
     "updated_at", "last_step_sent_at", "ended_at",
+)  # fmt: skip
+# Story 4.12 (added at its merge): a Draft with one revision on each Enrollment, written
+# directly; its footer snapshot id is a stand-in
+JANE_DRAFT = "01JD3QZ8X5V9K2M7N4P6R8T0G1"
+BOB_DRAFT = "01JD3QZ8X5V9K2M7N4P6R8T0G2"
+JANE_REVISION = "01JD3QZ8X5V9K2M7N4P6R8T0G3"
+BOB_REVISION = "01JD3QZ8X5V9K2M7N4P6R8T0G4"
+FOOTER_SNAPSHOT = "01JD3QZ8X5V9K2M7N4P6R8T0G5"
+JANE_SUBJECT = "Jane, your new partner role"
+BOB_SUBJECT = "Bob, your litigation team"
+REVISION_COLUMNS = (
+    "id", "draft_id", "rev", "subject", "body", "footer_snapshot_id", "evidence_ids",
+    "fact_versions", "cited_signal_id", "origin", "route_tuple_id", "playbook_sha256",
+    "playbook_version", "prompt_version", "instruction", "text_hash", "created_at",
 )  # fmt: skip
 
 
@@ -371,6 +386,8 @@ class Seeded:
         if enrollments:
             enrollment(world, JANE_ENROLLMENT, self.lead, self.jane, ended=False)
             enrollment(world, BOB_ENROLLMENT, self.lead, self.bob, ended=True)
+            draft(world, JANE_DRAFT, JANE_ENROLLMENT, JANE_REVISION, JANE_SUBJECT)
+            draft(world, BOB_DRAFT, BOB_ENROLLMENT, BOB_REVISION, BOB_SUBJECT)
         if receipts:
             self.jane_receipt = receipt(world, self.jane, JANE_RECEIPT_REF)
             self.bob_receipt = receipt(world, self.bob, BOB_RECEIPT_REF)
@@ -387,6 +404,25 @@ class Seeded:
             )
         with world.units.open():
             world.compliance.add_value(OLD_ADDRESS)
+
+
+def draft(
+    world: World, draft_id: str, enrollment_id: str, revision_id: str, subject: str
+) -> None:
+    """Store a Step Draft of ``enrollment_id`` with one ``generated`` revision (Story 4.12)."""
+    stamp = "2026-11-18T09:00:00.000000Z"
+    world.sql(
+        "INSERT INTO drafts (id, kind, enrollment_id, step_no, day_offset, current_rev, "
+        "created_at, updated_at) VALUES (?, 'step', ?, 1, 0, NULL, ?, ?)",
+        (draft_id, enrollment_id, stamp, stamp),
+    )
+    world.sql(
+        "INSERT INTO draft_revisions (id, draft_id, rev, subject, body, footer_snapshot_id, "
+        "evidence_ids, fact_versions, origin, text_hash, created_at) "
+        "VALUES (?, ?, 1, ?, ?, ?, '[]', '[]', 'generated', ?, ?)",
+        (revision_id, draft_id, subject, f"{subject}.", FOOTER_SNAPSHOT, "d" * 64, stamp),
+    )
+    world.sql("UPDATE drafts SET current_rev = 1 WHERE id = ?", (draft_id,))
 
 
 def enrollment(
@@ -455,6 +491,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "notify",
         "playbook",
         "sequencing",
+        "drafting",
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (
@@ -571,6 +608,15 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "2026-11-18T09:00:00.000000Z",
     )
     assert enrolled["ended_at"] == "2026-11-18T11:00:00.000000Z"
+    # Story 4.12: the revision of her Enrollment's Draft, every column; Bob's isn't hers
+    [revision] = file["drafting"]["draft_revisions"]
+    assert tuple(revision) == REVISION_COLUMNS
+    assert (revision["id"], revision["draft_id"], revision["subject"], revision["body"]) == (
+        JANE_REVISION,
+        JANE_DRAFT,
+        JANE_SUBJECT,
+        f"{JANE_SUBJECT}.",
+    )
     [alert] = file["notify"]["alerts"]
     assert (alert["subject"], alert["text"]) == (seeded.jane, JANE_ALERT)
     [notice] = file["notify"]["notifications"]
@@ -627,6 +673,9 @@ def test_no_other_contacts_data_or_any_hash_id_or_cause_is_in_the_file(world: Wo
         BOB_RECEIPT_REF,  # Story 3.14: Bob's receipt
         seeded.bob_receipt,
         BOB_ENROLLMENT,  # Story 4.8: Bob's Enrollment
+        BOB_DRAFT,  # Story 4.12: Bob's Draft and its revision
+        BOB_REVISION,
+        BOB_SUBJECT,
     ):
         assert value not in text, value
     assert TEAM_TEXT not in json.loads(text)["research"]["pages"][0].values()
@@ -816,6 +865,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     assert file["notify"] == {"alerts": [], "notifications": []}
     assert file["playbook"] == {"override_cases": []}
     assert file["sequencing"] == {"enrollments": []}
+    assert file["drafting"] == {"draft_revisions": []}
     assert file["event_log"] == {"contact_history": []}
 
 
@@ -885,6 +935,14 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
         JANE_ENROLLMENT,
         "stopped",
         "suppressed",  # a DSR erasure suppresses first (Story 4.8)
+    )
+    # Story 4.12: drafting's hook tombstoned her revision's text; the row and its hash stay
+    [revision] = file["drafting"]["draft_revisions"]
+    assert (revision["id"], revision["subject"], revision["body"], revision["text_hash"]) == (
+        JANE_REVISION,
+        REDACTED,
+        REDACTED,
+        "d" * 64,
     )
 
 
@@ -1080,6 +1138,9 @@ def test_the_readers_return_every_column(world: World) -> None:
     bobs = world.read(lambda: sequencing_queries.export_pii(seeded.bob))["enrollments"]
     assert [row["id"] for row in bobs] == [BOB_ENROLLMENT]  # Story 4.8
     assert world.read(lambda: sequencing_queries.export_pii("nope")) == {"enrollments": ()}
+    bob_revisions = world.read(lambda: drafting_queries.export_pii(seeded.bob))["draft_revisions"]
+    assert [row["id"] for row in bob_revisions] == [BOB_REVISION]  # Story 4.12
+    assert world.read(lambda: drafting_queries.export_pii("nope")) == {"draft_revisions": ()}
     assert world.read(lambda: compliance_queries.export_pii("nope", [])) == {
         "suppression": (),
         "requests": (),

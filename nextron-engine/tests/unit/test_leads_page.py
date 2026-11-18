@@ -672,6 +672,7 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "Contacts",
         "Job postings",
         "Data subject requests",  # Story 3.15's export forms
+        "Drafts",  # Story 4.12
     ]
     table = page.find("table", class_="contact-table")
     assert table_rows(table)[0] == CONTACT_HEADER

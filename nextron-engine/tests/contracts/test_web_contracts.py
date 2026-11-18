@@ -668,6 +668,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "inboxes_panel.html",
         "lead.html",
         "lead_contacts.html",
+        "lead_drafts.html",  # Story 4.12
         "lead_import.html",
         "lead_import_form.html",
         "lead_legal_form.html",

@@ -15,6 +15,8 @@ There is no setter for a bound column (``contact_id``, ``campaign_id``, ``varian
 - ``get(enrollment_id)``: the row, or ``None``;
 - ``live_for_lead(lead_id)``: the Lead's ``active`` or ``paused`` row, or ``None``;
 - ``live_for_contact(contact_id)``: the Contact's live rows, oldest first;
+- ``for_lead(lead_id)`` and ``for_contact(contact_id)`` (Story 4.12): every row of the Lead or
+  the Contact, whatever its status, oldest first;
 - ``live()``: every live row, oldest first;
 - ``ended_with_step(contact_id)``: the Contact's ``stopped`` or ``completed`` rows that sent a
   Step, by ``ended_at``, then ``id``;
@@ -117,6 +119,24 @@ def live_for_contact(contact_id: str) -> list[StoredEnrollment]:
     statement = (
         select(*_COLUMNS)
         .where(EnrollmentRecord.contact_id == contact_id, EnrollmentRecord.status.in_(LIVE))
+        .order_by(*_OLDEST_FIRST)
+    )
+    return [_stored(row) for row in current().session.execute(statement)]
+
+
+def for_lead(lead_id: str) -> list[StoredEnrollment]:
+    """Every Enrollment of the Lead, oldest first."""
+    statement = (
+        select(*_COLUMNS).where(EnrollmentRecord.lead_id == lead_id).order_by(*_OLDEST_FIRST)
+    )
+    return [_stored(row) for row in current().session.execute(statement)]
+
+
+def for_contact(contact_id: str) -> list[StoredEnrollment]:
+    """Every Enrollment of the Contact, oldest first."""
+    statement = (
+        select(*_COLUMNS)
+        .where(EnrollmentRecord.contact_id == contact_id)
         .order_by(*_OLDEST_FIRST)
     )
     return [_stored(row) for row in current().session.execute(statement)]

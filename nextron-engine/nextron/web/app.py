@@ -319,6 +319,7 @@ from nextron.app.playbook.api import (
 )
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import pipeline as pipeline_queries
@@ -326,6 +327,7 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import scoring as scoring_queries
 from nextron.app.queries import sending as sending_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.finding import EmailFinding, SearchQueued
@@ -355,6 +357,7 @@ from nextron.domain.open_code import CodeCheck
 from nextron.domain.playbook import SyncTrigger
 from nextron.domain.prompts import InvalidPrompts
 from nextron.domain.recovery import RECOVERY_BANNER
+from nextron.domain.render import footer_complete
 from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
@@ -1574,6 +1577,41 @@ def create_app(
             contact.id for contact in contacts if contact.erased_at is not None
         )
 
+    def lead_drafts(lead_id: str) -> tuple[lead_rows.DraftSource, ...]:
+        """What the Lead page's Drafts section shows of each Draft of the Lead's Enrollments
+        (Story 4.12), oldest Enrollment first, each by Step."""
+        settings = setup_queries.footer_settings()
+        found: list[lead_rows.DraftSource] = []
+        for enrollment in sequencing_queries.enrollments_of_lead(lead_id):
+            contact = research_queries.contact(enrollment.contact_id)
+            check = None
+            if contact is not None and contact.market_id is not None:
+                try:
+                    market = setup_queries.market_by_id(contact.market_id)
+                except InvalidMarkets:  # unreadable: no footer check to show
+                    market = None
+                if market is not None:
+                    check = footer_complete(settings, market.definition)
+            erased = contact is None or contact.erased_at is not None
+            for draft in drafting_queries.drafts_of(enrollment.id):
+                revisions = drafting_queries.revisions(draft.id)
+                current = next((each for each in revisions if each.rev == draft.current_rev), None)
+                footer = (
+                    None
+                    if current is None
+                    else drafting_queries.footer_snapshot(current.footer_snapshot_id)
+                )
+                found.append(
+                    lead_rows.DraftSource(
+                        draft,
+                        revisions,
+                        footer,
+                        None if erased or contact is None else contact.email,
+                        check,
+                    )
+                )
+        return tuple(found)
+
     def missing_lead(request: Request) -> HTMLResponse:
         missing = page(request, lead_rows.MISSING_TEMPLATE)  # never echoes an id
         missing.status_code = 404
@@ -1726,6 +1764,7 @@ def create_app(
             legal_form=research_queries.legal_form(found.id),
             receipts=lead_receipts(contacts),
             score=scoring_queries.stored(found.id),
+            drafts=lead_drafts(found.id),
         )
         return page(
             request,
