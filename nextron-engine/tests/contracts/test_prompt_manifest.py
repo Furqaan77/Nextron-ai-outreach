@@ -18,6 +18,10 @@
 - **Shipped candidates never change.** ``SHIPPED_CANDIDATES`` is add-only: each route candidate
   ever shipped must still be found by ``routes.find``, because a stored activation may name it
   and the gateway refuses a tuple no candidate matches (``llm_unknown_route``).
+- **Every route can be gated** (Story 4.5, decision 7). Each shipped route has an AI Test Set
+  (``nextron.domain.ai_test_gate.ROUTE_SETS``) and its set has a scorer
+  (``nextron.app.playbook.api.SCORERS``), so no route ships without a way to pass its gate; and
+  only the extraction routes are bootstrap routes.
 """
 
 import hashlib
@@ -34,7 +38,9 @@ from nextron import main
 from nextron.adapters.ai import routes
 from nextron.adapters.ai.prompting import build_request
 from nextron.adapters.ai.schemas import json_schema
+from nextron.app.playbook.api import SCORERS
 from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock
+from nextron.domain.ai_test_gate import BOOTSTRAP_ROUTES, ROUTE_SETS, TestSet
 from nextron.domain.playbook import AUTHORITY_ORDER, PlaybookSnapshot, playbook_section
 from nextron.domain.prompts import MANIFEST_FILE_NAME, InvalidPrompts, PromptFile, parse_manifest
 from tests.contracts.support import ENGINE_ROOT
@@ -319,3 +325,21 @@ def test_the_order_of_authority_precedes_the_playbook_in_a_built_playbook_reques
     assert system.index(AUTHORITY_ORDER) < system.index("Playbook rules.")
     assert [("cache_control" in part) for part in request["system"]] == [False, True]
     assert "Playbook rules." not in request["messages"][0]["content"]
+
+
+# Every route can be gated (Story 4.5) ------------------------------------------------------------
+
+
+def test_every_shipped_route_has_a_test_set_with_a_scorer() -> None:
+    shipped = [spec.route for spec in routes.default_specs()]
+
+    assert shipped  # the check looks at real routes
+    assert [route for route in shipped if route not in ROUTE_SETS] == []
+    assert [route for route in shipped if ROUTE_SETS[route] not in SCORERS] == []
+
+
+def test_only_the_extraction_routes_are_bootstrap_routes() -> None:
+    assert BOOTSTRAP_ROUTES == {
+        route for route, test_set in ROUTE_SETS.items() if test_set is TestSet.EXTRACTION
+    }
+    assert BOOTSTRAP_ROUTES == {"extract_signals", "extract_people", "signal_inbox_parse"}

@@ -131,6 +131,40 @@ def test_a_first_start_stores_each_prompt_and_bootstrap_activates_each_default(
     assert [getattr(record, name) for name in counts] == [3, 0, 3, 0]
 
 
+# Story 4.5: the bootstrap is limited to the three extraction routes
+def test_a_default_outside_the_bootstrap_routes_gets_a_candidate_but_no_activation(
+    units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    files, defaults = shipped()
+    reply = PromptFile("classify_reply", "v1", "Classify the reply.")
+    spec = RouteSpec("classify_reply", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1)
+
+    result = sync(units, (*files, reply), (*defaults, spec))
+
+    assert [route for route, _ in result.activated] == list(ROUTES)
+    assert active(units, "classify_reply") is None  # it serves only after its test run passes
+    assert ("classify_reply", "v1") in result.stored
+    assert "classify_reply" in [route for route, _ in result.candidates]
+    assert [row[0] for row in activations(db_engine)] == sorted(ROUTES)
+
+
+def test_an_extraction_default_that_uses_the_playbook_is_not_bootstrapped(
+    units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    files, defaults = shipped()
+    changed = tuple(
+        dataclasses.replace(spec, uses_playbook=True) if spec.route == "extract_people" else spec
+        for spec in defaults
+    )
+
+    result = sync(units, files, changed)
+
+    assert [route for route, _ in result.activated] == ["extract_signals", "signal_inbox_parse"]
+    assert active(units, "extract_people") is None
+    assert [row[0] for row in activations(db_engine)] == ["extract_signals", "signal_inbox_parse"]
+    assert "extract_people" in [route for route, _ in result.candidates]
+
+
 def not_default(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage() == "active_tuple_not_default"]
 
@@ -360,6 +394,21 @@ def test_a_tampered_snapshot_is_refused(units: UnitOfWorkFactory, db_engine: Eng
 # Rows: Two active, Untested, and the other checks
 
 
+def raw_run(engine: Engine) -> str:
+    """A passing test run of the stored extract_signals tuple (Story 4.5: a tested
+    activation's ``test_run_id`` must name a stored run)."""
+    [(tuple_id,)] = query(engine, "SELECT id FROM ai_route_tuples WHERE route = 'extract_signals'")
+    run_id = new_id()
+    query(
+        engine,
+        "INSERT INTO ai_test_runs (id, tuple_id, test_set, outcome, error, case_count, "
+        "passed_count, metrics, results, cost_micros, started_at, finished_at) VALUES "
+        "(?, ?, 'extraction', 'passed', NULL, 1, 1, '[]', '[]', 0, ?, ?)",
+        (run_id, tuple_id, STAMP, STAMP),
+    )
+    return run_id
+
+
 def raw_activation(engine: Engine, **changes: object) -> str:
     [(sha,)] = query(
         engine,
@@ -376,7 +425,7 @@ def raw_activation(engine: Engine, **changes: object) -> str:
         "schema_version": 1,
         "actor": "operator",
         "bootstrap": 0,
-        "test_run_id": new_id(),
+        "test_run_id": raw_run(engine),
         "activated_at": STAMP,
         "deactivated_at": STAMP,
     }
@@ -416,6 +465,7 @@ def test_a_second_active_row_for_a_route_is_refused(synced: Engine) -> None:  # 
     "changes",
     [
         {"bootstrap": 0, "test_run_id": None},  # Row: Untested
+        {"test_run_id": new_id()},  # no such run: the foreign key (Story 4.5)
         {"bootstrap": 1},  # a bootstrap activation with a test run
         {"bootstrap": 2, "test_run_id": None},
         {"effort": "extreme"},

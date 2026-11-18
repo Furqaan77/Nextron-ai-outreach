@@ -41,8 +41,10 @@ returns ``DEFERRED`` only before its use case has done any work: the budget chec
 
 **Keys.** ``idempotency_key(job_type, scope, discriminator)`` is
 ``<type>:<scope>:<discriminator>``. The type is a ``verb_noun`` job-type name; the scope is a
-ULID, ``inbox:<ULID>`` or ``global``; the discriminator is ``tick``, a real ``YYYY-MM-DD`` date
-or a revision from ``0`` to ``999999999`` without leading zeros, all as text.
+ULID, ``inbox:<ULID>`` or ``global``; the discriminator is ``tick``, a real ``YYYY-MM-DD`` date,
+a revision from ``0`` to ``999999999`` without leading zeros, or the value of an AI Test Set
+(``nextron.domain.ai_test_gate.TestSet``: ``reply``, ``grounding``, ``drafting_smoke`` or
+``extraction``; Story 4.5's ``run_ai_test_sets:<tuple id>:<set>``), all as text.
 ``is_concurrency_key(value)`` accepts ``inbox:<ULID>`` and ``domain:<name>``, where the name is
 at most 253 characters of ``[a-z0-9-]`` labels joined by dots, with at least one dot.
 
@@ -84,6 +86,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from nextron.domain.ai_test_gate import set_of
 from nextron.domain.errors import DomainError
 from nextron.domain.ids import is_ulid
 from nextron.domain.machines import IllegalTransition, Transition
@@ -363,7 +366,12 @@ def _is_scope(value: object) -> bool:
 def _is_discriminator(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    return value == TICK or is_iso_date(value) or REVISION_PATTERN.fullmatch(value) is not None
+    return (
+        value == TICK
+        or is_iso_date(value)
+        or REVISION_PATTERN.fullmatch(value) is not None
+        or set_of(value) is not None
+    )
 
 
 def idempotency_key(job_type: str, scope: str, discriminator: str) -> str:
@@ -374,8 +382,8 @@ def idempotency_key(job_type: str, scope: str, discriminator: str) -> str:
         raise InvalidJob("the key's scope must be a ULID, inbox:<ULID> or global")
     if not _is_discriminator(discriminator):
         raise InvalidJob(
-            "the key's discriminator must be tick, a YYYY-MM-DD date or a revision from 0 to "
-            "999999999"
+            "the key's discriminator must be tick, a YYYY-MM-DD date, a revision from 0 to "
+            "999999999 or an AI Test Set"
         )
     return f"{job_type}:{scope}:{discriminator}"
 

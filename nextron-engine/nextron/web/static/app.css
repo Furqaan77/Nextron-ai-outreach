@@ -793,3 +793,45 @@ button.secondary {
   align-items: center;
   gap: 0.5rem;
 }
+
+/* The AI test gate (Story 4.5): each tuple's test run, its metrics and failing cases, and the
+   ungated mark. */
+.ai-mark {
+  margin: 0 0 0.5rem;
+  font-style: italic;
+}
+
+.ai-ungated,
+.ai-run-failed {
+  font-weight: 600;
+  color: var(--refused);
+}
+
+.ai-run {
+  margin: 0 0 0.75rem;
+}
+
+.ai-metrics,
+.ai-cases {
+  margin: 0 0 0.75rem;
+  border-collapse: collapse;
+}
+
+.ai-metrics th,
+.ai-metrics td,
+.ai-cases th,
+.ai-cases td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.ai-cases caption {
+  text-align: left;
+  font-weight: 600;
+}
+
+.ai-cases td {
+  overflow-wrap: anywhere;
+}

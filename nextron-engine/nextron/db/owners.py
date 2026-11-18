@@ -162,6 +162,36 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "playbook_checks": {
         "playbook": ("id", "checked_at", "trigger", "playbook_sha256", "problem"),
     },
+    "ai_test_cases": {
+        "playbook": (
+            "id",
+            "case_key",
+            "test_set",
+            "route",
+            "input",
+            "expected",
+            "covers",
+            "sha256",
+            "loaded_at",
+            "retired_at",
+        ),
+    },
+    "ai_test_runs": {
+        "playbook": (
+            "id",
+            "tuple_id",
+            "test_set",
+            "outcome",
+            "error",
+            "case_count",
+            "passed_count",
+            "metrics",
+            "results",
+            "cost_micros",
+            "started_at",
+            "finished_at",
+        ),
+    },
     "contacts": {
         "research": (
             "id",

@@ -48,8 +48,10 @@ database, the notification subscriber registry and Uvicorn.
    ``serve(read_playbook=...)`` (``read_playbook_file`` unless injected), both outside any unit
    of work, then ``Playbook(SystemClock()).sync_prompts(files, defaults, playbook)`` in one unit
    of work: it stores each new prompt version and Playbook snapshot, records the candidate
-   tuples and the Playbook check, and bootstrap-activates each non-Playbook route's default that
-   has no active tuple (``nextron.app.playbook.api``). ``read_playbook_file(path)`` reads at
+   tuples and the Playbook check, and bootstrap-activates the default of each of the three
+   extraction routes (``nextron.domain.ai_test_gate.BOOTSTRAP_ROUTES``, Story 4.5) that doesn't
+   use the Playbook and has no active tuple (``nextron.app.playbook.api``); every other route
+   serves only after its test run passes. ``read_playbook_file(path)`` reads at
    most ``MAX_PLAYBOOK_BYTES`` + 1 bytes and returns ``nextron.domain.playbook.read_playbook``'s
    snapshot, or the ``PlaybookProblem``: any ``OSError`` (a missing file included) is
    ``unreadable``, and an ``InvalidPlaybook`` gives its problem. A problem never stops ``serve``
@@ -65,8 +67,21 @@ database, the notification subscriber registry and Uvicorn.
    without its file, or a stored version whose text changed) exits 2, printing ``startup check
    failed: prompts: <message>`` and logging ``startup_check_failed`` with ``check=prompts``.
    Any other failure exits 2, printing ``prompt sync failed (<type>); the traceback is in
-   <log file>`` and logging ``prompt_sync_failed`` with the traceback. Either way the
-   transaction rolled back, so nothing was stored or activated, and the server never starts.
+   <log file>`` and logging ``prompt_sync_failed`` with the traceback. Either way the server
+   never starts. A failure in the prompt sync rolls its transaction back, so nothing was stored
+   or activated; a failure in the case sync below comes after the prompt sync committed, so the
+   prompt sync's rows stay stored.
+
+   **The AI Test Set cases (Story 4.5, decision 2).** The step also runs the case loader
+   (``serve(load_test_cases=...)``, ``load_test_cases`` unless injected) outside any unit of
+   work, and ``Playbook.sync_test_cases(cases)`` in a unit of work of its own (a unit of work
+   runs one use case) right after the prompt sync's. ``load_test_cases(folder=AI_SETS_DIR)``
+   reads every ``extraction/*.json`` file of ``folder`` (``tests/ai_sets`` under the engine
+   root), by name, as strict UTF-8 JSON of at most ``MAX_CASE_FILE_BYTES`` (1 MiB), through
+   ``nextron.domain.ai_test_cases.extraction_case``. A missing folder, an unreadable or
+   oversized file, a file that isn't JSON and a case of the wrong shape each raise
+   ``InvalidTestCases``, which exits 2, printing ``startup check failed: ai_sets: <message>``
+   and logging ``startup_check_failed`` with ``check=ai_sets``; nothing is stored.
 8. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
    The dashboard's GET handlers read through the unit-of-work factory step 6 returned.
    ``engine_started`` (with ``db_revision``) is logged before it and ``engine_stopped`` (with
@@ -119,9 +134,20 @@ contact_markets)``, runs its ``queue_backfill`` in a unit of work of its own (in
 is unresolved. ``build_job_types(..., contact_markets=lambda: contact_markets)`` breaks the
 registry cycle as for ``backups``.
 
+**The AI test gate (Story 4.5).** ``build_app(llm=None)`` builds one ``AiTestRuns(clock, meter,
+llm, queue)`` (``nextron.app.playbook.api``) on ``llm``, which is ``ClaudeGateway(secrets,
+meter=meter)`` unless injected: imported inside ``build_app``, so importing this module still
+loads neither the AI package nor the SDK, and building it builds no HTTP client. The
+``run_ai_test_sets`` job calls its ``run``; the lifespan's startup runs ``queue_test_runs(units,
+test_runs)`` after ``queue_contact_markets`` (``run_startup_steps``: each step in a unit of work
+and context of its own, so either can fail without stopping the other), which queues a run of
+each tuple that has none; and the dashboard gets it (``create_app(..., test_runs=...)``) to
+queue runs after Check for changes. ``build_job_types(..., test_runs=lambda: test_runs)`` breaks
+the registry cycle.
+
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
-contact_markets, crawls, discovery, research, extractions, primary)`` is the job type registry:
-the only
+contact_markets, crawls, discovery, research, extractions, primary, test_runs)`` is the job
+type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -143,9 +169,11 @@ Story 2.6's ``render_pages`` (bulk only, priority 40, the ``enrich_lead`` chain'
 retry limit 2, ``handlers.render_pages(crawls)``, ``enrichment``) and ``purge_page_text`` (bulk
 only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(research)``,
 ``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
-minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``) and Story
+minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``), Story
 2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
-retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``).
+retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), and Story 4.5's
+``run_ai_test_sets`` (bulk only, priority 30, ``max_runtime`` 2 hours, retry limit 3,
+``handlers.run_ai_test_sets(test_runs)``, ``other``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -348,8 +376,10 @@ included). Building the app starts nothing. Startup first runs the recovery step
 (``recovery_startup``) through ``asyncio.to_thread``; if it raises (``recovery_state`` can't be
 read or written), the server doesn't start: Uvicorn exits 3, and ``serve`` reports
 ``server_start_failed`` and exits 2, which fails closed. Next it runs the ``startup`` step
-(``queue_contact_markets``) through ``asyncio.to_thread``; an exception there is logged as
-``startup_step_failed`` (ERROR, with the exception's type only) and never stops the engine. The
+(``run_startup_steps``: ``queue_contact_markets``, then ``queue_test_runs``) through
+``asyncio.to_thread``; an exception there is logged as ``startup_step_failed`` (ERROR, with the
+exception's type and, from ``run_startup_steps``, the step's name) and never stops the engine.
+The
 recovery pass goes first so that a start it refuses writes nothing else, and so the backfill
 is queued against the state recovery left. Then it runs ``runner.start`` through
 ``asyncio.to_thread``, then ``scheduler.start()`` on the event
@@ -543,6 +573,7 @@ import asyncio
 import contextlib
 import contextvars
 import functools
+import json
 import logging
 import os
 import signal
@@ -550,7 +581,7 @@ import sys
 import tempfile
 import threading
 import webbrowser
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -593,7 +624,7 @@ from nextron.app.ops.api import (
     remove_work_folder,
 )
 from nextron.app.pipeline.api import Pipeline
-from nextron.app.playbook.api import CompanyFacts, CompanyFactSync, Playbook
+from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import playbook as playbook_queries
@@ -643,6 +674,8 @@ from nextron.domain.backup import (
     copy_name,
 )
 from nextron.domain.ai import RouteSpec
+from nextron.domain.ai_test_cases import InvalidTestCases, TestCase, extraction_case
+from nextron.domain.ai_test_gate import RUN_AI_TEST_SETS_JOB
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
@@ -766,6 +799,7 @@ ENV_SOURCE_FLAG: Final = "--env"
 ENV_SOURCE_VARIABLE: Final = "NEXTRON_ENV"
 PRE_MIGRATE_BACKUP_CHECK: Final = "pre_migrate_backup"
 PROMPTS_CHECK: Final = "prompts"
+AI_SETS_CHECK: Final = "ai_sets"
 FALLBACK_TIMEZONE: Final = "UTC"
 PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
@@ -792,6 +826,10 @@ OFFERS_FILE_LABEL: Final = "seed/offers.yaml"
 CAMPAIGNS_FILE_NAME: Final = "campaigns.yaml"
 CAMPAIGNS_FILE_LABEL: Final = "seed/campaigns.yaml"
 MAX_SEED_FILE_BYTES: Final = 1024 * 1024
+AI_SETS_DIR: Final = ENGINE_ROOT / "tests" / "ai_sets"  # Story 4.5: the AI Test Set cases
+EXTRACTION_DIR_NAME: Final = "extraction"
+CASE_FILE_SUFFIX: Final = ".json"
+MAX_CASE_FILE_BYTES: Final = 1024 * 1024
 SEED_DATABASE_MISSING: Final = (
     "the database doesn't exist yet: start the engine once (nextron serve), "
     "then run seed sync again"
@@ -819,6 +857,7 @@ RESTORE_TIME_FORMAT: Final = "%Y-%m-%d %H:%M:%S UTC"
 ServerRunner = Callable[[BootstrapConfig, bool, UnitOfWorkFactory], None]
 PromptLoader = Callable[[], tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]]
 PlaybookReader = Callable[[Path], PlaybookSnapshot | PlaybookProblem]
+TestCaseLoader = Callable[[], tuple[TestCase, ...]]
 EngineProbe = Callable[[str, int], bool]
 Browser = Callable[[str], bool]
 
@@ -884,7 +923,10 @@ def build_app(
     (``PlaywrightRenderer(meter=meter)`` on that same ``HttpCrawler`` unless injected), which
     starts a browser only for each render. The Signal extraction calls Claude through ``llm``
     (``ClaudeGateway(secrets, meter=meter)`` unless injected, imported here so that importing
-    this module loads no AI package), which builds its HTTP client on its first call."""
+    this module loads no AI package), which builds its HTTP client on its first call.
+    ``AiTestRuns`` runs the AI Test Sets (the ``run_ai_test_sets`` job) through that same
+    ``llm``; the lifespan's startup queues a run of each tuple that has none
+    (``queue_test_runs``, after ``queue_contact_markets``)."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -904,7 +946,7 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions and primary_contacts are bound just below
+    # extractions, primary_contacts and test_runs are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -916,6 +958,7 @@ def build_app(
         research=lambda: research,
         extractions=lambda: extractions,
         primary=lambda: primary_contacts,
+        test_runs=lambda: test_runs,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
@@ -951,6 +994,11 @@ def build_app(
     )
     restore_tests = build_restore_tests(config, clock, offpc, notify, queue)
     contact_markets = ContactMarkets(clock, research, queue)
+    test_runs = AiTestRuns(clock, meter, llm, queue)
+    startup_steps = (
+        ("queue_contact_markets", functools.partial(queue_contact_markets, units, contact_markets)),
+        ("queue_test_runs", functools.partial(queue_test_runs, units, test_runs)),
+    )
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
     triggers = build_triggers(
@@ -987,6 +1035,7 @@ def build_app(
         facts=CompanyFacts(clock),
         playbook=Playbook(clock),
         ai_content=functools.partial(load_ai_content, config.playbook_path),
+        test_runs=test_runs,
         credentials=Credentials(secrets, clock),
         google=google,
         notify=notify,
@@ -1006,7 +1055,7 @@ def build_app(
             scheduler,
             writer,
             recovery_runner.startup,
-            startup=functools.partial(queue_contact_markets, units, contact_markets),
+            startup=functools.partial(run_startup_steps, startup_steps),
         ),
     )
 
@@ -1021,6 +1070,29 @@ def queue_contact_markets(units: Units, contact_markets: ContactMarkets) -> None
             contact_markets.queue_backfill()
 
     contextvars.Context().run(run)
+
+
+def queue_test_runs(units: Units, test_runs: AiTestRuns) -> None:
+    """The engine's startup step (Story 4.5): ``test_runs.queue_runs()`` in a unit of work of
+    its own, inside a fresh ``contextvars.Context()``, so a run is queued for each tuple that has
+    none on its route's set."""
+
+    def run() -> None:
+        with units.open():
+            test_runs.queue_runs()
+
+    contextvars.Context().run(run)
+
+
+def run_startup_steps(steps: Sequence[tuple[str, Callable[[], None]]]) -> None:
+    """The lifespan's startup step: each ``(name, step)`` in order. A step that raises is
+    logged as ``startup_step_failed`` (ERROR, with ``step`` and the exception's type only), and
+    the next step still runs."""
+    for name, step in steps:
+        try:
+            step()
+        except Exception as error:  # noqa: BLE001 - one step never stops the others
+            log.error("startup_step_failed", extra={"step": name, "error": type(error).__name__})
 
 
 def check_usage(units: Units, budget: Budget) -> None:
@@ -1047,6 +1119,7 @@ def build_job_types(
     research: Callable[[], handlers.PurgingPageText],
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
+    test_runs: Callable[[], handlers.AiTestRunning],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1058,8 +1131,9 @@ def build_job_types(
     ``WebsiteCrawls`` that ``enrich_lead`` and ``render_pages`` jobs call, ``discovery`` the
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
     service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions`` that
-    ``extract_lead`` jobs call, and ``primary`` its ``PrimaryContacts`` that
-    ``select_primary_contact`` jobs call."""
+    ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
+    ``select_primary_contact`` jobs call, and ``test_runs`` the ``playbook`` service's
+    ``AiTestRuns`` that ``run_ai_test_sets`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1198,6 +1272,19 @@ def build_job_types(
             retry_limit=3,
             handler=handlers.select_primary_contact(primary),
             group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RUN_AI_TEST_SETS_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=30,
+            # every case of the set, one Claude call each (50 for the Reply set)
+            max_runtime=timedelta(hours=2),
+            retry_limit=3,  # a retryable gateway failure retries the whole run
+            handler=handlers.run_ai_test_sets(test_runs),
+            group=JobGroup.OTHER,
         )
     )
     job_types.freeze()
@@ -1627,26 +1714,62 @@ def load_ai_content(
     return files, defaults, read_playbook_file(playbook_path)
 
 
+def load_test_cases(folder: Path = AI_SETS_DIR) -> tuple[TestCase, ...]:
+    """The AI Test Set cases of ``folder`` (Story 4.5): every ``extraction/*.json`` file, by
+    name; ``InvalidTestCases`` naming the file for a missing folder or a bad file. File I/O
+    only: it opens no unit of work."""
+    found = folder / EXTRACTION_DIR_NAME
+    if not found.is_dir():
+        raise InvalidTestCases(EXTRACTION_DIR_NAME, "the folder doesn't exist")
+    cases: list[TestCase] = []
+    for path in sorted(found.glob(f"*{CASE_FILE_SUFFIX}")):
+        name = f"{EXTRACTION_DIR_NAME}/{path.name}"
+        try:
+            with path.open("rb") as file:
+                data = file.read(MAX_CASE_FILE_BYTES + 1)
+        except OSError:
+            raise InvalidTestCases(name, "the file couldn't be read") from None
+        if len(data) > MAX_CASE_FILE_BYTES:
+            raise InvalidTestCases(name, "the file is larger than 1 MiB")
+        try:
+            parsed = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise InvalidTestCases(name, "the file isn't UTF-8 JSON") from None
+        cases.append(extraction_case(path.name, parsed))
+    return tuple(cases)
+
+
 def sync_prompts(
     units: UnitOfWorkFactory,
     load: PromptLoader,
     read: Callable[[], PlaybookSnapshot | PlaybookProblem],
     err: TextIO,
     log_file: Path,
+    load_cases: TestCaseLoader,
 ) -> bool:
-    """``serve``'s prompt step: ``load()`` and ``read()`` outside any unit of work, then
-    ``Playbook.sync_prompts`` in one. A Playbook problem prints ``warning: playbook: <problem
-    text>`` and the step goes on. False, after printing and logging why, when it failed."""
+    """``serve``'s prompt step: ``load()``, ``read()`` and ``load_cases()`` outside any unit of
+    work, then ``Playbook.sync_prompts`` in one, then ``Playbook.sync_test_cases`` in the next
+    (a unit of work runs one use case). A Playbook
+    problem prints ``warning: playbook: <problem text>`` and the step goes on. False, after
+    printing and logging why, when it failed."""
     try:
         files, defaults = load()
         playbook = read()
+        cases = load_cases()
         if isinstance(playbook, PlaybookProblem):
             print(f"warning: playbook: {problem_text(playbook)}", file=err)
+        prompts = Playbook(SystemClock())
         with units.open():
-            Playbook(SystemClock()).sync_prompts(files, defaults, playbook)
+            prompts.sync_prompts(files, defaults, playbook)
+        with units.open():  # a unit of work runs one use case
+            prompts.sync_test_cases(cases)
     except InvalidPrompts as exc:
         print(f"startup check failed: {PROMPTS_CHECK}: {exc.message}", file=err)
         log.error("startup_check_failed", extra={"check": PROMPTS_CHECK})
+        return False
+    except InvalidTestCases as exc:
+        print(f"startup check failed: {AI_SETS_CHECK}: {exc.message}", file=err)
+        log.error("startup_check_failed", extra={"check": AI_SETS_CHECK})
         return False
     except Exception as exc:  # noqa: BLE001 - logged with its traceback; startup stops
         log.exception("prompt_sync_failed")
@@ -1700,6 +1823,7 @@ def serve(
     err: TextIO | None = None,
     load_prompts: PromptLoader = load_prompts,
     read_playbook: PlaybookReader = read_playbook_file,
+    load_test_cases: TestCaseLoader = load_test_cases,
 ) -> int:
     """Start the engine for ``NEXTRON_ENV``; return the process exit code."""
     err = err if err is not None else sys.stderr
@@ -1772,7 +1896,7 @@ def serve(
                 record_pre_migrate(units, local, pre_migrate.taken)
             log_file = config.data_dir / LOGS_DIR_NAME / LOG_FILE_NAME
             read = functools.partial(read_playbook, config.playbook_path)
-            if not sync_prompts(units, load_prompts, read, err, log_file):
+            if not sync_prompts(units, load_prompts, read, err, log_file, load_test_cases):
                 return EXIT_STARTUP_FAILED
             identity = {"env": config.env, "version": __version__}
             log.info("engine_started", extra={**identity, "db_revision": db_revision})

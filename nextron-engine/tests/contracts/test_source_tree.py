@@ -70,6 +70,8 @@ FILES = [
     "nextron/domain/pipeline_stage.py",
     "nextron/domain/prompts.py",
     "nextron/domain/playbook.py",
+    "nextron/domain/ai_test_gate.py",
+    "nextron/domain/ai_test_cases.py",
     "nextron/domain/quotes.py",
     "nextron/domain/fetch_policy.py",
     "nextron/domain/contacts.py",
@@ -153,6 +155,7 @@ FILES = [
     "nextron/db/alembic/versions/0027_2_6_contact_methods.py",
     "nextron/db/alembic/versions/0028_2_10_primary_contact.py",
     "nextron/db/alembic/versions/0029_2_9_tag_managers.py",
+    "nextron/db/alembic/versions/0030_4_5_ai_test_runs.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",
@@ -171,6 +174,8 @@ FILES = [
     "nextron/db/repos/playbook/playbook_snapshots.py",
     "nextron/db/repos/playbook/route_tuples.py",
     "nextron/db/repos/playbook/playbook_checks.py",
+    "nextron/db/repos/playbook/test_cases.py",
+    "nextron/db/repos/playbook/test_runs.py",
     "nextron/db/repos/research/crawl.py",
     "nextron/db/repos/drafting/footer_snapshots.py",
     "nextron/db/repos/research/signals.py",
@@ -304,6 +309,7 @@ FILES = [
     "tests/task_scheduler_guard.py",
     "tests/fake_serve.py",
     "tests/processes.py",
+    "tests/child_guard/sitecustomize.py",
     "tests/contracts/safe_allowlist.txt",
 ]
 FOLDERS = [
@@ -319,6 +325,7 @@ FOLDERS = [
     "tests/ai_sets",
     "tests/ai_sets/extraction",
     "tests/ai_eval",
+    "tests/child_guard",
 ]
 
 

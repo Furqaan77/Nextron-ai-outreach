@@ -2109,6 +2109,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0027_2_6_contact_methods` | `page_contact_methods` (a foreign key to `crawled_pages` with no cascade, `ix_page_contact_methods_page_id`, unique on `page_id`, `method`, `signature` and `source`, method and source checks); adds `leads.contact_methods` in place (`add_column`) (see [Rendering and contact methods](#rendering-and-contact-methods)) | `research` |
 | `0028_2_10_primary_contact` | `contacts.primary_set_by` (nullable, `system` or `operator`) and `leads.no_decision_maker` (nullable Boolean), both added in place with no check, and the partial unique index `uq_contacts_one_primary` on `contacts (lead_id)` where `is_primary = 1` (see [Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)) | `research` |
 | `0029_2_9_tag_managers` | adds `crawled_pages.tag_managers` in place (`add_column`, nullable text: the tag managers a page loads as a JSON array of keys, `[]` for none, NULL for a page never checked) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
+| `0030_4_5_ai_test_runs` | `ai_test_cases` (a test-set check, a SHA-256 check and the partial unique index `uq_ai_test_cases_live_key` on `test_set` and `case_key` where `retired_at` is NULL) and `ai_test_runs` (a foreign key to `ai_route_tuples` with no cascade, test-set, outcome, error and count checks, `ix_ai_test_runs_tuple_id_test_set`); rebuilds `ai_route_activations` from 0026's exact table (which 0027 to 0029 leave unchanged) with the foreign key `fk_ai_route_activations_test_run_id_ai_test_runs` from `test_run_id` to `ai_test_runs`, no cascade, every row, check and index kept (see [The AI test gate (Story 4.5)](#the-ai-test-gate-story-45)) | `playbook` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2193,9 +2194,10 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
 `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
 crawling](#website-crawling)), `extract_lead` (see [Signals and
-Evidence](#signals-and-evidence)) and `select_primary_contact` (see [Decision-makers and the
-Primary Contact](#decision-makers-and-the-primary-contact)); the stories that add work add
-theirs, with a thin handler in `nextron/jobs/handlers.py`.
+Evidence](#signals-and-evidence)), `select_primary_contact` (see [Decision-makers and the
+Primary Contact](#decision-makers-and-the-primary-contact)) and `run_ai_test_sets` (see [The AI
+test gate](#the-ai-test-gate-story-45)); the stories that add work add theirs, with a thin
+handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -3442,7 +3444,9 @@ the Playbook work is in "The Sales Playbook snapshot and the candidate tuples":
 - For each route with no active tuple, it activates the default candidate in
   `ai_route_activations`: the model, effort, prompt version, prompt hash and schema version,
   with actor `seed`, `bootstrap` true and no test run. It writes one `events` row (`None` to
-  `active`, cause `bootstrap`).
+  `active`, cause `bootstrap`). Since Story 4.5 only the three extraction routes are
+  bootstrap-activated; every other route serves only after its AI test run passes (see [The AI
+  test gate](#the-ai-test-gate-story-45)).
 - **An active tuple is never replaced or changed**, even when the default in `routes.py` has
   moved on.
 - It logs `prompts_synced` with `stored_count`, `unchanged_count`, `activated_count` and
@@ -3515,8 +3519,8 @@ records it. In the same transaction, after the prompt work, the sync:
    the Playbook, the snapshot's SHA-256. A tuple with no row is inserted with one `events` row
    (`None` to `candidate`). The active tuple of each route gets a row too. A tuple row's id is
    the "tuple id" the AI test gate (Story 4.5) runs and activates;
-3. bootstrap-activates only routes that don't use the Playbook: **a Playbook route is activated
-   only through the test gate**. No shipped route uses the Playbook yet (`Candidate.uses_playbook`
+3. bootstrap-activates only the extraction routes that don't use the Playbook (Story 4.5): **a
+   Playbook route, and any other route, is activated only through the test gate**. No shipped route uses the Playbook yet (`Candidate.uses_playbook`
    is false for all three);
 4. records one `playbook_checks` row: the trigger (`startup`, or `operator_check` for the AI
    content view's button) and the snapshot's SHA-256 or the problem.
@@ -3592,6 +3596,92 @@ in a file.
 It prints the report and asserts the bars: every case was answered (no failed call), every
 proposed quote passes, at least 80% of the labelled Signals are found, and no injection
 succeeds. Without the key it skips.
+
+### The AI test gate (Story 4.5)
+
+A route tuple serves only after it passed its route's **AI Test Set** (FR-73, AD-12, NFR-26).
+A new prompt, model setting or Playbook version can never go live untested, and the Operator
+sees whether each live tuple meets its pass bar.
+
+**The sets and their bars** (`nextron.domain.ai_test_gate`). Each route has a set, a minimum
+size and bars. A set smaller than its minimum fails with "set too small" and makes no call.
+
+| Set | Routes | Minimum | Pass bar |
+|---|---|---|---|
+| Reply set | `classify_reply` | 50 | 100% Unsubscribe recall; at least 90% classified correctly |
+| Grounding set | `grounding_check` | 30 | 100% of banned patterns; at least 95% of planted claims; no clean control flagged |
+| Drafting smoke set | `draft_sequence`, `draft_reply`, `draft_channel`, `call_prep` | 10 | every output with zero flags |
+| Extraction fixtures | `extract_signals`, `extract_people`, `signal_inbox_parse` | 1 per route | 100% of proposed quotes pass the substring check (nothing proposed passes); at least 80% recall of labelled Signals (labelled people for `extract_people`); no forbidden Signal type proposed; every call answered |
+
+A share with nothing to measure fails (a recall with nothing labelled, say), except the quote
+bar. Only the extraction set has a **scorer** now; each later route ships its own (Stories
+4.14, 4.15 and 7.x), and a contract test requires every shipped route to have a set and a
+scorer. A set big enough but without a scorer raises `LookupError` before any call.
+
+**The cases.** At every start, `serve` reads `tests/ai_sets/extraction/*.json` (Story 2.8's
+fixtures) and `Playbook.sync_test_cases` stores them in `ai_test_cases`: a new case is inserted,
+an edited one (another SHA-256) retires its old row and inserts the new one, and a removed one
+is retired. A broken fixture stops `serve` with exit 2 and `startup check failed: ai_sets:
+<file>: <field and reason>`; the message never repeats a case's text. Story 4.6 adds the other
+sets.
+
+**The runs.** Every tuple row whose route has a set and that has no run on it gets a
+`run_ai_test_sets:<tuple id>:<set>` job on the bulk lane (priority 30, up to 2 hours, 3
+retries): at each engine start (after the Contact Markets backfill) and after **Check for
+changes**, whose notice then adds "Queued <n> test run(s)." when it queued any (each run
+is paid Claude calls). A live job absorbs a repeat. The job runs `AiTestRuns.run(tuple_id, set)`:
+
+1. When the AI budget is spent, the job is deferred an hour (a gate run is deferrable spend).
+2. It reads the tuple (checked as the active tuple is), the set's live cases of the route and
+   the stored Segments. A case naming a Segment that isn't stored stops the run before any
+   call: run `nextron seed sync`, then restart the engine.
+3. Each case is one call through the real `LlmPort` with that tuple, outside any transaction. A
+   retryable gateway failure retries the job and stores nothing; `llm_unknown_route` stores a
+   failed run (`unknown_route`); any other failure (no Claude key, say) stores nothing, so the
+   job dies and is queued again at the next start.
+4. It stores an `ai_test_runs` row: the outcome (`passed` when every metric passed), the case
+   and passed counts, the metrics, every case's result (case id, expected and got, each at most
+   300 characters) and the summed cost.
+
+**Activation** (`Playbook.activate(tuple_id, trigger=...)`). A passing run activates its tuple
+when it is the route's newest tuple, or re-qualifies the active one (actor `system:playbook`,
+trigger `test_passed`). An older tuple that passed is offered as a rollback target instead. A
+new activation is copied from the tuple row with `bootstrap` false and `test_run_id` set to the
+passing run (a foreign key to `ai_test_runs`, added by migration `0030_4_5_ai_test_runs`); the
+activation it replaces is deactivated, and each change appends an `events` row. `activate`
+refuses an unknown tuple ("No such tuple") and a tuple with no passing run on its set ("No
+passing test run for this tuple"): nothing is written and the previous tuple keeps serving.
+
+**The bootstrap routes.** Only the three extraction routes are activated at first start without
+a run (Epic 2's bootstrap); every other route serves only after a passing run. Each bootstrap
+tuple gets its run at the next start. The AI content view marks it "Ungated" until a run
+passes; a bootstrap tuple whose run fails keeps serving (there is nothing earlier to fall back
+to), and the health panel shows "<route>: active tuple failed its test set" until a passing
+tuple replaces it, with "It keeps serving until a tuple passes its test set and is activated.
+The AI content page (/ai) shows the run's metrics, its failing cases or why it failed."
+
+**The AI content view** shows, per tuple, its newest run: the outcome, the set, "<p> of <n>
+cases passed", the cost and the time; a table of each metric's value ("<p>% (<n> of <d>)" or a
+count), its bar and Pass or Fail; and the failing cases (case id, expected, got), escaped inside
+an `hx-disable` container. "No test run yet" marks a tuple without a run. A candidate with a
+passing run has a **Roll back to this tuple** button (`POST /ai/rollback`), which activates it
+(actor `operator`, trigger `rollback`) and says "Rolled back <route> to tuple <id>." ("<route>
+already runs tuple <id>." when it already served), or shows the refusal. Nothing on the
+dashboard starts a test run.
+
+**The schema lock.** `tests/contracts/test_schema_lock.py` pins the SHA-256 of each shipped
+output schema, by route and schema version: editing a used schema version in place fails the
+suite ("a used schema version never changes: add a new version").
+
+**Engines that tests start** get the network guard too: `tests.live_guard.child_env` puts
+`tests/child_guard` first on the child's `PYTHONPATH`, so its `sitecustomize.py` refuses every
+host but loopback (or stops the child when it can't install the guard).
+
+**The gate eval** (`tests/ai_eval/test_gate_eval.py`, marker `ai_eval`) runs the same runner
+with `activate=False` and the real `ClaudeGateway` on a temporary database for the three
+extraction tuples, prints each run's metrics and failing cases, and asserts that
+`ai_route_activations` is unchanged. It runs with the extraction eval above (`uv run pytest -m
+ai_eval -s tests/ai_eval`) and skips without the key.
 
 ## Website crawling
 

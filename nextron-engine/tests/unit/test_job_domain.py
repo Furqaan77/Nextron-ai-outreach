@@ -255,6 +255,10 @@ def test_after_interruption(attempts: int, limit: int, released: bool, event: Jo
         (f"inbox:{ULID}", "tick"),
         ("global", "2026-11-17"),
         ("global", "2028-02-29"),
+        (ULID, "extraction"),  # an AI Test Set (Story 4.5)
+        (ULID, "reply"),
+        (ULID, "grounding"),
+        (ULID, "drafting_smoke"),
     ],
 )
 def test_a_key_is_type_scope_and_discriminator(scope: str, discriminator: str) -> None:
@@ -284,6 +288,8 @@ def test_a_key_is_type_scope_and_discriminator(scope: str, discriminator: str) -
         ("enrich_lead", ULID, "2026-02-30", "discriminator"),
         ("enrich_lead", ULID, "2026-11-17T09:00:00Z", "discriminator"),
         ("enrich_lead", ULID, "Tick", "discriminator"),
+        ("enrich_lead", ULID, "Extraction", "discriminator"),
+        ("enrich_lead", ULID, "drafting", "discriminator"),
         ("enrich_lead", ULID, "", "discriminator"),
         ("enrich_lead", ULID, 3, "discriminator"),
         ("enrich_lead", ULID, PLANTED, "discriminator"),

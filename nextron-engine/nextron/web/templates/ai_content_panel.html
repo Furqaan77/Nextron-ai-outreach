@@ -1,6 +1,36 @@
 {#- The AI content panel (nextron.web.ai_content_page): rendered inside ai_content.html, and
-    alone as the answer to POST /ai/check, swapped in for this whole panel. Stored values are
-    escaped with |plain; Playbook text is never shown. -#}
+    alone as the answer to POST /ai/check and POST /ai/rollback, swapped in for this whole
+    panel. Stored values are escaped with |plain; Playbook text is never shown. A test run's
+    failing cases (synthetic case text and the model's answers) render only through |plain,
+    inside an element carrying hx-disable. -#}
+{%- macro run_block(run) -%}
+<div class="ai-run">
+<p class="ai-run-outcome{% if not run.passed %} ai-run-failed{% endif %}">Test run: {{ run.outcome|plain }}{% if run.error %} ({{ run.error|plain }}){% endif %}. {{ run.test_set|plain }}, {{ run.counts|plain }}, cost {{ run.cost|plain }}, finished {{ run.time }}.</p>
+{%- if run.metrics %}
+<table class="ai-metrics">
+<thead><tr><th scope="col">Metric</th><th scope="col">Value</th><th scope="col">Bar</th><th scope="col">Result</th></tr></thead>
+<tbody>
+{%- for metric in run.metrics %}
+<tr><td>{{ metric.label|plain }}</td><td>{{ metric.value|plain }}</td><td>{{ metric.bar|plain }}</td><td>{% if metric.passed %}Pass{% else %}Fail{% endif %}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if run.failing %}
+<div class="ai-failing" hx-disable>
+<table class="ai-cases">
+<caption>Failing cases ({{ run.failing|length }})</caption>
+<thead><tr><th scope="col">Case id</th><th scope="col">Expected</th><th scope="col">Got</th></tr></thead>
+<tbody>
+{%- for case in run.failing %}
+<tr><td>{{ case.case_key|plain }}</td><td>{{ case.expected|plain }}</td><td>{{ case.got|plain }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+</div>
+{%- endif %}
+</div>
+{%- endmacro -%}
 {%- macro tuple_fields(found) -%}
 <dl class="ai-tuple">
 {%- if found.id %}
@@ -17,6 +47,21 @@
 <dt>Created</dt><dd>{{ found.time }}</dd>
 {%- endif %}
 </dl>
+{%- if found.ungated %}
+<p class="ai-mark ai-ungated">Ungated: this tuple serves without a passing test run.</p>
+{%- endif %}
+{%- if found.run %}
+{{ run_block(found.run) }}
+{%- else %}
+<p class="ai-mark">No test run yet</p>
+{%- endif %}
+{%- if found.rollback %}
+<form method="post" hx-post="/ai/rollback" hx-target="#ai-content-panel" hx-swap="outerHTML">
+{{ csrf_field() }}
+<input type="hidden" name="tuple_id" value="{{ found.id|plain }}">
+<button type="submit" class="secondary">Roll back to this tuple</button>
+</form>
+{%- endif %}
 {%- endmacro -%}
 <div id="ai-content-panel">
 {%- if notice %}

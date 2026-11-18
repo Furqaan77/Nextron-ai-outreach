@@ -1,7 +1,12 @@
 """``python -m nextron`` as a real process: env refusal, the guarded health page, the database
 at head, the log file, the prompts pinned at start (Story 2.8), the runner, scheduler and
 heartbeat started by the lifespan, the page-text purge enqueued at scheduler start (Story 2.5),
-the second instance, and ``nextron open`` with no engine running.
+the AI test gate's start (Story 4.5: the extraction fixtures stored, one ``run_ai_test_sets``
+job per extraction tuple, no tested activation, and the child's network guarded), the second
+instance, and ``nextron open`` with no engine running.
+
+Every engine here starts with ``tests.live_guard.child_env``, so it can look up and connect to
+loopback only (``tests/child_guard``).
 
 Nothing here runs ``nextron open`` against a live engine or touches Credential Manager: entering
 the dashboard is covered in-process with fakes (``tests/unit/test_dashboard.py``)."""
@@ -27,6 +32,7 @@ import pytest
 from nextron import __version__
 from nextron.bootstrap import DEFAULT_PLAYBOOK_PATH, ENGINE_ROOT
 from nextron.db.migrations import head_revision
+from tests.live_guard import child_env
 from tests.migration_chains import stored_revisions
 
 HEAD = head_revision()
@@ -62,7 +68,8 @@ def nextron(*args: str, env: dict[str, str], **kwargs: object) -> subprocess.Com
 
 @pytest.fixture
 def engine_env(tmp_path: Path, local_app_data: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("NEXTRON_")}
+    # Story 4.5: every engine a test starts gets the network guard (tests/child_guard)
+    env = child_env({k: v for k, v in os.environ.items() if not k.upper().startswith("NEXTRON_")})
     playbook = tmp_path / "playbook" / "sales-playbook.md"  # Story 4.4: a copy, never the real one
     playbook.parent.mkdir()
     shutil.copyfile(ENGINE_ROOT / DEFAULT_PLAYBOOK_PATH, playbook)
@@ -163,6 +170,35 @@ def playbook_counts(path: Path) -> tuple[int, int, int, int, int]:
         return tuple(int(count) for count in counts)  # type: ignore[return-value]
     finally:
         reader.close()
+
+
+def read_rows(path: Path, statement: str) -> list[tuple[object, ...]]:
+    """The rows ``statement`` reads from the running engine's database, read outside it."""
+    reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        return reader.execute(statement).fetchall()
+    finally:
+        reader.close()
+
+
+def wait_for_dead_test_runs(path: Path, count: int) -> list[tuple[object, ...]]:
+    """The ``run_ai_test_sets`` jobs once ``count`` of them are ``dead``: with no Segment stored
+    (no seed sync ran), each run refuses its cases before any call."""
+    deadline = time.monotonic() + 20
+    statement = (
+        "SELECT idempotency_key, status, last_error FROM jobs "
+        "WHERE type = 'run_ai_test_sets' ORDER BY idempotency_key"
+    )
+    while True:
+        try:
+            rows = read_rows(path, statement)
+        except sqlite3.OperationalError:  # the engine holds a write lock for a moment
+            rows = []
+        if len([row for row in rows if row[1] == "dead"]) == count:
+            return rows
+        if time.monotonic() > deadline:
+            pytest.fail(f"the test runs did not end: {rows}")
+        time.sleep(0.1)
 
 
 def prompt_counts(path: Path) -> tuple[int, int, int]:
@@ -321,7 +357,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0029_2_9_tag_managers"
+    assert HEAD == "0030_4_5_ai_test_runs"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]
@@ -339,9 +375,39 @@ def test_guarded_health_page_and_second_instance(
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
     assert (synced["stored_count"], synced["activated_count"]) == (3, 3)
     assert lines.index(synced) < lines.index(started)
-    # no alert was raised or sent: nothing built the Telegram adapter or reached the sink
-    assert not [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]
+    # Story 4.5: the 11 extraction fixtures were stored before the engine started, and the
+    # lifespan queued one run_ai_test_sets job per extraction tuple, keyed by tuple and set
+    db = data_dir / "nextron.db"
+    [(cases,)] = read_rows(
+        db,
+        "SELECT COUNT(*) FROM ai_test_cases "
+        "WHERE retired_at IS NULL AND test_set = 'extraction'",
+    )
+    assert cases == 11
+    [cases_synced] = [line for line in lines if line["event"] == "test_cases_synced"]
+    assert (cases_synced["added_count"], cases_synced["retired_count"]) == (11, 0)
+    assert lines.index(cases_synced) < lines.index(started)
+    tuple_ids = sorted(str(row[0]) for row in read_rows(db, "SELECT id FROM ai_route_tuples"))
+    runs = wait_for_dead_test_runs(db, 3)
+    assert [row[0] for row in runs] == [f"run_ai_test_sets:{t}:extraction" for t in tuple_ids]
+    # no Segment is stored (seed sync never ran), so each run refused its cases before any
+    # call: nothing was stored, no Claude call was made and no activation is tested
+    assert all("invalid_test_cases" in str(row[2]) for row in runs), runs
+    assert read_rows(db, "SELECT COUNT(*) FROM ai_test_runs") == [(0,)]
+    assert playbook_counts(db)[4] == 0  # every activation is still a bootstrap one
+    lines = log_lines(data_dir)
+    [queued] = [line for line in lines if line["event"] == "ai_test_runs_queued"]
+    assert queued["count"] == 3
+    # each dead run raised a job_dead alert, which failed for want of a Telegram chat id: no
+    # adapter was built and nothing reached the sink
+    alerting = [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]
+    assert all(
+        (line["event"], line["kind"], line["code"])
+        == ("alert_failed", "job_dead", "setting_not_set")
+        for line in alerting
+    ), alerting
     assert not (data_dir / "sink").exists()
+    assert usage_counts(db) == (0, 0)
     for line in lines:
         assert {"ts", "level", "logger", "event"} <= set(line)
     assert PLANTED_CODE not in log_text(data_dir)

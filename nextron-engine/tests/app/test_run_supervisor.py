@@ -2,7 +2,9 @@
 
 The serve command is the stdlib fake ``tests/fake_serve.py`` on this test's Python, except in the
 real-engine test, which runs ``python -m nextron serve``; nothing here starts ``uv`` or touches
-Task Scheduler. Every run uses a temporary data dir (with a space in its path), a temporary
+Task Scheduler. The two tests whose supervisor could start the real engine (that one, and the
+default command's) pass its environment through ``tests.live_guard.child_env`` (Story 4.5):
+``run.ps1``'s child inherits it, so the engine can look up and connect to loopback only. Every run uses a temporary data dir (with a space in its path), a temporary
 ``%LOCALAPPDATA%`` and its own hidden console. The assertions read the JSON-line logs and check
 that pids are gone, not the clock. Each test kills, in a ``finally``, every PowerShell it started
 with its whole tree and every Python pid the logs name.
@@ -23,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.live_guard import child_env
 from tests.processes import kill_python, kill_tree, load_kernel32, still_running
 from tests.task_scheduler_guard import ps_array, ps_string
 
@@ -398,7 +401,8 @@ def test_the_default_command_is_uv_run_frozen_python_m_nextron_serve(sup: Superv
     path = os.pathsep.join(str(folder) for folder in folders)
     if shutil.which("uv.exe", path=path) or shutil.which("uv.exe", path=str(sup.tmp_path)):
         pytest.skip("uv.exe is reachable without PATH; this test must never start uv")
-    sup.env["PATH"] = path
+    # Story 4.5: were uv found after all, the engine it starts would get the network guard
+    sup.env = child_env({**sup.env, "PATH": path})
     run = sup.run(None, MaxRestarts=0, **FAST)
 
     assert run.code == 0, run.stderr
@@ -935,6 +939,8 @@ def test_the_real_engine_migrates_before_its_first_beat_and_stops_cleanly_on_req
     sup.env.update(
         NEXTRON_BACKUP_DIR=str(backups), NEXTRON_PORT=str(free_port()), PYTHONIOENCODING="utf-8"
     )
+    # Story 4.5: the supervised engine gets the network guard (tests/child_guard)
+    sup.env = child_env(sup.env)
     heartbeat = sup.data_dir / "heartbeat"
 
     process = sup.start([sys.executable, "-m", "nextron", "serve"], PollSeconds=0.2)

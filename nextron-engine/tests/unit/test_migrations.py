@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0029_2_9_tag_managers"
+HEAD = "0030_4_5_ai_test_runs"
 
 
 @pytest.fixture
@@ -474,9 +474,16 @@ def test_0026_keeps_every_activation_and_its_partial_index(tmp_path: Path) -> No
         f"'01JD3QZ8X5V9K2M7N4P6R8T0B3', '{at}', '{at}')",
     )
     before = activation_rows(path, ACTIVATION_COLUMNS)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        # only 0026 to 0029: 0030's foreign key would refuse OLD_ROW's invented test run
+        if "0025_2_9_signals_evidence" < revision.stem <= "0029_2_9_tag_managers":
+            shutil.copy2(revision, location / "versions" / revision.name)
 
     with engine_on(path) as engine:
-        assert ensure_current(engine) == ("0025_2_9_signals_evidence", HEAD)
+        assert ensure_current(engine, script_location=location) == (
+            "0025_2_9_signals_evidence",
+            "0029_2_9_tag_managers",
+        )
 
     assert activation_rows(path, ACTIVATION_COLUMNS) == before  # every row unchanged
     assert activation_rows(path, "playbook_sha256") == [(None,), (None,)]
@@ -556,3 +563,137 @@ def test_0029_leaves_every_existing_page_unchecked(tmp_path: Path) -> None:
         reader.close()
     assert rows == [(page, "Smith Law LLP", None)]  # kept, and never checked
     assert columns[-1] == "tag_managers"
+
+
+# Story 4.5: 0030 adds the test cases and runs, and rebuilds ai_route_activations again with the
+# foreign key from test_run_id to ai_test_runs.id
+TESTED_ROW = "01JD3QZ8X5V9K2M7N4P6R8T0C1"
+TUPLE_ROW = "01JD3QZ8X5V9K2M7N4P6R8T0C2"
+RUN_ROW = "01JD3QZ8X5V9K2M7N4P6R8T0C3"
+UNKNOWN_RUN = "01JD3QZ8X5V9K2M7N4P6R8T0C9"
+
+
+def test_0030_keeps_every_activation_and_adds_the_test_run_key(tmp_path: Path) -> None:
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0029_2_9_tag_managers":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0029_2_9_tag_managers",
+        )
+    digest, at = "a" * 64, "2026-11-18T09:00:00.000000Z"
+    columns = f"{ACTIVATION_COLUMNS}, playbook_sha256"
+    run_sql(
+        path,
+        "INSERT INTO prompt_snapshots (id, route, prompt_version, sha256, text, created_at) "
+        f"VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0B0', 'extract_signals', 'v1', '{digest}', 'Text.', "
+        f"'{at}')",
+        f"INSERT INTO ai_route_activations ({columns}) VALUES ('{ACTIVE_ROW}', "
+        f"'extract_signals', 'claude-haiku-5-5', 'medium', 'v1', '{digest}', 1, 'seed', 1, NULL, "
+        f"'{at}', NULL, NULL)",
+    )
+    before = activation_rows(path, columns)
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0029_2_9_tag_managers", HEAD)
+
+    assert activation_rows(path, columns) == before  # the bootstrap activation survives
+    reader = sqlite3.connect(path)
+    try:
+        [(index_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_ai_route_activations_active_route'"
+        ).fetchall()
+        [(cases_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_ai_test_cases_live_key'"
+        ).fetchall()
+        keys = reader.execute("PRAGMA foreign_key_list(ai_route_activations)").fetchall()
+        run_keys = reader.execute("PRAGMA foreign_key_list(ai_test_runs)").fetchall()
+        run_indexes = [row[1] for row in reader.execute("PRAGMA index_list(ai_test_runs)")]
+    finally:
+        reader.close()
+    assert "WHERE deactivated_at IS NULL" in index_sql
+    assert "WHERE retired_at IS NULL" in cases_sql
+    assert {(row[2], row[3], row[4]) for row in keys} == {
+        ("prompt_snapshots", "route", "route"),
+        ("prompt_snapshots", "prompt_version", "prompt_version"),
+        ("prompt_snapshots", "prompt_sha256", "sha256"),
+        ("playbook_snapshots", "playbook_sha256", "sha256"),
+        ("ai_test_runs", "test_run_id", "id"),
+    }
+    assert [(row[2], row[3], row[4]) for row in run_keys] == [("ai_route_tuples", "tuple_id", "id")]
+    assert "ix_ai_test_runs_tuple_id_test_set" in run_indexes
+    for check, statement in (
+        ("tested", f"UPDATE ai_route_activations SET bootstrap = 0 WHERE id = '{ACTIVE_ROW}'"),
+        ("effort", f"UPDATE ai_route_activations SET effort = 'huge' WHERE id = '{ACTIVE_ROW}'"),
+        (
+            "schema_version",
+            f"UPDATE ai_route_activations SET schema_version = 0 WHERE id = '{ACTIVE_ROW}'",
+        ),
+        (
+            "playbook_sha256",
+            f"UPDATE ai_route_activations SET playbook_sha256 = 'X' WHERE id = '{ACTIVE_ROW}'",
+        ),
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=rf"ck_ai_route_activations_{check}$"):
+            run_sql(path, statement)
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):  # still one active per route
+        run_sql(
+            path,
+            f"INSERT INTO ai_route_activations ({columns}) VALUES "
+            f"('01JD3QZ8X5V9K2M7N4P6R8T0B4', 'extract_signals', 'claude-haiku-5-5', 'high', 'v1', "
+            f"'{digest}', 1, 'seed', 1, NULL, '{at}', NULL, NULL)",
+        )
+    run_sql(  # a tuple and a passing run of it: a tested activation names the run
+        path,
+        "INSERT INTO ai_route_tuples (id, route, model, effort, prompt_version, prompt_sha256, "
+        f"playbook_sha256, schema_version, created_at) VALUES ('{TUPLE_ROW}', 'extract_signals', "
+        f"'claude-haiku-5-5', 'medium', 'v1', '{digest}', NULL, 1, '{at}')",
+        "INSERT INTO ai_test_runs (id, tuple_id, test_set, outcome, error, case_count, "
+        "passed_count, metrics, results, cost_micros, started_at, finished_at) VALUES "
+        f"('{RUN_ROW}', '{TUPLE_ROW}', 'extraction', 'passed', NULL, 1, 1, '[]', '[]', 0, '{at}', "
+        f"'{at}')",
+        f"UPDATE ai_route_activations SET deactivated_at = '{at}' WHERE id = '{ACTIVE_ROW}'",
+        f"INSERT INTO ai_route_activations ({columns}) VALUES ('{TESTED_ROW}', "
+        f"'extract_signals', 'claude-haiku-5-5', 'medium', 'v1', '{digest}', 1, "
+        f"'system:playbook', 0, '{RUN_ROW}', '{at}', NULL, NULL)",
+    )
+    writer = sqlite3.connect(path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            writer.execute(
+                f"UPDATE ai_route_activations SET test_run_id = '{UNKNOWN_RUN}' "
+                f"WHERE id = '{TESTED_ROW}'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            writer.execute(f"UPDATE ai_test_runs SET tuple_id = '{UNKNOWN_RUN}'")
+    finally:
+        writer.close()
+    for check, statement in (
+        ("outcome", f"UPDATE ai_test_runs SET outcome = 'maybe' WHERE id = '{RUN_ROW}'"),
+        (
+            "error_when_failed",
+            f"UPDATE ai_test_runs SET error = 'set_too_small' WHERE id = '{RUN_ROW}'",
+        ),
+        (
+            "error",
+            f"UPDATE ai_test_runs SET outcome = 'failed', error = 'x' WHERE id = '{RUN_ROW}'",
+        ),
+        ("counts", f"UPDATE ai_test_runs SET passed_count = 2 WHERE id = '{RUN_ROW}'"),
+        ("test_set", f"UPDATE ai_test_runs SET test_set = 'other' WHERE id = '{RUN_ROW}'"),
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=rf"ck_ai_test_runs_{check}$"):
+            run_sql(path, statement)
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):  # one live case per key
+        run_sql(
+            path,
+            *(
+                "INSERT INTO ai_test_cases (id, case_key, test_set, route, input, expected, "
+                f"covers, sha256, loaded_at, retired_at) VALUES ('{case_id}', 'one', "
+                f"'extraction', 'extract_signals', '{{}}', '{{}}', '[]', '{digest}', '{at}', NULL)"
+                for case_id in ("01JD3QZ8X5V9K2M7N4P6R8T0D1", "01JD3QZ8X5V9K2M7N4P6R8T0D2")
+            ),
+        )
