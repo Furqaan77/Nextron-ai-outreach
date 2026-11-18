@@ -25,8 +25,10 @@ from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.playbook.api import Playbook
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import notify as notify_queries
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
@@ -85,6 +87,9 @@ REF_NAME = "must not hold the person's name"
 JANE_ALERT = "Contact needs review"
 BOB_ALERT = "Second Contact needs review"
 JANE_NOTICE = "A Contact needs a look"
+# Story 4.6: an Operator's Reply class override made from Jane's Reply, pseudonymised
+JANE_REPLY = "Hi, Jane Doe here: what would the audit cost for our team?"
+JANE_OVERRIDE = "Hi, [name] here: what would the audit cost for our team?"
 REQUEST_COLUMNS = (
     "id",
     "contact_id",
@@ -307,6 +312,12 @@ class Seeded:
                 kind="contact_review", subject=self.jane, text=JANE_NOTICE, at=T0
             )
         )
+        # an override case made from Jane's Reply (Story 4.6)
+        self.override = world.transact(
+            lambda: Playbook(world.clock).add_override_case(
+                JANE_REPLY, "question", contact_id=self.jane, names=("Jane Doe",)
+            )
+        )
         # Bob's request and entries come first, so the file must leave them out by more than
         # time; then Jane's entries: every key with the firm's domain, and her old address
         world.clock.set(T0 + timedelta(hours=1))
@@ -339,6 +350,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "research",
         "compliance",
         "notify",
+        "playbook",
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (
@@ -427,6 +439,14 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
     assert (alert["subject"], alert["text"]) == (seeded.jane, JANE_ALERT)
     [notice] = file["notify"]["notifications"]
     assert notice["text"] == JANE_NOTICE
+    [override] = file["playbook"]["override_cases"]
+    assert (override["case_key"], override["origin"], override["contact_id"]) == (
+        seeded.override,
+        "override",
+        seeded.jane,
+    )
+    assert json.loads(override["input"])["blocks"][0]["text"] == JANE_OVERRIDE
+    assert json.loads(override["expected"]) == {"reply_class": "question"}
     history = file["event_log"]["contact_history"]
     assert [(row["entity"], row["entity_id"], row["to_status"]) for row in history] == [
         ("contacts", seeded.jane, "guessed")
@@ -653,6 +673,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     assert file["compliance"]["suppression"] == []
     assert [row["status"] for row in file["compliance"]["requests"]] == ["completed"]
     assert file["notify"] == {"alerts": [], "notifications": []}
+    assert file["playbook"] == {"override_cases": []}
     assert file["event_log"] == {"contact_history": []}
 
 
@@ -689,6 +710,12 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     }
     assert [row["quote"] for row in research["evidence"]] == [REDACTED]
     assert research["pages"] == [] and research["contact_methods"] == []
+    # Story 4.6: playbook's hook erased and retired her override case
+    [override] = file["playbook"]["override_cases"]
+    assert (override["input"], override["retired_at"]) == (
+        REDACTED,
+        "2026-11-18T12:00:00.000000Z",
+    )
     # alerts and notices carry no Contact's data, so the erasure leaves them (not_held)
     assert [row["text"] for row in file["notify"]["alerts"]] == [JANE_ALERT]
     text = json.dumps(file)
@@ -864,6 +891,7 @@ def test_the_readers_return_every_column(world: World) -> None:
     research = world.read(lambda: research_queries.export_pii(seeded.jane))
     compliance = world.read(lambda: compliance_queries.export_pii(seeded.bob, ["not a hash", 3]))
     notify = world.read(lambda: notify_queries.export_pii(seeded.jane))
+    playbook = world.read(lambda: playbook_queries.export_pii(seeded.jane))
     history = world.read(lambda: eventlog.history("contacts", seeded.jane))
 
     assert set(research) == set(SECTIONS["research"])
@@ -877,6 +905,15 @@ def test_the_readers_return_every_column(world: World) -> None:
     assert compliance["suppression"] == ()  # no valid hash given, and Bob's request caused none
     assert [row["request_ref"] for row in compliance["requests"]] == [BOB_REF]
     assert set(notify) == {"alerts", "notifications"}
+    [override] = playbook["override_cases"]
+    assert set(override) == {
+        "id", "case_key", "test_set", "route", "input", "expected", "covers", "sha256",
+        "loaded_at", "retired_at", "origin", "contact_id",
+    }  # fmt: skip
+    assert world.read(lambda: playbook_queries.export_pii(seeded.bob)) == {
+        "override_cases": ()
+    }
+    assert world.read(lambda: playbook_queries.export_pii("nope")) == {"override_cases": ()}
     assert [row["entity_id"] for row in history] == [seeded.jane]
     with pytest.raises(LookupError):
         world.read(lambda: research_queries.export_pii("nope"))

@@ -1,0 +1,25 @@
+{
+  "id": "reply_interested_coordinator_leaving",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-04",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Interesting timing. Our intake coordinator just handed in her notice, so we're rethinking the whole process anyway. Let's set up a call - what does your week look like?"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:interested"
+  ]
+}

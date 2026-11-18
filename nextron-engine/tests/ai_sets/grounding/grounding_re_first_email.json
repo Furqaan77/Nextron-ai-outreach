@@ -1,0 +1,102 @@
+{
+  "id": "grounding_re_first_email",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 1,
+    "draft": {
+      "subject": "Re: your intake hire",
+      "body": "Hi Dana,\n\nSaw Brightwell Law is hiring an intake coordinator to run new-client calls and conflict checks. That usually means client details being typed into more than one system.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs keeping that intake work private on your radar?"
+    },
+    "claims": [
+      {
+        "text": "Brightwell Law is hiring an intake coordinator to run new-client calls and conflict checks",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "legal_ai",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-09"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_size_document_heavy",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Intake Coordinator (full time). You will be the first point of contact for new clients, running intake calls, conflict checks and new-matter forms."
+      },
+      {
+        "id": "e2",
+        "source": "team_pages",
+        "kind": "quote",
+        "text": "Our 14 attorneys advise on estate planning, probate and residential real estate."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "re_fwd_first_email",
+        "span": "Re: your intake hire"
+      }
+    ],
+    "rules": [
+      "subject_rule"
+    ]
+  },
+  "covers": [
+    "pattern:re_fwd_first_email",
+    "segment:law_private_ai",
+    "market:us",
+    "step:1",
+    "variant:re"
+  ]
+}

@@ -84,28 +84,70 @@ activations of ``BOOTSTRAP_ROUTES`` are the one exception, marked "ungated" unti
   retired (``retired``). Each is ``(test_set, case_key)``, in input order (``retired`` by set and
   key). An empty ``cases`` touches no table and changes nothing (as ``sync_prompts`` with no
   input). It logs ``test_cases_synced`` with the four counts. ``serve`` runs it at every start,
-  in the prompt step's unit of work (decision 2).
+  in the prompt step's unit of work (decision 2). Story 4.6: it reads and retires only
+  ``fixture`` rows (``origin``), so the Operator's override cases survive every sync, and a case
+  key starting ``override-`` is a ``ValueError`` before any transaction.
 - ``@use_case Playbook.activate(tuple_id, *, trigger) -> Activation(route, tuple_id, run_id,
   changed)``. ``ActivationTrigger`` is ``test_passed`` (actor ``system:playbook``) or
   ``rollback`` (actor ``operator``); anything else is a ``TypeError``. In one transaction it
   refuses, with ``ActivationRefused`` (code ``activation_refused``), writing nothing so the
   previous tuple keeps serving: an unknown tuple (a text that isn't a ULID included), "No such
-  tuple"; a tuple whose route has no set, or with no ``passed`` run on its set, "No passing
-  test run for this tuple". When the route's active activation has the tuple's model, effort,
+  tuple"; a tuple whose route has no set, or with no ``passed`` run on its set that measured
+  the live case set (Story 4.6: the run's ``cases_sha256`` equals
+  ``queries.playbook.case_set_fingerprint`` of the set and route), "No passing test run for
+  this tuple". When the route's active activation has the tuple's model, effort,
   prompt version, schema version and Playbook and isn't a bootstrap one, nothing changes
   (``changed`` false). Otherwise: the active activation (when there is one) is deactivated now,
   with an ``events`` row ``active`` to ``inactive`` (cause the trigger's value, ``cause_ref``
   the qualifying run); an activation copied from the tuple row (its Playbook SHA-256 included)
-  is inserted, with ``bootstrap`` false, ``test_run_id`` the tuple's newest passing run and the
-  trigger's actor; and an ``events`` row ``None`` to ``active`` follows. It logs
-  ``route_activated`` (``route``, ``tuple_id``, ``run_id``, ``trigger``, ``changed``).
+  is inserted, with ``bootstrap`` false, ``test_run_id`` the tuple's newest passing run on the
+  live case set and the trigger's actor; and an ``events`` row ``None`` to ``active``
+  follows. It logs ``route_activated`` (``route``, ``tuple_id``, ``run_id``, ``trigger``,
+  ``changed``).
+
+**The Operator's override cases** (FR-40, FR-73, AD-12, AD-17, Story 4.6). An Operator's
+Reply class override joins the Reply set as a pseudonymised case.
+
+- ``@command add_override_case(text, label, *, contact_id, names=(), organisations=()) ->
+  str`` joins the caller's transaction (Epic 7's override use case calls it; decision 8). It
+  raises before any write: ``TypeError`` unless ``text`` is a ``str`` and ``names`` and
+  ``organisations`` hold ``str``s; ``ValueError`` when ``label`` isn't a
+  ``nextron.domain.reply_classes.ReplyClass`` (or its value), when ``contact_id`` isn't a ULID,
+  or when the text is blank once pseudonymised. It pseudonymises ``text``
+  (``nextron.domain.pseudonymise.pseudonymise`` with ``names`` and ``organisations``), strips
+  it and cuts it to ``MAX_OVERRIDE_TEXT`` (8,000) characters, then stores a ``reply`` /
+  ``classify_reply`` case: the key ``override-<the row's ULID, lowercase>``; ``input``
+  ``{"received_on": <today, UTC>, "blocks": [{"id": "r1", "source": "reply", "text": <the
+  pseudonymised text>}]}``; ``expected`` ``{"reply_class": <label>}`` (the class only, decision
+  3); ``covers`` ``["class:<label>", "override"]``; origin ``override`` and the ``contact_id``.
+  A correction replaces the earlier case: every live override row of the same Contact whose
+  Reply text equals the new pseudonymised text is retired first, so the newest label wins and
+  the set never holds one text under two classes. The source text, a Reply id or a name never
+  reaches a row, a log record or an error. It logs ``override_case_added`` (``case_key``,
+  ``replaced_count``) and returns the key. Each new override changes the
+  Reply set's fingerprint, so every ``classify_reply`` tuple is queued for a new run at the next
+  ``queue_runs`` (decision 6).
+- ``@command erase_override_cases(contact_id) -> int`` (``ValueError`` for a ``contact_id``
+  that isn't a ULID) erases each override row of that Contact, live or retired, whose ``input``
+  isn't erased yet: ``input`` becomes ``[erased]`` and a live row is retired now (AD-17,
+  decision 7). It logs ``override_cases_erased`` (``count``) and returns the count.
+- ``@command erase_pii(n: ContactErased)`` is ``playbook``'s ``ContactErased`` subscriber
+  (Story 3.13's erasure, registered in ``nextron.main.build_subscribers`` after research's):
+  it checks ``n.cause`` (an ``ErasureCause``: a data subject request or Epic 8's retention
+  job reach it the same way) and runs ``erase_override_cases(n.contact_id)`` in the
+  erasure's transaction. ``ERASURE`` declares ``ai_test_cases`` ``tombstoned``: the
+  override rows' ``input`` (PII class ``redact``) becomes ``[erased]``; a fixture row is
+  synthetic and names no one.
 
 **``AiTestRuns(clock, meter, llm, queue)``** runs the AI Test Sets.
 
 - ``@use_case queue_runs() -> int``: in one transaction, each tuple row whose route has a set
-  and that has no run on that set gets a ``run_ai_test_sets`` job (scope the tuple id,
+  and that has no run on that set, or whose newest run on it didn't measure the live case set
+  (its ``cases_sha256`` differs from ``case_set_fingerprint``, a run stored before Story 4.6
+  included; decision 6), gets a ``run_ai_test_sets`` job (scope the tuple id,
   discriminator the set, payload ``{"v": 1, "tuple_id": <id>, "test_set": <set>}``, the bulk
-  lane); a live job with that key absorbs it. It returns how many jobs it created and logs
+  lane); a live job with that key absorbs it. A run that failed on the live set is not run
+  again until the set or the tuple changes. It returns how many jobs it created and logs
   ``ai_test_runs_queued`` (``count``). ``nextron.main`` runs it at each engine start, after
   ``queue_contact_markets``, and the AI content view after Check for changes (decision 4).
 - ``@use_case run(tuple_id, test_set, *, activate=True) -> bool`` (the job's use case):
@@ -115,11 +157,12 @@ activations of ``BOOTSTRAP_ROUTES`` are the one exception, marked "ungated" unti
      nothing called or written (decision 3: a gate run is deferrable spend). An unknown tuple, or
      a ``test_set`` that isn't its route's set, logs ``ai_test_run_skipped`` (``tuple_id``,
      ``reason``) and returns ``True``. It builds the ``RouteTuple`` (``queries.playbook
-     .tuple_of``) and reads the set's live cases of the tuple's route (by ``case_key``) and the
-     stored Segments. When there are at least ``MIN_CASES`` cases, the set's scorer
-     (``SCORERS``) must exist (``LookupError`` otherwise: only ``extraction`` has one, decision
-     7), and a case naming a Segment that isn't stored raises ``InvalidTestCases`` before any
-     call.
+     .tuple_of``) and reads the set's live cases of the tuple's route (by ``case_key``; both
+     origins) and the stored Segments, and takes their fingerprint (``case_set_sha256`` of the
+     rows' stored SHA-256s, the source ``case_set_fingerprint`` reads). When there are at
+     least ``MIN_CASES`` cases, the set's scorer (``SCORERS``) must exist (``LookupError``
+     otherwise: only ``extraction`` has one, decision 7), and a case naming a Segment that isn't
+     stored raises ``InvalidTestCases`` before any call.
   2. **The calls**, with no transaction open. Fewer cases than ``MIN_CASES`` make a ``failed``
      run with ``set_too_small`` and no call. Otherwise each case's ``llm.run(route_tuple,
      blocks, urgency)`` runs in case order (the scorer builds the inputs). A retryable
@@ -129,8 +172,12 @@ activations of ``BOOTSTRAP_ROUTES`` are the one exception, marked "ungated" unti
      result's type name).
   3. **Last transaction.** The run is inserted (``ai_test_runs``: its outcome, ``passed`` when
      every metric passed; the error; the case and passed counts; the metrics and every case's
-     result; the summed ``cost_micros``; ``started_at`` and ``finished_at``). When it passed,
-     ``activate`` is true and the tuple is its route's newest tuple row or the active tuple,
+     result; the summed ``cost_micros``; ``started_at`` and ``finished_at``; and
+     ``cases_sha256``, the fingerprint of the cases it measured). When it passed, ``activate``
+     is true, that fingerprint still equals the live fingerprint of the set and route (cases
+     that changed during the run leave the run stored and nothing activated; the next
+     ``queue_runs`` queues it again) and the tuple is its route's newest tuple row or the
+     active tuple,
      ``activate``'s work runs in this transaction with ``test_passed`` (decision 5: an older tuple
      that passed is a rollback target only). It logs ``ai_test_run_finished`` (``tuple_id``,
      ``run_id``, ``test_set``, ``outcome``, ``error``, ``case_count``, ``passed_count``,
@@ -218,12 +265,17 @@ from nextron.db.repos.playbook import test_cases as cases_repo
 from nextron.db.repos.playbook import test_runs as runs_repo
 from nextron.db.repos.playbook.activations import StoredActivation
 from nextron.db.repos.playbook.company_facts import StoredFact
+from nextron.db.repos.playbook.test_cases import StoredCase
 from nextron.db.repos.playbook.route_tuples import StoredTuple
 from nextron.db.uow import command, current, use_case
 from nextron.domain import company_facts as facts_domain
 from nextron.domain.ai import RouteSpec, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.ai_test_cases import (
+    OVERRIDE_PREFIX,
+    CaseOrigin,
+    InvalidTestCases,
     TestCase,
+    case_set_sha256,
     check_segments,
     extraction_inputs,
     score_extraction,
@@ -247,6 +299,7 @@ from nextron.domain.ai_test_gate import (
     run_passed,
     set_of,
 )
+from nextron.domain.ai_test_sets import CLASSIFY_REPLY, REPLY_SOURCE, class_tag
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.company_facts import (
     ENTER_A_VALUE,
@@ -262,11 +315,15 @@ from nextron.domain.company_facts import (
     fact_from_fields,
     validate_company_facts,
 )
+from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
 from nextron.domain.errors import DomainError
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import VERSION_FIELD
+from nextron.domain.notifications import ContactErased
 from nextron.domain.playbook import PlaybookProblem, PlaybookSnapshot, SyncTrigger
 from nextron.domain.prompts import USED_PROMPT_NEVER_CHANGES, InvalidPrompts, PromptFile
+from nextron.domain.pseudonymise import pseudonymise
+from nextron.domain.reply_classes import ReplyClass
 from nextron.domain.segments import SegmentDef
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
@@ -311,8 +368,24 @@ AI_TEST_RUN_FINISHED: Final = "ai_test_run_finished"
 UNKNOWN_TUPLE: Final = "unknown_tuple"
 NOT_THE_ROUTES_SET: Final = "not_the_routes_set"
 PAYLOAD_VERSION: Final = 1
+OVERRIDE_CASE_ADDED: Final = "override_case_added"
+OVERRIDE_CASES_ERASED: Final = "override_cases_erased"
+OVERRIDE_TAG: Final = "override"
+OVERRIDE_BLOCK_ID: Final = "r1"
+MAX_OVERRIDE_TEXT: Final = 8_000
 # nextron.adapters.ai.LLM_UNKNOWN_ROUTE: the app never imports the gateway (tests pin the two)
 UNKNOWN_ROUTE_CODE: Final = "llm_unknown_route"
+
+# Story 3.13 (AD-17): what playbook's erasure hook does to each of its personal-data tables.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "ai_test_cases": TableErasure(
+            Coverage.TOMBSTONED,
+            "the input of each of the Contact's override cases (a pseudonymised Reply) "
+            "becomes [erased] and a live one is retired; fixture cases are synthetic",
+        ),
+    }
+)
 
 log = logging.getLogger(__name__)
 
@@ -397,7 +470,10 @@ def _activate(tuple_id: str, trigger: ActivationTrigger, now: datetime) -> Activ
     if row is None:
         raise ActivationRefused(NO_SUCH_TUPLE)
     test_set = ROUTE_SETS.get(row.route)
-    passing = None if test_set is None else runs_repo.newest_passed(row.id, test_set.value)
+    passing = None
+    if test_set is not None:
+        current_set = playbook_queries.case_set_fingerprint(test_set, row.route)
+        passing = runs_repo.newest_passed(row.id, test_set.value, current_set)
     if passing is None:
         raise ActivationRefused(NO_PASSING_RUN)
     active = activations_repo.active(row.route)
@@ -439,6 +515,22 @@ def _activate(tuple_id: str, trigger: ActivationTrigger, now: datetime) -> Activ
         at=now,
     )
     return Activation(row.route, row.id, passing.id, changed=True)
+
+
+def _override_text(row: StoredCase) -> str | None:
+    """The Reply text of a stored override case, or ``None`` when it doesn't read back."""
+    try:
+        case = stored_case(
+            row.case_key, row.test_set, row.route, row.input, row.expected, row.covers
+        )
+    except InvalidTestCases:
+        return None
+    blocks = case.input.get("blocks")
+    for block in blocks if isinstance(blocks, list) else ():
+        if isinstance(block, dict) and block.get("source") == REPLY_SOURCE:
+            text = block.get("text")
+            return text if isinstance(text, str) else None
+    return None
 
 
 def _log_case_sync(*found: Sequence[tuple[str, str]]) -> None:
@@ -486,6 +578,8 @@ class Playbook:
         repeated = sorted(f"{test_set} {key}" for (test_set, key), n in keys.items() if n > 1)
         if repeated:
             raise ValueError(f"sync_test_cases got a test case more than once: {repeated[0]}")
+        if any(case.case_key.startswith(OVERRIDE_PREFIX) for case in chosen):
+            raise ValueError(f"a fixture case key never starts with {OVERRIDE_PREFIX}")
         now = self._clock.now()
         added: list[tuple[str, str]] = []
         changed: list[tuple[str, str]] = []
@@ -495,16 +589,18 @@ class Playbook:
             _log_case_sync(added, changed, retired, unchanged)
             return TestCaseSync((), (), (), ())
         with current().transaction():
-            live = {(row.test_set, row.case_key): row for row in cases_repo.all_live()}
+            live = {
+                (row.test_set, row.case_key): row for row in cases_repo.all_live_fixtures()
+            }
             for case in chosen:
                 key = (case.test_set.value, case.case_key)
                 row = live.pop(key, None)
                 if row is None:
-                    cases_repo.insert(case, now)
+                    cases_repo.insert(case, now, origin=CaseOrigin.FIXTURE, contact_id=None)
                     added.append(key)
                 elif row.sha256 != case.sha256:
                     cases_repo.retire(row.id, now)
-                    cases_repo.insert(case, now)
+                    cases_repo.insert(case, now, origin=CaseOrigin.FIXTURE, contact_id=None)
                     changed.append(key)
                 else:
                     unchanged.append(key)
@@ -513,6 +609,82 @@ class Playbook:
                 cases_repo.retire(live[key].id, now)
         _log_case_sync(added, changed, retired, unchanged)
         return TestCaseSync(tuple(added), tuple(changed), retired, tuple(unchanged))
+
+    @command
+    def add_override_case(
+        self,
+        text: str,
+        label: ReplyClass | str,
+        *,
+        contact_id: str,
+        names: Sequence[str] = (),
+        organisations: Sequence[str] = (),
+    ) -> str:
+        """Store an Operator's Reply class override as a pseudonymised Reply case; see the
+        module docstring."""
+        if not isinstance(text, str):
+            raise TypeError("add_override_case takes the Reply's text as a str")
+        try:
+            reply_class = ReplyClass(label)
+        except ValueError:
+            raise ValueError("label must be a Reply Class") from None
+        if not is_ulid(contact_id):
+            raise ValueError("contact_id must be a ULID")
+        kept = pseudonymise(text, names=names, organisations=organisations).strip()
+        if not kept:
+            raise ValueError("the Reply's text is blank once pseudonymised")
+        case_id = cases_repo.new_case_id()
+        now = self._clock.now()
+        case = TestCase(
+            case_key=OVERRIDE_PREFIX + case_id.lower(),
+            test_set=TestSet.REPLY,
+            route=CLASSIFY_REPLY,
+            input={
+                "received_on": now.astimezone(UTC).date().isoformat(),
+                "blocks": [
+                    {
+                        "id": OVERRIDE_BLOCK_ID,
+                        "source": REPLY_SOURCE,
+                        "text": kept[:MAX_OVERRIDE_TEXT],
+                    }
+                ],
+            },
+            expected={"reply_class": reply_class.value},
+            covers=(class_tag(reply_class), OVERRIDE_TAG),
+        )
+        replaced = 0
+        for row in cases_repo.override_rows(contact_id):  # a correction: the newest label wins
+            if row.retired_at is None and _override_text(row) == kept[:MAX_OVERRIDE_TEXT]:
+                cases_repo.retire(row.id, now)
+                replaced += 1
+        cases_repo.insert(
+            case, now, origin=CaseOrigin.OVERRIDE, contact_id=contact_id, case_id=case_id
+        )
+        log.info(
+            OVERRIDE_CASE_ADDED, extra={"case_key": case.case_key, "replaced_count": replaced}
+        )
+        return case.case_key
+
+    @command
+    def erase_override_cases(self, contact_id: str) -> int:
+        """Erase every override case of a Contact; see the module docstring."""
+        if not is_ulid(contact_id):
+            raise ValueError("contact_id must be a ULID")
+        now = self._clock.now()
+        erased = 0
+        for row in cases_repo.override_rows(contact_id):
+            if row.input != cases_repo.ERASED:
+                cases_repo.erase(row.id, now)
+                erased += 1
+        log.info(OVERRIDE_CASES_ERASED, extra={"count": erased})
+        return erased
+
+    @command
+    def erase_pii(self, n: ContactErased) -> None:
+        """Playbook's erasure hook: erase the Contact's override cases; see the module
+        docstring."""
+        ErasureCause(n.cause)  # a data subject request or a retention erasure
+        self.erase_override_cases(n.contact_id)
 
     @use_case
     def activate(self, tuple_id: str, *, trigger: ActivationTrigger) -> Activation:
@@ -1144,6 +1316,7 @@ class _Prepared:
     cases: tuple[TestCase, ...]
     segments: tuple[SegmentDef, ...]
     scorer: Scorer | None  # None when the set is too small
+    cases_sha256: str  # the fingerprint of the cases read
 
 
 @dataclass(slots=True)
@@ -1169,14 +1342,24 @@ class AiTestRuns:
 
     @use_case
     def queue_runs(self) -> int:
-        """Queue a run of each tuple row that has none on its route's set; how many jobs were
-        created."""
+        """Queue a run of each tuple row that has none on its route's live case set; how many
+        jobs were created."""
         created = 0
         with current().transaction():
-            done = {(run.tuple_id, run.test_set) for run in runs_repo.every()}
+            newest: dict[tuple[str, str], str | None] = {}
+            for run in runs_repo.every():  # by tuple and set, newest first
+                newest.setdefault((run.tuple_id, run.test_set), run.cases_sha256)
+            fingerprints: dict[str, str] = {}
             for row in tuples_repo.every():
                 test_set = ROUTE_SETS.get(row.route)
-                if test_set is None or (row.id, test_set.value) in done:
+                if test_set is None:
+                    continue
+                if row.route not in fingerprints:
+                    fingerprints[row.route] = playbook_queries.case_set_fingerprint(
+                        test_set, row.route
+                    )
+                key = (row.id, test_set.value)
+                if key in newest and newest[key] == fingerprints[row.route]:
                     continue
                 enqueued = self._queue.enqueue(
                     RUN_AI_TEST_SETS_JOB,
@@ -1229,8 +1412,17 @@ class AiTestRuns:
                 cost_micros=scored.cost_micros,
                 started_at=started_at,
                 finished_at=finished_at,
+                cases_sha256=prepared.cases_sha256,
             )
-            if outcome is RunOutcome.PASSED and activate and _may_activate(prepared.row):
+            live_set = playbook_queries.case_set_fingerprint(
+                prepared.test_set, prepared.row.route
+            )
+            if (
+                outcome is RunOutcome.PASSED
+                and activate
+                and live_set == prepared.cases_sha256
+                and _may_activate(prepared.row)
+            ):
                 activated = _activate(prepared.row.id, ActivationTrigger.TEST_PASSED, finished_at)
         if activated is not None:
             _log_activation(activated, ActivationTrigger.TEST_PASSED)
@@ -1284,6 +1476,7 @@ def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
     route_tuple = playbook_queries.tuple_of(row.id)
     if route_tuple is None:  # pragma: no cover - the row was just read in this transaction
         return UNKNOWN_TUPLE
+    rows = cases_repo.live(chosen.value, row.route)
     cases = tuple(
         stored_case(
             stored.case_key,
@@ -1293,7 +1486,7 @@ def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
             stored.expected,
             stored.covers,
         )
-        for stored in cases_repo.live(chosen.value, row.route)
+        for stored in rows
     )
     segments = tuple(seeded.definition for seeded in setup_queries.segments())
     scorer: Scorer | None = None
@@ -1302,7 +1495,9 @@ def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
         if scorer is None:
             raise LookupError(f"the {chosen.value} set has no scorer yet")
         scorer.check(cases, segments)
-    return _Prepared(row, chosen, route_tuple, cases, segments, scorer)
+    # the stored SHA-256s, as queries.playbook.case_set_fingerprint reads them
+    fingerprint = case_set_sha256(stored.sha256 for stored in rows)
+    return _Prepared(row, chosen, route_tuple, cases, segments, scorer, fingerprint)
 
 
 def _may_activate(row: StoredTuple) -> bool:

@@ -1,0 +1,25 @@
+{
+  "id": "reply_interested_tell_me_more",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-21",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Tell me more."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:interested"
+  ]
+}

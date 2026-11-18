@@ -1,0 +1,64 @@
+{
+  "id": "drafting_law_uk_newer_of_two_posts",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "uk",
+    "lead_name": "Peel & Co Solicitors",
+    "contact": {
+      "name": "Judith Peel",
+      "role": "Owner"
+    },
+    "angle_note": "She has posted twice about AI; cite the newer post.",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_ai_confidentiality_post",
+        "tier": 1,
+        "evidence_id": "e2",
+        "observed_on": "2026-11-02"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_ai_confidentiality_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-16"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Judith Peel, owner of Peel & Co Solicitors: after the SRA warning notice we stopped every AI trial. Client data stays in-house until someone shows me a safe way."
+      },
+      {
+        "id": "e2",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Judith Peel: is anyone using AI on conveyancing files without sending them to a cloud service abroad?"
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "sra_ai_notice",
+        "version": 1,
+        "wording": "The Solicitors Regulation Authority (SRA) warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards."
+      },
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s2"
+  },
+  "covers": [
+    "segment:law_private_ai",
+    "market:uk"
+  ]
+}

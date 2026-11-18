@@ -71,6 +71,7 @@ def test_the_coverage_declares_every_section_once() -> None:
         ),
         "compliance": ("suppression", "requests"),
         "notify": ("alerts", "notifications"),
+        "playbook": ("override_cases",),  # Story 4.6
         "event_log": ("contact_history",),
     }
     declared = [(owner, section) for owner, sections in SECTIONS.items() for section in sections]
@@ -369,6 +370,7 @@ def test_every_declared_section_is_an_array_and_none_is_omitted() -> None:
         },
         "compliance": {"suppression": [], "requests": []},
         "notify": {"alerts": [], "notifications": []},
+        "playbook": {"override_cases": []},
         "event_log": {"contact_history": []},
     }
     assert SCHEMA_VERSION == 1
@@ -379,6 +381,7 @@ def test_every_declared_section_is_an_array_and_none_is_omitted() -> None:
         "research",
         "compliance",
         "notify",
+        "playbook",
         "event_log",
     ]
 

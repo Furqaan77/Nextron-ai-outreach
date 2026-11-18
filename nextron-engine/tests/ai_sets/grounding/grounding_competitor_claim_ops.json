@@ -1,0 +1,126 @@
+{
+  "id": "grounding_competitor_claim_ops",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "step": 2,
+    "draft": {
+      "subject": "order tracking spreadsheets",
+      "body": "Hi Owen,\n\nA different angle. Your job ads ask for advanced Excel to maintain order tracking spreadsheets. Your competitor Bramley Haulage already automates its order entry and quotes same-day.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWould a shorter path from order to dispatch be useful?"
+    },
+    "claims": [
+      {
+        "text": "Your job ads ask for advanced Excel to maintain order tracking spreadsheets",
+        "evidence_id": "e2",
+        "fact": null
+      },
+      {
+        "text": "Your competitor Bramley Haulage already automates its order entry and quotes same-day",
+        "evidence_id": null,
+        "fact": null
+      },
+      {
+        "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "mp_online_digital",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s2",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_rekeying_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-04"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Owen Carr, Operations Director at Pennine Fasteners: we still re-key every emailed order into our system by hand. Three people, all day, every day."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Advanced Excel skills required; you will maintain our order tracking spreadsheets."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "re-keying emailed orders",
+        "body": "Hi Owen,\n\nRead your post about re-keying every emailed order by hand, with three people on it all day. That kind of copying tends to grow with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIs this on your radar?",
+        "claims": [
+          {
+            "text": "your post about re-keying every emailed order by hand",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "wish_wheels",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "competitor_claim",
+        "span": "Your competitor Bramley Haulage already automates its order entry and quotes same-day"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "pattern:competitor_claim",
+    "segment:ops_automation",
+    "market:uk",
+    "step:2"
+  ]
+}

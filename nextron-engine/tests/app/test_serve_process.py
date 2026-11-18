@@ -360,7 +360,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0033_6_5_domain_checks"
+    assert HEAD == "0034_4_6_ai_test_sets"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]
@@ -379,16 +379,26 @@ def test_guarded_health_page_and_second_instance(
     assert (synced["stored_count"], synced["activated_count"]) == (3, 3)
     assert lines.index(synced) < lines.index(started)
     # Story 4.5: the 11 extraction fixtures were stored before the engine started, and the
-    # lifespan queued one run_ai_test_sets job per extraction tuple, keyed by tuple and set
+    # lifespan queued one run_ai_test_sets job per extraction tuple, keyed by tuple and set.
+    # Story 4.6: the Reply, Grounding and drafting-smoke sets were stored too, every row a
+    # fixture, and still only the three extraction jobs were queued (no other route has a tuple)
     db = data_dir / "nextron.db"
-    [(cases,)] = read_rows(
-        db,
-        "SELECT COUNT(*) FROM ai_test_cases "
-        "WHERE retired_at IS NULL AND test_set = 'extraction'",
+    stored = dict(
+        read_rows(
+            db,
+            "SELECT test_set, COUNT(*) FROM ai_test_cases "
+            "WHERE retired_at IS NULL AND origin = 'fixture' AND contact_id IS NULL "
+            "GROUP BY test_set",
+        )
     )
-    assert cases == 11
+    assert stored["extraction"] == 11
+    assert stored["reply"] >= 50 and stored["grounding"] >= 30 and stored["drafting_smoke"] >= 10
+    assert read_rows(db, "SELECT COUNT(*) FROM ai_test_cases") == [(sum(stored.values()),)]
     [cases_synced] = [line for line in lines if line["event"] == "test_cases_synced"]
-    assert (cases_synced["added_count"], cases_synced["retired_count"]) == (11, 0)
+    assert (cases_synced["added_count"], cases_synced["retired_count"]) == (
+        sum(stored.values()),
+        0,
+    )
     assert lines.index(cases_synced) < lines.index(started)
     tuple_ids = sorted(str(row[0]) for row in read_rows(db, "SELECT id FROM ai_route_tuples"))
     runs = wait_for_dead_test_runs(db, 3)

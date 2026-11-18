@@ -1,0 +1,117 @@
+{
+  "id": "grounding_claim_nextron_distributor",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "step": 3,
+    "draft": {
+      "subject": "a similar build",
+      "body": "Hi Wendy,\n\nWe've done this before for a distributor: a single operations platform covering CRM, orders, inventory, vendors and analytics for Wish Wheels.\n\nHappy to send more detail by reply. Want me to?"
+    },
+    "claims": [
+      {
+        "text": "We've done this before for a distributor: a single operations platform covering CRM, orders, inventory, vendors and analytics for Wish Wheels",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "wish_wheels",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-02"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_dynamics_gp",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Lakeshore Electrical Supply acquires Ferro Supply, adding two branches in Ohio."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Dynamics GP experience a plus."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "the Ferro acquisition",
+        "body": "Hi Wendy,\n\nSaw Lakeshore has acquired Ferro Supply and added two branches. Bringing two order desks together usually means a lot of re-keying.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "Lakeshore has acquired Ferro Supply and added two branches",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "mp_online_digital",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "planted_claim",
+    "findings": [
+      {
+        "code": "unsupported_nextron_claim",
+        "span": "We've done this before for a distributor: a single operations platform covering CRM, orders, inventory, vendors and analytics for Wish Wheels"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "claim:nextron",
+    "segment:ops_automation",
+    "market:us",
+    "step:3",
+    "variant:distributor"
+  ]
+}

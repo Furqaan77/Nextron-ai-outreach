@@ -1,0 +1,77 @@
+{
+  "id": "drafting_ops_us_hiring_over_gp_attribute",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "lead_name": "Marlow Parts Supply",
+    "contact": {
+      "name": "Angela Ruiz",
+      "role": "COO"
+    },
+    "angle_note": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_dynamics_gp",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": null
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e3",
+        "observed_on": null
+      },
+      {
+        "id": "s3",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-06"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "ats_board",
+        "kind": "quote",
+        "text": "Order Entry Clerk. Enter customer purchase orders received by email into our order system; 60+ orders a day."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Experience with Microsoft Dynamics GP is required."
+      },
+      {
+        "id": "e3",
+        "source": "website",
+        "kind": "absence",
+        "text": "No online ordering portal, customer login or EDI page was found on the website."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s3"
+  },
+  "covers": [
+    "segment:ops_automation",
+    "market:us"
+  ]
+}

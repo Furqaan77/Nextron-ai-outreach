@@ -1,0 +1,36 @@
+{
+  "id": "reply_optout_unsubscribe",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-16",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your intake coordinator role\n\nHi Dana,\n\nSaw Brightwell Law is hiring an intake coordinator. More intake usually means more client detail moving through more tools, and more questions about where it ends up.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?\n\nSam\nNextron AI\n\nNot relevant? Reply \"no\" and I won't write again."
+      },
+      {
+        "id": "s2",
+        "source": "sent_email",
+        "text": "Subject: Opinion 512 and intake\n\nHi Dana,\n\nA different angle. ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool.\n\nIs that shaping how Brightwell thinks about AI for intake?\n\nSam\nNextron AI\n\nNot relevant? Reply \"no\" and I won't write again."
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Unsubscribe"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "opt_out_wording"
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "id": "grounding_attachment_overview",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "step": 1,
+    "draft": {
+      "subject": "your transport planner role",
+      "body": "Hi Joanna,\n\nSaw Fenmoor is hiring a transport planner to key collection requests from email into your TMS. Requests like that often get typed in twice.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business. I've attached a one-page overview.\n\nWorth a look?"
+    },
+    "claims": [
+      {
+        "text": "Fenmoor is hiring a transport planner to key collection requests from email into your TMS",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "wish_wheels",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-09"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Transport Planner / Dispatcher. Plan daily routes and key customer collection requests from email into our TMS."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "attachment",
+        "span": "I've attached a one-page overview."
+      }
+    ],
+    "rules": [
+      "attachment"
+    ]
+  },
+  "covers": [
+    "pattern:attachment",
+    "segment:ops_automation",
+    "market:uk",
+    "step:1"
+  ]
+}

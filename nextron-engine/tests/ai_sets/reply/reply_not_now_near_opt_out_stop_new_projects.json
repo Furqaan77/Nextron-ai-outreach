@@ -1,0 +1,32 @@
+{
+  "id": "reply_not_now_near_opt_out_stop_new_projects",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-16",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: dispatch hiring at Brindle\n\nHi Owen,\n\nSaw Brindle Freight is hiring two dispatch coordinators. Dispatch teams often re-key the same load details into three systems.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nNot relevant? Reply \"no\" and I won't contact you again."
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Not now, I'm afraid. We've had to stop all new projects until the merger closes in March. Try me again in April?\n\nOwen"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_now",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": "2027-04-01",
+    "referral": null
+  },
+  "covers": [
+    "class:not_now",
+    "recontact_date",
+    "near_opt_out"
+  ]
+}

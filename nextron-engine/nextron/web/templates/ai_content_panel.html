@@ -6,6 +6,9 @@
 {%- macro run_block(run) -%}
 <div class="ai-run">
 <p class="ai-run-outcome{% if not run.passed %} ai-run-failed{% endif %}">Test run: {{ run.outcome|plain }}{% if run.error %} ({{ run.error|plain }}){% endif %}. {{ run.test_set|plain }}, {{ run.counts|plain }}, cost {{ run.cost|plain }}, finished {{ run.time }}.</p>
+{%- if run.stale %}
+<p class="ai-mark ai-run-stale">{{ run.stale|plain }}</p>
+{%- endif %}
 {%- if run.metrics %}
 <table class="ai-metrics">
 <thead><tr><th scope="col">Metric</th><th scope="col">Value</th><th scope="col">Bar</th><th scope="col">Result</th></tr></thead>

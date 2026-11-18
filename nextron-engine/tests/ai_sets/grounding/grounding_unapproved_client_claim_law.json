@@ -1,0 +1,116 @@
+{
+  "id": "grounding_unapproved_client_claim_law",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "uk",
+    "step": 3,
+    "draft": {
+      "subject": "a firm like yours",
+      "body": "Hi Imogen,\n\nOne example. We recently built a private AI system for Wexley Brook Solicitors, a firm much like yours, so their lawyers can search precedents without client data leaving the building.\n\nHappy to send a short write-up by reply if that would help. Shall I?"
+    },
+    "claims": [
+      {
+        "text": "We recently built a private AI system for Wexley Brook Solicitors",
+        "evidence_id": null,
+        "fact": null
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-19"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Legal Innovation Manager (new role). Lead our work on legal technology, knowledge management and AI adoption across the firm."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "sra_ai_notice",
+        "version": 1,
+        "wording": "The Solicitors Regulation Authority (SRA) warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your legal innovation role",
+        "body": "Hi Imogen,\n\nSaw Calloway Shaw has created a legal innovation manager role to lead AI adoption. Choosing AI tools that keep client data inside the firm is usually the hard part.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs this on your radar?",
+        "claims": [
+          {
+            "text": "Calloway Shaw has created a legal innovation manager role to lead AI adoption",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "legal_ai",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      },
+      {
+        "step": 2,
+        "subject": "client data and the SRA",
+        "body": "Hi Imogen,\n\nA different angle. The SRA warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards.\n\nIs that shaping how Calloway Shaw chooses its AI tools?",
+        "claims": [
+          {
+            "text": "The SRA warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "sra_ai_notice",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": null
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "unapproved_client_claim",
+        "span": "We recently built a private AI system for Wexley Brook Solicitors"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "pattern:unapproved_client_claim",
+    "segment:law_private_ai",
+    "market:uk",
+    "step:3"
+  ]
+}

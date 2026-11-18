@@ -1,0 +1,104 @@
+{
+  "id": "grounding_competitor_claim_law",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 1,
+    "draft": {
+      "subject": "your Sacramento office",
+      "body": "Hi Gina,\n\nCongratulations on opening the Sacramento office and adding family law. Harlan & Reece, two streets from you, has already moved its intake onto private AI.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?"
+    },
+    "claims": [
+      {
+        "text": "opening the Sacramento office and adding family law",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "Harlan & Reece, two streets from you, has already moved its intake onto private AI",
+        "evidence_id": null,
+        "fact": null
+      },
+      {
+        "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "legal_ai",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-28"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_size_document_heavy",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Pryor Whitley LLP opens a second office in Sacramento and adds a family law practice."
+      },
+      {
+        "id": "e2",
+        "source": "team_pages",
+        "kind": "quote",
+        "text": "Our 19 attorneys handle family law, estate planning and business disputes."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "competitor_claim",
+        "span": "Harlan & Reece, two streets from you, has already moved its intake onto private AI"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "pattern:competitor_claim",
+    "segment:law_private_ai",
+    "market:us",
+    "step:1"
+  ]
+}

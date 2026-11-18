@@ -1,0 +1,100 @@
+{
+  "id": "grounding_claim_nextron_invented_scale",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 2,
+    "draft": {
+      "subject": "private AI at small firms",
+      "body": "Hi Marisol,\n\nA different angle. We've already rolled out private AI at more than 40 small firms across the US, each one running on systems the firm controls.\n\nWould that kind of setup be worth a look?"
+    },
+    "claims": [
+      {
+        "text": "We've already rolled out private AI at more than 40 small firms across the US",
+        "evidence_id": null,
+        "fact": null
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_ai_confidentiality_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-09"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Marisol Delgado, Managing Partner at Delgado Finch: before we let AI near client files, I need to know exactly where the data lives."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "where the data lives",
+        "body": "Hi Marisol,\n\nRead your post about needing to know exactly where client data lives before AI goes near your files.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "your post about needing to know exactly where client data lives before AI goes near your files",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "legal_ai",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "planted_claim",
+    "findings": [
+      {
+        "code": "unsupported_nextron_claim",
+        "span": "We've already rolled out private AI at more than 40 small firms across the US"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "claim:nextron",
+    "segment:law_private_ai",
+    "market:us",
+    "step:2"
+  ]
+}

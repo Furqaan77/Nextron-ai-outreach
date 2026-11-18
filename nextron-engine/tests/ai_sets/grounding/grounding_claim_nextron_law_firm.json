@@ -1,0 +1,120 @@
+{
+  "id": "grounding_claim_nextron_law_firm",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "uk",
+    "step": 3,
+    "draft": {
+      "subject": "a relevant build",
+      "body": "Hi Alison,\n\nOne example of our work: we built an AI legal assistant for research and document help for a law firm, so its lawyers could search their own files privately.\n\nHappy to send more detail by reply. Want me to?"
+    },
+    "claims": [
+      {
+        "text": "we built an AI legal assistant for research and document help for a law firm, so its lawyers could search their own files privately",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "legal_ai",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-07"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Kilbride Moss Solicitors opens a new office in Leeds and launches a commercial property team."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "sra_ai_notice",
+        "version": 1,
+        "wording": "The Solicitors Regulation Authority (SRA) warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your new Leeds office",
+        "body": "Hi Alison,\n\nSaw Kilbride Moss has opened a Leeds office and launched a commercial property team. A new team brings new client files, and new questions about where that data can go.\n\nWe're a 17+ person team of engineers, AI specialists and analysts, based in San Jose.\n\nIs this on your radar?",
+        "claims": [
+          {
+            "text": "Kilbride Moss has opened a Leeds office and launched a commercial property team",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We're a 17+ person team of engineers, AI specialists and analysts, based in San Jose",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "nextron_team",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      },
+      {
+        "step": 2,
+        "subject": "client data and the SRA",
+        "body": "Hi Alison,\n\nA different angle. The SRA warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards.\n\nIs that shaping your plans for AI?",
+        "claims": [
+          {
+            "text": "The SRA warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "sra_ai_notice",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": null
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "planted_claim",
+    "findings": [
+      {
+        "code": "unsupported_nextron_claim",
+        "span": "we built an AI legal assistant for research and document help for a law firm, so its lawyers could search their own files privately"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "claim:nextron",
+    "segment:law_private_ai",
+    "market:uk",
+    "step:3",
+    "variant:law_firm"
+  ]
+}

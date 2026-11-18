@@ -1,0 +1,26 @@
+{
+  "id": "reply_optout_no_thanks_remove_me",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-06",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "No thanks, remove me."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "opt_out_wording"
+  ]
+}

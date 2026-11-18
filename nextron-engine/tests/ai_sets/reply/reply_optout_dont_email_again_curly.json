@@ -1,0 +1,31 @@
+{
+  "id": "reply_optout_dont_email_again_curly",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-22",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your knowledge management hire\n\nHi Helen,\n\nSaw Ashby Kerr is recruiting a knowledge management lawyer. Precedents and client files spread across systems are hard to search without sending data somewhere you don't control.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\". Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Please don’t email me again."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "opt_out_wording"
+  ]
+}

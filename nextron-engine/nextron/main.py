@@ -76,12 +76,17 @@ database, the notification subscriber registry and Uvicorn.
    (``serve(load_test_cases=...)``, ``load_test_cases`` unless injected) outside any unit of
    work, and ``Playbook.sync_test_cases(cases)`` in a unit of work of its own (a unit of work
    runs one use case) right after the prompt sync's. ``load_test_cases(folder=AI_SETS_DIR)``
-   reads every ``extraction/*.json`` file of ``folder`` (``tests/ai_sets`` under the engine
-   root), by name, as strict UTF-8 JSON of at most ``MAX_CASE_FILE_BYTES`` (1 MiB), through
-   ``nextron.domain.ai_test_cases.extraction_case``. A missing folder, an unreadable or
+   reads the four sets' folders of ``folder`` (``tests/ai_sets`` under the engine root) in this
+   order (``CASE_FOLDERS``): every ``extraction/*.json`` file through
+   ``nextron.domain.ai_test_cases.extraction_case`` (Epic 2's fixtures), then every
+   ``reply/``, ``grounding/`` and ``drafting_smoke/`` ``*.json`` file through
+   ``nextron.domain.ai_test_sets.set_case`` (Story 4.6), each folder by file name, each file as
+   strict UTF-8 JSON of at most ``MAX_CASE_FILE_BYTES`` (1 MiB). Every folder is required: a
+   missing one raises ``<set>: the folder doesn't exist``. A missing folder, an unreadable or
    oversized file, a file that isn't JSON and a case of the wrong shape each raise
-   ``InvalidTestCases``, which exits 2, printing ``startup check failed: ai_sets: <message>``
-   and logging ``startup_check_failed`` with ``check=ai_sets``; nothing is stored.
+   ``InvalidTestCases`` naming ``<set>/<file>``, which exits 2, printing ``startup check
+   failed: ai_sets: <message>`` and logging ``startup_check_failed`` with ``check=ai_sets``;
+   nothing is stored.
 8. Uvicorn on 127.0.0.1 with one worker (``--reload`` only in ``dev``) until it stops: exit 0.
    The dashboard's GET handlers read through the unit-of-work factory step 6 returned.
    ``engine_started`` (with ``db_revision``) is logged before it and ``engine_stopped`` (with
@@ -115,9 +120,10 @@ links the survivor lacks); ``SubjectSuppressed`` -> ``Pipeline(clock).close_supp
 stories add them); ``ContactErased`` -> each owner's ``erase_pii`` hook (Story 3.13, AD-17):
 compliance's first (``Erasures(clock, Compliance(clock)).erase_pii``, which reads the Contact
 while it still holds its values), then research's (``Research(clock).erase_pii``, which
-tombstones the Contact last), then the no-op hooks of ``setup``, ``drafting``, ``jobqueue``,
-``ops`` and ``notify``, whose tables never hold a Contact's data. Each uses ``SystemClock()``
-when no clock is given.
+tombstones the Contact last), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
+erases the Contact's override cases, ``erase_override_cases``), then the no-op hooks of
+``setup``, ``drafting``, ``jobqueue``, ``ops`` and ``notify``, whose tables never hold a
+Contact's data. Each uses ``SystemClock()`` when no clock is given.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance)``
 (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the dashboard gets too,
@@ -714,7 +720,8 @@ from nextron.domain.backup import (
 )
 from nextron.domain.ai import RouteSpec
 from nextron.domain.ai_test_cases import InvalidTestCases, TestCase, extraction_case
-from nextron.domain.ai_test_gate import RUN_AI_TEST_SETS_JOB
+from nextron.domain.ai_test_gate import RUN_AI_TEST_SETS_JOB, TestSet
+from nextron.domain.ai_test_sets import set_case
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
 from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
@@ -868,7 +875,12 @@ CAMPAIGNS_FILE_NAME: Final = "campaigns.yaml"
 CAMPAIGNS_FILE_LABEL: Final = "seed/campaigns.yaml"
 MAX_SEED_FILE_BYTES: Final = 1024 * 1024
 AI_SETS_DIR: Final = ENGINE_ROOT / "tests" / "ai_sets"  # Story 4.5: the AI Test Set cases
-EXTRACTION_DIR_NAME: Final = "extraction"
+CASE_FOLDERS: Final = (  # Story 4.6: each set's folder, in load order
+    TestSet.EXTRACTION,
+    TestSet.REPLY,
+    TestSet.GROUNDING,
+    TestSet.DRAFTING_SMOKE,
+)
 CASE_FILE_SUFFIX: Final = ".json"
 MAX_CASE_FILE_BYTES: Final = 1024 * 1024
 SEED_DATABASE_MISSING: Final = (
@@ -1700,6 +1712,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     erasures = Erasures(chosen, Compliance(chosen))
     subscribers.register_subscriber(ContactErased, erasures.erase_pii)
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)
+    # Story 4.6: the Operator's override cases of the Contact (ai_test_cases.input)
+    subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
     for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
     subscribers.freeze()
@@ -1821,28 +1835,37 @@ def load_ai_content(
     return files, defaults, read_playbook_file(playbook_path)
 
 
+def _case_file(path: Path, name: str) -> object:
+    """The JSON of one case file; ``InvalidTestCases`` naming it when it can't be read."""
+    try:
+        with path.open("rb") as file:
+            data = file.read(MAX_CASE_FILE_BYTES + 1)
+    except OSError:
+        raise InvalidTestCases(name, "the file couldn't be read") from None
+    if len(data) > MAX_CASE_FILE_BYTES:
+        raise InvalidTestCases(name, "the file is larger than 1 MiB")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise InvalidTestCases(name, "the file isn't UTF-8 JSON") from None
+
+
 def load_test_cases(folder: Path = AI_SETS_DIR) -> tuple[TestCase, ...]:
-    """The AI Test Set cases of ``folder`` (Story 4.5): every ``extraction/*.json`` file, by
-    name; ``InvalidTestCases`` naming the file for a missing folder or a bad file. File I/O
-    only: it opens no unit of work."""
-    found = folder / EXTRACTION_DIR_NAME
-    if not found.is_dir():
-        raise InvalidTestCases(EXTRACTION_DIR_NAME, "the folder doesn't exist")
+    """The AI Test Set cases of ``folder`` (Stories 4.5 and 4.6): every ``*.json`` file of each
+    set's folder (``CASE_FOLDERS``), by name; ``InvalidTestCases`` naming the folder or the file
+    for a missing folder or a bad file. File I/O only: it opens no unit of work."""
     cases: list[TestCase] = []
-    for path in sorted(found.glob(f"*{CASE_FILE_SUFFIX}")):
-        name = f"{EXTRACTION_DIR_NAME}/{path.name}"
-        try:
-            with path.open("rb") as file:
-                data = file.read(MAX_CASE_FILE_BYTES + 1)
-        except OSError:
-            raise InvalidTestCases(name, "the file couldn't be read") from None
-        if len(data) > MAX_CASE_FILE_BYTES:
-            raise InvalidTestCases(name, "the file is larger than 1 MiB")
-        try:
-            parsed = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, RecursionError):
-            raise InvalidTestCases(name, "the file isn't UTF-8 JSON") from None
-        cases.append(extraction_case(path.name, parsed))
+    for test_set in CASE_FOLDERS:
+        found = folder / test_set.value
+        if not found.is_dir():
+            raise InvalidTestCases(test_set.value, "the folder doesn't exist")
+        for path in sorted(found.glob(f"*{CASE_FILE_SUFFIX}")):
+            name = f"{test_set.value}/{path.name}"
+            parsed = _case_file(path, name)
+            if test_set is TestSet.EXTRACTION:
+                cases.append(extraction_case(name, parsed))  # its stem is the file's stem
+            else:
+                cases.append(set_case(test_set, path.name, parsed))
     return tuple(cases)
 
 

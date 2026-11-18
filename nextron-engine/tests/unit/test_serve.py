@@ -11,6 +11,7 @@ import shutil
 import signal
 import sqlite3
 import zoneinfo
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +26,7 @@ from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.notify import api as notify_api
 from nextron.app.ops import api as ops_api
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
 from nextron.app.setup import api as setup_api
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
@@ -35,6 +37,7 @@ from nextron.db.uow import UnitOfWorkError, UnitOfWorkFactory, current, is_comma
 from nextron.domain.backup import BackupKind, BackupNotVerified
 from nextron.domain.ai import RouteSpec
 from nextron.domain.ai_test_cases import InvalidTestCases, TestCase
+from nextron.domain.ai_test_gate import TestSet
 from nextron.domain.notifications import (
     NOTIFICATIONS,
     ContactErased,
@@ -787,9 +790,10 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
     assert all(is_command(subscriber) for subscriber in erased)
     assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
-    compliance, research, *rest = erased
+    compliance, research, playbook, *rest = erased
     assert type(getattr(compliance, "__self__", None)) is Erasures  # compliance first
     assert type(getattr(research, "__self__", None)) is Research  # then research
+    assert type(getattr(playbook, "__self__", None)) is Playbook  # Story 4.6's override cases
     assert rest == [
         setup_api.erase_pii,
         drafting_api.erase_pii,
@@ -809,11 +813,11 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     found = [
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
-        *subscribers.subscribers_of(ContactErased)[:2],  # the rest are module functions
+        *subscribers.subscribers_of(ContactErased)[:3],  # the rest are module functions
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 5
+    assert clocks == [clock] * 6
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 
@@ -866,7 +870,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0034_more", create_table("more")))
+    extend(location, ("0035_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -880,7 +884,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0034_more"
+    assert spy.calls[0]["db_revision"] == "0035_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade
@@ -1432,22 +1436,33 @@ def cases_of(folder: Path) -> main.TestCaseLoader:
     return lambda: main.load_test_cases(folder)
 
 
-def test_a_first_start_stores_the_extraction_fixtures(dev: Path) -> None:
+def test_a_first_start_stores_the_four_sets_as_fixtures(dev: Path) -> None:
     cases = main.load_test_cases()
 
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
     assert case_rows(dev / "nextron.db") == sorted(
-        (case.case_key, "extraction", case.route, case.sha256, None) for case in cases
+        (case.case_key, case.test_set.value, case.route, case.sha256, None) for case in cases
     )
-    assert len(cases) == 11
+    counts = Counter(case.test_set for case in cases)
+    assert counts[TestSet.EXTRACTION] == 11
+    assert counts[TestSet.REPLY] >= 50 and counts[TestSet.GROUNDING] >= 30
+    assert counts[TestSet.DRAFTING_SMOKE] >= 10
+    reader = sqlite3.connect(f"{(dev / 'nextron.db').as_uri()}?mode=ro", uri=True)
+    try:
+        origins = reader.execute(
+            "SELECT DISTINCT origin, contact_id FROM ai_test_cases"
+        ).fetchall()
+    finally:
+        reader.close()
+    assert origins == [("fixture", None)]
     lines = log_lines(dev)
     logged = [line["event"] for line in lines]
     assert logged.index("prompts_synced") < logged.index("test_cases_synced")
     assert logged.index("test_cases_synced") < logged.index("engine_started")
     [synced] = [line for line in lines if line["event"] == "test_cases_synced"]
-    assert (synced["added_count"], synced["unchanged_count"]) == (11, 0)
+    assert (synced["added_count"], synced["unchanged_count"]) == (len(cases), 0)
 
 
 def test_an_edited_fixture_retires_its_old_row_at_the_next_start(
@@ -1489,11 +1504,30 @@ def test_an_edited_fixture_retires_its_old_row_at_the_next_start(
                 .replace('"injection": null', '"injection": "other"'),
                 encoding="utf-8",
             ),
-            "ops_inbox_job_ad.json: injection must be null or one of",
+            "extraction/ops_inbox_job_ad.json: injection must be null or one of",
         ),
         (
             lambda folder: shutil.rmtree(folder / "extraction"),
             "extraction: the folder doesn't exist",
+        ),
+        (  # Story 4.6: every set's folder is required, and each file is checked at load
+            lambda folder: shutil.rmtree(folder / "grounding"),
+            "grounding: the folder doesn't exist",
+        ),
+        (
+            lambda folder: (folder / "reply" / "reply_optout_take_me_off.json").write_text(
+                "{not json", encoding="utf-8"
+            ),
+            "reply/reply_optout_take_me_off.json: the file isn't UTF-8 JSON",
+        ),
+        (
+            lambda folder: (folder / "reply" / "reply_optout_take_me_off.json").write_text(
+                (folder / "reply" / "reply_optout_take_me_off.json")
+                .read_text(encoding="utf-8")
+                .replace('"id": "r1"', '"id": "bad id!"'),
+                encoding="utf-8",
+            ),
+            "reply/reply_optout_take_me_off.json: input.blocks[0].id must match",
         ),
     ],
 )
@@ -1541,7 +1575,8 @@ def test_load_test_cases_names_the_file_and_the_field_never_the_text(tmp_path: P
         main.load_test_cases(folder)
 
     assert raised.value.message == (
-        "law_inbox_confidentiality_post.json: blocks[0].source must be a non-empty string"
+        "extraction/law_inbox_confidentiality_post.json: blocks[0].source must be a non-empty "
+        "string"
     )
     assert secret not in str(raised.value)
     path.write_bytes(b" " * (main.MAX_CASE_FILE_BYTES + 1))
@@ -1549,13 +1584,44 @@ def test_load_test_cases_names_the_file_and_the_field_never_the_text(tmp_path: P
         main.load_test_cases(folder)
 
 
-def test_load_test_cases_reads_every_extraction_file_by_name() -> None:
+def test_load_test_cases_reads_every_file_of_each_set_by_name() -> None:
     cases = main.load_test_cases()
 
-    files = sorted(path.stem for path in (main.AI_SETS_DIR / "extraction").glob("*.json"))
-    assert [case.case_key for case in cases] == files
+    files = [
+        (test_set, path.stem)
+        for test_set in main.CASE_FOLDERS
+        for path in sorted((main.AI_SETS_DIR / test_set.value).glob("*.json"))
+    ]
+    assert [(case.test_set, case.case_key) for case in cases] == files
+    assert main.CASE_FOLDERS == (
+        TestSet.EXTRACTION,
+        TestSet.REPLY,
+        TestSet.GROUNDING,
+        TestSet.DRAFTING_SMOKE,
+    )
     assert {case.route for case in cases} == {
         "extract_signals",
         "extract_people",
         "signal_inbox_parse",
+        "classify_reply",
+        "grounding_check",
+        "draft_sequence",
     }
+
+
+def test_load_test_cases_names_a_new_sets_file_and_path_never_the_text(tmp_path: Path) -> None:
+    folder = tmp_path / "ai_sets"
+    shutil.copytree(main.AI_SETS_DIR, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    path = folder / "reply" / "reply_optout_take_me_off.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    secret = data["input"]["blocks"][0]["text"]
+    data["expected"]["reply_class"] = "maybe"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(InvalidTestCases) as raised:
+        main.load_test_cases(folder)
+
+    assert raised.value.message.startswith(
+        "reply/reply_optout_take_me_off.json: expected.reply_class must be one of"
+    )
+    assert secret not in str(raised.value)

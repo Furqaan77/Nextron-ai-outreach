@@ -1,0 +1,77 @@
+{
+  "id": "drafting_ops_uk_newer_of_two_expansions",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "lead_name": "Larkfield Distribution Ltd",
+    "contact": {
+      "name": "Gareth Hughes",
+      "role": "CEO"
+    },
+    "angle_note": "Mention the acquisition; keep it under 60 words.",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": "2026-07-21"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e3",
+        "observed_on": null
+      },
+      {
+        "id": "s3",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-09"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Larkfield Distribution acquires Brannock Ltd, a cleaning-supplies wholesaler in Wakefield."
+      },
+      {
+        "id": "e2",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Larkfield Distribution opens a trade counter in Huddersfield."
+      },
+      {
+        "id": "e3",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Advanced Excel skills essential."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s3"
+  },
+  "covers": [
+    "segment:ops_automation",
+    "market:uk"
+  ]
+}

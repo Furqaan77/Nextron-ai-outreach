@@ -1,0 +1,26 @@
+{
+  "id": "reply_objection_send_information",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-14",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Send me some information and I'll take a look when I get a chance."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "objection",
+    "objection_type": "send_information",
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:objection",
+    "objection:send_information"
+  ]
+}

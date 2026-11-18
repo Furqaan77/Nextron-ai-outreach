@@ -1,0 +1,25 @@
+{
+  "id": "reply_not_now_busy_season",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-08-20",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Can't take on anything new while our busy season is on. Maybe later in the year."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_now",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:not_now"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "id": "reply_not_interested_not_for_us",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-09",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Not for us, thanks."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:not_interested"
+  ]
+}

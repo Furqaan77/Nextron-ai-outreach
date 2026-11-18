@@ -1,0 +1,26 @@
+{
+  "id": "reply_ooo_annual_leave",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-18",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Thank you for your email. I am on annual leave and will return on 30 November 2026. If your message is urgent, please call the office on 0161 496 0215."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "out_of_office",
+    "objection_type": null,
+    "return_date": "2026-11-30",
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:out_of_office",
+    "return_date"
+  ]
+}

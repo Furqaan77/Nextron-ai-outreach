@@ -56,8 +56,13 @@ tables is ever updated or deleted.
 (``ck_ai_test_cases_test_set``: one of the four ``TestSet`` values), ``route``, the canonical
 JSON ``input``, ``expected`` and ``covers``, the case's ``sha256`` (``ck_ai_test_cases_sha256``),
 ``loaded_at`` and ``retired_at`` (NULL while the case is live). The partial unique index
-``uq_ai_test_cases_live_key`` keeps one live case per ``(test_set, case_key)``. A row is never
-deleted, and only ``retired_at`` is ever set.
+``uq_ai_test_cases_live_key`` keeps one live case per ``(test_set, case_key)``. Story 4.6
+(migration ``0034_4_6_ai_test_sets``, which rebuilds the table) adds ``origin`` (server default
+``fixture``: a file under ``tests/ai_sets``; or ``override``, an Operator's pseudonymised Reply
+class override) and a nullable ``contact_id`` (no foreign key: the Contact an override came
+from); ``ck_ai_test_cases_origin_contact`` gives an override row a Contact and a fixture row
+none. A row is never deleted; only ``retired_at`` is ever set, and an override row's ``input``
+becomes ``[erased]`` when its Contact is erased (AD-17).
 
 ``ai_test_runs`` (Story 4.5) holds every run of a tuple's AI Test Set, written only by
 ``nextron.db.repos.playbook.test_runs``: the ``tuple_id`` (a foreign key to
@@ -66,7 +71,10 @@ deleted, and only ``retired_at`` is ever set.
 ``ck_ai_test_runs_error_when_failed``: only a failed run has one), ``case_count`` and
 ``passed_count`` (``ck_ai_test_runs_counts``, with ``cost_micros``), the canonical JSON
 ``metrics`` and ``results``, ``cost_micros``, ``started_at`` and ``finished_at``; indexed by
-``(tuple_id, test_set)``. A row is never updated or deleted.
+``(tuple_id, test_set)``. Story 4.6 (migration ``0034_4_6_ai_test_sets``, which rebuilds the
+table) adds a nullable ``cases_sha256`` (``ck_ai_test_runs_cases_sha256``): the fingerprint of
+the live cases the run measured, NULL only on a run stored before it. A row is never updated or
+deleted.
 
 ``company_facts`` holds the Approved Company Facts (FR-72, Story 4.3) as append-only versions,
 written only by ``nextron.db.repos.playbook.company_facts`` (migration
@@ -115,6 +123,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.ai import Effort
+from nextron.domain.ai_test_cases import CaseOrigin
 from nextron.domain.ai_test_gate import RunError, RunOutcome, TestSet
 from nextron.domain.playbook import PlaybookProblem, SyncTrigger
 
@@ -172,6 +181,15 @@ RUN_COUNTS_CHECK: Final = (
     "AND cost_micros >= 0"
 )
 LIVE_WHERE: Final = "retired_at IS NULL"
+ORIGIN_LENGTH: Final = 8
+ORIGIN_CONTACT_CHECK: Final = (
+    f"(origin = '{CaseOrigin.FIXTURE}' AND contact_id IS NULL) "
+    f"OR (origin = '{CaseOrigin.OVERRIDE}' AND contact_id IS NOT NULL)"
+)
+CASES_SHA256_CHECK: Final = (
+    "cases_sha256 IS NULL OR "
+    "(length(cases_sha256) = 64 AND cases_sha256 NOT GLOB '*[^0-9a-f]*')"
+)
 
 FACT_ID_LENGTH: Final = 31  # nextron.domain.company_facts.FACT_ID_PATTERN
 FACT_TYPE_LENGTH: Final = 16  # company, case_study, offer, regulation, statistic
@@ -336,6 +354,7 @@ class AiTestCaseRecord(Base):
         ),
         CheckConstraint(TEST_SET_CHECK, name="test_set"),
         CheckConstraint(SHA256_CHECK, name="sha256"),
+        CheckConstraint(ORIGIN_CONTACT_CHECK, name="origin_contact"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -348,6 +367,10 @@ class AiTestCaseRecord(Base):
     sha256: Mapped[str] = mapped_column(String(SHA256_LENGTH))
     loaded_at: Mapped[datetime] = mapped_column(UtcDateTime)
     retired_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    origin: Mapped[str] = mapped_column(
+        String(ORIGIN_LENGTH), server_default=text(f"'{CaseOrigin.FIXTURE}'")
+    )
+    contact_id: Mapped[str | None] = mapped_column(Ulid)
 
 
 class AiTestRunRecord(Base):
@@ -361,6 +384,7 @@ class AiTestRunRecord(Base):
         CheckConstraint(RUN_ERROR_CHECK, name="error"),
         CheckConstraint(ERROR_WHEN_FAILED_CHECK, name="error_when_failed"),
         CheckConstraint(RUN_COUNTS_CHECK, name="counts"),
+        CheckConstraint(CASES_SHA256_CHECK, name="cases_sha256"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -375,6 +399,7 @@ class AiTestRunRecord(Base):
     cost_micros: Mapped[int] = mapped_column(Integer)
     started_at: Mapped[datetime] = mapped_column(UtcDateTime)
     finished_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    cases_sha256: Mapped[str | None] = mapped_column(String(SHA256_LENGTH))
 
 
 class CompanyFactRecord(Base):

@@ -1,0 +1,31 @@
+{
+  "id": "reply_referral_no_role_may_name",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-05",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "I'm not the right person for this. Try Ellen Achebe - ellen.achebe@hartwell-solicitors.example.co.uk. Happy for you to say I suggested it."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "referral",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": {
+      "name": "Ellen Achebe",
+      "role": null,
+      "email": "ellen.achebe@hartwell-solicitors.example.co.uk",
+      "referrer_may_be_named": true
+    }
+  },
+  "covers": [
+    "class:referral",
+    "referral:may_name"
+  ]
+}

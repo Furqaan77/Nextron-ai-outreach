@@ -1,0 +1,105 @@
+{
+  "id": "grounding_just_following_up_ops",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "step": 2,
+    "draft": {
+      "subject": "orders and invoicing",
+      "body": "Hi Ian,\n\nI'm just following up in case my last email got buried. We built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWould cutting the double entry be useful this year?"
+    },
+    "claims": [
+      {
+        "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "mp_online_digital",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_rekeying_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-03"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Ian Booth, Operations Director at Wetherby Cold Store: our team re-keys every customer order from email into the WMS, then again into Sage for invoicing."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "keying orders twice",
+        "body": "Hi Ian,\n\nRead your post about re-keying each customer order from email into the WMS and again into Sage. Typing the same order twice tends to grow with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIs this on your radar?",
+        "claims": [
+          {
+            "text": "your post about re-keying each customer order from email into the WMS and again into Sage",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "wish_wheels",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "just_following_up",
+        "span": "I'm just following up in case my last email got buried."
+      }
+    ],
+    "rules": [
+      "banned_phrase"
+    ]
+  },
+  "covers": [
+    "pattern:just_following_up",
+    "segment:ops_automation",
+    "market:uk",
+    "step:2"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "reply_unsubscribe_firm_wide_whole_company",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-04",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Take our whole company off your list, please. That goes for every address at Kestrel Logistics.\n\nRaj Patel\nCOO"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "firm_wide"
+  ]
+}

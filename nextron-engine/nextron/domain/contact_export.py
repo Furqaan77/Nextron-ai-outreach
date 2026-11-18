@@ -23,6 +23,7 @@ Table                      Owner        Exported as / why not
 ``data_subject_requests``  compliance   ``requests``
 ``alerts``                 notify       ``alerts``
 ``notifications``          notify       ``notifications``
+``ai_test_cases``          playbook     ``override_cases`` (Story 4.6's override cases)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``jobs``                   jobqueue     never linked to a Contact
@@ -166,6 +167,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "data_subject_requests": Exported("compliance", "requests"),
         "alerts": Exported("notify", "alerts"),
         "notifications": Exported("notify", "notifications"),
+        "ai_test_cases": Exported("playbook", "override_cases"),
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

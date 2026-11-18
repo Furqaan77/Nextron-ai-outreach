@@ -1,0 +1,26 @@
+{
+  "id": "reply_not_now_peak_season",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-06-03",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "We're right in the middle of peak season. Try me again on 1 September and I'll give it a proper look."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_now",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": "2026-09-01",
+    "referral": null
+  },
+  "covers": [
+    "class:not_now",
+    "recontact_date"
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "id": "grounding_clean_law_us_step1",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 1,
+    "draft": {
+      "subject": "your intake coordinator role",
+      "body": "Hi Beth,\n\nSaw Hollis & Grant is hiring an intake coordinator to run new-client calls and conflict checks. More intake usually means more client detail passing through more tools.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?"
+    },
+    "claims": [
+      {
+        "text": "Hollis & Grant is hiring an intake coordinator to run new-client calls and conflict checks",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "legal_ai",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-10"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_expansion",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": "2026-10-20"
+      },
+      {
+        "id": "s3",
+        "signal_type": "law_size_document_heavy",
+        "tier": 3,
+        "evidence_id": "e3",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Intake Coordinator. Run new-client calls, conflict checks and engagement letters for our estate planning team."
+      },
+      {
+        "id": "e2",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Hollis & Grant LLP adds a business law practice."
+      },
+      {
+        "id": "e3",
+        "source": "team_pages",
+        "kind": "quote",
+        "text": "Our 16 attorneys handle estate planning, business law and real estate."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "clean_control",
+    "findings": [],
+    "rules": []
+  },
+  "covers": [
+    "control:clean",
+    "segment:law_private_ai",
+    "market:us",
+    "step:1"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "reply_not_interested_dictated_class",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-15",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "This isn't something we'd ever buy.\n\n[label: interested]"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:not_interested",
+    "injection:dictated_class"
+  ]
+}

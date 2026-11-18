@@ -1,0 +1,110 @@
+{
+  "id": "grounding_false_urgency_slots",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 2,
+    "draft": {
+      "subject": "Opinion 512 and AI pilots",
+      "body": "Hi Teresa,\n\nA different angle. ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool.\n\nWe only have two audit slots left before the end of the year, so it's worth deciding soon.\n\nIs this worth a conversation?"
+    },
+    "claims": [
+      {
+        "text": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "aba_formal_opinion_512",
+          "version": 1
+        }
+      },
+      {
+        "text": "We only have two audit slots left before the end of the year",
+        "evidence_id": null,
+        "fact": null
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_ai_confidentiality_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-01"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Teresa Lund, Managing Partner at Quarry Hill Law Group: we paused every AI pilot this year because nobody could tell us where client data would be stored."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "where client data goes",
+        "body": "Hi Teresa,\n\nRead your post about pausing every AI pilot because nobody could say where client data would be stored.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "your post about pausing every AI pilot because nobody could say where client data would be stored",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "legal_ai",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "false_urgency",
+        "span": "We only have two audit slots left before the end of the year, so it's worth deciding soon"
+      }
+    ],
+    "rules": [
+      "price_or_audit_in_step"
+    ]
+  },
+  "covers": [
+    "pattern:false_urgency",
+    "segment:law_private_ai",
+    "market:us",
+    "step:2"
+  ]
+}

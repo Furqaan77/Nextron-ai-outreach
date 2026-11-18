@@ -1,0 +1,25 @@
+{
+  "id": "reply_data_question_how_details",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-05",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "How did you get my details? I don't remember ever signing up for anything from you."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "data_question",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:data_question"
+  ]
+}

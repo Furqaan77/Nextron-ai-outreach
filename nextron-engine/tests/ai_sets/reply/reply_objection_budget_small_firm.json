@@ -1,0 +1,26 @@
+{
+  "id": "reply_objection_budget_small_firm",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-08",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Sounds clever, but we're an eight-lawyer firm and there's simply nothing in the budget for custom software."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "objection",
+    "objection_type": "no_budget",
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:objection",
+    "objection:no_budget"
+  ]
+}

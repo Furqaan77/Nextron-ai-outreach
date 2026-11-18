@@ -1,0 +1,121 @@
+{
+  "id": "grounding_attachment_see_the_pdf",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 3,
+    "draft": {
+      "subject": "a short case study",
+      "body": "Hi Grace,\n\nA bit more about who we are: a 17+ person team of engineers, AI specialists and analysts, based in San Jose. See the PDF for a summary of how we run private AI projects.\n\nWant me to send anything else by reply?"
+    },
+    "claims": [
+      {
+        "text": "a 17+ person team of engineers, AI specialists and analysts, based in San Jose",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "nextron_team",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-14"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Linwood Marsh LLP adds an employment law practice and two new partners."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your new employment practice",
+        "body": "Hi Grace,\n\nSaw Linwood Marsh has added an employment law practice and two partners. A new practice brings new client files, and new questions about where that data goes.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "Linwood Marsh has added an employment law practice and two partners",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "legal_ai",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      },
+      {
+        "step": 2,
+        "subject": "Opinion 512 and client data",
+        "body": "Hi Grace,\n\nA different angle. ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool.\n\nIs that shaping how Linwood Marsh uses AI?",
+        "claims": [
+          {
+            "text": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "aba_formal_opinion_512",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": null
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "attachment",
+        "span": "See the PDF for a summary of how we run private AI projects."
+      }
+    ],
+    "rules": [
+      "attachment"
+    ]
+  },
+  "covers": [
+    "pattern:attachment",
+    "segment:law_private_ai",
+    "market:us",
+    "step:3"
+  ]
+}

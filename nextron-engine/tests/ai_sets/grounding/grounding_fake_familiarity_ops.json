@@ -1,0 +1,91 @@
+{
+  "id": "grounding_fake_familiarity_ops",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "step": 1,
+    "draft": {
+      "subject": "your dispatcher opening",
+      "body": "Hi Luis,\n\nGreat to meet you at the Midwest Freight Expo last month. Since then I noticed Cobalt Ridge is hiring a dispatcher to take load requests by email and enter each one into your TMS.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?"
+    },
+    "claims": [
+      {
+        "text": "Great to meet you at the Midwest Freight Expo last month",
+        "evidence_id": null,
+        "fact": null
+      },
+      {
+        "text": "Cobalt Ridge is hiring a dispatcher to take load requests by email and enter each one into your TMS",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "mp_online_digital",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-08"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Dispatcher (days). Take load requests by phone and email, build routes and enter each load into our TMS."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "fake_familiarity",
+        "span": "Great to meet you at the Midwest Freight Expo last month"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "pattern:fake_familiarity",
+    "segment:ops_automation",
+    "market:us",
+    "step:1"
+  ]
+}

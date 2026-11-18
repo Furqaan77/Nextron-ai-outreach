@@ -28,6 +28,7 @@ from nextron.app.compliance.erasure import ERASURE_INCOMPLETE, ErasureResult, Er
 from nextron.app.discovery.api import Discovery
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.playbook.api import Playbook
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import research as research_queries
@@ -79,6 +80,7 @@ VALUE = "Plantvalue practice"
 PAGE_TEXT = "Plantpage: meet Jane, our partner. Call 0161 496 0000."
 MATCHED = "Plantmatch 0161 496 0000"
 VOID_REASON = "Plantvoid: Jane wrote back to say yes"
+OVERRIDE = "Plantreply: Jane asks what the audit costs."  # Story 4.6's override case
 ADDRESS = key_hash("address", EMAIL)
 PERSON = key_hash("person", (NAME, WEB))
 PROFILE = key_hash("profile", LINKEDIN)
@@ -338,7 +340,8 @@ class Planted:
 
 def plant(world: World) -> Planted:
     """Jane with every value set, her Provenance (notes too), her Evidence, the Lead's page and
-    a merged Lead's page, a voided entry on each of her keys, and Bob, another Contact."""
+    a merged Lead's page, a voided entry on each of her keys, an override case made from her
+    Reply (Story 4.6), and Bob, another Contact."""
     lead_id = world.lead()
     contact_id = world.contact(
         lead_id,
@@ -369,6 +372,11 @@ def plant(world: World) -> Planted:
         world.voided(entry_id, kind, value_hash)
     # a "remove us" on the firm's domain, voided with a reason that names the person
     world.voided("01JD3QZ8X5V9K2M7N4P6R8T0A4", "domain", DOMAIN, domain_plain=WEB)
+    world.transact(
+        lambda: Playbook(world.clock).add_override_case(
+            OVERRIDE, "question", contact_id=contact_id, names=(NAME,)
+        )
+    )
     return Planted(
         lead_id,
         contact_id,
@@ -532,6 +540,7 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("crawled_pages", "text"),
         ("page_contact_methods", "matched"),
         ("suppression_entries", "void_reason"),
+        ("ai_test_cases", "input"),  # Story 4.6: playbook's hook erases it
     }
     not_planted = {
         (table, column)
@@ -772,6 +781,44 @@ def test_a_retention_erasure_tombstones_with_no_entry_and_no_request(world: Worl
     assert world.requests() == []
     assert world.events("contacts")[-1][3:7] == ("erased", "retention", None, "system:research")
     assert world.events("data_subject_requests", "suppression_entries") == []
+
+
+OVERRIDE_COLUMNS = "contact_id, input, retired_at"
+
+
+def override_rows(world: World) -> dict[str, tuple[Any, ...]]:
+    """Each override case's ``input`` and ``retired_at``, by its Contact."""
+    rows = world.sql(f"SELECT {OVERRIDE_COLUMNS} FROM ai_test_cases WHERE origin = 'override'")
+    return {contact_id: (text, retired_at) for contact_id, text, retired_at in rows}
+
+
+@pytest.mark.parametrize("cause", ["dsr", "retention"])
+def test_an_erasure_redacts_and_retires_the_contacts_override_cases(
+    world: World, cause: str
+) -> None:
+    """Story 4.6's override cases (``ai_test_cases.input``, PII ``redact``) are reached through
+    playbook's ``ContactErased`` hook, by a data subject request and a retention erasure alike;
+    another Contact's case is left as it was."""
+    planted = plant(world)
+    [(bob,)] = world.sql("SELECT id FROM contacts WHERE name = 'Bob Other'")
+    world.transact(
+        lambda: Playbook(world.clock).add_override_case(
+            "Bob here: not now, try us in spring.", "not_now", contact_id=bob
+        )
+    )
+    before = override_rows(world)
+    assert set(before) == {planted.contact_id, bob}
+    assert MARK in before[planted.contact_id][0].lower() and before[bob][1] is None
+
+    if cause == "dsr":
+        world.erase(planted.contact_id)
+    else:
+        world.erase_in(planted.contact_id, None, "retention")
+
+    # Jane's case: [erased] and retired now; Bob's: still live, its text kept
+    assert override_rows(world) == {planted.contact_id: (REDACTED, STAMP), bob: before[bob]}
+    # no row is deleted: both cases are still stored
+    assert world.sql("SELECT COUNT(*) FROM ai_test_cases WHERE origin = 'override'") == [(2,)]
 
 
 def test_a_retention_erasure_takes_no_reference(world: World) -> None:

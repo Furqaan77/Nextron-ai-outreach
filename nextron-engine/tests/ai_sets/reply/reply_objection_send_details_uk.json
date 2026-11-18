@@ -1,0 +1,36 @@
+{
+  "id": "reply_objection_send_details_uk",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-06",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your knowledge management hire\n\nHi Helen,\n\nSaw Ashby Kerr is recruiting a knowledge management lawyer. Precedents and client files spread across systems are hard to search without sending data somewhere you don't control.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\". Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "s2",
+        "source": "sent_email",
+        "text": "Subject: client data and the SRA\n\nHi Helen,\n\nA different angle. The SRA warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards.\n\nIs putting those safeguards in place something Ashby Kerr is working through?\n\nSam\nNextron AI"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Happy to look at some details, but please send them over by email rather than booking anything in."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "objection",
+    "objection_type": "send_information",
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:objection",
+    "objection:send_information"
+  ]
+}

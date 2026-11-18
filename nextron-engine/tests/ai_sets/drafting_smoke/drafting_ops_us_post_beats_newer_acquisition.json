@@ -1,0 +1,64 @@
+{
+  "id": "drafting_ops_us_post_beats_newer_acquisition",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "lead_name": "Sutter Valley Packaging",
+    "contact": {
+      "name": "Lorraine Tate",
+      "role": "Owner"
+    },
+    "angle_note": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": "2026-11-16"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_rekeying_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-19"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Lorraine Tate, owner of Sutter Valley Packaging: our office team retypes every PO from email into the ERP. It's the worst part of the week."
+      },
+      {
+        "id": "e2",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Sutter Valley Packaging acquires a corrugated box plant in Stockton."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s2"
+  },
+  "covers": [
+    "segment:ops_automation",
+    "market:us"
+  ]
+}

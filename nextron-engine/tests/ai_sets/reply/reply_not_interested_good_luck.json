@@ -1,0 +1,30 @@
+{
+  "id": "reply_not_interested_good_luck",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-17",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your intake coordinator role\n\nHi Dana,\n\nSaw Brightwell Law is hiring an intake coordinator. More intake usually means more client detail moving through more tools, and more questions about where it ends up.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?\n\nSam\nNextron AI\n\nNot relevant? Reply \"no\" and I won't write again."
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Appreciate the note, but we're not interested. Good luck with it."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:not_interested"
+  ]
+}
