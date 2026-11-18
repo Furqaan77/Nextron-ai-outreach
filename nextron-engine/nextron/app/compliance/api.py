@@ -82,7 +82,9 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
 
   1. a token record for ``om.id`` raises ``TokenAlreadyIssued`` ("token already issued for this
      message") before any keyring read;
-  2. the kid is ``queries.setup.get(Key.UNSUB_ACTIVE_KID)``;
+  2. the kid is ``nextron.app.compliance.unsub_kid.active_unsub_kid()``, the
+     ``unsub_active_kid`` setting (read there, so this module reads no setting: Eligibility,
+     below, must never depend on one);
   3. ``issued_at`` is the clock's now, at whole seconds;
   4. ``codec.encode(kid, addr_hash_of(om.to_address), <issued_at as Unix seconds>)`` (two
      local Credential Manager reads), then one ``unsub_tokens`` row (``token_hash`` of the
@@ -131,6 +133,33 @@ inside a caller's transaction and in a read-only unit of work alike. Callers rea
    queries.compliance.active_keys(lookup_keys(facts)))``: ``Blocked(reasons)`` or
    ``Allowed()``. Nothing is written, cached or logged, and a ``Blocked`` answer is returned,
    never raised, so a caller's transaction stays usable.
+
+**Live Eligibility (FR-18, FR-2, FR-63, AD-16, NFR-7, Story 3.6).** ``Compliance(clock)
+.evaluate_eligibility(contact_id) -> Decision`` answers whether a stored Contact may lawfully
+receive cold email at the clock's now. It is a plain method, not a ``@command``: it only reads,
+so it runs in a read-only unit of work (the Lead page renders it) and inside a caller's
+transaction alike. Every consumer (the Lead page; Enrollment, Story 4.8; the send gate, 6.9)
+calls it, and it is the only caller of ``nextron.domain.eligibility.evaluate``.
+
+1. **Reads.** The Contact (``queries.research.contact``; unknown, a non-ULID id included:
+   ``LookupError``), its Lead (``queries.discovery.lead``) and the Lead's stage
+   (``queries.pipeline.stage``).
+2. **The gate.** ``assert_contactable(ContactSubject(contact_id), "email", "cold")``, looked up
+   in this module's namespace at call time, so a recording fake of
+   ``compliance_api.assert_contactable`` sees the call. A merged Lead raises its
+   ``ValueError``.
+3. **The Markets.** ``queries.setup.markets()`` as a read-only ``{id: definition}``; a stored
+   Market that no longer decodes (``InvalidMarkets``) makes the rules ``None``, which fails
+   closed with ``no_enabled_market``.
+4. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code,
+   stage), market_rules, clock.now())``. No Enrollment history, Event times, legal form or
+   re-contact date is read yet (Stories 4.8, 2.9, 2.12 and Epic 7 pass them), so ``history``
+   and ``events_first_seen`` are empty, ``legal_form`` is ``None`` (every UK Contact fails
+   with ``uk_legal_form_unconfirmed``) and ``recontact_on`` is ``None`` (every ``not_now`` Lead
+   fails with ``not_now_undated``).
+
+Nothing is written, cached or logged: each call reads the current facts again, so an edit to a
+Market, a suppression or a stage change shows in the very next Decision.
 """
 
 from collections.abc import Iterable, Mapping
@@ -139,6 +168,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Final, Protocol
 
+from nextron.app.compliance.unsub_kid import active_unsub_kid
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import pipeline as pipeline_queries
@@ -172,9 +202,10 @@ from nextron.domain.contactability import (
     purpose_of,
     suppression_key,
 )
+from nextron.domain.eligibility import Decision, EligibilityContact, EligibilityLead, evaluate
 from nextron.domain.ids import is_ulid
+from nextron.domain.markets import InvalidMarkets, MarketDef
 from nextron.domain.notifications import SubjectSuppressed
-from nextron.domain.settings_schema import Key
 from nextron.domain.suppression_entry import (
     CREATION,
     OPT_OUT_SOURCES,
@@ -271,6 +302,16 @@ class OutboundAddress(Protocol):
 
     @property
     def to_address(self) -> str: ...
+
+
+def _market_rules() -> Mapping[str, MarketDef] | None:
+    """Every stored Market's row id to its current definition, read-only; ``None`` when a
+    stored Market no longer decodes (Eligibility then fails closed)."""
+    try:
+        stored = setup_queries.markets()
+    except InvalidMarkets:
+        return None
+    return MappingProxyType({market.id: market.definition for market in stored})
 
 
 def _unique(keys: tuple[SuppressionKey, ...]) -> tuple[SuppressionKey, ...]:
@@ -497,7 +538,7 @@ class Compliance:
             raise TypeError(f"issue_unsub_token: to_address is a str, not {type(address).__name__}")
         if unsub_tokens_repo.for_om(om_id) is not None:
             raise TokenAlreadyIssued()
-        kid = setup_queries.get(Key.UNSUB_ACTIVE_KID)
+        kid = active_unsub_kid()
         issued_at = self._clock.now().replace(microsecond=0)
         token = self._codec.encode(kid, addr_hash_of(address), int(issued_at.timestamp()))
         unsub_tokens_repo.insert(
@@ -538,6 +579,34 @@ class Compliance:
         """Reverse a rule-matched opt-out; see ``reverse_optout``."""
         with current().transaction():
             return self.reverse_optout(entry_id, reason)
+
+    def evaluate_eligibility(self, contact_id: str) -> Decision:
+        """The stored Contact's live cold-email Eligibility; see the module docstring."""
+        contact = research_queries.contact(contact_id)
+        if contact is None:
+            raise LookupError("evaluate_eligibility: the Contact is unknown")
+        lead = discovery_queries.lead(contact.lead_id)
+        if lead is None:
+            raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
+        stage = pipeline_queries.stage(lead.id)
+        if stage is None:  # the Lead was just read, so its stage is there
+            raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
+        # a global looked up at call time: a fake of compliance_api.assert_contactable sees it
+        contactable = assert_contactable(ContactSubject(contact.id), "email", "cold")
+        return evaluate(
+            EligibilityContact(
+                email=contact.email,
+                address_class=contact.address_class,
+                market_id=contact.market_id,
+                market_basis=contact.market_basis,
+                office_country=contact.office_country,
+                office_region=contact.office_region,
+                contactable=contactable,
+            ),
+            EligibilityLead(country_code=lead.country_code, stage=stage),
+            _market_rules(),
+            self._clock.now(),
+        )
 
 
 # The contactability gate ------------------------------------------------------------------------

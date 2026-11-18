@@ -158,7 +158,8 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts``,
   ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
-  Evidence and the headquarters zone).
+  Evidence and the headquarters zone), with each Contact's live Eligibility from
+  ``compliance.evaluate_eligibility`` (Story 3.6), evaluated on every render and never stored.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -203,8 +204,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
-from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.compliance.api import Compliance
+from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -457,7 +458,8 @@ def create_app(
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone; ``compliance`` runs the Suppression List
-    panel's add, import and Reverse.
+    panel's add, import and Reverse, and evaluates each Contact's live Eligibility on the Lead
+    page (that only reads).
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1297,13 +1299,17 @@ def create_app(
             return missing
         if found.id != lead_id:
             return RedirectResponse(f"/leads/{found.id}", status_code=303, headers=NO_STORE)
+        contacts = research_queries.contacts(found.id)
+        # live on every render, never stored (FR-18, AD-16)
+        decisions = {each.id: compliance.evaluate_eligibility(each.id) for each in contacts}
         context = lead_rows.lead_context(
             found,
             pipeline_queries.stage(found.id),
             setup_queries.segments(),
-            research_queries.contacts(found.id),
+            contacts,
             research_queries.lead_provenance(found.id),
             lead_signals.view(found.id),
+            decisions,
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 

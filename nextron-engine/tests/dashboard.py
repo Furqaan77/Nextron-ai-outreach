@@ -57,8 +57,9 @@ for changes" runs it on what ``ai_content`` loads (``shipped_ai_content`` unless
 another loader: the shipped prompt files and defaults, and ``TEST_PLAYBOOK``, a synthetic
 Sales Playbook, so no test reads or edits the real one).
 
-Its ``Compliance`` (``compliance``, Story 3.5) is ``Compliance(clock)``; the Suppression List
-panel runs its use cases, so it needs real units of work too.
+Its ``Compliance`` (``compliance``, Stories 3.5 and 3.6) is one ``Compliance(clock)``; the
+Suppression List panel runs its use cases, and the Lead page evaluates each Contact's live
+Eligibility through it, so it needs real units of work too.
 
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
@@ -78,8 +79,8 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron import main
-from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.compliance.api import Compliance
+from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (

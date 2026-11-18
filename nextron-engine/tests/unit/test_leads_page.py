@@ -2,16 +2,17 @@
 FR-51, FR-13, UX-DR17, UX-DR18, AD-3, AD-13) through ``Dashboard(units=...)`` on a temporary
 database at head with the real subscriber registry and the shipped Segments, the HTML parsed
 into a tree: every page row of the I/O matrix (the list, the filters, paging, bad parameters, a
-CSV-imported Lead's page, merged and missing Leads, hostile text, the empty cases),
+CSV-imported Lead's page, merged and missing Leads, hostile text, the empty cases), each
+Contact's live Eligibility row (Story 3.6: eligible and ineligible Contacts, every reason with
+its ``data-reason``, recomputed on every render, nothing stored, inside ``hx-disable``),
 ``no-store``, the lock without a session, the route order, the nav link, the label tables and
 the queries-only import rule. Story 2.9 adds the headquarters zone and the Signals and Evidence
 sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped)."""
 
 import ast
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -20,6 +21,7 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron import main
+from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
@@ -30,11 +32,14 @@ from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
+from nextron.domain.contactability import ContactSubject, SuppressionScope
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource
+from nextron.domain.eligibility import Decision, Reason, ReasonKind
 from nextron.domain.leads import LeadIdentity, LeadSource
-from nextron.domain.markets import validate_markets
+from nextron.domain.markets import MarketDef, validate_markets
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import validate_segments
+from nextron.domain.suppression_entry import SuppressionSource
 from nextron.web import leads_page
 from nextron.web.forms import MALFORMED_FORM
 from nextron.domain.extraction import FactKind
@@ -1033,6 +1038,231 @@ def test_every_signal_class_evidence_type_and_fact_kind_has_a_label() -> None:
     assert leads_page.age_text(1) == "1 day"
     assert leads_page.age_text(0) == "0 days"
     assert leads_page.age_text(1200) == "1,200 days"
+
+
+# Live Eligibility (Story 3.6) ------------------------------------------------------------------
+
+
+def sync_markets(world: World, *changes: Callable[[MarketDef], MarketDef]) -> None:
+    """Store the shipped Markets, each changed by ``changes`` in turn."""
+    markets = list(validate_markets(seed_yaml.parse(SHIPPED_MARKETS.read_text(encoding="utf-8"))))
+    for change in changes:
+        markets = [change(market) for market in markets]
+    with world.units.open():
+        Setup(world.clock).sync_markets(markets)
+
+
+def eligibility(row: Node) -> tuple[str, list[tuple[str | None, str]]]:
+    """An ``eligibility-row``'s summary and its reasons as (``data-reason``, text)."""
+    summary = row.find("p", class_="eligibility-summary").text
+    items = [(item.attrs.get("data-reason"), item.text) for item in row.find_all("li")]
+    return summary, items
+
+
+def contact_table_rows(page: Tree) -> list[str]:
+    """The class of each body row of the Contacts table itself, in order."""
+    table = page.find("table", class_="contact-table")
+    return [
+        row.attrs.get("class") or ""
+        for row in table.find_all("tr")
+        if next(node for node in row.ancestors() if node.tag == "table") is table
+    ][1:]
+
+
+def test_each_contact_shows_its_live_eligibility_under_its_row(world: World) -> None:
+    sync_markets(world)
+    lead = world.lead("Acme Law", "acmelaw.co.uk")
+    world.add(
+        lead,
+        ContactCandidate(name="Zelda Quill", email="zelda@acmelaw.co.uk"),
+        source=ProvenanceSource.CSV,
+    )
+    us_lead = world.lead("Acme US", "acmelaw.com", minutes=1, country="US")
+    world.add(us_lead, ContactCandidate(email="info@acmelaw.com"), source=ProvenanceSource.WEBSITE)
+
+    uk_page = world.page(f"/leads/{lead}")
+    us_page = world.page(f"/leads/{us_lead}")
+
+    assert contact_table_rows(uk_page) == ["contact-row", "eligibility-row", "provenance-row"]
+    [uk_row] = uk_page.find_all("tr", class_="eligibility-row")
+    assert eligibility(uk_row) == (
+        "Not eligible",
+        [
+            (
+                "uk_legal_form_unconfirmed",
+                "The Lead's legal form isn't confirmed: no Evidence links the Lead to its "
+                "Companies House record",
+            ),
+            (
+                "address_not_sendable",
+                "The address is Guessed; only Published or Verified addresses can be emailed",
+            ),
+        ],
+    )
+    [us_row] = us_page.find_all("tr", class_="eligibility-row")
+    assert eligibility(us_row) == ("Eligible: US: cold email allowed (CAN-SPAM)", [])
+    assert not us_row.find_all("ul")
+    assert summary_class(uk_row) == "eligibility-summary not-eligible"
+    assert summary_class(us_row) == "eligibility-summary eligible"
+    for row in (uk_row, us_row):
+        assert row.find("td").attrs["colspan"] == "6"
+        table = next(node for node in row.ancestors() if node.tag == "table")
+        assert "contact-table" in (table.attrs.get("class") or "")
+        assert "hx-disable" in table.attrs
+
+
+def summary_class(row: Node) -> str:
+    return row.find("p", class_="eligibility-summary").attrs.get("class") or ""
+
+
+def test_each_contact_on_one_lead_shows_its_own_decision(world: World) -> None:
+    sync_markets(world)
+    lead = world.lead("Acme US", "acmelaw.com", country="US")
+    world.add(lead, ContactCandidate(email="info@acmelaw.com"), source=ProvenanceSource.WEBSITE)
+    world.add(
+        lead,
+        ContactCandidate(name="Ann Jones", email="ann@acmelaw.com"),
+        source=ProvenanceSource.CSV,
+        seconds=1,
+    )
+    world.add(lead, ContactCandidate(name="Bo Smith"), seconds=2)
+
+    page = world.page(f"/leads/{lead}")
+
+    assert contact_table_rows(page) == ["contact-row", "eligibility-row", "provenance-row"] * 3
+    contacts = page.find_all("tr", class_="contact-row")
+    assert [cells(row)[:3] for row in contacts] == [
+        ["—", "—", "info@acmelaw.com"],
+        ["Ann Jones", "—", "ann@acmelaw.com"],
+        ["Bo Smith", "—", "—"],
+    ]
+    rows = page.find_all("tr", class_="eligibility-row")
+    assert [eligibility(row) for row in rows] == [
+        ("Eligible: US: cold email allowed (CAN-SPAM)", []),
+        (
+            "Not eligible",
+            [
+                (
+                    "address_not_sendable",
+                    "The address is Guessed; only Published or Verified addresses can be emailed",
+                )
+            ],
+        ),
+        ("Not eligible", [("address_not_sendable", "The Contact has no email address")]),
+    ]
+    assert [summary_class(row) for row in rows] == [
+        "eligibility-summary eligible",
+        "eligibility-summary not-eligible",
+        "eligibility-summary not-eligible",
+    ]
+
+
+def test_a_contact_without_a_market_shows_why(world: World) -> None:
+    lead = world.lead("Jones Law", "jones.co.uk")
+    world.add(lead, ContactCandidate(name="Ann Jones"))
+
+    [row] = world.page(f"/leads/{lead}").find_all("tr", class_="eligibility-row")
+
+    summary, items = eligibility(row)
+    assert summary == "Not eligible"
+    assert [code for code, _ in items] == ["no_enabled_market", "address_not_sendable"]
+    assert items[1][1] == "The Contact has no email address"
+
+
+def test_the_eligibility_is_recomputed_on_every_render_and_stored_nowhere(world: World) -> None:
+    sync_markets(world)
+    lead = world.lead("Acme US", "acmelaw.com", country="US")
+    contact = world.add(
+        lead,
+        ContactCandidate(name="Zelda Quill", email="zelda@acmelaw.com"),
+        source=ProvenanceSource.WEBSITE,
+    )
+    tables = [
+        name
+        for (name,) in world.sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
+
+    def counts() -> dict[str, int]:
+        return {name: world.sql(f'SELECT COUNT(*) FROM "{name}"')[0][0] for name in tables}
+
+    before = counts()
+    first = world.page(f"/leads/{lead}").find("tr", class_="eligibility-row")
+    again = world.page(f"/leads/{lead}").find("tr", class_="eligibility-row")
+    assert counts() == before
+    world.stage(lead, PipelineStage.NOT_NOW)
+    second = world.page(f"/leads/{lead}").find("tr", class_="eligibility-row")
+    world.stage(lead, PipelineStage.NEW)
+    world.transact(
+        lambda: Compliance(world.clock).suppress(
+            ContactSubject(contact), SuppressionScope.PERSON, SuppressionSource.OPERATOR, None
+        )
+    )
+    third = world.page(f"/leads/{lead}").find("tr", class_="eligibility-row")
+    world.stage(lead, PipelineStage.LOST)
+    fourth = world.page(f"/leads/{lead}").find("tr", class_="eligibility-row")
+
+    assert eligibility(first) == eligibility(again)
+    assert eligibility(first) == ("Eligible: US: cold email allowed (CAN-SPAM)", [])
+    assert eligibility(second) == (
+        "Not eligible",
+        [("not_now_undated", "Parked Not Now with no re-contact date recorded")],
+    )
+    assert [code for code, _ in eligibility(third)[1]] == [
+        "address_or_domain_suppressed",
+        "asked_not_to_be_contacted",
+    ]
+    assert [code for code, _ in eligibility(fourth)[1]] == [
+        "address_or_domain_suppressed",
+        "asked_not_to_be_contacted",
+        "lead_closed",
+    ]
+
+
+def test_a_market_name_in_a_reason_is_escaped_inside_hx_disable(world: World) -> None:
+    hostile = "<i>Britain</i>"
+
+    def rename(market: MarketDef) -> MarketDef:
+        return replace(market, name=hostile) if market.code == "uk" else market
+
+    sync_markets(world, rename)
+    lead = world.lead("Acme Law", "acmelaw.co.uk")
+    world.add(lead, ContactCandidate(email="zelda@gmail.com"), source=ProvenanceSource.WEBSITE)
+
+    reply = world.get(f"/leads/{lead}")
+
+    assert reply.status == 200
+    assert hostile not in reply.text
+    assert "&lt;i&gt;Britain&lt;/i&gt;" in reply.text
+    page = Tree(reply.text)
+    assert not page.find_all("i")
+    assert page.disabled("Britain") == [True]
+    [row] = page.find_all("tr", class_="eligibility-row")
+    assert [code for code, _ in eligibility(row)[1]] == [
+        "uk_legal_form_unconfirmed",
+        "uk_free_webmail",
+    ]
+
+
+def test_an_eligibility_row_carries_each_reasons_code() -> None:
+    until = Reason(ReasonKind.NOT_NOW_UNTIL, "Parked Not Now until 2027-01-15", date(2027, 1, 15))
+    closed = Reason(ReasonKind.LEAD_CLOSED, "The Lead is closed (Lost)")
+
+    row = leads_page.eligibility_row(Decision(False, None, (until, closed)))
+    passing = leads_page.eligibility_row(Decision(True, "US: cold email allowed (CAN-SPAM)", ()))
+
+    assert row.eligible is False
+    assert row.summary == "Not eligible"
+    assert row.reasons == (
+        leads_page.ReasonRow("not_now_until_2027-01-15", "Parked Not Now until 2027-01-15"),
+        leads_page.ReasonRow("lead_closed", "The Lead is closed (Lost)"),
+    )
+    assert passing == leads_page.EligibilityRow(
+        True, "Eligible: US: cold email allowed (CAN-SPAM)", ()
+    )
+    with pytest.raises(TypeError):
+        leads_page.eligibility_row(None)  # type: ignore[arg-type]
 
 
 # Route rules, nav and labels --------------------------------------------------------------------
