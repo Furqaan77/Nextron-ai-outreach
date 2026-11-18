@@ -29,21 +29,27 @@ a recorded outcome ends it, so a later rebooking never supersedes a recorded cal
   changed;
 - ``reparent(survivor_lead_id, merged_lead_id)``: moves every booking of the merged Lead to the
   survivor, returning how many;
+- ``report_rows(creation_causes)`` (Story 9.6): every unsuperseded booking whose Lead has a
+  creation ``events`` row (entity ``leads``, no ``from`` status, read-only) with a cause in
+  ``creation_causes``, oldest first (by ``scheduled_at``, then ``id``), each a ``ReportRow`` of
+  the booking's Lead id and outcome columns (``objections`` as stored);
 - ``about(contact_id)``: every booking of the Contact as a row ``dict`` of all its columns
   (oldest first), for the subject access export.
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import CursorResult, select
+from sqlalchemy import CursorResult, exists, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
 from nextron.db.models.base import new_id
+from nextron.db.models.events import EventRecord
 from nextron.db.models.leads import LeadRecord
 from nextron.db.models.pipeline import CallOutcomeRecord
+from nextron.db.repos.pipeline.stages import LEADS_ENTITY
 from nextron.db.uow import current
 from nextron.domain.call_outcomes import Outcome
 from nextron.domain.pipeline_stage import PipelineStage
@@ -122,6 +128,19 @@ class DueBooking:
     booking_id: str
     lead_id: str
     lead_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReportRow:
+    """A booking as the Calls report counts it (Story 9.6)."""
+
+    lead_id: str
+    outcome: str | None
+    qualified: bool | None
+    audit_proposed: bool | None
+    audit_price: int | None
+    objections: str | None
+    price_reaction: str | None
 
 
 def _pending() -> tuple[object, ...]:
@@ -267,6 +286,30 @@ def reparent(survivor_lead_id: str, merged_lead_id: str) -> int:
         .values(lead_id=survivor_lead_id)
     )
     return result.rowcount if isinstance(result, CursorResult) else 0
+
+
+def report_rows(creation_causes: Collection[str]) -> tuple[ReportRow, ...]:
+    """The unsuperseded bookings of Leads created with one of ``creation_causes``."""
+    created = exists().where(
+        EventRecord.entity == LEADS_ENTITY,
+        EventRecord.entity_id == CallOutcomeRecord.lead_id,
+        EventRecord.from_status.is_(None),
+        EventRecord.cause.in_(sorted(creation_causes)),
+    )
+    statement = (
+        select(
+            CallOutcomeRecord.lead_id,
+            CallOutcomeRecord.outcome,
+            CallOutcomeRecord.qualified,
+            CallOutcomeRecord.audit_proposed,
+            CallOutcomeRecord.audit_price,
+            CallOutcomeRecord.objections,
+            CallOutcomeRecord.price_reaction,
+        )
+        .where(CallOutcomeRecord.superseded_at.is_(None), created)
+        .order_by(CallOutcomeRecord.scheduled_at, CallOutcomeRecord.id)
+    )
+    return tuple(ReportRow(*row) for row in current().session.execute(statement))
 
 
 def about(contact_id: str) -> tuple[dict[str, object], ...]:

@@ -1,0 +1,47 @@
+{#- The Calls report's body (nextron.web.calls_report_page, Story 9.6): counts, codes and prices
+    only, never a Call Outcome's free text or a Lead's or Contact's name. -#}
+<section id="calls-report" aria-labelledby="calls-report-title">
+<h2 id="calls-report-title">Discovery calls</h2>
+<p class="report-scope">{{ engine_sourced }}</p>
+<dl class="call-counts">
+{%- for figure in counts %}
+<dt>{{ figure.label }}</dt><dd>{{ figure.value }}</dd>
+{%- endfor %}
+</dl>
+{%- if progress %}
+<p class="offer-progress">{{ progress }}</p>
+{%- endif %}
+{%- if validating %}
+<h2 id="offer-validation-title">Offer validation</h2>
+{%- if checkpoint %}
+<p class="notice offer-checkpoint" role="status">{{ checkpoint }}</p>
+{%- endif %}
+<dl class="offer-figures">
+{%- for figure in figures %}
+<dt>{{ figure.label }}</dt><dd>{{ figure.value }}</dd>
+{%- endfor %}
+</dl>
+<h3>Price reactions</h3>
+<table class="price-reactions">
+<thead><tr><th scope="col">Reaction</th><th scope="col">Held calls</th></tr></thead>
+<tbody>
+{%- for row in reactions %}
+<tr><td>{{ row.label }}</td><td>{{ row.value }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+<h3>Top objections</h3>
+{%- if objections %}
+<table class="top-objections">
+<thead><tr><th scope="col">Objection</th><th scope="col">Held calls</th></tr></thead>
+<tbody>
+{%- for row in objections %}
+<tr><td>{{ row.label }}</td><td>{{ row.value }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="no-objections">{{ no_objections }}</p>
+{%- endif %}
+{%- endif %}
+</section>

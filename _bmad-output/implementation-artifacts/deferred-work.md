@@ -342,3 +342,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-9-1-move-leads-through-the-later-pipeline-stages-by-hand-with-de.md`
   summary: Decide what a Lead merge does with the merged Lead's `deal_value` and `notes` (today the survivor keeps its own and the merged Lead's stay on its row, unseen); its `call_outcomes` rows already move to the survivor.
   evidence: Story 9.1 implementation: `Pipeline.reparent_lead` moves bookings only; the spec says nothing about deal details on a merge.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-6-report-offer-validation-after-the-first-10-held-calls.md`
+  summary: The Calls report can miss an accepted audit recorded under a merged Lead when the merge didn't change the survivor's stage, because no `leads_merged` events row then links the two Leads.
+  evidence: `Pipeline.reparent_lead` appends its `leads_merged` row only on a stage change; 9.6 may read only `call_outcomes` and `events`, so the link would need either an always-written merge event or permission to read `leads.merged_into` (rare: needs two records of one organization both past a held call).

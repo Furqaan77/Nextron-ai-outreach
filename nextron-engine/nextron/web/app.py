@@ -175,6 +175,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``queries.setup.segments`` and the stored Markets (``lead_markets``; a bad parameter is
   ``MalformedForm``, 400), then ``queries.pipeline.board``; a start date after the end date
   answers 400 with the page, its alert and no groups.
+- ``GET /reports/calls`` (``calls_report_page``, ``@personal_data(False)``, Story 9.6): the
+  Calls report; see ``nextron.web.calls_report_page``. It reads
+  ``nextron.app.analytics.offer.offer_validation()`` and writes nothing. The Pipeline board links
+  to it; it isn't a navigation section.
 - ``GET /leads`` (``pipeline_page``, the navigation's Leads/Pipeline section) and ``GET
   /leads/{lead_id}`` (``lead_page``, registered after ``/leads/import``), both
   ``@personal_data(True)``: the Leads list and the Lead page (Story 2.4); see
@@ -303,6 +307,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.analytics.offer import offer_validation
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
@@ -372,6 +377,7 @@ from nextron.domain.suppression_list import (
 )
 from nextron.domain.unsub_token import UnsubKeyInUse
 from nextron.web import ai_content_page as ai_rows
+from nextron.web import calls_report_page as report_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import erase_page as erase_rows
@@ -1592,6 +1598,12 @@ def create_app(
         if board is None:
             answer.status_code = 400
         return answer
+
+    @app.get(report_rows.REPORT_PATH, name="calls_report_page")
+    @personal_data(False)  # counts, codes and prices only: no free text, no names
+    def calls_report_page(request: Request) -> HTMLResponse:
+        context = report_rows.report_context(offer_validation())
+        return page(request, report_rows.TEMPLATE, **context)
 
     # before /leads/{lead_id}, like every /leads/<word> path
     @app.get("/leads/{lead_id}/contacts/{contact_id}/erase", name="contact_erase_page")

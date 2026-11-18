@@ -194,6 +194,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/exports/{ticket}",
         "/leads",
         "/leads/pipeline",  # Story 9.7
+        "/reports/calls",  # Story 9.6
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}",
@@ -646,6 +647,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "ai_content.html",
         "ai_content_panel.html",
         "base.html",
+        "calls_report.html",
+        "calls_report_panel.html",
         "campaigns_panel.html",
         "contact_erase.html",
         "contact_erase_panel.html",

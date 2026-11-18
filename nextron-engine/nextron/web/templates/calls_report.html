@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{#- The Calls report (nextron.web.calls_report_page, Story 9.6): the report body is
+    calls_report_panel.html, which Epic 11's Funnel can include on its own. -#}
+{% block title %}Nextron: Calls report{% endblock %}
+{% block content %}
+<h1>Calls report</h1>
+<p><a href="/leads/pipeline">Pipeline</a></p>
+{% include "calls_report_panel.html" %}
+{% endblock %}
