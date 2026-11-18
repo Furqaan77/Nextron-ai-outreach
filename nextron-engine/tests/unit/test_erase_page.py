@@ -564,6 +564,7 @@ def test_the_lead_page_follows_the_tombstone_line_with_its_receipt(world: World)
         "contact-row contact-erased",
         "receipt-row",
         "contact-row",
+        "eligibility-row",  # main's 8-column Contacts panel (Stories 2.10, 3.6, 3.7)
         "provenance-row",
     ]
     [(anchor, heading, lines)] = receipt_sections(page)

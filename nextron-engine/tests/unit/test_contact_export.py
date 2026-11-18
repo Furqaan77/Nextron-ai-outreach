@@ -70,9 +70,10 @@ def test_the_coverage_declares_every_section_once() -> None:
             "addresses",
             "signals",
         ),
-        "compliance": ("suppression", "requests"),
+        "compliance": ("suppression", "requests", "erasure_receipts"),  # Story 3.14
         "notify": ("alerts", "notifications"),
         "playbook": ("override_cases",),  # Story 4.6
+        "sequencing": ("enrollments",),  # Story 4.8
         "event_log": ("contact_history",),
     }
     declared = [(owner, section) for owner, sections in SECTIONS.items() for section in sections]
@@ -370,9 +371,10 @@ def test_every_declared_section_is_an_array_and_none_is_omitted() -> None:
             "addresses": [],
             "signals": [],
         },
-        "compliance": {"suppression": [], "requests": []},
+        "compliance": {"suppression": [], "requests": [], "erasure_receipts": []},
         "notify": {"alerts": [], "notifications": []},
         "playbook": {"override_cases": []},
+        "sequencing": {"enrollments": []},
         "event_log": {"contact_history": []},
     }
     assert SCHEMA_VERSION == 1
@@ -384,6 +386,7 @@ def test_every_declared_section_is_an_array_and_none_is_omitted() -> None:
         "compliance",
         "notify",
         "playbook",
+        "sequencing",
         "event_log",
     ]
 
