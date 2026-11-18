@@ -9,8 +9,10 @@ holds:
    host can't be read is never fetched;
 2. the host is, or is a subdomain of, one of ``DENIED_DOMAINS`` (``linkedin.com``, ``lnkd.in``,
    ``instagram.com``, ``instagr.am``, ``ziprecruiter.com``, ``maps.app.goo.gl``,
-   ``reed.co.uk``, ``totaljobs.com``, ``cv-library.co.uk``, ``g.page``), so
-   ``www.linkedin.com`` matches and ``notlinkedin.com`` doesn't;
+   ``reed.co.uk``, ``totaljobs.com``, ``cv-library.co.uk``, ``g.page``, and, from Story 10.1,
+   the platforms' own static CDNs ``licdn.com`` and ``cdninstagram.com``, which serve LinkedIn
+   badges and Instagram embeds), so ``www.linkedin.com`` matches and ``notlinkedin.com``
+   doesn't;
 3. the host's registrable domain (``identity.registrable_domain(host)``; a refusal there means
    no match) has a first label in ``DENIED_BRANDS`` (``indeed``, ``glassdoor``), so
    ``indeed.com``, ``uk.indeed.com`` and ``glassdoor.co.uk`` match and ``indeedjobs.com``
@@ -100,6 +102,8 @@ DENIED_DOMAINS: Final = (
     "totaljobs.com",
     "cv-library.co.uk",
     "g.page",
+    "licdn.com",
+    "cdninstagram.com",
 )
 DENIED_BRANDS: Final = frozenset({"indeed", "glassdoor"})
 MAPS_LABEL: Final = "maps"

@@ -17,7 +17,10 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
      ``source=ProvenanceSource.ELIGIBILITY_BASIS`` (Story 3.7: a basis says why a Contact may
      be emailed, not where it came from; only ``record_eligibility_basis`` writes one) and a
      ``detail`` that isn't a ``str`` of 1 to 2,048 characters equal to its own strip raise
-     ``ValueError``. The Lead is read with ``queries.discovery.lead``: an
+     ``ValueError``; so does a candidate with a ``linkedin_url`` from a source outside
+     ``nextron.domain.contacts.LINKEDIN_URL_SOURCES`` (FR-49, Story 10.1: ``finder``,
+     ``pattern`` and ``replier`` never carry one). The Lead is read with
+     ``queries.discovery.lead``: an
      unknown Lead raises ``LookupError`` and a merged one ``ValueError``. With an email,
      ``assign(source)`` (``nextron.domain.address_class``) runs first, so a source that never
      yields an address (``IllegalTransition``) writes nothing.
@@ -413,6 +416,7 @@ from nextron.domain.contactability import (
     Purpose,
 )
 from nextron.domain.contacts import (
+    LINKEDIN_URL_SOURCES,
     NO_PRIMARY,
     ContactCandidate,
     PrimaryCandidate,
@@ -628,6 +632,8 @@ def _check_arguments(
         raise TypeError("add_contact takes retrieved_at as an aware datetime")
     if source is ProvenanceSource.ELIGIBILITY_BASIS:  # only record_eligibility_basis writes one
         raise ValueError("add_contact: eligibility_basis is not where a Contact comes from")
+    if candidate.linkedin_url is not None and source not in LINKEDIN_URL_SOURCES:  # FR-49
+        raise ValueError(f"add_contact: a LinkedIn URL never comes from {source.value}")
     if (
         not isinstance(detail, str)
         or not 1 <= len(detail) <= MAX_DETAIL_LENGTH

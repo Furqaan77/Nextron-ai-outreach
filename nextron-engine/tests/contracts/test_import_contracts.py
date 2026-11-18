@@ -85,6 +85,16 @@ def test_contracts_one_to_six_are_written_as_in_ad1() -> None:
         "instaloader",
         "instagrapi",
         "selenium",
+        "pyautogui",
+        "undetected_chromedriver",
+        "linkedin",
+        "seleniumwire",
+        "playwright_stealth",
+        "linkedin_scraper",
+        "selenium_stealth",
+        "undetected_playwright",
+        "pyppeteer_stealth",
+        "instagram_private_api",
     }
     assert contract(ANTHROPIC_ONLY_IN_AI)["forbidden_modules"] == ["anthropic"]
     c6 = contract("c6-app-dag")
@@ -125,6 +135,17 @@ def test_anthropic_in_the_domain_breaks_lint(tmp_path: Path) -> None:
         ("import instaloader", "instaloader"),
         ("from instagrapi import Client", "instagrapi"),
         ("from selenium import webdriver", "selenium"),
+        ("import pyautogui", "pyautogui"),
+        ("import undetected_chromedriver as uc", "undetected_chromedriver"),
+        ("import linkedin", "linkedin"),
+        ("from linkedin import linkedin", "linkedin"),
+        ("from seleniumwire import webdriver", "seleniumwire"),
+        ("from playwright_stealth import stealth_sync", "playwright_stealth"),
+        ("from linkedin_scraper import Person", "linkedin_scraper"),
+        ("from selenium_stealth import stealth", "selenium_stealth"),
+        ("import undetected_playwright", "undetected_playwright"),
+        ("from pyppeteer_stealth import stealth", "pyppeteer_stealth"),
+        ("from instagram_private_api import Client", "instagram_private_api"),
     ],
 )
 def test_banned_libraries_break_lint_in_any_module(

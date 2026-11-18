@@ -93,9 +93,63 @@ def test_dev_dependencies_are_pinned_and_locked() -> None:
     assert lock["pytest-xdist"]["version"] == "3.8.0"
 
 
-@pytest.mark.parametrize("banned", ["ulid-py", "aiosqlite"])
+# FR-49 (Story 10.1): the LinkedIn and Instagram clients and scrapers, and the browser and
+# desktop automation and anti-bot tools, never enter the lock, even as a transitive dependency.
+PLATFORM_AUTOMATION_DISTS = (
+    "linkedin-api",
+    "linkedin",
+    "linkedin-scraper",
+    "instaloader",
+    "instagrapi",
+    "selenium",
+    "selenium-wire",
+    "pyautogui",
+    "undetected-chromedriver",
+    "playwright-stealth",
+    "selenium-stealth",
+    "undetected-playwright",
+    "pyppeteer-stealth",
+    "python-linkedin",
+    "python3-linkedin",
+    "instagram-private-api",
+)
+BANNED_DISTS = ("ulid-py", "aiosqlite", *PLATFORM_AUTOMATION_DISTS)
+
+
+def _locked_names(lock_text: str) -> set[str]:
+    """The normalised names of every package a lock file holds."""
+    return {_normalise(package["name"]) for package in tomllib.loads(lock_text)["package"]}
+
+
+def banned_in_lock(lock_text: str, banned: tuple[str, ...]) -> list[str]:
+    """Each of ``banned`` the lock holds, names compared PEP 503-normalised."""
+    names = _locked_names(lock_text)
+    return [dist for dist in banned if _normalise(dist) in names]
+
+
+@pytest.mark.parametrize("banned", BANNED_DISTS)
 def test_banned_package_is_not_in_the_lock(banned: str) -> None:
-    assert banned not in _lock()
+    assert banned_in_lock(LOCKFILE.read_text(encoding="utf-8"), (banned,)) == []
+
+
+@pytest.mark.parametrize(
+    ("spelling", "reported"),
+    [
+        ("selenium-wire", "selenium-wire"),
+        ("Selenium_Wire", "selenium-wire"),
+        ("PyAutoGUI", "pyautogui"),
+        ("linkedin", "linkedin"),
+        ("Python3.LinkedIn", "python3-linkedin"),
+        ("instagram_private_api", "instagram-private-api"),
+    ],
+)
+def test_a_planted_banned_package_is_caught(spelling: str, reported: str) -> None:
+    """Negative probe: the real lock plus one planted entry; the check the real test runs
+    reports exactly that dist."""
+    planted = LOCKFILE.read_text(encoding="utf-8") + (
+        f'\n[[package]]\nname = "{spelling}"\nversion = "1.0"\n'
+    )
+    assert banned_in_lock(planted, BANNED_DISTS) == [reported]
 
 
 def test_pytz_arrives_only_through_dateparser() -> None:

@@ -51,6 +51,12 @@ from nextron.domain.fetch_policy import (
         "instagram.com/firm",
         "https://www.instagram.com/p/x",
         "instagr.am/p/x",
+        # the platforms' static CDNs (Story 10.1)
+        "https://static.licdn.com/sc/h/badge.js",
+        "licdn.com",
+        "https://media.licdn.com/dms/image/x",
+        "https://scontent.cdninstagram.com/v/t51/x.jpg",
+        "cdninstagram.com",
         # job sites
         "ziprecruiter.com",
         "https://www.ziprecruiter.com/jobs/x",
@@ -98,6 +104,9 @@ def test_denied(url: str) -> None:
         "mylinkedin.co",
         "linkedin.co.uk",  # not linkedin.com; another registrant
         "instagramfirm.com",
+        "notlicdn.com",
+        "licdn.com.example.org",
+        "mycdninstagram.com",
         "indeedjobs.com",
         "glassdoors.com",
         "notindeed.co.uk",
@@ -158,6 +167,8 @@ def test_the_lists() -> None:
         "totaljobs.com",
         "cv-library.co.uk",
         "g.page",
+        "licdn.com",
+        "cdninstagram.com",
     )
     assert DENIED_BRANDS == {"indeed", "glassdoor"}
     assert "2.5" in (fetch_policy.__doc__ or "")
