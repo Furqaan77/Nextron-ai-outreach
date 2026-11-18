@@ -508,14 +508,20 @@ def test_everything_sits_inside_hx_disable_with_no_htmx_action(seeded: World) ->
             found.add(kind)
     assert len(found) == 4  # not vacuous: each kind shows
     forms = page.find("main").find_all("form")
-    # the only HTMX actions are Story 2.10's "Make primary" forms and Story 3.15's "Export data
-    # (JSON)" form for each Contact, outside every hx-disable
+    # the only HTMX actions are Story 2.10's "Make primary" forms, Story 2.13's "Find email"
+    # forms, Story 2.15's "Re-score" form and Story 3.15's "Export data (JSON)" form for each
+    # Contact, outside every hx-disable
     exports = page.find("main").find_all("form", class_="contact-export")
     contacts = [row[0] for row in seeded.sql("SELECT id FROM contacts WHERE lead_id = ?", (lead,))]
     assert sorted(form.attrs["hx-post"] for form in exports) == sorted(
         f"/contacts/{contact_id}/export" for contact_id in contacts
     )
-    primary = [form for form in forms if form not in exports]
+    rescore = [form for form in forms if form.attrs.get("action") == f"/leads/{lead}/rescore"]
+    assert len(rescore) == 1  # Story 2.15: the Score panel's one form
+    find_email = [
+        form for form in forms if form.attrs.get("action") == f"/leads/{lead}/find-email"
+    ]
+    primary = [form for form in forms if form not in exports + rescore + find_email]
     assert primary and all(form.attrs["action"] == f"/leads/{lead}/primary" for form in primary)
     actions = [  # base.html's own hx- attributes sit outside main
         node
