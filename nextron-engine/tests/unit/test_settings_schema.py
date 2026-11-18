@@ -527,6 +527,7 @@ def test_the_declared_keys_in_order() -> None:
         "crawl_max_pages",
         "ats_hosts",
         "unsub_active_kid",
+        "call_outcome_prompt_delay",  # Story 9.4
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -553,7 +554,33 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
         setting(Key.UNSUB_ACTIVE_KID),
+        setting(Key.CALL_OUTCOME_PROMPT_DELAY),
     )
+
+
+def test_call_outcome_prompt_delay_is_an_engine_duration_defaulting_to_60_minutes() -> None:
+    """Story 9.4, decision 1: the delay after a call's time before its outcome is asked for."""
+    found = setting(Key.CALL_OUTCOME_PROMPT_DELAY)
+
+    assert (found.key, found.type, found.section) == (
+        "call_outcome_prompt_delay",
+        SettingType.DURATION,
+        Section.ENGINE,
+    )
+    assert found.default == timedelta(minutes=60)
+    assert found.label == "Call Outcome prompt delay"
+    assert parse(found, "PT60M") == timedelta(hours=1)
+    assert encode(found, timedelta(minutes=90)) == "PT1H30M"
+
+
+def test_call_outcome_prompt_delay_is_at_most_7_days() -> None:
+    """A huge delay would overflow ``now - delay`` and break every page's notification area."""
+    found = setting(Key.CALL_OUTCOME_PROMPT_DELAY)
+
+    assert parse(found, "P7D") == timedelta(days=7)
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(found, "P8D")
+    assert (raised.value.rule, raised.value.reason) == ("maximum", "must be at most 7 days")
 
 
 # Row: Setting (alert_chat_id) -------------------------------------------------------------------
@@ -1284,6 +1311,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
+                "call_outcome_prompt_delay, "
             "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
             "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "

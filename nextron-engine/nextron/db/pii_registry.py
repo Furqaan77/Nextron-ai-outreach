@@ -149,6 +149,20 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "booked_at": PiiClass.NONE,
         "booked_by": PiiClass.NONE,
         "superseded_at": PiiClass.NONE,
+        # Story 9.4: the outcome. Codes, flags, an amount, a date and times, except the two
+        # free texts (why not qualified, the next step), which may name a person: erasing a
+        # Contact redacts them on its Lead's (and merged Leads') rows
+        "outcome": PiiClass.NONE,
+        "qualified": PiiClass.NONE,
+        "reason": PiiClass.REDACT,
+        "next_step": PiiClass.REDACT,
+        "next_step_on": PiiClass.NONE,
+        "audit_proposed": PiiClass.NONE,
+        "audit_price": PiiClass.NONE,
+        "objections": PiiClass.NONE,
+        "price_reaction": PiiClass.NONE,
+        "recorded_at": PiiClass.NONE,
+        "recorded_by": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.

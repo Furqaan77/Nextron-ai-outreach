@@ -178,6 +178,7 @@ class Key(StrEnum):
     CRAWL_MAX_PAGES = "crawl_max_pages"
     ATS_HOSTS = "ats_hosts"
     UNSUB_ACTIVE_KID = "unsub_active_kid"
+    CALL_OUTCOME_PROMPT_DELAY = "call_outcome_prompt_delay"
 
 
 class _Required(Enum):
@@ -1276,6 +1277,19 @@ SCHEMA: Mapping[str, Setting] = _declare(
             minimum(UNSUB_MIN_KID, str(UNSUB_MIN_KID)),
             maximum(UNSUB_MAX_KID, str(UNSUB_MAX_KID)),
         ),
+    ),
+    # The Call Outcome prompt (Story 9.4, FR-69), read at each render of the notification area.
+    Setting(
+        key=Key.CALL_OUTCOME_PROMPT_DELAY,
+        type=SettingType.DURATION,
+        section=Section.ENGINE,
+        label="Call Outcome prompt delay",
+        unit=(
+            "An ISO 8601 duration, such as PT60M, at most 7 days (P7D). The notification area "
+            "asks how a booked call went once its scheduled time plus this delay has passed."
+        ),
+        default=timedelta(minutes=60),
+        rules=(maximum(timedelta(days=7), "7 days"),),
     ),
 )
 

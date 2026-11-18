@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0037_9_1_manual_stages"
+HEAD = "0038_9_4_call_outcomes"
 
 
 @pytest.fixture
@@ -994,7 +994,7 @@ def test_0037_adds_the_deal_columns_in_place_and_the_call_outcomes_table(
         reader.close()
     assert rows == [(lead, "replied", None, None)]
     assert columns[-2:] == [("deal_value", "BIGINT", 0), ("notes", "TEXT", 0)]
-    assert outcomes == [
+    assert outcomes[:8] == [  # 0038 (Story 9.4) adds the outcome's columns after
         ("id", "VARCHAR(26)", 1),
         ("lead_id", "VARCHAR(26)", 1),
         ("contact_id", "VARCHAR(26)", 1),
@@ -1008,4 +1008,64 @@ def test_0037_adds_the_deal_columns_in_place_and_the_call_outcomes_table(
     assert "ix_call_outcomes_lead_id" in indexes
     run_sql(  # any value fits: the code, not a CHECK, keeps the limits
         path, f"UPDATE leads SET deal_value = -1, notes = 'x' WHERE id = '{lead}'"
+    )
+
+
+def test_0038_adds_the_outcome_columns_in_place_and_keeps_every_booking_pending(
+    tmp_path: Path,
+) -> None:
+    """A booking stored before 0038 (Story 9.4) keeps its row with no outcome; the eleven
+    columns are nullable, with no CHECK, at the end of ``call_outcomes``."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0037_9_1_manual_stages":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0037_9_1_manual_stages")
+    at = "2026-11-18T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    contact, booking = "01JD3QZ8X5V9K2M7N4P6R8T0D2", "01JD3QZ8X5V9K2M7N4P6R8T0D3"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at, pipeline_stage) "
+        f"VALUES ('{lead}', 'Acme Accounting', 'acme.co.uk', '{segment}', '{at}', 'call_booked')",
+        "INSERT INTO contacts (id, lead_id, name, created_at, updated_at) "
+        f"VALUES ('{contact}', '{lead}', 'Jane Doe', '{at}', '{at}')",
+        "INSERT INTO call_outcomes (id, lead_id, contact_id, scheduled_at, prospect_tz, "
+        "booked_at, booked_by) "
+        f"VALUES ('{booking}', '{lead}', '{contact}', '{at}', 'Europe/London', '{at}', 'operator')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0037_9_1_manual_stages", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(
+            "SELECT id, outcome, recorded_at, reason, next_step FROM call_outcomes"
+        ).fetchall()
+        columns = [
+            (row[1], row[2], row[3]) for row in reader.execute("PRAGMA table_info(call_outcomes)")
+        ]
+    finally:
+        reader.close()
+    assert rows == [(booking, None, None, None, None)]
+    assert columns[8:] == [
+        ("outcome", "VARCHAR(16)", 0),
+        ("qualified", "BOOLEAN", 0),
+        ("reason", "TEXT", 0),
+        ("next_step", "TEXT", 0),
+        ("next_step_on", "DATE", 0),
+        ("audit_proposed", "BOOLEAN", 0),
+        ("audit_price", "BIGINT", 0),
+        ("objections", "VARCHAR(200)", 0),
+        ("price_reaction", "VARCHAR(16)", 0),
+        ("recorded_at", "VARCHAR(27)", 0),
+        ("recorded_by", "VARCHAR(64)", 0),
+    ]
+    run_sql(  # any value fits: the code, not a CHECK, keeps the rules
+        path, f"UPDATE call_outcomes SET outcome = 'maybe', audit_price = -1 WHERE id = '{booking}'"
     )

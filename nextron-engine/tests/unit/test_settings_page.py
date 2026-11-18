@@ -560,6 +560,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "backup_offpc_dir",
         "crawl_max_pages",
         "ats_hosts",
+        "call_outcome_prompt_delay",  # Story 9.4
     ]
     shown = page.fields["sink_allowlist"]
     assert (shown.tag, shown.label, shown.value) == ("textarea", "Dev and test allowlist", "")

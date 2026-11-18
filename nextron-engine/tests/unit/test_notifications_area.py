@@ -262,12 +262,12 @@ def test_the_layout_holds_the_error_notice_and_loads_the_list_once(
     assert section == {"id": "notifications", "aria-live": "polite"}
     assert page.find("p", id="request-error", **{"class": "request-error", "role": "alert"})
     assert page.find(
-        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load"}
+        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load, call-outcome-saved from:body"}
     )
     assert (
         '<section id="notifications" aria-live="polite">'
         '<p id="request-error" class="request-error" role="alert"></p>'
-        '<div id="notification-list" hx-get="/notifications" hx-trigger="load"></div>'
+        '<div id="notification-list" hx-get="/notifications" hx-trigger="load, call-outcome-saved from:body"></div>'
         "</section>"
     ) in reply.text  # both empty: no whitespace, so each matches :empty
     assert not page.find("div", **{"hx-trigger": "every 30s"})  # loaded once, never polled
@@ -448,6 +448,6 @@ def test_every_page_loads_the_area_that_holds_the_banner(
     # the layout loads the area once per page view, and the area holds the banner
     assert reply.status == 200
     assert Tags(reply.text).find(
-        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load"}
+        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load, call-outcome-saved from:body"}
     )
     assert banners(area(dashboard, session[0]))

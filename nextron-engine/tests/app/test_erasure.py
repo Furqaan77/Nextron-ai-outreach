@@ -367,6 +367,14 @@ def plant(world: World) -> Planted:
     world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (lead_id, merged_lead_id))
     # Story 9.1 review: notes left on a Lead merged into hers are redacted too
     world.sql("UPDATE leads SET notes = ? WHERE id = ?", (f"Old notes. {NOTES}", merged_lead_id))
+    # Story 9.4: a recorded Call Outcome's free texts, on a booking of a Lead merged into hers
+    world.sql(
+        "INSERT INTO call_outcomes (id, lead_id, contact_id, scheduled_at, prospect_tz, "
+        "booked_at, booked_by, outcome, reason, next_step) VALUES "
+        "('01JD3QZ8X5V9K2M7N4P6R8T0B9', ?, ?, '2026-11-01T10:00:00.000000Z', 'Europe/London', "
+        "'2026-11-01T09:00:00.000000Z', 'operator', 'held', ?, ?)",
+        (merged_lead_id, contact_id, f"Not now. {NOTES}", f"Call {NOTES} again"),
+    )
     pages = (
         world.page(lead_id, "https://firm.co.uk/team"),
         world.page(merged_lead_id, "https://firm.co.uk/team"),  # stayed on the merged Lead
@@ -575,6 +583,8 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("job_postings", "title"),  # Story 2.11
         ("job_postings", "description"),
         ("leads", "notes"),  # Story 9.1
+        ("call_outcomes", "reason"),  # Story 9.4
+        ("call_outcomes", "next_step"),
     }
     not_planted = {
         (table, column)

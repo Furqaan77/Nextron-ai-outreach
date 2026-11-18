@@ -62,6 +62,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "notifications": ("notify", Coverage.NOT_HELD),
     "ai_test_cases": ("playbook", Coverage.TOMBSTONED),  # Story 4.6's override cases
     "leads": ("pipeline", Coverage.TOMBSTONED),  # Story 9.1: the notes
+    "call_outcomes": ("pipeline", Coverage.TOMBSTONED),  # Story 9.4: reason, next step
 }
 
 type Declarations = Mapping[str, object]  # owner -> its ERASURE (or None)

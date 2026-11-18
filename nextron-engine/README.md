@@ -2204,6 +2204,26 @@ that name the Contact and the Contact's booked calls. Migration `0037_9_1_manual
 yet: closing a Lead doesn't stop them here (see `deferred-work.md`), and the contactability gate
 already blocks a closed Lead.
 
+**Call Outcomes (Story 9.4, FR-69).** Once a booked call's time plus the **Call Outcome prompt
+delay** setting (Engine section, default `PT60M`, at most 7 days) has passed, every page's notification area
+shows "Call Outcome due: <Lead name>", linked to the Lead's Call Outcome form
+(`/leads/<id>#call-outcome`). It is worked out from `call_outcomes` at each render (no job, no
+stored flag) and only for a pending booking of a Lead still at `call_booked` and not merged, so a
+closed Lead doesn't nag. The form sits in the Pipeline panel for the oldest pending booking whose
+time has passed (on any stage), or, once recorded, as a prefilled "Correct Call Outcome" form. It
+records held or no-show; for a held call, qualified (with a reason when not), whether the audit
+was proposed (with its price in whole US dollars), the price reaction and any Sales Playbook §5
+objections; and, for either, an optional next step and its date. A missing or bad field shows its
+error next to it and stores nothing. Recording appends a `call_outcomes` row `booked` to `held`
+or `no_show` (cause `call_outcome`, actor `operator`) and moves the stage through the AD-4
+machine: held at `call_booked` gives `call_held`, a no-show at `call_held` gives `call_booked`;
+any other stage is left alone. A correction appends one row per changed field (cause
+`corrected_<field>`) and never recomputes the stage. A recorded booking is no longer pending, so
+a later rebooking never supersedes it. The reason and next step are personal data (`redact`):
+erasing a Contact sets them to `[erased]` on every booking of its Lead and of the Leads merged
+into it, whichever Contact the call was with. Migration
+`0038_9_4_call_outcomes` adds the outcome columns to `call_outcomes`.
+
 **The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
 to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created
 date, with a link back to **All Leads**. **Contacts** lists every Contact, oldest first, with its

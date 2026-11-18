@@ -698,7 +698,7 @@ def test_the_layout_has_a_brand_nav_notifications_and_main(dashboard: Dashboard)
     assert page.find("section", id="notifications", **{"aria-live": "polite"})
     assert page.find("p", id="request-error", role="alert", **{"class": "request-error"})
     assert page.find(
-        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load"}
+        "div", id="notification-list", **{"hx-get": "/notifications", "hx-trigger": "load, call-outcome-saved from:body"}
     )
     assert page.find("main")
 

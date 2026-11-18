@@ -3,13 +3,23 @@
     HTMX swaps into the same list. While recovery mode is on (Story 1.19) it starts with the
     recovery banner, linked to the health panel; every page loads the area, so every page shows
     it. Then comes the engine health error count, linked to the health panel, when there are
-    errors. It renders nothing at all when recovery mode is off, no notification is undismissed
-    and no error needs attention, so the list stays empty and takes no space. -#}
+    errors. Then (Story 9.4) one "Call Outcome due: <Lead name>" line per due booking, worked out
+    at render time and linked to the Lead's Call Outcome form; the Lead's name is imported text,
+    so it renders through |plain inside hx-disable. It renders nothing at all when recovery mode
+    is off, no notification is undismissed, no error needs attention and no Call Outcome is due,
+    so the list stays empty and takes no space. -#}
 {%- if recovery -%}
 <p class="recovery-banner" role="alert"><a href="/health/panel">{{ RECOVERY_BANNER }}</a></p>
 {%- endif -%}
 {%- if health_text -%}
 <p class="health-count"><a href="/health/panel">{{ health_text }}</a></p>
+{%- endif -%}
+{%- if due_items -%}
+<ul class="outcome-due" hx-disable>
+{%- for due in due_items %}
+<li><a href="{{ due.href }}">{{ due.text|plain }}</a></li>
+{%- endfor %}
+</ul>
 {%- endif -%}
 {%- if count -%}
 <h2 class="notifications-heading">Notifications ({{ count }})</h2>
