@@ -232,6 +232,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "check_domains",
         "check_job_boards",
         "recheck_event",
+        "poll_unsubscribes",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -920,8 +921,9 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    # backup_db, restore_test, check_recovery, purge_page_text and check_domains
-    assert scheduled.triggers == 5  # type: ignore[attr-defined]
+    # backup_db, restore_test, check_recovery, purge_page_text, check_domains and
+    # poll_unsubscribes
+    assert scheduled.triggers == 6  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1285,6 +1287,7 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         "backup_db",
         "check_domains",
         "check_recovery",
+        "poll_unsubscribes",
         "purge_page_text",
         "restore_test",
     ]
@@ -1292,8 +1295,16 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     assert isinstance(check.trigger, IntervalTrigger)
     assert check.trigger.interval == timedelta(minutes=1)
     assert (check.misfire_grace_time, check.coalesce, check.max_instances) == (60, True, 1)
+    [poll] = [job for job in jobs if job.id == "poll_unsubscribes"]  # Story 3.11: test env
+    assert isinstance(poll.trigger, IntervalTrigger)
+    assert poll.trigger.interval == timedelta(minutes=30)
+    assert (poll.misfire_grace_time, poll.coalesce, poll.max_instances) == (1800, True, 1)
     dailies = sorted(
-        (job for job in jobs if job.id not in {"check_recovery", "purge_page_text"}),
+        (
+            job
+            for job in jobs
+            if job.id not in {"check_recovery", "purge_page_text", "poll_unsubscribes"}
+        ),
         key=lambda job: job.id,
     )
     for job, hour in zip(dailies, ("10", "7", "11"), strict=True):  # check_domains at 07:00

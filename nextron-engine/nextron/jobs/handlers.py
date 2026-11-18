@@ -70,6 +70,11 @@ handler runs in.
   ``legal_forms().check_legal_form(lead_id)`` once (the discovery service's
   ``LegalFormChecks``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused
   the work). A retryable ``AdapterError`` it raises is retried by the runner.
+- ``poll_unsubscribes(polls)`` (Story 3.11): calls ``polls().poll()`` once (the ``compliance``
+  service's ``UnsubscribePolls``; ``nextron.main`` passes ``lambda: unsubscribes``) and returns
+  ``None``. The payload is a trigger's tick, ``{"v": 1}``. It is never budget-gated. A
+  retryable ``AdapterError`` (the Worker unavailable) is retried by the runner; any other error
+  fails the job, and nothing is applied either way.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -382,3 +387,19 @@ def recheck_event(job_boards: Callable[[], CheckingJobBoards]) -> Handler:
         job_boards().recheck_event(signal_id)
 
     return handle_recheck_event
+
+
+class PollingUnsubscribes(Protocol):
+    """What ``poll_unsubscribes`` needs of the ``compliance`` service's ``UnsubscribePolls``."""
+
+    def poll(self) -> object: ...
+
+
+def poll_unsubscribes(polls: Callable[[], PollingUnsubscribes]) -> Handler:
+    """The ``poll_unsubscribes`` job's handler: poll the unsubscribe Worker through
+    ``polls()``."""
+
+    def handle_poll_unsubscribes(job: Job) -> None:
+        polls().poll()
+
+    return handle_poll_unsubscribes

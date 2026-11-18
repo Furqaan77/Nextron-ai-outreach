@@ -97,6 +97,32 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
   (``AdapterError`` ``unsub_key_missing``) rolls the enqueue back, so no message goes out
   without a working link. It logs nothing and writes no ``events`` row; only the token's hash
   is stored.
+- ``@command unsubscribe_by_token(token, source, received_at) -> UnsubOutcome`` (Story 3.11)
+  applies one unsubscribe request, a one-click from the Worker's pending list
+  (``nextron.app.compliance.unsub_poll``) or, from Epic 7, a mailto opt-out, in the caller's
+  transaction. With no ``codec`` it raises ``TypeError``; ``source`` must be ``one_click`` or
+  ``mailto`` (a ``SuppressionSource`` or its text; otherwise ``ValueError``) and
+  ``received_at`` an aware ``datetime`` (otherwise ``TypeError``). Then:
+
+  1. a ``token`` that isn't a ``str`` of 108 ``[A-Za-z0-9_-]`` characters is ``invalid``, with
+     nothing read;
+  2. a ``unsub_requests`` row with the token's ``token_hash`` makes it ``duplicate``;
+  3. ``codec.decode(token)``: a ``TokenInvalid`` is ``invalid``, with nothing written (it is
+     tried again on the next poll while the Worker keeps it); a Credential Manager
+     ``AdapterError`` propagates;
+  4. a new request id (a ULID) is the ``cause_ref`` of every entry below. The address key,
+     ``erased_person_keys(<addr_hash as hex>)``, is written as ``_write`` writes (an ``events``
+     row per new entry);
+  5. each Contact holding the address (``queries.research.contacts_with_address_hash``, oldest
+     first, erased ones included) gets ``suppress(ContactSubject(id), person, source,
+     request_id)``, which writes its other keys and publishes ``SubjectSuppressed`` with its
+     Lead, so the opt-out closes the Lead ``lost``. With no such Contact, one
+     ``SubjectSuppressed`` with no Contact or Lead is published, as for an ``AddressSubject``;
+  6. one ``unsub_requests`` row (that id, the ``token_hash``, ``received_at`` and
+     ``processed_at``, the clock's now), and it returns ``applied``.
+
+  It logs nothing; no token, address or address hash is stored, and the ``events`` rows hold
+  only entry ids and the request id.
 
 **The panel's use cases** (Story 3.5; each the one use case of a web POST's unit of work):
 
@@ -216,6 +242,7 @@ from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
+from nextron.db.repos.compliance import unsub_requests as unsub_requests_repo
 from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
 from nextron.db.uow import command, current, use_case
 from nextron.domain.contact_export import (
@@ -276,7 +303,14 @@ from nextron.domain.suppression_list import (
     entry_value,
     parse_import,
 )
-from nextron.domain.unsub_token import TokenAlreadyIssued, addr_hash_of, token_hash
+from nextron.domain.unsub_requests import UnsubOutcome
+from nextron.domain.unsub_token import (
+    TOKEN_PATTERN,
+    TokenAlreadyIssued,
+    TokenInvalid,
+    addr_hash_of,
+    token_hash,
+)
 from nextron.ports.clock import Clock
 from nextron.ports.token_codec import TokenCodecPort
 
@@ -291,6 +325,7 @@ ACTORS: Final[Mapping[SuppressionSource, str]] = MappingProxyType(
     }
 )
 IMPORT_BATCH: Final = 500  # values per transaction in import_list
+UNSUB_SOURCES: Final = frozenset({SuppressionSource.ONE_CLICK, SuppressionSource.MAILTO})
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +389,14 @@ class OutboundAddress(Protocol):
 
     @property
     def to_address(self) -> str: ...
+
+
+def _unsub_source(source: object) -> SuppressionSource:
+    """``source`` as ``one_click`` or ``mailto``; ``ValueError`` for anything else."""
+    for allowed in UNSUB_SOURCES:
+        if isinstance(source, str) and source == str(allowed):
+            return allowed
+    raise ValueError("unsubscribe_by_token: source must be one_click or mailto")
 
 
 def _market_rules() -> Mapping[str, MarketDef] | None:
@@ -602,6 +645,49 @@ class Compliance:
             token_hash=token_hash(token), om_id=om_id, kid=kid, issued_at=issued_at
         )
         return token
+
+    @command
+    def unsubscribe_by_token(
+        self, token: str, source: SuppressionSource | str, received_at: datetime
+    ) -> UnsubOutcome:
+        """Apply one unsubscribe request by its token; see the module docstring."""
+        if self._codec is None:
+            raise TypeError("unsubscribe_by_token needs a TokenCodecPort codec")
+        found_source = _unsub_source(source)
+        if not isinstance(received_at, datetime) or received_at.utcoffset() is None:
+            raise TypeError("unsubscribe_by_token: received_at must be an aware datetime")
+        if not isinstance(token, str) or TOKEN_PATTERN.fullmatch(token) is None:
+            return UnsubOutcome.INVALID
+        hashed = token_hash(token)
+        if unsub_requests_repo.for_token_hash(hashed) is not None:
+            return UnsubOutcome.DUPLICATE
+        decoded = self._codec.decode(token)
+        if isinstance(decoded, TokenInvalid):
+            return UnsubOutcome.INVALID
+        request_id = unsub_requests_repo.new_request_id()
+        address_hash = decoded.addr_hash.hex()
+        _, ids = self._write(erased_person_keys(address_hash), found_source, request_id)
+        matched = research_queries.contacts_with_address_hash(address_hash)
+        for contact in matched:
+            self.suppress(
+                ContactSubject(contact.id), SuppressionScope.PERSON, found_source, request_id
+            )
+        if not matched:
+            current().publish(
+                SubjectSuppressed(
+                    suppression_entry_id=ids[0],
+                    source=str(found_source),
+                    contact_id=None,
+                    lead_id=None,
+                )
+            )
+        unsub_requests_repo.insert(
+            request_id=request_id,
+            token_hash=hashed,
+            received_at=received_at,
+            processed_at=self._clock.now(),
+        )
+        return UnsubOutcome.APPLIED
 
     def export_contact(self, contact_id: str) -> ContactExport:
         """Everything held on the Contact as one JSON file; see the module docstring."""

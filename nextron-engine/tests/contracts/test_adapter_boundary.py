@@ -4,7 +4,7 @@ secret is in the error.
 
 - **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__``
   takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway``,
-  ``HttpCrawler`` and ``CompaniesHouseRegistry`` today) has a driver in
+  ``HttpCrawler``, ``CompaniesHouseRegistry`` and ``WorkerUnsubscribe`` today) has a driver in
   ``DRIVERS``: it builds the adapter on a client whose transport is the probe's, with secrets
   planted where the adapter reads them, and makes each of its port calls. The coverage check
   fails for a new such class until it gets one.
@@ -45,6 +45,7 @@ from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.adapters.telegram import TelegramAlert
+from nextron.adapters.unsubscribe import WorkerUnsubscribe
 from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import AiCall, ApiCall
 from nextron.domain.google_oauth import ClientConfig
@@ -63,6 +64,7 @@ REFRESH_TOKEN: Final = "Rt8Gh2Mc5Vb9Xq3Nz7Lp"
 REVOKED_TOKEN: Final = "Rv3Jd7Ks1Wq5Pz9Lm2Xc"
 CLAUDE_KEY: Final = "Ck5Wn9Qx2Lr6Tz3Hv8Mb"
 COMPANIES_HOUSE_KEY: Final = "Kh6Tp1Zc8Wm4Rq2Nx7Lv"
+UNSUB_BEARER: Final = "Ub4Xq8Lm2Vz6Np1Rt5Hk9Jc3Wd7Gs0Fy4Tb8Mn2Qe6Ah"
 PLANTED: Final = (
     BOT_TOKEN,
     BOT_TOKEN.split(":")[1],
@@ -72,6 +74,7 @@ PLANTED: Final = (
     REVOKED_TOKEN,
     CLAUDE_KEY,
     COMPANIES_HOUSE_KEY,
+    UNSUB_BEARER,
 )
 CHAT: Final = "-1001234567890"
 ALERT_TEXT: Final = "Job dead: send_alert 01JD3QZ8X5V9K2M7N4P6R8T0WY, attempts: 6"
@@ -227,6 +230,13 @@ def companies_house_calls(
     yield "company", lambda: adapter.company("01234567")
 
 
+def unsubscribe_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    secrets = InMemorySecrets()
+    secrets.write("unsub/bearer", UNSUB_BEARER)
+    adapter = WorkerUnsubscribe(secrets, meter=meter, http=http)
+    yield "fetch_pending", lambda: adapter.fetch_pending("u.example-sender.com")
+
+
 # Every adapter class whose __init__ takes an http client, with its driver.
 DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
@@ -234,6 +244,7 @@ DRIVERS: Final[dict[type, Driver]] = {
     ClaudeGateway: claude_calls,
     HttpCrawler: crawler_calls,
     CompaniesHouseRegistry: companies_house_calls,
+    WorkerUnsubscribe: unsubscribe_calls,
 }
 # What each adapter records per request: an ApiCall, unless it is listed here.
 RECORDS: Final[dict[type, type]] = {ClaudeGateway: AiCall}

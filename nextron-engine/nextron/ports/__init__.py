@@ -18,4 +18,9 @@ text; ``nextron.adapters.crawler`` implements it.
 registered name, company type, company status, registered office postcode);
 ``nextron.adapters.companies_house`` implements it over the Companies House API, metered and
 self rate-limited.
+
+``UnsubscribePort`` (``unsubscribe``) is the one way to read the unsubscribe Worker's pending
+list (Story 3.11): ``fetch_pending(host)`` returns a ``PendingFetch`` of ``PendingUnsub``
+entries and a count of the malformed ones; ``nextron.adapters.unsubscribe`` implements it over
+``GET https://<host>/pending``, metered.
 """

@@ -1067,15 +1067,17 @@ def test_build_app_builds_compliance_on_its_clock(
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / "data"))
     clocks: list[FrozenClock] = []
     given: list[object] = []
+    codecs: list[object] = []
     real_compliance = main.Compliance
 
     def system_clock() -> FrozenClock:
         clocks.append(FrozenClock(T))
         return clocks[-1]
 
-    def compliance(clock: Any) -> Any:
+    def compliance(clock: Any, **kwargs: Any) -> Any:
         given.append(clock)
-        return real_compliance(clock)
+        codecs.append(kwargs.get("codec"))
+        return real_compliance(clock, **kwargs)
 
     monkeypatch.setattr(main, "KeyringSecrets", lambda env: InMemorySecrets(env))
     monkeypatch.setattr(main, "SystemClock", system_clock)
@@ -1085,3 +1087,5 @@ def test_build_app_builds_compliance_on_its_clock(
 
     [clock] = clocks
     assert given == [clock]
+    [codec] = codecs  # Story 3.11: the poll decodes unsubscribe tokens through it
+    assert isinstance(codec, main.TokenCodec)

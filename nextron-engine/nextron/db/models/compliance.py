@@ -1,6 +1,7 @@
 """The ``compliance`` service's tables (FR-50, FR-52, FR-63, FR-70, AD-3, AD-4, AD-15, AD-16,
-AD-17; migrations ``0022_3_3_suppression_entries``, ``0024_3_8_unsub_tokens`` and
-``0032_3_13_erase_contacts``), owned by ``compliance`` (``nextron.db.repos.compliance``).
+AD-17; migrations ``0022_3_3_suppression_entries``, ``0024_3_8_unsub_tokens``,
+``0032_3_13_erase_contacts`` and ``0037_3_11_unsub_requests``), owned by ``compliance``
+(``nextron.db.repos.compliance``).
 
 **``suppression_entries``**: the Suppression List, one row per suppressed key.
 
@@ -55,6 +56,21 @@ key check can't be defeated by deleting rows: ``trg_unsub_tokens_no_delete`` abo
 ``INSERT`` whose ``id``, ``token_hash`` or ``om_id`` exists (so ``INSERT OR REPLACE`` can't
 replace one), each with "unsubscribe token records are permanent". Every column is PII class
 ``none``.
+
+**``unsub_requests``** (Story 3.11): one row per unsubscribe request applied from the Worker's
+pending list (or, from Epic 7, a mailto opt-out), so a request lands exactly once. It never
+holds the token, the address or the address hash.
+
+- ``id``, the request's ULID (the ``cause_ref`` of the suppression entries it wrote);
+  ``token_hash``, ``nextron.domain.unsub_token.token_hash`` of the token
+  (``ck_unsub_requests_token_hash``: 64 lowercase hex characters; unique,
+  ``uq_unsub_requests_token_hash``); ``received_at``, when the Worker received it;
+  ``processed_at``, when the engine applied it. Every column is NOT NULL.
+- Three triggers (migration ``0037_3_11_unsub_requests``) make the records permanent:
+  ``trg_unsub_requests_no_delete`` aborts any ``DELETE``, ``trg_unsub_requests_immutable`` any
+  ``UPDATE``, and ``trg_unsub_requests_no_reuse`` an ``INSERT`` whose ``id`` or ``token_hash``
+  exists, each with "unsubscribe request records are permanent". Every column is PII class
+  ``none``.
 
 **``data_subject_requests``** (Story 3.13): one row per data subject request, the proof that
 an erasure (or, from Story 3.15, an export) ran.
@@ -173,6 +189,21 @@ class UnsubTokenRecord(Base):
     om_id: Mapped[str] = mapped_column(Ulid)
     kid: Mapped[int] = mapped_column(Integer)
     issued_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class UnsubRequestRecord(Base):
+    """One applied unsubscribe request: its token's hash, when it came and when it landed."""
+
+    __tablename__ = "unsub_requests"
+    __table_args__ = (
+        Index("uq_unsub_requests_token_hash", "token_hash", unique=True),
+        CheckConstraint(TOKEN_HASH_CHECK, name="token_hash"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    token_hash: Mapped[str] = mapped_column(String(TOKEN_HASH_LENGTH))
+    received_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    processed_at: Mapped[datetime] = mapped_column(UtcDateTime)
 
 
 class DataSubjectRequestRecord(Base):

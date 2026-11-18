@@ -527,6 +527,7 @@ def test_the_declared_keys_in_order() -> None:
         "crawl_max_pages",
         "ats_hosts",
         "unsub_active_kid",
+        "unsub_worker_host",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -553,6 +554,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
         setting(Key.UNSUB_ACTIVE_KID),
+        setting(Key.UNSUB_WORKER_HOST),
     )
 
 
@@ -1287,7 +1289,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
             "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
-            "sender_timezone, sink_allowlist, unsub_active_kid, us_solicitation_label"
+            "sender_timezone, sink_allowlist, unsub_active_kid, unsub_worker_host, "
+            "us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

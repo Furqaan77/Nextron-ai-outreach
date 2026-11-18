@@ -461,6 +461,14 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "kid": PiiClass.NONE,
         "issued_at": PiiClass.NONE,
     },
+    # Story 3.11. An applied unsubscribe request keeps only its token's hash and two times,
+    # never the token, the address or its hash.
+    "unsub_requests": {
+        "id": PiiClass.NONE,
+        "token_hash": PiiClass.NONE,
+        "received_at": PiiClass.NONE,
+        "processed_at": PiiClass.NONE,
+    },
     # Story 3.13. A data subject request is kept as the proof of erasure; its reference is the
     # Operator's free text (check_request_ref refuses an address or the person's name), and the
     # rest are IDs, codes and times.

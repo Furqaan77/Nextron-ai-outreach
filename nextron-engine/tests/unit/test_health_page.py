@@ -293,6 +293,7 @@ NEVER_RUN = [
         ["recheck_event", "never"],  # Story 2.11, group Re-check
     ],
     [["Job type", "Last success"], ["check_domains", "never"]],  # Sending, Story 6.5
+    [["Job type", "Last success"], ["poll_unsubscribes", "never"]],  # Story 3.11
     [
         ["Job type", "Last success"],
         ["backup_db", "never"],
@@ -355,6 +356,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Enrichment",
         "Re-check",
         "Sending",
+        "Unsubscribe Endpoint poll",
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
@@ -410,15 +412,17 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Enrichment",
         "Re-check",
         "Sending",
+        "Unsubscribe Endpoint poll",
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
         "13 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables[:5] == [
+    assert panel.tables[:6] == [
         NEVER_RUN[0],
         NEVER_RUN[1],
         NEVER_RUN[2],
+        NEVER_RUN[3],
         [
             ["Job type", "Last success"],
             ["backup_db", "never"],

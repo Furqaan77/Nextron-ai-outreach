@@ -31,7 +31,9 @@ request builder and prices; live constructor ``default_http_client``) and ``craw
 ``default_resolver`` and ``default_own_addresses``) and ``companies_house``
 (``CompaniesHouseRegistry``, the ``RegistryPort``: company search and lookup through the
 Companies House API over ``httpx2``, self rate-limited to 600 requests per 5 minutes; live
-constructor ``default_http_client``).
+constructor ``default_http_client``) and ``unsubscribe`` (``WorkerUnsubscribe``, the
+``UnsubscribePort``: the unsubscribe Worker's pending list, ``GET https://<host>/pending`` with
+the bearer secret over ``httpx2``; live constructor ``default_http_client``).
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
 port calls, whatever the transport raises or answers, and never carries a secret into an error.

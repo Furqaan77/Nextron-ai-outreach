@@ -432,6 +432,14 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "issued_at",
         ),
     },
+    "unsub_requests": {  # Story 3.11
+        "compliance": (
+            "id",
+            "token_hash",
+            "received_at",
+            "processed_at",
+        ),
+    },
     "data_subject_requests": {  # Story 3.13
         "compliance": (
             "id",
