@@ -1,5 +1,5 @@
-"""Cold-email Eligibility (FR-18, FR-2, FR-63, AD-4, AD-16, NFR-5, NFR-7; Story 3.6). Standard
-library and ``nextron.domain`` only.
+"""Cold-email Eligibility (FR-18, FR-2, FR-51, FR-63, AD-4, AD-16, NFR-5, NFR-7; Stories 3.6 and
+3.7). Standard library and ``nextron.domain`` only.
 
 Eligibility answers whether a Contact may lawfully receive cold email **now**. It is computed
 live on every call and never stored: ``compliance.evaluate_eligibility(contact_id)`` gathers the
@@ -8,9 +8,10 @@ nowhere else (``tests/contracts/test_eligibility_contracts.py``).
 
 **Reasons.** ``ReasonKind`` is a closed ``StrEnum``, in this order: ``no_enabled_market``,
 ``cold_email_not_allowed``, ``uk_legal_form_ineligible``, ``uk_legal_form_unconfirmed``,
-``uk_free_webmail``, ``address_not_sendable``, ``address_or_domain_suppressed``,
-``asked_not_to_be_contacted``, ``recontact_not_allowed``, ``not_now_until``,
-``not_now_undated``, ``lead_closed``. ``Reason(kind, text, until=None)`` is one failing check:
+``uk_free_webmail``, ``address_not_sendable``, ``provenance_missing`` (Story 3.7),
+``address_or_domain_suppressed``, ``asked_not_to_be_contacted``, ``recontact_not_allowed``,
+``not_now_until``, ``not_now_undated``, ``lead_closed``. ``Reason(kind, text, until=None)`` is
+one failing check:
 ``until`` is the re-contact ``date`` of a ``not_now_until`` reason (required there, refused on
 every other kind), and ``code`` is ``not_now_until_<YYYY-MM-DD>`` for that kind and the kind's
 value for every other. ``text`` is the Operator-facing sentence (the ``*_TEXT`` constants): it
@@ -19,7 +20,16 @@ or a domain.
 
 **The Decision.** ``Decision(eligible, basis_rule, reasons)``: ``eligible`` is true exactly when
 ``reasons`` is empty and exactly when ``basis_rule`` (the rule that makes the Contact eligible)
-is set. The reasons have distinct kinds, in ``ReasonKind`` order; ``kinds`` gives them.
+is set. The reasons have distinct kinds, in ``ReasonKind`` order; ``kinds`` gives them. A
+``basis_rule`` longer than ``MAX_BASIS_RULE_LENGTH`` (128, the width of
+``provenance_records.basis_rule``) raises ``ValueError``; ``evaluate``'s longest is 113 (a
+64-character legal-form code with no label), and a labelled UK basis is 71 to 108.
+
+**``basis_country(basis_rule) -> str | None``** (Story 3.7) is the country a basis rule is for:
+``US`` for ``US_BASIS``, ``GB`` for a rule of ``UK_BASIS``'s shape with any non-blank label,
+and ``None`` for anything else (another text, ``None``, a non-``str``).
+``Research.record_eligibility_basis`` refuses a basis for another country than its Campaign's
+Market.
 
 **Facts.**
 
@@ -27,8 +37,10 @@ is set. The reasons have distinct kinds, in ``ReasonKind`` order; ``kinds`` give
   (Story 4.8 passes the Enrollment history); ``ended_at`` before ``last_step_at`` raises
   ``ValueError``, since it would move FR-63's "first seen after it ended" window earlier.
 - ``EligibilityContact(email, address_class, market_id, market_basis, office_country,
-  office_region, contactable, history=())``: the stored Contact texts as they are stored, the
-  gate's answer (``Allowed`` or ``Blocked``, from ``assert_contactable`` on ``email``) and the
+  office_region, contactable, provenance_recorded, history=())``: the stored Contact texts as
+  they are stored, the gate's answer (``Allowed`` or ``Blocked``, from ``assert_contactable`` on
+  ``email``), whether its Provenance Records show where it and its email came from
+  (``nextron.domain.contacts.provenance_recorded``; required, a ``bool``) and the
   ``EndedSequence`` history. ``email`` never appears in a ``repr``.
 - ``EligibilityLead(country_code, stage, recontact_on=None, legal_form=None,
   legal_form_confirmed=False, events_first_seen=())``: the Lead's country, its
@@ -58,16 +70,19 @@ every failing reason; the Contact is eligible only with none.
    and the email is free webmail (``markets.is_free_webmail``).
 3. **The address:** ``address_not_sendable`` unless there is an email whose Address Class is
    ``published`` or ``verified``.
-4. **The Suppression List:** a ``Blocked`` answer maps each ``BlockReason`` through
+4. **Provenance (FR-51, Story 3.7):** ``provenance_missing`` when ``provenance_recorded`` is
+   false: no Provenance Record shows where the Contact, or the email address it would be sent
+   to, came from (a data error).
+5. **The Suppression List:** a ``Blocked`` answer maps each ``BlockReason`` through
    ``BLOCK_REASON_KINDS``: address and domain keys to ``address_or_domain_suppressed``, person
    and profile keys to ``asked_not_to_be_contacted``, a Lost or Disqualified Lead to
    ``lead_closed``.
-5. **FR-63:** ``recontact_not_allowed`` unless ``recontact_allowed(history, events_first_seen,
+6. **FR-63:** ``recontact_not_allowed`` unless ``recontact_allowed(history, events_first_seen,
    now)``.
-6. **Not Now:** a ``not_now`` Lead gives ``not_now_undated`` with no ``recontact_on``, and
+7. **Not Now:** a ``not_now`` Lead gives ``not_now_undated`` with no ``recontact_on``, and
    ``not_now_until`` while ``recontact_on`` is after ``now``'s UTC date.
-7. **Closed:** ``lead_closed`` for a ``lost`` or ``disqualified`` Lead.
-8. **The basis** of an eligible Contact: ``US_BASIS`` in a US Market; ``UK_BASIS`` with the legal
+8. **Closed:** ``lead_closed`` for a ``lost`` or ``disqualified`` Lead.
+9. **The basis** of an eligible Contact: ``US_BASIS`` in a US Market; ``UK_BASIS`` with the legal
    form's ``LEGAL_FORM_LABELS`` label (or its code) in a GB Market.
 
 **``recontact_allowed(history, events_first_seen, now)``** (FR-63) is true when every
@@ -98,6 +113,8 @@ from nextron.domain.markets import (
 from nextron.domain.pipeline_stage import CLOSED_STAGES, PipelineStage
 
 RECONTACT_WAIT: Final = timedelta(days=90)  # FR-63: since an unanswered Sequence's last Step
+# provenance_records.basis_rule's width (nextron.db.models.research.BASIS_RULE_LENGTH)
+MAX_BASIS_RULE_LENGTH: Final = 128
 
 
 class ReasonKind(StrEnum):
@@ -107,6 +124,7 @@ class ReasonKind(StrEnum):
     UK_LEGAL_FORM_UNCONFIRMED = "uk_legal_form_unconfirmed"
     UK_FREE_WEBMAIL = "uk_free_webmail"
     ADDRESS_NOT_SENDABLE = "address_not_sendable"
+    PROVENANCE_MISSING = "provenance_missing"
     ADDRESS_OR_DOMAIN_SUPPRESSED = "address_or_domain_suppressed"
     ASKED_NOT_TO_BE_CONTACTED = "asked_not_to_be_contacted"
     RECONTACT_NOT_ALLOWED = "recontact_not_allowed"
@@ -165,6 +183,10 @@ ADDRESS_CLASS_TEXT: Final = (
 )
 NO_EMAIL_TEXT: Final = "The Contact has no email address"
 NO_ADDRESS_CLASS_TEXT: Final = "The address has no known Address Class"
+PROVENANCE_MISSING_TEXT: Final = (
+    "Provenance missing: no Provenance Record shows where this Contact or its email address "
+    "came from"
+)
 SUPPRESSED_TEXT: Final = "The address or its domain is on the Suppression List"
 ASKED_TEXT: Final = "This person asked not to be contacted (Suppression List)"
 RECONTACT_TEXT: Final = (
@@ -176,6 +198,7 @@ NOT_NOW_UNDATED_TEXT: Final = "Parked Not Now with no re-contact date recorded"
 LEAD_CLOSED_TEXT: Final = "The Lead is closed ({stage})"
 US_BASIS: Final = "US: cold email allowed (CAN-SPAM)"
 UK_BASIS: Final = "UK: corporate subscriber ({label}), legitimate interests"
+_UK_BASIS_PREFIX, _UK_BASIS_SUFFIX = UK_BASIS.split("{label}")
 
 SENDABLE_CLASSES: Final = frozenset({AddressClass.PUBLISHED, AddressClass.VERIFIED})
 ADDRESS_CLASS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
@@ -308,6 +331,10 @@ class Decision:
             raise TypeError("Decision.reasons must hold Reason values only")
         if self.basis_rule is not None and not self.basis_rule.strip():
             raise ValueError("Decision.basis_rule must not be blank")
+        if self.basis_rule is not None and len(self.basis_rule) > MAX_BASIS_RULE_LENGTH:
+            raise ValueError(
+                f"Decision.basis_rule must be at most {MAX_BASIS_RULE_LENGTH} characters"
+            )
         if not (self.eligible == (not self.reasons) == (self.basis_rule is not None)):
             raise ValueError(
                 "a Decision is eligible exactly when it has no reason and exactly when it has "
@@ -368,6 +395,7 @@ class EligibilityContact:
     office_country: str | None
     office_region: str | None
     contactable: Allowed | Blocked
+    provenance_recorded: bool
     history: tuple[EndedSequence, ...] = ()
 
     def __post_init__(self) -> None:
@@ -382,6 +410,7 @@ class EligibilityContact:
                 "EligibilityContact.contactable must be Allowed or Blocked, not "
                 f"{_type_name(self.contactable)}"
             )
+        _bool(self.provenance_recorded, "EligibilityContact.provenance_recorded")
         _history(self.history, "EligibilityContact.history")
 
 
@@ -540,6 +569,13 @@ def _address_reason(contact: EligibilityContact) -> Reason | None:
     return Reason(ReasonKind.ADDRESS_NOT_SENDABLE, text)
 
 
+def _provenance_reason(contact: EligibilityContact) -> Reason | None:
+    """``provenance_missing`` unless the Contact's Provenance Records show where it came from."""
+    if contact.provenance_recorded:
+        return None
+    return Reason(ReasonKind.PROVENANCE_MISSING, PROVENANCE_MISSING_TEXT)
+
+
 def _closed_reason(lead: EligibilityLead, blocked: tuple[BlockReason, ...]) -> Reason | None:
     """``lead_closed`` for a closed stage or a gate's closed-Lead reason, naming the stage."""
     if lead.stage in CLOSED_STAGES:
@@ -578,6 +614,23 @@ def _legal_form_label(code: str) -> str:
     return LEGAL_FORM_LABELS.get(code, code)
 
 
+def basis_country(basis_rule: object) -> str | None:
+    """The country ``basis_rule`` is for: ``US``, ``GB`` or ``None``; see the module
+    docstring."""
+    if not isinstance(basis_rule, str):
+        return None
+    if basis_rule == US_BASIS:
+        return US
+    if (
+        len(basis_rule) > len(_UK_BASIS_PREFIX) + len(_UK_BASIS_SUFFIX)
+        and basis_rule.startswith(_UK_BASIS_PREFIX)
+        and basis_rule.endswith(_UK_BASIS_SUFFIX)
+        and basis_rule[len(_UK_BASIS_PREFIX) : -len(_UK_BASIS_SUFFIX)].strip()
+    ):
+        return GB
+    return None
+
+
 def _basis_rule(market: MarketDef | None, lead: EligibilityLead) -> str | None:
     """The rule that makes a Contact with no failing check eligible in ``market``: by then the
     Market is a US one, or a GB one with a listed, confirmed legal form."""
@@ -610,7 +663,11 @@ def evaluate(
         found.append(no_market)
     if market is not None:
         found += _market_reasons(market, contact, lead)
-    found += [reason for reason in (_address_reason(contact),) if reason is not None]
+    found += [
+        reason
+        for reason in (_address_reason(contact), _provenance_reason(contact))
+        if reason is not None
+    ]
     found += _suppression_reasons(blocked)
     if not recontact_allowed(contact.history, lead.events_first_seen, now):
         found.append(Reason(ReasonKind.RECONTACT_NOT_ALLOWED, RECONTACT_TEXT))

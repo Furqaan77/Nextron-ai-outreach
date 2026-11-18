@@ -59,12 +59,13 @@ inside a caller's transaction and in a read-only unit of work alike. Callers rea
    ``Allowed()``. Nothing is written, cached or logged, and a ``Blocked`` answer is returned,
    never raised, so a caller's transaction stays usable.
 
-**Live Eligibility (FR-18, FR-2, FR-63, AD-16, NFR-7, Story 3.6).** ``Compliance(clock)
-.evaluate_eligibility(contact_id) -> Decision`` answers whether a stored Contact may lawfully
-receive cold email at the clock's now. It is a plain method, not a ``@command``: it only reads,
-so it runs in a read-only unit of work (the Lead page renders it) and inside a caller's
-transaction alike. Every consumer (the Lead page; Enrollment, Story 4.8; the send gate, 6.9)
-calls it, and it is the only caller of ``nextron.domain.eligibility.evaluate``.
+**Live Eligibility (FR-18, FR-2, FR-51, FR-63, AD-16, NFR-7, Stories 3.6 and 3.7).**
+``Compliance(clock).evaluate_eligibility(contact_id) -> Decision`` answers whether a stored
+Contact may lawfully receive cold email at the clock's now. It is a plain method, not a
+``@command``: it only reads, so it runs in a read-only unit of work (the Lead page renders it)
+and inside a caller's transaction alike. Every consumer (the Lead page; Enrollment, Story 4.8;
+the send gate, 6.9) calls it, and it is the only caller of
+``nextron.domain.eligibility.evaluate``.
 
 1. **Reads.** The Contact (``queries.research.contact``; unknown, a non-ULID id included:
    ``LookupError``), its Lead (``queries.discovery.lead``) and the Lead's stage
@@ -76,7 +77,11 @@ calls it, and it is the only caller of ``nextron.domain.eligibility.evaluate``.
 3. **The Markets.** ``queries.setup.markets()`` as a read-only ``{id: definition}``; a stored
    Market that no longer decodes (``InvalidMarkets``) makes the rules ``None``, which fails
    closed with ``no_enabled_market``.
-4. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code,
+4. **Provenance (FR-51, Story 3.7).** ``provenance_recorded(contact.email,
+   queries.research.provenance(contact.id))`` (``nextron.domain.contacts``): false, which gives
+   ``provenance_missing``, when no source record shows where the Contact or its email address
+   came from.
+5. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code,
    stage), market_rules, clock.now())``. No Enrollment history, Event times, legal form or
    re-contact date is read yet (Stories 4.8, 2.9, 2.12 and Epic 7 pass them), so ``history``
    and ``events_first_seen`` are empty, ``legal_form`` is ``None`` (every UK Contact fails
@@ -119,6 +124,7 @@ from nextron.domain.contactability import (
     person_keys,
     purpose_of,
 )
+from nextron.domain.contacts import provenance_recorded
 from nextron.domain.eligibility import Decision, EligibilityContact, EligibilityLead, evaluate
 from nextron.domain.ids import is_ulid
 from nextron.domain.markets import InvalidMarkets, MarketDef
@@ -273,6 +279,9 @@ class Compliance:
                 office_country=contact.office_country,
                 office_region=contact.office_region,
                 contactable=contactable,
+                provenance_recorded=provenance_recorded(
+                    contact.email, research_queries.provenance(contact.id)
+                ),
             ),
             EligibilityLead(country_code=lead.country_code, stage=stage),
             _market_rules(),

@@ -16,14 +16,16 @@ violation.
   build them.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
-  Contact matched by name) run on a temporary database at head with the real services, a
-  recording fake of ``nextron.app.compliance.api.assert_contactable`` and a
-  ``before_cursor_execute`` log of the write statements (``INSERT``, ``UPDATE``, ``DELETE``,
-  ``REPLACE``) on that engine. With ``Allowed()``, the gate is called with the expected
-  subjects (compared by value), channel and purpose, before the first write (all of them before
-  it, except for the CSV import, which gates row by row), and once before each insert into a
-  guarded table. With ``Blocked``, no table gains a row (jobs included) and no write runs,
-  except the one ``contact_blocked`` ``events`` insert of ``add_contact``.
+  Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
+  ``eligibility_basis``, which ``add_contact`` refuses before the gate since Story 3.7) run on a
+  temporary database at head with the real services, a recording fake of
+  ``nextron.app.compliance.api.assert_contactable`` and a ``before_cursor_execute`` log of the
+  write statements (``INSERT``, ``UPDATE``, ``DELETE``, ``REPLACE``) on that engine. With
+  ``Allowed()``, the gate is called with the expected subjects (compared by value), channel and
+  purpose, before the first write (all of them before it, except for the CSV import, which
+  gates row by row), and once before each insert into a guarded table. With ``Blocked``, no
+  table gains a row (jobs included) and no write runs, except the one ``contact_blocked``
+  ``events`` insert of ``add_contact``.
 - **Call sites.** Every use of ``upsert_lead`` or ``add_contact`` (a call or a reference) under
   ``nextron/`` sits lexically inside a manifest def, so a new caller (Epic 8 discovery, Epic 7
   replies) can't skip the manifest.
@@ -94,6 +96,11 @@ GUARDED_TABLES: Final = frozenset(
     }
 )
 GATED_COMMANDS: Final = frozenset({"upsert_lead", "add_contact"})
+# The sources add_contact accepts: eligibility_basis is refused before the gate (Story 3.7), and
+# only Research.record_eligibility_basis writes such a record.
+CONTACT_SOURCES: Final = tuple(
+    source for source in ProvenanceSource if source is not ProvenanceSource.ELIGIBILITY_BASIS
+)
 MODELS: Final = "db/models/"
 REPOS: Final = "db/repos/"
 MIGRATIONS: Final = "db/alembic/versions/"
@@ -127,7 +134,7 @@ MANIFEST: Final = (
             r"Research\.add_contact",
             inserts=frozenset({"contacts"}),
         )
-        for source in ProvenanceSource
+        for source in CONTACT_SOURCES
     ),
     Caller("find_contact_email", ("app/",), ANY + r"\w*find\w*email\w*"),
     Caller("verify_contact_email", ("app/",), ANY + r"\w*verify\w*email\w*"),
@@ -944,7 +951,7 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
                 blocked_writes=frozenset({("INSERT", "events")}),
                 after_blocked=_contact_blocked,
             )
-            for source in ProvenanceSource
+            for source in CONTACT_SOURCES
         },
     }
 )
@@ -1013,7 +1020,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
     assert {name for name, defs in found.items() if defs} == {
         "discovery.upsert_lead",
         "discovery.csv_import",
-        *(f"research.add_contact[{source}]" for source in ProvenanceSource),
+        *(f"research.add_contact[{source}]" for source in CONTACT_SOURCES),
     }
     assert scenario_problems(package_index(), SCENARIOS) == []
 

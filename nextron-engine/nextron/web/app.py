@@ -121,7 +121,9 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts`` and
   ``queries.research.lead_provenance``, with each Contact's live Eligibility from
-  ``compliance.evaluate_eligibility`` (Story 3.6), evaluated on every render and never stored.
+  ``compliance.evaluate_eligibility`` (Story 3.6), evaluated on every render and never stored,
+  and the stored Markets (``queries.setup.markets``, or none when one no longer decodes:
+  ``InvalidMarkets``), which name each Contact's Market (Story 3.7).
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -1007,6 +1009,10 @@ def create_app(
         contacts = research_queries.contacts(found.id)
         # live on every render, never stored (FR-18, AD-16)
         decisions = {each.id: compliance.evaluate_eligibility(each.id) for each in contacts}
+        try:  # Story 3.7: the Markets name each Contact's Market
+            markets = setup_queries.markets()
+        except InvalidMarkets:  # unreadable: each stored Market shows as "Unknown Market"
+            markets = ()
         context = lead_rows.lead_context(
             found,
             pipeline_queries.stage(found.id),
@@ -1014,6 +1020,7 @@ def create_app(
             contacts,
             research_queries.lead_provenance(found.id),
             decisions,
+            markets,
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 

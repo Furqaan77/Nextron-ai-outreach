@@ -7,11 +7,17 @@ the running use case's transaction. It checks nothing; ``nextron.app.research`` 
 
 - ``StoredProvenance``: one row;
 - ``insert(...) -> id``: a new record; ``notes`` and the eligibility-basis fields are NULL;
+- ``insert_basis(contact_id, basis_rule, campaign_id, lia_ref, lia_date, at) -> id`` (Story
+  3.7): a new ``eligibility_basis`` record of subject ``contact``, its ``source_detail`` the
+  basis rule, ``retrieved_at`` and ``basis_recorded_at`` both ``at``, ``basis_rule``,
+  ``basis_campaign_id``, ``lia_ref`` and ``lia_date`` as given, and ``address``,
+  ``address_class`` and ``notes`` NULL. ``research`` never updates or removes one;
 - ``for_contact(contact_id)``: the Contact's records, by ``retrieved_at``, then ``id``;
 - ``for_lead(lead_id)`` (Story 2.4): the records of every Contact of the Lead, by
   ``retrieved_at``, then ``id``, in one statement joining ``contacts``;
 - ``first_contact_record(contact_id)``: the Contact's first ``contact``-subject record (by
-  ``retrieved_at``, then ``id``), or ``None``;
+  ``retrieved_at``, then ``id``) whose source kind isn't ``eligibility_basis`` (Story 3.7: the
+  Market notes never land on a basis record), or ``None``;
 - ``set_notes(record_id, notes)``: sets the record's ``notes`` (``None`` clears them);
 - ``clear_other_contact_notes(contact_id, keep_id)``: clears the ``notes`` of every other
   ``contact``-subject record of the Contact that holds some, in one statement.
@@ -27,7 +33,7 @@ from sqlalchemy import update as update_rows
 from nextron.db.models.base import new_id
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
 from nextron.db.uow import current
-from nextron.domain.contacts import ProvenanceSubject
+from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +101,39 @@ def insert(
     return record_id
 
 
+def insert_basis(
+    *,
+    contact_id: str,
+    basis_rule: str,
+    campaign_id: str,
+    lia_ref: str | None,
+    lia_date: date | None,
+    at: datetime,
+) -> str:
+    """Store a new ``eligibility_basis`` record for the Contact ``contact_id``; return its new
+    ULID."""
+    record_id = new_id()
+    current().session.execute(
+        insert_rows(ProvenanceRecord).values(
+            id=record_id,
+            contact_id=contact_id,
+            subject=str(ProvenanceSubject.CONTACT),
+            source_kind=str(ProvenanceSource.ELIGIBILITY_BASIS),
+            source_detail=basis_rule,
+            address=None,
+            retrieved_at=at,
+            address_class=None,
+            notes=None,
+            basis_rule=basis_rule,
+            basis_campaign_id=campaign_id,
+            lia_ref=lia_ref,
+            lia_date=lia_date,
+            basis_recorded_at=at,
+        )
+    )
+    return record_id
+
+
 def for_contact(contact_id: str) -> tuple[StoredProvenance, ...]:
     """The Provenance Records of the Contact ``contact_id``, by ``retrieved_at``, then ``id``."""
     statement = (
@@ -119,12 +158,13 @@ def for_lead(lead_id: str) -> tuple[StoredProvenance, ...]:
 
 def first_contact_record(contact_id: str) -> StoredProvenance | None:
     """The first ``contact``-subject record of the Contact ``contact_id`` (by ``retrieved_at``,
-    then ``id``), or ``None``."""
+    then ``id``) that isn't an ``eligibility_basis`` record, or ``None``."""
     statement = (
         select(*_COLUMNS)
         .where(
             ProvenanceRecord.contact_id == contact_id,
             ProvenanceRecord.subject == str(ProvenanceSubject.CONTACT),
+            ProvenanceRecord.source_kind != str(ProvenanceSource.ELIGIBILITY_BASIS),
         )
         .order_by(ProvenanceRecord.retrieved_at, ProvenanceRecord.id)
         .limit(1)

@@ -1,6 +1,7 @@
 """The ``research`` service's tables (FR-2, FR-14, FR-15, FR-51, AD-3, AD-7, AD-11, AD-17;
-migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). Owner
-``research`` writes every column (``nextron.db.repos.research``). No foreign key cascades.
+migrations ``0015_2_3_contacts_provenance``, ``0019_3_2_contact_markets`` and
+``0024_3_7_basis_rule_width``). Owner ``research`` writes every column
+(``nextron.db.repos.research``). No foreign key cascades.
 
 **``contacts``**: one person on a Lead.
 
@@ -37,9 +38,11 @@ migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). O
   (``ck_provenance_records_address``);
 - ``retrieved_at``; ``address_class`` (nullable; the class at the time, on ``address`` records
   only: ``ck_provenance_records_address_class``); ``notes`` (nullable);
-- the eligibility-basis fields, all nullable and NULL until Story 3.x sets them:
-  ``basis_rule``, ``basis_campaign_id`` (a ULID; no foreign key until ``campaigns`` exists),
-  ``lia_ref``, ``lia_date`` (a calendar date) and ``basis_recorded_at``.
+- the eligibility-basis fields, all nullable and set only on an ``eligibility_basis`` record
+  (``Research.record_eligibility_basis``, Story 3.7): ``basis_rule`` (at most 128 characters,
+  ``BASIS_RULE_LENGTH``, widened from 64 by ``0024_3_7_basis_rule_width`` so a UK basis fits),
+  ``basis_campaign_id`` (a ULID; no foreign key), ``lia_ref``, ``lia_date`` (a calendar date)
+  and ``basis_recorded_at``.
 
 PII classes (``nextron.db.pii_registry``): a Contact's ``name`` and ``role`` and a record's
 ``source_detail`` and ``notes`` are ``redact``; ``email`` and a record's ``address`` are
@@ -66,6 +69,7 @@ from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.address_class import AddressClass
 from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
+from nextron.domain.eligibility import MAX_BASIS_RULE_LENGTH
 
 TEXT_LENGTH: Final = 200  # nextron.domain.contacts.MAX_TEXT_LENGTH
 EMAIL_LENGTH: Final = 254  # nextron.domain.identity.MAX_EMAIL_LENGTH
@@ -75,7 +79,7 @@ TZ_LENGTH: Final = 64
 SUBJECT_LENGTH: Final = 16
 SOURCE_KIND_LENGTH: Final = 32
 DETAIL_LENGTH: Final = 2048
-BASIS_RULE_LENGTH: Final = 64
+BASIS_RULE_LENGTH: Final = MAX_BASIS_RULE_LENGTH  # 128: a Decision refuses a longer rule
 LIA_REF_LENGTH: Final = 200
 BASIS_LENGTH: Final = 32
 COUNTRY_LENGTH: Final = 2

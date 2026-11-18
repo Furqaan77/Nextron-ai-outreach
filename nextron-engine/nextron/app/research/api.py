@@ -14,7 +14,9 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
 
   1. **Checks, before any write.** ``candidate`` not a ``ContactCandidate``, ``source`` not a
      ``ProvenanceSource``, or ``retrieved_at`` not an aware ``datetime`` raises ``TypeError``;
-     a ``detail`` that isn't a ``str`` of 1 to 2,048 characters equal to its own strip raises
+     ``source=ProvenanceSource.ELIGIBILITY_BASIS`` (Story 3.7: a basis says why a Contact may
+     be emailed, not where it came from; only ``record_eligibility_basis`` writes one) and a
+     ``detail`` that isn't a ``str`` of 1 to 2,048 characters equal to its own strip raise
      ``ValueError``. The Lead is read with ``queries.discovery.lead``: an
      unknown Lead raises ``LookupError`` and a merged one ``ValueError``. With an email,
      ``assign(source)`` (``nextron.domain.address_class``) runs first, so a source that never
@@ -69,6 +71,36 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
   its email, office location or Lead outside ``add_contact`` (Stories 2.10, 2.13, 2.14, 2.16);
   an unknown Contact (an id that isn't a ULID included) raises ``LookupError``.
 
+- ``@command record_eligibility_basis(contact_id, decision, campaign_id, lia_ref, lia_date, at)
+  -> str`` (FR-51, AD-7, Story 3.7) records why a Contact may be emailed in a Campaign: the
+  recorder Story 4.8's ``enroll`` calls in its unit, with the Decision it just got from
+  ``compliance.evaluate_eligibility`` and the Campaign's LIA. It trusts that Decision but
+  refuses anything that would make a false audit record. Every check comes first, so a refusal
+  writes nothing:
+
+  1. ``TypeError``: ``decision`` not a ``nextron.domain.eligibility.Decision``,
+     ``contact_id`` or ``campaign_id`` not a ``str``, ``lia_ref`` not a ``str`` or ``None``,
+     ``lia_date`` not a ``date`` or ``None`` (a ``datetime`` is refused), ``at`` not an aware
+     ``datetime``.
+  2. ``ValueError``: a Decision that isn't eligible.
+  3. ``LookupError``: an unknown Contact (a text that isn't a ULID included) or Campaign
+     (``queries.setup.campaign``). A stored Market that no longer decodes raises its
+     ``InvalidMarkets`` (from ``queries.setup.markets()``); nothing is written.
+  4. ``ValueError``: the Contact's ``market_id`` isn't the Campaign's ``market_id``;
+     ``basis_country(decision.basis_rule)`` isn't the ``country_code`` of that Market (read
+     from ``queries.setup.markets()``); when ``needs_lia(country)`` (GB), ``lia_ref`` and
+     ``lia_date`` aren't both set and equal to the Campaign's recorded ``lia`` (its ``ref`` and
+     ``date``); otherwise either is set.
+
+  It then inserts one ``eligibility_basis`` record (``provenance_repo.insert_basis``): subject
+  ``contact``, ``source_detail`` the basis rule, ``retrieved_at`` and ``basis_recorded_at``
+  ``at``, ``basis_rule``, ``basis_campaign_id``, ``lia_ref`` and ``lia_date`` as given, and
+  ``address``, ``address_class`` and ``notes`` NULL, and returns its id. Each call adds a new
+  record: an earlier basis keeps the LIA it was recorded with, even after
+  ``Campaigns.record_lia`` changes the Campaign's. No ``research`` command updates or removes a
+  basis record (the resolver's notes skip it). Nothing is logged and no ``events`` row is
+  appended.
+
 - ``@use_case purge_page_text() -> int`` (the daily ``purge_page_text`` job, Story 2.5): in one
   transaction, nulls ``text`` on every page whose ``text_purge_after`` is now or earlier, keeping
   ``content_hash``; logs ``page_text_purged`` (``count``) and returns the count.
@@ -82,10 +114,10 @@ and ``lead_hq_tz=None`` (Story 2.9 passes the Lead's headquarters zone). It writ
 ``market_id`` (the chosen Market's row id, or NULL), ``market_basis``, ``tz`` and ``tz_basis``
 through ``contacts.fill`` (``updated_at`` now) only when one of them differs, and sets the notes
 (joined with a newline, or NULL when there are none) on the Contact's first ``contact``
-Provenance Record (by ``retrieved_at``, then ``id``) only when they differ; when it does, it also
-clears the notes of the Contact's other ``contact`` records, so only the first holds them (a
-later source may supply an earlier ``retrieved_at``). No log line or ``events`` row holds a note
-or a place.
+Provenance Record that isn't an ``eligibility_basis`` record (by ``retrieved_at``, then ``id``)
+only when they differ; when it does, it also clears the notes of the Contact's other ``contact``
+records, so only the first holds them (a later source may supply an earlier ``retrieved_at``).
+No log line or ``events`` row holds a note or a place.
 
 **``ContactMarkets(clock, research, queue)``** resolves the Contacts stored before Story 3.2,
 through the one-off ``resolve_contact_markets`` job (bulk lane):
@@ -169,13 +201,14 @@ import logging
 import urllib.parse
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.queries.setup import SeededCampaign
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -184,6 +217,7 @@ from nextron.db.repos.research.contacts import StoredContact
 from nextron.db.uow import command, current, use_case
 from nextron.domain.address_class import AddressCause, AddressClass, assign
 from nextron.domain.budget import BudgetClass, allow
+from nextron.domain.campaign import needs_lia
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB, resolve_contact_market
 from nextron.domain.contactability import (
     Allowed,
@@ -214,6 +248,7 @@ from nextron.domain.crawl import (
     lead_job_keys,
     text_hash,
 )
+from nextron.domain.eligibility import Decision, basis_country
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
 from nextron.domain.geo import Location
 from nextron.domain.identity import IdentityError, normalize_name, registrable_domain
@@ -300,6 +335,8 @@ def _check_arguments(
         raise TypeError(f"add_contact takes a ProvenanceSource, not {type(source).__name__}")
     if not (isinstance(retrieved_at, datetime) and retrieved_at.utcoffset() is not None):
         raise TypeError("add_contact takes retrieved_at as an aware datetime")
+    if source is ProvenanceSource.ELIGIBILITY_BASIS:  # only record_eligibility_basis writes one
+        raise ValueError("add_contact: eligibility_basis is not where a Contact comes from")
     if (
         not isinstance(detail, str)
         or not 1 <= len(detail) <= MAX_DETAIL_LENGTH
@@ -308,6 +345,58 @@ def _check_arguments(
         raise ValueError(
             f"add_contact takes a stripped detail of 1 to {MAX_DETAIL_LENGTH:,} characters"
         )
+
+
+def _check_basis_arguments(
+    contact_id: object,
+    decision: object,
+    campaign_id: object,
+    lia_ref: object,
+    lia_date: object,
+    at: object,
+) -> str:
+    """``record_eligibility_basis``'s type checks and its refusal of an ineligible Decision;
+    no message holds a value. Returns the Decision's basis rule."""
+    name = "record_eligibility_basis"
+    if not isinstance(decision, Decision):
+        raise TypeError(f"{name} takes a Decision, not {type(decision).__name__}")
+    if not isinstance(contact_id, str):
+        raise TypeError(f"{name} takes contact_id as a str, not {type(contact_id).__name__}")
+    if not isinstance(campaign_id, str):
+        raise TypeError(f"{name} takes campaign_id as a str, not {type(campaign_id).__name__}")
+    if lia_ref is not None and not isinstance(lia_ref, str):
+        raise TypeError(f"{name} takes lia_ref as a str or None, not {type(lia_ref).__name__}")
+    if lia_date is not None and (isinstance(lia_date, datetime) or not isinstance(lia_date, date)):
+        raise TypeError(f"{name} takes lia_date as a date or None, not {type(lia_date).__name__}")
+    if not (isinstance(at, datetime) and at.utcoffset() is not None):
+        raise TypeError(f"{name} takes at as an aware datetime")
+    if not decision.eligible or decision.basis_rule is None:
+        raise ValueError(f"{name}: the Decision isn't eligible")
+    return decision.basis_rule
+
+
+def _basis_problem(
+    contact: StoredContact,
+    campaign: SeededCampaign,
+    country: str,
+    basis_rule: str,
+    lia_ref: str | None,
+    lia_date: date | None,
+) -> str | None:
+    """Why the basis would be a false audit record, or ``None``; see the module docstring."""
+    if contact.market_id != campaign.market_id:
+        return "the Contact's Market isn't the Campaign's"
+    if basis_country(basis_rule) != country:
+        return "the basis isn't for the Campaign's Market"
+    if needs_lia(country):
+        lia = campaign.lia
+        if lia is None or lia_ref is None or lia_date is None:
+            return "a UK basis needs the Campaign's recorded LIA"
+        if (lia_ref, lia_date) != (lia.ref, lia.date):
+            return "the LIA isn't the Campaign's recorded one"
+    elif lia_ref is not None or lia_date is not None:
+        return "only a UK basis records an LIA"
+    return None
 
 
 def _name_key(contact: StoredContact) -> str | None:
@@ -463,6 +552,47 @@ class Research:
         """Resolve the Contact ``contact_id``'s Market and timezone again; see the module
         docstring. An unknown Contact raises ``LookupError``."""
         self._resolve(contact_id)
+
+    @command
+    def record_eligibility_basis(
+        self,
+        contact_id: str,
+        decision: Decision,
+        campaign_id: str,
+        lia_ref: str | None,
+        lia_date: date | None,
+        at: datetime,
+    ) -> str:
+        """Record why the Contact ``contact_id`` may be emailed in the Campaign ``campaign_id``:
+        a new ``eligibility_basis`` Provenance Record; return its id. See the module
+        docstring."""
+        basis_rule = _check_basis_arguments(
+            contact_id, decision, campaign_id, lia_ref, lia_date, at
+        )
+        contact = contacts_repo.get(contact_id) if is_ulid(contact_id) else None
+        if contact is None:
+            raise LookupError("record_eligibility_basis: the Contact is unknown")
+        campaign = setup_queries.campaign(campaign_id)
+        if campaign is None:
+            raise LookupError("record_eligibility_basis: the Campaign is unknown")
+        market = next(
+            (found for found in setup_queries.markets() if found.id == campaign.market_id), None
+        )
+        if market is None:  # the campaigns table's foreign key keeps it
+            raise LookupError("record_eligibility_basis: the Campaign's Market is unknown")
+        problem = _basis_problem(
+            contact, campaign, market.definition.country_code, basis_rule, lia_ref, lia_date
+        )
+        if problem is not None:
+            raise ValueError(f"record_eligibility_basis: {problem}")
+        return provenance_repo.insert_basis(
+            contact_id=contact.id,
+            basis_rule=basis_rule,
+            campaign_id=campaign.id,
+            lia_ref=lia_ref,
+            lia_date=lia_date,
+            at=at,
+        )
 
     def _resolve(self, contact_id: str) -> None:
         """Resolve the Contact's Market and timezone and write what changed; see the module

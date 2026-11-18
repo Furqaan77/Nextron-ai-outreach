@@ -678,6 +678,7 @@ def test_the_facts_not_yet_recorded_are_passed_as_absent(
     assert contact.history == ()
     assert contact.address_class == "published"
     assert contact.contactable == Allowed()
+    assert contact.provenance_recorded is True  # Story 3.7: its contact and address records
     assert isinstance(lead, EligibilityLead)
     assert lead == EligibilityLead(country_code="US", stage=PipelineStage.NOT_NOW)
     assert (lead.recontact_on, lead.legal_form, lead.legal_form_confirmed) == (None, None, False)

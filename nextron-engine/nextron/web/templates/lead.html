@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {#- The Lead page (nextron.web.leads_page): the header facts, then each Contact with its live
-    Eligibility (evaluated on this render, never stored) and its Provenance Records. Every Lead,
-    Contact and Provenance text is imported or crawled: it renders only through |plain or
-    safe_link, inside an element carrying hx-disable. -#}
+    Eligibility (evaluated on this render, never stored) and its recorded bases, then its Market
+    and timezone facts and its Provenance Records. Every Lead, Contact and Provenance text is
+    imported or crawled: it renders only through |plain or safe_link, inside an element carrying
+    hx-disable. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}
@@ -43,8 +44,32 @@
 {%- endfor %}
 </ul>
 {%- endif %}
+{%- if contact.bases %}
+<ul class="eligibility-bases">
+{%- for basis in contact.bases %}
+<li>{{ basis.basis|plain }}{% if basis.lia %}<br>{{ basis.lia|plain }}{% endif %}</li>
+{%- endfor %}
+</ul>
+{%- else %}
+<p class="eligibility-basis">Basis not yet recorded (recorded at enrollment)</p>
+{%- endif %}
 </td></tr>
 <tr class="provenance-row"><td colspan="6">
+<dl class="provenance-facts">
+<dt>Market</dt>
+<dd>{{ contact.facts.market|plain }}</dd>
+<dt>Timezone</dt>
+<dd>{{ contact.facts.timezone|plain }}</dd>
+<dt>Notes</dt>
+{%- for line in contact.facts.notes %}
+<dd>{{ line|plain }}</dd>
+{%- else %}
+<dd>—</dd>
+{%- endfor %}
+</dl>
+{%- if contact.provenance_missing %}
+<p class="provenance-missing">Provenance missing</p>
+{%- endif %}
 {%- if contact.records %}
 <table class="provenance-table">
 <thead>
@@ -52,12 +77,10 @@
 </thead>
 <tbody>
 {%- for record in contact.records %}
-<tr><td>{{ record.record|plain }}{% if record.address %} {{ record.address|plain }}{% endif %}</td><td>{{ record.source|plain }}</td><td>{{ record.detail|plain }}</td><td>{{ record.retrieved }}</td><td>{{ or_dash(record.address_class) }}</td></tr>
+<tr><td>{{ record.record|plain }}{% if record.address %} {{ record.address|plain }}{% endif %}</td><td>{{ record.source|plain }}</td><td>{{ safe_link(record.detail) }}</td><td>{{ record.retrieved }}</td><td>{{ or_dash(record.address_class) }}</td></tr>
 {%- endfor %}
 </tbody>
 </table>
-{%- else %}
-<p class="no-provenance">No Provenance Record.</p>
 {%- endif %}
 </td></tr>
 {%- endfor %}

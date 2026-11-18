@@ -136,6 +136,7 @@ FILES = [
     "nextron/db/alembic/versions/0021_4_2_campaigns.py",
     "nextron/db/alembic/versions/0022_3_3_suppression_entries.py",
     "nextron/db/alembic/versions/0023_4_11_footer_snapshots.py",
+    "nextron/db/alembic/versions/0024_3_7_basis_rule_width.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",

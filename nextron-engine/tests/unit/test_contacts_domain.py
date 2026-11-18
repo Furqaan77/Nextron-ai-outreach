@@ -1,7 +1,9 @@
-"""``nextron.domain.contacts`` (FR-14, FR-15, FR-51): the Provenance sources and subjects, and
-``ContactCandidate``'s rules, each refusal naming its field and never the value."""
+"""``nextron.domain.contacts`` (FR-14, FR-15, FR-51): the Provenance sources and subjects,
+``ContactCandidate``'s rules, each refusal naming its field and never the value, and (Story 3.7)
+``provenance_recorded``'s table."""
 
 import dataclasses
+from dataclasses import dataclass
 
 import pytest
 
@@ -13,6 +15,7 @@ from nextron.domain.contacts import (
     ProvenanceSubject,
     check_name,
     check_role,
+    provenance_recorded,
 )
 from nextron.domain.errors import DomainError
 
@@ -138,3 +141,54 @@ def test_check_name_and_check_role_apply_the_text_rules_alone() -> None:
     check_role("!!!")  # a role needs no name key
     with pytest.raises(InvalidContact, match="^role:"):
         check_role("x" * (MAX_TEXT_LENGTH + 1))
+
+
+# provenance_recorded (Story 3.7) ----------------------------------------------------------------
+
+EMAIL = "jane@firm.com"
+
+
+@dataclass(frozen=True, slots=True)
+class Record:
+    """A stand-in for a stored Provenance Record: only what ``provenance_recorded`` reads."""
+
+    subject: str
+    source_kind: str
+    address: str | None = None
+
+
+CONTACT = Record("contact", "csv")
+ADDRESS = Record("address", "csv", EMAIL)
+BASIS = Record("contact", "eligibility_basis")
+BASIS_ADDRESS = Record("address", "eligibility_basis", EMAIL)  # never written; still ignored
+
+
+@pytest.mark.parametrize(
+    ("email", "records", "recorded"),
+    [
+        (None, [CONTACT], True),
+        (EMAIL, [CONTACT, ADDRESS], True),
+        (EMAIL, [ADDRESS, CONTACT], True),  # order doesn't matter
+        (None, [CONTACT, BASIS], True),
+        (EMAIL, [BASIS, ADDRESS, CONTACT], True),
+        (None, [Record("contact", "operator")], True),
+        (None, [Record("contact", "carrier_pigeon")], True),  # an unknown stored source counts
+        (None, [], False),
+        (EMAIL, [], False),
+        (None, [BASIS], False),  # a basis isn't a source
+        (EMAIL, [CONTACT], False),  # the email has no address record
+        (EMAIL, [ADDRESS], False),  # no contact record
+        (EMAIL, [CONTACT, Record("address", "csv", "other@firm.com")], False),
+        (EMAIL, [CONTACT, Record("address", "csv", "Jane@firm.com")], False),  # exact address
+        (EMAIL, [CONTACT, BASIS_ADDRESS], False),
+        (EMAIL, [BASIS, ADDRESS], False),
+        (None, [ADDRESS], False),
+    ],
+)
+def test_provenance_recorded(email: str | None, records: list[Record], recorded: bool) -> None:
+    assert provenance_recorded(email, records) is recorded
+
+
+def test_provenance_recorded_takes_any_iterable_once() -> None:
+    assert provenance_recorded(EMAIL, iter([CONTACT, ADDRESS])) is True
+    assert provenance_recorded(EMAIL, (record for record in [ADDRESS, CONTACT])) is True
