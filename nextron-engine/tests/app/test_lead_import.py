@@ -219,7 +219,7 @@ def world(db_engine: Engine) -> World:
         Setup(clock).sync_markets(markets)
     discovery = Discovery(clock, Pipeline(clock), queue_on(clock))
     research = Research(clock)
-    imports = LeadImports(clock, discovery, research, FakeEmailSyntax())
+    imports = LeadImports(clock, discovery, research, FakeEmailSyntax(), queue_on(clock))
     found = World(units, db_engine, clock, discovery, research, imports, "", "")
     [(law,), (ops,)] = found.sql("SELECT id FROM segments ORDER BY key")
     found.law, found.ops = law, ops

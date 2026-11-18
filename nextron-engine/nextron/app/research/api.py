@@ -293,7 +293,9 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    (``first_seen_at`` kept, ``last_seen_at``, ``run_id`` and ``page_id`` updated; the first page
    that holds it in the run). Each upserted page's ``page_contact_methods`` rows are replaced
    by its detections (``detected_at`` now), and its ``tag_managers`` by the keys it loads
-   (``set_tag_managers``). With a ``final_domain``, ``canonicalize_lead`` is
+   (``set_tag_managers``). Then each ``guessed`` Contact address found on a stored page moves
+   to ``published`` (Story 2.14, ``verification.promote_found_on_site``). With a
+   ``final_domain``, ``canonicalize_lead`` is
    enqueued (payload ``{v, lead_id, run_id}``). When any stored page ``needs_render`` (under
    500 characters of text), ``render_pages`` is enqueued (the same payload, discriminator and
    concurrency key, from ``lead_job_keys``) and the Signal extraction waits for it; otherwise,
@@ -329,7 +331,8 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    2.13; an empty render keeps both); the render's detections the page doesn't hold yet are
    added (``detected_at`` the render's time), and so are the tag managers it loads
    (``add_tag_managers``); the run's
-   ``renders`` (successes) and ``errors`` grow; the Lead's ``contact_methods`` is set; and
+   ``renders`` (successes) and ``errors`` grow; each ``guessed`` Contact address found on a
+   stored page moves to ``published`` (Story 2.14); the Lead's ``contact_methods`` is set; and
    ``extract_lead`` is enqueued (below), so the Signals are read from the rendered text.
 4. It logs ``render_finished`` (``lead_id``, ``run_id``, ``pages``, ``renders``, ``errors``,
    ``error_codes``, ``applied``), then ``absence_checked`` (below) when the apply wrote, and
@@ -387,6 +390,7 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.setup import SeededCampaign
 from nextron.app.research import postings
 from nextron.app.research.absence import AbsenceApplied, apply_contact_form_only
+from nextron.app.research.verification import promote_found_on_site
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -1773,6 +1777,7 @@ class WebsiteCrawls:
         for page_id, page in zip(page_ids, run.pages, strict=True):
             crawl_repo.replace_contact_methods(page_id, page.detections, now)
             crawl_repo.set_tag_managers(page_id, page.tag_managers)
+        promote_found_on_site(run.lead_id, now)  # Story 2.14: guessed addresses on the site
         seen: set[str] = set()
         for page_id, page in zip(page_ids, run.pages, strict=True):
             for link in page.links:
@@ -2011,6 +2016,7 @@ class WebsiteCrawls:
             crawl_repo.add_tag_managers(page.id, result.tag_managers)
         crawl_repo.add_render_counts(run_id, renders=renders, errors=errors)
         now = self._clock.now()
+        promote_found_on_site(lead_id, now)  # Story 2.14: guessed addresses on the site
         absence = self._set_contact_methods(lead_id, lead.segment_id, run_id, now)
         # Story 2.9: the run's Signals are extracted once its renders are written
         self._enqueue_extraction(lead_id, run_id, latest.site_domain, now)

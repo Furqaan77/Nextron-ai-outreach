@@ -439,6 +439,7 @@ class Dashboard:
             Discovery(self.clock, Pipeline(self.clock), self.queue),
             self.research,
             self.email_syntax,
+            self.queue,
         )
         self.erasures = Erasures(self.clock, Compliance(self.clock), queue=self.queue)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}

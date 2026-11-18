@@ -254,7 +254,7 @@ def world(db_engine: Engine) -> World:
         discovery,
         research,
         Compliance(clock),
-        LeadImports(clock, discovery, research, FakeEmailSyntax()),
+        LeadImports(clock, discovery, research, FakeEmailSyntax(), queue_on(clock)),
     )
     [(segment,), *_] = found.sql("SELECT id FROM segments ORDER BY key")
     found.segment = segment
@@ -555,7 +555,11 @@ def test_a_csv_row_on_a_suppressed_domain_is_counted_apart(
     assert REASON_SUPPRESSED == "Organization is on the Suppression List"
     assert world.sql("SELECT web_domain FROM leads") == [("open-firm.co.uk",)]
     assert [row[2] for row in world.contact_rows()] == ["Ann Lee"]
-    assert world.sql("SELECT COUNT(*) FROM jobs") == [(1,)]  # the open Lead's crawl only
+    # the open Lead's crawl and its Contact's address check (Story 2.14) only
+    assert world.sql("SELECT type FROM jobs ORDER BY rowid") == [
+        ("enrich_lead",),
+        ("verify_contact_email",),
+    ]
     [record] = [r for r in caplog.records if r.getMessage() == "lead_import_finished"]
     logged = [getattr(record, key) for key in ("imported", "merged", "noted", "suppressed")]
     assert logged == [1, 0, 0, 2]

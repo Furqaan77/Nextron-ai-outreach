@@ -1,5 +1,5 @@
-"""``ScriptedFinder`` and ``ScriptedDomainSearch``: the scripted fakes of
-``nextron.ports.email_finder.EmailFinderPort`` and ``DomainSearchPort``.
+"""``ScriptedFinder``, ``ScriptedDomainSearch`` and ``ScriptedVerifier``: the scripted fakes of
+``nextron.ports.email_finder.EmailFinderPort``, ``DomainSearchPort`` and ``EmailVerifierPort``.
 
 ``ScriptedFinder(*script)`` answers each ``find_email`` with the next item of ``script``, in
 order: a ``FinderAnswer`` is returned as it is, an ``AdapterError`` is raised. Once the script is
@@ -10,13 +10,22 @@ address needs no script. ``calls`` records every ``FinderQuery`` it was asked, a
 ``DomainSearchAnswer``s; once its script is exhausted it answers ``DomainSearchAnswer(None,
 ())`` (no pattern, nobody). ``calls`` records every domain it was asked.
 
-Both build with no arguments. Unlike the real adapters they read no key and meter nothing, so a
+``ScriptedVerifier(*script)`` does the same for ``verify_email``, with ``VerifierAnswer``s; once
+its script is exhausted it answers ``VerifierAnswer("unknown")``. ``calls`` records every address
+it was asked.
+
+All three build with no arguments. Unlike the real adapters they read no key and meter nothing, so a
 service test checks the budget and the call counts itself.
 """
 
 from collections import deque
 
-from nextron.ports.email_finder import DomainSearchAnswer, FinderAnswer, FinderQuery
+from nextron.ports.email_finder import (
+    DomainSearchAnswer,
+    FinderAnswer,
+    FinderQuery,
+    VerifierAnswer,
+)
 from nextron.ports.errors import AdapterError
 
 
@@ -48,6 +57,23 @@ class ScriptedDomainSearch:
         self.calls.append(domain)
         if not self.script:
             return DomainSearchAnswer(None, ())
+        answer = self.script.popleft()
+        if isinstance(answer, AdapterError):
+            raise answer
+        return answer
+
+
+class ScriptedVerifier:
+    def __init__(self, *script: VerifierAnswer | AdapterError) -> None:
+        self.script: deque[VerifierAnswer | AdapterError] = deque(script)
+        self.calls: list[str] = []
+
+    def verify_email(self, email: str) -> VerifierAnswer:
+        if not isinstance(email, str):
+            raise TypeError("verify_email takes a str")
+        self.calls.append(email)
+        if not self.script:
+            return VerifierAnswer("unknown")
         answer = self.script.popleft()
         if isinstance(answer, AdapterError):
             raise answer

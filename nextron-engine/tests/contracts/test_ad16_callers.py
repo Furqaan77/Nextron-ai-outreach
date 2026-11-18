@@ -10,8 +10,9 @@ violation.
   name. ``inserts`` are the guarded tables the caller may insert into. An entry is *built* when
   the AST finds such a def; the patterns are loose (``*find*email*``, ``*verify*email*``,
   ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever.
-  ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method. Not built yet:
-  ``verify_contact_email``, the Signal Inbox chain, replies, ``approval.approve``, the pipeline
+  ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method;
+  ``verify_contact_email`` (Story 2.14) is ``EmailVerification.verify_contact_email``. Not built
+  yet: the Signal Inbox chain, replies, ``approval.approve``, the pipeline
   Tasks and call sheets and ``compliance.assert_sendable``: their stories add a scenario here
   when they build them. ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with
   Law-PrivateAI x US active and one Sending Inbox: an eligible US Contact's first two gate calls
@@ -40,7 +41,12 @@ violation.
   unit of work, as the job runner runs it, on a named Contact without an address whose
   Lead's crawled page publishes ``jane.doe@<domain>``: allowed, it gates the Contact, then the
   found address; blocked, it writes only its ``email_search_blocked`` event and the Contact's
-  search outcome.
+  search outcome. Story 2.14's ``EmailVerification.verify_contact_email`` runs the same way on
+  the Primary Contact's ``guessed`` CSV address, with a scripted MX record and Hunter answering
+  ``valid``: allowed, it gates the Contact before its first write and again before the Hunter
+  call, and verifies the address;
+  blocked, it records only the result ``suppressed`` (one ``UPDATE contacts``), makes no DNS or
+  Hunter call and leaves the class ``guessed``.
 - **Call sites.** Every use of ``upsert_lead`` or ``add_contact`` (a call or a reference) under
   ``nextron/`` sits lexically inside a manifest def, so a new caller (Epic 8 discovery, Epic 7
   replies) can't skip the manifest.
@@ -86,11 +92,13 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PeopleExtractions
+from nextron.app.research.verification import EmailVerification
 from nextron.app.sending.api import Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
+from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
@@ -113,6 +121,8 @@ from nextron.domain.markets import validate_markets
 from nextron.domain.offers import validate_offers
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
+from nextron.ports.dns import MxRecord
+from nextron.ports.email_finder import VerifierAnswer
 from nextron.ports.llm import LlmOk, LlmUsage
 from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
 from tests.app.test_signal_extraction import HOME_HTML as RESEARCH_HOME_HTML
@@ -120,7 +130,8 @@ from tests.app.test_signal_extraction import build_world as research_world
 from tests.contracts.support import PACKAGE
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import html_page, robots_txt
-from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
+from tests.fakes.dns import FakeDns
+from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder, ScriptedVerifier
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -965,7 +976,7 @@ def world_at(folder: Path) -> Iterator[World]:
             Setup(clock).sync_markets(markets)
         discovery = Discovery(clock, Pipeline(clock), queue_on(clock))
         research = Research(clock)
-        imports = LeadImports(clock, discovery, research, FakeEmailSyntax())
+        imports = LeadImports(clock, discovery, research, FakeEmailSyntax(), queue_on(clock))
         with engine.connect() as connection:
             segment = str(
                 connection.exec_driver_sql("SELECT id FROM segments ORDER BY key").first()[0]
@@ -1318,8 +1329,59 @@ def _email_search_blocked(world: World) -> None:
     assert addresses == 1  # the allowed case's only
 
 
+# Story 2.14: each verify case's fakes, so the blocked check can see they were never called
+VERIFY_FAKES: list[tuple[FakeDns, ScriptedVerifier]] = []
+
+
+def _verify(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 2.14's ``verify_contact_email`` on the Primary Contact's ``guessed`` CSV address,
+    its domain with an MX record and Hunter answering ``valid``: two gate calls, the Contact's
+    before its first write and again before the paid Hunter call."""
+    domain = f"verify-{tag}.co.uk"
+    lead_id = world.lead(domain)
+    contact_id = world.contact(lead_id, ContactCandidate(name=NAME, email=f"jane.doe@{domain}"))
+    world.transact(lambda: contacts_repo.set_primary(contact_id, "operator", T0))
+    clock = FrozenClock(T0)
+    dns = FakeDns(mx={domain: (MxRecord(10, f"mx.{domain}"),)})
+    verifier = ScriptedVerifier(VerifierAnswer("valid"))
+    VERIFY_FAKES.append((dns, verifier))
+    verification = EmailVerification(
+        clock,
+        InMemoryUsageMeter(clock),
+        queue_on(clock),
+        dns=dns,
+        email_syntax=FakeEmailSyntax(),
+        verifier=verifier,
+    )
+
+    def action() -> object:  # as the job runner runs it: the use case in a unit of work
+        with world.units.open():
+            return verification.verify_contact_email(lead_id, contact_id)
+
+    return action, lambda: (_gate(ContactSubject(contact_id)),) * 2
+
+
+def _verify_blocked(world: World) -> None:
+    """A blocked check makes no DNS or Hunter call, keeps the class and records
+    ``suppressed``; the allowed case verified its address (the scenario isn't vacuous)."""
+    dns, verifier = VERIFY_FAKES[-1]
+    assert dns.queries == [] and verifier.calls == []
+    with world.engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT address_class, email_check_result FROM contacts "
+            "WHERE email LIKE 'jane.doe@verify-%' ORDER BY email"
+        ).all()
+    assert [tuple(row) for row in rows] == [("verified", "valid"), ("guessed", "suppressed")]
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
+        "verify_contact_email": Scenario(
+            (_verify,),
+            # what a blocked check still writes: the Contact's result, never its class
+            blocked_writes=frozenset({("UPDATE", "contacts")}),
+            after_blocked=_verify_blocked,
+        ),
         "find_contact_email": Scenario(
             (_find,),
             # what a blocked search still writes: its event and the Contact's search outcome
@@ -1435,10 +1497,13 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "sequencing.enroll",  # Story 4.8
         "find_contact_email",
         "drafting.request_*",  # Story 4.9
+        "verify_contact_email",  # Story 2.14
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
     assert all(name.startswith("EmailFinding.") for name in finding)
+    verifying = {d.qualname for d in found["verify_contact_email"]}
+    assert verifying == {"EmailVerification.verify_contact_email"}
     assert scenario_problems(package_index(), SCENARIOS) == []
 
 
@@ -1484,7 +1549,7 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
             ),
             "app/research/api.py": (
                 "class Research:\n    def find_email_for_contact(self, contact_id):\n"
-                "        pass\n\n    def verify_address_email(self, contact_id):\n        pass\n"
+                "        pass\n\n    def ingest_signal_item(self, item):\n        pass\n"
             ),
             "app/research/finding.py": (
                 "class EmailFinding:\n    def _write(self, contact_id):\n        pass\n"
@@ -1504,8 +1569,8 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
     # Story 4.8's real scenario left out, so the probe's enroll has none
     without_enroll = [name for name in SCENARIOS if name != "sequencing.enroll"]
     assert scenario_problems(index, without_enroll) == [
-        "verify_contact_email is built (app/research/api.py Research.verify_address_email) but "
-        "has no scenario",
+        "signal_inbox is built (app/research/api.py Research.ingest_signal_item) but has no "
+        "scenario",
         "replies.add_contact is built (app/replies/api.py Replies.intake) but has no scenario",
         "sequencing.enroll is built (app/sequencing/api.py Sequencing.enroll) but has no "
         "scenario",
@@ -1519,16 +1584,14 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
         "Sequencing.enroll",
         "Sequencing.enroll_contact",
     ]
-    assert [d.qualname for d in found["verify_contact_email"]] == [
-        "Research.verify_address_email"
-    ]
+    assert [d.qualname for d in found["signal_inbox"]] == ["Research.ingest_signal_item"]
     assert [d.qualname for d in found["find_contact_email"]] == [
         "Research.find_email_for_contact",
         "EmailFinding._write",
     ]
-    assert scenario_problems(index, [n for n in NAMES if n != "verify_contact_email"]) == [
-        "verify_contact_email is built (app/research/api.py Research.verify_address_email) but "
-        "has no scenario"
+    assert scenario_problems(index, [n for n in NAMES if n != "signal_inbox"]) == [
+        "signal_inbox is built (app/research/api.py Research.ingest_signal_item) but has no "
+        "scenario"
     ]
     assert scenario_problems(index, [*SCENARIOS, *NAMES]) == []
 

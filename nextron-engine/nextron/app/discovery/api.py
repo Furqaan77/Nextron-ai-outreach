@@ -92,7 +92,7 @@ normaliser).
 record through ``set_ch_number`` and records the finding through ``research.record_legal_form``.
 
 **The CSV import (FR-59, Story 2.3).** ``LeadImports(clock, discovery, research,
-email_syntax)`` turns an uploaded CSV into Leads and Contacts; the rules for the file and its
+email_syntax, queue)`` turns an uploaded CSV into Leads and Contacts; the rules for the file and its
 rows are ``nextron.domain.lead_import``'s.
 
 - ``@use_case run(request: ImportRequest(origin, default_segment, data)) -> ImportSummary``:
@@ -116,6 +116,9 @@ rows are ``nextron.domain.lead_import``'s.
      retrieved_at=imported_at)``: a ``blocked`` answer adds ``NOTE_CONTACT_SUPPRESSED`` to the
      row when any reason is in ``SUPPRESSION_REASONS``, else ``NOTE_CONTACT_LEAD_CLOSED`` (the
      Lead is Lost or Disqualified); otherwise ``email_dropped`` adds ``NOTE_EMAIL_DROPPED``.
+     A Contact that holds the row's address after the row (created with it, filled with it or
+     already holding it; never a dropped one) gets its ``verify_contact_email`` job (Story
+     2.14, ``nextron.app.research.verification.enqueue_verify``) in the batch's transaction.
   3. **A failing batch** rolls back, and ``ImportStopped(summary, at_row)`` (a
      ``RuntimeError``) is raised from the error, logged as ``lead_import_stopped`` with
      ``at_row`` and the error's type. ``summary`` counts only the committed batches and
@@ -143,6 +146,7 @@ from nextron.app.queries import research as research_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
+from nextron.app.research.verification import enqueue_verify
 from nextron.db.repos.discovery import leads as leads_repo
 from nextron.db.repos.discovery.leads import StoredLead
 from nextron.db.uow import command, current, use_case
@@ -483,11 +487,13 @@ class LeadImports:
         discovery: Discovery,
         research: Research,
         email_syntax: EmailSyntaxPort,
+        queue: JobQueue,
     ) -> None:
         self._clock = clock
         self._discovery = discovery
         self._research = research
         self._email_syntax = email_syntax
+        self._queue = queue
 
     @use_case
     def run(self, request: ImportRequest) -> ImportSummary:
@@ -552,6 +558,14 @@ class LeadImports:
                                 notes.append(_contact_note(added.blocked))
                             elif added.email_dropped:
                                 notes.append(NOTE_EMAIL_DROPPED)
+                            # the Contact holds the row's address (created, filled or already
+                            # its own): check it; a dropped address isn't stored
+                            if (
+                                added.contact_id is not None
+                                and row.contact.email is not None
+                                and not added.email_dropped
+                            ):
+                                enqueue_verify(self._queue, upserted.lead_id, added.contact_id)
                         if notes:
                             batch_noted.append(NotedRow(row.number, row.label, tuple(notes)))
             except Exception as error:

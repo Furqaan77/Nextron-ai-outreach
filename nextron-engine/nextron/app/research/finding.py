@@ -63,7 +63,8 @@ the page URL and its ``fetched_at``, ``pattern`` or ``finder`` with the clock's 
 actor ``system:research``), for a published address its Quote Evidence (``quote``,
 ``website``, ``source_url`` and ``pages_checked`` the page, ``retrieved_at`` its
 ``fetched_at``, ``extracted_by`` ``rule``, ``person_contact_id``; a live row with the same
-quote, URL, Contact and actor is confirmed instead), ``research.resolve_market`` and the
+quote, URL, Contact and actor is confirmed instead), ``research.resolve_market``, the
+address's ``verify_contact_email`` job (Story 2.14, ``verification.enqueue_verify``) and the
 outcome ``found``.
 
 Every outcome is stored on the Contact (``email_search_outcome``, ``email_search_at``, with
@@ -93,6 +94,7 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.discovery import StoredLead
 from nextron.app.research.api import Research
 from nextron.app.research.extraction import page_order
+from nextron.app.research.verification import enqueue_verify
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -655,6 +657,7 @@ class EmailFinding:
         if match is not None:
             self._quote_evidence(search.lead_id, contact.id, match, now)
         self._research.resolve_market(contact.id)
+        enqueue_verify(self._queue, search.lead_id, contact.id)  # Story 2.14
         self._record(search, EmailSearchOutcome.FOUND)
 
     def _quote_evidence(

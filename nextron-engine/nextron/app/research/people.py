@@ -94,7 +94,10 @@ selection sees the hiring Events and the legal form. Scope the Lead, discriminat
 the Primary it leaves has no usable address (an email whose class isn't ``invalid``), the same
 transaction enqueues its ``find_contact_email`` job (Story 2.13,
 ``nextron.app.research.finding.enqueue_search``): on the job's default (bulk) lane after a
-selection, on the interactive lane after "Make primary".
+selection, on the interactive lane after "Make primary". When its address is ``guessed`` and the
+verifier hasn't answered for it, the same transaction enqueues its ``verify_contact_email``
+job instead (Story 2.14, ``nextron.app.research.verification.enqueue_verify``), on the same
+lane; like the search, it is a job beside the chain, not a stage of it.
 
 - ``@use_case select_primary_contact(lead_id) -> PrimaryChoice | None`` (the
   ``select_primary_contact`` job): in one transaction, ``research.select_primary(lead_id)``. An
@@ -126,6 +129,7 @@ from nextron.app.queries.discovery import StoredLead
 from nextron.app.research.api import Research
 from nextron.app.research.extraction import RecordedRun, outcome_of, page_order
 from nextron.app.research.finding import enqueue_search, has_usable_address
+from nextron.app.research.verification import enqueue_verify, needs_verifier
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -717,7 +721,12 @@ class PrimaryContacts:
 
     def _search(self, lead: StoredLead, contact_id: str | None, *, lane: Lane | None) -> None:
         """Enqueue the Primary Contact's email search (Story 2.13) when it has no usable
-        address, in the caller's transaction."""
+        address, or its verification (Story 2.14) when its address is ``guessed`` and not yet
+        verified, in the caller's transaction."""
         contact = None if contact_id is None else contacts_repo.get(contact_id)
-        if contact is not None and not has_usable_address(contact):
+        if contact is None:
+            return
+        if not has_usable_address(contact):
             enqueue_search(self._queue, lead.id, contact.id, lead.web_domain, lane=lane)
+        elif needs_verifier(contact):
+            enqueue_verify(self._queue, lead.id, contact.id, lane=lane)

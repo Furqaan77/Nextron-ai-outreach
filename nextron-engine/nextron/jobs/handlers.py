@@ -80,6 +80,11 @@ handler runs in.
   contact_id)`` once (the research service's ``EmailFinding``) and returns ``DEFERRED`` when it
   returns ``quota_reached`` (a Hunter or Prospeo quota refused the paid step). A retryable
   ``AdapterError`` it raises is retried by the runner; any other error fails the job.
+- ``verify_contact_email(verification)`` (Story 2.14): calls
+  ``verification().verify_contact_email(lead_id, contact_id)`` once (the research service's
+  ``EmailVerification``) and returns ``DEFERRED`` when it returns ``quota_reached`` (Hunter's
+  quota refused the verification). A retryable ``AdapterError`` it raises (a DNS timeout,
+  Hunter unavailable) is retried by the runner; any other error fails the job.
 - ``score_lead(scores)`` (Story 2.15): calls ``scores().score_lead(lead_id)`` once (the
   ``scoring`` service's ``LeadScores``) and returns ``None``.
 - ``recompute_tiers(scores)`` (Story 2.15): calls ``scores().recompute_tiers()`` once and returns
@@ -95,6 +100,7 @@ from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
 from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
+from nextron.domain.email_checks import CheckResult
 from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, STORE_FIELD
 from nextron.domain.postings import SIGNAL_ID_FIELD
@@ -330,6 +336,28 @@ def find_contact_email(finding: Callable[[], FindingEmail]) -> Handler:
         return None
 
     return handle_find_contact_email
+
+
+class VerifyingEmail(Protocol):
+    """What ``verify_contact_email`` needs of the ``research`` service's
+    ``EmailVerification``."""
+
+    def verify_contact_email(self, lead_id: str, contact_id: str) -> object: ...
+
+
+def verify_contact_email(verification: Callable[[], VerifyingEmail]) -> Handler:
+    """The ``verify_contact_email`` job's handler: check the payload's Contact's address
+    through ``verification()``."""
+
+    def handle_verify_contact_email(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        contact_id = _ulid_field(job, CONTACT_ID_FIELD)
+        result = verification().verify_contact_email(lead_id, contact_id)
+        if result == CheckResult.QUOTA_REACHED:
+            return DEFERRED
+        return None
+
+    return handle_verify_contact_email
 
 
 def extract_lead(extractions: Callable[[], Extracting]) -> Handler:

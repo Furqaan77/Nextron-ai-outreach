@@ -21,5 +21,6 @@ self rate-limited.
 
 ``EmailFinderPort`` and ``DomainSearchPort`` (``email_finder``, Story 2.13) ask a paid finder
 for one person's address and Hunter's Domain Search for a domain's pattern and people;
-``nextron.adapters.hunter`` implements both and ``nextron.adapters.prospeo`` the first.
+``EmailVerifierPort`` (Story 2.14) asks a verifier whether an address can receive mail.
+``nextron.adapters.hunter`` implements all three and ``nextron.adapters.prospeo`` the first.
 """

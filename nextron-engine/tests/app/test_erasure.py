@@ -1265,10 +1265,17 @@ def test_every_column_of_an_erased_contact_but_a_merges_is_fixed(world: World) -
     fixed = [column for column in contact_columns(world) if column not in MERGE_COLUMNS]
     # a new contacts column must join trg_contacts_tombstone: 15 since the merge with Story
     # 2.10's primary_set_by (fixed: a tombstone keeps it NULL and is never Primary again), 18
-    # since Story 2.13's email_search_tried, email_search_outcome and email_search_at (0040)
-    assert len(fixed) == 18
+    # since Story 2.13's email_search_tried, email_search_outcome and email_search_at (0040),
+    # 22 since Story 2.14's four email check columns (0043)
+    assert len(fixed) == 22
     assert "primary_set_by" in fixed
     assert {"email_search_tried", "email_search_outcome", "email_search_at"} <= set(fixed)
+    assert {
+        "email_check_result",
+        "email_checked_at",
+        "email_invalid_reason",
+        "email_verifier_at",
+    } <= set(fixed)
 
     for column in fixed:
         # the trigger runs before any check, so any different value shows the refusal

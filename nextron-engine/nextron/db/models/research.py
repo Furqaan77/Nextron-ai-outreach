@@ -102,6 +102,7 @@ SET_BY_LENGTH: Final = 8  # nextron.domain.contacts.PrimarySetBy
 ONE_PRIMARY_WHERE: Final = "is_primary = 1"
 TRIED_LENGTH: Final = 32  # Story 2.13: "hunter,prospeo"
 OUTCOME_LENGTH: Final = 16  # nextron.domain.email_finding.EmailSearchOutcome
+CHECK_CODE_LENGTH: Final = 32  # Story 2.14: nextron.domain.email_checks codes
 DOMAIN_LENGTH: Final = 253  # nextron.domain.identity.MAX_DOMAIN_LENGTH
 PATTERN_LENGTH: Final = 16  # nextron.domain.email_finding.Pattern
 PATTERN_SOURCE_LENGTH: Final = 32  # nextron.domain.email_finding.PatternSource
@@ -198,6 +199,10 @@ class ContactRecord(Base):
     email_search_tried: Mapped[str | None] = mapped_column(String(TRIED_LENGTH))  # Story 2.13
     email_search_outcome: Mapped[str | None] = mapped_column(String(OUTCOME_LENGTH))
     email_search_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    email_check_result: Mapped[str | None] = mapped_column(String(CHECK_CODE_LENGTH))  # 2.14
+    email_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    email_invalid_reason: Mapped[str | None] = mapped_column(String(CHECK_CODE_LENGTH))
+    email_verifier_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class ProvenanceRecord(Base):

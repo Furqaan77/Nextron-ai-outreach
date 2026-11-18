@@ -270,7 +270,7 @@ def world(db_engine: Engine) -> World:
         discovery,
         research,
         Compliance(clock),
-        LeadImports(clock, discovery, research, FakeEmailSyntax()),
+        LeadImports(clock, discovery, research, FakeEmailSyntax(), queue_on(clock)),
     )
     [(segment,), *_] = found.sql("SELECT id FROM segments ORDER BY key")
     found.segment = segment
