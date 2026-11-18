@@ -91,6 +91,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron import main
+from nextron.app.analytics.history import LeadHistory
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
@@ -444,6 +445,7 @@ class Dashboard:
             lead_imports=self.lead_imports,
             sending=self.sending,
             lead_signals=LeadSignals(self.clock),
+            lead_history=LeadHistory(self.clock),
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,
             pipeline=Pipeline(self.clock),

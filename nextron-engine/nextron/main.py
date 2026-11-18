@@ -660,6 +660,7 @@ from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.app.analytics.history import LeadHistory
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
@@ -1163,6 +1164,7 @@ def build_app(
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=Sending(clock, env=config.env),
         lead_signals=LeadSignals(clock),
+        lead_history=LeadHistory(clock),  # Story 9.8: the Lead page's History tab
         compliance=compliance,
         primary_contacts=primary_contacts,
         pipeline=Pipeline(clock),  # Story 9.1: the Lead page's Pipeline panel

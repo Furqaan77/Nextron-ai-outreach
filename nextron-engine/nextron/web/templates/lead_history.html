@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{#- A Lead's History tab (nextron.web.history_page, Story 9.8): the tab bar, one filter link per
+    history type, then the timeline newest first and its pager. Read-only: no form, no HTMX
+    action. Names, quotes and other stored text are imported, crawled or extracted: they render
+    only through |plain or safe_link, inside an element carrying hx-disable. -#}
+{% block title %}Nextron: Lead history{% endblock %}
+{% block content %}
+<header class="lead-header" hx-disable>
+<h1>{{ lead_name|plain }}</h1>
+</header>
+{% include "lead_tabs.html" %}
+<p><a href="/leads">All Leads</a></p>
+<nav class="history-filters" aria-label="History types">
+{%- for filter in filters %}
+<a href="{{ filter.href }}"{% if filter.current %} aria-current="true"{% endif %}>{{ filter.label }}</a>
+{%- endfor %}
+</nav>
+<section class="lead-history" aria-labelledby="history-heading" hx-disable>
+<h2 id="history-heading">History</h2>
+<p class="history-count">{{ count_text }}</p>
+{%- if rows %}
+<table class="lead-table history-table">
+<thead>
+<tr><th scope="col">When</th><th scope="col">Type</th><th scope="col">Change</th><th scope="col">Cause</th><th scope="col">By</th><th scope="col">Contact</th><th scope="col">Detail</th></tr>
+</thead>
+<tbody>
+{%- for row in rows %}
+<tr data-kind="{{ row.kind }}"><td>{{ row.when }}</td><td>{{ row.title|plain }}</td><td>{{ row.change|plain }}</td><td>{{ row.cause|plain }}</td><td>{{ row.actor|plain }}</td><td>{{ row.contact|plain }}</td><td>{% if row.text %}{{ row.text|plain }}{% endif %}{% if row.source %} {{ safe_link(row.source, source_link) }}{% endif %}{% if row.detail_href %} <a href="{{ row.detail_href }}">{{ row.detail_label }}</a>{% endif %}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="history-empty">{{ empty }}</p>
+{%- endif %}
+{%- if pager %}
+<nav class="pager" aria-label="History pages">
+{%- if pager.previous %}
+<a href="{{ pager.previous }}" rel="prev">Previous</a>
+{%- endif %}
+<span>Page {{ "{:,}".format(pager.page) }} of {{ "{:,}".format(pager.pages) }}</span>
+{%- if pager.next %}
+<a href="{{ pager.next }}" rel="next">Next</a>
+{%- endif %}
+</nav>
+{%- endif %}
+</section>
+{% endblock %}

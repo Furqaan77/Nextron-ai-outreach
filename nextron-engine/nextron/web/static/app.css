@@ -904,3 +904,38 @@ button.secondary {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Story 9.8: the Lead page's tab bar, the History tab's type filters (the shown one marked
+   aria-current), its count, table and empty line. */
+.lead-tabs,
+.history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  margin: 0 0 1rem;
+}
+
+.lead-tabs {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.25rem;
+}
+
+.lead-tabs a[aria-current],
+.history-filters a[aria-current] {
+  color: var(--ink);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.3em;
+}
+
+.history-count {
+  font-weight: 600;
+}
+
+.history-table {
+  width: 100%;
+}
+
+.history-empty {
+  color: var(--muted);
+}

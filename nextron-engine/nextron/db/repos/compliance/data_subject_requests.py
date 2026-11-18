@@ -16,6 +16,8 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
   request, its first one (by ``completed_at``, then ``id``: the one that erased it, or, after a
   retention erasure, the first request completed afterwards), as ``{contact_id:
   StoredRequest}``;
+- ``ids_for_contacts(contact_ids)`` (Story 9.8): the ids of every request of those Contacts, by
+  ``opened_at``, then ``id``;
 - ``for_contact(contact_id)`` (Story 3.15): every column of each of the Contact's requests, as a
   ``dict`` (a generic ``select`` of the table, so a new column is exported without code), by
   ``opened_at``, then ``id``.
@@ -139,6 +141,19 @@ def completed_erasures(contact_ids: Iterable[str]) -> dict[str, StoredRequest]:
         request = StoredRequest(*row)
         found.setdefault(request.contact_id, request)  # the first one completed
     return found
+
+
+def ids_for_contacts(contact_ids: Iterable[str]) -> tuple[str, ...]:
+    """The ids of every request, of any kind or status, of one of ``contact_ids``."""
+    wanted = sorted(set(contact_ids))
+    if not wanted:
+        return ()
+    statement = (
+        select(DataSubjectRequestRecord.id)
+        .where(DataSubjectRequestRecord.contact_id.in_(wanted))
+        .order_by(DataSubjectRequestRecord.opened_at, DataSubjectRequestRecord.id)
+    )
+    return tuple(current().session.execute(statement).scalars())
 
 
 def for_contact(contact_id: str) -> tuple[dict[str, object], ...]:
