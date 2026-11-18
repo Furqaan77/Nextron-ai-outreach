@@ -27,7 +27,8 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   id). ``segment_ids()``: every stored Segment's id, a ``frozenset`` (``Discovery.upsert_lead``
   checks a candidate's Segment against it).
 - ``markets()``: every stored Market as a ``SeededMarket(id, code, version, definition)``, by
-  code; ``market(code)``: one, or ``None``. ``definition`` is the
+  code; ``market(code)``: one, or ``None``; ``market_by_id(market_id)`` (Story 4.12): one by
+  its row id, or ``None`` (a text that isn't a ULID included). ``definition`` is the
   ``nextron.domain.markets.MarketDef`` the ``markets`` repository decodes through
   ``market_from_form``, which raises ``InvalidMarkets`` for a row that no longer validates. A
   Lead's Market is derived from these with ``nextron.domain.markets.market_for_country``, never
@@ -217,6 +218,14 @@ def markets() -> tuple[SeededMarket, ...]:
 def market(code: str) -> SeededMarket | None:
     """The stored Market ``code``, or ``None``."""
     stored = markets_repo.by_code(code)
+    return None if stored is None else _seeded_market(stored)
+
+
+def market_by_id(market_id: str) -> SeededMarket | None:
+    """The stored Market whose row id is ``market_id``, or ``None``."""
+    if not is_ulid(market_id):
+        return None
+    stored = markets_repo.by_id(market_id)
     return None if stored is None else _seeded_market(stored)
 
 

@@ -127,6 +127,21 @@ element carrying ``hx-disable``; the forms sit outside them. A person Evidence r
 Signal class, Evidence type and fact kind; a stored value none knows renders as its own text.
 Every Lead, Contact, Provenance, Signal and Evidence text renders through ``|plain`` or
 ``safe_link`` inside an element carrying ``hx-disable``.
+
+**Drafts (Story 4.12).** ``lead_context`` also takes ``drafts``: one ``DraftSource`` per Draft
+of the Lead's Enrollments (oldest Enrollment first, each by Step), which the route reads: the
+``DraftView``, its revisions (by ``rev``), the footer snapshot its current revision was composed
+with, the Contact's to-address (``None`` for an erased Contact) and the ``FooterCheck`` of the
+Contact's Market now (``None`` when the Market can't be read). ``lead_drafts.html`` (included
+in ``lead.html``, its ``<section>`` carrying ``hx-disable``) shows one ``DraftRow`` each: the
+kind's label, "Step <n>", the status's label, the due time (``YYYY-MM-DD HH:MM UTC``), else
+"after Step <n−1> is sent" for a later Step, else "—"; the current composed message
+(``render.compose``: "To", "Subject" and the plain-text body in a ``<pre>``, autoescaped
+through ``|plain``), or "No text yet" without a revision; "Sending blocked: footer incomplete
+(…)" (``render.incomplete_notice``) for a ``ready`` or ``approved`` Draft whose Market's footer
+check fails; the current revision's Playbook version (or "—"); and the revision history, one
+``RevisionRow`` per revision: rev, the origin's label, the time and the first 12 characters of
+its hash. "No Drafts yet." when there are none.
 """
 
 import re
@@ -140,6 +155,7 @@ from urllib.parse import urlencode
 
 from nextron.app.queries.compliance import StoredRequest
 from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
+from nextron.app.queries.drafting import DraftView, RevisionView
 from nextron.app.queries.research import (
     EvidenceSupport,
     LeadSignalsView,
@@ -148,6 +164,7 @@ from nextron.app.queries.research import (
     StoredProvenance,
 )
 from nextron.app.queries.setup import SeededMarket, SeededSegment
+from nextron.domain import render
 from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import (
     INVALID_ADDRESS,
@@ -980,18 +997,21 @@ def lead_context(
     markets: Iterable[SeededMarket],
     no_decision_maker: bool | None = None,
     erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
+    drafts: Iterable[DraftSource] = (),
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
     given), and the Contacts panel (``contacts_context``), each Contact with its live
     Eligibility from ``decisions`` (by Contact id), its Market named from ``markets`` (the
     route passes ``()`` when the Markets can't be read) and its erase link, or, for an erased
-    one, its tombstone line with its request from ``erasures`` (by Contact id)."""
+    one, its tombstone line with its request from ``erasures`` (by Contact id); then the Drafts
+    (Story 4.12), one ``DraftRow`` per ``DraftSource``, in the order given."""
     found = tuple(contacts)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
         "evidence": tuple(evidence_row(row, names) for row in signals.evidence),
+        "drafts": tuple(draft_row(source) for source in drafts),
         **contacts_context(
             lead.id,
             found,
@@ -1002,3 +1022,126 @@ def lead_context(
             erasures=erasures,
         ),
     }
+
+
+# Drafts (Story 4.12) ----------------------------------------------------------------------------
+
+DRAFTS_TEMPLATE: Final = "lead_drafts.html"
+NO_TEXT: Final = "No text yet"
+AFTER_STEP: Final = "after Step {step} is sent"
+STEP_LINE: Final = "Step {step}"
+SHORT_HASH_LENGTH: Final = 12
+BLOCKING_STATUSES: Final = frozenset({"ready", "approved"})
+DRAFT_KIND_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "step": "Sequence Step",
+        "recontact": "Re-contact",
+        "reply": "Reply",
+        "rebook": "Rebook",
+        "channel": "Channel message",
+    }
+)
+DRAFT_STATUS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "ready": "Ready",
+        "approved": "Approved",
+        "sent": "Sent",
+        "rejected": "Rejected",
+        "superseded": "Superseded",
+        "cancelled": "Cancelled",
+    }
+)
+ORIGIN_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "generated": "Generated",
+        "regenerated": "Regenerated",
+        "operator_edit": "Edited by you",
+        "footer_change": "Footer change",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DraftSource:
+    """What the route read for one Draft of the Lead."""
+
+    draft: DraftView
+    revisions: tuple[RevisionView, ...]
+    footer: render.FooterText | None  # the current revision's footer snapshot
+    to_address: str | None  # None for an erased Contact
+    footer_check: render.FooterCheck | None  # None when the Market can't be read
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionRow:
+    """One line of a Draft's revision history."""
+
+    rev: int
+    origin: str
+    at: str
+    short_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class DraftRow:
+    """One Draft in the Lead page's Drafts section."""
+
+    draft_id: str
+    kind: str
+    step: str | None
+    status: str
+    due: str
+    message: render.Composed | None  # None: no text yet
+    blocked: str | None
+    playbook_version: str
+    revisions: tuple[RevisionRow, ...]
+
+
+def due_text(draft: DraftView) -> str:
+    """The due time, else "after Step <n-1> is sent" for a later Step, else "—"."""
+    if draft.due_at is not None:
+        return moment(draft.due_at)
+    if draft.step_no is not None and draft.step_no > 1:
+        return AFTER_STEP.format(step=draft.step_no - 1)
+    return NO_VALUE
+
+
+def revision_row(revision: RevisionView) -> RevisionRow:
+    return RevisionRow(
+        rev=revision.rev,
+        origin=ORIGIN_LABELS.get(revision.origin, str(revision.origin)),
+        at=moment(revision.created_at),
+        short_hash=revision.text_hash[:SHORT_HASH_LENGTH],
+    )
+
+
+def draft_row(source: DraftSource) -> DraftRow:
+    """The ``DraftRow`` of ``source``; see the module docstring."""
+    draft = source.draft
+    current = next((each for each in source.revisions if each.rev == draft.current_rev), None)
+    message = (
+        None
+        if current is None or source.footer is None
+        else render.compose(current, source.footer, source.to_address or "")
+    )
+    check = source.footer_check
+    blocked = (
+        render.incomplete_notice(check)
+        if check is not None and not check.complete and draft.status in BLOCKING_STATUSES
+        else None
+    )
+    return DraftRow(
+        draft_id=draft.id,
+        kind=DRAFT_KIND_LABELS.get(draft.kind, str(draft.kind)),
+        step=None if draft.step_no is None else STEP_LINE.format(step=draft.step_no),
+        status=DRAFT_STATUS_LABELS.get(draft.status, str(draft.status)),
+        due=due_text(draft),
+        message=message,
+        blocked=blocked,
+        playbook_version=(
+            current.playbook_version
+            if current is not None and current.playbook_version
+            else NO_VALUE
+        ),
+        revisions=tuple(revision_row(revision) for revision in source.revisions),
+    )

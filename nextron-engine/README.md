@@ -2017,6 +2017,56 @@ Drafts in the same transaction; an `approved` one waits for Epic 5's `sending.ca
 Enrollments' unsent Steps after Step 1, due by the end of the day in `sender_timezone`,
 overdue ones included) are reserved before new Step 1s.
 
+## Draft text, revisions and the hash
+
+Story 4.12 (FR-20, FR-23, AD-6, AD-17) stores each Draft's text as immutable revisions and binds
+it to one hash, so what you approve later is exactly what is sent.
+
+**Revisions.** The `draft_revisions` table (owner `drafting`) holds one row per revision: the
+subject and body (the editable text, without the footer), the footer snapshot it was composed
+with, its traceability (Evidence ids, fact versions, cited Signal, AI route tuple, Playbook
+SHA-256 and version, prompt version, a regenerate's instruction), its origin (`generated`,
+`regenerated`, `operator_edit` or `footer_change`) and its `text_hash`. Revision 1 is always
+the AI's original text (`generated`). `drafts.current_rev` points at the latest, and a foreign
+key keeps it naming an existing revision of the same Draft. Triggers refuse any delete, any
+replacing insert and any update except erasure's `[erased]` tombstone of the subject, body and
+instruction; the repository has `insert`, reads and that `tombstone` only.
+
+**Compose and hash** (`nextron/domain/render.py`, the single definitions). `compose(revision,
+footer_snapshot, recipient)` gives the to-address, the subject and a plain-text body: the
+revision's body, a blank line and the footer, so an empty body still ends with the full footer.
+It adds no HTML, no tracking pixel and no link but the footer's. `text_hash` is the SHA-256 of
+`to_address`, LF, the inbox id, LF, the canonical subject, two LFs and the canonical composed
+body, where canonical means NFC, CRLF and CR as LF, trailing whitespace stripped per line and
+trailing blank lines dropped. CRLF and LF, trailing spaces, and NFD and NFC give the same hash;
+another footer or another inbox gives another.
+
+**Writing a revision.** Only `Drafting` writes one, through a private writer that reads the
+Contact's email and Market, builds the footer from the footer settings and the Contact's
+earliest `contact` Provenance source (a UK Market without a phrase for that source fails
+closed), snapshots it, composes, hashes with the Enrollment's inbox and moves `current_rev` in
+the same transaction.
+
+- `Drafting.revise(draft_id, subject, body)` is your edit (Epic 5's approval card calls it): a
+  `ready` Draft with text, a one-line subject of 1 to 200 characters (stored stripped) and a
+  body of at most 10,000 characters (empty allowed). It appends an `operator_edit` revision with
+  the previous traceability and returns the new revision number. Grounding (Stories 4.13 and
+  4.14) is not run yet.
+- `Drafting.recompose_ready` subscribes to `FooterChanged`: saving a footer setting, or a
+  `nextron seed sync` that changes a Market's footer template or `privacy_line_required`, gives
+  each `ready` Draft with text in that Market a `footer_change` revision (same subject and body,
+  the new footer, a new hash) when the hash changes. `approved` and `sent` Drafts are untouched;
+  a Draft whose footer can't be composed is logged (`recompose_skipped`) and skipped.
+
+**Erasure.** Erasing a Contact turns the subject, body and instruction of every revision of its
+Drafts into `[erased]`, keeping the rows and hashes.
+
+**The Lead page** shows a Drafts section: each Draft of the Lead's Enrollments with its kind,
+Step, status, due time (or "after Step N is sent"), the current composed message exactly as the
+prospect would receive it (escaped, inside `hx-disable`), "Sending blocked: footer incomplete
+(…)" while the Market's footer is incomplete, the Playbook version and the revision history
+(revision, origin, time and the first 12 characters of the hash), or "No text yet".
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.

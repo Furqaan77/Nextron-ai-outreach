@@ -444,6 +444,28 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text": PiiClass.REDACT,
         "created_at": PiiClass.NONE,
     },
+    # Story 4.12. A Draft's subject, body and regenerate instruction are written to a person and
+    # may name them, so erasure redacts them; text_hash is already a hash of the message (to
+    # address included), so it is kept; the rest are IDs, codes, versions and times.
+    "draft_revisions": {
+        "id": PiiClass.NONE,
+        "draft_id": PiiClass.NONE,
+        "rev": PiiClass.NONE,
+        "subject": PiiClass.REDACT,
+        "body": PiiClass.REDACT,
+        "footer_snapshot_id": PiiClass.NONE,
+        "evidence_ids": PiiClass.NONE,
+        "fact_versions": PiiClass.NONE,
+        "cited_signal_id": PiiClass.NONE,
+        "origin": PiiClass.NONE,
+        "route_tuple_id": PiiClass.NONE,
+        "playbook_sha256": PiiClass.NONE,
+        "playbook_version": PiiClass.NONE,
+        "prompt_version": PiiClass.NONE,
+        "instruction": PiiClass.REDACT,
+        "text_hash": PiiClass.KEEP_HASH,
+        "created_at": PiiClass.NONE,
+    },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.
     "unsub_tokens": {
@@ -665,5 +687,6 @@ HASH_KINDS: Final[Mapping[tuple[str, str], str | None]] = MappingProxyType(
         ("contacts", "email"): "address",
         ("provenance_records", "address"): "address",
         ("suppression_entries", "value_hash"): None,
+        ("draft_revisions", "text_hash"): None,  # Story 4.12
     }
 )

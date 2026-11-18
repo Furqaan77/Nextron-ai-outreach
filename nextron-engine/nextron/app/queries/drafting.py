@@ -11,6 +11,16 @@ current unit of work, read-only ones included.
 - ``follow_ups_due_before(end) -> Mapping[enrollment_id, int]``: per Enrollment, its unsent
   (``ready`` or ``approved``) Step Drafts with ``step_no > 1`` and ``due_at`` before ``end``
   (overdue ones included). Whether the Enrollment is live is ``sequencing``'s to filter.
+
+Story 4.12 (a Draft's text):
+
+- ``RevisionView``: one revision (``origin`` a ``RevisionOrigin``; ``evidence_ids`` and
+  ``fact_versions`` as tuples); ``revisions(draft_id)``: the Draft's revisions, by ``rev``
+  (``()`` for a text that isn't a ULID); ``revision(draft_id, rev)``: one, or ``None``;
+  ``current_revision(draft)``: the revision a ``DraftView``'s ``current_rev`` names, or
+  ``None`` without one;
+- ``ready_with_text()``: every ``ready`` Draft that has a revision, by ``id``;
+- ``footer_snapshot(snapshot_id)``: the stored footer snapshot, or ``None``.
 """
 
 from collections.abc import Mapping
@@ -19,8 +29,12 @@ from datetime import datetime
 from types import MappingProxyType
 
 from nextron.db.repos.drafting import drafts as drafts_repo
+from nextron.db.repos.drafting import footer_snapshots as footer_snapshots_repo
+from nextron.db.repos.drafting import revisions as revisions_repo
 from nextron.db.repos.drafting.drafts import StoredDraft
-from nextron.domain.draft import DraftKind, DraftStatus
+from nextron.db.repos.drafting.footer_snapshots import StoredFooterSnapshot
+from nextron.db.repos.drafting.revisions import StoredRevision
+from nextron.domain.draft import DraftKind, DraftStatus, RevisionOrigin
 from nextron.domain.ids import is_ulid
 
 
@@ -90,3 +104,83 @@ def drafts_of(enrollment_id: str) -> tuple[DraftView, ...]:
 def follow_ups_due_before(end: datetime) -> Mapping[str, int]:
     """Per Enrollment, its unsent follow-up Step Drafts due before ``end``."""
     return MappingProxyType(drafts_repo.follow_ups_due_before(end))
+
+
+# A Draft's text (Story 4.12) ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionView:
+    """One revision of a Draft's text."""
+
+    id: str
+    draft_id: str
+    rev: int
+    subject: str
+    body: str
+    footer_snapshot_id: str
+    evidence_ids: tuple[str, ...]
+    fact_versions: tuple[tuple[str, int], ...]
+    cited_signal_id: str | None
+    origin: RevisionOrigin
+    route_tuple_id: str | None
+    playbook_sha256: str | None
+    playbook_version: str | None
+    prompt_version: str | None
+    instruction: str | None
+    text_hash: str
+    created_at: datetime
+
+
+def _revision(stored: StoredRevision) -> RevisionView:
+    return RevisionView(
+        id=stored.id,
+        draft_id=stored.draft_id,
+        rev=stored.rev,
+        subject=stored.subject,
+        body=stored.body,
+        footer_snapshot_id=stored.footer_snapshot_id,
+        evidence_ids=stored.evidence_ids,
+        fact_versions=stored.fact_versions,
+        cited_signal_id=stored.cited_signal_id,
+        origin=RevisionOrigin(stored.origin),
+        route_tuple_id=stored.route_tuple_id,
+        playbook_sha256=stored.playbook_sha256,
+        playbook_version=stored.playbook_version,
+        prompt_version=stored.prompt_version,
+        instruction=stored.instruction,
+        text_hash=stored.text_hash,
+        created_at=stored.created_at,
+    )
+
+
+def revisions(draft_id: str) -> tuple[RevisionView, ...]:
+    """The Draft's revisions, by ``rev``."""
+    if not is_ulid(draft_id):
+        return ()
+    return tuple(_revision(stored) for stored in revisions_repo.of_draft(draft_id))
+
+
+def revision(draft_id: str, rev: int) -> RevisionView | None:
+    """The revision ``rev`` of the Draft ``draft_id``, or ``None``."""
+    if not is_ulid(draft_id):
+        return None
+    stored = revisions_repo.get(draft_id, rev)
+    return None if stored is None else _revision(stored)
+
+
+def current_revision(found: DraftView) -> RevisionView | None:
+    """The revision the Draft's ``current_rev`` names, or ``None``."""
+    if found.current_rev is None:
+        return None
+    return revision(found.id, found.current_rev)
+
+
+def ready_with_text() -> tuple[DraftView, ...]:
+    """Every ``ready`` Draft that has a revision, by ``id``."""
+    return tuple(_view(stored) for stored in drafts_repo.ready_with_text())
+
+
+def footer_snapshot(snapshot_id: str) -> StoredFooterSnapshot | None:
+    """The footer snapshot ``snapshot_id``, or ``None``."""
+    return footer_snapshots_repo.by_id(snapshot_id)

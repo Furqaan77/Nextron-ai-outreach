@@ -39,8 +39,11 @@ key has no row (``set`` still upserts as before). The templates come from
 one of ``nextron.domain.markets.REQUIRED_PLACEHOLDERS``, counts as using every placeholder, so
 a bad row is over-notified, never skipped. No Market, or no changed footer key, publishes
 nothing. A subscriber that raises rolls the whole save back. Story 4.12 registers
-``drafting.recompose_ready``; until then nothing subscribes. A seed sync that changes a Market's
-template publishes nothing (Story 3.1).
+``drafting.recompose_ready``, which recomposes the ``ready`` Drafts of that Market's Contacts.
+A seed sync that changes a stored Market's decoded ``footer_template`` or
+``privacy_line_required`` publishes one ``FooterChanged`` for it too (Story 4.12, from
+``_record_market``, in the same transaction); a new Market, or a change to any other field,
+publishes nothing.
 
 ``Setup.sync_segments(segments)`` (FR-1, AD-12, Story 2.1; ``nextron seed sync``) upserts the
 Segments of ``seed/segments.yaml``, as ``nextron.domain.segments.SegmentDef``s, by key into
@@ -970,7 +973,13 @@ def _sync_markets(chosen: tuple[MarketDef, ...], now: datetime) -> MarketSync:
         elif stored.market != market:
             version = stored.version + 1
             markets_repo.update(stored.id, market, version, now)
-            _record_market(stored.id, stored.version, version, now)
+            footer_changed = (
+                stored.market.footer_template != market.footer_template
+                or stored.market.privacy_line_required != market.privacy_line_required
+            )
+            _record_market(
+                stored.id, stored.version, version, now, footer_changed=footer_changed
+            )
             changed.append((market.code, stored.version, version))
         else:
             unchanged.append(market.code)
@@ -1009,8 +1018,15 @@ def _refuse_shared_markets(
 
 
 def _record_market(
-    market_id: str, from_version: int | None, to_version: int, at: datetime
+    market_id: str,
+    from_version: int | None,
+    to_version: int,
+    at: datetime,
+    *,
+    footer_changed: bool = False,
 ) -> None:
+    """The Market's version ``events`` row; with ``footer_changed`` (its footer template or
+    ``privacy_line_required`` changed), ``FooterChanged`` for it too (Story 4.12)."""
     eventlog.append(
         entity=MARKETS_ENTITY,
         entity_id=market_id,
@@ -1021,6 +1037,8 @@ def _record_market(
         actor=SEED_ACTOR,
         at=at,
     )
+    if footer_changed:
+        current().publish(FooterChanged(market_id=market_id))
 
 
 # Sequences ----------------------------------------------------------------------------------------

@@ -117,12 +117,14 @@ stop), then ``Pipeline(clock).close_suppressed`` (Story 3.3: an opt-out closes t
 AD-3's other subscribers go between them when their stories add them); ``ContactErased`` -> each
 owner's ``erase_pii`` hook (Story 3.13, AD-17): compliance's first (``Erasures(clock,
 Compliance(clock)).erase_pii``, which reads the Contact while it still holds its values), then
-research's (``Research(clock).erase_pii``, which tombstones the Contact last), then the no-op
-hooks of ``setup``, ``drafting``, ``jobqueue``, ``ops`` and ``notify``, whose tables never hold a
-Contact's data, then ``Sequencing(clock).erase_pii`` (Story 4.8: the erased Contact's live
+research's (``Research(clock).erase_pii``, which tombstones the Contact last), then the hooks of
+``setup``, ``drafting`` (Story 4.12: it tombstones the text of the Contact's ``draft_revisions``),
+``jobqueue``, ``ops`` and ``notify`` (the others no-ops: their tables never hold a Contact's
+data), then ``Sequencing(clock).erase_pii`` (Story 4.8: the erased Contact's live
 Enrollments stop with ``contact_erased``); ``Enrolled`` -> ``Pipeline(clock).on_enrolled``
-(Story 4.8: a ``new`` Lead moves to ``queued``). Each uses ``SystemClock()`` when no clock is
-given.
+(Story 4.8: a ``new`` Lead moves to ``queued``); ``FooterChanged`` ->
+``Drafting(clock).recompose_ready`` (Story 4.12: the Market's ``ready`` Drafts get a
+``footer_change`` revision). Each uses ``SystemClock()`` when no clock is given.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance)``
 (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the dashboard gets too,
@@ -622,6 +624,7 @@ from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.drafting import api as drafting_api
+from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify import api as notify_api
@@ -716,6 +719,7 @@ from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import (
     ContactErased,
     Enrolled,
+    FooterChanged,
     LeadsMerged,
     MessageSent,
     SubjectSuppressed,
@@ -1641,6 +1645,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
     # Story 4.9: the next Step's due time, or the Enrollment's completion
     subscribers.register_subscriber(MessageSent, Sequencing(chosen).on_step_sent)
+    # Story 4.12: a footer change recomposes the Market's ready Drafts
+    subscribers.register_subscriber(FooterChanged, Drafting(chosen).recompose_ready)
     subscribers.freeze()
     return subscribers
 

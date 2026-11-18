@@ -554,6 +554,11 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("alerts", "text"),
         ("notifications", "text"),
         ("data_subject_requests", "request_ref"),
+        # Story 4.12: no Draft text in this world; tests/app/test_draft_revisions.py erases it
+        ("draft_revisions", "subject"),
+        ("draft_revisions", "body"),
+        ("draft_revisions", "instruction"),
+        ("draft_revisions", "text_hash"),
     }
     assert world.sql(
         "SELECT office_country FROM contacts WHERE id = ?", (planted.contact_id,)

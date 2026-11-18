@@ -1,10 +1,10 @@
 """The email footer (FR-23, NFR-2, NFR-7, CAN-SPAM, PECR, UK GDPR Art. 14; Story 4.11).
 
-The spine's ``domain.render``: the single definition of ``footer`` and ``footer_complete``
-(Story 4.12 adds ``compose`` and ``text_hash`` here). Standard library only, importing only
-``nextron.domain``. Every email ends with a footer built from a Market's seeded footer template
-(``nextron.domain.markets``, Story 3.1) and the footer settings
-(``nextron.domain.settings_schema``); nothing here sends or composes an email.
+The spine's ``domain.render``: the single definition of ``footer``, ``footer_complete``,
+``compose``, ``canon`` and ``text_hash`` (Story 4.12: FR-20, AD-6). Standard library only,
+importing only ``nextron.domain``. Every email ends with a footer built from a Market's seeded
+footer template (``nextron.domain.markets``, Story 3.1) and the footer settings
+(``nextron.domain.settings_schema``); nothing here sends an email.
 
 - ``FooterSettings``: the six footer setting values as ``str`` (``""`` for one that is unset or
   whose stored text no longer parses: ``nextron.app.queries.setup.footer_settings()`` reads it).
@@ -40,13 +40,32 @@ The spine's ``domain.render``: the single definition of ``footer`` and ``footer_
   approval card and 6.9's gate show. A complete check raises ``ValueError``.
 - ``footer_sha256(text)``: the lowercase hex SHA-256 of UTF-8 ``text`` (the
   ``footer_snapshots`` key).
+
+**Composing (Story 4.12).** What the prospect receives, plain text only:
+
+- ``compose(revision, footer_snapshot, recipient) -> Composed(to_address, subject, body)``:
+  ``revision`` is anything with ``str`` ``subject`` and ``body`` (a Draft revision),
+  ``footer_snapshot`` anything with a ``str`` ``text`` (a footer snapshot) and ``recipient``
+  the to-address ``str``. ``subject`` is the revision's subject unchanged; ``body`` is the
+  revision's body, a blank line (``BODY_FOOTER_SEPARATOR``, two line breaks) and the footer
+  text, so an empty body still ends with the full footer (the footer is never part of the
+  editable body). Nothing is added: no HTML, no tracking pixel, no link other than what the
+  footer text holds, and no setting changes it. A value that isn't a ``str`` raises
+  ``TypeError``.
+- ``canon(text)``: NFC, CRLF and CR line breaks turned into LF, trailing whitespace stripped
+  from each line, trailing blank lines dropped.
+- ``text_hash(to_address, inbox_id, subject, body)``: the lowercase hex SHA-256 of the UTF-8 of
+  the to-address, LF, the inbox id, LF, ``canon(subject)``, two LFs and ``canon(body)``, where
+  ``body`` is the composed body. What an approval binds to (AD-6); transport headers are
+  outside it. A value that isn't a ``str`` raises ``TypeError``.
 """
 
 import hashlib
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Protocol
 
 from nextron.domain.markets import (
     REQUIRED_PLACEHOLDERS,
@@ -183,3 +202,75 @@ def incomplete_notice(check: FooterCheck) -> str:
 def footer_sha256(text: str) -> str:
     """The lowercase hex SHA-256 of ``text`` encoded as UTF-8."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Composing (Story 4.12) ------------------------------------------------------------------------
+
+LF: Final = "\n"
+BODY_FOOTER_SEPARATOR: Final = LF + LF
+
+
+class RevisionText(Protocol):
+    """What ``compose`` reads of a Draft revision."""
+
+    @property
+    def subject(self) -> str: ...
+
+    @property
+    def body(self) -> str: ...
+
+
+class FooterText(Protocol):
+    """What ``compose`` reads of a footer snapshot."""
+
+    @property
+    def text(self) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Composed:
+    """One email exactly as the prospect receives it: plain text."""
+
+    to_address: str
+    subject: str
+    body: str
+
+
+def _str(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    return value
+
+
+def compose(revision: RevisionText, footer_snapshot: FooterText, recipient: str) -> Composed:
+    """``revision`` rendered for ``recipient`` with ``footer_snapshot``; see the module
+    docstring."""
+    subject = _str(revision.subject, "the revision's subject")
+    body = _str(revision.body, "the revision's body")
+    footer_text = _str(footer_snapshot.text, "the footer snapshot's text")
+    to_address = _str(recipient, "the recipient")
+    return Composed(to_address, subject, body + BODY_FOOTER_SEPARATOR + footer_text)
+
+
+def canon(text: str) -> str:
+    """``text`` canonicalised for ``text_hash``; see the module docstring."""
+    normal = unicodedata.normalize("NFC", _str(text, "the text"))
+    unified = normal.replace("\r\n", LF).replace("\r", LF)
+    lines = [line.rstrip() for line in unified.split(LF)]
+    while lines and not lines[-1]:
+        lines.pop()
+    return LF.join(lines)
+
+
+def text_hash(to_address: str, inbox_id: str, subject: str, body: str) -> str:
+    """The hash an approval binds to; see the module docstring."""
+    content = LF.join(
+        (
+            _str(to_address, "the to-address"),
+            _str(inbox_id, "the inbox id"),
+            canon(subject),
+            "",
+            canon(body),
+        )
+    )
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()

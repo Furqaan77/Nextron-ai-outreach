@@ -778,6 +778,8 @@ def test_the_repository_has_no_setter_for_a_bound_column() -> None:
         "get",
         "live_for_lead",
         "live_for_contact",
+        "for_lead",  # Story 4.12
+        "for_contact",  # Story 4.12
         "live",
         "ended_with_step",
         "live_counts_by_inbox",

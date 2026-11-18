@@ -3,7 +3,8 @@
     then the Contacts panel (lead_contacts.html: the Primary Contact and each Contact with its
     live Eligibility, evaluated on this render and never stored, and its recorded bases, then its
     Market and timezone facts, its Provenance Records and its erase link (Story 3.13), or, for an
-    erased Contact, its tombstone line only). Every Lead, Signal, Evidence, Contact and
+    erased Contact, its tombstone line only), then the Drafts section (lead_drafts.html, Story
+    4.12). Every Lead, Signal, Evidence, Contact and
     Provenance text is imported, crawled or extracted: it renders only through |plain or
     safe_link, inside an element carrying hx-disable. The Signals and Evidence sections hold no
     HTMX action. -#}
@@ -67,4 +68,5 @@
 {%- endif %}
 </section>
 {% include "lead_contacts.html" %}
+{% include "lead_drafts.html" %}
 {% endblock %}

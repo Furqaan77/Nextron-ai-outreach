@@ -22,6 +22,7 @@ from nextron import main
 from nextron.app.approval.api import Approval
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.drafting import api as drafting_api
+from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.notify import api as notify_api
 from nextron.app.ops import api as ops_api
@@ -41,6 +42,7 @@ from nextron.domain.notifications import (
     NOTIFICATIONS,
     ContactErased,
     Enrolled,
+    FooterChanged,
     LeadsMerged,
     MessageSent,
     SubjectSuppressed,
@@ -815,7 +817,18 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert is_command(sent)
     assert sent.__name__ == "on_step_sent"
     assert type(getattr(sent, "__self__", None)) is Sequencing
-    registered = (LeadsMerged, SubjectSuppressed, ContactErased, Enrolled, MessageSent)
+    [footer] = subscribers.subscribers_of(FooterChanged)  # Story 4.12
+    assert is_command(footer)
+    assert footer.__name__ == "recompose_ready"
+    assert type(getattr(footer, "__self__", None)) is Drafting
+    registered = (
+        LeadsMerged,
+        SubjectSuppressed,
+        ContactErased,
+        Enrolled,
+        MessageSent,
+        FooterChanged,
+    )
     others = [kind for kind in NOTIFICATIONS if kind not in registered]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
 
@@ -831,10 +844,11 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
         subscribers.subscribers_of(ContactErased)[-1],  # sequencing's, last
         *subscribers.subscribers_of(Enrolled),
         *subscribers.subscribers_of(MessageSent),
+        *subscribers.subscribers_of(FooterChanged),
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 11
+    assert clocks == [clock] * 12
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 

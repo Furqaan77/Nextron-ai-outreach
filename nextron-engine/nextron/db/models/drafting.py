@@ -29,7 +29,24 @@ Step (``uq_drafts_enrollment_step``, partial on those kinds). Its status group b
 writing it), ``reapproval_required`` and ``event_expired`` (server default 0), ``skipped_at``
 and ``status_at`` (when ``approval`` last moved the status). Indexes on ``due_at`` and
 ``enrollment_id``. Every
-column of ``drafts`` holds no personal data: IDs, codes, numbers, flags and times.
+column of ``drafts`` holds no personal data: IDs, codes, numbers, flags and times. Since Story
+4.12 (migration ``0035_4_12_draft_revisions``) (``id``, ``current_rev``) references
+``draft_revisions`` (``draft_id``, ``rev``), so ``current_rev`` names an existing revision of the
+same Draft or nothing.
+
+``draft_revisions`` (FR-20, AD-6, Story 4.12) holds a Draft's text, one immutable row per
+revision, written only by ``nextron.db.repos.drafting.revisions``: a ULID ``id``; ``draft_id``
+(a foreign key to ``drafts.id``) and ``rev`` (at least 1), unique as a pair; ``subject`` and
+``body`` (the editable text, without the footer); ``footer_snapshot_id`` (the footer it was
+composed with); ``evidence_ids`` (a JSON list of Evidence ULIDs) and ``fact_versions`` (a JSON
+list of ``[fact_id, version]`` pairs); the nullable ``cited_signal_id``, ``route_tuple_id``,
+``playbook_sha256``, ``playbook_version``, ``prompt_version`` and ``instruction`` (a regenerate's
+instruction, at most 200 characters); ``origin`` (``nextron.domain.draft.RevisionOrigin``;
+revision 1 is exactly the ``generated`` one, the AI's original text); ``text_hash``
+(``nextron.domain.render.text_hash`` of the composed message) and ``created_at``. Triggers
+refuse a ``DELETE``, a replacing ``INSERT`` and any ``UPDATE`` except the erasure tombstone of
+``subject``, ``body`` and ``instruction`` (to ``[erased]``). Those three are classed
+``redact``; ``text_hash`` is ``keep_hash`` (already a hash); the rest hold no personal data.
 """
 
 from collections.abc import Iterable
@@ -40,6 +57,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -50,7 +68,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
-from nextron.domain.draft import DraftKind, DraftStatus
+from nextron.domain.draft import DraftKind, DraftStatus, RevisionOrigin
 
 SHA256_LENGTH: Final = 64  # lowercase hex SHA-256
 SHA256_CHECK: Final = "length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'"
@@ -73,6 +91,31 @@ STEP_SLOT_CHECK: Final = (
 STEP_NO_CHECK: Final = "step_no IS NULL OR step_no >= 1"
 DAY_OFFSET_CHECK: Final = "day_offset IS NULL OR day_offset >= 0"
 CURRENT_REV_CHECK: Final = "current_rev IS NULL OR current_rev >= 1"
+ORIGIN_LENGTH: Final = 16
+PLAYBOOK_VERSION_LENGTH: Final = 32  # nextron.domain.playbook.VERSION_PATTERN
+PROMPT_VERSION_LENGTH: Final = 5  # v1 to v9999
+MAX_INSTRUCTION: Final = 200
+
+
+def _hex64(column: str) -> str:
+    return f"length({column}) = 64 AND {column} NOT GLOB '*[^0-9a-f]*'"
+
+
+def _json_list(column: str) -> str:
+    return f"json_valid({column}) AND json_type({column}) = 'array'"
+
+
+ORIGIN_CHECK: Final = _one_of("origin", RevisionOrigin)
+REV_CHECK: Final = "rev >= 1"
+FIRST_CHECK: Final = "(rev = 1) = (origin = 'generated')"
+TEXT_HASH_CHECK: Final = _hex64("text_hash")
+PLAYBOOK_SHA256_CHECK: Final = f"playbook_sha256 IS NULL OR ({_hex64('playbook_sha256')})"
+INSTRUCTION_CHECK: Final = (
+    f"instruction IS NULL OR (origin = 'regenerated' AND length(instruction) <= "
+    f"{MAX_INSTRUCTION})"
+)
+EVIDENCE_IDS_CHECK: Final = _json_list("evidence_ids")
+FACT_VERSIONS_CHECK: Final = _json_list("fact_versions")
 
 
 class FooterSnapshotRecord(Base):
@@ -116,6 +159,12 @@ class DraftRecord(Base):
         CheckConstraint(STEP_NO_CHECK, name="step_no"),
         CheckConstraint(DAY_OFFSET_CHECK, name="day_offset"),
         CheckConstraint(CURRENT_REV_CHECK, name="current_rev"),
+        # Story 4.12: current_rev names an existing revision of this Draft
+        ForeignKeyConstraint(
+            ["id", "current_rev"],
+            ["draft_revisions.draft_id", "draft_revisions.rev"],
+            use_alter=True,
+        ),
     )
 
     # the content group (drafting)
@@ -138,3 +187,38 @@ class DraftRecord(Base):
     event_expired: Mapped[bool] = _flag()
     skipped_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     status_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+class DraftRevisionRecord(Base):
+    """One immutable revision of a Draft's text."""
+
+    __tablename__ = "draft_revisions"
+    __table_args__ = (
+        UniqueConstraint("draft_id", "rev"),
+        CheckConstraint(ORIGIN_CHECK, name="origin"),
+        CheckConstraint(REV_CHECK, name="rev"),
+        CheckConstraint(FIRST_CHECK, name="first"),
+        CheckConstraint(TEXT_HASH_CHECK, name="text_hash"),
+        CheckConstraint(PLAYBOOK_SHA256_CHECK, name="playbook_sha256"),
+        CheckConstraint(INSTRUCTION_CHECK, name="instruction"),
+        CheckConstraint(EVIDENCE_IDS_CHECK, name="evidence_ids"),
+        CheckConstraint(FACT_VERSIONS_CHECK, name="fact_versions"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    draft_id: Mapped[str] = mapped_column(Ulid, ForeignKey("drafts.id"))
+    rev: Mapped[int] = mapped_column(Integer)
+    subject: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    footer_snapshot_id: Mapped[str] = mapped_column(Ulid, ForeignKey("footer_snapshots.id"))
+    evidence_ids: Mapped[str] = mapped_column(Text)
+    fact_versions: Mapped[str] = mapped_column(Text)
+    cited_signal_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("signals.id"))
+    origin: Mapped[str] = mapped_column(String(ORIGIN_LENGTH))
+    route_tuple_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("ai_route_tuples.id"))
+    playbook_sha256: Mapped[str | None] = mapped_column(String(SHA256_LENGTH))
+    playbook_version: Mapped[str | None] = mapped_column(String(PLAYBOOK_VERSION_LENGTH))
+    prompt_version: Mapped[str | None] = mapped_column(String(PROMPT_VERSION_LENGTH))
+    instruction: Mapped[str | None] = mapped_column(Text)
+    text_hash: Mapped[str] = mapped_column(String(SHA256_LENGTH))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)

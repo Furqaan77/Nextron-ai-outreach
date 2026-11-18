@@ -640,7 +640,12 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     website = header.find("a")
     assert website.attrs == {"href": "https://smith-law.co.uk/", "rel": "noopener noreferrer"}
     assert page.find("main").find("a", href="/leads").text == "All Leads"
-    assert [h2.text for h2 in page.find_all("h2")] == ["Signals", "Evidence", "Contacts"]
+    assert [h2.text for h2 in page.find_all("h2")] == [
+        "Signals",
+        "Evidence",
+        "Contacts",
+        "Drafts",  # Story 4.12
+    ]
     table = page.find("table", class_="contact-table")
     assert table_rows(table)[0] == CONTACT_HEADER
     [contact] = table.find_all("tr", class_="contact-row")

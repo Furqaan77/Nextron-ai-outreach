@@ -18,7 +18,11 @@ writes them (AD-3), and ``insert_slots`` leaves them to their server defaults (`
 - ``set_due(draft_id, due_at, at) -> bool``: ``due_at`` and ``updated_at`` of a ``ready`` or
   ``approved`` Draft (a conditional update); whether it changed a row;
 - ``follow_ups_due_before(end) -> dict[enrollment_id, int]``: per Enrollment, its ``ready`` or
-  ``approved`` ``step``/``recontact`` Drafts with ``step_no > 1`` and ``due_at < end``.
+  ``approved`` ``step``/``recontact`` Drafts with ``step_no > 1`` and ``due_at < end``;
+- ``set_current_rev(draft_id, rev, at) -> bool`` (Story 4.12): ``current_rev`` and
+  ``updated_at`` (the foreign key makes ``rev`` name an existing revision); whether a row
+  changed;
+- ``ready_with_text()`` (Story 4.12): every ``ready`` Draft with a ``current_rev``, by ``id``.
 """
 
 from collections.abc import Sequence
@@ -34,7 +38,8 @@ from nextron.db.models.base import new_id
 from nextron.db.models.drafting import DraftRecord
 from nextron.db.uow import current
 
-PENDING: Final = ("ready", "approved")
+READY: Final = "ready"
+PENDING: Final = (READY, "approved")
 STEP_KINDS: Final = ("step", "recontact")
 
 
@@ -165,3 +170,23 @@ def follow_ups_due_before(end: datetime) -> dict[str, int]:
         .group_by(DraftRecord.enrollment_id)
     )
     return {str(found): int(count) for found, count in current().session.execute(statement)}
+
+
+def set_current_rev(draft_id: str, rev: int, at: datetime) -> bool:
+    """Point the Draft at its revision ``rev``, at ``at``; whether a row changed."""
+    result = current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id)
+        .values(current_rev=rev, updated_at=at)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+
+def ready_with_text() -> list[StoredDraft]:
+    """Every ``ready`` Draft that has a revision, by ``id``."""
+    statement = (
+        select(*_COLUMNS)
+        .where(DraftRecord.status == READY, DraftRecord.current_rev.is_not(None))
+        .order_by(DraftRecord.id)
+    )
+    return [_stored(row) for row in current().session.execute(statement)]

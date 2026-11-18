@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0034_4_9_drafts"
+HEAD = "0035_4_12_draft_revisions"
 
 
 @pytest.fixture
@@ -697,3 +697,78 @@ def test_0030_keeps_every_activation_and_adds_the_test_run_key(tmp_path: Path) -
                 for case_id in ("01JD3QZ8X5V9K2M7N4P6R8T0D1", "01JD3QZ8X5V9K2M7N4P6R8T0D2")
             ),
         )
+
+
+DRAFT_COLUMNS = (
+    "id, kind, enrollment_id, step_no, day_offset, current_rev, due_at, generic, stale, "
+    "created_at, updated_at, status, reapproval_required, event_expired, skipped_at, status_at"
+)
+CHANNEL_DRAFT = "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+REPLY_DRAFT = "01JD3QZ8X5V9K2M7N4P6R8T0D2"
+DRAFT_ENROLLMENT = "01JD3QZ8X5V9K2M7N4P6R8T0D3"
+
+
+def draft_rows(path: Path) -> list[tuple[object, ...]]:
+    reader = sqlite3.connect(path)
+    try:
+        return reader.execute(f"SELECT {DRAFT_COLUMNS} FROM drafts ORDER BY id").fetchall()
+    finally:
+        reader.close()
+
+
+def test_0035_keeps_every_draft_and_its_partial_index(tmp_path: Path) -> None:
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0034_4_9_drafts":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0034_4_9_drafts")
+    at, due = "2026-11-18T09:00:00.000000Z", "2026-11-19T14:00:00.000000Z"
+    # Non-step kinds only: a step slot needs a real Enrollment, whose own chain (Lead, Contact,
+    # Campaign, Variant, inbox, Sequence, Offer) the post-upgrade foreign-key check would demand
+    run_sql(
+        path,
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('{CHANNEL_DRAFT}', 'channel', NULL, NULL, "
+        f"NULL, NULL, '{due}', 1, 0, '{at}', '{at}', 'approved', 1, 0, NULL, '{at}')",
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('{REPLY_DRAFT}', 'reply', NULL, NULL, "
+        f"NULL, NULL, NULL, 0, 1, '{at}', '{at}', 'ready', 0, 1, '{at}', NULL)",
+    )
+    before = draft_rows(path)
+    shutil.copy2(
+        SCRIPT_LOCATION / "versions" / "0035_4_12_draft_revisions.py",
+        location / "versions" / "0035_4_12_draft_revisions.py",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            "0034_4_9_drafts",
+            "0035_4_12_draft_revisions",
+        )
+
+    assert draft_rows(path) == before  # every row and column unchanged, current_rev NULL
+    assert {row[5] for row in before} == {None}
+    reader = sqlite3.connect(path)
+    try:
+        [(index_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_drafts_enrollment_step'"
+        ).fetchall()
+        keys = reader.execute("PRAGMA foreign_key_list(drafts)").fetchall()
+    finally:
+        reader.close()
+    assert "WHERE kind IN ('step','recontact')" in index_sql
+    assert {row[2] for row in keys} == {"enrollments", "draft_revisions"}
+    slot = (
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('{{id}}', 'step', '{DRAFT_ENROLLMENT}', 1, "
+        f"0, NULL, NULL, 0, 0, '{at}', '{at}', 'ready', 0, 0, NULL, NULL)"
+    )
+    run_sql(path, slot.format(id="01JD3QZ8X5V9K2M7N4P6R8T0D6"))  # foreign keys off
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):  # still one slot per Step
+        run_sql(path, slot.format(id="01JD3QZ8X5V9K2M7N4P6R8T0D4"))
+    run_sql(  # the index stays partial: a second reply without a Step is fine
+        path,
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0D5', 'reply', "
+        f"NULL, NULL, NULL, NULL, NULL, 0, 0, '{at}', '{at}', 'ready', 0, 0, NULL, NULL)",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_drafts_step_slot$"):
+        run_sql(path, "UPDATE drafts SET step_no = NULL WHERE id = '01JD3QZ8X5V9K2M7N4P6R8T0D6'")

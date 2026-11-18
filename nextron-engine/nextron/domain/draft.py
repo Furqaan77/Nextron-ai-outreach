@@ -35,6 +35,10 @@ log_touch               ready               sent        touch_logged
 ``log_touch`` is allowed only for kind ``channel`` (``kind`` must be given and be ``channel``;
 otherwise ``IllegalTransition``). **Creation.** ``CREATION`` is ``Transition(ready,
 requested)``: the creation ``events`` row has no ``from`` status.
+
+**Revision origins** (``RevisionOrigin``, Story 4.12): why a Draft revision was written:
+``generated`` (revision 1, the AI's original text), ``regenerated``, ``operator_edit`` and
+``footer_change``.
 """
 
 from collections.abc import Iterable, Mapping
@@ -62,6 +66,13 @@ class DraftKind(StrEnum):
     REPLY = "reply"
     REBOOK = "rebook"
     CHANNEL = "channel"
+
+
+class RevisionOrigin(StrEnum):
+    GENERATED = "generated"
+    REGENERATED = "regenerated"
+    OPERATOR_EDIT = "operator_edit"
+    FOOTER_CHANGE = "footer_change"
 
 
 class DraftEvent(StrEnum):

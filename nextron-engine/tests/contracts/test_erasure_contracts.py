@@ -50,6 +50,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "data_subject_requests": ("compliance", Coverage.KEPT),
     "settings": ("setup", Coverage.NOT_HELD),
     "footer_snapshots": ("drafting", Coverage.NOT_HELD),
+    "draft_revisions": ("drafting", Coverage.TOMBSTONED),  # Story 4.12
     "jobs": ("jobqueue", Coverage.NOT_HELD),
     "backups": ("ops", Coverage.NOT_HELD),
     "restore_tests": ("ops", Coverage.NOT_HELD),
@@ -222,7 +223,11 @@ def test_the_declaration_check_names_stale_and_foreign_declarations() -> None:
     declared = {
         **declarations(),
         "setup": {"settings": erasure, "segments": erasure, "ghosts": erasure},
-        "drafting": {"footer_snapshots": erasure, "contacts": erasure},
+        "drafting": {
+            "footer_snapshots": erasure,
+            "draft_revisions": erasure,  # Story 4.12
+            "contacts": erasure,
+        },
         "notify": {"alerts": erasure, "notifications": "not_held"},
         "scoring": ("a tuple",),
     }
@@ -285,6 +290,7 @@ def test_every_keep_hash_column_is_in_hash_kinds() -> None:
         ("contacts", "email"): "address",
         ("provenance_records", "address"): "address",
         ("suppression_entries", "value_hash"): None,
+        ("draft_revisions", "text_hash"): None,  # Story 4.12
     }
 
 
