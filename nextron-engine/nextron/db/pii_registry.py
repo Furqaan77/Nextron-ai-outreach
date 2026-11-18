@@ -311,6 +311,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text": PiiClass.REDACT,
         "text_purge_after": PiiClass.NONE,
         "changed_at": PiiClass.NONE,
+        "tag_managers": PiiClass.NONE,  # Story 2.9: tag manager keys, codes only
     },
     "ats_links": {
         "id": PiiClass.NONE,

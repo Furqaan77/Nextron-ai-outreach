@@ -189,7 +189,8 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    ``pages_fetched`` counts the 2xx answers, the homepage included; ``renders`` is 0 here
    (``render_pages`` adds to it). Each stored page carries ``nextron.domain.widgets.detect``
    over its raw HTML, its links (``(tag, url)``) and its visible text, before any stripping
-   matters. The renderer is never called here.
+   matters, and ``nextron.domain.widgets.tag_managers`` over its raw HTML and links (Story
+   2.9). The renderer is never called here.
 5. **Apply transaction.** When the Lead was merged meanwhile, the run is inserted as
    ``lead_merged`` and nothing else is written or enqueued. Otherwise the run is inserted
    (outcome ``ok`` unless step 2 or 3 ended it); each stored page is upserted on
@@ -200,7 +201,8 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    ``check_url`` accepts and whose host is in ``ats_hosts`` is upserted on ``(lead_id, url)``
    (``first_seen_at`` kept, ``last_seen_at``, ``run_id`` and ``page_id`` updated; the first page
    that holds it in the run). Each upserted page's ``page_contact_methods`` rows are replaced
-   by its detections (``detected_at`` now). With a ``final_domain``, ``canonicalize_lead`` is
+   by its detections (``detected_at`` now), and its ``tag_managers`` by the keys it loads
+   (``set_tag_managers``). With a ``final_domain``, ``canonicalize_lead`` is
    enqueued (payload ``{v, lead_id, run_id}``). When any stored page ``needs_render`` (under
    500 characters of text), ``render_pages`` is enqueued (the same payload, discriminator and
    concurrency key, from ``lead_job_keys``) and the Signal extraction waits for it; otherwise,
@@ -209,7 +211,7 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    as it was and enqueues no extraction.
 6. **Afterwards** it logs ``crawl_finished`` (``lead_id``, ``run_id``, ``outcome``,
    ``error_code``, ``pages_fetched``, ``pages_stored``, ``pages_skipped_robots``, ``errors``,
-   ``render_queued``).
+   ``render_queued``), then ``absence_checked`` (below) when the apply set ``contact_methods``.
    Then, when ``may_retry`` holds, the run isn't ``lead_merged`` and its ``error_code``
    ``is_retryable`` (a timeout or a 5xx from robots.txt or the homepage), it raises
    ``AdapterError(True, "crawl_retry", ...)`` so the job runs again; without ``may_retry`` (the
@@ -226,22 +228,34 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
 2. **Rendering**, with no transaction open: each candidate's ``final_url`` through the
    ``RendererPort``, ``site`` the run's ``final_domain`` (else its ``site_domain``), at
    ``MIN_INTERVAL_S``. A rendered page is detected (``widgets.detect`` over the rendered HTML,
-   links and text); an ``AdapterError`` counts one error, keeps the crawled text and is never
-   retried.
+   links and text, and ``widgets.tag_managers`` over the rendered HTML and links); an
+   ``AdapterError`` counts one error, keeps the crawled text and is never retried.
 3. **Apply transaction.** When the Lead was merged meanwhile, or the run is no longer the
    Lead's latest (a crawl finished during the renders), nothing is written or enqueued (the
    newer run queues its own extraction). Otherwise a non-empty rendered text replaces the
    page's ``text`` and ``content_hash`` (``changed_at`` moves to the render's time when the
    hash changed); the render's detections the page doesn't hold yet are added (``detected_at``
-   the render's time); the run's ``renders`` (successes) and ``errors`` grow; the Lead's
-   ``contact_methods`` is set; and ``extract_lead`` is enqueued (below), so the Signals are
-   read from the rendered text.
+   the render's time), and so are the tag managers it loads (``add_tag_managers``); the run's
+   ``renders`` (successes) and ``errors`` grow; the Lead's ``contact_methods`` is set; and
+   ``extract_lead`` is enqueued (below), so the Signals are read from the rendered text.
 4. It logs ``render_finished`` (``lead_id``, ``run_id``, ``pages``, ``renders``, ``errors``,
-   ``error_codes``, ``applied``) and returns ``True``.
+   ``error_codes``, ``applied``), then ``absence_checked`` (below) when the apply wrote, and
+   returns ``True``.
 
 **The Lead's ``contact_methods``** is ``nextron.domain.widgets.encode(summarize(run_id, now,
 pages))`` over the run's pages (``crawled_pages`` whose ``run_id`` is the run), each with the
 methods of its ``page_contact_methods`` rows: every page checked, and each method's pages.
+
+**The "contact form only" Absence (Story 2.9).** In the same transaction, each time it sets
+``contact_methods``, it calls ``nextron.app.research.absence.apply_contact_form_only`` with the
+Lead's Segment (``queries.setup.segment_by_id``), that value and a
+``nextron.domain.absence.CheckedPage`` for each of the run's pages (its URL, stored text and
+``tag_managers``), so the Absence Evidence and its score-only Signal follow every complete
+detection, whatever the AI extraction then does. After the transaction commits, the caller
+logs ``absence_checked`` (``lead_id``, ``run_id``, ``reason``, ``confirmed``, ``inserted``,
+``superseded``, ``retracted``, ``signals_created``, ``signals_retracted``). A run that sets no
+``contact_methods`` (nothing stored, a merged Lead, a stale or merged render) doesn't run the
+rule and leaves the Absence as it was.
 
 **The ``extract_lead`` job** (Story 2.9) is enqueued once for each crawl run that stored a page:
 by ``enrich_lead``'s apply when no page needs rendering, else by the ``render_pages`` apply that
@@ -269,6 +283,7 @@ from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research.absence import AbsenceApplied, apply_contact_form_only
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -278,6 +293,7 @@ from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.contacts import StoredContact
 from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import command, current, use_case
+from nextron.domain.absence import CheckedPage
 from nextron.domain.address_class import AddressCause, AddressClass, assign
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB, resolve_contact_market
@@ -337,7 +353,7 @@ from nextron.domain.people import ROUTE as PEOPLE_ROUTE
 from nextron.domain.segments import SegmentDef, SignalClass
 from nextron.domain.settings_schema import Key
 from nextron.domain.signals import EventSignal, preferred_roles, strongest_event
-from nextron.domain.widgets import Detection, detect, encode, summarize
+from nextron.domain.widgets import Detection, detect, encode, summarize, tag_managers
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import (
     FETCH_CONNECT_FAILED,
@@ -389,6 +405,7 @@ SHARED_PLATFORM: Final = "shared_platform"  # the homepage landed on a shared pl
 KIND_ORDER: Final = {kind: index for index, kind in enumerate(PageKind)}
 RENDER_SKIPPED: Final = "render_skipped"
 RENDER_FINISHED: Final = "render_finished"
+ABSENCE_CHECKED: Final = "absence_checked"  # Story 2.9: the "contact form only" rule ran
 # Why render_pages rendered nothing, as logged
 UNKNOWN_RUN: Final = "unknown_run"
 OTHER_LEAD: Final = "other_lead"
@@ -972,6 +989,7 @@ class _Page:
     text: str = field(repr=False)
     links: tuple[PageLink, ...] = field(repr=False)
     detections: tuple[Detection, ...] = field(default=(), repr=False)
+    tag_managers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -990,12 +1008,31 @@ class _Rendered:
     at: datetime
     text: str = field(default="", repr=False)
     detections: tuple[Detection, ...] = field(default=(), repr=False)
+    tag_managers: tuple[str, ...] = ()
     error_code: str | None = None
 
 
 def _embeds(links: Iterable[PageLink]) -> list[tuple[str, str]]:
     """A page's links as ``nextron.domain.widgets.detect`` takes them."""
     return [(link.tag, link.url) for link in links]
+
+
+def _log_absence(lead_id: str, run_id: str, absence: AbsenceApplied) -> None:
+    """Log what the "contact form only" rule did, once its transaction committed."""
+    log.info(
+        ABSENCE_CHECKED,
+        extra={
+            "lead_id": lead_id,
+            "run_id": run_id,
+            "reason": str(absence.reason),
+            "confirmed": absence.confirmed,
+            "inserted": absence.inserted,
+            "superseded": absence.superseded,
+            "retracted": absence.retracted,
+            "signals_created": absence.signals_created,
+            "signals_retracted": absence.signals_retracted,
+        },
+    )
 
 
 @dataclass(slots=True)
@@ -1014,6 +1051,7 @@ class _Run:
     errors: int = 0
     throttled: bool = False
     render_queued: bool = False
+    absence: AbsenceApplied | None = None  # what the "contact form only" rule did, if it ran
 
 
 @dataclass(frozen=True, slots=True)
@@ -1087,6 +1125,8 @@ class WebsiteCrawls:
                 "render_queued": run.render_queued,
             },
         )
+        if run.absence is not None:
+            _log_absence(lead_id, run_id, run.absence)
         if may_retry and run.outcome is not CrawlOutcome.LEAD_MERGED and is_retryable(
             run.error_code
         ):
@@ -1269,6 +1309,7 @@ class WebsiteCrawls:
             text=fetched.text,
             links=fetched.links,
             detections=detect(fetched.html, _embeds(fetched.links), fetched.text),
+            tag_managers=tag_managers(fetched.html, _embeds(fetched.links)),
         )
 
     # The apply transaction ---------------------------------------------------------------------
@@ -1299,6 +1340,7 @@ class WebsiteCrawls:
         page_ids = [self._upsert_page(run.lead_id, run_id, page) for page in run.pages]
         for page_id, page in zip(page_ids, run.pages, strict=True):
             crawl_repo.replace_contact_methods(page_id, page.detections, now)
+            crawl_repo.set_tag_managers(page_id, page.tag_managers)
         seen: set[str] = set()
         for page_id, page in zip(page_ids, run.pages, strict=True):
             for link in page.links:
@@ -1328,7 +1370,7 @@ class WebsiteCrawls:
             )
             run.render_queued = True
         elif run.pages:
-            self._set_contact_methods(run.lead_id, run_id, now)
+            run.absence = self._set_contact_methods(run.lead_id, lead.segment_id, run_id, now)
             self._enqueue_extraction(run.lead_id, run_id, run.site, now)
         return run_id
 
@@ -1395,8 +1437,11 @@ class WebsiteCrawls:
         )
 
     @staticmethod
-    def _set_contact_methods(lead_id: str, run_id: str, now: datetime) -> None:
-        """Set the Lead's ``contact_methods`` to ``summarize`` over the run's pages."""
+    def _set_contact_methods(
+        lead_id: str, segment_id: str, run_id: str, now: datetime
+    ) -> AbsenceApplied:
+        """Set the Lead's ``contact_methods`` to ``summarize`` over the run's pages, then
+        reconcile its "contact form only" Absence with them (Story 2.9)."""
         pages = crawl_repo.run_pages(run_id)
         page_ids = {page.id for page in pages}
         methods: dict[str, set[str]] = {}
@@ -1407,6 +1452,12 @@ class WebsiteCrawls:
             run_id, now, [(page.url, sorted(methods.get(page.id, ()))) for page in pages]
         )
         profile_repo.set_contact_methods(lead_id, encode(summary))
+        seeded = setup_queries.segment_by_id(segment_id)
+        if seeded is None:  # leads.segment_id is a foreign key
+            raise RuntimeError(f"Lead {lead_id}'s Segment has no row")
+        loaded = crawl_repo.tag_managers_of(page_ids)
+        checked = [CheckedPage(page.url, page.text, loaded.get(page.id)) for page in pages]
+        return apply_contact_form_only(lead_id, seeded.definition, summary, checked, now)
 
     # Rendering (Story 2.6) ---------------------------------------------------------------------
 
@@ -1428,7 +1479,7 @@ class WebsiteCrawls:
             return True
         results = [self._render(candidate, site) for candidate in candidates]
         with uow.transaction():
-            applied = self._apply_renders(lead_id, run_id, results)
+            absence = self._apply_renders(lead_id, run_id, results)
         log.info(
             RENDER_FINISHED,
             extra={
@@ -1440,9 +1491,11 @@ class WebsiteCrawls:
                 "error_codes": sorted(
                     {result.error_code for result in results if result.error_code is not None}
                 ),
-                "applied": applied,
+                "applied": absence is not None,
             },
         )
+        if absence is not None:
+            _log_absence(lead_id, run_id, absence)
         return True
 
     @staticmethod
@@ -1485,17 +1538,21 @@ class WebsiteCrawls:
             self._clock.now(),
             text=rendered.text,
             detections=detect(rendered.html, _embeds(rendered.links), rendered.text),
+            tag_managers=tag_managers(rendered.html, _embeds(rendered.links)),
         )
 
-    def _apply_renders(self, lead_id: str, run_id: str, results: list[_Rendered]) -> bool:
-        """Step 3 of ``render_pages``, in the caller's transaction: whether anything was
-        written (nothing once the Lead was merged or a newer run was recorded)."""
+    def _apply_renders(
+        self, lead_id: str, run_id: str, results: list[_Rendered]
+    ) -> AbsenceApplied | None:
+        """Step 3 of ``render_pages``, in the caller's transaction: what the "contact form
+        only" rule did, or ``None`` when nothing was written (the Lead was merged or a newer
+        run was recorded)."""
         lead = discovery_queries.lead(lead_id)
         if lead is None or lead.merged_into is not None:
-            return False
+            return None
         latest = crawl_repo.latest_run(lead_id)
         if latest is None or latest.id != run_id:  # a crawl finished during the renders
-            return False
+            return None
         pages = {page.id: page for page in crawl_repo.run_pages(run_id)}
         renders = errors = 0
         for result in results:
@@ -1515,9 +1572,10 @@ class WebsiteCrawls:
                     changed_at=page.changed_at if digest == page.content_hash else result.at,
                 )
             crawl_repo.add_contact_methods(page.id, result.detections, result.at)
+            crawl_repo.add_tag_managers(page.id, result.tag_managers)
         crawl_repo.add_render_counts(run_id, renders=renders, errors=errors)
         now = self._clock.now()
-        self._set_contact_methods(lead_id, run_id, now)
+        absence = self._set_contact_methods(lead_id, lead.segment_id, run_id, now)
         # Story 2.9: the run's Signals are extracted once its renders are written
         self._enqueue_extraction(lead_id, run_id, latest.site_domain, now)
-        return True
+        return absence

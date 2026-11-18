@@ -295,6 +295,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "text",
             "text_purge_after",
             "changed_at",
+            "tag_managers",
         ),
     },
     "ats_links": {

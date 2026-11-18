@@ -64,6 +64,24 @@ listed is checked. ``encode(value)`` writes canonical JSON (sorted keys, no spac
 ...}``, ``checked_at`` as ``YYYY-MM-DDTHH:MM:SS.ffffffZ``); ``decode(text)`` reads it back and
 raises ``ValueError`` for anything ``encode`` wouldn't write (``"v"`` must be the integer 1, not
 ``1.0`` or ``true``).
+
+**Tag managers (Story 2.9).** A tag manager can inject a chat widget that neither the raw HTML
+nor the visible text names, so a page that loads one can't show that it has no chat.
+``TagManager(key, hosts, markers)`` matches as a ``Signature`` does (``hosts`` against a URL's
+host and path, ``markers`` as case-insensitive substrings of the raw HTML). ``TAG_MANAGERS``, in
+order:
+
+- ``google_tag_manager``: hosts ``googletagmanager.com/gtm.js`` and
+  ``googletagmanager.com/ns.html`` (a container and its ``noscript`` frame); markers the same two
+  and ``gtm.start`` (the container snippet). The Google tag (``googletagmanager.com/gtag/js``,
+  for Analytics and Ads) loads only Google's own products and isn't one;
+- ``segment``: hosts and markers ``cdn.segment.com`` and ``cdn.segment.io``;
+- ``tealium``: host ``tags.tiqcdn.com``; markers ``tags.tiqcdn.com`` and ``utag.js``;
+- ``adobe_launch``: host and marker ``assets.adobedtm.com``.
+
+``tag_managers(html, embeds) -> tuple[str, ...]`` is the keys found, from ``script`` and
+``iframe`` URLs (an ``a`` link loads nothing) and from raw-HTML markers, each once, in
+``TAG_MANAGERS`` order. It takes ``detect``'s ``html`` and ``embeds`` and, like it, never raises.
 """
 
 import json
@@ -570,6 +588,74 @@ def detect(html: str, embeds: Iterable[tuple[str, str]], text: str) -> tuple[Det
     if phone is not None:
         add(ContactMethod.PHONE, PHONE_TEXT, MatchSource.TEXT, phone)
     return tuple(sorted(found.values(), key=_order))
+
+
+# Tag managers (Story 2.9) ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TagManager:
+    """A tag manager: its key and what matches it, as a ``Signature`` matches."""
+
+    key: str
+    hosts: tuple[str, ...]
+    markers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, str) or KEY_PATTERN.fullmatch(self.key) is None:
+            raise ValueError("a tag manager key is lowercase letters, digits and underscores")
+        for name in ("hosts", "markers"):
+            values = getattr(self, name)
+            if (
+                not isinstance(values, tuple)
+                or not values
+                or not all(
+                    isinstance(value, str) and value and value == value.strip()
+                    for value in values
+                )
+            ):
+                raise ValueError(f"a tag manager's {name} must be a non-empty tuple of str")
+        if any(host != host.lower() or "://" in host for host in self.hosts):
+            raise ValueError("a tag manager's hosts are lowercase, without a scheme")
+
+
+TAG_MANAGERS: Final[tuple[TagManager, ...]] = (
+    TagManager(
+        "google_tag_manager",
+        hosts=("googletagmanager.com/gtm.js", "googletagmanager.com/ns.html"),
+        markers=("googletagmanager.com/gtm.js", "googletagmanager.com/ns.html", "gtm.start"),
+    ),
+    TagManager(
+        "segment",
+        hosts=("cdn.segment.com", "cdn.segment.io"),
+        markers=("cdn.segment.com", "cdn.segment.io"),
+    ),
+    TagManager("tealium", hosts=("tags.tiqcdn.com",), markers=("tags.tiqcdn.com", "utag.js")),
+    TagManager("adobe_launch", hosts=("assets.adobedtm.com",), markers=("assets.adobedtm.com",)),
+)
+# The embeds that load something into the page: an ``a`` link loads nothing
+_LOADING_SOURCES: Final = frozenset({MatchSource.SCRIPT, MatchSource.IFRAME})
+
+
+def tag_managers(html: str, embeds: Iterable[tuple[str, str]]) -> tuple[str, ...]:
+    """The keys of the tag managers a page loads; see the module docstring."""
+    html = html if isinstance(html, str) else ""
+    found: set[str] = set()
+    for source, url in _pairs(embeds):
+        if source not in _LOADING_SOURCES:
+            continue
+        parsed = _host_and_path(url)
+        if parsed is None:
+            continue
+        host, path = parsed
+        for manager in TAG_MANAGERS:
+            if any(_host_matches(spec, host, path) for spec in manager.hosts):
+                found.add(manager.key)
+    lowered = html.lower()
+    for manager in TAG_MANAGERS:
+        if _first_marker(lowered, manager.markers) is not None:
+            found.add(manager.key)
+    return tuple(manager.key for manager in TAG_MANAGERS if manager.key in found)
 
 
 # The Lead's profile value ---------------------------------------------------------------------

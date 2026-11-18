@@ -1,7 +1,8 @@
 """``nextron.domain.widgets`` (Story 2.6): every signature from a script and an iframe source, a
 marker and a phrase; links for booking and forms only; the generic rules; the first match, the
 order and the cap; garbage input; and the Lead's profile value (``summarize``, ``encode``,
-``decode``)."""
+``decode``). Also the tag managers (Story 2.9): each host from a script or an iframe and never a
+link, each marker, the Google tag left out, the order and garbage input."""
 
 import json
 from collections.abc import Iterator
@@ -17,15 +18,18 @@ from nextron.domain.widgets import (
     MAX_MATCHED,
     RULE_KEYS,
     SIGNATURES,
+    TAG_MANAGERS,
     ContactMethod,
     ContactMethods,
     Detection,
     MatchSource,
     Signature,
+    TagManager,
     decode,
     detect,
     encode,
     summarize,
+    tag_managers,
 )
 
 RUN = "01JD0000000000000000000011"
@@ -743,3 +747,145 @@ def test_contact_methods_checks_its_values(arguments: dict[str, object]) -> None
 def test_encode_takes_only_contact_methods() -> None:
     with pytest.raises(TypeError):
         encode({"v": 1})  # type: ignore[arg-type]
+
+
+# Tag managers (Story 2.9) ---------------------------------------------------------------------
+
+GTM_SNIPPET = (
+    "<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),"
+    "event:'gtm.js'});var f=d.getElementsByTagName(s)[0],j=d.createElement(s);j.async=true;"
+    "j.src='https://www.googletagmanager.com/gtm.js?id='+i;f.parentNode.insertBefore(j,f);"
+    "})(window,document,'script','dataLayer','GTM-ABC123');</script>"
+)
+GTAG_SNIPPET = (
+    "<script async src='https://www.googletagmanager.com/gtag/js?id=G-ABC123'></script>"
+    "<script>window.dataLayer = window.dataLayer || [];"
+    "function gtag(){dataLayer.push(arguments);}gtag('js', new Date());"
+    "gtag('config', 'G-ABC123');</script>"
+)
+
+
+def test_the_tag_manager_list() -> None:
+    assert [(m.key, m.hosts, m.markers) for m in TAG_MANAGERS] == [
+        (
+            "google_tag_manager",
+            ("googletagmanager.com/gtm.js", "googletagmanager.com/ns.html"),
+            ("googletagmanager.com/gtm.js", "googletagmanager.com/ns.html", "gtm.start"),
+        ),
+        ("segment", ("cdn.segment.com", "cdn.segment.io"), ("cdn.segment.com", "cdn.segment.io")),
+        ("tealium", ("tags.tiqcdn.com",), ("tags.tiqcdn.com", "utag.js")),
+        ("adobe_launch", ("assets.adobedtm.com",), ("assets.adobedtm.com",)),
+    ]
+
+
+TAG_HOSTS = [(manager.key, host) for manager in TAG_MANAGERS for host in manager.hosts]
+TAG_MARKERS = [(manager.key, marker) for manager in TAG_MANAGERS for marker in manager.markers]
+
+
+@pytest.mark.parametrize(("key", "host"), TAG_HOSTS)
+@pytest.mark.parametrize("tag", ["script", "iframe"])
+def test_every_tag_manager_host_is_found_from_a_script_or_iframe(
+    key: str, host: str, tag: str
+) -> None:
+    host_only, _, prefix = host.partition("/")
+    url = f"https://www.{host_only}/{prefix}?id=GTM-ABC123" if prefix else url_for(host)
+
+    assert tag_managers("", [(tag, url)]) == (key,)
+
+
+@pytest.mark.parametrize(("key", "host"), TAG_HOSTS)
+def test_a_link_to_a_tag_manager_loads_nothing(key: str, host: str) -> None:
+    assert tag_managers("", [("a", url_for(host))]) == ()
+
+
+@pytest.mark.parametrize(("key", "marker"), TAG_MARKERS)
+def test_every_tag_manager_marker_is_found_in_the_raw_html_whatever_its_case(
+    key: str, marker: str
+) -> None:
+    assert tag_managers(f"<p>x</p><script>{marker.upper()}</script>", []) == (key,)
+
+
+def test_the_container_snippet_and_its_noscript_frame_are_google_tag_manager() -> None:
+    noscript = (
+        "<noscript><iframe src='https://www.googletagmanager.com/ns.html?id=GTM-ABC123'>"
+        "</iframe></noscript>"
+    )
+    assert tag_managers(GTM_SNIPPET, []) == ("google_tag_manager",)
+    assert tag_managers(noscript, []) == ("google_tag_manager",)
+    assert tag_managers(
+        "", [("iframe", "https://www.googletagmanager.com/ns.html?id=GTM-ABC123")]
+    ) == ("google_tag_manager",)
+
+
+def test_the_google_tag_is_no_tag_manager() -> None:
+    gtag = "https://www.googletagmanager.com/gtag/js?id=G-ABC123"
+
+    assert tag_managers(GTAG_SNIPPET, [("script", gtag)]) == ()
+    # a path that only starts like a container's isn't one
+    assert tag_managers("", [("script", "https://www.googletagmanager.com/gtm.jsx")]) == ()
+
+
+def test_each_key_once_in_tag_manager_order_from_any_source() -> None:
+    embeds = [
+        ("script", "https://assets.adobedtm.com/launch-x.min.js"),
+        ("iframe", "https://tags.tiqcdn.com/utag/acme/main/prod/utag.js"),
+        ("script", "https://assets.adobedtm.com/other.js"),
+    ]
+    html = "<script src='https://cdn.segment.com/analytics.js/v1/x/analytics.min.js'></script>"
+
+    assert tag_managers(GTM_SNIPPET + html, embeds) == (
+        "google_tag_manager",
+        "segment",
+        "tealium",
+        "adobe_launch",
+    )
+
+
+def test_a_page_with_no_tag_manager_has_none() -> None:
+    assert tag_managers("<p>Hello</p>", [("script", "https://widget.intercom.io/widget/x")]) == ()
+
+
+@pytest.mark.parametrize(
+    ("html", "embeds"),
+    [
+        (None, None),
+        (b"gtm.start", "https://www.googletagmanager.com/gtm.js"),
+        (42, [("script",), ("script", None), (None, "x"), "ab", ("script", "https://[::1")]),
+        ("<<<", [("frame", "https://www.googletagmanager.com/gtm.js")]),
+    ],
+)
+def test_tag_managers_never_raises(html: object, embeds: object) -> None:
+    assert tag_managers(html, embeds) == ()  # type: ignore[arg-type]
+
+
+def test_a_broken_embed_iterable_keeps_what_was_read() -> None:
+    def embeds() -> Iterator[tuple[str, str]]:
+        yield ("script", "https://cdn.segment.io/x.js")
+        raise RuntimeError("broken")
+
+    assert tag_managers("", embeds()) == ("segment",)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"key": "Bad key"},
+        {"hosts": ()},
+        {"markers": ()},
+        {"hosts": ["cdn.segment.com"]},
+        {"hosts": ("CDN.segment.com",)},
+        {"hosts": ("https://cdn.segment.com",)},
+        {"markers": (" utag.js",)},
+        {"markers": ("",)},
+    ],
+)
+def test_a_bad_tag_manager_is_refused(arguments: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "key": "segment",
+        "hosts": ("cdn.segment.com",),
+        "markers": ("cdn.segment.com",),
+        **arguments,
+    }
+
+    with pytest.raises(ValueError):
+        TagManager(**values)  # type: ignore[arg-type]

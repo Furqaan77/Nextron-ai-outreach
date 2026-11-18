@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0028_2_10_primary_contact"
+HEAD = "0029_2_9_tag_managers"
 
 
 @pytest.fixture
@@ -512,3 +512,47 @@ def test_0026_keeps_every_activation_and_its_partial_index(tmp_path: Path) -> No
     )
     with pytest.raises(sqlite3.IntegrityError, match=r"ck_ai_route_activations_playbook_sha256$"):
         run_sql(path, bad_playbook)
+
+
+def test_0029_leaves_every_existing_page_unchecked(tmp_path: Path) -> None:
+    """A page stored before 0029 was never checked for tag managers: its value is NULL."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0028_2_10_primary_contact":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0028_2_10_primary_contact",
+        )
+    at = "2026-11-17T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0C0", "01JD3QZ8X5V9K2M7N4P6R8T0C1"
+    run, page = "01JD3QZ8X5V9K2M7N4P6R8T0C2", "01JD3QZ8X5V9K2M7N4P6R8T0C3"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'law_private_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at) "
+        f"VALUES ('{lead}', 'Smith Law LLP', 'smith-law.com', '{segment}', '{at}')",
+        "INSERT INTO crawl_runs (id, lead_id, site_domain, started_at, ended_at, outcome, "
+        "pages_fetched, pages_skipped_robots, renders, errors) "
+        f"VALUES ('{run}', '{lead}', 'smith-law.com', '{at}', '{at}', 'ok', 1, 0, 0, 0)",
+        "INSERT INTO crawled_pages (id, lead_id, run_id, url, final_url, kind, fetched_at, "
+        "http_status, content_hash, text, text_purge_after, changed_at) "
+        f"VALUES ('{page}', '{lead}', '{run}', 'https://smith-law.com/', "
+        f"'https://smith-law.com/', 'home', '{at}', 200, '{'a' * 64}', 'Smith Law LLP', '{at}', "
+        f"'{at}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0028_2_10_primary_contact", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute("SELECT id, text, tag_managers FROM crawled_pages").fetchall()
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(crawled_pages)")]
+    finally:
+        reader.close()
+    assert rows == [(page, "Smith Law LLP", None)]  # kept, and never checked
+    assert columns[-1] == "tag_managers"
