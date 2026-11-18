@@ -359,6 +359,27 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "receipt_id",
         ),
     },
+    "erasure_receipts": {  # Story 3.14
+        "compliance": (
+            "id",
+            "contact_id",
+            "request_ref",
+            "cause",
+            "outcome",
+            "created_at",
+        ),
+    },
+    "erasure_receipt_stores": {  # Story 3.14
+        "compliance": (
+            "id",
+            "receipt_id",
+            "store",
+            "action",
+            "status",
+            "detail",
+            "at",
+        ),
+    },
     "evidence": {
         "research": (
             "id",

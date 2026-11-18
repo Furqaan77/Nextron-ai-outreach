@@ -7,7 +7,7 @@
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6, and
-  ``extract_lead``, Story 2.9,
+  ``extract_lead``, Story 2.9, and ``erase_external``, Story 3.14,
   with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
@@ -48,6 +48,7 @@ from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
 from nextron.domain.job import DEFERRED, InvalidJob, Job, JobGroup, JobTypes, Lane
+from nextron.jobs import handlers
 from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
 
@@ -443,6 +444,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "render_pages",
         "purge_page_text",
         "extract_lead",
+        "erase_external",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -636,6 +638,74 @@ def test_an_extract_lead_job_without_its_ids_is_invalid(payload: dict[str, objec
     with pytest.raises(InvalidJob, match="must be a ULID"):
         handler(Job(RUN, "extract_lead", Lane.BULK, payload, 1))
     assert extractions.calls == []
+
+
+# erase_external (Story 3.14) ----------------------------------------------------------------
+
+
+class RecordingStores:
+    """A stand-in for the ``compliance`` service's ``ErasureStores``: records each run."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+
+    def run(self, contact_id: str, store: str, *, last_attempt: bool) -> object:
+        self.calls.append((contact_id, store, last_attempt))
+        return None
+
+
+def test_erase_external_is_registered_as_specified() -> None:
+    found = registry().get("erase_external")
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 60, timedelta(minutes=5), 5, JobGroup.OTHER)
+    assert handlers.ERASE_EXTERNAL_RETRIES == 5
+
+
+@pytest.mark.parametrize(("attempts", "last"), [(1, False), (5, False), (6, True), (7, True)])
+def test_erase_external_runs_its_store_once_and_flags_the_last_attempt(
+    attempts: int, last: bool
+) -> None:
+    stores = RecordingStores()
+    handler = registry(erasure_stores=lambda: stores).get("erase_external").handler
+    payload = {"v": 1, "contact_id": LEAD, "store": "telegram"}
+
+    assert handler(Job(RUN, "erase_external", Lane.BULK, payload, attempts)) is None
+    assert stores.calls == [(LEAD, "telegram", last)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "store": "telegram"},
+        {"v": 1, "contact_id": "not-a-ulid", "store": "telegram"},
+        {"v": 1, "contact_id": LEAD},
+        {"v": 1, "contact_id": LEAD, "store": "database"},  # an in-database item has no job
+        {"v": 1, "contact_id": LEAD, "store": "ghost"},
+        {"v": 1, "contact_id": LEAD, "store": 3},
+    ],
+)
+def test_an_erase_external_job_with_a_bad_payload_is_invalid(payload: dict[str, object]) -> None:
+    stores = RecordingStores()
+    handler = registry(erasure_stores=lambda: stores).get("erase_external").handler
+
+    with pytest.raises(InvalidJob):
+        handler(Job(RUN, "erase_external", Lane.BULK, payload, 1))
+    assert stores.calls == []
+
+
+def test_an_unwired_erase_external_fails_without_a_retry() -> None:
+    handler = registry().get("erase_external").handler
+    payload = {"v": 1, "contact_id": LEAD, "store": "logs"}
+
+    with pytest.raises(RuntimeError, match="no ErasureStores"):
+        handler(Job(RUN, "erase_external", Lane.BULK, payload, 1))
 
 
 @pytest.mark.parametrize(

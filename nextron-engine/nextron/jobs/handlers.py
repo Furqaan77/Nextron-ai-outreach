@@ -47,6 +47,12 @@ handler runs in.
   run_id)`` once (the research service's ``SignalExtractions``) and returns ``DEFERRED`` when it
   returns ``False`` (the budget refused the call). A retryable ``AdapterError`` it raises is
   retried by the runner; any other error fails the job.
+- ``erase_external(stores)`` (Story 3.14): the ``erase_external`` job's handler. ``stores``
+  returns the ``compliance`` service's ``ErasureStores`` (``nextron.main`` passes ``lambda:
+  erasure_stores``). The payload's ``contact_id`` must be a ULID and its ``store`` one of
+  ``EXTERNAL_STORES`` (else ``InvalidJob``); it calls ``stores().run(contact_id, store,
+  last_attempt=job.attempts > ERASE_EXTERNAL_RETRIES)`` once, so the last allowed attempt
+  settles the store ``failed`` instead of leaving it ``pending``, and returns ``None``.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -56,12 +62,14 @@ from typing import Final, Protocol
 
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
+from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, STORE_FIELD
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
 from nextron.domain.restore_test import RestoreTestKind
 
 ALERT_ID_FIELD: Final = "alert_id"
 ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
+ERASE_EXTERNAL_RETRIES: Final = 5  # the erase_external job type's retry limit (nextron.main)
 
 
 def _ulid_field(job: Job, name: str) -> str:
@@ -245,3 +253,23 @@ def extract_lead(extractions: Callable[[], Extracting]) -> Handler:
         return None
 
     return handle_extract_lead
+
+
+class StoreErasing(Protocol):
+    """What ``erase_external`` needs of the ``compliance`` service's ``ErasureStores``."""
+
+    def run(self, contact_id: str, store: str, *, last_attempt: bool) -> object: ...
+
+
+def erase_external(stores: Callable[[], StoreErasing]) -> Handler:
+    """The ``erase_external`` job's handler: settle the payload's store of the payload's
+    Contact through ``stores()``."""
+
+    def handle_erase_external(job: Job) -> None:
+        contact_id = _ulid_field(job, CONTACT_ID_FIELD)
+        store = job.payload.get(STORE_FIELD)
+        if not isinstance(store, str) or store not in {str(found) for found in EXTERNAL_STORES}:
+            raise InvalidJob(f"{job.type}: the {STORE_FIELD} field must be an external store")
+        stores().run(contact_id, store, last_attempt=job.attempts > ERASE_EXTERNAL_RETRIES)
+
+    return handle_erase_external

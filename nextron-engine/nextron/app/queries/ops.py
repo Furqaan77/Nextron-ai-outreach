@@ -34,6 +34,12 @@ The restore test (Story 1.18):
 - ``newest_offpc_copy()``: the ``BackupRow`` whose off-PC copy a restore test fetches: the newest
   one ``copied`` off the PC and not yet rotated out, or ``None``.
 
+The copies an erasure leaves (Story 3.14):
+
+- ``copies_holding(since, until)``: the ``verified`` ``BackupRow`` rows started from ``since`` to
+  ``until`` whose local copy is still there or whose off-PC copy is ``copied`` and not yet
+  rotated out, oldest first: the copies that may hold a Contact erased at ``until``.
+
 Restore and recovery mode (Story 1.19):
 
 - ``recovery_mode() -> bool``: whether recovery mode is on (a ``recovery_state`` row is
@@ -47,6 +53,7 @@ Restore and recovery mode (Story 1.19):
 It reads through the current unit of work, read-only ones included.
 """
 
+from datetime import datetime
 from typing import Final
 
 from nextron.db.repos.ops import backups as backups_repo
@@ -105,6 +112,11 @@ def newest_restore_test(kind: RestoreTestKind) -> RestoreTestRow | None:
 def newest_offpc_copy() -> BackupRow | None:
     """The newest backup copied off the PC whose copy is not rotated out, or ``None``."""
     return backups_repo.newest_offpc_copy()
+
+
+def copies_holding(since: datetime, until: datetime) -> tuple[BackupRow, ...]:
+    """The verified backups started from ``since`` to ``until`` that still have a copy."""
+    return backups_repo.copies_holding(since, until)
 
 
 def recovery_mode() -> bool:

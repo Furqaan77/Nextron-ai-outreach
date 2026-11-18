@@ -308,7 +308,7 @@ def world(db_engine: Engine) -> Iterator[World]:
         Discovery(clock, Pipeline(clock), queue_on(clock)),
         Research(clock),
         compliance,
-        Erasures(clock, compliance),
+        Erasures(clock, compliance, queue=queue_on(clock)),
     )
     [(segment,), *_] = found.sql("SELECT id FROM segments ORDER BY key")
     found.segment = segment
@@ -404,7 +404,9 @@ def test_a_dsr_erasure_tombstones_every_personal_column_and_keeps_the_keys(
     result = world.erase(planted.contact_id)
 
     [(request_id, *_)] = world.requests()
-    assert result == ErasureResult(planted.contact_id, request_id, erased=True)
+    assert result == ErasureResult(
+        planted.contact_id, request_id, erased=True, receipt_id=result.receipt_id
+    )
     # the Contact: a tombstone
     row = world.contact_row(planted.contact_id)
     assert {name: row[name] for name in ("name", "role", "email", "linkedin_url")} == {
@@ -452,15 +454,24 @@ def test_a_dsr_erasure_tombstones_every_personal_column_and_keeps_the_keys(
     ]
     # the request: completed
     assert world.requests() == [
-        (request_id, planted.contact_id, "erase", "completed", REF, STAMP, STAMP, None)
+        (request_id, planted.contact_id, "erase", "completed", REF, STAMP, STAMP, result.receipt_id)
     ]
+    assert result.receipt_id is not None  # Story 3.14: the request names its receipt
     # the Lead and Bob unchanged
     assert world.sql("SELECT * FROM contacts WHERE name = 'Bob Other'") == bob_before
     assert world.sql("SELECT * FROM leads ORDER BY id") == lead_before
-    # no row deleted, no DELETE run; only the request, its entries and events were added
+    # no row deleted, no DELETE run; only the request, its entries, events, its receipt (Story
+    # 3.14) and the receipt's erase_external jobs were added
     after = world.counts()
     grown = {table for table in counts if after[table] != counts[table]}
-    assert grown == {"data_subject_requests", "suppression_entries", "events"}
+    assert grown == {
+        "data_subject_requests",
+        "suppression_entries",
+        "events",
+        "erasure_receipts",
+        "erasure_receipt_stores",
+        "jobs",
+    }
     assert all(after[table] >= counts[table] for table in counts)
     assert (after["data_subject_requests"], after["suppression_entries"]) == (1, 7)
     assert not [s for s in world.statements if s.lstrip().upper().startswith("DELETE")]
@@ -552,6 +563,7 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("alerts", "text"),
         ("notifications", "text"),
         ("data_subject_requests", "request_ref"),
+        ("erasure_receipts", "request_ref"),  # Story 3.14: the same reference
     }
     assert world.sql(
         "SELECT office_country FROM contacts WHERE id = ?", (planted.contact_id,)
@@ -610,9 +622,11 @@ def test_erasing_an_erased_contact_changes_nothing_but_completes_its_request(
     result = world.erase(planted.contact_id, ref)
 
     first, second = world.requests()
-    assert result == ErasureResult(planted.contact_id, second[0], erased=False)
+    assert result == ErasureResult(
+        planted.contact_id, second[0], erased=False, receipt_id=result.receipt_id
+    )
     assert second[2:] == ("erase", "completed", ref, "2026-11-19T10:00:00.000000Z",
-                          "2026-11-19T10:00:00.000000Z", None)
+                          "2026-11-19T10:00:00.000000Z", result.receipt_id)
     assert first[3] == "completed"
     assert world.contact_row(planted.contact_id) == contact
     assert world.entries() == entries
@@ -629,7 +643,9 @@ def test_an_erased_contact_completes_an_open_request_with_its_reference(world: W
 
     result = world.erase(planted.contact_id, REF)
 
-    assert result == ErasureResult(planted.contact_id, request_id, erased=False)
+    assert result == ErasureResult(
+        planted.contact_id, request_id, erased=False, receipt_id=result.receipt_id
+    )
     assert [row[3] for row in world.requests()] == ["completed"]
 
 
@@ -686,14 +702,16 @@ def test_a_failing_hook_rolls_the_erasure_back_and_leaves_the_request_open(
     monkeypatch.undo()
     result = world.erase(planted.contact_id)
 
-    assert result == ErasureResult(planted.contact_id, request_id, erased=True)
+    assert result == ErasureResult(
+        planted.contact_id, request_id, erased=True, receipt_id=result.receipt_id
+    )
     assert [row[3] for row in world.requests()] == ["completed"]
 
 
 def test_a_failing_later_subscriber_rolls_everything_back(db_engine: Engine) -> None:
     clock = FrozenClock(T0)
     compliance = Compliance(clock)
-    erasures = Erasures(clock, compliance)
+    erasures = Erasures(clock, compliance, queue=queue_on(clock))
 
     @command
     def failing(n: ContactErased) -> None:
@@ -760,7 +778,9 @@ def test_a_retention_erasure_tombstones_with_no_entry_and_no_request(world: Worl
 
     result = world.erase_in(planted.contact_id, None, "retention")
 
-    assert result == ErasureResult(planted.contact_id, None, erased=True)
+    assert result == ErasureResult(
+        planted.contact_id, None, erased=True, receipt_id=result.receipt_id
+    )
     row = world.contact_row(planted.contact_id)
     assert (row["name"], row["email"], row["erased_at"]) == (REDACTED, ADDRESS, STAMP)
     assert world.entries() == [  # the voided ones are redacted; nothing is written
@@ -1031,7 +1051,9 @@ def test_a_dsr_after_a_retention_erasure_suppresses_the_stored_address(world: Wo
     result = world.erase(planted.contact_id)
 
     [(request_id, *_)] = world.requests()
-    assert result == ErasureResult(planted.contact_id, request_id, erased=False)
+    assert result == ErasureResult(
+        planted.contact_id, request_id, erased=False, receipt_id=result.receipt_id
+    )
     active = [row for row in world.entries() if row[3] == "active"]
     assert [row[1:6] for row in active] == [("address", ADDRESS, "active", "dsr", request_id)]
     added = world.transact(
@@ -1311,14 +1333,21 @@ def test_a_request_is_permanent_and_moves_only_to_completed(world: World) -> Non
     ):
         refused(world, REQUESTS_PERMANENT, statement, params)
 
-    world.sql(
-        "UPDATE data_subject_requests SET receipt_id = ? WHERE id = ?", (OTHER_ID, request_id)
+    # Story 3.14: the erasure set its request's receipt once; another request may name a
+    # receipt of the same Contact once (a receipt that doesn't exist is refused, 3.14's tests)
+    [(receipt_id,)] = world.sql(
+        "SELECT receipt_id FROM data_subject_requests WHERE id = ?", (request_id,)
     )
+    assert receipt_id is not None
+    world.sql(
+        "UPDATE data_subject_requests SET receipt_id = ? WHERE id = ?", (receipt_id, open_id)
+    )
+    second = world.erase(planted.contact_id, OTHER_REF)  # another receipt of the same Contact
     refused(
         world,
         REQUESTS_PERMANENT,
         "UPDATE data_subject_requests SET receipt_id = ? WHERE id = ?",
-        ("01JD3QZ8X5V9K2M7N4P6R8T0AY", request_id),
+        (second.receipt_id, request_id),
     )
     refused(
         world,
@@ -1326,7 +1355,7 @@ def test_a_request_is_permanent_and_moves_only_to_completed(world: World) -> Non
         "UPDATE data_subject_requests SET receipt_id = NULL WHERE id = ?",
         (request_id,),
     )
-    assert len(world.requests()) == 2
+    assert len(world.requests()) == 3
 
 
 @pytest.mark.parametrize(

@@ -43,6 +43,11 @@ status change appends an ``events`` row in the same transaction: entity ``alerts
   not have been delivered: ..."`` after a second unknown outcome).
 - ``@use_case dismiss(notification_id) -> bool`` sets ``dismissed_at`` once, in one
   transaction. An unknown or already dismissed id is ``False`` and changes nothing.
+- ``delete_message(chat_id, message_id) -> bool`` (Story 3.14) is a plain call of the Telegram
+  port's ``delete``: ``True`` when the message was deleted, ``False`` when Telegram refused. It
+  writes nothing, joins no unit of work and must be called outside any transaction (AD-3);
+  the port's ``AdapterError`` propagates. An erasure's Telegram store calls it for each recent
+  alert about the Contact.
 
 **Logs**, written after the transaction commits, carry ``alert_id``, ``kind``, ``channel`` and
 ``code`` or ``sink``, never text, a chat id or a token: ``alert_sent`` (INFO, with ``sink``),
@@ -237,6 +242,12 @@ class Notify:
             run_after=run_after,
             lane=Lane.REALTIME,
         )
+
+    # Deleting (Story 3.14) -----------------------------------------------------------------
+
+    def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a Telegram message the bot sent; ``False`` when Telegram refuses."""
+        return self._port(Channel.TELEGRAM).delete(chat_id, message_id)
 
     # Sending ---------------------------------------------------------------------------------
 

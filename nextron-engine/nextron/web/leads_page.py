@@ -46,7 +46,10 @@ or, after a retention erasure, the first request completed afterwards;
 ``queries.compliance.completed_erasures``, passed in as ``erasures``); a retention erasure with
 no request since leaves out " (request <reference>)". Its row holds no other value (no
 name, role, address, Address Class, LinkedIn URL or Primary flag) and no Provenance Record;
-the Lead and its other Contacts render unchanged.
+the Lead and its other Contacts render unchanged. Story 3.14: the tombstone line is followed by
+the Contact's erasure receipts (``queries.compliance.receipts``, passed in as ``receipts``),
+oldest first, each through ``nextron.web.erase_page.receipt_view`` and
+``erasure_receipt.html``.
 
 **Signals and Evidence (Story 2.9).** ``lead_context`` also takes the Lead's
 ``queries.research.LeadSignalsView`` (``LeadSignals.view``, read at one time):
@@ -82,7 +85,7 @@ from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlencode
 
-from nextron.app.queries.compliance import StoredRequest
+from nextron.app.queries.compliance import StoredReceipt, StoredRequest
 from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
 from nextron.app.queries.research import (
     EvidenceSupport,
@@ -96,7 +99,7 @@ from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
 from nextron.domain.extraction import FactKind
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import EvidenceType, SignalClass
-from nextron.web.erase_page import ERASE_LABEL, erase_href
+from nextron.web.erase_page import ERASE_LABEL, ReceiptView, erase_href, receipt_view
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
@@ -451,6 +454,7 @@ class ContactRow:
     erase_href: str | None = None
     erase_label: str = ERASE_LABEL
     tombstone: str | None = None
+    receipts: tuple[ReceiptView, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,8 +600,10 @@ def contact_row(
     *,
     lead_id: str | None = None,
     erasure: StoredRequest | None = None,
+    receipts: Iterable[StoredReceipt] = (),
 ) -> ContactRow:
-    """One Contact as the Lead page shows it: an erased one by its tombstone line only."""
+    """One Contact as the Lead page shows it: an erased one by its tombstone line and its
+    receipts only."""
     if contact.erased_at is not None:
         return ContactRow(
             name=None,
@@ -610,6 +616,7 @@ def contact_row(
             tombstone=tombstone_line(
                 contact.erased_at, None if erasure is None else erasure.request_ref
             ),
+            receipts=tuple(receipt_view(receipt) for receipt in receipts),
         )
     return ContactRow(
         name=contact.name,
@@ -631,11 +638,13 @@ def lead_context(
     provenance: Mapping[str, Iterable[StoredProvenance]],
     signals: LeadSignalsView,
     erasures: Mapping[str, StoredRequest] = MappingProxyType({}),
+    receipts: Mapping[str, Iterable[StoredReceipt]] = MappingProxyType({}),
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
     given), and the Contacts (in the order given, oldest first), each with its Provenance
     Records from ``provenance`` (by Contact id) and its erase link, or, for an erased one, its
-    tombstone line with its request from ``erasures`` (by Contact id)."""
+    tombstone line with its request from ``erasures`` and its receipts from ``receipts`` (both
+    by Contact id)."""
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
@@ -646,6 +655,7 @@ def lead_context(
                 provenance.get(contact.id, ()),
                 lead_id=lead.id,
                 erasure=erasures.get(contact.id),
+                receipts=receipts.get(contact.id, ()),
             )
             for contact in contacts
         ),

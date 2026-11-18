@@ -613,6 +613,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "contact_erase_panel.html",
         "credential_row.html",
         "credentials.html",
+        "erasure_receipt.html",
         "facts.html",
         "facts_panel.html",
         "google_client_row.html",

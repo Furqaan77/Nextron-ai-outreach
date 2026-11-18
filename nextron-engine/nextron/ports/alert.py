@@ -15,6 +15,10 @@ Tasks). Its first adapter is Telegram (``nextron.adapters.telegram``, Story 1.12
   back (a timeout or a dropped connection after sending, or a success answer without a message
   id). The ``notify`` service re-sends such an alert once at most; any other non-retryable code
   means the message was not delivered.
+- ``delete(recipient, message_id) -> bool`` (Story 3.14, an erasure): deletes a message the
+  channel sent earlier, by its ``message_id``. ``True`` means it was deleted, ``False`` that the
+  channel refused (Telegram does for a message over 48 hours old, or one already gone). A
+  failure that may pass raises a retryable ``AdapterError``; any other raises one that isn't.
 
 Outside ``prod``, ``nextron.main`` wraps every adapter registered for the ``alert`` role in
 ``AlertSink``, which reads ``recipient`` and ``text``; a new field here must be reviewed against
@@ -50,4 +54,9 @@ class AlertPort(Protocol):
 
     def send(self, message: AlertMessage) -> AlertDelivery:
         """Send ``message``; raise ``AdapterError`` when it can't be sent."""
+        ...
+
+    def delete(self, recipient: str, message_id: str) -> bool:
+        """Delete the message ``message_id`` sent to ``recipient``; ``False`` when the channel
+        refuses; raise ``AdapterError`` when it can't be asked."""
         ...

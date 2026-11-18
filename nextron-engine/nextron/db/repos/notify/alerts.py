@@ -10,7 +10,9 @@ applies the Alert machine. Rows come back as ``AlertRow``, a frozen copy of ever
 - ``insert_alert(...)``: a new row with no message id, error or resend; returns its id;
 - ``update_seen(alert_id, seen_status, *, at, **changes)``: sets ``changes`` and ``updated_at``
   only while the alert still has the status the caller saw (the fence); returns the row count;
-- ``subjects(kind)``: the subjects of every alert of ``kind``.
+- ``subjects(kind)``: the subjects of every alert of ``kind``;
+- ``about(subject, channel)`` (Story 3.14): every alert about ``subject`` on ``channel``, of any
+  kind and status, oldest first (``created_at``, then id).
 """
 
 from dataclasses import dataclass, fields
@@ -107,3 +109,13 @@ def subjects(kind: str) -> set[str]:
     """The subjects of every alert of ``kind``."""
     statement = select(AlertRecord.subject).where(AlertRecord.kind == kind).distinct()
     return set(current().session.execute(statement).scalars())
+
+
+def about(subject: str, channel: str) -> tuple[AlertRow, ...]:
+    """Every alert about ``subject`` on ``channel``, oldest first."""
+    statement = (
+        select(*_COLUMNS)
+        .where(AlertRecord.subject == subject, AlertRecord.channel == channel)
+        .order_by(AlertRecord.created_at, AlertRecord.id)
+    )
+    return tuple(AlertRow(*row) for row in current().session.execute(statement))

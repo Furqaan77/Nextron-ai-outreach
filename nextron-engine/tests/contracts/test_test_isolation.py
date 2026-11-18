@@ -144,6 +144,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "MailPort",
         "RendererPort",
         "SecretsPort",
+        "SinkFilesPort",
         "TokenCodecPort",
         "UsageMeterPort",
     }

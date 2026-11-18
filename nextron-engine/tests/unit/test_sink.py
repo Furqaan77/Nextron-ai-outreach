@@ -604,3 +604,16 @@ def test_a_messages_repr_leaves_out_its_recipient_and_text() -> None:
     for shown in (repr(alert), repr(mail), str(alert), str(mail)):
         for hidden in ("mac@example.com", "ann@prospect.example", SUBJECT, TEXT):
             assert hidden not in shown
+
+
+def test_the_alert_sink_passes_a_deletion_to_the_wrapped_adapter(tmp_path: Path) -> None:
+    fake = InMemoryAlert()
+    fake.delete_outcomes.append(AdapterError(True, "telegram_unavailable", "503"))
+    folder = tmp_path / "sink"
+    sink = AlertSink(fake, Allowlist(), SinkRecorder(folder, FrozenClock(T)))
+
+    with pytest.raises(AdapterError):
+        sink.delete("-100123", "7")
+    assert sink.delete("-100123", "8") is True
+    assert fake.deleted == [("-100123", "7"), ("-100123", "8")]
+    assert not folder.exists()  # nothing recorded

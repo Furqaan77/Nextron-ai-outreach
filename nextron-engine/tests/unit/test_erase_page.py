@@ -5,7 +5,9 @@ POST needs CSRF and exactly one ``request_ref``; each answer (a refused referenc
 repeat, a failure rolled back and logged) is 200 and shows no erased value; the Lead page's
 tombstone line, for a request and for retention, holds no name, role, address, hash or LinkedIn
 URL, and the Lead and its other Contacts are unchanged; both routes declare personal data and
-come before ``/leads/{lead_id}``; and the view reads only through ``nextron.app.queries``."""
+come before ``/leads/{lead_id}``; and the view reads only through ``nextron.app.queries``.
+Story 3.14: the erasure receipts on both pages (heading, state and one line per store, oldest
+first) and the answers' links to them."""
 
 import ast
 import logging
@@ -326,7 +328,12 @@ def test_an_erasure_answers_with_its_request_and_no_erased_value(world: World) -
     assert reply.header(b"cache-control") == b"no-store"
     panel = Tree(reply.text)
     notice = panel.find("p", class_="notice")
-    assert (notice.attrs["role"], notice.text) == ("status", f"Erased. Request {REF} completed.")
+    assert (notice.attrs["role"], notice.text) == (
+        "status",
+        f"Erased. Request {REF} completed. See the receipt on the Lead page",
+    )
+    [(receipt_id,)] = world.sql("SELECT id FROM erasure_receipts")
+    assert notice.find("a").attrs["href"] == f"/leads/{lead}#receipt-{receipt_id}"  # Story 3.14
     erased = panel.find("p", class_="erased-contact")
     assert erased.text == "This Contact was erased on 2026-11-17."
     assert not panel.find_all("form") and not panel.find_all("dl")
@@ -343,7 +350,9 @@ def test_an_erased_contacts_step_shows_only_when_it_was_erased(world: World) -> 
 
     assert reply.status == 200
     panel = Tree(reply.text).find("div", id="erase-panel")
-    assert panel.text == "This Contact was erased on 2026-11-17."
+    assert panel.find("p", class_="erased-contact").text == "This Contact was erased on 2026-11-17."
+    assert not panel.find_all("form") and not panel.find_all("dl")
+    assert len(panel.find_all("section", class_="erasure-receipt")) == 1  # Story 3.14
     assert_holds_no_erased_value(reply.text)
 
 
@@ -356,7 +365,14 @@ def test_erasing_again_says_nothing_changed(world: World) -> None:
 
     assert reply.status == 200
     notice = Tree(reply.text).find("p", class_="notice")
-    assert notice.text == "This Contact was already erased; nothing changed."
+    assert notice.text == (
+        "This Contact was already erased; nothing more was erased, and this request has its "
+        "own receipt. See the receipt on the Lead page"
+    )
+    [(receipt_id,)] = world.sql(
+        "SELECT id FROM erasure_receipts WHERE outcome = 'already_erased'"
+    )
+    assert notice.find("a").attrs["href"] == f"/leads/{lead}#receipt-{receipt_id}"
     assert_holds_no_erased_value(reply.text)
     assert world.requests() == [("completed", REF), ("completed", "Erased per letter 12")]
 
@@ -426,6 +442,7 @@ def test_the_lead_page_shows_an_erased_contact_by_its_tombstone_line_only(world:
     assert not first.find_all("a")
     assert cells(second) == cells(bob_row[0])
     assert len(page.find_all("tr", class_="provenance-row")) == 1  # Bob's only
+    assert len(page.find_all("tr", class_="receipt-row")) == 1  # Jane's receipts (Story 3.14)
     assert page.find("header", class_="lead-header").text == header
     assert_holds_no_erased_value(reply.text)
     assert "guessed" not in cells(first)[0]
@@ -460,7 +477,7 @@ def test_the_erase_use_case_result_is_what_the_answer_says(world: World) -> None
         result = world.dashboard.erasures.erase_on_request(jane, REF)
 
     [(request_id,)] = world.sql("SELECT id FROM data_subject_requests")
-    assert result == ErasureResult(jane, request_id, erased=True)
+    assert result == ErasureResult(jane, request_id, erased=True, receipt_id=result.receipt_id)
 
 
 # The routes and the view module -----------------------------------------------------------------
@@ -504,3 +521,174 @@ def test_the_view_module_reads_only_through_queries() -> None:
     assert app_modules  # not vacuous
     assert all(name.startswith("nextron.app.queries.") for name in app_modules), app_modules
     assert not [name for name in modules if name.startswith("nextron.db")]
+
+
+# Receipts (Story 3.14) --------------------------------------------------------------------------
+
+
+def receipt_sections(page: Tree) -> list[tuple[str, str, list[list[str]]]]:
+    """Each receipt shown: its element id, its heading and its store lines."""
+    return [
+        (
+            section.attrs["id"] or "",
+            section.find("h3").text,
+            [cells(row) for row in section.find("tbody").find_all("tr")],
+        )
+        for section in page.find_all("section", class_="erasure-receipt")
+    ]
+
+
+def settle_all(world: World, status: str = "done") -> None:
+    world.sql(
+        "UPDATE erasure_receipt_stores SET status = ?, detail = 'Settled' "
+        "WHERE status = 'pending'",
+        (status,),
+    )
+
+
+def test_the_lead_page_follows_the_tombstone_line_with_its_receipt(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+    world.erase(path_of(lead, jane))
+    [(receipt_id,)] = world.sql("SELECT id FROM erasure_receipts")
+
+    page = world.page(f"/leads/{lead}")
+
+    table = page.find("table", class_="contact-table")
+    [body] = [node for node in table.children if not isinstance(node, str) and node.tag == "tbody"]
+    rows = [row for row in body.children if not isinstance(row, str)]
+    assert [row.attrs.get("class") for row in rows] == [
+        "contact-row contact-erased",
+        "receipt-row",
+        "contact-row",
+        "provenance-row",
+    ]
+    [(anchor, heading, lines)] = receipt_sections(page)
+    assert (anchor, heading) == (f"receipt-{receipt_id}", "Receipt 2026-11-17: In progress")
+    assert [line[0] for line in lines] == [
+        "Database",
+        "Suppression List",
+        "Evidence quotes",
+        "Page addresses",
+        "Other Contacts",
+        "Sending Inbox mailboxes",
+        "Crawled page text",
+        "Telegram",
+        "Anthropic",
+        "Worker KV",
+        "Backups",
+        "AI Test Sets",
+        "nextronai.com inbox",
+        "Logs",
+        "Dev and test sink files",
+        "Restore work copies",
+        "Erasure ledger",
+    ]
+    assert lines[1] == [
+        "Suppression List",
+        "Done",
+        "3 keys (address, person, profile) stay suppressed",
+        "2026-11-17 09:00 UTC",
+    ]
+    assert lines[7] == [
+        "Telegram",
+        "Pending",
+        "Waiting for its erase_external job",
+        "2026-11-17 09:00 UTC",
+    ]
+    section = page.find("section", class_="erasure-receipt")
+    assert any("hx-disable" in node.attrs for node in (section, *section.ancestors()))
+    assert_holds_no_erased_value(page.text)
+
+
+def test_the_receipt_reads_complete_or_incomplete_as_its_stores_settle(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+    world.erase(path_of(lead, jane))
+    world.sql(
+        "UPDATE erasure_receipt_stores SET status = 'failed', detail = 'Failed: RuntimeError' "
+        "WHERE store = 'telegram'"
+    )
+
+    [(_, heading, lines)] = receipt_sections(world.page(f"/leads/{lead}"))
+    assert heading == "Receipt 2026-11-17: Incomplete: 1 failed"
+    assert lines[7][:3] == ["Telegram", "Failed", "Failed: RuntimeError"]
+
+    settle_all(world, "residual")
+    [(_, heading, _)] = receipt_sections(world.page(f"/leads/{lead}"))
+    assert heading == "Receipt 2026-11-17: Incomplete: 1 failed"  # a failed store stays failed
+
+
+def test_a_settled_receipt_reads_complete(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+    world.erase(path_of(lead, jane))
+    settle_all(world)
+
+    [(_, heading, lines)] = receipt_sections(world.page(f"/leads/{lead}"))
+
+    assert heading == "Receipt 2026-11-17: Complete"
+    assert {line[1] for line in lines} == {"Done", "None held"}
+
+
+def test_a_repeat_request_adds_its_receipt_after_the_first(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+    world.erase(path_of(lead, jane))
+    world.clock.set(T + timedelta(days=2))
+    world.erase(path_of(lead, jane), "DSR-LATER")
+    ids = [row[0] for row in world.sql("SELECT id FROM erasure_receipts ORDER BY created_at")]
+
+    sections = receipt_sections(world.page(f"/leads/{lead}"))
+
+    assert [(anchor, heading) for anchor, heading, _ in sections] == [
+        (f"receipt-{ids[0]}", "Receipt 2026-11-17: In progress"),
+        (f"receipt-{ids[1]}", "Receipt 2026-11-19: In progress"),
+    ]
+    assert sections[1][2][0][:3] == [
+        "Database",
+        "None held",
+        "Already erased on 2026-11-17; see that erasure's receipt",
+    ]
+
+
+def test_the_erase_step_of_an_erased_contact_shows_the_same_receipts(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+    world.erase(path_of(lead, jane))
+
+    step = receipt_sections(world.page(path_of(lead, jane)))
+
+    assert step == receipt_sections(world.page(f"/leads/{lead}"))
+    assert len(step) == 1
+
+
+def test_a_merged_leads_answer_links_the_receipt_on_the_survivor(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+    old = world.lead("Smith Law Old", "smith-law-old.co.uk")
+    world.sql("UPDATE leads SET merged_into = ? WHERE id = ?", (lead, old))
+
+    reply = world.erase(path_of(old, jane))
+
+    [(receipt_id,)] = world.sql("SELECT id FROM erasure_receipts")
+    link = Tree(reply.text).find("p", class_="notice").find("a")
+    assert link.attrs["href"] == f"/leads/{lead}#receipt-{receipt_id}"
+
+
+def test_a_contact_that_isnt_erased_shows_no_receipt(world: World) -> None:
+    lead, jane, _ = jane_and_bob(world)
+
+    assert receipt_sections(world.page(f"/leads/{lead}")) == []
+    assert receipt_sections(world.page(path_of(lead, jane))) == []
+
+
+def test_each_receipt_names_the_request_it_answers(world: World) -> None:
+    lead, jane, bob = jane_and_bob(world)
+    world.erase(path_of(lead, jane))
+    world.clock.set(T + timedelta(days=2))
+    world.erase(path_of(lead, jane), "DSR-LATER")
+    world.transact(lambda: world.dashboard.erasures.erase_contact(bob, None, "retention"))
+
+    page = world.page(f"/leads/{lead}")
+
+    lines = [
+        section.find("p", class_="receipt-request").text
+        for section in page.find_all("section", class_="erasure-receipt")
+    ]
+    assert lines == [f"Request {REF}", "Request DSR-LATER, already erased", "Retention"]
+    assert all(page.disabled("DSR-LATER"))  # the typed reference renders inside hx-disable

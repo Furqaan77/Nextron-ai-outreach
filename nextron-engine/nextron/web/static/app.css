@@ -734,3 +734,30 @@ button.secondary {
   margin: 0;
   overflow-wrap: anywhere;
 }
+
+/* Story 3.14: an erased Contact's erasure receipts, under its tombstone line and on its erase
+   step. */
+.receipt-row > td {
+  padding-left: 2rem;
+  background: var(--band);
+}
+
+.erasure-receipt h3 {
+  margin: 0.75rem 0 0.5rem;
+  font-size: 1rem;
+}
+
+.receipt-table {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+  border-collapse: collapse;
+}
+
+.receipt-table th,
+.receipt-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}

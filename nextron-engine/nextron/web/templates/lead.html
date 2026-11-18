@@ -76,6 +76,13 @@
 {%- for contact in contacts %}
 {%- if contact.tombstone %}
 <tr class="contact-row contact-erased"><td colspan="7">{{ contact.tombstone|plain }}</td></tr>
+{%- if contact.receipts %}
+<tr class="receipt-row"><td colspan="7">
+{%- for receipt in contact.receipts %}
+{% include "erasure_receipt.html" %}
+{%- endfor %}
+</td></tr>
+{%- endif %}
 {%- else %}
 <tr class="contact-row"><td>{{ or_dash(contact.name) }}</td><td>{{ or_dash(contact.role) }}</td><td>{{ or_dash(contact.email) }}</td><td>{{ or_dash(contact.address_class) }}</td><td>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td><td>{% if contact.erase_href %}<a class="erase-link" href="{{ contact.erase_href }}">{{ contact.erase_label }}</a>{% else %}—{% endif %}</td></tr>
 <tr class="provenance-row"><td colspan="7">

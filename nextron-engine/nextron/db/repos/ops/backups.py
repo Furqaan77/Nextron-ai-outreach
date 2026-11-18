@@ -31,13 +31,19 @@ The copy under test (Story 1.18):
 
 - ``newest_offpc_copy()``: the newest row (``started_at``, then id, descending) whose off-PC
   copy is ``copied`` and not yet rotated out (``offpc_deleted_at IS NULL``), or ``None``.
+
+The copies an erasure leaves (Story 3.14):
+
+- ``copies_holding(since, until)``: every ``verified`` row that started from ``since`` to
+  ``until`` (both included) whose local copy is still there (``local_deleted_at IS NULL``) or
+  whose off-PC copy is ``copied`` and not yet rotated out, oldest first.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from datetime import datetime
 
-from sqlalchemy import Executable, select, update
+from sqlalchemy import Executable, and_, or_, select, update
 from sqlalchemy import insert as sql_insert
 
 from nextron.db.models.base import new_id
@@ -249,3 +255,24 @@ def newest_offpc_copy() -> BackupRow | None:
         .limit(1)
     )
     return rows[0] if rows else None
+
+
+# The copies an erasure leaves (Story 3.14) -------------------------------------------------------
+
+
+def copies_holding(since: datetime, until: datetime) -> tuple[BackupRow, ...]:
+    """Every ``verified`` row started from ``since`` to ``until`` with a local copy still there
+    or an off-PC copy not yet rotated out, oldest first."""
+    statement = select(*_COLUMNS).where(
+        BackupRecord.status == VERIFIED,
+        BackupRecord.started_at >= since,
+        BackupRecord.started_at <= until,
+        or_(
+            BackupRecord.local_deleted_at.is_(None),
+            and_(
+                BackupRecord.offpc_status == OFFPC_COPIED,
+                BackupRecord.offpc_deleted_at.is_(None),
+            ),
+        ),
+    )
+    return tuple(_rows(statement.order_by(BackupRecord.started_at, BackupRecord.id)))

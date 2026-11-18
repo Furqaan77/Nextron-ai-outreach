@@ -17,6 +17,13 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
   retention erasure, the first request completed afterwards), as ``{contact_id:
   StoredRequest}``.
 
+Story 3.14:
+
+- ``set_receipt(request_id, receipt_id) -> int``: sets the request's ``receipt_id`` while it
+  is ``NULL`` (a trigger refuses a receipt of another Contact, or none); the row count;
+- ``open_erase_requests()``: every ``open`` ``erase`` request, oldest first (``opened_at``, then
+  ``id``).
+
 Nothing here removes a request: they are the proof of erasure, and the table's triggers refuse a
 ``DELETE`` too.
 """
@@ -135,3 +142,31 @@ def completed_erasures(contact_ids: Iterable[str]) -> dict[str, StoredRequest]:
         request = StoredRequest(*row)
         found.setdefault(request.contact_id, request)  # the first one completed
     return found
+
+
+def set_receipt(request_id: str, receipt_id: str) -> int:
+    """Link the request ``request_id`` to its receipt ``receipt_id`` while it has none; the row
+    count."""
+    result = current().session.execute(
+        update_rows(DataSubjectRequestRecord)
+        .where(
+            DataSubjectRequestRecord.id == request_id,
+            DataSubjectRequestRecord.receipt_id.is_(None),
+        )
+        .values(receipt_id=receipt_id)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+def open_erase_requests() -> tuple[StoredRequest, ...]:
+    """Every ``open`` ``erase`` request, oldest first."""
+    statement = (
+        select(*_COLUMNS)
+        .where(
+            DataSubjectRequestRecord.kind == ERASE,
+            DataSubjectRequestRecord.status == OPEN,
+        )
+        .order_by(DataSubjectRequestRecord.opened_at, DataSubjectRequestRecord.id)
+    )
+    return tuple(StoredRequest(*row) for row in current().session.execute(statement))

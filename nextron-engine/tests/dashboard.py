@@ -57,8 +57,9 @@ for changes" runs it on what ``ai_content`` loads (``shipped_ai_content`` unless
 another loader: the shipped prompt files and defaults, and ``TEST_PLAYBOOK``, a synthetic
 Sales Playbook, so no test reads or edits the real one).
 
-Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(clock))``; the
-Lead page's erase step runs it, on real units of work.
+Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(clock),
+queue=queue)`` (Story 3.14: an erasure enqueues its ``erase_external`` jobs on the dashboard's
+queue, which nothing runs here); the Lead page's erase step runs it, on real units of work.
 
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
@@ -385,7 +386,7 @@ class Dashboard:
             self.research,
             self.email_syntax,
         )
-        self.erasures = Erasures(self.clock, Compliance(self.clock))
+        self.erasures = Erasures(self.clock, Compliance(self.clock), queue=self.queue)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,

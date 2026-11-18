@@ -104,9 +104,19 @@ tombstones the Contact last), then the no-op hooks of ``setup``, ``drafting``, `
 ``ops`` and ``notify``, whose tables never hold a Contact's data. Each uses ``SystemClock()``
 when no clock is given.
 
-**Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, Compliance(clock))``
-(``nextron.app.compliance.erasure``) and hands it to the dashboard (``create_app(...,
-erasures=...)``) for the Lead page's "Erase (data subject request)".
+**Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, Compliance(clock),
+queue=queue)`` (``nextron.app.compliance.erasure``) and hands it to the dashboard
+(``create_app(..., erasures=...)``) for the Lead page's "Erase (data subject request)". The
+``ContactErased`` hook's instance (``build_subscribers``) has no queue: it only runs
+``erase_pii``, and its ``erase_contact`` would fail closed.
+
+**Erasure outside the database (Story 3.14).** Each erasure writes a receipt and enqueues one
+``erase_external`` job per external store on that queue. ``build_app`` builds one
+``ErasureStores(clock, notify, sink)`` (``nextron.app.compliance.erasure_stores``), ``sink``
+being ``SinkRecorder(<data dir>\\sink, clock)`` (the ``SinkFilesPort`` of the dev and test sink
+files) outside ``prod`` and ``None`` in ``prod``; the registry reaches it through
+``erasure_stores=lambda: erasure_stores``. ``build_health_issues`` registers
+``queries.compliance.health_issues`` last (open erase requests and failed stores).
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
 ``LeadImports(clock, discovery, research, EmailValidatorSyntax())``, on the same ``discovery =
@@ -147,7 +157,10 @@ Story 2.6's ``render_pages`` (bulk only, priority 40, the ``enrich_lead`` chain'
 retry limit 2, ``handlers.render_pages(crawls)``, ``enrichment``) and ``purge_page_text`` (bulk
 only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(research)``,
 ``other``), and Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
-minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``).
+minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``), and Story
+3.14's ``erase_external`` (bulk only, priority 60, 5 minutes, retry limit 5
+(``handlers.ERASE_EXTERNAL_RETRIES``), ``handlers.erase_external(erasure_stores)``, ``other``;
+with ``erasure_stores`` unwired, its handler raises a ``RuntimeError``, which isn't retried).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -383,7 +396,9 @@ registry: the only code that constructs ``HealthIssues`` or calls ``register_sou
 ``IssueSource("budget", budget.health_issues)`` (AI spend and quotas), then
 ``IssueSource("backups", queries.ops.health_issues)`` (each failed backup newer than the newest
 verified one), then ``IssueSource("playbook", queries.playbook.health_issues)`` (the newest
-Sales Playbook check's problem, Story 4.4), then freezes it; each later owner registers its
+Sales Playbook check's problem, Story 4.4), then ``IssueSource("erasure",
+queries.compliance.health_issues)`` (each open erase request and each failed erasure store,
+Story 3.14), then freezes it; each later owner registers its
 ``queries.<owner>.health_issues`` there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
@@ -563,6 +578,7 @@ from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
+from nextron.app.compliance.erasure_stores import ErasureStores
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
@@ -589,6 +605,7 @@ from nextron.app.ops.api import (
 )
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import CompanyFacts, CompanyFactSync, Playbook
+from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import playbook as playbook_queries
@@ -648,6 +665,7 @@ from nextron.domain.crawl import (
     PURGE_PAGE_TEXT_JOB,
     RENDER_PAGES_JOB,
 )
+from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
@@ -897,8 +915,8 @@ def build_app(
         Recovery(clock),
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
-    # notify, backups, restore_tests, contact_markets, crawls, discovery, research and
-    # extractions are bound just below
+    # notify, backups, restore_tests, contact_markets, crawls, discovery, research, extractions
+    # and erasure_stores are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -909,6 +927,7 @@ def build_app(
         discovery=lambda: discovery,
         research=lambda: research,
         extractions=lambda: extractions,
+        erasure_stores=lambda: erasure_stores,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
@@ -931,6 +950,10 @@ def build_app(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
+    sink_files = (
+        SinkRecorder(config.data_dir / SINK_DIR_NAME, clock) if sink_applies(config.env) else None
+    )
+    erasure_stores = ErasureStores(clock, notify, sink_files)
     targets = (
         backup_targets
         if backup_targets is not None
@@ -989,7 +1012,7 @@ def build_app(
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=Sending(clock, env=config.env),
         lead_signals=LeadSignals(clock),
-        erasures=Erasures(clock, Compliance(clock)),
+        erasures=Erasures(clock, Compliance(clock), queue=queue),
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1036,6 +1059,7 @@ def build_job_types(
     discovery: Callable[[], handlers.Canonicalizing],
     research: Callable[[], handlers.PurgingPageText],
     extractions: Callable[[], handlers.Extracting],
+    erasure_stores: Callable[[], handlers.StoreErasing] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1046,8 +1070,10 @@ def build_job_types(
     ``ContactMarkets`` that ``resolve_contact_markets`` jobs call, ``crawls`` its
     ``WebsiteCrawls`` that ``enrich_lead`` and ``render_pages`` jobs call, ``discovery`` the
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
-    service that ``purge_page_text`` jobs call, and ``extractions`` its ``SignalExtractions``
-    that ``extract_lead`` jobs call."""
+    service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions``
+    that ``extract_lead`` jobs call, and ``erasure_stores`` the ``compliance`` service's
+    ``ErasureStores`` that ``erase_external`` jobs call (``None``: unwired, so such a job
+    fails with a ``RuntimeError``, which isn't retried)."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1176,19 +1202,41 @@ def build_job_types(
             group=JobGroup.ENRICHMENT,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=ERASE_EXTERNAL_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=60,
+            # one store: a few Telegram deletes, a sink file rewrite or a few reads
+            max_runtime=timedelta(minutes=5),
+            retry_limit=handlers.ERASE_EXTERNAL_RETRIES,  # the last attempt settles it failed
+            handler=handlers.erase_external(
+                erasure_stores if erasure_stores is not None else _no_erasure_stores
+            ),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
 
+def _no_erasure_stores() -> handlers.StoreErasing:
+    """``erase_external`` with no ``ErasureStores`` wired: fail the job, without a retry."""
+    raise RuntimeError("erase_external has no ErasureStores wired")
+
+
 def build_health_issues(*, budget: Budget) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
-    quotas, then the failed backups, then the Sales Playbook's problem. Each later owner
-    registers its ``queries.<owner>.health_issues`` here, before ``freeze()``."""
+    quotas, then the failed backups, then the Sales Playbook's problem, then the erasures'
+    open requests and failed stores. Each later owner registers its
+    ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
     issues.register_source(IssueSource("budget", budget.health_issues))
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
+    issues.register_source(IssueSource("erasure", compliance_queries.health_issues))
     issues.freeze()
     return issues
 
@@ -1484,7 +1532,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
     subscribers.register_subscriber(SubjectSuppressed, Pipeline(chosen).close_suppressed)
-    # Story 3.13: compliance's hook first (it reads the Contact before research tombstones it)
+    # Story 3.13: compliance's hook first (it reads the Contact before research tombstones it);
+    # hook-only, so no queue (its erase_contact fails closed)
     erasures = Erasures(chosen, Compliance(chosen))
     subscribers.register_subscriber(ContactErased, erasures.erase_pii)
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)

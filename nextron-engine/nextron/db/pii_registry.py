@@ -389,6 +389,26 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "completed_at": PiiClass.NONE,
         "receipt_id": PiiClass.NONE,
     },
+    # Story 3.14. A receipt's request reference is the Operator's free text (as on its request);
+    # the rest are IDs, codes and times. Each store's action is fixed text and its detail is
+    # built by nextron.domain.erasure_receipt from counts, dates, ids and codes (no @).
+    "erasure_receipts": {
+        "id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "request_ref": PiiClass.REDACT,
+        "cause": PiiClass.NONE,
+        "outcome": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+    },
+    "erasure_receipt_stores": {
+        "id": PiiClass.NONE,
+        "receipt_id": PiiClass.NONE,
+        "store": PiiClass.NONE,
+        "action": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "detail": PiiClass.NONE,
+        "at": PiiClass.NONE,
+    },
     # Story 2.9. A quote or a fact's value is a page's words and may quote a person, so both are
     # redacted; the rest are IDs, codes, numbers, public page URLs and times.
     "evidence": {

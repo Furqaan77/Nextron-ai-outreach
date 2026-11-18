@@ -344,6 +344,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("send_alert", None),
                 LastRun("resolve_contact_markets", None),
                 LastRun("purge_page_text", None),
+                LastRun("erase_external", None),
             ),
         ),
     )

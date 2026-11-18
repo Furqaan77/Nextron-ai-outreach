@@ -139,8 +139,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts``,
   ``queries.research.lead_provenance``, ``lead_signals.view`` (Story 2.9: the Signals, the
-  Evidence and the headquarters zone) and ``queries.compliance.completed_erasures`` (Story
-  3.13: an erased Contact's tombstone line names its request).
+  Evidence and the headquarters zone), ``queries.compliance.completed_erasures`` (Story
+  3.13: an erased Contact's tombstone line names its request) and
+  ``queries.compliance.receipts`` (Story 3.14: an erased Contact's erasure receipts follow its
+  tombstone line).
 - ``GET /leads/{lead_id}/contacts/{contact_id}/erase`` (``contact_erase_page``) and ``POST`` to
   the same path (``contact_erase``), both ``@personal_data(True)`` and registered before
   ``/leads/{lead_id}``: the erase confirmation step (Story 3.13, FR-52); see
@@ -149,8 +151,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   apart from ``csrf_token``, must be exactly one ``request_ref`` (anything else is
   ``MalformedForm``, 400); it checks the reference, runs ``erasures.erase_on_request``
   (``Erasures``, the ``compliance`` service) in its own unit of work, then renders the panel
-  again in a read-only one, always 200: the refusal, the outcome, or, for any exception, the
-  failure (logged as ``contact_erasure_failed`` with ``contact_id`` and ``error_type``).
+  again in a read-only one, always 200: the refusal, the outcome (linked to its receipt on the
+  Lead page, Story 3.14), or, for any exception, the failure (logged as
+  ``contact_erasure_failed`` with ``contact_id`` and ``error_type``). For an erased Contact both
+  show its erasure receipts (``queries.compliance.receipts``).
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -1162,8 +1166,11 @@ def create_app(
         if found is None:
             return missing_lead(request)
         lead, contact = found
+        receipts = ()
+        if contact.erased_at is not None:  # Story 3.14: an erased Contact shows its receipts
+            receipts = compliance_queries.receipts([contact.id]).get(contact.id, ())
         context = erase_rows.panel_context(
-            lead, contact, notice=notice, request_ref=request_ref
+            lead, contact, notice=notice, request_ref=request_ref, receipts=receipts
         )
         return page(request, template, **context)
 
@@ -1186,7 +1193,7 @@ def create_app(
             found = erase_target(lead_id, contact_id)
             if found is None:
                 return missing_lead(request)
-            _, contact = found
+            survivor, contact = found
             name = contact.name if contact.erased_at is None else None  # a tombstone is no name
             try:
                 check_request_ref(request_ref, name=name)
@@ -1217,8 +1224,15 @@ def create_app(
                     notice=erase_rows.failed(error_type),
                     request_ref=request_ref,
                 )
+        href = (
+            None
+            if result.receipt_id is None
+            else erase_rows.receipt_href(survivor.id, result.receipt_id)
+        )
         notice = (
-            erase_rows.erased(request_ref) if result.erased else erase_rows.already_erased()
+            erase_rows.erased(request_ref, href)
+            if result.erased
+            else erase_rows.already_erased(href)
         )
         with units.open(read_only=True):
             return erase_answer(
@@ -1235,6 +1249,7 @@ def create_app(
         if found.id != lead_id:
             return RedirectResponse(f"/leads/{found.id}", status_code=303, headers=NO_STORE)
         contacts = research_queries.contacts(found.id)
+        erased = [contact.id for contact in contacts if contact.erased_at is not None]
         context = lead_rows.lead_context(
             found,
             pipeline_queries.stage(found.id),
@@ -1242,9 +1257,8 @@ def create_app(
             contacts,
             research_queries.lead_provenance(found.id),
             lead_signals.view(found.id),
-            compliance_queries.completed_erasures(
-                contact.id for contact in contacts if contact.erased_at is not None
-            ),
+            compliance_queries.completed_erasures(erased),
+            compliance_queries.receipts(erased),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 
