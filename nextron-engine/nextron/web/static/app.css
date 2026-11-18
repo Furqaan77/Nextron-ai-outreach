@@ -578,6 +578,29 @@ button.secondary {
   font-size: 0.875rem;
 }
 
+/* Each inbox's warm-up facts and form (Story 6.4). */
+.inbox-warmup {
+  max-width: 48rem;
+  margin: 0 0 1.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.warmup-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.warmup-facts dt {
+  font-weight: 600;
+}
+
+.warmup-facts dd {
+  margin: 0;
+}
+
 /* The Sending Domain authentication section: the results table and a blocked verdict. */
 .auth-table {
   margin: 1rem 0 1.5rem;

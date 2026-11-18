@@ -11,9 +11,15 @@ Story 6.5's Sending Domain authentication section (``GET /inboxes/auth`` and ``P
 /inboxes/auth/recheck``): the section on the page and its empty state, a listed domain never
 checked, the partial showing a newly recorded result, a Recheck queuing one job and saying so,
 an unlisted or unknown domain's alert, malformed forms (400), a POST without the CSRF token
-(403), and a hostile stored domain rendered escaped."""
+(403), and a hostile stored domain rendered escaped.
 
-from datetime import UTC, datetime
+Story 6.4's warm-up section per inbox (``POST /inboxes/warmup``): the unrecorded facts and the
+prefilled form, a save and its recorded days, an active warmed inbox's cold cap under the
+ceiling, a refusal keeping only that inbox's typed values, each bad field's message, an unknown
+inbox and an unset timezone, malformed and repeated fields (400), a POST without the CSRF token
+(403), and a hostile tool name rendered escaped."""
+
+from datetime import UTC, date, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -38,6 +44,7 @@ from tests.fakes.units import FakeUnits
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 PAGE = "/inboxes"
+WARMUP = "/inboxes/warmup"
 SENDER = "Furqaan Ahmed"
 FIRST = "furqaan@nextron-ai.com"
 MALFORMED = b"Request refused: malformed form"
@@ -54,7 +61,8 @@ HEADINGS = ["Label", "Address", "Sending Domain", "Status"]
 
 class Panel(HTMLParser):
     """The ``#inboxes-panel`` div: its notices (role and text), its warnings, its forms
-    (attributes and inputs), its table rows (cells) and its other paragraphs."""
+    (attributes and inputs), its table rows (cells), its warm-up facts (one list of (name,
+    value) per ``<dl>``) and its other paragraphs."""
 
     def __init__(self, html: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -64,6 +72,8 @@ class Panel(HTMLParser):
         self.paragraphs: list[str] = []
         self.forms: list[tuple[dict[str, str | None], list[dict[str, str | None]]]] = []
         self.rows: list[list[str]] = []
+        self.facts: list[list[tuple[str, str]]] = []
+        self._fact: list[str] | None = None
         self._depth = 0
         self._text: list[str] | None = None
         self._kind: tuple[str, str | None] | None = None
@@ -88,6 +98,10 @@ class Panel(HTMLParser):
             self.forms[-1][1].append(found)
         elif tag == "tr":
             self._row = []
+        elif tag == "dl":
+            self.facts.append([])
+        elif tag in ("dt", "dd"):
+            self._fact = []
         elif tag in ("td", "th"):
             self._cell = []
         elif tag == "p" and self._cell is None:
@@ -102,6 +116,13 @@ class Panel(HTMLParser):
         elif tag == "tr" and self._row is not None:
             self.rows.append(self._row)
             self._row = None
+        elif tag == "dt" and self._fact is not None:
+            self.facts[-1].append(("".join(self._fact), ""))
+            self._fact = None
+        elif tag == "dd" and self._fact is not None:
+            name, _ = self.facts[-1][-1]
+            self.facts[-1][-1] = (name, "".join(self._fact))
+            self._fact = None
         elif tag in ("td", "th") and self._cell is not None and self._row is not None:
             self._row.append(" ".join(" ".join(self._cell).split()))
             self._cell = None
@@ -122,13 +143,24 @@ class Panel(HTMLParser):
             return
         if self._cell is not None:
             self._cell.append(data)
+        elif self._fact is not None:
+            self._fact.append(data)
         elif self._text is not None:
             self._text.append(data)
 
     def value(self, name: str) -> str | None:
-        [(_, inputs)] = self.forms
+        """A field of the registration form."""
+        [(_, inputs)] = [form for form in self.forms if form[0].get("hx-post") == PAGE]
         [found] = [field for field in inputs if field.get("name") == name]
         return found.get("value")
+
+    def warmup_forms(self) -> list[dict[str, str | None]]:
+        """Each warm-up form's field values by name, in panel order."""
+        return [
+            {field.get("name") or "": field.get("value") for field in inputs}
+            for attrs, inputs in self.forms
+            if attrs.get("hx-post") == WARMUP
+        ]
 
 
 @pytest.fixture
@@ -434,8 +466,9 @@ def test_a_hostile_label_renders_as_escaped_text(
 
     assert "<script>" not in reply.text and "<b hx-post" not in reply.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in reply.text
-    # only the forms' own: the panel's and the domain's Recheck (Story 6.5)
-    assert reply.text.count('hx-post="') == 2
+    # only the forms' own: the panel's, the inbox's warm-up (Story 6.4) and the domain's
+    # Recheck (Story 6.5)
+    assert reply.text.count('hx-post="') == 3
     assert panel_of(reply).rows[1][0] == hostile
 
 
@@ -865,3 +898,301 @@ def test_a_hostile_stored_domain_renders_as_escaped_text(
     assert "<script>" not in reply.text and "<b hx-post" not in reply.text
     assert reply.text.count('hx-post="') == 1  # only the Recheck form's own
     assert auth_of(reply).rows[1][0] == hostile
+
+
+# Warm-up and Daily Caps (Story 6.4) -------------------------------------------------------------
+
+WARMUP_FORM = {
+    "method": "post",
+    "hx-post": "/inboxes/warmup",
+    "hx-target": "#inboxes-panel",
+    "hx-swap": "outerHTML",
+    "hx-sync": "this:drop",
+}
+WARMUP_NAMES = [
+    "csrf_token",
+    "inbox_id",
+    "warmup_started_on",
+    "warmup_method",
+    "warm_level",
+    "warmup_tool_daily",
+    "ramp_step",
+    "ramp_target",
+]
+GOOD = {
+    "warmup_started_on": "2026-11-01",
+    "warmup_method": "Manual",
+    "warm_level": "12",
+    "warmup_tool_daily": "0",
+    "ramp_step": "5",
+    "ramp_target": "30",
+}
+
+
+@pytest.fixture
+def zoned(ready: Dashboard, units: UnitOfWorkFactory) -> Dashboard:
+    """``ready`` with the Sender's timezone set (09:00 UTC is 14:30 in Kolkata)."""
+    with units.open():
+        Setup(ready.clock).save({"sender_timezone": "Asia/Kolkata"})
+    return ready
+
+
+def inbox_id_of(units: UnitOfWorkFactory, address: str = FIRST) -> str:
+    with units.open(read_only=True):
+        [found] = [view.id for view in sending_queries.inboxes() if view.address == address]
+    return found
+
+
+def post_warmup(dashboard: Dashboard, session: tuple[bytes, str], **fields: str) -> Reply:
+    cookie, token = session
+    return dashboard.post(
+        WARMUP,
+        cookie=cookie,
+        token=token,
+        headers=[(b"content-type", FORM)],
+        body=form(csrf_token=token, **fields),
+    )
+
+
+def save_warmup(
+    dashboard: Dashboard, session: tuple[bytes, str], inbox_id: str, **changes: str
+) -> Reply:
+    reply = post_warmup(dashboard, session, inbox_id=inbox_id, **{**GOOD, **changes})
+    assert reply.status == 200, reply
+    assert reply.header(b"cache-control") == b"no-store"
+    return reply
+
+
+def stored_warmup(units: UnitOfWorkFactory) -> list[tuple[Any, ...]]:
+    with units.open(read_only=True):
+        return [
+            (
+                view.warmup_started_on,
+                view.warmup_method,
+                view.warm_level,
+                view.warmup_tool_daily,
+                view.ramp_step,
+                view.ramp_target,
+            )
+            for view in sending_queries.inboxes()
+        ]
+
+
+def test_each_inbox_shows_its_unrecorded_warmup_and_a_prefilled_form(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    inbox_id = inbox_id_of(units)
+
+    panel = panel_of(get(zoned, session[0]))
+
+    assert panel.facts == [
+        [
+            ("Recorded warm-up", "Not recorded"),
+            ("Today's cap", "0 (inbox not active)"),
+            ("Cap used", "0 of 0"),
+            ("Ceiling", "50 a day, 0 of them warm-up tool sends"),
+        ]
+    ]
+    [(attrs, inputs)] = [entry for entry in panel.forms if entry[0].get("hx-post") == WARMUP]
+    assert attrs == WARMUP_FORM
+    assert [field.get("name") for field in inputs] == WARMUP_NAMES
+    assert inputs[0] == {"type": "hidden", "name": "csrf_token", "value": session[1]}
+    assert inputs[1] == {"type": "hidden", "name": "inbox_id", "value": inbox_id}
+    assert panel.warmup_forms() == [
+        {
+            "csrf_token": session[1],
+            "inbox_id": inbox_id,
+            "warmup_started_on": "",
+            "warmup_method": "",
+            "warm_level": "",
+            "warmup_tool_daily": "0",
+            "ramp_step": "5",
+            "ramp_target": "30",
+        }
+    ]
+
+
+def test_a_saved_warmup_says_so_and_shows_the_recorded_days(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    inbox_id = inbox_id_of(units)
+
+    reply = save_warmup(zoned, session, inbox_id)
+    panel = panel_of(reply)
+
+    assert "<title>" not in reply.text  # the panel alone, swapped in by HTMX
+    assert panel.notices == [("status", "Warm-up saved.")]
+    assert panel.facts[0][0] == ("Recorded warm-up", "16 days")
+    assert panel.warmup_forms()[0]["warmup_method"] == "manual"  # as stored
+    assert panel.warmup_forms()[0]["warmup_started_on"] == "2026-11-01"
+    assert stored_warmup(units) == [(date(2026, 11, 1), "manual", 12, 0, 5, 30)]
+
+
+def test_an_active_warmed_inbox_shows_its_cold_cap_under_the_ceiling(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    inbox_id = inbox_id_of(units)
+    with db_engine.connect() as connection:
+        connection.exec_driver_sql("UPDATE sending_inboxes SET status = 'active'")
+        connection.commit()
+
+    panel = panel_of(
+        save_warmup(
+            zoned,
+            session,
+            inbox_id,
+            warmup_started_on="2026-10-01",
+            warm_level="30",
+            warmup_tool_daily="25",
+        )
+    )
+
+    assert panel.facts == [
+        [
+            ("Recorded warm-up", "47 days"),
+            ("Today's cap", "25"),
+            ("Cap used", "0 of 25"),
+            ("Ceiling", "50 a day, 25 of them warm-up tool sends"),
+        ]
+    ]
+
+
+def test_a_refused_warmup_shows_the_message_and_keeps_that_inboxs_typed_values(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    register(zoned, session, "mac@nextron-ai.com", "Second")
+    first, second = inbox_id_of(units), inbox_id_of(units, "mac@nextron-ai.com")
+
+    panel = panel_of(save_warmup(zoned, session, second, warmup_started_on="2026-11-18"))
+
+    assert panel.notices == [("alert", "The warm-up start date can't be after today")]
+    forms = {values["inbox_id"]: values for values in panel.warmup_forms()}
+    assert forms[second]["warmup_started_on"] == "2026-11-18"
+    assert forms[second]["warmup_method"] == "Manual"  # as typed
+    assert forms[first]["warmup_started_on"] == ""  # the other inbox shows storage
+    assert stored_warmup(units) == [(None, None, None, 0, 5, 30)] * 2
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"warm_level": "101"}, "Enter the warm level as a whole number from 0 to 100"),
+        ({"warm_level": "abc"}, "Enter the warm level as a whole number from 0 to 100"),
+        ({"warmup_started_on": "1 Nov"}, "Enter the warm-up start date as YYYY-MM-DD"),
+        ({"ramp_target": "51"}, "Enter the ramp target as a whole number from 1 to 50"),
+    ],
+)
+def test_each_bad_field_is_refused_with_its_message(
+    zoned: Dashboard,
+    session: tuple[bytes, str],
+    units: UnitOfWorkFactory,
+    changes: dict[str, str],
+    message: str,
+) -> None:
+    register(zoned, session, FIRST, "Main")
+
+    panel = panel_of(save_warmup(zoned, session, inbox_id_of(units), **changes))
+
+    assert panel.notices == [("alert", message)]
+    assert stored_warmup(units) == [(None, None, None, 0, 5, 30)]
+
+
+def test_an_unknown_inbox_and_an_unset_timezone_are_refused(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(ready, session, FIRST, "Main")
+
+    no_zone = panel_of(save_warmup(ready, session, inbox_id_of(units)))
+    with units.open():
+        Setup(ready.clock).save({"sender_timezone": "UTC"})
+    unknown = panel_of(save_warmup(ready, session, new_id()))
+
+    assert no_zone.notices == [("alert", "Set the Sender's timezone on the Settings page first")]
+    assert unknown.notices == [("alert", "That inbox isn't registered")]
+    assert stored_warmup(units) == [(None, None, None, 0, 5, 30)]
+
+
+@pytest.mark.parametrize(
+    ("change", "why"),
+    [
+        ({"ramp_target": None}, "a field missing"),
+        ({"status": "active"}, "an extra field"),
+        ({"inbox_id": "not-a-ulid"}, "an inbox id that isn't a ULID"),
+        ({"inbox_id": None}, "no inbox id"),
+    ],
+)
+def test_a_warmup_form_without_exactly_its_fields_is_malformed(
+    zoned: Dashboard,
+    session: tuple[bytes, str],
+    units: UnitOfWorkFactory,
+    change: dict[str, str | None],
+    why: str,
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    fields: dict[str, str | None] = {"inbox_id": inbox_id_of(units), **GOOD, **change}
+
+    reply = post_warmup(
+        zoned, session, **{name: value for name, value in fields.items() if value is not None}
+    )
+
+    assert reply.status == 400, why
+    assert reply.body == MALFORMED
+    assert stored_warmup(units) == [(None, None, None, 0, 5, 30)]
+
+
+def test_a_repeated_warmup_field_is_malformed(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    cookie, token = session
+    body = form(csrf_token=token, inbox_id=inbox_id_of(units), **GOOD) + b"&warm_level=13"
+
+    reply = zoned.post(
+        WARMUP, cookie=cookie, token=token, headers=[(b"content-type", FORM)], body=body
+    )
+
+    assert reply.status == 400
+    assert reply.body == MALFORMED
+    assert stored_warmup(units) == [(None, None, None, 0, 5, 30)]
+
+
+def test_a_warmup_post_without_the_csrf_token_is_refused_with_403(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(zoned, session, FIRST, "Main")
+
+    reply = zoned.post(
+        WARMUP,
+        cookie=session[0],
+        headers=[(b"content-type", FORM)],
+        body=form(inbox_id=inbox_id_of(units), **GOOD),
+    )
+
+    assert reply.status == 403
+    assert reply.body == REFUSED
+    assert stored_warmup(units) == [(None, None, None, 0, 5, 30)]
+
+
+def test_a_hostile_tool_name_is_stored_and_rendered_escaped(
+    zoned: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(zoned, session, FIRST, "Main")
+    hostile = '"><script>alert(1)</script>'
+
+    reply = save_warmup(zoned, session, inbox_id_of(units), warmup_method=hostile)
+    again = get(zoned, session[0])
+
+    for text in (reply.text, again.text):
+        assert "<script>" not in text
+        assert panel_of_text(text).warmup_forms()[0]["warmup_method"] == hostile
+    assert stored_warmup(units)[0][1] == hostile
+
+
+def panel_of_text(text: str) -> Panel:
+    found = Panel(text)
+    assert found.panels == 1
+    return found

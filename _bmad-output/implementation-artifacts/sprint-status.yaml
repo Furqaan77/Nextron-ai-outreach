@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-18-2026 10:56
+last_updated: 11-18-2026 14:10
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -139,7 +139,7 @@ development_status:
   6-1-spike-gmail-send-path-header-reconciliation-and-internal-oau: backlog
   6-2-connect-a-sending-inbox-through-gmail-oauth-with-an-identity: backlog
   6-3-pause-resume-and-remove-sending-inboxes: backlog
-  6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total: backlog
+  6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total: review
   6-5-check-sending-domain-authentication-on-connect-and-daily: review
   6-6-pause-inboxes-on-blocklistings-and-postmaster-spam-rates: backlog
   6-7-assemble-plain-text-messages-in-one-thread-per-contact: backlog

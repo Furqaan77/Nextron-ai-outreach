@@ -330,3 +330,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-12-confirm-a-uk-lead-s-legal-form-through-companies-house.md`
   summary: Let the name path link a UK firm whose registered office (often its accountant's or a formation agent's address) isn't on its site, for example with the officers or the trading address, without weakening FR-12's Evidence rule.
   evidence: Story 2.12 review pass 1 (BH14, low). The name path needs the registered office postcode to appear on the site, so many small firms that quote no company number stay `unconfirmed` and can't be emailed.
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total.md`
+  summary: Show each inbox's warm-up days and today's Daily Cap use on the Health panel (UX-DR29), and count real cold sends for "Cap used" once Story 6.10 records sent messages.
+  evidence: Story 6.4 planning: its ACs cover only the inbox panel, and no sent messages exist to count before 6.10.

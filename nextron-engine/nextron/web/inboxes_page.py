@@ -28,6 +28,23 @@ Sending Domain and Status, oldest first, where a ``connecting`` inbox's status a
 it"). With no inboxes the table is replaced by "No Sending Inboxes registered yet." Every value
 is autoescaped; nothing here is marked safe.
 
+**Warm-up and Daily Caps (Story 6.4, FR-33, FR-34, UX-DR26).** After the table, the panel has
+one ``<section class="inbox-warmup">`` per listed inbox, headed "Warm-up: <label>", with its
+facts (``WARMUP_FACTS``): Recorded warm-up ("N days" or "Not recorded"), Today's cap (the cold
+cap from ``Sending.inbox_caps()``, plus "(inbox not active)" for an inbox that isn't), Cap used
+("0 of N": nothing is counted until Story 6.10) and Ceiling ("N a day, M of them warm-up tool
+sends"); then its warm-up form (``method="post"``, ``hx-post="/inboxes/warmup"``, the CSRF
+field, a hidden ``inbox_id`` and the six fields ``WARMUP_FIELDS``, prefilled from storage:
+blank start date, method and warm level while unrecorded, and the stored ramp).
+
+``POST /inboxes/warmup`` (``inbox_warmup``, ``@personal_data(True)``: it answers with the whole
+panel) takes exactly ``inbox_id`` (a ULID) and the six fields, each once (``csrf_token`` aside;
+``submitted_warmup``); anything else raises ``MalformedForm`` (400). It runs
+``Sending.record_warmup`` in its own unit of work, then renders ``inboxes_panel.html`` alone in
+a read-only one: ``Warm-up saved.`` (``role="status"``) with every form prefilled from storage,
+or the ``WarmupRefused`` message (``role="alert"``, 200) with that inbox's form keeping the
+typed values.
+
 **Sending Domain authentication (Story 6.5).** ``inboxes.html`` includes
 ``inbox_auth_panel.html`` after the panel: ``<section id="domain-auth">``, headed "Sending Domain
 authentication", which HTMX re-fetches every 30 seconds from ``GET /inboxes/auth``
@@ -52,13 +69,14 @@ from dataclasses import dataclass
 from datetime import UTC
 from typing import Final
 
-from nextron.app.queries.sending import DomainAuthView, SendingInboxView
+from nextron.app.queries.sending import DomainAuthView, InboxCapView, SendingInboxView
 from nextron.domain.domain_auth import REASON_TEXTS, AuthItem, AuthReason
 from nextron.domain.ids import is_ulid
 from nextron.domain.sending_inbox import (
     CONNECTING_NOTE,
     InboxRefused,
     InboxStatus,
+    WarmupRefused,
     crowded_domains,
     crowding_warning,
 )
@@ -82,50 +100,141 @@ LABEL_FIELD: Final = "label"
 FORM_FIELDS: Final = frozenset({ADDRESS_FIELD, LABEL_FIELD})
 REGISTERED: Final = "Inbox registered."
 NO_INBOXES: Final = "No Sending Inboxes registered yet."
+# The warm-up form (Story 6.4), in form order after the hidden inbox_id.
+INBOX_ID_FIELD: Final = "inbox_id"
+STARTED_ON_FIELD: Final = "warmup_started_on"
+METHOD_FIELD: Final = "warmup_method"
+WARM_LEVEL_FIELD: Final = "warm_level"
+TOOL_DAILY_FIELD: Final = "warmup_tool_daily"
+RAMP_STEP_FIELD: Final = "ramp_step"
+RAMP_TARGET_FIELD: Final = "ramp_target"
+WARMUP_FIELDS: Final = (
+    STARTED_ON_FIELD,
+    METHOD_FIELD,
+    WARM_LEVEL_FIELD,
+    TOOL_DAILY_FIELD,
+    RAMP_STEP_FIELD,
+    RAMP_TARGET_FIELD,
+)
+WARMUP_FORM_FIELDS: Final = frozenset({INBOX_ID_FIELD, *WARMUP_FIELDS})
+WARMUP_SAVED: Final = "Warm-up saved."
+NOT_RECORDED: Final = "Not recorded"
+NOT_ACTIVE: Final = " (inbox not active)"
+WARMUP_FACTS: Final = ("Recorded warm-up", "Today's cap", "Cap used", "Ceiling")
+
+
+@dataclass(frozen=True, slots=True)
+class WarmupForm:
+    """The warm-up form's values for one inbox, as text."""
+
+    inbox_id: str
+    warmup_started_on: str
+    warmup_method: str
+    warm_level: str
+    warmup_tool_daily: str
+    ramp_step: str
+    ramp_target: str
 
 
 @dataclass(frozen=True, slots=True)
 class InboxRow:
-    """One inbox as the panel's table shows it."""
+    """One inbox as the panel shows it: its table cells, warm-up facts and warm-up form."""
 
     label: str
     address: str
     domain: str
     status: str
     note: str | None  # CONNECTING_NOTE for a connecting inbox
+    id: str
+    facts: tuple[tuple[str, str], ...]
+    warmup: WarmupForm
 
 
-def inbox_row(inbox: SendingInboxView) -> InboxRow:
-    """``inbox`` as a table row."""
+def _text(value: object) -> str:
+    return "" if value is None else str(value)
+
+
+def stored_warmup(inbox: SendingInboxView) -> WarmupForm:
+    """The warm-up form prefilled from ``inbox``'s stored values."""
+    started = inbox.warmup_started_on
+    return WarmupForm(
+        inbox_id=inbox.id,
+        warmup_started_on="" if started is None else started.isoformat(),
+        warmup_method=_text(inbox.warmup_method),
+        warm_level=_text(inbox.warm_level),
+        warmup_tool_daily=str(inbox.warmup_tool_daily),
+        ramp_step=str(inbox.ramp_step),
+        ramp_target=str(inbox.ramp_target),
+    )
+
+
+def _days(count: int) -> str:
+    return f"{count} day" if count == 1 else f"{count} days"
+
+
+def warmup_facts(inbox: SendingInboxView, cap: InboxCapView) -> tuple[tuple[str, str], ...]:
+    """The panel's warm-up facts for ``inbox``, in ``WARMUP_FACTS`` order."""
+    recorded = NOT_RECORDED if cap.warmup_days is None else _days(cap.warmup_days)
+    today = str(cap.cold_cap)
+    if inbox.status is not InboxStatus.ACTIVE:
+        today += NOT_ACTIVE
+    values = (
+        recorded,
+        today,
+        f"{cap.cap_used} of {cap.cold_cap}",
+        f"{cap.ceiling} a day, {cap.tool_sends} of them warm-up tool sends",
+    )
+    return tuple(zip(WARMUP_FACTS, values, strict=True))
+
+
+def inbox_row(
+    inbox: SendingInboxView,
+    cap: InboxCapView | None = None,
+    typed: WarmupForm | None = None,
+) -> InboxRow:
+    """``inbox`` as a row, with its warm-up facts (none without ``cap``) and form (``typed``
+    when it is this inbox's, else the stored values)."""
     note = CONNECTING_NOTE if inbox.status is InboxStatus.CONNECTING else None
-    return InboxRow(inbox.label, inbox.address, inbox.domain, str(inbox.status), note)
+    warmup = typed if typed is not None and typed.inbox_id == inbox.id else stored_warmup(inbox)
+    facts = () if cap is None else warmup_facts(inbox, cap)
+    return InboxRow(
+        inbox.label, inbox.address, inbox.domain, str(inbox.status), note, inbox.id, facts, warmup
+    )
 
 
 def registered() -> Notice:
     return Notice(Role.STATUS, REGISTERED)
 
 
-def refused(refusal: InboxRefused) -> Notice:
+def refused(refusal: InboxRefused | WarmupRefused) -> Notice:
     return Notice(Role.ALERT, refusal.message)
+
+
+def warmup_saved() -> Notice:
+    return Notice(Role.STATUS, WARMUP_SAVED)
 
 
 def panel_context(
     inboxes: Iterable[SendingInboxView],
     *,
+    caps: Iterable[InboxCapView] = (),
     notice: Notice | None = None,
     address: str = "",
     label: str = "",
+    typed_warmup: WarmupForm | None = None,
 ) -> dict[str, object]:
     """What ``inboxes_panel.html`` renders: the notice, the crowding warnings, the form's values
-    and the rows."""
+    and the rows, each with its warm-up facts (from ``caps``) and form (``typed_warmup`` for
+    the inbox whose save was refused)."""
     listed = list(inboxes)
+    by_inbox = {cap.inbox_id: cap for cap in caps}
     crowded = crowded_domains(inbox.domain for inbox in listed)
     return {
         "notice": notice,
         "warnings": [crowding_warning(domain) for domain in crowded],
         "address": address,
         "label": label,
-        "rows": [inbox_row(inbox) for inbox in listed],
+        "rows": [inbox_row(inbox, by_inbox.get(inbox.id), typed_warmup) for inbox in listed],
         "no_inboxes": NO_INBOXES,
     }
 
@@ -139,6 +248,19 @@ def submitted_inbox(fields: FormFields) -> tuple[str, str]:
     if len(address) != 1 or len(label) != 1:
         raise MalformedForm(REPEATED_FIELD)
     return address[0], label[0]
+
+
+def submitted_warmup(fields: FormFields) -> WarmupForm:
+    """The ``inbox_id`` (a ULID) and the six warm-up fields the form posts, each once;
+    ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD} != WARMUP_FORM_FIELDS:
+        raise MalformedForm(WRONG_FIELDS)
+    if any(len(fields[name]) != 1 for name in WARMUP_FORM_FIELDS):
+        raise MalformedForm(REPEATED_FIELD)
+    inbox_id = fields[INBOX_ID_FIELD][0]
+    if not is_ulid(inbox_id):
+        raise MalformedForm(WRONG_FIELDS)
+    return WarmupForm(inbox_id, *(fields[name][0] for name in WARMUP_FIELDS))
 
 
 # Sending Domain authentication (Story 6.5) ----------------------------------------------------

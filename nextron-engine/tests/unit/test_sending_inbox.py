@@ -3,9 +3,12 @@ AD-14, FR-32, Story 4.7): every (status, event) pair is its table row or raises;
 statuses, pause causes, ``PAUSE_EVENTS``, ``CREATION``, ``BINDABLE_STATUSES`` and
 ``TERMINAL_STATUSES``; every refusal row of the I/O matrix at domain level, with messages that
 never hold the input; the role list with a ``+tag``; ``allowlist_refusal`` in prod, dev and
-test; ``crowded_domains``; and the Sender's name ``display_name`` rule."""
+test; ``crowded_domains``; the Sender's name ``display_name`` rule; and Story 6.4's
+``check_warmup``: every field's range edges, blank, non-integer, today and tomorrow, the blank
+record, and the first refusal in form order."""
 
 import itertools
+from datetime import date
 from types import MappingProxyType
 
 import pytest
@@ -20,11 +23,13 @@ from nextron.domain.sending_inbox import (
     MACHINE,
     MAX_INBOXES_PER_DOMAIN,
     MAX_LABEL_LENGTH,
+    MAX_METHOD_LENGTH,
     PAUSE_EVENTS,
     REFUSAL_MESSAGES,
     ROLE_LOCAL_PARTS,
     TERMINAL_STATUSES,
     TRANSITIONS,
+    WARMUP_MESSAGES,
     InboxAddress,
     InboxCause,
     InboxEvent,
@@ -32,9 +37,13 @@ from nextron.domain.sending_inbox import (
     InboxStatus,
     PauseCause,
     Refusal,
+    WarmupRecord,
+    WarmupRefusal,
+    WarmupRefused,
     allowlist_refusal,
     check_address,
     check_label,
+    check_warmup,
     crowded_domains,
     crowding_warning,
     transition,
@@ -525,3 +534,114 @@ def test_the_sender_name_is_at_most_100_characters() -> None:
 @pytest.mark.parametrize("value", [None, 1, b"Mac"])
 def test_the_display_name_check_refuses_a_non_str(value: object) -> None:
     assert not is_display_name(value)
+
+
+# Warm-up (Story 6.4) ----------------------------------------------------------------------------
+
+TODAY = date(2026, 11, 18)
+GOOD = {
+    "started_on": "2026-11-01",
+    "method": "manual",
+    "warm_level": "12",
+    "tool_daily": "0",
+    "ramp_step": "5",
+    "ramp_target": "30",
+}
+
+
+def warmup(**changes: str) -> WarmupRecord:
+    return check_warmup(**{**GOOD, **changes}, today=TODAY)
+
+
+def warmup_refusal(**changes: str) -> WarmupRefusal:
+    with pytest.raises(WarmupRefused) as caught:
+        warmup(**changes)
+    assert caught.value.code == "warmup_refused"
+    # a fixed message per refusal, so it never holds the value typed
+    assert str(caught.value) == WARMUP_MESSAGES[caught.value.refusal]
+    return caught.value.refusal
+
+
+def test_a_valid_form_gives_the_typed_record() -> None:
+    assert warmup() == WarmupRecord(date(2026, 11, 1), "manual", 12, 0, 5, 30)
+
+
+def test_values_are_stripped_and_manual_is_stored_lowercase() -> None:
+    record = warmup(started_on=" 2026-11-01 ", method=" MaNuAl ", warm_level=" 7 ")
+    assert (record.warmup_started_on, record.warmup_method, record.warm_level) == (
+        date(2026, 11, 1),
+        "manual",
+        7,
+    )
+
+
+def test_a_tool_name_keeps_its_case() -> None:
+    assert warmup(method="Instantly").warmup_method == "Instantly"
+    assert warmup(method="x" * MAX_METHOD_LENGTH).warmup_method == "x" * 40
+
+
+def test_today_is_allowed_and_tomorrow_is_refused() -> None:
+    assert warmup(started_on="2026-11-18").warmup_started_on == TODAY
+    assert warmup_refusal(started_on="2026-11-19") is WarmupRefusal.FUTURE_START
+
+
+@pytest.mark.parametrize("text", ["2026-11-31", "20261101", "2026-11-1", "yesterday", "2026/11/01"])
+def test_a_malformed_start_is_refused(text: str) -> None:
+    assert warmup_refusal(started_on=text) is WarmupRefusal.INVALID_START
+
+
+@pytest.mark.parametrize("text", ["", "x" * 41, "Tool\nname", "Tool\u200bname"])
+def test_a_bad_method_is_refused(text: str) -> None:
+    assert warmup_refusal(method=text) is WarmupRefusal.INVALID_METHOD
+
+
+@pytest.mark.parametrize(
+    ("field", "low", "high", "refusal"),
+    [
+        ("warm_level", 0, 100, WarmupRefusal.INVALID_WARM_LEVEL),
+        ("tool_daily", 0, 100, WarmupRefusal.INVALID_TOOL_DAILY),
+        ("ramp_step", 1, 10, WarmupRefusal.INVALID_RAMP_STEP),
+        ("ramp_target", 1, 50, WarmupRefusal.INVALID_RAMP_TARGET),
+    ],
+)
+def test_each_number_takes_its_range_and_refuses_anything_else(
+    field: str, low: int, high: int, refusal: WarmupRefusal
+) -> None:
+    attribute = {"tool_daily": "warmup_tool_daily"}.get(field, field)
+    assert getattr(warmup(**{field: str(low)}), attribute) == low
+    assert getattr(warmup(**{field: str(high)}), attribute) == high
+    for text in (str(low - 1), str(high + 1), "abc", "", "1.5", "-1", "\uff11", "1e2"):
+        assert warmup_refusal(**{field: text}) is refusal, text
+
+
+def test_all_three_record_fields_blank_clears_the_record() -> None:
+    record = warmup(started_on="", method=" ", warm_level="")
+    assert record == WarmupRecord(None, None, None, 0, 5, 30)
+
+
+@pytest.mark.parametrize(
+    ("blank", "refusal"),
+    [
+        ("started_on", WarmupRefusal.INVALID_START),
+        ("method", WarmupRefusal.INVALID_METHOD),
+        ("warm_level", WarmupRefusal.INVALID_WARM_LEVEL),
+    ],
+)
+def test_one_blank_record_field_is_refused(blank: str, refusal: WarmupRefusal) -> None:
+    assert warmup_refusal(**{blank: ""}) is refusal
+
+
+def test_the_first_bad_field_in_form_order_wins() -> None:
+    assert warmup_refusal(warm_level="101", ramp_step="0") is WarmupRefusal.INVALID_WARM_LEVEL
+    assert warmup_refusal(started_on="x", method="") is WarmupRefusal.INVALID_START
+
+
+def test_every_warmup_refusal_has_a_message_naming_its_field() -> None:
+    assert set(WARMUP_MESSAGES) == set(WarmupRefusal)
+    assert isinstance(WARMUP_MESSAGES, MappingProxyType)
+    assert issubclass(WarmupRefused, DomainError)
+
+
+def test_check_warmup_refuses_a_non_str() -> None:
+    with pytest.raises(TypeError):
+        check_warmup(1, "manual", "1", "0", "5", "30", today=TODAY)  # type: ignore[arg-type]

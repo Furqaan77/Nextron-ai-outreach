@@ -12,6 +12,14 @@
   ``nextron.domain.sending_inbox.InboxStatus``: ``ck_sending_inboxes_status``) and
   ``created_at``. ``ck_sending_inboxes_not_brand``: the address is on neither nextronai.com nor
   a subdomain of it.
+
+  Story 6.4 (migration ``0037_6_4_inbox_warmup``) adds the warm-up record and the ramp
+  (``nextron.domain.sending_policy``): ``warmup_started_on`` (a date), ``warmup_method``
+  (``manual`` or a warm-up tool's name, 1 to 40 characters) and ``warm_level`` (0 to 100), all
+  NULL until warm-up is recorded (``ck_sending_inboxes_warmup_record``: all three NULL or all
+  three set); ``warmup_tool_daily`` (0 to 100, server default 0), ``ramp_step`` (1 to 10, server
+  default 5) and ``ramp_target`` (1 to 50, server default 30), each NOT NULL.
+  ``ck_sending_inboxes_warmup_ranges`` holds every range.
 - ``domain_checks``: one row per authentication check that ran (append-only: the repository
   only inserts and reads): ``id``, its ``sending_domain_id``
   (``fk_domain_checks_sending_domain_id_sending_domains``, no cascade), ``checked_at``, the
@@ -21,19 +29,35 @@
   ``ix_domain_checks_sending_domain_id_checked_at`` finds a domain's newest check.
 
 The nextronai.com checks repeat ``nextron.domain.sending_inbox.check_address`` as defence in
-depth (FR-32). Every column is NOT NULL and PII class ``none``: these are Nextron's own sender
-identity, never a data subject's. Story 6.2 alters these tables for the Gmail connection,
-warm-up and authentication checks.
+depth (FR-32). Every column but the three warm-up record columns is NOT NULL; every column is
+PII class ``none``: these are Nextron's own sender
+identity, never a data subject's. Story 6.4 added the warm-up columns (migration
+``0037_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story 6.2 will add the
+Gmail connection.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, String, text
+from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
-from nextron.domain.sending_inbox import BRAND_DOMAIN, MAX_LABEL_LENGTH, InboxStatus
+from nextron.domain.sending_inbox import (
+    BRAND_DOMAIN,
+    MAX_LABEL_LENGTH,
+    MAX_METHOD_LENGTH,
+    InboxStatus,
+)
+from nextron.domain.sending_policy import (
+    DEFAULT_RAMP_STEP,
+    DEFAULT_RAMP_TARGET,
+    DEFAULT_TOOL_DAILY,
+    RAMP_STEP_RANGE,
+    RAMP_TARGET_RANGE,
+    TOOL_DAILY_RANGE,
+    WARM_LEVEL_RANGE,
+)
 
 DOMAIN_LENGTH: Final = 253  # nextron.domain.identity.MAX_DOMAIN_LENGTH
 ADDRESS_LENGTH: Final = 254  # nextron.domain.identity.MAX_EMAIL_LENGTH
@@ -46,6 +70,25 @@ NOT_BRAND_ADDRESS_CHECK: Final = (
 )
 STATUS_CHECK: Final = "status IN ({})".format(",".join(f"'{status}'" for status in InboxStatus))
 DETAILS_LENGTH: Final = 256
+WARMUP_RECORD_CHECK: Final = (
+    "(warmup_started_on IS NULL AND warmup_method IS NULL AND warm_level IS NULL) OR "
+    "(warmup_started_on IS NOT NULL AND warmup_method IS NOT NULL AND warm_level IS NOT NULL)"
+)
+
+
+def _between(column: str, bounds: tuple[int, int]) -> str:
+    return f"{column} BETWEEN {bounds[0]} AND {bounds[1]}"
+
+
+WARMUP_RANGES_CHECK: Final = " AND ".join(
+    (
+        f"(warmup_method IS NULL OR length(warmup_method) BETWEEN 1 AND {MAX_METHOD_LENGTH})",
+        f"(warm_level IS NULL OR {_between('warm_level', WARM_LEVEL_RANGE)})",
+        _between("warmup_tool_daily", TOOL_DAILY_RANGE),
+        _between("ramp_step", RAMP_STEP_RANGE),
+        _between("ramp_target", RAMP_TARGET_RANGE),
+    )
+)
 PASSED_CHECK: Final = "passed = (spf_ok AND dkim_ok AND dmarc_ok AND aligned_ok)"
 
 
@@ -71,6 +114,8 @@ class SendingInboxRecord(Base):
         Index("uq_sending_inboxes_address", "address", unique=True),
         CheckConstraint(STATUS_CHECK, name="status"),
         CheckConstraint(NOT_BRAND_ADDRESS_CHECK, name="not_brand"),
+        CheckConstraint(WARMUP_RECORD_CHECK, name="warmup_record"),
+        CheckConstraint(WARMUP_RANGES_CHECK, name="warmup_ranges"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -82,6 +127,16 @@ class SendingInboxRecord(Base):
         String(STATUS_LENGTH), server_default=text(f"'{InboxStatus.CONNECTING}'")
     )
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    warmup_started_on: Mapped[date | None] = mapped_column(Date)
+    warmup_method: Mapped[str | None] = mapped_column(String(MAX_METHOD_LENGTH))
+    warm_level: Mapped[int | None] = mapped_column(Integer)
+    warmup_tool_daily: Mapped[int] = mapped_column(
+        Integer, server_default=text(str(DEFAULT_TOOL_DAILY))
+    )
+    ramp_step: Mapped[int] = mapped_column(Integer, server_default=text(str(DEFAULT_RAMP_STEP)))
+    ramp_target: Mapped[int] = mapped_column(
+        Integer, server_default=text(str(DEFAULT_RAMP_TARGET))
+    )
 
 
 class DomainCheckRecord(Base):

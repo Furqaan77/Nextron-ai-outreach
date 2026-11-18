@@ -59,6 +59,27 @@ moves; they add no status.
 Every refusal raises ``InboxRefused`` (code ``inbox_refused``) with ``.refusal`` (a
 ``Refusal``); its message is exactly ``REFUSAL_MESSAGES[refusal]``, and no message ever holds
 the address or the label. A non-``str`` argument raises ``TypeError``.
+
+**Warm-up (Story 6.4, FR-33, FR-34).** ``check_warmup(started_on, method, warm_level,
+tool_daily, ramp_step, ramp_target, *, today) -> WarmupRecord`` reads the warm-up form's six
+texts (each stripped) into typed values, with the ranges of ``nextron.domain.sending_policy``:
+
+- ``started_on``: an ISO date ``YYYY-MM-DD`` (``invalid_start``) not after ``today``, the date
+  in ``sender_timezone`` (``future_start``);
+- ``method``: ``manual`` in any case (stored ``manual``), or a warm-up tool's name of 1 to
+  ``MAX_METHOD_LENGTH`` (40) characters on one line, by ``check_label``'s character rule
+  (``invalid_method``);
+- ``warm_level`` (``invalid_warm_level``), ``tool_daily`` (``invalid_tool_daily``),
+  ``ramp_step`` (``invalid_ramp_step``) and ``ramp_target`` (``invalid_ramp_target``): ASCII
+  digits only, within their range.
+
+The start date, method and warm level are the warm-up record: all three blank clears it
+(``WarmupRecord`` with ``None`` for each: warm-up unrecorded, so the cap is 0); one blank while
+another is filled is that field's refusal. The fields are checked in form order and the first
+refusal wins. Every refusal raises ``WarmupRefused`` (code ``warmup_refused``) with
+``.refusal`` (a ``WarmupRefusal``); its message is exactly ``WARMUP_MESSAGES[refusal]``, which
+names the field, never the value. ``timezone_unset``, ``unknown_inbox`` and ``inbox_removed``
+are ``Sending.record_warmup``'s.
 """
 
 import re
@@ -66,6 +87,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -73,6 +95,12 @@ from typing import Final
 from nextron.domain import identity
 from nextron.domain.errors import DomainError
 from nextron.domain.machines import IllegalTransition, Transition
+from nextron.domain.sending_policy import (
+    RAMP_STEP_RANGE,
+    RAMP_TARGET_RANGE,
+    TOOL_DAILY_RANGE,
+    WARM_LEVEL_RANGE,
+)
 from nextron.domain.sink import allowlisted, sink_applies
 
 MACHINE: Final = "sending_inbox"
@@ -292,12 +320,17 @@ def check_address(text: str) -> InboxAddress:
     return InboxAddress(address, domain)
 
 
+def _one_line(text: str, max_length: int) -> bool:
+    """Whether ``text`` is 1 to ``max_length`` characters on one line."""
+    return 1 <= len(text) <= max_length and not any(
+        unicodedata.category(character) in REFUSED_LABEL_CATEGORIES for character in text
+    )
+
+
 def check_label(text: str) -> str:
     """The label stripped; ``InboxRefused`` unless it is 1 to 80 characters on one line."""
     label = _require_str(text, "check_label").strip()
-    if not 1 <= len(label) <= MAX_LABEL_LENGTH or any(
-        unicodedata.category(character) in REFUSED_LABEL_CATEGORIES for character in label
-    ):
+    if not _one_line(label, MAX_LABEL_LENGTH):
         raise InboxRefused(Refusal.INVALID_LABEL)
     return label
 
@@ -323,4 +356,149 @@ def crowding_warning(domain: str) -> str:
     _require_str(domain, "crowding_warning")
     return (
         f"More than {MAX_INBOXES_PER_DOMAIN} inboxes on {domain} raises deliverability risk"
+    )
+
+
+# Warm-up (Story 6.4) ----------------------------------------------------------------------------
+
+MAX_METHOD_LENGTH: Final = 40
+MANUAL_METHOD: Final = "manual"
+_ISO_DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # matched with fullmatch
+_DIGITS: Final = re.compile(r"[0-9]{1,6}")  # matched with fullmatch
+
+
+class WarmupRefusal(StrEnum):
+    """Why an inbox's warm-up can't be recorded."""
+
+    TIMEZONE_UNSET = "timezone_unset"
+    UNKNOWN_INBOX = "unknown_inbox"
+    INBOX_REMOVED = "inbox_removed"
+    INVALID_START = "invalid_start"
+    FUTURE_START = "future_start"
+    INVALID_METHOD = "invalid_method"
+    INVALID_WARM_LEVEL = "invalid_warm_level"
+    INVALID_TOOL_DAILY = "invalid_tool_daily"
+    INVALID_RAMP_STEP = "invalid_ramp_step"
+    INVALID_RAMP_TARGET = "invalid_ramp_target"
+
+
+def _range_text(bounds: tuple[int, int]) -> str:
+    return f"{bounds[0]} to {bounds[1]}"
+
+
+WARMUP_MESSAGES: Final[Mapping[WarmupRefusal, str]] = MappingProxyType(
+    {
+        WarmupRefusal.TIMEZONE_UNSET: "Set the Sender's timezone on the Settings page first",
+        WarmupRefusal.UNKNOWN_INBOX: "That inbox isn't registered",
+        WarmupRefusal.INBOX_REMOVED: "That inbox has been removed",
+        WarmupRefusal.INVALID_START: "Enter the warm-up start date as YYYY-MM-DD",
+        WarmupRefusal.FUTURE_START: "The warm-up start date can't be after today",
+        WarmupRefusal.INVALID_METHOD: (
+            f"Enter the warm-up method: manual, or a tool's name of 1 to {MAX_METHOD_LENGTH} "
+            "characters on one line"
+        ),
+        WarmupRefusal.INVALID_WARM_LEVEL: (
+            f"Enter the warm level as a whole number from {_range_text(WARM_LEVEL_RANGE)}"
+        ),
+        WarmupRefusal.INVALID_TOOL_DAILY: (
+            "Enter the warm-up tool's sends a day as a whole number from "
+            f"{_range_text(TOOL_DAILY_RANGE)}"
+        ),
+        WarmupRefusal.INVALID_RAMP_STEP: (
+            f"Enter the ramp step as a whole number from {_range_text(RAMP_STEP_RANGE)}"
+        ),
+        WarmupRefusal.INVALID_RAMP_TARGET: (
+            f"Enter the ramp target as a whole number from {_range_text(RAMP_TARGET_RANGE)}"
+        ),
+    }
+)
+
+
+class WarmupRefused(DomainError):
+    """A warm-up that can't be recorded; the message is ``WARMUP_MESSAGES[refusal]``, which
+    names the field and never holds the value."""
+
+    code = "warmup_refused"
+
+    def __init__(self, refusal: WarmupRefusal) -> None:
+        refusal = WarmupRefusal(refusal)
+        super().__init__(WARMUP_MESSAGES[refusal])
+        self.refusal = refusal
+
+
+@dataclass(frozen=True, slots=True)
+class WarmupRecord:
+    """Checked warm-up form values; the first three are all ``None`` (unrecorded) or all
+    set."""
+
+    warmup_started_on: date | None
+    warmup_method: str | None
+    warm_level: int | None
+    warmup_tool_daily: int
+    ramp_step: int
+    ramp_target: int
+
+
+def _integer(text: str, bounds: tuple[int, int], refusal: WarmupRefusal) -> int:
+    if _DIGITS.fullmatch(text) is None:
+        raise WarmupRefused(refusal)
+    value = int(text)
+    if not bounds[0] <= value <= bounds[1]:
+        raise WarmupRefused(refusal)
+    return value
+
+
+def _start(text: str, today: date) -> date:
+    if _ISO_DATE.fullmatch(text) is None:
+        raise WarmupRefused(WarmupRefusal.INVALID_START)
+    try:
+        found = date.fromisoformat(text)
+    except ValueError:
+        raise WarmupRefused(WarmupRefusal.INVALID_START) from None
+    if found > today:
+        raise WarmupRefused(WarmupRefusal.FUTURE_START)
+    return found
+
+
+def _method(text: str) -> str:
+    if text.casefold() == MANUAL_METHOD:
+        return MANUAL_METHOD
+    if not _one_line(text, MAX_METHOD_LENGTH):
+        raise WarmupRefused(WarmupRefusal.INVALID_METHOD)
+    return text
+
+
+def check_warmup(
+    started_on: str,
+    method: str,
+    warm_level: str,
+    tool_daily: str,
+    ramp_step: str,
+    ramp_target: str,
+    *,
+    today: date,
+) -> WarmupRecord:
+    """The warm-up form's texts as typed values; ``WarmupRefused`` for the first field that
+    isn't valid. See the module docstring."""
+    texts = [
+        _require_str(value, "check_warmup").strip()
+        for value in (started_on, method, warm_level, tool_daily, ramp_step, ramp_target)
+    ]
+    if not isinstance(today, date):
+        raise TypeError("check_warmup takes today as a date")
+    start_text, method_text, level_text, tool_text, step_text, target_text = texts
+    started: date | None = None
+    shown_method: str | None = None
+    level: int | None = None
+    if start_text or method_text or level_text:
+        started = _start(start_text, today)
+        shown_method = _method(method_text)
+        level = _integer(level_text, WARM_LEVEL_RANGE, WarmupRefusal.INVALID_WARM_LEVEL)
+    return WarmupRecord(
+        warmup_started_on=started,
+        warmup_method=shown_method,
+        warm_level=level,
+        warmup_tool_daily=_integer(tool_text, TOOL_DAILY_RANGE, WarmupRefusal.INVALID_TOOL_DAILY),
+        ramp_step=_integer(step_text, RAMP_STEP_RANGE, WarmupRefusal.INVALID_RAMP_STEP),
+        ramp_target=_integer(target_text, RAMP_TARGET_RANGE, WarmupRefusal.INVALID_RAMP_TARGET),
     )

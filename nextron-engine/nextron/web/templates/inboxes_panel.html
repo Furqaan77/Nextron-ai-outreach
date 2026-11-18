@@ -34,6 +34,55 @@
 {%- endfor %}
 </tbody>
 </table>
+{%- for row in rows %}
+{%- set w = row.warmup %}
+{%- set f = "warmup-" ~ row.id %}
+<section class="inbox-warmup" aria-labelledby="{{ f }}-heading">
+<h3 id="{{ f }}-heading">Warm-up: {{ row.label }}</h3>
+{%- if row.facts %}
+<dl class="warmup-facts">
+{%- for name, value in row.facts %}
+<dt>{{ name }}</dt><dd>{{ value }}</dd>
+{%- endfor %}
+</dl>
+{%- endif %}
+<form method="post" hx-post="/inboxes/warmup" hx-target="#inboxes-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="inbox_id" value="{{ w.inbox_id }}">
+<div class="field">
+<label for="{{ f }}-started">Warm-up started on</label>
+<input type="text" id="{{ f }}-started" name="warmup_started_on" value="{{ w.warmup_started_on }}" autocomplete="off" aria-describedby="{{ f }}-started-hint">
+<p class="hint" id="{{ f }}-started-hint">YYYY-MM-DD, not after today in the Sender's timezone. Leave the start date, method and warm level blank while warm-up isn't recorded. No cold email goes out before 14 days of recorded warm-up.</p>
+</div>
+<div class="field">
+<label for="{{ f }}-method">Warm-up method</label>
+<input type="text" id="{{ f }}-method" name="warmup_method" value="{{ w.warmup_method }}" autocomplete="off" aria-describedby="{{ f }}-method-hint">
+<p class="hint" id="{{ f }}-method-hint">manual, or the warm-up tool's name (1 to 40 characters). The engine never sends warm-up emails itself.</p>
+</div>
+<div class="field">
+<label for="{{ f }}-level">Warm level</label>
+<input type="text" id="{{ f }}-level" name="warm_level" value="{{ w.warm_level }}" inputmode="numeric" autocomplete="off" aria-describedby="{{ f }}-level-hint">
+<p class="hint" id="{{ f }}-level-hint">0 to 100. The Daily Cap on day 14, before the ramp.</p>
+</div>
+<div class="field">
+<label for="{{ f }}-tool">Warm-up tool sends a day</label>
+<input type="text" id="{{ f }}-tool" name="warmup_tool_daily" value="{{ w.warmup_tool_daily }}" inputmode="numeric" autocomplete="off" aria-describedby="{{ f }}-tool-hint">
+<p class="hint" id="{{ f }}-tool-hint">0 to 100. They count toward the total daily ceiling.</p>
+</div>
+<div class="field">
+<label for="{{ f }}-step">Ramp step a week</label>
+<input type="text" id="{{ f }}-step" name="ramp_step" value="{{ w.ramp_step }}" inputmode="numeric" autocomplete="off" aria-describedby="{{ f }}-step-hint">
+<p class="hint" id="{{ f }}-step-hint">1 to 10. How much the Daily Cap rises each week after day 14.</p>
+</div>
+<div class="field">
+<label for="{{ f }}-target">Ramp target</label>
+<input type="text" id="{{ f }}-target" name="ramp_target" value="{{ w.ramp_target }}" inputmode="numeric" autocomplete="off" aria-describedby="{{ f }}-target-hint">
+<p class="hint" id="{{ f }}-target-hint">1 to 50. The Daily Cap the ramp stops at.</p>
+</div>
+<button type="submit">Save warm-up</button>
+</form>
+</section>
+{%- endfor %}
 {%- else %}
 <p class="inbox-empty">{{ no_inboxes }}</p>
 {%- endif %}

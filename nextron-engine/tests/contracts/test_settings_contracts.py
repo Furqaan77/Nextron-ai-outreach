@@ -144,7 +144,8 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
             "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
             "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
-            "sender_timezone, sink_allowlist, unsub_active_kid, us_solicitation_label"
+            "sender_timezone, sink_allowlist, total_daily_ceiling, unsub_active_kid, "
+            "us_solicitation_label"
         ),
         "declared but not in Key: Footer-Address, footer_postal_address",
     ]
