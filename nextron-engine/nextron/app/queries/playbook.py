@@ -50,6 +50,13 @@ The AI test gate (FR-73, AD-12, NFR-26, UX-DR30, Story 4.5):
   ``RunSummary`` of the tuple row on its route's set (``ROUTE_SETS``), or ``None``: the run's
   id, set, outcome, error, case and passed counts, metrics, the ``CaseResult``s of its failing
   cases, cost and ``finished_at``.
+- **The case-set binding** (Story 4.6). ``case_set_fingerprint(test_set, route)`` is
+  ``nextron.domain.ai_test_cases.case_set_sha256`` over the SHA-256s of the live cases of that
+  set and route (both origins: fixtures and Operator overrides): the set a run must have
+  measured to count. A ``RunSummary``'s ``current`` is whether its run measured that live set
+  (a run stored before Story 4.6 never did), and a ``CandidateTuple``'s ``passing`` means a
+  ``passed`` run on the current set, exactly what ``Playbook.activate`` accepts, so a rollback
+  is offered only where it would succeed.
 - ``health_issues()`` also reports, per route (by name) whose active tuple's newest run on its
   set failed, ``HealthIssue("ai_tuple_failed", <route>, "<route>: active tuple failed its test
   set", detail=TUPLE_FAILED_DETAIL)``, until a passing tuple replaces it (or the active tuple's
@@ -89,12 +96,14 @@ from nextron.db.repos.playbook import playbook_checks as checks_repo
 from nextron.db.repos.playbook import playbook_snapshots as playbook_snapshots_repo
 from nextron.db.repos.playbook import route_tuples as tuples_repo
 from nextron.db.repos.playbook import snapshots as snapshots_repo
+from nextron.db.repos.playbook import test_cases as cases_repo
 from nextron.db.repos.playbook import test_runs as runs_repo
 from nextron.db.repos.playbook.activations import StoredActivation
 from nextron.db.repos.playbook.company_facts import StoredFact
 from nextron.db.repos.playbook.route_tuples import StoredTuple
 from nextron.db.repos.playbook.test_runs import StoredRun
 from nextron.domain.ai import Effort, RouteTuple
+from nextron.domain.ai_test_cases import case_set_sha256
 from nextron.domain.ai_test_gate import (
     ROUTE_SETS,
     CaseResult,
@@ -129,6 +138,7 @@ __all__ = [
     "RunSummary",
     "active_tuple",
     "allowed_facts",
+    "case_set_fingerprint",
     "company_facts",
     "fact",
     "health_issues",
@@ -159,6 +169,14 @@ def active_tuple(route: str) -> RouteTuple | None:
     if activation is None:
         return None
     return _built(activation, "active tuple")
+
+
+def case_set_fingerprint(test_set: TestSet, route: str) -> str:
+    """The fingerprint of the live cases of ``test_set`` and ``route``; see the module
+    docstring."""
+    if not isinstance(test_set, TestSet):
+        raise TypeError("test_set must be a TestSet")
+    return case_set_sha256(cases_repo.live_sha256s(test_set.value, route))
 
 
 def tuple_of(tuple_id: str) -> RouteTuple | None:
@@ -220,7 +238,8 @@ class PlaybookRef:
 @dataclass(frozen=True, slots=True)
 class RunSummary:
     """A tuple's test run as the AI content view shows it: ``failing`` holds the
-    ``CaseResult`` of each case that failed, in case order."""
+    ``CaseResult`` of each case that failed, in case order, and ``current`` is whether the run
+    measured the live case set (Story 4.6)."""
 
     id: str
     test_set: TestSet
@@ -232,6 +251,7 @@ class RunSummary:
     failing: tuple[CaseResult, ...]
     cost_micros: int
     finished_at: datetime
+    current: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +276,8 @@ class ActiveTuple:
 @dataclass(frozen=True, slots=True)
 class CandidateTuple:
     """A stored tuple of a route that isn't its active one, its newest run on the route's set
-    and whether it has a passing one (``passing``: a rollback target)."""
+    and whether it has a passing run on the current case set (``passing``: a rollback
+    target)."""
 
     id: str
     model: str
@@ -327,17 +348,24 @@ def _identity(row: StoredActivation | StoredTuple) -> tuple[str, str, str, int, 
 
 
 class _Runs:
-    """Every stored run, read once: the newest of each tuple on each set, and which tuples
-    passed."""
+    """Every stored run, read once: the newest of each tuple on each set, which tuples passed
+    on which case set, and each route's current case-set fingerprint (read once each)."""
 
     def __init__(self) -> None:
         self.newest: dict[tuple[str, str], StoredRun] = {}
-        self.passed: set[tuple[str, str]] = set()
+        self.passed: set[tuple[str, str, str | None]] = set()
+        self._fingerprints: dict[str, str] = {}
         for run in runs_repo.every():  # by tuple and set, newest first
             key = (run.tuple_id, run.test_set)
             self.newest.setdefault(key, run)
             if run.outcome == RunOutcome.PASSED.value:
-                self.passed.add(key)
+                self.passed.add((*key, run.cases_sha256))
+
+    def fingerprint(self, route: str, test_set: TestSet) -> str:
+        """The current case-set fingerprint of ``route``."""
+        if route not in self._fingerprints:
+            self._fingerprints[route] = case_set_fingerprint(test_set, route)
+        return self._fingerprints[route]
 
     def summary(self, route: str, tuple_id: str | None) -> RunSummary | None:
         """The newest run of ``tuple_id`` on ``route``'s set, or ``None``."""
@@ -345,15 +373,19 @@ class _Runs:
         if tuple_id is None or test_set is None:
             return None
         run = self.newest.get((tuple_id, test_set.value))
-        return None if run is None else _summary(run)
+        if run is None:
+            return None
+        return _summary(run, current=run.cases_sha256 == self.fingerprint(route, test_set))
 
     def passing(self, route: str, tuple_id: str) -> bool:
-        """Whether ``tuple_id`` has a ``passed`` run on ``route``'s set."""
+        """Whether ``tuple_id`` has a ``passed`` run on ``route``'s current case set."""
         test_set = ROUTE_SETS.get(route)
-        return test_set is not None and (tuple_id, test_set.value) in self.passed
+        if test_set is None:
+            return False
+        return (tuple_id, test_set.value, self.fingerprint(route, test_set)) in self.passed
 
 
-def _summary(run: StoredRun) -> RunSummary:
+def _summary(run: StoredRun, *, current: bool) -> RunSummary:
     return RunSummary(
         id=run.id,
         test_set=TestSet(run.test_set),
@@ -365,6 +397,7 @@ def _summary(run: StoredRun) -> RunSummary:
         failing=tuple(result for result in results_from_json(run.results) if not result.passed),
         cost_micros=run.cost_micros,
         finished_at=run.finished_at,
+        current=current,
     )
 
 

@@ -1,0 +1,106 @@
+{
+  "id": "grounding_link_booking_and_second_ask",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "step": 1,
+    "draft": {
+      "subject": "your new Columbus site",
+      "body": "Hi Denise,\n\nSaw Brookline is opening a new site in Columbus. A second building usually means orders and stock split across more spreadsheets.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look? If so, grab 15 minutes here: https://cal.example.com/nextron/intro"
+    },
+    "claims": [
+      {
+        "text": "Brookline is opening a new site in Columbus",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "mp_online_digital",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-05"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_dynamics_gp",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Brookline Industrial Supply opens a 120,000 sq ft distribution center in Columbus."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Experience with Dynamics GP preferred."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "link_in_step_1",
+        "span": "https://cal.example.com/nextron/intro"
+      },
+      {
+        "code": "two_calls_to_action",
+        "span": "If so, grab 15 minutes here: https://cal.example.com/nextron/intro"
+      }
+    ],
+    "rules": [
+      "link_in_step1"
+    ]
+  },
+  "covers": [
+    "pattern:link_in_step_1",
+    "pattern:two_calls_to_action",
+    "segment:ops_automation",
+    "market:us",
+    "step:1"
+  ]
+}

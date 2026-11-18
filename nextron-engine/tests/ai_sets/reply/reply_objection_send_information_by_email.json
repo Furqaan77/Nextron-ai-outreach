@@ -1,0 +1,31 @@
+{
+  "id": "reply_objection_send_information_by_email",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-12",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: dispatch hiring at Calder\n\nHi Marcus,\n\nSaw Calder Freight is hiring a dispatch coordinator. Dispatch roles usually mean someone copying loads between email, spreadsheets and the TMS.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?\n\nSam\nNextron AI"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Can you email me something to read first? I don't get on calls with vendors I haven't checked out.\n\nMarcus"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "objection",
+    "objection_type": "send_information",
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:objection",
+    "objection:send_information"
+  ]
+}

@@ -5,11 +5,14 @@ Every function works through the current unit of work's session (``nextron.db.uo
 reads work in a read-only unit of work too, writes only inside the running use case's
 transaction. It stores and returns what it is given and checks nothing; the table's checks and
 foreign key refuse a bad row (``IntegrityError``). A row is never updated or deleted.
+``cases_sha256`` is the fingerprint of the cases a run measured (``None`` only on a run stored
+before Story 4.6).
 
 - ``insert(...) -> id``: a new run;
 - ``newest(tuple_id, test_set)``: the newest run of that tuple on that set (``finished_at``,
   then ``id``) as a ``StoredRun``, or ``None``;
-- ``newest_passed(tuple_id, test_set)``: the newest ``passed`` one, or ``None``;
+- ``newest_passed(tuple_id, test_set, cases_sha256)``: the newest ``passed`` one that measured
+  the case set ``cases_sha256`` (Story 4.6), or ``None``;
 - ``every()``: every run, by ``tuple_id`` and ``test_set``, then newest first (the AI content
   view and the backfill read it).
 """
@@ -43,6 +46,7 @@ class StoredRun:
     cost_micros: int
     started_at: datetime
     finished_at: datetime
+    cases_sha256: str | None
 
 
 _COLUMNS = (
@@ -58,6 +62,7 @@ _COLUMNS = (
     AiTestRunRecord.cost_micros,
     AiTestRunRecord.started_at,
     AiTestRunRecord.finished_at,
+    AiTestRunRecord.cases_sha256,
 )
 
 
@@ -74,6 +79,7 @@ def insert(
     cost_micros: int,
     started_at: datetime,
     finished_at: datetime,
+    cases_sha256: str,
 ) -> str:
     """Store a new run; return its ULID."""
     run_id = new_id()
@@ -91,6 +97,7 @@ def insert(
             cost_micros=cost_micros,
             started_at=started_at,
             finished_at=finished_at,
+            cases_sha256=cases_sha256,
         )
     )
     return run_id
@@ -113,13 +120,15 @@ def newest(tuple_id: str, test_set: str) -> StoredRun | None:
     )
 
 
-def newest_passed(tuple_id: str, test_set: str) -> StoredRun | None:
-    """The newest ``passed`` run of ``tuple_id`` on ``test_set``, or ``None``."""
+def newest_passed(tuple_id: str, test_set: str, cases_sha256: str) -> StoredRun | None:
+    """The newest ``passed`` run of ``tuple_id`` on ``test_set`` that measured the case set
+    ``cases_sha256``, or ``None``."""
     return _newest(
         select(*_COLUMNS).where(
             AiTestRunRecord.tuple_id == str(tuple_id),
             AiTestRunRecord.test_set == str(test_set),
             AiTestRunRecord.outcome == RunOutcome.PASSED.value,
+            AiTestRunRecord.cases_sha256 == str(cases_sha256),
         )
     )
 

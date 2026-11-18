@@ -1,0 +1,64 @@
+{
+  "id": "drafting_law_uk_hiring_over_contact_form",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "uk",
+    "lead_name": "Ashcombe & Rhys Solicitors",
+    "contact": {
+      "name": "Siobhan Rhys",
+      "role": "Managing Partner"
+    },
+    "angle_note": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-09"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_contact_form_only",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Knowledge Management Lawyer. Maintain our precedent bank and know-how for the private client and family teams."
+      },
+      {
+        "id": "e2",
+        "source": "website",
+        "kind": "absence",
+        "text": "No live chat, online booking or after-hours phone line was found; the Contact page has a form only."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "sra_ai_notice",
+        "version": 1,
+        "wording": "The Solicitors Regulation Authority (SRA) warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards."
+      },
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s1"
+  },
+  "covers": [
+    "segment:law_private_ai",
+    "market:uk"
+  ]
+}

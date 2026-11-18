@@ -1,0 +1,31 @@
+{
+  "id": "reply_not_now_system_migration",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-10",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: order entry at Larkfield\n\nHi Gareth,\n\nNoticed Larkfield is hiring two order entry administrators. Keying emailed orders by hand tends to grow with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\" and I won't email again. Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Interesting, but we've got a system migration finishing at the end of the month. Drop me a line on 14 December and I'll have more headspace.\n\nGareth"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_now",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": "2026-12-14",
+    "referral": null
+  },
+  "covers": [
+    "class:not_now",
+    "recontact_date"
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "id": "grounding_clean_ops_uk_step1",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "step": 1,
+    "draft": {
+      "subject": "re-keying emailed orders",
+      "body": "Hi Bethan,\n\nRead your post about re-keying every emailed order by hand, with three people on it all day. That kind of copying tends to grow with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIs this on your radar?"
+    },
+    "claims": [
+      {
+        "text": "your post about re-keying every emailed order by hand, with three people on it all day",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "wish_wheels",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_rekeying_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-12"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e2",
+        "observed_on": "2026-10-28"
+      },
+      {
+        "id": "s3",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e3",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Bethan Rees, Operations Director at Moorside Trade Supplies: we still re-key every emailed order into our system by hand. Three people, all day."
+      },
+      {
+        "id": "e2",
+        "source": "ats_board",
+        "kind": "quote",
+        "text": "Order Entry Assistant. Key customer orders from email into Sage 200."
+      },
+      {
+        "id": "e3",
+        "source": "website",
+        "kind": "absence",
+        "text": "No online ordering portal or customer login was found on the website."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "clean_control",
+    "findings": [],
+    "rules": []
+  },
+  "covers": [
+    "control:clean",
+    "segment:ops_automation",
+    "market:uk",
+    "step:1"
+  ]
+}

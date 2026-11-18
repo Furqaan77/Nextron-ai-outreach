@@ -1,0 +1,123 @@
+{
+  "id": "grounding_unhedged_absence_ordering",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "step": 2,
+    "draft": {
+      "subject": "ordering on your website",
+      "body": "Hi Hector,\n\nA different angle. Your website has no online ordering portal, so every order has to be keyed in by hand.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWould letting customers order online be useful?"
+    },
+    "claims": [
+      {
+        "text": "Your website has no online ordering portal, so every order has to be keyed in by hand",
+        "evidence_id": "e2",
+        "fact": null
+      },
+      {
+        "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "mp_online_digital",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s2",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-06"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "ats_board",
+        "kind": "quote",
+        "text": "Order Desk Associate. Take customer orders by phone and email and enter them into our order system."
+      },
+      {
+        "id": "e2",
+        "source": "website",
+        "kind": "absence",
+        "text": "No online ordering portal, customer login or EDI page was found on the website."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your order desk opening",
+        "body": "Hi Hector,\n\nSaw Bayside Restaurant Supply is hiring an order desk associate to enter phone and email orders. That kind of keying tends to grow with every new account.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "Bayside Restaurant Supply is hiring an order desk associate to enter phone and email orders",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "wish_wheels",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "unhedged_absence_claim",
+        "span": "Your website has no online ordering portal, so every order has to be keyed in by hand"
+      }
+    ],
+    "rules": [
+      "unhedged_absence"
+    ]
+  },
+  "covers": [
+    "pattern:unhedged_absence_claim",
+    "segment:ops_automation",
+    "market:us",
+    "step:2"
+  ]
+}

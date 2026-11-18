@@ -1,0 +1,31 @@
+{
+  "id": "reply_unsubscribe_auto_reply_sales_removal",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-18",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your knowledge management hire\n\nHi Helen,\n\nSaw Ashby Kerr is recruiting a knowledge management lawyer. Precedents and client files spread across systems are hard to search without sending data somewhere you don't control.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\". Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Thank you for your message. I am out of the office until 30 November with no access to email.\n\nIf this is a sales or marketing email, please remove me from your list. I do not accept unsolicited approaches."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "opt_out_in_auto_reply"
+  ]
+}

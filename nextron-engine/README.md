@@ -2823,9 +2823,10 @@ fixtures) and `Playbook.sync_test_cases` stores them in `ai_test_cases`: a new c
 an edited one (another SHA-256) retires its old row and inserts the new one, and a removed one
 is retired. A broken fixture stops `serve` with exit 2 and `startup check failed: ai_sets:
 <file>: <field and reason>`; the message never repeats a case's text. Story 4.6 adds the other
-sets.
+sets (below).
 
-**The runs.** Every tuple row whose route has a set and that has no run on it gets a
+**The runs.** Every tuple row whose route has a set and that has no run on it (Story 4.6: on
+its live case set) gets a
 `run_ai_test_sets:<tuple id>:<set>` job on the bulk lane (priority 30, up to 2 hours, 3
 retries): at each engine start (after the Contact Markets backfill) and after **Check for
 changes**, whose notice then adds "Queued <n> test run(s)." when it queued any (each run
@@ -2849,8 +2850,8 @@ trigger `test_passed`). An older tuple that passed is offered as a rollback targ
 new activation is copied from the tuple row with `bootstrap` false and `test_run_id` set to the
 passing run (a foreign key to `ai_test_runs`, added by migration `0023_4_5_ai_test_runs`); the
 activation it replaces is deactivated, and each change appends an `events` row. `activate`
-refuses an unknown tuple ("No such tuple") and a tuple with no passing run on its set ("No
-passing test run for this tuple"): nothing is written and the previous tuple keeps serving.
+refuses an unknown tuple ("No such tuple") and a tuple with no passing run on its set (Story
+4.6: on its live case set) ("No passing test run for this tuple"): nothing is written and the previous tuple keeps serving.
 
 **The bootstrap routes.** Only the three extraction routes are activated at first start without
 a run (Epic 2's bootstrap); every other route serves only after a passing run. Each bootstrap
@@ -2882,6 +2883,87 @@ with `activate=False` and the real `ClaudeGateway` on a temporary database for t
 extraction tuples, prints each run's metrics and failing cases, and asserts that
 `ai_route_activations` is unchanged. It runs with the extraction eval above (`uv run pytest -m
 ai_eval -s tests/ai_eval`) and skips without the key.
+
+### The AI Test Sets (Story 4.6)
+
+The gate now measures what matters for every gated route (FR-73, FR-21, FR-40, AD-12, AD-18,
+NFR-26, NFR-27). Four sets live under `tests/ai_sets/`, one synthetic case per file, and all
+of them load at every `serve` start:
+
+| Folder | Route | Shipped | What it covers |
+|---|---|---|---|
+| `extraction/` | the three extraction routes | 11 | Story 2.8's fixtures, unchanged |
+| `reply/` | `classify_reply` | 79 | all 10 Reply Classes, the 3 objection types, 14 opt-out wordings in varied case and punctuation, opt-outs inside auto-replies, Out of Office return dates, Not Now re-contact dates, Referrals with and without permission to name the referrer, firm-wide and hostile opt-outs, negative controls whose words only look like an opt-out (`near_opt_out`), and the AD-18 injections |
+| `grounding/` | `grounding_check` | 49 | every Sales Playbook §4 and FR-21 banned pattern, planted claims about the Lead, Nextron (including "for a law firm" and Wish Wheels as a distributor) and regulations, 6 clean controls, and the AD-18 injections |
+| `drafting_smoke/` | `draft_sequence` | 14 | Step 1 inputs for fictional Leads in both Segments and both Markets, with Evidence, allowed facts and a single strongest Event, often not the first Signal listed |
+
+**The files.** Each Reply, Grounding and drafting-smoke file is `{id, set, route, input,
+expected, covers}`, and `nextron.domain.ai_test_sets.set_case` checks it at load. The `id` is
+the file name. Every block and Evidence item must be one the AI gateway accepts. Every claim
+and finding must quote the Draft exactly. `covers` lists the tags the case earns, such as
+`class:unsubscribe`, `pattern:re_fwd_first_email` or `variant:aba_to_uk`. A tag the case doesn't
+earn is refused, so a variant tag such as `variant:re` needs a subject that really starts "Re:".
+The Reply vocabulary is `nextron.domain.reply_classes` (`ReplyClass`, `ObjectionType`). A broken
+file stops `serve` with exit 2 and `startup check failed: ai_sets: <set>/<file>: <path>
+<reason>`, without quoting the case; a missing folder stops it too (`<set>: the folder doesn't
+exist`). Epic 2's extraction fixtures are now also checked against the gateway's block rules,
+each label must name one of the case's blocks, and no fixture key may start `override-`.
+
+**Guards** (`tests/contracts/test_ai_sets.py`):
+
+- **No real contact details.** Every email address, URL and bare domain name is on
+  `example.com` or `example.co.uk` (Epic 2's extraction fixtures may also use reserved `.test`
+  names), and every phone number is fictional (Ofcom drama numbers or US 555-01xx), however
+  its digits are split.
+- **Seeded values.** Every Segment, Market and Signal type a case names exists in `seed/`, at
+  its seeded tier. Every fact a case is allowed to cite is a `seed/company_facts.yaml` fact,
+  word for word, allowed for the case's Segment and Market.
+- **Coverage.** `coverage_gaps` must find nothing missing. When a class, pattern, variant or
+  injection loses its last case, the test fails and names the gap (for example
+  `class:data_question` or `opt-out wording "stop"`).
+- **No shortcut answers.** At least 5 drafting cases list their strongest Event after another
+  Signal, and at least 2 Replies in other classes use opt-out-like words (`near_opt_out`), so
+  neither "the first Signal" nor a keyword match passes a set.
+
+**A run is bound to the cases it measured.**
+
+- Each run stores the fingerprint of its route's live cases (`cases_sha256`, migration
+  `0024_4_6_ai_test_sets`).
+- `queue_runs` queues a tuple again whenever its set changes: an edited, added or removed case,
+  or a new override. Runs stored before Story 4.6 have no fingerprint, so their tuples are
+  queued again too. A run that failed on the live set isn't repeated until the set or the tuple
+  changes.
+- `activate` and rollback accept only a pass on the live set, so a pass on an earlier set gives
+  "No passing test run for this tuple".
+- If the cases change while a run is making its calls, the run is still stored, but nothing is
+  activated.
+- On the AI content view, such a run reads "This run measured an earlier version of the <set>."
+  A rollback button appears only where the rollback would succeed.
+
+**The Operator's overrides.**
+
+- `Playbook.add_override_case(text, label, *, contact_id, names=(), organisations=())` turns a
+  Reply class override into a Reply case. Epic 7's override screen will call it.
+- It first pseudonymises the text (`nextron.domain.pseudonymise`). Quoted history is dropped,
+  including Outlook and Gmail header blocks, forwarded messages and underscore rules. Email
+  addresses, URLs and domains, phone numbers, postal addresses, organisations and names become
+  `[email]`, `[url]`, `[phone]`, `[address]`, `[organisation]` and `[name]`. It over-replaces
+  rather than misses one (a lone name line, "Tom, our COO", "Sarah from accounts", initials,
+  an all-capitals signature and any first name are taken), yet keeps the words of an opt-out
+  ("Take Me Off Your List", "Hi STOP!"), and running it twice changes nothing.
+- A correction replaces the earlier case: a live override of the same Contact with the same
+  pseudonymised text is retired first, so the newest label wins.
+- It stores the class only (`override-<ULID>`, origin `override`), with the Contact's id and
+  never the Reply's id.
+- The fixture sync never touches override rows.
+- `Playbook.erase_override_cases(contact_id)` sets each of that Contact's override cases to
+  `[erased]` and retires it. Story 3.13 wires it to Contact erasure.
+- Override text is pseudonymised but still personal data, so `ai_test_cases.input` is a
+  `redact` column. This is stricter than AD-17's table, and Mac should confirm it.
+
+None of the Reply, Grounding or drafting routes has a tuple yet, so a fresh start still queues
+only the three extraction runs. Each of those routes ships its own scorer (Stories 4.14, 4.15
+and 7.x), and its first tuple's run finds its set ready.
 
 ## Website crawling
 

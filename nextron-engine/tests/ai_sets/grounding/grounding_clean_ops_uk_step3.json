@@ -1,0 +1,132 @@
+{
+  "id": "grounding_clean_ops_uk_step3",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "step": 3,
+    "draft": {
+      "subject": "one example of our work",
+      "body": "Hi Aled,\n\nOne example that may be relevant. We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIf it would help, I can send a short write-up of how it fits together. Want me to reply with one?"
+    },
+    "claims": [
+      {
+        "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "wish_wheels",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-22"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": "2026-09-18"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "ats_board",
+        "kind": "quote",
+        "text": "Transport Administrator. Key customer bookings from email into our TMS and chase proof of delivery."
+      },
+      {
+        "id": "e2",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Holbeck Freight Services opens a cross-dock in Doncaster."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your transport administrator role",
+        "body": "Hi Aled,\n\nSaw Holbeck Freight is hiring a transport administrator to key customer bookings from email into your TMS. That kind of keying tends to grow with every new account.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "Holbeck Freight is hiring a transport administrator to key customer bookings from email into your TMS",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "mp_online_digital",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      },
+      {
+        "step": 2,
+        "subject": "your Doncaster cross-dock",
+        "body": "Hi Aled,\n\nA different angle. Saw Holbeck has opened a cross-dock in Doncaster. A second site often means bookings split across more inboxes and spreadsheets.\n\nWe're a 17+ person team of engineers, AI specialists and analysts, based in San Jose.\n\nWould one view of bookings across both sites help?",
+        "claims": [
+          {
+            "text": "Holbeck has opened a cross-dock in Doncaster",
+            "evidence_id": "e2",
+            "fact": null
+          },
+          {
+            "text": "We're a 17+ person team of engineers, AI specialists and analysts, based in San Jose",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "nextron_team",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s2"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "clean_control",
+    "findings": [],
+    "rules": []
+  },
+  "covers": [
+    "control:clean",
+    "segment:ops_automation",
+    "market:uk",
+    "step:3"
+  ]
+}

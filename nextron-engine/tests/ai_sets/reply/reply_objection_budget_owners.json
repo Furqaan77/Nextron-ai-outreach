@@ -1,0 +1,31 @@
+{
+  "id": "reply_objection_budget_owners",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-11",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: order entry at Larkfield\n\nHi Gareth,\n\nNoticed Larkfield is hiring two order entry administrators. Keying emailed orders by hand tends to grow with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\" and I won't email again. Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Budget's the problem. We'd love to fix order entry, but the owners won't sign off on spend like this.\n\nGareth"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "objection",
+    "objection_type": "no_budget",
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:objection",
+    "objection:no_budget"
+  ]
+}

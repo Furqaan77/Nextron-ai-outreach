@@ -1,0 +1,31 @@
+{
+  "id": "reply_ooo_back_monday",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-16",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your knowledge management hire\n\nHi Helen,\n\nSaw Ashby Kerr is recruiting a knowledge management lawyer. Precedents and client files spread across systems are hard to search without sending data somewhere you don't control.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\". Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "I'm out of the office with limited access to email and will be back on Monday 23 November. For anything urgent, please call reception on 020 7946 0402."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "out_of_office",
+    "objection_type": null,
+    "return_date": "2026-11-23",
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:out_of_office",
+    "return_date"
+  ]
+}

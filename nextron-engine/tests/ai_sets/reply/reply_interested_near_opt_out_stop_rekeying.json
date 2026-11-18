@@ -1,0 +1,31 @@
+{
+  "id": "reply_interested_near_opt_out_stop_rekeying",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-12",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: order entry at Halden\n\nHi Marcus,\n\nSaw Halden Supply is hiring an order entry clerk to key PDF purchase orders into Dynamics GP. That work tends to grow with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nIs this on your radar?\n\nSam\nNextron AI\n\nNot relevant? Reply \"no\" and I won't contact you again."
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Honestly, we'd love to stop re-keying orders from PDFs into GP. Tell me more about how it would work for a team our size.\n\nMarcus"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:interested",
+    "near_opt_out"
+  ]
+}

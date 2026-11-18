@@ -1,0 +1,139 @@
+{
+  "id": "grounding_unapproved_client_metric",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "step": 3,
+    "draft": {
+      "subject": "a result worth sharing",
+      "body": "Hi Kate,\n\nOne result worth sharing. We helped Dunmore Supply cut order-entry time by 60% in six weeks, without replacing their ERP.\n\nIf it's useful, I can send a short write-up by reply. Want me to?"
+    },
+    "claims": [
+      {
+        "text": "We helped Dunmore Supply cut order-entry time by 60% in six weeks",
+        "evidence_id": null,
+        "fact": null
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-26"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_dynamics_gp",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Data Entry Specialist. Key incoming purchase orders and invoices into Dynamics GP; strong attention to detail."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Must have 3+ years with Microsoft Dynamics GP."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your data entry opening",
+        "body": "Hi Kate,\n\nSaw Halvorsen Packaging is hiring a data entry specialist to key purchase orders and invoices into Dynamics GP. Keying at that level usually grows with every new customer.\n\nWe built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "Halvorsen Packaging is hiring a data entry specialist to key purchase orders and invoices into Dynamics GP",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "wish_wheels",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      },
+      {
+        "step": 2,
+        "subject": "Dynamics GP and order entry",
+        "body": "Hi Kate,\n\nA different angle. Your job ads ask for years of Dynamics GP experience, so GP looks like it's staying.\n\nWe're a 17+ person team of engineers, AI specialists and analysts, based in San Jose.\n\nWould that be useful at Halvorsen?",
+        "claims": [
+          {
+            "text": "Your job ads ask for years of Dynamics GP experience",
+            "evidence_id": "e2",
+            "fact": null
+          },
+          {
+            "text": "We're a 17+ person team of engineers, AI specialists and analysts, based in San Jose",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "nextron_team",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s2"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "unapproved_client_claim",
+        "span": "We helped Dunmore Supply cut order-entry time by 60% in six weeks"
+      },
+      {
+        "code": "unsourced_statistic",
+        "span": "cut order-entry time by 60%"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "pattern:unapproved_client_claim",
+    "pattern:unsourced_statistic",
+    "segment:ops_automation",
+    "market:us",
+    "step:3"
+  ]
+}

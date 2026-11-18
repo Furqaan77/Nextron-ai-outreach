@@ -1,0 +1,26 @@
+{
+  "id": "reply_objection_uses_clio",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-02",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "We already use Clio for intake and it does what we need."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "objection",
+    "objection_type": "uses_other_tool",
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:objection",
+    "objection:uses_other_tool"
+  ]
+}

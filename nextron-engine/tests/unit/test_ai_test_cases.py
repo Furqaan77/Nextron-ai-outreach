@@ -5,6 +5,7 @@ fixture shape: signals, people and inbox items, each injection, and a result tha
 answer. The harness (``tests/ai_eval/extraction.py``) is the reference the port must match."""
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,14 @@ import pytest
 
 from nextron.domain.ai import Urgency
 from nextron.domain.ai_test_cases import (
+    CaseOrigin,
     InvalidTestCases,
     TestCase,
     check_segments,
     extraction_case,
     extraction_inputs,
     score_extraction,
+    case_set_sha256,
     stored_case,
 )
 from nextron.domain.ai_test_gate import ExtractionOutcome, TestSet, extraction_metrics
@@ -163,6 +166,22 @@ NAME = "law_signals_hiring_and_expansion.json"
             "forbidden_signals must hold strings",
         ),
         (lambda d: d["expect"].update(people={}), "expect.people must be a list"),
+        # Story 4.6: each block as UntrustedBlock checks it, and each label names a block
+        (lambda d: d["blocks"][0].update(id="bad id!"), "blocks[0].id must match"),
+        (lambda d: d["blocks"][0].update(source="Web Site"), "blocks[0].source must match"),
+        (lambda d: d["blocks"][0].update(text="\ud800"), "blocks[0].text must encode as UTF-8"),
+        (lambda d: d["blocks"][1].update(id="p1"), "blocks[1].id must be unique"),
+        (lambda d: d["blocks"][0].update(id="signal_types"), "never signal_types"),
+        (
+            lambda d: d["expect"]["signals"][0].update(block_id="p9"),
+            "expect.signals[0].block_id must name one of the case's blocks",
+        ),
+        (
+            lambda d: d["expect"]["people"].append(
+                {"name": "Dana Reyes", "role": "COO", "block_id": "p9", "quote": "Dana Reyes"}
+            ),
+            "expect.people[0].block_id must name one of the case's blocks",
+        ),
     ],
 )
 def test_a_bad_fixture_names_the_file_and_the_field_never_the_text(
@@ -384,3 +403,42 @@ def test_scoring_refuses_a_case_of_another_set() -> None:
         score_extraction(case, {})
     with pytest.raises(TypeError):
         score_extraction(case_of(NAME), 7)  # type: ignore[arg-type]
+
+
+# Story 4.6 ----------------------------------------------------------------------------------------
+
+
+def test_a_case_refuses_json_that_wont_encode_as_utf8() -> None:
+    with pytest.raises(ValueError, match="input must encode as UTF-8"):
+        reply({"text": "\ud800"}, ("unsubscribe",))
+    with pytest.raises(ValueError, match="expected must encode as UTF-8"):
+        TestCase("reply_01", TestSet.REPLY, "classify_reply", {}, {"x": "\udfff"}, ())
+
+
+def test_the_case_set_fingerprint_is_the_sorted_shas_whatever_their_order() -> None:
+    shas = [case_of(path.name).sha256 for path in FILES]
+    expected = hashlib.sha256(
+        json.dumps(sorted(shas), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    assert case_set_sha256(shas) == case_set_sha256(reversed(shas)) == expected
+    assert case_set_sha256(shas[1:]) != expected
+    assert case_set_sha256([]) == hashlib.sha256(b"[]").hexdigest()
+    with pytest.raises(TypeError):
+        case_set_sha256([1])  # type: ignore[list-item]
+
+
+def test_a_case_comes_from_a_fixture_or_an_override() -> None:
+    assert [origin.value for origin in CaseOrigin] == ["fixture", "override"]
+
+
+def test_an_extraction_key_never_starts_like_an_override() -> None:
+    data = raw(NAME)
+    data["case"] = "override-law_signals"
+
+    with pytest.raises(InvalidTestCases) as raised:
+        extraction_case("extraction/override-law_signals.json", data)
+
+    assert raised.value.message == (
+        "extraction/override-law_signals.json: case must not start with override-"
+    )

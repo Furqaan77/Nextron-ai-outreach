@@ -1,0 +1,64 @@
+{
+  "id": "drafting_ops_uk_hiring_over_cross_dock",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "ops_automation",
+    "market": "uk",
+    "lead_name": "Kestrel Logistics Ltd",
+    "contact": {
+      "name": "Raj Patel",
+      "role": "COO"
+    },
+    "angle_note": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-12"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": "2026-10-20"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "ats_board",
+        "kind": "quote",
+        "text": "Data Entry Clerk. Key customer delivery bookings from email and spreadsheets into our transport system."
+      },
+      {
+        "id": "e2",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Kestrel Logistics opens a new cross-dock near Northampton."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s1"
+  },
+  "covers": [
+    "segment:ops_automation",
+    "market:uk"
+  ]
+}

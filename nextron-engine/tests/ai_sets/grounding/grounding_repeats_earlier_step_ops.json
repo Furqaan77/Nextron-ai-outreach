@@ -1,0 +1,139 @@
+{
+  "id": "grounding_repeats_earlier_step_ops",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "step": 3,
+    "draft": {
+      "subject": "one platform for orders",
+      "body": "Hi Trevor,\n\nTo recap the example from my last note: we built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nHappy to send more detail by reply. Want me to?"
+    },
+    "claims": [
+      {
+        "text": "we built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "wish_wheels",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": null,
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_hiring_manual_entry",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-10-21"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Order Entry Coordinator. Key customer POs from email into our ERP and confirm ship dates."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Advanced Excel required for daily order reports."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "wish_wheels",
+        "version": 1,
+        "wording": "Built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business (Wish Wheels)."
+      },
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [
+      {
+        "step": 1,
+        "subject": "your order entry coordinator role",
+        "body": "Hi Trevor,\n\nSaw Granite Peak Supply is hiring an order entry coordinator to key customer POs from email into your ERP. That kind of keying usually grows with every new account.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?",
+        "claims": [
+          {
+            "text": "Granite Peak Supply is hiring an order entry coordinator to key customer POs from email into your ERP",
+            "evidence_id": "e1",
+            "fact": null
+          },
+          {
+            "text": "We built a citizen-services digital transformation platform with workflow automation and dashboards",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "mp_online_digital",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s1"
+      },
+      {
+        "step": 2,
+        "subject": "order reports in Excel",
+        "body": "Hi Trevor,\n\nA different angle. Your job ads ask for advanced Excel for daily order reports. We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business.\n\nWould live order reporting be useful?",
+        "claims": [
+          {
+            "text": "Your job ads ask for advanced Excel for daily order reports",
+            "evidence_id": "e2",
+            "fact": null
+          },
+          {
+            "text": "We built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business",
+            "evidence_id": null,
+            "fact": {
+              "fact_id": "wish_wheels",
+              "version": 1
+            }
+          }
+        ],
+        "cited_signal_id": "s2"
+      }
+    ],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "repeats_earlier_step",
+        "span": "To recap the example from my last note: we built a single operations platform covering CRM, orders, inventory, vendors and analytics for an automotive retail and services business."
+      }
+    ],
+    "rules": [
+      "repeated_angle"
+    ]
+  },
+  "covers": [
+    "pattern:repeats_earlier_step",
+    "segment:ops_automation",
+    "market:us",
+    "step:3"
+  ]
+}

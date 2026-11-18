@@ -14,11 +14,22 @@ its value:
 - ``covers`` is a tuple of tokens fullmatching ``[a-z0-9_:.-]{1,64}``: what the case covers
   (Story 4.6's coverage tests read them).
 
+``input`` and ``expected`` must also encode as UTF-8 (a lone surrogate is a ``ValueError``,
+Story 4.6), so every case can be hashed and stored.
+
 ``sha256`` is the hex SHA-256 of the case's canonical JSON (every field, sorted keys, compact,
 UTF-8): a fixture file edited in any way gives a new hash, so ``Playbook.sync_test_cases``
 retires the old row. ``stored_case(case_key, test_set, route, input_json, expected_json,
 covers_json)`` builds the case back from a stored row's JSON text (``InvalidTestCases`` naming
 the case key when it doesn't read back).
+
+**The case-set fingerprint** (Story 4.6). ``case_set_sha256(shas)`` is the hex SHA-256 of the
+canonical JSON of the sorted case SHA-256s (a list of strings): the identity of a set of cases,
+whatever their order. A test run stores the fingerprint of the cases it measured, so a run is
+bound to them (``Playbook.activate`` accepts only a pass on the live set). ``CaseOrigin`` is
+where a stored case came from: ``fixture`` (a file under ``tests/ai_sets``) or ``override`` (an
+Operator's Reply class override, pseudonymised; ``Playbook.add_override_case``).
+``OVERRIDE_PREFIX`` (``override-``) starts every override case's key and no fixture's.
 
 **``InvalidTestCases(where, reason)``** (code ``invalid_test_cases``, a ``DomainError``) is a
 case file, or a stored case, that can't be used. Its message is ``<where>: <reason>``: the file
@@ -31,7 +42,14 @@ an object with exactly ``case``, ``route``, ``segment``, ``injection``, ``blocks
 (the file's stem), ``route`` (an extraction route) and ``segment`` non-empty strings;
 ``injection`` ``null`` or one of ``INJECTIONS``; ``blocks`` a list of ``{id, source, text}``,
 ``signals`` of ``{signal_type, block_id, quote}`` and ``people`` of ``{name, role, block_id,
-quote}``, each field a non-empty string; ``forbidden_signals`` a list of strings. The case's
+quote}``, each field a non-empty string; ``forbidden_signals`` a list of strings. Story 4.6 also
+checks each block as ``nextron.domain.ai.UntrustedBlock`` would at call time
+(``check_block_fields``: ``source`` fullmatches ``SOURCE_PATTERN``, ``id`` ``BLOCK_ID_PATTERN``,
+and ``text`` encodes as UTF-8), the block ids unique and never ``signal_types`` (the catalogue
+block's id), and each label's ``block_id`` one of the case's blocks, so a bad fixture stops
+``serve`` instead of failing a paid run; ``case`` never starts with ``override-`` (the
+Operator's override cases own those keys). ``nextron.main`` passes ``name`` as
+``extraction/<file>``, so a message names the set's folder too. The case's
 ``case_key`` is ``case``, its ``input`` ``{segment, blocks}``, its ``expected`` the ``expect``
 object, and its ``covers`` ``[segment, injection]``, or ``[segment, "clean"]``.
 
@@ -61,10 +79,11 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import PurePath
 from typing import Any, Final
 
-from nextron.domain.ai import UntrustedBlock, Urgency
+from nextron.domain.ai import BLOCK_ID_PATTERN, SOURCE_PATTERN, UntrustedBlock, Urgency
 from nextron.domain.ai_test_gate import (
     EXTRACT_PEOPLE,
     EXTRACT_SIGNALS,
@@ -92,6 +111,14 @@ SIGNAL_FIELDS: Final = ("signal_type", "block_id", "quote")
 PERSON_FIELDS: Final = ("name", "role", "block_id", "quote")
 QUOTED_LISTS: Final = ("signals", "profile_facts", "size_clues", "job_postings", "people")
 NONE_TEXT: Final = "none"
+OVERRIDE_PREFIX: Final = "override-"
+
+
+class CaseOrigin(StrEnum):
+    """Where a stored test case came from (Story 4.6)."""
+
+    FIXTURE = "fixture"
+    OVERRIDE = "override"
 
 
 class InvalidTestCases(DomainError):
@@ -124,6 +151,10 @@ def _json_object(name: str, value: object) -> dict[str, Any]:
         text = canonical_json(value)
     except ValueError:
         raise ValueError(f"{name} must be plain JSON") from None
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{name} must encode as UTF-8") from None
     copied = json.loads(text)
     if not isinstance(copied, dict):  # pragma: no cover - a dict always reads back as one
         raise TypeError(f"{name} must be a dict")
@@ -178,6 +209,15 @@ class TestCase:
     def sha256(self) -> str:
         """The hex SHA-256 of the case's canonical JSON."""
         return hashlib.sha256(canonical_json(self.as_json()).encode("utf-8")).hexdigest()
+
+
+def case_set_sha256(shas: Iterable[str]) -> str:
+    """The hex SHA-256 of the canonical JSON of the sorted case SHA-256s ``shas``; see the
+    module docstring."""
+    chosen = list(shas)
+    if not all(isinstance(sha, str) for sha in chosen):
+        raise TypeError("case_set_sha256 takes str SHA-256s")
+    return hashlib.sha256(canonical_json(sorted(chosen)).encode("utf-8")).hexdigest()
 
 
 def stored_case(
@@ -239,6 +279,29 @@ def _items(
     return found
 
 
+def check_block_fields(source: str, block_id: str, text: str, where: str, path: str) -> None:
+    """Raise ``InvalidTestCases`` unless a block's fields fit ``UntrustedBlock``'s rules: the
+    ``source`` and ``block_id`` patterns, and a ``text`` that encodes as UTF-8."""
+    if SOURCE_PATTERN.fullmatch(source) is None:
+        raise InvalidTestCases(where, f"{path}.source must match {SOURCE_PATTERN.pattern}")
+    if BLOCK_ID_PATTERN.fullmatch(block_id) is None:
+        raise InvalidTestCases(where, f"{path}.id must match {BLOCK_ID_PATTERN.pattern}")
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidTestCases(where, f"{path}.text must encode as UTF-8") from None
+
+
+def _check_blocks(blocks: Sequence[Mapping[str, str]], name: str) -> None:
+    seen: set[str] = set()
+    for index, block in enumerate(blocks):
+        at = f"blocks[{index}]"
+        check_block_fields(block["source"], block["id"], block["text"], name, at)
+        if block["id"] == SIGNAL_TYPES or block["id"] in seen:
+            raise InvalidTestCases(name, f"{at}.id must be unique and never {SIGNAL_TYPES}")
+        seen.add(block["id"])
+
+
 def extraction_case(name: str, data: object) -> TestCase:
     """The extraction case in the JSON ``data`` of the file ``name``; ``InvalidTestCases`` when
     it isn't shaped as the module docstring says."""
@@ -249,6 +312,8 @@ def extraction_case(name: str, data: object) -> TestCase:
         raise InvalidTestCases(
             name, f"case must be the file's stem and match {CASE_KEY_PATTERN.pattern}"
         )
+    if key.startswith(OVERRIDE_PREFIX):
+        raise InvalidTestCases(name, f"case must not start with {OVERRIDE_PREFIX}")
     route = _text(case["route"], name, "route")
     if ROUTE_SETS.get(route) is not TestSet.EXTRACTION:
         raise InvalidTestCases(name, "route must be an extraction route")
@@ -259,8 +324,16 @@ def extraction_case(name: str, data: object) -> TestCase:
     if injection is not None and injection not in INJECTIONS:
         raise InvalidTestCases(name, f"injection must be null or one of {list(INJECTIONS)}")
     blocks = _items(case["blocks"], BLOCK_FIELDS, name, "blocks")
+    _check_blocks(blocks, name)
     signals = _items(expect["signals"], SIGNAL_FIELDS, name, "expect.signals")
     people = _items(expect["people"], PERSON_FIELDS, name, "expect.people")
+    ids = {block["id"] for block in blocks}
+    for path, labels in (("expect.signals", signals), ("expect.people", people)):
+        for index, label in enumerate(labels):
+            if label["block_id"] not in ids:
+                raise InvalidTestCases(
+                    name, f"{path}[{index}].block_id must name one of the case's blocks"
+                )
     forbidden = _list(expect["forbidden_signals"], name, "expect.forbidden_signals")
     if not all(isinstance(key_, str) for key_ in forbidden):
         raise InvalidTestCases(name, "expect.forbidden_signals must hold strings")

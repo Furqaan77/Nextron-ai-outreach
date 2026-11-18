@@ -42,7 +42,7 @@ from nextron.db.repos.playbook import test_runs as runs_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.ai import Effort, RouteSpec, Urgency
-from nextron.domain.ai_test_cases import InvalidTestCases, TestCase
+from nextron.domain.ai_test_cases import InvalidTestCases, TestCase, case_set_sha256
 from nextron.domain.ai_test_gate import ROUTE_SETS, RunError, RunOutcome, TestSet
 from nextron.domain.budget import AiCall
 from nextron.domain.job import DEFERRED, Job, JobStatus, Lane
@@ -279,11 +279,17 @@ def test_a_first_start_stores_the_fixtures_and_queues_one_run_per_extraction_tup
     synced = world.sync_cases(cases)
     created = world.queue_runs()
 
-    assert len(synced.added) == 11 and synced.changed == synced.retired == synced.unchanged == ()
-    assert world.sql(
-        "SELECT COUNT(*) FROM ai_test_cases WHERE retired_at IS NULL AND test_set = 'extraction'"
-    ) == [(11,)]
-    assert created == 3
+    assert len(synced.added) == len(cases)
+    assert synced.changed == synced.retired == synced.unchanged == ()
+    assert world.sql(  # Story 4.6: the four sets, every row a fixture
+        "SELECT test_set, origin, contact_id, COUNT(*) FROM ai_test_cases "
+        "WHERE retired_at IS NULL GROUP BY test_set, origin, contact_id ORDER BY test_set"
+    ) == [
+        (found.value, "fixture", None, sum(1 for case in cases if case.test_set is found))
+        for found in sorted(TestSet, key=lambda found: found.value)
+    ]
+    assert sum(1 for case in cases if case.test_set is TestSet.EXTRACTION) == 11
+    assert created == 3  # only the extraction routes have tuples
     expected = sorted(
         (
             f"run_ai_test_sets:{world.tuple_id(route)}:extraction",
@@ -305,7 +311,7 @@ def test_a_first_start_stores_the_fixtures_and_queues_one_run_per_extraction_tup
     [queued] = [r for r in caplog.records if r.getMessage() == "ai_test_runs_queued"]
     assert queued.count == 3  # type: ignore[attr-defined]
     [record] = [r for r in caplog.records if r.getMessage() == "test_cases_synced"]
-    assert (record.added_count, record.retired_count) == (11, 0)  # type: ignore[attr-defined]
+    assert (record.added_count, record.retired_count) == (len(cases), 0)  # type: ignore[attr-defined]
 
 
 # Row: Restart ------------------------------------------------------------------------------------
@@ -329,7 +335,7 @@ def test_a_restart_with_the_same_fixtures_changes_no_case(started: World) -> Non
     again = started.sync_cases(main.load_test_cases())
 
     assert (again.added, again.changed, again.retired) == ((), (), ())
-    assert len(again.unchanged) == 11
+    assert len(again.unchanged) == len(started.cases)
     assert started.sql("SELECT id, sha256, loaded_at, retired_at FROM ai_test_cases") == before
 
 
@@ -622,6 +628,7 @@ def test_the_first_activation_of_a_route_deactivates_nothing(world: World) -> No
                 cost_micros=0,
                 started_at=T0,
                 finished_at=T0,
+                cases_sha256=playbook_queries.case_set_fingerprint(TestSet.REPLY, "classify_reply"),
             )
 
     with world.units.open():
@@ -903,7 +910,7 @@ def test_an_edited_fixture_retires_its_old_row_and_a_removed_one_is_retired(
 
     assert result.changed == (("extraction", first.case_key),)
     assert result.retired == (("extraction", second.case_key),)
-    assert len(result.unchanged) == 9 and result.added == ()
+    assert len(result.unchanged) == len(started.cases) - 2 and result.added == ()
     rows = started.sql(
         "SELECT case_key, sha256, retired_at FROM ai_test_cases WHERE case_key IN (?, ?) "
         "ORDER BY case_key, loaded_at",
@@ -926,6 +933,9 @@ def test_the_sync_refuses_a_non_case_or_a_repeated_key_before_any_write(world: W
         world.sync_cases([*cases, "case"])  # type: ignore[list-item]
     with pytest.raises(ValueError, match="more than once"):
         world.sync_cases([*cases, cases[0]])
+    override = dataclasses.replace(cases[0], case_key="override-01jd3qz8x5v9k2m7n4p6r8t0b1")
+    with pytest.raises(ValueError, match="never starts with override-"):  # Story 4.6
+        world.sync_cases([*cases, override])
 
     assert world.sql("SELECT COUNT(*) FROM ai_test_cases") == [(0,)]
 
@@ -934,4 +944,224 @@ def test_an_empty_input_touches_no_table(started: World) -> None:
     assert started.sync_cases(()) == TestCaseSync((), (), (), ())
     assert started.sql(
         "SELECT COUNT(*) FROM ai_test_cases WHERE retired_at IS NULL"
-    ) == [(11,)]
+    ) == [(len(started.cases),)]
+
+
+# Story 4.6: a run is bound to the case set it measured ------------------------------------------
+
+
+def people_edited(world: World) -> TestCase:
+    """Edit one extract_people fixture (a new extraction set for that route); the edited case."""
+    [first] = [case for case in world.cases if case.case_key == "law_people_team_pages"]
+    edited = dataclasses.replace(first, covers=(*first.covers, "edited"))
+    world.cases = tuple(edited if case is first else case for case in world.cases)
+    world.later()
+    world.sync_cases(world.cases)
+    return edited
+
+
+def fingerprint(world: World, test_set: TestSet, route: str) -> str:
+    with world.units.open(read_only=True):
+        return playbook_queries.case_set_fingerprint(test_set, route)
+
+
+def test_a_run_stores_the_fingerprint_of_the_cases_it_measured(started: World) -> None:
+    started.answer(PEOPLE)
+
+    started.run(started.tuple_id(PEOPLE))
+
+    shas = sorted(case.sha256 for case in started.of(PEOPLE))
+    [(stored,)] = started.sql("SELECT cases_sha256 FROM ai_test_runs")
+    assert stored == case_set_sha256(shas) == fingerprint(started, TestSet.EXTRACTION, PEOPLE)
+    assert stored != fingerprint(started, TestSet.EXTRACTION, SIGNALS)  # per route
+    active = started.route(PEOPLE).active
+    assert active is not None and active.run is not None and active.run.current is True
+
+
+def test_a_changed_case_set_queues_the_tuple_again_and_a_run_on_it_does_not(
+    started: World,
+) -> None:
+    started.answer(PEOPLE)
+    started.run(started.tuple_id(PEOPLE))
+    started.sql("DELETE FROM jobs")
+    assert started.queue_runs() == 2  # the people tuple measured the live set
+
+    started.sql("DELETE FROM jobs")
+    people_edited(started)
+
+    assert started.queue_runs() == 3  # the people set changed: its tuple runs again
+    assert f"run_ai_test_sets:{started.tuple_id(PEOPLE)}:extraction" in {
+        row[0] for row in started.jobs()
+    }
+    active = started.route(PEOPLE).active
+    assert active is not None and active.run is not None and active.run.current is False
+    started.sql("DELETE FROM jobs")
+    started.answer(PEOPLE)
+    started.later()
+
+    started.run(started.tuple_id(PEOPLE))  # the newest run measured the live set
+
+    assert started.queue_runs() == 2  # so the people tuple is left out, though an older run
+    assert f"run_ai_test_sets:{started.tuple_id(PEOPLE)}:extraction" not in {  # didn't
+        row[0] for row in started.jobs()
+    }
+    active = started.route(PEOPLE).active
+    assert active is not None and active.run is not None and active.run.current is True
+
+
+def test_a_run_stored_before_story_4_6_is_queued_again_and_qualifies_nothing(
+    started: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    more_candidates(monkeypatch, PEOPLE, Effort.HIGH)
+    old = started.tuple_id(PEOPLE)
+    started.answer(PEOPLE)
+    started.run(old)
+    new = candidate(started, PEOPLE, Effort.HIGH)
+    started.answer(PEOPLE)
+    started.run(new)  # both passed; the newer serves
+    started.sql("DELETE FROM jobs")
+    started.sql("UPDATE ai_test_runs SET cases_sha256 = NULL")  # 4.5 runs: no fingerprint
+
+    assert started.queue_runs() == 4  # both people tuples, and the two other routes
+    route = started.route(PEOPLE)
+    assert route.active is not None and route.active.run is not None
+    assert route.active.run.current is False
+    [older] = route.candidates
+    assert older.id == old and older.run is not None
+    assert (older.run.outcome, older.run.current, older.passing) == (
+        RunOutcome.PASSED,
+        False,
+        False,
+    )
+    with pytest.raises(ActivationRefused, match="^No passing test run for this tuple$"):
+        started.activate(old, ActivationTrigger.ROLLBACK)
+
+
+def test_a_failed_run_on_the_live_set_is_not_queued_again(started: World) -> None:
+    started.answer(SIGNALS, invent_a_quote)
+    started.run(started.tuple_id(SIGNALS))
+    [(outcome,)] = started.sql("SELECT outcome FROM ai_test_runs")
+    assert outcome == "failed"
+    started.sql("DELETE FROM jobs")
+
+    assert started.queue_runs() == 2  # people and inbox; the failed signals tuple waits
+    assert f"run_ai_test_sets:{started.tuple_id(SIGNALS)}:extraction" not in {
+        row[0] for row in started.jobs()
+    }
+
+
+def test_a_too_small_set_runs_again_once_it_grows(world: World) -> None:
+    world.segments()
+    tuple_id = reply_tuple(world)
+    world.sync_cases([reply_case(n) for n in range(49)])
+    world.run(tuple_id, "reply")
+    world.sql("DELETE FROM jobs")
+    key = f"run_ai_test_sets:{tuple_id}:reply"
+    world.queue_runs()
+    assert key not in {row[0] for row in world.jobs()}  # its failed run measured the live set
+    world.sql("DELETE FROM jobs")
+
+    world.sync_cases([reply_case(n) for n in range(50)])
+
+    world.queue_runs()
+    assert key in {row[0] for row in world.jobs()}
+
+
+def test_a_pass_on_an_earlier_set_qualifies_nothing(started: World) -> None:
+    tuple_id = started.tuple_id(PEOPLE)
+    started.answer(PEOPLE)
+    started.run(tuple_id)  # passes and activates: a tested activation
+    before = started.activations()
+    people_edited(started)
+
+    with pytest.raises(ActivationRefused, match="^No passing test run for this tuple$"):
+        started.activate(tuple_id, ActivationTrigger.ROLLBACK)
+
+    assert started.activations() == before  # the tested activation keeps serving
+
+
+def test_a_stale_pass_is_no_rollback_target(
+    started: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    more_candidates(monkeypatch, PEOPLE, Effort.HIGH)
+    old = started.tuple_id(PEOPLE)
+    started.answer(PEOPLE)
+    started.run(old)
+    new = candidate(started, PEOPLE, Effort.HIGH)
+    started.answer(PEOPLE)
+    started.run(new)  # the newest candidate passes and serves
+    [older] = started.route(PEOPLE).candidates
+    assert (older.id, older.passing) == (old, True)
+
+    people_edited(started)
+
+    [older] = started.route(PEOPLE).candidates
+    assert older.passing is False
+    assert older.run is not None and older.run.current is False
+    with pytest.raises(ActivationRefused, match="^No passing test run for this tuple$"):
+        started.activate(old, ActivationTrigger.ROLLBACK)
+
+
+def test_activation_takes_the_newest_pass_on_the_live_set(started: World) -> None:
+    tuple_id = started.tuple_id(PEOPLE)
+    started.answer(PEOPLE)
+    started.later()
+    started.run(tuple_id)  # a pass on set A
+    [(first_run,)] = started.sql("SELECT id FROM ai_test_runs")
+    shipped = started.cases
+    people_edited(started)
+    started.answer(PEOPLE)
+    started.later()
+    started.run(tuple_id)  # a pass on set B
+    started.later()
+    started.sync_cases(shipped)  # back to set A
+    started.cases = shipped
+
+    activated = started.activate(tuple_id, ActivationTrigger.ROLLBACK)
+
+    assert activated.run_id == first_run  # set A's pass, not the newer pass on set B
+
+
+class ChangesCasesMidRun:
+    """An LLM that retires one live case of the route at its first call, as an edit landing
+    while a run's calls are made."""
+
+    def __init__(self, world: World, case_key: str) -> None:
+        self.world = world
+        self.case_key = case_key
+        self.changed = False
+
+    def run(self, route_tuple: Any, inputs: Any, urgency: Any) -> LlmResult:
+        if not self.changed:
+            self.changed = True
+            self.world.sql(
+                "UPDATE ai_test_cases SET retired_at = ? WHERE case_key = ? "
+                "AND retired_at IS NULL",
+                ("2026-11-18T09:00:30.000000Z", self.case_key),
+            )
+        return self.world.llm.run(route_tuple, inputs, urgency)
+
+
+def test_cases_changed_during_a_passing_run_leave_it_stored_and_activate_nothing(
+    started: World,
+) -> None:
+    tuple_id = started.tuple_id(PEOPLE)
+    started.answer(PEOPLE)
+    before = started.activations()
+    measured = fingerprint(started, TestSet.EXTRACTION, PEOPLE)
+    runs = AiTestRuns(
+        started.clock,
+        started.meter,
+        ChangesCasesMidRun(started, "ops_people_leadership_page"),  # type: ignore[arg-type]
+        started.queue,
+    )
+
+    with started.units.open():
+        assert runs.run(tuple_id, "extraction") is True
+
+    [(outcome, stored)] = started.sql("SELECT outcome, cases_sha256 FROM ai_test_runs")
+    assert (outcome, stored) == ("passed", measured)
+    assert started.activations() == before  # still the bootstrap: nothing activated
+    assert fingerprint(started, TestSet.EXTRACTION, PEOPLE) != measured
+    started.sql("DELETE FROM jobs")
+    assert started.queue_runs() == 3  # the people tuple runs again, on the live set

@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0023_4_5_ai_test_runs"
+HEAD = "0024_4_6_ai_test_sets"
 
 
 @pytest.fixture
@@ -650,3 +650,123 @@ def test_0023_keeps_every_activation_and_adds_the_test_run_key(tmp_path: Path) -
                 for case_id in ("01JD3QZ8X5V9K2M7N4P6R8T0D1", "01JD3QZ8X5V9K2M7N4P6R8T0D2")
             ),
         )
+
+
+# Story 4.6: 0024 rebuilds ai_test_cases (origin, contact_id) and ai_test_runs (cases_sha256)
+CASE_COLUMNS = (
+    "id, case_key, test_set, route, input, expected, covers, sha256, loaded_at, retired_at"
+)
+RUN_COLUMNS = (
+    "id, tuple_id, test_set, outcome, error, case_count, passed_count, metrics, results, "
+    "cost_micros, started_at, finished_at"
+)
+LIVE_CASE = "01JD3QZ8X5V9K2M7N4P6R8T0E1"
+RETIRED_CASE = "01JD3QZ8X5V9K2M7N4P6R8T0E2"
+CONTACT = "01JD3QZ8X5V9K2M7N4P6R8T0E3"
+
+
+def rows_of(path: Path, table: str, columns: str) -> list[tuple[object, ...]]:
+    reader = sqlite3.connect(path)
+    try:
+        return reader.execute(f"SELECT {columns} FROM {table} ORDER BY id").fetchall()
+    finally:
+        reader.close()
+
+
+def test_0024_keeps_every_case_and_run_and_adds_the_origin_and_the_fingerprint(
+    tmp_path: Path,
+) -> None:
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0023_4_5_ai_test_runs":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0023_4_5_ai_test_runs")
+    digest, at = "a" * 64, "2026-11-18T09:00:00.000000Z"
+    activations = f"{ACTIVATION_COLUMNS}, playbook_sha256"
+    run_sql(
+        path,
+        "INSERT INTO prompt_snapshots (id, route, prompt_version, sha256, text, created_at) "
+        f"VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0B0', 'extract_signals', 'v1', '{digest}', 'Text.', "
+        f"'{at}')",
+        "INSERT INTO ai_route_tuples (id, route, model, effort, prompt_version, prompt_sha256, "
+        f"playbook_sha256, schema_version, created_at) VALUES ('{TUPLE_ROW}', 'extract_signals', "
+        f"'claude-haiku-5-5', 'medium', 'v1', '{digest}', NULL, 1, '{at}')",
+        f"INSERT INTO ai_test_runs ({RUN_COLUMNS}) VALUES ('{RUN_ROW}', '{TUPLE_ROW}', "
+        f"'extraction', 'passed', NULL, 1, 1, '[]', '[]', 0, '{at}', '{at}')",
+        f"INSERT INTO ai_route_activations ({activations}) VALUES ('{TESTED_ROW}', "
+        f"'extract_signals', 'claude-haiku-5-5', 'medium', 'v1', '{digest}', 1, "
+        f"'system:playbook', 0, '{RUN_ROW}', '{at}', NULL, NULL)",
+        f"INSERT INTO ai_test_cases ({CASE_COLUMNS}) VALUES ('{LIVE_CASE}', 'one', 'extraction', "
+        f"'extract_signals', '{{}}', '{{}}', '[]', '{digest}', '{at}', NULL)",
+        f"INSERT INTO ai_test_cases ({CASE_COLUMNS}) VALUES ('{RETIRED_CASE}', 'one', "
+        f"'extraction', 'extract_signals', '{{}}', '{{}}', '[]', '{'b' * 64}', '{at}', '{at}')",
+    )
+    cases_before = rows_of(path, "ai_test_cases", CASE_COLUMNS)
+    runs_before = rows_of(path, "ai_test_runs", RUN_COLUMNS)
+    activations_before = rows_of(path, "ai_route_activations", activations)
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0023_4_5_ai_test_runs", HEAD)
+
+    assert rows_of(path, "ai_test_cases", CASE_COLUMNS) == cases_before
+    assert rows_of(path, "ai_test_cases", "origin, contact_id") == [("fixture", None)] * 2
+    assert rows_of(path, "ai_test_runs", RUN_COLUMNS) == runs_before
+    assert rows_of(path, "ai_test_runs", "cases_sha256") == [(None,)]
+    assert rows_of(path, "ai_route_activations", activations) == activations_before
+    reader = sqlite3.connect(path)
+    try:
+        [(cases_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_ai_test_cases_live_key'"
+        ).fetchall()
+        run_keys = reader.execute("PRAGMA foreign_key_list(ai_test_runs)").fetchall()
+        activation_keys = reader.execute("PRAGMA foreign_key_list(ai_route_activations)").fetchall()
+        run_indexes = [row[1] for row in reader.execute("PRAGMA index_list(ai_test_runs)")]
+        broken = reader.execute("PRAGMA foreign_key_check").fetchall()
+    finally:
+        reader.close()
+    assert "WHERE retired_at IS NULL" in cases_sql
+    assert [(row[2], row[3], row[4]) for row in run_keys] == [("ai_route_tuples", "tuple_id", "id")]
+    assert ("ai_test_runs", "test_run_id", "id") in {
+        (row[2], row[3], row[4]) for row in activation_keys
+    }
+    assert "ix_ai_test_runs_tuple_id_test_set" in run_indexes
+    assert broken == []
+    writer = sqlite3.connect(path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            writer.execute(
+                f"UPDATE ai_route_activations SET test_run_id = '{UNKNOWN_RUN}' "
+                f"WHERE id = '{TESTED_ROW}'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            writer.execute(f"UPDATE ai_test_runs SET tuple_id = '{UNKNOWN_RUN}'")
+    finally:
+        writer.close()
+    for check, statement in (
+        ("ai_test_cases_origin_contact", f"UPDATE ai_test_cases SET origin = 'override' WHERE id = '{LIVE_CASE}'"),
+        ("ai_test_cases_origin_contact", f"UPDATE ai_test_cases SET contact_id = '{CONTACT}' WHERE id = '{LIVE_CASE}'"),
+        ("ai_test_cases_origin_contact", f"UPDATE ai_test_cases SET origin = 'other' WHERE id = '{LIVE_CASE}'"),
+        ("ai_test_cases_test_set", f"UPDATE ai_test_cases SET test_set = 'other' WHERE id = '{LIVE_CASE}'"),
+        ("ai_test_cases_sha256", f"UPDATE ai_test_cases SET sha256 = 'X' WHERE id = '{LIVE_CASE}'"),
+        ("ai_test_runs_cases_sha256", f"UPDATE ai_test_runs SET cases_sha256 = 'X' WHERE id = '{RUN_ROW}'"),
+        ("ai_test_runs_cases_sha256", f"UPDATE ai_test_runs SET cases_sha256 = '{'A' * 64}' WHERE id = '{RUN_ROW}'"),
+        ("ai_test_runs_outcome", f"UPDATE ai_test_runs SET outcome = 'maybe' WHERE id = '{RUN_ROW}'"),
+        ("ai_test_runs_counts", f"UPDATE ai_test_runs SET passed_count = 2 WHERE id = '{RUN_ROW}'"),
+        (
+            "ai_test_runs_error_when_failed",
+            f"UPDATE ai_test_runs SET error = 'set_too_small' WHERE id = '{RUN_ROW}'",
+        ),
+    ):  # fmt: skip
+        with pytest.raises(sqlite3.IntegrityError, match=rf"ck_{check}$"):
+            run_sql(path, statement)
+    run_sql(  # an override row needs its Contact; a fingerprint is 64 lowercase hex digits
+        path,
+        f"UPDATE ai_test_cases SET origin = 'override', contact_id = '{CONTACT}' "
+        f"WHERE id = '{RETIRED_CASE}'",
+        f"UPDATE ai_test_runs SET cases_sha256 = '{'c' * 64}' WHERE id = '{RUN_ROW}'",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):  # still one live case per key
+        run_sql(path, f"UPDATE ai_test_cases SET retired_at = NULL WHERE id = '{RETIRED_CASE}'")

@@ -1,0 +1,25 @@
+{
+  "id": "reply_other_lead_gen_pitch",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-05",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Thanks Sam. Out of interest, are you looking for help with your own lead generation? We help AI companies book 15 to 20 qualified meetings a month, and I'd be glad to share a few case studies."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "other",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:other"
+  ]
+}

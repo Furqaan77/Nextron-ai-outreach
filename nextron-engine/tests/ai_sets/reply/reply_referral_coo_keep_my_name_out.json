@@ -1,0 +1,31 @@
+{
+  "id": "reply_referral_coo_keep_my_name_out",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-27",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Speak to Raj Patel, our COO: raj.patel@kestrel-logistics.example.co.uk. Keep my name out of it if you don't mind."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "referral",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": {
+      "name": "Raj Patel",
+      "role": "COO",
+      "email": "raj.patel@kestrel-logistics.example.co.uk",
+      "referrer_may_be_named": false
+    }
+  },
+  "covers": [
+    "class:referral",
+    "referral:may_not_name"
+  ]
+}

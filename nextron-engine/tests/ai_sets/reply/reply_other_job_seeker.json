@@ -1,0 +1,25 @@
+{
+  "id": "reply_other_job_seeker",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-15",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Hi Sam, are you hiring? I'm an experienced intake coordinator looking for my next role and would love to hear about any openings at Nextron."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "other",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:other"
+  ]
+}

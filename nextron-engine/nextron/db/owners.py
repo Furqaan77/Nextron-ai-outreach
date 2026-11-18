@@ -172,6 +172,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "sha256",
             "loaded_at",
             "retired_at",
+            "origin",
+            "contact_id",
         ),
     },
     "ai_test_runs": {
@@ -188,6 +190,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "cost_micros",
             "started_at",
             "finished_at",
+            "cases_sha256",
         ),
     },
     "contacts": {

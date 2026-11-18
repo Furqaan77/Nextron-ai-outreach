@@ -40,7 +40,9 @@ each run is paid Claude calls.
   table with each metric's label, value ("<p>% (<n> of <d>)", "none (0 of 0)" for a share of
   nothing, or the count), bar ("at least <p>%" or "at most <n>") and "Pass" or "Fail"; and the
   failing cases (case id, expected and got) inside an ``hx-disable`` container, autoescaped.
-  "No test run yet" when the tuple has none.
+  "No test run yet" when the tuple has none. A run that didn't measure the live case set
+  (``RunSummary.current`` false, Story 4.6) adds "This run measured an earlier version of the
+  <set label>." (``stale``): the tuple is due for a new run.
 - "Ungated" on an active tuple that serves without a passing test run (a bootstrap one).
 - On a candidate with a passing run (``CandidateTuple.passing``), the "Roll back to this tuple"
   form: ``method="post"``, ``hx-post="/ai/rollback"``, ``hx-target="#ai-content-panel"``,
@@ -97,6 +99,7 @@ TRIGGER_LABELS: Final = {
 TUPLE_ID_FIELD: Final = "tuple_id"
 OUTCOME_LABELS: Final = {RunOutcome.PASSED: "Passed", RunOutcome.FAILED: "Failed"}
 MICROS_PER_DOLLAR: Final = 1_000_000
+STALE_RUN: Final = "This run measured an earlier version of the {set_label}."
 
 # The AI content view's loader: the verified prompt files, each route's default candidate and
 # the Sales Playbook read, read outside any unit of work (nextron.main.load_ai_content).
@@ -137,6 +140,7 @@ class RunView:
     time: str
     metrics: tuple[MetricView, ...]
     failing: tuple[CaseView, ...]
+    stale: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +233,7 @@ def run_view(run: RunSummary) -> RunView:
         failing=tuple(
             CaseView(result.case_key, result.expected, result.got) for result in run.failing
         ),
+        stale=None if run.current else STALE_RUN.format(set_label=run.test_set.label),
     )
 
 

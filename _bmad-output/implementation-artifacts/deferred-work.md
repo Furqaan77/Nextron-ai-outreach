@@ -106,3 +106,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-5-gate-ai-route-activation-on-test-runs.md`
   summary: Classify and erase Operator override cases in `ai_test_cases`. Story 4.5 classes every column `none` and never deletes a row, because its cases are synthetic, but AD-12's override cases (FR-40, Story 4.6's `add_override_case`) are pseudonymised Replies, which are still personal data.
   evidence: Review pass 1 of Story 4.5 (B13, maybe-false, medium if true). No override case exists yet. Story 4.6 should revisit `pii_registry.py` for `ai_test_cases.input` and `expected` (at least `redact` for override rows), and give retired override rows an erasure and retention path (Stories 3.14 and 8.12).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-6-build-the-ai-test-sets.md`
+  summary: Register `Playbook(clock).erase_override_cases(contact_id)` as playbook's `ContactErased` hook when Story 4.6 merges with Story 3.13. Story 4.6 classes `ai_test_cases.input` as `redact`, and erasing a Contact must reach that Contact's pseudonymised override cases.
+  evidence: Review pass 1 of Story 4.6 (B3+VO1, medium). This worktree has no `ContactErased`, so the hook can't be wired here. Story 3.13's contract fails for any table with a non-`none` column that has no `erase_pii` hook. Retention erasures (Stories 3.14 and 8.12) reach the hook the same way.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-6-build-the-ai-test-sets.md`
+  summary: Keep Reply text out of `ai_test_runs.results`, or erase it. A Reply scorer's `CaseResult` `expected` and `got` must hold class codes only, so an override case's text never outlives its Contact's erasure.
+  evidence: Review pass 1 of Story 4.6 (B4, maybe-false, medium if true). No Reply scorer exists yet. Story 7.5 settles it by keeping the scorer's texts to classes and extracted field codes, or by giving `ai_test_runs` an erasure path.

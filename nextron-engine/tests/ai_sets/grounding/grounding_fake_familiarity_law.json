@@ -1,0 +1,104 @@
+{
+  "id": "grounding_fake_familiarity_law",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "uk",
+    "step": 1,
+    "draft": {
+      "subject": "your client intake role",
+      "body": "Hi Martin,\n\nLoved your recent talk at the Law Society on client confidentiality. I also saw Penrose Vale is hiring a client intake assistant to open files and run conflict checks.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs keeping intake data in-house on your radar?"
+    },
+    "claims": [
+      {
+        "text": "Loved your recent talk at the Law Society on client confidentiality",
+        "evidence_id": null,
+        "fact": null
+      },
+      {
+        "text": "Penrose Vale is hiring a client intake assistant to open files and run conflict checks",
+        "evidence_id": "e1",
+        "fact": null
+      },
+      {
+        "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "legal_ai",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s1",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-05"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_contact_form_only",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Client Intake Assistant. Handle first enquiries from new clients, open files and run ID and conflict checks."
+      },
+      {
+        "id": "e2",
+        "source": "website",
+        "kind": "absence",
+        "text": "No live chat, online booking or after-hours phone line was found on the website; the Contact page offers a form only."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "sra_ai_notice",
+        "version": 1,
+        "wording": "The Solicitors Regulation Authority (SRA) warning notice of 17 August 2026 allows client data into AI tools only with contractual, technical and organisational safeguards."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "fake_familiarity",
+        "span": "Loved your recent talk at the Law Society on client confidentiality"
+      }
+    ],
+    "rules": []
+  },
+  "covers": [
+    "pattern:fake_familiarity",
+    "segment:law_private_ai",
+    "market:uk",
+    "step:1"
+  ]
+}

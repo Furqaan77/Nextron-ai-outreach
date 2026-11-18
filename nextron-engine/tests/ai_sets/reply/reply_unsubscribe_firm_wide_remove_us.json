@@ -1,0 +1,31 @@
+{
+  "id": "reply_unsubscribe_firm_wide_remove_us",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-26",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your intake coordinator role\n\nHi Dana,\n\nSaw Brightwell Law is hiring an intake coordinator. More intake usually means more client detail moving through more tools, and more questions about where it ends up.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?\n\nSam\nNextron AI\n\nNot relevant? Reply \"no\" and I won't write again."
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Remove us. Nobody at this firm wants these emails."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "firm_wide"
+  ]
+}

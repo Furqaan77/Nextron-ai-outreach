@@ -1,0 +1,82 @@
+{
+  "id": "drafting_law_us_newest_post",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "lead_name": "Pruitt & Lowe",
+    "contact": {
+      "name": "Gary Pruitt",
+      "role": "Owner"
+    },
+    "angle_note": "Keep it short; he prefers plain emails.",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e2",
+        "observed_on": "2026-10-01"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_contact_form_only",
+        "tier": 3,
+        "evidence_id": "e3",
+        "observed_on": null
+      },
+      {
+        "id": "s3",
+        "signal_type": "law_ai_confidentiality_post",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-15"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "signal_inbox",
+        "kind": "quote",
+        "text": "Gary Pruitt, owner of Pruitt & Lowe: we told our associates to stop pasting client documents into public chatbots. We need something private, and we need it soon."
+      },
+      {
+        "id": "e2",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Legal Assistant (intake). Schedule consultations and enter new matters into our case management system."
+      },
+      {
+        "id": "e3",
+        "source": "website",
+        "kind": "absence",
+        "text": "No live chat, online booking or after-hours phone line was found on the website; the Contact page offers a form only."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s3"
+  },
+  "covers": [
+    "segment:law_private_ai",
+    "market:us"
+  ]
+}

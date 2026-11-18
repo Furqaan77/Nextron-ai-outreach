@@ -167,19 +167,24 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "playbook_sha256": PiiClass.NONE,
         "problem": PiiClass.NONE,
     },
-    # Story 4.5. Test cases are synthetic (invented firms and people on .test domains); runs
-    # hold codes, counts, metrics and the synthetic cases' verdicts.
+    # Story 4.5. Fixture cases are synthetic (invented firms and people on reserved domains);
+    # runs hold codes, counts, metrics and the cases' verdicts. Story 4.6 (decision 7): an
+    # Operator's override case holds a pseudonymised Reply, still personal data, so its input is
+    # redacted when its Contact is erased (Playbook.erase_override_cases); contact_id is the
+    # erasure's key, and the expected class and covers tags name no one.
     "ai_test_cases": {
         "id": PiiClass.NONE,
         "case_key": PiiClass.NONE,
         "test_set": PiiClass.NONE,
         "route": PiiClass.NONE,
-        "input": PiiClass.NONE,
+        "input": PiiClass.REDACT,
         "expected": PiiClass.NONE,
         "covers": PiiClass.NONE,
         "sha256": PiiClass.NONE,
         "loaded_at": PiiClass.NONE,
         "retired_at": PiiClass.NONE,
+        "origin": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
     },
     "ai_test_runs": {
         "id": PiiClass.NONE,
@@ -194,6 +199,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "cost_micros": PiiClass.NONE,
         "started_at": PiiClass.NONE,
         "finished_at": PiiClass.NONE,
+        "cases_sha256": PiiClass.NONE,
     },
     # Story 2.3. A Contact is a person: free text is redacted, the address is kept as a hash so
     # suppression and dedupe still match after an erasure, and the LinkedIn URL is nulled.

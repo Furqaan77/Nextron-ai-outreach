@@ -763,3 +763,46 @@ def test_the_health_panel_shows_a_failed_active_tuple(units: UnitOfWorkFactory) 
     panel = texts(dashboard.get("/health/panel", cookie=dashboard.open_session()).text)
 
     assert "extract_people: active tuple failed its test set" in panel
+
+
+# Story 4.6: a run is bound to the case set it measured
+
+
+def changed_people_cases() -> list[TestCase]:
+    """The shipped cases with one extract_people fixture edited: a new extraction set."""
+    cases = main.load_test_cases()
+    [first] = [case for case in cases if case.case_key == "law_people_team_pages"]
+    edited = dataclasses.replace(first, covers=(*first.covers, "edited"))
+    return [edited if case is first else case for case in cases]
+
+
+def test_a_run_on_an_earlier_case_set_is_marked_and_offers_no_rollback(
+    units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dashboard = gate_world(units)
+    old = tuple_id_of(units, "extract_people")
+    dashboard.llm.script.extend(people_answers())
+    run_people(dashboard, units, old)
+    new = newer_people_tuple(units, monkeypatch)
+    dashboard.llm.script.extend(people_answers())
+    run_people(dashboard, units, new)
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+    assert "measured an earlier version" not in html
+    assert route_section(html, "extract_people").count("Roll back to this tuple") == 1
+
+    with units.open():
+        Playbook(FrozenClock(DEFAULT_NOW.replace(hour=11))).sync_test_cases(
+            changed_people_cases()
+        )
+    html = dashboard.get("/ai", cookie=dashboard.open_session()).text
+    section = route_section(html, "extract_people")
+
+    stale = "This run measured an earlier version of the Extraction fixtures."
+    assert section.count(stale) == 2  # the active tuple's run and the older candidate's
+    assert f'<p class="ai-mark ai-run-stale">{stale}</p>' in html
+    assert "Roll back to this tuple" not in section  # its pass was on the earlier set
+    assert "measured an earlier version" not in route_section(html, "extract_signals")
+    reply = rollback(dashboard, f"tuple_id={old}")
+    assert '<p class="notice notice-refused" role="alert">No passing test run for this tuple</p>' in (
+        reply.text
+    )

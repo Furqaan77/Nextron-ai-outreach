@@ -1,0 +1,30 @@
+{
+  "id": "reply_not_interested_family_business",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-04",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: dispatch hiring at Calder\n\nHi Marcus,\n\nSaw Calder Freight is hiring a dispatch coordinator. Dispatch roles usually mean someone copying loads between email, spreadsheets and the TMS.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?\n\nSam\nNextron AI"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Thanks Sam, but it's not a fit for us. We're a family business and we like doing things our own way."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:not_interested"
+  ]
+}

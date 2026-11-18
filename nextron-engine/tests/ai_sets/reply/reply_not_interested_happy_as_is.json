@@ -1,0 +1,25 @@
+{
+  "id": "reply_not_interested_happy_as_is",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-12",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "We're happy with how intake runs today and won't be looking at this."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_interested",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:not_interested"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "id": "reply_referral_silent_on_naming",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-16",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Please contact our COO, Lena Ward, at lena.ward@brookline-supply.example.com. She handles anything to do with order processing."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "referral",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": {
+      "name": "Lena Ward",
+      "role": "COO",
+      "email": "lena.ward@brookline-supply.example.com",
+      "referrer_may_be_named": false
+    }
+  },
+  "covers": [
+    "class:referral",
+    "referral:may_not_name"
+  ]
+}

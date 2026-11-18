@@ -1,0 +1,31 @@
+{
+  "id": "reply_referral_managing_partner_may_name",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-03",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Our managing partner, Beth Carver, makes decisions like this. You can tell her I said to get in touch."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "referral",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": {
+      "name": "Beth Carver",
+      "role": "Managing Partner",
+      "email": null,
+      "referrer_may_be_named": true
+    }
+  },
+  "covers": [
+    "class:referral",
+    "referral:may_name"
+  ]
+}

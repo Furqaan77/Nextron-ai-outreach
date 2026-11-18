@@ -1,0 +1,77 @@
+{
+  "id": "drafting_ops_us_only_event_is_expansion",
+  "set": "drafting_smoke",
+  "route": "draft_sequence",
+  "input": {
+    "segment": "ops_automation",
+    "market": "us",
+    "lead_name": "Brookline Industrial Supply",
+    "contact": {
+      "name": "Denise Archer",
+      "role": "VP Operations"
+    },
+    "angle_note": "They run Dynamics GP; don't knock it.",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "ops_expansion",
+        "tier": 2,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-13"
+      },
+      {
+        "id": "s2",
+        "signal_type": "ops_dynamics_gp",
+        "tier": 2,
+        "evidence_id": "e2",
+        "observed_on": null
+      },
+      {
+        "id": "s3",
+        "signal_type": "ops_manual_ordering",
+        "tier": 3,
+        "evidence_id": "e3",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "news_pages",
+        "kind": "quote",
+        "text": "Brookline Industrial Supply opens a 120,000 sq ft distribution center in Columbus."
+      },
+      {
+        "id": "e2",
+        "source": "job_ads",
+        "kind": "quote",
+        "text": "Dynamics GP experience preferred."
+      },
+      {
+        "id": "e3",
+        "source": "website",
+        "kind": "quote",
+        "text": "To order, download our order form and email it to our sales team."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "mp_online_digital",
+        "version": 1,
+        "wording": "Built a citizen-services digital transformation platform with workflow automation and dashboards (MP Online Digital)."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ]
+  },
+  "expected": {
+    "cited_signal_id": "s1"
+  },
+  "covers": [
+    "segment:ops_automation",
+    "market:us"
+  ]
+}

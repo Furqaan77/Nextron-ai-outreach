@@ -1,0 +1,103 @@
+{
+  "id": "grounding_unhedged_absence_contact_form",
+  "set": "grounding",
+  "route": "grounding_check",
+  "input": {
+    "segment": "law_private_ai",
+    "market": "us",
+    "step": 1,
+    "draft": {
+      "subject": "enquiries after hours",
+      "body": "Hi Elena,\n\nYour website only offers a contact form, with no chat, online booking or after-hours line.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nIs this on your radar?"
+    },
+    "claims": [
+      {
+        "text": "Your website only offers a contact form, with no chat, online booking or after-hours line",
+        "evidence_id": "e2",
+        "fact": null
+      },
+      {
+        "text": "We built an AI legal assistant platform for research and document help for a legal-tech venture",
+        "evidence_id": null,
+        "fact": {
+          "fact_id": "legal_ai",
+          "version": 1
+        }
+      }
+    ],
+    "cited_signal_id": "s2",
+    "signals": [
+      {
+        "id": "s1",
+        "signal_type": "law_hiring_legal_ops",
+        "tier": 1,
+        "evidence_id": "e1",
+        "observed_on": "2026-11-07"
+      },
+      {
+        "id": "s2",
+        "signal_type": "law_contact_form_only",
+        "tier": 3,
+        "evidence_id": "e2",
+        "observed_on": null
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e1",
+        "source": "careers_page",
+        "kind": "quote",
+        "text": "Intake Paralegal. Answer new client enquiries, run conflict checks and schedule consultations."
+      },
+      {
+        "id": "e2",
+        "source": "website",
+        "kind": "absence",
+        "text": "No live chat, online booking or after-hours phone line was found on the website; the Contact page offers a form only."
+      }
+    ],
+    "facts": [
+      {
+        "fact_id": "legal_ai",
+        "version": 1,
+        "wording": "Built an AI legal assistant platform for research and document help for a legal-tech venture (Legal AI)."
+      },
+      {
+        "fact_id": "aba_formal_opinion_512",
+        "version": 1,
+        "wording": "ABA Formal Opinion 512 says a lawyer needs the client's informed consent before putting client information into a self-learning generative AI tool."
+      },
+      {
+        "fact_id": "nextron_team",
+        "version": 1,
+        "wording": "A 17+ person team of engineers, AI specialists and analysts, based in San Jose."
+      }
+    ],
+    "earlier_steps": [],
+    "settings": {
+      "sender_signature": "Sam\nNextron AI",
+      "booking_link": "https://cal.example.com/nextron/intro",
+      "privacy_notice_url": "https://www.example.com/nextron/privacy"
+    }
+  },
+  "expected": {
+    "kind": "banned_pattern",
+    "findings": [
+      {
+        "code": "unhedged_absence_claim",
+        "span": "Your website only offers a contact form, with no chat, online booking or after-hours line"
+      }
+    ],
+    "rules": [
+      "unhedged_absence",
+      "wrong_signal",
+      "score_only_cited"
+    ]
+  },
+  "covers": [
+    "pattern:unhedged_absence_claim",
+    "segment:law_private_ai",
+    "market:us",
+    "step:1"
+  ]
+}

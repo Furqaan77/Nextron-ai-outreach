@@ -1,0 +1,31 @@
+{
+  "id": "reply_question_near_opt_out_remove_manual_steps",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-13",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: your intake coordinator role\n\nHi Fiona,\n\nNoticed Calloway Grant is hiring an intake coordinator to run new-client calls and conflict checks. More intake usually means more client detail passing through more tools.\n\nWe built an AI legal assistant platform for research and document help for a legal-tech venture.\n\nWorth a look?\n\nSam\nNextron AI\n\nIf you'd rather not hear from me, reply \"stop\" and I won't email again. Privacy notice: https://www.example.com/nextron/privacy"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Could something like this remove the manual steps between our web enquiry form and the conflict check, or is it only for research and documents?\n\nFiona"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "question",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:question",
+    "near_opt_out"
+  ]
+}

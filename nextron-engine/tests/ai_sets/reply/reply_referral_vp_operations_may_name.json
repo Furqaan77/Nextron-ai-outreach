@@ -1,0 +1,36 @@
+{
+  "id": "reply_referral_vp_operations_may_name",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-12",
+    "blocks": [
+      {
+        "id": "s1",
+        "source": "sent_email",
+        "text": "Subject: dispatch hiring at Calder\n\nHi Marcus,\n\nSaw Calder Freight is hiring a dispatch coordinator. Dispatch roles usually mean someone copying loads between email, spreadsheets and the TMS.\n\nWe built a citizen-services digital transformation platform with workflow automation and dashboards.\n\nWorth a look?\n\nSam\nNextron AI"
+      },
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Not my area - you want Priya Shah, our VP Operations. She owns order entry and dispatch. priya.shah@calder-freight.example.com\n\nFeel free to say I pointed you her way.\n\nMarcus"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "referral",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": {
+      "name": "Priya Shah",
+      "role": "VP Operations",
+      "email": "priya.shah@calder-freight.example.com",
+      "referrer_may_be_named": true
+    }
+  },
+  "covers": [
+    "class:referral",
+    "referral:may_name"
+  ]
+}

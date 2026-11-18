@@ -1,0 +1,26 @@
+{
+  "id": "reply_optout_no_capitals",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-30",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "NO"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "opt_out_wording"
+  ]
+}

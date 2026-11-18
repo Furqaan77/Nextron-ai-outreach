@@ -1,0 +1,26 @@
+{
+  "id": "reply_unsubscribe_auto_reply_vendors",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-17",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Auto-reply: I'm on leave and back on 1 December. Vendors: please unsubscribe me from all marketing lists."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "opt_out_in_auto_reply"
+  ]
+}

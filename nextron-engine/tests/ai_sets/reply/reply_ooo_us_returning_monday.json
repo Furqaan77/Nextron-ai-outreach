@@ -1,0 +1,26 @@
+{
+  "id": "reply_ooo_us_returning_monday",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-10-09",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "I am out of the office through Friday, October 16, returning Monday, October 19. I will have limited access to email during this time."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "out_of_office",
+    "objection_type": null,
+    "return_date": "2026-10-19",
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:out_of_office",
+    "return_date"
+  ]
+}

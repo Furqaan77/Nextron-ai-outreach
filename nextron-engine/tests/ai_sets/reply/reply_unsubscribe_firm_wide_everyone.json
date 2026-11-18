@@ -1,0 +1,26 @@
+{
+  "id": "reply_unsubscribe_firm_wide_everyone",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-10",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Please remove everyone at Hollis & Grant from your list. We don't accept unsolicited approaches."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "unsubscribe",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:unsubscribe",
+    "firm_wide"
+  ]
+}

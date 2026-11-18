@@ -1,0 +1,25 @@
+{
+  "id": "reply_other_ticket_acknowledgement",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-06",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Thank you for contacting Ferris Logistics customer services. Your message has been logged as ticket 48213 and a member of the team will reply within two working days."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "other",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": null
+  },
+  "covers": [
+    "class:other"
+  ]
+}

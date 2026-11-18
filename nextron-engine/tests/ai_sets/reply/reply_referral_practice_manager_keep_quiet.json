@@ -1,0 +1,31 @@
+{
+  "id": "reply_referral_practice_manager_keep_quiet",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-11-09",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "This isn't really me. Our practice manager, Joanne Price, looks after intake and systems. Please don't mention I passed this on, though."
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "referral",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": null,
+    "referral": {
+      "name": "Joanne Price",
+      "role": "Practice Manager",
+      "email": null,
+      "referrer_may_be_named": false
+    }
+  },
+  "covers": [
+    "class:referral",
+    "referral:may_not_name"
+  ]
+}

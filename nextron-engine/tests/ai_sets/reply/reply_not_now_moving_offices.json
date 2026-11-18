@@ -1,0 +1,26 @@
+{
+  "id": "reply_not_now_moving_offices",
+  "set": "reply",
+  "route": "classify_reply",
+  "input": {
+    "received_on": "2026-09-14",
+    "blocks": [
+      {
+        "id": "r1",
+        "source": "reply",
+        "text": "Not a priority this quarter - we're in the middle of moving offices. Could you check back on 7 December?"
+      }
+    ]
+  },
+  "expected": {
+    "reply_class": "not_now",
+    "objection_type": null,
+    "return_date": null,
+    "recontact_date": "2026-12-07",
+    "referral": null
+  },
+  "covers": [
+    "class:not_now",
+    "recontact_date"
+  ]
+}
