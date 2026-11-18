@@ -3,13 +3,20 @@
 every I/O matrix row with its rows and ``events``, nothing stored after each refusal, the
 ``prod`` and ``test`` paths, an invalid stored allowlist, the logs, the binding query over rows
 raw-inserted in each status, and the checks, unique indexes and foreign key on raw writes (the
-nextronai.com checks included)."""
+nextronai.com checks included).
+
+Story 6.4: ``Sending.record_warmup`` storing the six columns with no event, replacing and
+clearing the record, each refusal (timezone unset, future start in the Sender's timezone, each
+bad field, unknown and removed inbox) with nothing stored and its log; ``cold_daily_caps`` over
+every status, the ramp and the ceiling setting (an unreadable one reads as 0);
+``inbox_caps``; ``Sending.inbox_caps`` on today's date in the Sender's timezone (UTC without
+one); and the warm-up CHECKs on raw writes."""
 
 import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -18,12 +25,19 @@ from sqlalchemy.exc import IntegrityError
 
 from nextron import main
 from nextron.app.queries import sending as sending_queries
-from nextron.app.queries.sending import SendingInboxView
+from nextron.app.queries.sending import InboxCapView, SendingInboxView
 from nextron.app.sending.api import RegisteredInbox, Sending
 from nextron.app.setup.api import Setup
 from nextron.db.models.base import new_id
 from nextron.db.uow import UnitOfWorkFactory
-from nextron.domain.sending_inbox import InboxRefused, InboxStatus, Refusal
+from nextron.domain.sending_inbox import (
+    InboxRefused,
+    InboxStatus,
+    Refusal,
+    WarmupRecord,
+    WarmupRefusal,
+    WarmupRefused,
+)
 from tests.fakes.clock import FrozenClock
 
 T0 = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -425,6 +439,12 @@ def test_the_views_carry_every_field(world: World) -> None:
         from_name=SENDER,
         status=InboxStatus.CONNECTING,
         created_at=T0,
+        warmup_started_on=None,
+        warmup_method=None,
+        warm_level=None,
+        warmup_tool_daily=0,
+        ramp_step=5,
+        ramp_target=30,
     )
     assert world.read(sending_queries.inboxes_for_binding) == (view,)
 
@@ -529,3 +549,254 @@ def test_a_sending_domain_with_inboxes_cannot_be_deleted(world: World) -> None:
     with pytest.raises(IntegrityError):
         world.sql("DELETE FROM sending_domains")
     assert len(world.domains()) == 1
+
+
+# Warm-up and Daily Caps (Story 6.4) -------------------------------------------------------------
+
+WARMUP_COLUMNS = (
+    "warmup_started_on, warmup_method, warm_level, warmup_tool_daily, ramp_step, ramp_target"
+)
+GOOD_WARMUP = ("2026-11-01", "Manual", "12", "0", "5", "30")
+LATE = date(2026, 12, 20)  # 49 days after 2026-11-01: fully ramped
+
+
+@pytest.fixture
+def zoned(world: World) -> World:
+    """``world`` with the Sender's timezone set to ``Asia/Kolkata`` (UTC+5:30)."""
+    world.save({"sender_timezone": "Asia/Kolkata"})
+    return world
+
+
+def warm(world: World, inbox_id: str, *texts: str) -> WarmupRecord:
+    with world.units.open():
+        return world.sending().record_warmup(inbox_id, *(texts or GOOD_WARMUP))
+
+
+def warmup_of(world: World, inbox_id: str) -> tuple[Any, ...]:
+    [row] = world.sql(f"SELECT {WARMUP_COLUMNS} FROM sending_inboxes WHERE id = ?", (inbox_id,))
+    return row
+
+
+def warm_refused(world: World, inbox_id: str, *texts: str) -> WarmupRefusal:
+    before = world.dump()
+    with pytest.raises(WarmupRefused) as caught:
+        warm(world, inbox_id, *texts)
+    assert world.dump() == before  # nothing stored
+    return caught.value.refusal
+
+
+def test_record_warmup_stores_the_six_columns_and_appends_no_event(
+    zoned: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    inbox_id = zoned.register(FIRST).inbox_id
+    events = zoned.events()
+    caplog.set_level(logging.INFO, logger=LOGGER)
+
+    record = warm(zoned, inbox_id)
+
+    assert record == WarmupRecord(date(2026, 11, 1), "manual", 12, 0, 5, 30)
+    assert warmup_of(zoned, inbox_id) == ("2026-11-01", "manual", 12, 0, 5, 30)
+    assert zoned.events() == events
+    [logged] = records(caplog, "sending_warmup_recorded")
+    assert logged.__dict__["inbox_id"] == inbox_id
+    assert FIRST not in caplog.text
+
+
+def test_record_warmup_replaces_the_record_and_blank_clears_it(zoned: World) -> None:
+    inbox_id = zoned.register(FIRST).inbox_id
+    warm(zoned, inbox_id)
+    warm(zoned, inbox_id, "2026-11-02", "Lemwarm", "20", "25", "3", "40")
+    assert warmup_of(zoned, inbox_id) == ("2026-11-02", "Lemwarm", 20, 25, 3, 40)
+
+    warm(zoned, inbox_id, "", "", "", "0", "5", "30")
+
+    assert warmup_of(zoned, inbox_id) == (None, None, None, 0, 5, 30)
+
+
+def test_without_the_sender_timezone_warmup_is_refused(world: World) -> None:
+    inbox_id = world.register(FIRST).inbox_id
+    assert warm_refused(world, inbox_id) is WarmupRefusal.TIMEZONE_UNSET
+
+
+def test_today_in_the_sender_timezone_is_allowed_and_tomorrow_refused(zoned: World) -> None:
+    inbox_id = zoned.register(FIRST).inbox_id
+    # 09:00 UTC is 14:30 on 2026-11-17 in Kolkata
+    refusal = warm_refused(zoned, inbox_id, "2026-11-18", *GOOD_WARMUP[1:])
+    assert refusal is WarmupRefusal.FUTURE_START
+    warm(zoned, inbox_id, "2026-11-17", *GOOD_WARMUP[1:])
+    assert warmup_of(zoned, inbox_id)[0] == "2026-11-17"
+
+
+def test_the_day_boundary_follows_the_sender_timezone(zoned: World) -> None:
+    inbox_id = zoned.register(FIRST).inbox_id
+    zoned.clock.set(datetime(2026, 11, 17, 20, 0, tzinfo=UTC))  # 01:30 on the 18th in Kolkata
+    warm(zoned, inbox_id, "2026-11-18", *GOOD_WARMUP[1:])
+    zoned.save({"sender_timezone": "UTC"})
+    refusal = warm_refused(zoned, inbox_id, "2026-11-18", *GOOD_WARMUP[1:])
+    assert refusal is WarmupRefusal.FUTURE_START
+
+
+@pytest.mark.parametrize(
+    ("texts", "refusal"),
+    [
+        (("2026-11-01", "manual", "101", "0", "5", "30"), WarmupRefusal.INVALID_WARM_LEVEL),
+        (("2026-11-01", "manual", "abc", "0", "5", "30"), WarmupRefusal.INVALID_WARM_LEVEL),
+        (("2026-11-31", "manual", "12", "0", "5", "30"), WarmupRefusal.INVALID_START),
+        (("2026-11-01", "", "12", "0", "5", "30"), WarmupRefusal.INVALID_METHOD),
+        (("2026-11-01", "manual", "12", "101", "5", "30"), WarmupRefusal.INVALID_TOOL_DAILY),
+        (("2026-11-01", "manual", "12", "0", "0", "30"), WarmupRefusal.INVALID_RAMP_STEP),
+        (("2026-11-01", "manual", "12", "0", "5", "51"), WarmupRefusal.INVALID_RAMP_TARGET),
+    ],
+)
+def test_a_bad_field_is_refused_and_nothing_is_stored(
+    zoned: World,
+    texts: tuple[str, ...],
+    refusal: WarmupRefusal,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    inbox_id = zoned.register(FIRST).inbox_id
+    caplog.set_level(logging.INFO, logger=LOGGER)
+
+    assert warm_refused(zoned, inbox_id, *texts) is refusal
+
+    [logged] = records(caplog, "sending_warmup_refused")
+    assert logged.__dict__["refusal"] == str(refusal)
+    assert logged.__dict__["inbox_id"] == inbox_id
+    for text in texts:
+        if len(text) > 3:
+            assert text not in caplog.text
+    assert warmup_of(zoned, inbox_id) == (None, None, None, 0, 5, 30)
+
+
+def test_an_unknown_or_removed_inbox_is_refused(zoned: World) -> None:
+    assert warm_refused(zoned, new_id()) is WarmupRefusal.UNKNOWN_INBOX
+    assert warm_refused(zoned, "not-a-ulid") is WarmupRefusal.UNKNOWN_INBOX
+    gone = raw_inbox(zoned, "gone@d.com", "removed", STAMP)
+    assert warm_refused(zoned, gone) is WarmupRefusal.INBOX_REMOVED
+    for n, status in enumerate(("connecting", "active", "paused", "auth_failed")):
+        inbox_id = raw_inbox(zoned, f"{status}@d{n}.com", status, STAMP)
+        warm(zoned, inbox_id)  # any listed inbox can record its warm-up
+        assert warmup_of(zoned, inbox_id)[2] == 12
+
+
+def warmed(world: World, address: str, status: str, created_at: str, tool: int = 0) -> str:
+    inbox_id = raw_inbox(world, address, status, created_at)
+    world.sql(
+        "UPDATE sending_inboxes SET warmup_started_on = '2026-11-01', warmup_method = 'manual', "
+        "warm_level = 30, warmup_tool_daily = ? WHERE id = ?",
+        (tool, inbox_id),
+    )
+    return inbox_id
+
+
+def test_cold_daily_caps_cover_every_listed_inbox_oldest_first(world: World) -> None:
+    active = warmed(world, "a@d1.com", "active", "2026-11-17T09:00:00.000000Z", tool=25)
+    connecting = warmed(world, "c@d2.com", "connecting", "2026-11-17T09:01:00.000000Z")
+    paused = warmed(world, "p@d3.com", "paused", "2026-11-17T09:02:00.000000Z")
+    fresh = raw_inbox(world, "f@d4.com", "active", "2026-11-17T09:03:00.000000Z")
+    warmed(world, "r@d5.com", "removed", "2026-11-17T08:00:00.000000Z")
+
+    caps = world.read(lambda: sending_queries.cold_daily_caps(LATE))
+
+    assert list(caps.items()) == [(active, 25), (connecting, 0), (paused, 0), (fresh, 0)]
+
+
+def test_cold_daily_caps_follow_the_ramp_and_the_ceiling_setting(world: World) -> None:
+    inbox_id = raw_inbox(world, "a@d1.com", "active", STAMP)
+    world.sql(
+        "UPDATE sending_inboxes SET warmup_started_on = '2026-11-01', warmup_method = 'manual', "
+        "warm_level = 12 WHERE id = ?",
+        (inbox_id,),
+    )
+
+    def cap(day: date) -> int:
+        return world.read(lambda: sending_queries.cold_daily_caps(day))[inbox_id]
+
+    assert [cap(date(2026, 11, day)) for day in (14, 15, 22)] == [0, 12, 17]
+    assert cap(LATE) == 30
+    world.save({"total_daily_ceiling": "20"})
+    assert cap(LATE) == 20
+    world.save({"total_daily_ceiling": "0"})
+    assert cap(LATE) == 0
+
+
+def test_an_unreadable_ceiling_reads_as_zero(world: World) -> None:
+    inbox_id = warmed(world, "a@d1.com", "active", STAMP)
+    world.save({"total_daily_ceiling": "40"})
+    world.sql("UPDATE settings SET value = 'lots' WHERE key = 'total_daily_ceiling'")
+
+    assert world.read(lambda: sending_queries.cold_daily_caps(LATE)) == {inbox_id: 0}
+    assert world.read(sending_queries.ceiling) == 0
+
+
+def test_inbox_caps_give_the_panel_its_facts(zoned: World) -> None:
+    active = warmed(zoned, "a@d1.com", "active", "2026-11-17T09:00:00.000000Z", tool=25)
+    fresh = raw_inbox(zoned, "f@d2.com", "connecting", "2026-11-17T09:01:00.000000Z")
+
+    caps = zoned.read(lambda: sending_queries.inbox_caps(LATE))
+
+    assert caps == (
+        InboxCapView(active, 49, 30, 25, 25, 0, 50),
+        InboxCapView(fresh, None, 0, 0, 0, 0, 50),
+    )
+
+
+def test_sending_inbox_caps_reads_today_in_the_sender_timezone(zoned: World) -> None:
+    inbox_id = warmed(zoned, "a@d1.com", "active", STAMP)
+    zoned.clock.set(datetime(2026, 11, 14, 23, 30, tzinfo=UTC))  # the 15th in Kolkata
+
+    found = zoned.read(zoned.sending().inbox_caps)
+
+    assert found.local_date == date(2026, 11, 15)
+    assert found.caps == (InboxCapView(inbox_id, 14, 30, 0, 30, 0, 50),)
+
+
+def test_sending_inbox_caps_fall_back_to_utc_without_a_timezone(world: World) -> None:
+    world.clock.set(datetime(2026, 11, 14, 23, 30, tzinfo=UTC))
+    assert world.read(world.sending().inbox_caps).local_date == date(2026, 11, 14)
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "warmup_started_on = '2026-11-01'",  # a partial record
+        "warm_level = 101",
+        "ramp_step = 0",
+        "ramp_target = 51",
+        "warmup_tool_daily = -1",
+        "ramp_step = NULL",
+    ],
+)
+def test_a_raw_warmup_write_that_breaks_a_rule_raises_integrity_error(
+    world: World, assignment: str
+) -> None:
+    inbox_id = raw_inbox(world, "a@d1.com", "active", STAMP)
+    with pytest.raises(IntegrityError):
+        world.sql(f"UPDATE sending_inboxes SET {assignment} WHERE id = ?", (inbox_id,))
+
+
+def test_an_unreadable_sender_timezone_falls_back_to_utc_and_refuses_warmup(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    inbox_id = world.register(FIRST).inbox_id
+    world.save({"sender_timezone": "Asia/Kolkata"})
+    world.sql("UPDATE settings SET value = 'Mars/Base' WHERE key = 'sender_timezone'")
+    world.clock.set(datetime(2026, 11, 14, 23, 30, tzinfo=UTC))  # the 15th in Kolkata
+    caplog.set_level(logging.INFO, logger=LOGGER)
+
+    assert world.read(world.sending().inbox_caps).local_date == date(2026, 11, 14)
+    assert warm_refused(world, inbox_id) is WarmupRefusal.TIMEZONE_UNSET
+    assert warmup_of(world, inbox_id) == (None, None, None, 0, 5, 30)
+    [logged] = records(caplog, "sending_warmup_refused")
+    assert logged.__dict__["inbox_id"] == inbox_id
+
+
+def test_a_refusal_for_an_id_that_is_not_a_ulid_logs_no_inbox_id(
+    zoned: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER)
+
+    warm_refused(zoned, "not-a-ulid")
+
+    [logged] = records(caplog, "sending_warmup_refused")
+    assert "inbox_id" not in logged.__dict__

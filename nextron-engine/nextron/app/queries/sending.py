@@ -1,14 +1,33 @@
 """Read API of the ``sending`` service (AD-3, AD-21, FR-32, FR-64).
 
-Import rule: ``nextron.domain`` and ``nextron.db.repos.sending`` only.
+Import rule: ``nextron.domain`` and ``nextron.db.repos.sending``, plus one read of
+``nextron.app.queries.setup`` (the ``total_daily_ceiling`` setting, Story 6.4).
 
 The inbox reads return ``SendingInboxView(id, address, label, sending_domain_id, domain,
-from_name, status, created_at)`` tuples, oldest first (by ``created_at``, then ``id``):
+from_name, status, created_at, warmup_started_on, warmup_method, warm_level, warmup_tool_daily,
+ramp_step, ramp_target)`` tuples, oldest first (by ``created_at``, then ``id``); ``.plan`` is the
+inbox's ``sending_policy.WarmupPlan``:
 
 - ``inboxes()``: every Sending Inbox that isn't ``removed`` (the Sending Inboxes panel);
 - ``inboxes_for_binding()``: only the inboxes at a ``BINDABLE_STATUSES`` status (``connecting``
   and ``active``): the inboxes a new Sequence may bind to (AD-21). Enrollment (Story 4.8) picks
   from these.
+
+**Daily Caps (Story 6.4, FR-33, FR-34, AD-11).** ``local_date`` is the calendar date in
+``sender_timezone`` (``sending_policy.local_date``); the caller passes it.
+
+- ``ceiling()``: the ``total_daily_ceiling`` setting through ``queries.setup.get``; a stored
+  text that no longer parses reads as 0, so cold sends stop rather than exceed it.
+- ``cold_daily_caps(local_date) -> dict[str, int]``: every listed (non-``removed``) inbox id,
+  oldest first, to ``sending_policy.cold_cap(plan, local_date, ceiling())`` for an ``active``
+  inbox and 0 for any other status. The send gate (6.9) and Epic 4's capacity (4.8, 4.10) read
+  it (Story 4.8 read a placeholder of 0 for every bindable inbox until this story).
+  ``local_date`` must be a ``date`` (a ``datetime`` is refused with ``TypeError``).
+- ``inbox_caps(local_date)``: one ``InboxCapView(inbox_id, warmup_days, daily_cap, tool_sends,
+  cold_cap, cap_used, ceiling)`` per listed inbox, oldest first, for the Sending Inboxes panel:
+  ``warmup_days`` (``None`` when unrecorded), the ramped ``daily_cap``, the warm-up tool sends
+  counted toward the ceiling, the ``cold_cap`` (as ``cold_daily_caps``), ``cap_used`` (0 until
+  Story 6.10 stores sent messages to count) and the ceiling.
 
 **Sending Domain authentication (Story 6.5).** A *listed* Sending Domain is one with at least
 one inbox at a ``LISTED_STATUSES`` status (any but ``removed``); only those are checked and
@@ -26,21 +45,14 @@ reported.
 - ``health_issues(now)``: one ``HealthIssue("domain_auth_failing", <id>, "<domain>: <verdict
   text>", detail=RECHECK_HINT)`` per listed Sending Domain whose verdict is blocked, by domain.
 
-``cold_daily_caps(local_date) -> Mapping[str, int]`` (Story 4.8) is each bindable inbox's cold
-Daily Cap on ``local_date`` (a calendar day in the ``sender_timezone``), by inbox id. It is a
-placeholder until Epic 6's warm-up ramp: every bindable inbox has cap 0, so
-``domain.sending_policy.pick_inbox`` falls back to the fewest live Enrollments. ``local_date``
-must be a ``date`` (a ``datetime`` is refused with ``TypeError``).
-
 Every read goes through the current unit of work, read-only ones included.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from types import MappingProxyType
 from typing import Final
 
+from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.sending import checks as checks_repo
 from nextron.db.repos.sending import domains as domains_repo
 from nextron.db.repos.sending import inboxes as inboxes_repo
@@ -59,6 +71,9 @@ from nextron.domain.domain_auth import (
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.sending_inbox import BINDABLE_STATUSES, TERMINAL_STATUSES, InboxStatus
+from nextron.domain.sending_policy import WarmupPlan, cold_cap, daily_cap, tool_send_figure
+from nextron.domain.sending_policy import warmup_days as count_warmup_days
+from nextron.domain.settings_schema import InvalidSettingValue, Key
 
 LISTED_STATUSES: Final = tuple(
     status for status in InboxStatus if status not in TERMINAL_STATUSES
@@ -77,6 +92,23 @@ class SendingInboxView:
     from_name: str
     status: InboxStatus
     created_at: datetime
+    warmup_started_on: date | None
+    warmup_method: str | None
+    warm_level: int | None
+    warmup_tool_daily: int
+    ramp_step: int
+    ramp_target: int
+
+    @property
+    def plan(self) -> WarmupPlan:
+        """The inbox's warm-up record and ramp."""
+        return WarmupPlan(
+            self.warmup_started_on,
+            self.warm_level,
+            self.warmup_tool_daily,
+            self.ramp_step,
+            self.ramp_target,
+        )
 
 
 def _view(row: StoredInbox) -> SendingInboxView:
@@ -89,6 +121,12 @@ def _view(row: StoredInbox) -> SendingInboxView:
         from_name=row.from_name,
         status=InboxStatus(row.status),
         created_at=row.created_at,
+        warmup_started_on=row.warmup_started_on,
+        warmup_method=row.warmup_method,
+        warm_level=row.warm_level,
+        warmup_tool_daily=row.warmup_tool_daily,
+        ramp_step=row.ramp_step,
+        ramp_target=row.ramp_target,
     )
 
 
@@ -100,6 +138,62 @@ def inboxes() -> tuple[SendingInboxView, ...]:
 def inboxes_for_binding() -> tuple[SendingInboxView, ...]:
     """The Sending Inboxes a new Sequence may bind to (``BINDABLE_STATUSES``), oldest first."""
     return tuple(_view(row) for row in inboxes_repo.listed(BINDABLE_STATUSES))
+
+
+# Daily Caps (Story 6.4) -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class InboxCapView:
+    """One listed inbox's warm-up days and caps on a local date."""
+
+    inbox_id: str
+    warmup_days: int | None
+    daily_cap: int
+    tool_sends: int
+    cold_cap: int
+    cap_used: int
+    ceiling: int
+
+
+def ceiling() -> int:
+    """The ``total_daily_ceiling`` setting; 0 when its stored text no longer parses."""
+    try:
+        return int(setup_queries.get(Key.TOTAL_DAILY_CEILING))
+    except InvalidSettingValue:
+        return 0
+
+
+def _cold_cap(inbox: SendingInboxView, local_date: date, limit: int) -> int:
+    if inbox.status is not InboxStatus.ACTIVE:
+        return 0
+    return cold_cap(inbox.plan, local_date, limit)
+
+
+def cold_daily_caps(local_date: date) -> dict[str, int]:
+    """Every listed inbox id, oldest first, to its cold Daily Cap on ``local_date`` under the
+    ceiling; 0 for an inbox that isn't ``active``."""
+    if isinstance(local_date, datetime) or not isinstance(local_date, date):
+        raise TypeError("cold_daily_caps takes a date")
+    limit = ceiling()
+    return {inbox.id: _cold_cap(inbox, local_date, limit) for inbox in inboxes()}
+
+
+def inbox_caps(local_date: date) -> tuple[InboxCapView, ...]:
+    """Each listed inbox's warm-up days and caps on ``local_date``, oldest first."""
+    limit = ceiling()
+    return tuple(
+        InboxCapView(
+            inbox_id=inbox.id,
+            warmup_days=count_warmup_days(inbox.plan, local_date),
+            daily_cap=daily_cap(inbox.plan, local_date),
+            tool_sends=tool_send_figure(inbox.plan),
+            cold_cap=_cold_cap(inbox, local_date, limit),
+            cap_used=0,
+            ceiling=limit,
+        )
+        for inbox in inboxes()
+    )
 
 
 # Sending Domain authentication (Story 6.5) ----------------------------------------------------
@@ -190,9 +284,3 @@ def health_issues(now: datetime) -> tuple[HealthIssue, ...]:
         if view.verdict.blocked
     )
 
-
-def cold_daily_caps(local_date: date) -> Mapping[str, int]:
-    """Each bindable inbox's cold Daily Cap on ``local_date``: 0 until Epic 6's ramp."""
-    if isinstance(local_date, datetime) or not isinstance(local_date, date):
-        raise TypeError("cold_daily_caps takes a date")
-    return MappingProxyType({inbox.id: 0 for inbox in inboxes_for_binding()})

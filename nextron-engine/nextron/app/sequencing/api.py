@@ -35,10 +35,11 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
    counter (round-robin in name order, skipping inactive Variants). The inbox is
    ``pick_inbox`` over the bindable inboxes, each weighed by ``capacity_forecast(its cold Daily
    Cap, its follow-ups due)`` on today's date in the ``sender_timezone`` (UTC while that is unset
-   or unreadable), its live Enrollments and when it was registered. Until Epic 6 every cap is 0
-   (``queries.sending.cold_daily_caps``) and no follow-up is due until Story 4.9 fills
-   ``_follow_ups_due``, so the inbox with the fewest live Enrollments wins, then the earliest
-   registered.
+   or unreadable), its live Enrollments and when it was registered. The cap is Story 6.4's
+   ramped cold cap (``queries.sending.cold_daily_caps``: 0 until the inbox's warm-up is
+   recorded and 14 days old) and no follow-up is due until Story 4.9 fills
+   ``_follow_ups_due``, so while every cap is 0 the inbox with the fewest live Enrollments
+   wins, then the earliest registered.
 4. **Writes**, in order: the Campaign's ``variant_counters`` row upserted; the Enrollment
    inserted ``active`` with its ``variant_id``, ``sending_inbox_id``, ``sequence_id``,
    ``sequence_version``, ``offer_id`` and ``origin`` bound for good, and one ``events`` row

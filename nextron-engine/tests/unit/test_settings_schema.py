@@ -527,6 +527,7 @@ def test_the_declared_keys_in_order() -> None:
         "crawl_max_pages",
         "ats_hosts",
         "unsub_active_kid",
+        "total_daily_ceiling",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -553,6 +554,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
         setting(Key.UNSUB_ACTIVE_KID),
+        setting(Key.TOTAL_DAILY_CEILING),
     )
 
 
@@ -1287,7 +1289,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
             "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
-            "sender_timezone, sink_allowlist, unsub_active_kid, us_solicitation_label"
+            "sender_timezone, sink_allowlist, total_daily_ceiling, unsub_active_kid, "
+            "us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]
@@ -1319,3 +1322,34 @@ def test_the_module_checks_its_schema_at_import() -> None:
     assert tree.body[-1].lineno > max(
         node.lineno for node in tree.body if isinstance(node, ast.Assign | ast.AnnAssign)
     )
+
+
+# Row: Setting (total_daily_ceiling, Story 6.4) --------------------------------------------------
+
+
+def test_total_daily_ceiling_is_an_integer_from_0_to_100_defaulting_to_50() -> None:
+    found = setting(Key.TOTAL_DAILY_CEILING)
+
+    assert (found.key, found.type, found.section) == (
+        "total_daily_ceiling",
+        SettingType.INTEGER,
+        Section.SENDING,
+    )
+    assert found.label == "Total daily ceiling per inbox"
+    assert found.unit.startswith("0 to 100. ")
+    assert found.default == 50 and not found.required and found.timezone_key is None
+    assert [(rule.name, rule.message) for rule in found.rules] == [
+        ("minimum", "must be at least 0"),
+        ("maximum", "must be at most 100"),
+    ]
+    assert default_text(found) == "50"
+    assert parse(found, "0") == 0 and parse(found, "100") == 100
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"), [("101", "maximum"), ("-1", "minimum"), ("x", "integer"), ("1.5", "integer")]
+)
+def test_total_daily_ceiling_refuses_anything_outside_0_to_100(text: str, rule: str) -> None:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.TOTAL_DAILY_CEILING), text)
+    assert raised.value.rule == rule

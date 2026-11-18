@@ -137,6 +137,14 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   inbox through ``sending`` (``Sending.register_inbox``) in its own unit of work, then renders
   the panel again in a read-only one, with "Inbox registered." or the ``InboxRefused`` message
   and the typed values. The page also includes the Sending Domain authentication section.
+- ``POST /inboxes/warmup`` (``inbox_warmup``, ``@personal_data(True)``): one inbox's warm-up
+  form (Story 6.4, FR-33, FR-34). Its fields, apart from ``csrf_token``, must be exactly one
+  ``inbox_id`` (a ULID) and one each of ``warmup_started_on``, ``warmup_method``,
+  ``warm_level``, ``warmup_tool_daily``, ``ramp_step`` and ``ramp_target`` (anything else is
+  ``MalformedForm``, 400); it records them through ``Sending.record_warmup`` in its own unit of
+  work, then renders the panel again in a read-only one, with "Warm-up saved." or the
+  ``WarmupRefused`` message and that inbox's typed values. The panel shows each inbox's
+  warm-up facts and caps from ``Sending.inbox_caps()``.
 - ``GET /inboxes/auth`` (``inbox_auth_panel``) and ``POST /inboxes/auth/recheck``
   (``inbox_auth_recheck``), both ``@personal_data(False)`` (domain names and check results
   only): the Sending Domain authentication section (Story 6.5, FR-64), which HTMX re-fetches
@@ -320,7 +328,7 @@ from nextron.domain.playbook import SyncTrigger
 from nextron.domain.prompts import InvalidPrompts
 from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.segments import InvalidSegments
-from nextron.domain.sending_inbox import InboxRefused
+from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.domain.suppression_list import (
@@ -1217,9 +1225,15 @@ def create_app(
         notice: credential_rows.Notice | None = None,
         address: str = "",
         label: str = "",
+        typed_warmup: inbox_rows.WarmupForm | None = None,
     ) -> HTMLResponse:
         context = inbox_rows.panel_context(
-            sending_queries.inboxes(), notice=notice, address=address, label=label
+            sending_queries.inboxes(),
+            caps=sending.inbox_caps().caps,
+            notice=notice,
+            address=address,
+            label=label,
+            typed_warmup=typed_warmup,
         )
         if template == inbox_rows.PAGE_TEMPLATE:
             context.update(inbox_rows.auth_context(domain_checks.auths()))
@@ -1258,6 +1272,38 @@ def create_app(
         with units.open(read_only=True):
             return inboxes_answer(
                 request, inbox_rows.PANEL_TEMPLATE, notice=inbox_rows.registered()
+            )
+
+    @app.post("/inboxes/warmup", name="inbox_warmup")
+    @personal_data(True)  # answers with the whole panel, which shows inbox addresses
+    def inbox_warmup(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        typed = inbox_rows.submitted_warmup(fields)
+        try:
+            with units.open():
+                sending.record_warmup(
+                    typed.inbox_id,
+                    typed.warmup_started_on,
+                    typed.warmup_method,
+                    typed.warm_level,
+                    typed.warmup_tool_daily,
+                    typed.ramp_step,
+                    typed.ramp_target,
+                )
+        except WarmupRefused as refused:
+            # 200, so HTMX swaps the panel in; nothing was stored, and that inbox's typed
+            # values stay
+            with units.open(read_only=True):
+                return inboxes_answer(
+                    request,
+                    inbox_rows.PANEL_TEMPLATE,
+                    notice=inbox_rows.refused(refused),
+                    typed_warmup=typed,
+                )
+        with units.open(read_only=True):
+            return inboxes_answer(
+                request, inbox_rows.PANEL_TEMPLATE, notice=inbox_rows.warmup_saved()
             )
 
     @app.get("/inboxes/auth", name="inbox_auth_panel")

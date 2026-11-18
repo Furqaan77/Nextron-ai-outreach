@@ -345,3 +345,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-3-10-deploy-the-unsubscribe-worker.md`
   summary: Run `workers/unsubscribe/test/dev.test.mjs` (the `wrangler dev --local` acceptance test) in an automated gate. Today only a manual `npm test` runs it; pytest runs only the handler tests.
   evidence: Review pass 1 of Story 3.10 (VG, medium). A `wrangler.jsonc` change that wrangler rejects, or a dependency on the fake KV's shape (for example `expiration`), would pass `suite_lock.py`. Decision 8 scoped the gate this way because the test needs `node_modules` and two ports.
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total.md`
+  summary: Show each inbox's warm-up days and today's Daily Cap use on the Health panel (UX-DR29), and count real cold sends for "Cap used" once Story 6.10 records sent messages.
+  evidence: Story 6.4 planning: its ACs cover only the inbox panel, and no sent messages exist to count before 6.10.

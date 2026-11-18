@@ -546,6 +546,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "sender_timezone",
         "alert_chat_id",
         "unsub_active_kid",
+        "total_daily_ceiling",
         "quota_hunter_credits",
         "quota_prospeo_credits",
         "quota_places_enterprise",

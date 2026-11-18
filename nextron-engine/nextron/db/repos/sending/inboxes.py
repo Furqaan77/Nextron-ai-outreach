@@ -11,15 +11,22 @@ the running use case's transaction. It checks nothing; ``nextron.app.sending`` d
 - ``insert(...) -> id``: a new row at the given status;
 - ``listed(statuses)``: the inboxes at those statuses, by ``created_at``, then ``id``;
 - ``addresses_of(sending_domain_id, statuses)``: the addresses of that Sending Domain's inboxes
-  at those statuses, sorted (Story 6.5).
+  at those statuses, sorted (Story 6.5);
+- ``status_of(inbox_id)``: that inbox's status, or ``None`` when no inbox has that id (Story
+  6.4);
+- ``update_warmup(inbox_id, *, warmup_started_on, warmup_method, warm_level, warmup_tool_daily,
+  ramp_step, ramp_target) -> bool``: set the six warm-up columns; whether a row changed (Story
+  6.4).
+
+``StoredInbox`` carries the six warm-up columns too (Story 6.4).
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import insert as insert_rows
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from nextron.db.models.base import new_id
 from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
@@ -38,6 +45,12 @@ class StoredInbox:
     from_name: str
     status: str
     created_at: datetime
+    warmup_started_on: date | None
+    warmup_method: str | None
+    warm_level: int | None
+    warmup_tool_daily: int
+    ramp_step: int
+    ramp_target: int
 
 
 def id_by_address(address: str) -> str | None:
@@ -86,6 +99,12 @@ def listed(statuses: Iterable[str]) -> list[StoredInbox]:
             SendingInboxRecord.from_name,
             SendingInboxRecord.status,
             SendingInboxRecord.created_at,
+            SendingInboxRecord.warmup_started_on,
+            SendingInboxRecord.warmup_method,
+            SendingInboxRecord.warm_level,
+            SendingInboxRecord.warmup_tool_daily,
+            SendingInboxRecord.ramp_step,
+            SendingInboxRecord.ramp_target,
         )
         .join(SendingDomainRecord, SendingDomainRecord.id == SendingInboxRecord.sending_domain_id)
         .where(SendingInboxRecord.status.in_(wanted))
@@ -104,3 +123,37 @@ def addresses_of(sending_domain_id: str, statuses: Iterable[str]) -> list[str]:
         .order_by(SendingInboxRecord.address)
     )
     return list(rows.scalars())
+
+
+def status_of(inbox_id: str) -> str | None:
+    """The status of the inbox ``inbox_id``, or ``None`` when there is none."""
+    found = current().session.execute(
+        select(SendingInboxRecord.status).where(SendingInboxRecord.id == inbox_id)
+    )
+    return found.scalar_one_or_none()
+
+
+def update_warmup(
+    inbox_id: str,
+    *,
+    warmup_started_on: date | None,
+    warmup_method: str | None,
+    warm_level: int | None,
+    warmup_tool_daily: int,
+    ramp_step: int,
+    ramp_target: int,
+) -> bool:
+    """Set the inbox's six warm-up columns; whether a row changed."""
+    result = current().session.execute(
+        update(SendingInboxRecord)
+        .where(SendingInboxRecord.id == inbox_id)
+        .values(
+            warmup_started_on=warmup_started_on,
+            warmup_method=warmup_method,
+            warm_level=warm_level,
+            warmup_tool_daily=warmup_tool_daily,
+            ramp_step=ramp_step,
+            ramp_target=ramp_target,
+        )
+    )
+    return bool(result.rowcount)  # type: ignore[attr-defined]

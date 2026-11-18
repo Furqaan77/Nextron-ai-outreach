@@ -107,6 +107,7 @@ from nextron.domain.fetch_policy import is_denied
 from nextron.domain.identity import IdentityError, url_host
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.prices import names_price
+from nextron.domain.sending_policy import CEILING_RANGE, DEFAULT_CEILING
 from nextron.domain.sink import is_sink_recipient
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
@@ -178,6 +179,7 @@ class Key(StrEnum):
     CRAWL_MAX_PAGES = "crawl_max_pages"
     ATS_HOSTS = "ats_hosts"
     UNSUB_ACTIVE_KID = "unsub_active_kid"
+    TOTAL_DAILY_CEILING = "total_daily_ceiling"
 
 
 class _Required(Enum):
@@ -1275,6 +1277,24 @@ SCHEMA: Mapping[str, Setting] = _declare(
         rules=(
             minimum(UNSUB_MIN_KID, str(UNSUB_MIN_KID)),
             maximum(UNSUB_MAX_KID, str(UNSUB_MAX_KID)),
+        ),
+    ),
+    # The total daily ceiling (Story 6.4, FR-34, NFR-22): per inbox, its cold sends plus its
+    # warm-up tool sends a day; nextron.domain.sending_policy.cold_cap reads it.
+    Setting(
+        key=Key.TOTAL_DAILY_CEILING,
+        type=SettingType.INTEGER,
+        section=Section.SENDING,
+        label="Total daily ceiling per inbox",
+        unit=(
+            f"{CEILING_RANGE[0]} to {CEILING_RANGE[1]}. The most emails one Sending Inbox sends "
+            "a day, cold emails and its warm-up tool's sends together; cold sends get what is "
+            "left after the warm-up tool's sends, up to the inbox's Daily Cap."
+        ),
+        default=DEFAULT_CEILING,
+        rules=(
+            minimum(CEILING_RANGE[0], str(CEILING_RANGE[0])),
+            maximum(CEILING_RANGE[1], str(CEILING_RANGE[1])),
         ),
     ),
 )

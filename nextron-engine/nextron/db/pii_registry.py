@@ -330,6 +330,14 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "from_name": PiiClass.NONE,
         "status": PiiClass.NONE,
         "created_at": PiiClass.NONE,
+        # Story 6.4: the inbox's warm-up record and Daily Cap ramp (a date, a method or tool
+        # name, and counts), about Nextron's own inbox.
+        "warmup_started_on": PiiClass.NONE,
+        "warmup_method": PiiClass.NONE,
+        "warm_level": PiiClass.NONE,
+        "warmup_tool_daily": PiiClass.NONE,
+        "ramp_step": PiiClass.NONE,
+        "ramp_target": PiiClass.NONE,
     },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.

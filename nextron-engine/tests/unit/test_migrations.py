@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0038_4_8_enrollments"
+HEAD = "0039_6_4_inbox_warmup"
 
 
 @pytest.fixture
@@ -950,3 +950,82 @@ def test_0036_adds_the_legal_form_columns_in_place_and_leaves_every_lead_uncheck
         "UPDATE leads SET legal_form = 'ltd', legal_form_status = 'confirmed' "
         f"WHERE id = '{lead}'",
     )
+
+
+WARMUP_COLUMNS = (
+    "warmup_started_on",
+    "warmup_method",
+    "warm_level",
+    "warmup_tool_daily",
+    "ramp_step",
+    "ramp_target",
+)
+
+
+def test_0039_keeps_every_inbox_unrecorded_with_the_default_ramp_and_checks_the_warmup(
+    tmp_path: Path,
+) -> None:
+    """An inbox stored before 0039 (Story 6.4) keeps its row, reads as warm-up unrecorded with
+    the default ramp, and keeps its foreign key and unique address; the new checks refuse a
+    partial record and an out-of-range value."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0038_4_8_enrollments":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0038_4_8_enrollments")
+    at = "2026-11-18T09:00:00.000000Z"
+    domain, inbox = "01JD3QZ8X5V9K2M7N4P6R8T0E0", "01JD3QZ8X5V9K2M7N4P6R8T0E1"
+    run_sql(
+        path,
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{domain}', "
+        f"'nextron-ai.com', '{at}')",
+        "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, status, "
+        f"created_at) VALUES ('{inbox}', 'furqaan@nextron-ai.com', 'Main', '{domain}', "
+        f"'Furqaan Ahmed', 'active', '{at}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0038_4_8_enrollments", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(
+            f"SELECT id, address, label, status, {', '.join(WARMUP_COLUMNS)} FROM sending_inboxes"
+        ).fetchall()
+        keys = reader.execute("PRAGMA foreign_key_list(sending_inboxes)").fetchall()
+        indexes = [row[1] for row in reader.execute("PRAGMA index_list(sending_inboxes)")]
+    finally:
+        reader.close()
+    assert rows == [
+        (inbox, "furqaan@nextron-ai.com", "Main", "active", None, None, None, 0, 5, 30)
+    ]
+    assert [(row[2], row[3], row[4]) for row in keys] == [
+        ("sending_domains", "sending_domain_id", "id")
+    ]
+    assert "uq_sending_inboxes_address" in indexes
+    run_sql(
+        path,
+        "UPDATE sending_inboxes SET warmup_started_on = '2026-11-01', warmup_method = 'manual', "
+        f"warm_level = 12, warmup_tool_daily = 100, ramp_step = 10, ramp_target = 50 "
+        f"WHERE id = '{inbox}'",
+    )
+    for assignment, check in (
+        ("warmup_method = NULL", "warmup_record"),
+        ("warm_level = NULL", "warmup_record"),
+        ("warmup_started_on = NULL", "warmup_record"),
+        ("warm_level = 101", "warmup_ranges"),
+        ("warm_level = -1", "warmup_ranges"),
+        ("warmup_tool_daily = 101", "warmup_ranges"),
+        ("ramp_step = 0", "warmup_ranges"),
+        ("ramp_step = 11", "warmup_ranges"),
+        ("ramp_target = 0", "warmup_ranges"),
+        ("ramp_target = 51", "warmup_ranges"),
+        ("warmup_method = ''", "warmup_ranges"),
+        (f"warmup_method = '{'x' * 41}'", "warmup_ranges"),
+        ("status = 'warming'", "status"),
+        ("address = 'x@nextronai.com'", "not_brand"),
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=rf"ck_sending_inboxes_{check}$"):
+            run_sql(path, f"UPDATE sending_inboxes SET {assignment} WHERE id = '{inbox}'")

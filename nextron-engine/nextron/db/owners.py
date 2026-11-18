@@ -307,6 +307,12 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "from_name",
             "status",
             "created_at",
+            "warmup_started_on",
+            "warmup_method",
+            "warm_level",
+            "warmup_tool_daily",
+            "ramp_step",
+            "ramp_target",
         ),
     },
     "domain_checks": {

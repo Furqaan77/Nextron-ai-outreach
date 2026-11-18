@@ -183,6 +183,7 @@ FILES = [
     "nextron/db/alembic/versions/0036_2_12_legal_form.py",
     "nextron/db/alembic/versions/0037_3_14_erasure_receipts.py",
     "nextron/db/alembic/versions/0038_4_8_enrollments.py",
+    "nextron/db/alembic/versions/0039_6_4_inbox_warmup.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",

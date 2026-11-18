@@ -2268,6 +2268,52 @@ causes are `operator`, `bounce_rate`, `policy_bounce`, `blocklist` and `spam_rat
 | `reconsent` | `auth_failed` | `active` | `reconsented` |
 | `remove` | every status except `removed` | `removed` | `operator_removed` |
 
+### Warm-up and Daily Caps
+
+A new Sending Inbox sends no cold email before 14 days of recorded warm-up, ramps its cold Daily
+Cap slowly, and counts its warm-up tool's sends toward a total daily ceiling (FR-33, FR-34,
+FR-19, NFR-22, AD-11, Story 6.4). The engine never runs warm-up exchanges itself: warm-up is
+done by hand or by an outside tool, and the engine only records its facts
+(`tests/contracts/test_warmup_contracts.py` checks that no job type, trigger, port, adapter or
+function is named for warm-up, outside an allowlist of the record, read and check functions).
+
+**Recording warm-up.** Under the inbox table, the Sending Inboxes page shows a "Warm-up:
+<label>" section for each inbox with a form (`POST /inboxes/warmup`, **Save warm-up**):
+
+| Field | Allowed | Default |
+|---|---|---|
+| Warm-up started on | `YYYY-MM-DD`, not after today in the Sender's timezone | blank |
+| Warm-up method | `manual` (any case) or the warm-up tool's name, 1 to 40 characters | blank |
+| Warm level | 0 to 100: the Daily Cap on day 14 | blank |
+| Warm-up tool sends a day | 0 to 100 | 0 |
+| Ramp step a week | 1 to 10 | 5 |
+| Ramp target | 1 to 50 | 30 |
+
+The start date, method and warm level are recorded together: leave all three blank to clear
+the record (the cap goes back to 0). Recording needs the Sender's timezone; a refusal names the
+field, never the value, and keeps what was typed. A removed inbox can't be changed. Saving
+changes no status and appends no `events` row; the log line is `sending_warmup_recorded` with
+the inbox id only.
+
+**The Daily Cap** (`nextron.domain.sending_policy`, days are calendar days in
+`sender_timezone`): 0 while warm-up is unrecorded or under 14 days; from day 14,
+`min(target, min(warm level, target) + step × ((days − 14) ÷ 7))`. With a start of 1 November,
+warm level 12, step 5 and target 30, the cap is 0 on 14 November, 12 on the 15th, 17 on the
+22nd, 22 on the 29th, 27 on 6 December and 30 from 13 December.
+
+**The total daily ceiling** (setting `total_daily_ceiling`, Settings page, Sending section,
+0 to 100, default 50) is per inbox and includes its warm-up tool's sends: the cold cap is
+`max(0, min(Daily Cap, ceiling − tool sends))`, where tool sends is the larger of "Warm-up tool
+sends a day" and the day's other sent mail (Story 6.8 supplies that count). A Daily Cap of 30
+with 25 tool sends under a ceiling of 50 leaves 25 cold sends; a ceiling at or below the tool
+sends leaves 0. Only an `active` inbox gets a cold cap; every other status gets 0.
+`queries.sending.cold_daily_caps(local_date)` gives each listed inbox's cold cap for the send
+gate (Story 6.9) and Epic 4's capacity, and `capacity_forecast` subtracts the follow-ups due.
+
+Each inbox's section shows Recorded warm-up (N days, or Not recorded), Today's cap (the cold
+cap, marked "(inbox not active)" when it isn't), Cap used (0 until Story 6.10 counts sent mail)
+and the Ceiling with the warm-up tool sends inside it.
+
 ### Sending Domain authentication
 
 No cold email leaves from a Sending Domain that Gmail, Yahoo or Microsoft would reject or
@@ -2782,6 +2828,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
 | `0037_3_14_erasure_receipts` | `erasure_receipts` (a foreign key to `contacts` with no cascade, `ix_erasure_receipts_contact_id`, reference, `dsr` reference, cause and outcome checks; `trg_erasure_receipts_no_delete` and `trg_erasure_receipts_immutable`), `erasure_receipt_stores` (a foreign key to `erasure_receipts` with no cascade, `ix_erasure_receipt_stores_receipt_id`, store, status, detail and no-`@` checks, unique on `receipt_id` and `store`; triggers: no delete, insert never replaces, update only from `pending` with the store and action unchanged) and `trg_data_subject_requests_receipt` (a request's `receipt_id` must name a receipt of its own Contact) (see [Erasure receipts and the stores outside the database](#erasure-receipts-and-the-stores-outside-the-database)) | `compliance` |
 | `0038_4_8_enrollments` | `enrollments` (foreign keys to `leads`, `contacts`, `campaigns`, `variants`, `sending_inboxes`, `sequences` and `offers` with no cascade; origin, status, cause, ended and version checks; the partial unique index `uq_enrollments_one_live_per_lead`; `ix_enrollments_contact_id`, `ix_enrollments_sending_inbox_id`; triggers `trg_enrollments_bound` (the bound Variant, inbox, Sequence and Offer never change) and `trg_enrollments_erased_insert`) and `variant_counters` (one per Campaign, `uq_variant_counters_campaign_id`) (see [Enrollments](#enrollments)) | `sequencing` |
+| `0039_6_4_inbox_warmup` | rebuilds `sending_inboxes` (from 0018's exact table, which 0019 to 0038 leave unchanged; every row, check, the foreign key to `sending_domains` and `uq_sending_inboxes_address` kept) with the nullable warm-up record `warmup_started_on` (date), `warmup_method` (40) and `warm_level`, and the ramp `warmup_tool_daily` (default 0), `ramp_step` (default 5) and `ramp_target` (default 30); `ck_sending_inboxes_warmup_record` (the record is all NULL or all set) and `ck_sending_inboxes_warmup_ranges` (see [Warm-up and Daily Caps](#warm-up-and-daily-caps)) | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
