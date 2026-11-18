@@ -7,6 +7,10 @@ current unit of work, read-only ones included.
   that id (a text that isn't a ULID included).
 - ``contacts(lead_id)``: the Lead's Contacts as ``StoredContact`` rows, oldest first (by
   ``created_at``, then ``id``); empty for an unknown Lead (a text that isn't a ULID included).
+- ``contacts_with_email(email)`` (Story 3.5): the Contacts whose stored ``email`` (always
+  normalised, ``identity.normalize_email``) is exactly ``email``, oldest first; empty for a
+  value that isn't a ``str``. ``Compliance.suppress`` reads it for an address the Operator
+  typed.
 - ``provenance(contact_id)``: the Contact's Provenance Records as ``StoredProvenance`` rows, by
   ``retrieved_at``, then ``id``; empty for an unknown Contact.
 - ``lead_provenance(lead_id)`` (Story 2.4): the Provenance Records of every Contact of the
@@ -39,6 +43,7 @@ __all__ = [
     "ats_links",
     "contact",
     "contacts",
+    "contacts_with_email",
     "crawl_run",
     "crawled_pages",
     "latest_crawl_run",
@@ -59,6 +64,13 @@ def contacts(lead_id: str) -> tuple[StoredContact, ...]:
     if not is_ulid(lead_id):
         return ()
     return contacts_repo.for_lead(lead_id)
+
+
+def contacts_with_email(email: str) -> tuple[StoredContact, ...]:
+    """The Contacts whose ``email`` is ``email``, oldest first."""
+    if not isinstance(email, str):
+        return ()
+    return contacts_repo.with_email(email)
 
 
 def provenance(contact_id: str) -> tuple[StoredProvenance, ...]:

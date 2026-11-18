@@ -52,6 +52,9 @@ the CSV import page runs it, so it needs real units of work too. Its ``ContactMa
 ``upload(**texts, file=...)`` builds a ``multipart/form-data`` body as a browser would, with its
 ``Content-Type``.
 
+Its ``Compliance`` (``compliance``, Story 3.5) is ``Compliance(clock)``; the Suppression List
+panel runs its use cases, so it needs real units of work too.
+
 Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
@@ -71,6 +74,7 @@ from fastapi import FastAPI
 
 from nextron import main
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.compliance.api import Compliance
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -276,6 +280,7 @@ class Dashboard:
     restore_tests: RestoreTests = field(init=False)
     lead_imports: LeadImports = field(init=False)
     sending: Sending = field(init=False)
+    compliance: Compliance = field(init=False)
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
 
@@ -333,6 +338,7 @@ class Dashboard:
             queue=self.queue,
         )
         self.sending = Sending(self.clock, env=self.env)
+        self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)
@@ -369,6 +375,7 @@ class Dashboard:
             restore_tests=self.restore_tests,
             lead_imports=self.lead_imports,
             sending=self.sending,
+            compliance=self.compliance,
             units=self.units,
             **extra,
         )

@@ -1,0 +1,139 @@
+{#- The Suppression List panel (nextron.web.suppression_page): rendered inside suppression.html,
+    and alone as the answer to every POST /suppression/..., which HTMX swaps in for this whole
+    panel. Nothing typed or uploaded is rendered back, and a row never shows an address, a
+    name, a URL or a reversal reason: only its kind, source, date, status, hash prefix and, for
+    a domain entry, the domain. The table above the forms shows the rows an action concerns
+    (its caption says which); it and the list give a reversible row its Reverse form, whose ids
+    carry the table's place so the same entry in both tables never repeats an id. The filter
+    form is a native GET form: no hx-post and no csrf_field(). There is no delete control.
+    Every value is autoescaped. -#}
+{%- macro entry_cells(row) -%}
+<td>{{ row.kind }}</td><td>{{ row.source }}</td><td>{{ row.created }}</td><td>{{ row.status }}</td><td><code>{{ row.hash_prefix }}</code></td><td>{% if row.domain %}{{ row.domain }}{% else %}—{% endif %}</td>
+{%- endmacro %}
+{%- macro reverse_cell(row, place) -%}
+<td>
+{%- if row.reversible %}
+<form class="suppression-reverse" method="post" hx-post="/suppression/reverse" hx-target="#suppression-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="entry_id" value="{{ row.id }}">
+<label for="reason-{{ place }}-{{ row.id }}">Reason</label>
+<input type="text" id="reason-{{ place }}-{{ row.id }}" name="reason" value="" required maxlength="500" autocomplete="off" aria-label="Reason for reversing the {{ row.kind }} entry {{ row.hash_prefix }}">
+<button type="submit" aria-label="Reverse the {{ row.kind }} entry {{ row.hash_prefix }}">Reverse</button>
+</form>
+{%- endif -%}
+</td>
+{%- endmacro %}
+{%- macro headings() -%}
+<tr><th scope="col">Kind</th><th scope="col">Source</th><th scope="col">Date</th><th scope="col">Status</th><th scope="col">Hash</th><th scope="col">Domain</th><th scope="col">Reverse</th></tr>
+{%- endmacro %}
+<div id="suppression-panel">
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
+{%- endif %}
+{%- if invalid_lines %}
+<p class="suppression-invalid">{{ invalid_lines }}</p>
+{%- endif %}
+{%- if featured_rows %}
+<table class="suppression-table suppression-featured">
+<caption>{{ featured_caption }}</caption>
+<thead>
+{{ headings() }}
+</thead>
+<tbody>
+{%- for row in featured_rows %}
+<tr>{{ entry_cells(row) }}{{ reverse_cell(row, "featured") }}</tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+<h2 id="suppression-add-heading">Add an address or a domain</h2>
+<form class="suppression-add" method="post" hx-post="/suppression/add" hx-target="#suppression-panel" hx-swap="outerHTML" hx-sync="this:drop" aria-labelledby="suppression-add-heading">
+{{ csrf_field() }}
+<div class="field">
+<label for="suppression-add-value">Email address or domain</label>
+<input type="text" id="suppression-add-value" name="value" value="" required autocomplete="off" spellcheck="false" aria-describedby="suppression-add-hint">
+<p class="hint" id="suppression-add-hint">An address such as jane@firm.co.uk, or a domain or website such as firm.co.uk, which suppresses the whole firm. A free-webmail domain such as gmail.com, or a shared platform such as facebook.com or sites.google.com, can't be added as a whole: add the firm's own domain or the address instead. When the address belongs to a known Contact, every key known for that Contact is added too.</p>
+</div>
+<button type="submit">Add to the list</button>
+</form>
+<h2 id="suppression-import-heading">Import a list</h2>
+<form class="suppression-import" method="post" enctype="multipart/form-data" hx-post="/suppression/import" hx-encoding="multipart/form-data" hx-target="#suppression-panel" hx-swap="outerHTML" hx-disabled-elt="find button" aria-labelledby="suppression-import-heading">
+{{ csrf_field() }}
+<div class="field">
+<label for="suppression-import-file">Text or CSV file</label>
+<input type="file" id="suppression-import-file" name="file" accept=".csv,.txt,text/csv,text/plain" required aria-describedby="suppression-import-hint">
+<p class="hint" id="suppression-import-hint">UTF-8 text, at most 5 MB and 10,000 addresses and domains: one per line, or in the first column of a CSV file. Blank lines are skipped. The file isn't kept.</p>
+</div>
+<button type="submit">Import</button>
+</form>
+<h2 id="suppression-search-heading">Check a value</h2>
+<form class="suppression-search" method="post" hx-post="/suppression/search" hx-target="#suppression-panel" hx-swap="outerHTML" hx-sync="this:drop" aria-labelledby="suppression-search-heading">
+{{ csrf_field() }}
+<div class="field">
+<label for="suppression-search-value">Exact email address or domain</label>
+<input type="text" id="suppression-search-value" name="value" value="" required autocomplete="off" spellcheck="false" aria-describedby="suppression-search-hint">
+<p class="hint" id="suppression-search-hint">The value is hashed and matched exactly; it isn't kept.</p>
+</div>
+<button type="submit">Search</button>
+</form>
+<h2 id="suppression-list-heading">Entries</h2>
+<form class="suppression-filters" method="get" action="/suppression" role="search" aria-labelledby="suppression-list-heading">
+<div class="field">
+<label for="filter-kind">Kind</label>
+<select id="filter-kind" name="kind">
+<option value=""{% if not kind_options|selectattr("selected")|list %} selected{% endif %}>All kinds</option>
+{%- for option in kind_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="filter-source">Source</label>
+<select id="filter-source" name="source">
+<option value=""{% if not source_options|selectattr("selected")|list %} selected{% endif %}>All sources</option>
+{%- for option in source_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="filter-status">Status</label>
+<select id="filter-status" name="status">
+<option value=""{% if not status_options|selectattr("selected")|list %} selected{% endif %}>All statuses</option>
+{%- for option in status_options %}
+<option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="filter-actions">
+<button type="submit">Filter</button>
+{%- if filtered %}
+<a href="/suppression">Clear filters</a>
+{%- endif %}
+</div>
+</form>
+<p class="suppression-count">{{ count_text }}</p>
+{%- if rows %}
+<table class="suppression-table">
+<thead>
+{{ headings() }}
+</thead>
+<tbody>
+{%- for row in rows %}
+<tr>{{ entry_cells(row) }}{{ reverse_cell(row, "list") }}</tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if pager %}
+<nav class="pager" aria-label="Pages">
+{%- if pager.previous %}
+<a href="{{ pager.previous }}" rel="prev">Previous</a>
+{%- endif %}
+<span>Page {{ "{:,}".format(pager.page) }} of {{ "{:,}".format(pager.pages) }}</span>
+{%- if pager.next %}
+<a href="{{ pager.next }}" rel="next">Next</a>
+{%- endif %}
+</nav>
+{%- endif %}
+</div>

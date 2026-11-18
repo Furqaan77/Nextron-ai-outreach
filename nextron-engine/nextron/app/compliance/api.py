@@ -1,45 +1,101 @@
-"""Public command API of the ``compliance`` service (AD-3, AD-4, AD-16, AD-17, FR-50, FR-63).
+"""Public command API of the ``compliance`` service (AD-3, AD-4, AD-16, AD-17, FR-41, FR-50,
+FR-63).
 
 Other services and the delivery layers change ``compliance`` data only through this module (AD-3).
-Commands join the caller's unit of work and never begin, commit or roll back.
+Commands join the caller's unit of work and never begin, commit or roll back; the use cases
+(Story 3.5's panel actions) open their own transactions.
 
 ``Compliance(clock)`` owns the Suppression List (``suppression_entries``) and applies the
-SuppressionEntry machine (``nextron.domain.suppression_entry``). Its ``suppress`` is the only
-code that writes the list (``tests/contracts/test_suppression_contracts.py``). An entry is
-permanent: nothing here, or anywhere, removes one or ages one out.
+SuppressionEntry machine (``nextron.domain.suppression_entry``). It is the only code that writes
+the list (``tests/contracts/test_suppression_contracts.py``): ``suppress`` adds entries and
+``reverse_optout`` voids one. An entry is permanent: nothing here, or anywhere, removes one or
+ages one out.
 
 - ``@command suppress(subject, scope, source, cause_ref) -> SuppressResult(written, existing)``:
 
-  1. **Arguments.** ``subject`` must be a ``ContactSubject``, ``scope`` a ``SuppressionScope``
-     and ``source`` a ``SuppressionSource`` (otherwise ``TypeError``); ``cause_ref`` must be
-     ``None`` or a ULID (otherwise ``ValueError``).
-  2. **Reads.** The Contact through ``queries.research.contact`` and its Lead through
-     ``queries.discovery.lead``; either missing raises ``LookupError``, whose message holds no
-     id or value.
-  3. **Keys.** ``person_keys`` of the Contact's email, name and LinkedIn URL with the Lead's
-     ``web_domain``, then, for scope ``firm``, ``firm_domain_keys`` of the email and the web
-     domain (``nextron.domain.contactability``), each (``kind``, ``value_hash``) once. A value
-     that can't be normalised is no key, so a Contact with no known key gives
-     ``SuppressResult((), ())``: nothing is written or published.
-  4. **Writes.** A key that already has an ``active`` entry adds that entry's id to
+  1. **Arguments.** ``subject`` must be a ``SuppressionSubject`` (``ContactSubject``,
+     ``AddressSubject`` or ``DomainSubject``), ``scope`` a ``SuppressionScope`` and ``source`` a
+     ``SuppressionSource`` (otherwise ``TypeError``); ``cause_ref`` must be ``None`` or a ULID
+     (otherwise ``ValueError``). An ``AddressSubject`` takes scope ``person`` only and a
+     ``DomainSubject`` scope ``firm`` only (otherwise ``ValueError``).
+  2. **Keys**, each (``kind``, ``value_hash``) once, in order:
+
+     - a ``ContactSubject``: the Contact through ``queries.research.contact`` and its Lead
+       through ``queries.discovery.lead`` (either missing raises ``LookupError``, whose
+       message holds no id or value); ``person_keys`` of the Contact's email, name and LinkedIn
+       URL with the Lead's ``web_domain``, then, for scope ``firm``, ``firm_domain_keys`` of the
+       email and the web domain (``nextron.domain.contactability``). A value that can't be
+       normalised is no key, so a Contact with no known key gives ``SuppressResult((), ())``:
+       nothing is written or published.
+     - an ``AddressSubject`` (Story 3.5): the address key, then ``person_keys`` of every Contact
+       whose stored ``email`` is the address (``queries.research.contacts_with_email``, oldest
+       first), each with its Lead's ``web_domain`` (a missing Lead raises ``LookupError``).
+     - a ``DomainSubject`` (Story 3.5): the one domain key.
+  3. **Writes.** A key that already has an ``active`` entry adds that entry's id to
      ``existing`` and writes nothing. Each other key gets a new ``active`` entry (its
      ``domain_plain`` only for a domain key) and one ``events`` row: entity
      ``suppression_entries``, ``None`` to ``active``, cause ``CREATION[source].cause`` (the
      source itself), the ``cause_ref``, the actor ``ACTORS[source]`` (``operator`` for the
      ``operator``, ``import`` and ``dsr`` sources; ``system:compliance`` for the opt-outs), at
      the clock's now. Its id goes to ``written``, in key order.
-  5. **Publish.** With at least one key, ``SubjectSuppressed(suppression_entry_id=(written +
-     existing)[0], source, contact_id, lead_id)`` is published, even when every key was already
-     ``active``, so a later opt-out still closes the Lead. Its subscribers
-     (``nextron.main.build_subscribers``) run before commit, and any exception in one rolls the
-     entries back with it.
+  4. **Publish** ``SubjectSuppressed`` (its subscribers, ``nextron.main.build_subscribers``, run
+     before commit, and any exception in one rolls the entries back with it), even when every
+     key was already ``active``, so a later opt-out still closes the Lead:
 
-  Nothing is logged: the ``events`` rows are the audit, and neither they nor the notification
-  hold an address, a name or a URL.
+     - a ``ContactSubject`` with at least one key: once, ``suppression_entry_id=(written +
+       existing)[0]``, with the Contact and its Lead;
+     - an ``AddressSubject``: once per matched Contact (with its id and its Lead's), or once
+       with no Contact or Lead when none matched; ``suppression_entry_id`` is the address
+       key's entry;
+     - a ``DomainSubject``: once, with no Contact and ``lead_id`` the Lead whose
+       ``web_domain`` is the domain (``queries.discovery.lead_by_web_domain``), followed to the
+       end of its merge chain (``queries.discovery.survivor_of``; a merged Lead keeps its own
+       ``web_domain``), or that Lead itself when the chain is broken, or ``None`` when no Lead
+       holds the domain.
+
+  ``operator``, ``import`` and ``dsr`` aren't opt-out sources, so they leave every Pipeline
+  Stage as it is.
+
+- ``@command reverse_optout(entry_id, reason) -> tuple[str, ...]`` (Story 3.5, the Operator's
+  Reverse). In
+  order: a non-``str`` argument raises ``TypeError``; then ``SuppressionRefused``
+  (``nextron.domain.suppression_list``) with ``UNKNOWN_ENTRY`` (an ``entry_id`` that isn't a
+  ULID, or no entry has), ``ONLY_RULE_MATCHED`` (a source other than ``reply_rule``,
+  ``VOIDABLE_SOURCES``), ``ALREADY_REVERSED`` (a ``voided`` entry), or ``checked_reason``'s
+  refusal. Then it applies ``transition(active, void)``, voids the entry (``status``
+  ``voided``, ``voided_at`` the clock's now, ``void_reason`` the stripped reason) and appends
+  one ``events`` row (``active`` to ``voided``, cause ``operator_reversal``, no ``cause_ref``,
+  actor ``operator``; never the reason). It publishes nothing and changes no Pipeline Stage. It
+  returns the ids of the other ``active`` ``reply_rule`` entries with the same ``cause_ref``
+  (the same opt-out), by ``created_at``, then ``id``, so the panel can show them with their own
+  Reverse forms; ``()`` when the entry has no ``cause_ref``.
+- ``@command import_values(values) -> ImportCounts(added, already)`` (Story 3.5): for each
+  ``EntryValue`` (``nextron.domain.suppression_list``), in order, it counts ``already`` when
+  the value's own key has an ``active`` entry and ``added`` otherwise, then calls
+  ``suppress(subject, person | firm, import, None)`` either way, so a known Contact's missing
+  keys are still written. A repeated value counts as ``already`` the second time.
+
+**The panel's use cases** (Story 3.5; each the one use case of a web POST's unit of work):
+
+- ``@use_case add_value(text) -> AddedValue(written, since, source)``: ``entry_value(text)``
+  (``SuppressionRefused`` before any transaction), then one transaction: ``suppress(subject,
+  person | firm, operator, None)`` and the typed value's own ``active`` entry, whose
+  ``created_at`` and ``source`` it returns with the ``written`` ids.
+- ``@use_case import_list(data) -> ImportOutcome(added, already, invalid_lines)``:
+  ``parse_import(data)`` (``SuppressionRefused`` before any transaction: nothing is written),
+  then ``import_values`` on ``IMPORT_BATCH`` (500) values per transaction, so the write lock is
+  never held long. A failure part-way keeps the batches before it; importing the same file
+  again counts them ``already``.
+- ``@use_case reverse_entry(entry_id, reason) -> tuple[str, ...]``: one transaction running
+  ``reverse_optout``, returning its ids.
+
+Nothing is logged: the ``events`` rows are the audit, and neither they nor the notifications
+hold an address, a name, a URL or a reason.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
 from typing import Final
 
@@ -47,17 +103,39 @@ from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import research as research_queries
 from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
-from nextron.db.uow import command, current
+from nextron.db.uow import command, current, use_case
 from nextron.domain.contactability import (
-    ContactSubject,
+    AddressSubject,
+    DomainSubject,
+    KeyKind,
     SuppressionKey,
     SuppressionScope,
+    SuppressionSubject,
     firm_domain_keys,
     person_keys,
+    suppression_key,
 )
 from nextron.domain.ids import is_ulid
 from nextron.domain.notifications import SubjectSuppressed
-from nextron.domain.suppression_entry import CREATION, OPT_OUT_SOURCES, SuppressionSource
+from nextron.domain.suppression_entry import (
+    CREATION,
+    OPT_OUT_SOURCES,
+    VOIDABLE_SOURCES,
+    EntryEvent,
+    EntryStatus,
+    SuppressionSource,
+    transition,
+)
+from nextron.domain.suppression_list import (
+    ALREADY_REVERSED,
+    ONLY_RULE_MATCHED,
+    UNKNOWN_ENTRY,
+    EntryValue,
+    SuppressionRefused,
+    checked_reason,
+    entry_value,
+    parse_import,
+)
 from nextron.ports.clock import Clock
 
 ENTITY: Final = "suppression_entries"
@@ -69,6 +147,7 @@ ACTORS: Final[Mapping[SuppressionSource, str]] = MappingProxyType(
         for source in SuppressionSource
     }
 )
+IMPORT_BATCH: Final = 500  # values per transaction in import_list
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,15 +158,49 @@ class SuppressResult:
     existing: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ImportCounts:
+    """How many imported values were new to the list, and how many were already on it."""
+
+    added: int
+    already: int
+
+
+@dataclass(frozen=True, slots=True)
+class AddedValue:
+    """What ``add_value`` did: the ids it wrote, in key order, and when the typed value's own
+    key became ``active`` and from which source."""
+
+    written: tuple[str, ...]
+    since: datetime
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImportOutcome:
+    """An import's counts and the numbers of its invalid lines."""
+
+    added: int
+    already: int
+    invalid_lines: tuple[int, ...]
+
+
 def _check_arguments(subject: object, scope: object, source: object, cause_ref: object) -> None:
-    if not isinstance(subject, ContactSubject):
-        raise TypeError(f"suppress takes a ContactSubject, not {type(subject).__name__}")
+    if not isinstance(subject, SuppressionSubject):
+        raise TypeError(
+            "suppress takes a ContactSubject, AddressSubject or DomainSubject, not "
+            f"{type(subject).__name__}"
+        )
     if not isinstance(scope, SuppressionScope):
         raise TypeError(f"suppress takes a SuppressionScope, not {type(scope).__name__}")
     if not isinstance(source, SuppressionSource):
         raise TypeError(f"suppress takes a SuppressionSource, not {type(source).__name__}")
     if not (cause_ref is None or is_ulid(cause_ref)):
         raise ValueError("suppress: cause_ref must be None or a ULID")
+    if isinstance(subject, AddressSubject) and scope is not SuppressionScope.PERSON:
+        raise ValueError("suppress: an AddressSubject takes scope person only")
+    if isinstance(subject, DomainSubject) and scope is not SuppressionScope.FIRM:
+        raise ValueError("suppress: a DomainSubject takes scope firm only")
 
 
 def _unique(keys: tuple[SuppressionKey, ...]) -> tuple[SuppressionKey, ...]:
@@ -102,48 +215,36 @@ def _unique(keys: tuple[SuppressionKey, ...]) -> tuple[SuppressionKey, ...]:
     return tuple(found)
 
 
+def _scope_of(subject: AddressSubject | DomainSubject) -> SuppressionScope:
+    """The one scope a typed subject takes: ``person`` for an address, ``firm`` for a
+    domain."""
+    return SuppressionScope.PERSON if isinstance(subject, AddressSubject) else SuppressionScope.FIRM
+
+
 class Compliance:
     """The Suppression List; see the module docstring."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
 
-    @command
-    def suppress(
+    def _write(
         self,
-        subject: ContactSubject,
-        scope: SuppressionScope,
+        keys: tuple[SuppressionKey, ...],
         source: SuppressionSource,
         cause_ref: str | None,
-    ) -> SuppressResult:
-        """Write an ``active`` entry for every known key of ``subject``; see the module
-        docstring."""
-        _check_arguments(subject, scope, source, cause_ref)
-        contact = research_queries.contact(subject.contact_id)
-        if contact is None:
-            raise LookupError("suppress: the Contact is unknown")
-        lead = discovery_queries.lead(contact.lead_id)
-        if lead is None:
-            raise LookupError("suppress: the Contact's Lead is unknown")
-        keys = person_keys(
-            email=contact.email,
-            name=contact.name,
-            linkedin_url=contact.linkedin_url,
-            web_domain=lead.web_domain,
-        )
-        if scope is SuppressionScope.FIRM:
-            keys += firm_domain_keys(email=contact.email, web_domain=lead.web_domain)
-        keys = _unique(keys)
-        if not keys:
-            return SuppressResult((), ())
+    ) -> tuple[SuppressResult, tuple[str, ...]]:
+        """Write an ``active`` entry and its ``events`` row for each key not yet ``active``;
+        the result, and every key's entry id in key order."""
         change = CREATION[source]
         now = self._clock.now()
         written: list[str] = []
         existing: list[str] = []
+        ids: list[str] = []
         for key in keys:
             found = entries_repo.active_for(str(key.kind), key.value_hash)
             if found is not None:
                 existing.append(found.id)
+                ids.append(found.id)
                 continue
             entry_id = entries_repo.insert(
                 kind=str(key.kind),
@@ -164,7 +265,42 @@ class Compliance:
                 at=now,
             )
             written.append(entry_id)
-        result = SuppressResult(tuple(written), tuple(existing))
+            ids.append(entry_id)
+        return SuppressResult(tuple(written), tuple(existing)), tuple(ids)
+
+    @command
+    def suppress(
+        self,
+        subject: SuppressionSubject,
+        scope: SuppressionScope,
+        source: SuppressionSource,
+        cause_ref: str | None,
+    ) -> SuppressResult:
+        """Write an ``active`` entry for every known key of ``subject``; see the module
+        docstring."""
+        _check_arguments(subject, scope, source, cause_ref)
+        if isinstance(subject, AddressSubject):
+            return self._suppress_address(subject, source, cause_ref)
+        if isinstance(subject, DomainSubject):
+            return self._suppress_domain(subject, source, cause_ref)
+        contact = research_queries.contact(subject.contact_id)
+        if contact is None:
+            raise LookupError("suppress: the Contact is unknown")
+        lead = discovery_queries.lead(contact.lead_id)
+        if lead is None:
+            raise LookupError("suppress: the Contact's Lead is unknown")
+        keys = person_keys(
+            email=contact.email,
+            name=contact.name,
+            linkedin_url=contact.linkedin_url,
+            web_domain=lead.web_domain,
+        )
+        if scope is SuppressionScope.FIRM:
+            keys += firm_domain_keys(email=contact.email, web_domain=lead.web_domain)
+        keys = _unique(keys)
+        if not keys:
+            return SuppressResult((), ())
+        result, _ = self._write(keys, source, cause_ref)
         current().publish(
             SubjectSuppressed(
                 suppression_entry_id=(result.written + result.existing)[0],
@@ -174,3 +310,139 @@ class Compliance:
             )
         )
         return result
+
+    def _suppress_address(
+        self, subject: AddressSubject, source: SuppressionSource, cause_ref: str | None
+    ) -> SuppressResult:
+        """The address key, then every key of each Contact holding the address."""
+        keys = (suppression_key(KeyKind.ADDRESS, subject.address),)
+        matched: list[tuple[str | None, str | None]] = []  # (contact id, lead id)
+        for contact in research_queries.contacts_with_email(subject.address):
+            lead = discovery_queries.lead(contact.lead_id)
+            if lead is None:
+                raise LookupError("suppress: the Contact's Lead is unknown")
+            keys += person_keys(
+                email=contact.email,
+                name=contact.name,
+                linkedin_url=contact.linkedin_url,
+                web_domain=lead.web_domain,
+            )
+            matched.append((contact.id, lead.id))
+        result, ids = self._write(_unique(keys), source, cause_ref)
+        address_entry = ids[0]  # the address key comes first
+        for contact_id, lead_id in matched or [(None, None)]:
+            current().publish(
+                SubjectSuppressed(
+                    suppression_entry_id=address_entry,
+                    source=str(source),
+                    contact_id=contact_id,
+                    lead_id=lead_id,
+                )
+            )
+        return result
+
+    def _suppress_domain(
+        self, subject: DomainSubject, source: SuppressionSource, cause_ref: str | None
+    ) -> SuppressResult:
+        """The one domain key, published with the Lead holding that web domain (its merge
+        survivor), if any."""
+        result, ids = self._write(
+            (suppression_key(KeyKind.DOMAIN, subject.domain),), source, cause_ref
+        )
+        lead = discovery_queries.lead_by_web_domain(subject.domain)
+        if lead is not None:  # a merged Lead keeps its web domain: publish its survivor
+            lead = discovery_queries.survivor_of(lead.id) or lead
+        current().publish(
+            SubjectSuppressed(
+                suppression_entry_id=ids[0],
+                source=str(source),
+                contact_id=None,
+                lead_id=None if lead is None else lead.id,
+            )
+        )
+        return result
+
+    @command
+    def reverse_optout(self, entry_id: str, reason: str) -> tuple[str, ...]:
+        """Void a ``reply_rule`` entry with the Operator's reason; see the module docstring."""
+        if not isinstance(entry_id, str) or not isinstance(reason, str):
+            raise TypeError("reverse_optout takes an entry id and a reason, each a str")
+        entry = entries_repo.get(entry_id) if is_ulid(entry_id) else None
+        if entry is None:
+            raise SuppressionRefused(UNKNOWN_ENTRY)
+        if entry.source not in VOIDABLE_SOURCES:
+            raise SuppressionRefused(ONLY_RULE_MATCHED)
+        if entry.status == EntryStatus.VOIDED:
+            raise SuppressionRefused(ALREADY_REVERSED)
+        stated = checked_reason(reason)
+        change = transition(EntryStatus(entry.status), EntryEvent.VOID)
+        now = self._clock.now()
+        if not entries_repo.void(entry.id, now, stated):
+            raise SuppressionRefused(ALREADY_REVERSED)
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=entry.id,
+            from_status=entry.status,
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=None,
+            actor=OPERATOR_ACTOR,
+            at=now,
+        )
+        if entry.cause_ref is None:
+            return ()
+        return entries_repo.active_ids_for_cause(
+            source=str(SuppressionSource.REPLY_RULE), cause_ref=entry.cause_ref
+        )
+
+    @command
+    def import_values(self, values: Iterable[EntryValue]) -> ImportCounts:
+        """Suppress each imported value with source ``import``; see the module docstring."""
+        listed = tuple(values)
+        for value in listed:
+            if not isinstance(value, EntryValue):
+                raise TypeError(f"import_values takes EntryValues, not {type(value).__name__}")
+        added = already = 0
+        for value in listed:
+            if entries_repo.active_for(str(value.key.kind), value.key.value_hash) is None:
+                added += 1
+            else:
+                already += 1
+            self.suppress(
+                value.subject, _scope_of(value.subject), SuppressionSource.IMPORT, None
+            )
+        return ImportCounts(added, already)
+
+    @use_case
+    def add_value(self, text: str) -> AddedValue:
+        """Suppress a typed address or domain with source ``operator``; see the module
+        docstring."""
+        value = entry_value(text)
+        with current().transaction():
+            result = self.suppress(
+                value.subject, _scope_of(value.subject), SuppressionSource.OPERATOR, None
+            )
+            own = entries_repo.active_for(str(value.key.kind), value.key.value_hash)
+        if own is None:  # suppress wrote the key or found it active, in that transaction
+            raise LookupError("add_value: the value's own entry is missing")
+        return AddedValue(result.written, own.created_at, own.source)
+
+    @use_case
+    def import_list(self, data: bytes) -> ImportOutcome:
+        """Suppress each valid value of an imported file with source ``import``; see the
+        module docstring."""
+        plan = parse_import(data)
+        values = [value for _, value in plan.values]
+        added = already = 0
+        for start in range(0, len(values), IMPORT_BATCH):
+            with current().transaction():
+                counts = self.import_values(values[start : start + IMPORT_BATCH])
+            added += counts.added
+            already += counts.already
+        return ImportOutcome(added, already, plan.invalid_lines)
+
+    @use_case
+    def reverse_entry(self, entry_id: str, reason: str) -> tuple[str, ...]:
+        """Reverse a rule-matched opt-out; see ``reverse_optout``."""
+        with current().transaction():
+            return self.reverse_optout(entry_id, reason)

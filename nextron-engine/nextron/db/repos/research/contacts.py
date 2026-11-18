@@ -8,6 +8,8 @@ nothing; ``nextron.app.research`` does.
 - ``StoredContact``: one row;
 - ``get(contact_id)``: the row, or ``None``;
 - ``for_lead(lead_id)``: the Lead's Contacts, by ``created_at``, then ``id``;
+- ``with_email(email)`` (Story 3.5): the Contacts whose stored ``email`` is exactly ``email``,
+  by ``created_at``, then ``id`` (no index: a table scan);
 - ``insert(...) -> id``: a new row (with its office's ``office_country`` and
   ``office_region``), created and updated at ``at``; ``is_primary`` is left to its server
   default (false), and ``tz``, ``market_id`` and both bases are NULL until ``research``
@@ -88,6 +90,17 @@ def for_lead(lead_id: str) -> tuple[StoredContact, ...]:
     statement = (
         select(*_COLUMNS)
         .where(ContactRecord.lead_id == lead_id)
+        .order_by(ContactRecord.created_at, ContactRecord.id)
+    )
+    return tuple(StoredContact(*row) for row in current().session.execute(statement))
+
+
+def with_email(email: str) -> tuple[StoredContact, ...]:
+    """The Contacts whose ``email`` is ``email``, oldest first (by ``created_at``, then
+    ``id``)."""
+    statement = (
+        select(*_COLUMNS)
+        .where(ContactRecord.email == email)
         .order_by(ContactRecord.created_at, ContactRecord.id)
     )
     return tuple(StoredContact(*row) for row in current().session.execute(statement))

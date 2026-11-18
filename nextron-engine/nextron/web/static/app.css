@@ -692,3 +692,52 @@ button.secondary {
 .campaign form {
   margin: 0 0 0.75rem;
 }
+
+/* The Suppression List panel: the filter form, the count line, the invalid lines, the entry
+   tables and the inline Reverse form. */
+.suppression-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0 1rem;
+  margin-bottom: 1rem;
+}
+
+.suppression-filters .field {
+  min-width: 10rem;
+}
+
+.suppression-count {
+  font-weight: 600;
+}
+
+.suppression-invalid {
+  max-width: 48rem;
+  overflow-wrap: anywhere;
+}
+
+.suppression-table {
+  margin: 0 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.suppression-table caption {
+  text-align: left;
+  font-weight: 600;
+}
+
+.suppression-table th,
+.suppression-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.suppression-reverse {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}

@@ -298,6 +298,12 @@ first beat).
 Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
 external service.
 
+**The Suppression List panel (Story 3.5; AD-16, FR-50, FR-41).** ``build_app`` builds one
+``Compliance(clock)`` (``nextron.app.compliance.api``) and hands it to ``create_app(...,
+compliance=compliance)``: the panel's add, import and Reverse run its use cases. Its
+``SubjectSuppressed`` goes to the subscribers ``build_subscribers`` registers, on the units of
+work ``build_app`` is given.
+
 **The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer,
 recovery_runner.startup, startup=...)`` to ``create_app``, so all three start when the server
 starts and stop when it stops, in whichever process serves the app (the reload worker
@@ -519,6 +525,7 @@ from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, L
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify.api import Notify
@@ -898,6 +905,7 @@ def build_app(
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=Sending(clock, env=config.env),
+        compliance=Compliance(clock),
         units=units,
         lifespan=engine_lifespan(
             runner,

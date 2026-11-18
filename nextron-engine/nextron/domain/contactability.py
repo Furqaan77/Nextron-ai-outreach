@@ -45,19 +45,33 @@ out of these functions.
   A domain that ``nextron.domain.markets.is_free_webmail`` matches is never a key, so a whole
   free-webmail domain is never suppressed.
 
-**The subject and the scope.** ``ContactSubject(contact_id)`` names a stored Contact (a
-non-ULID ``contact_id`` raises ``ValueError``); ``SuppressionScope`` is ``person`` (the person's
-own keys) or ``firm`` (those plus the firm's domain keys). Stories 3.5 and 3.11 add subject
-types for an address or a domain the Operator types and for a token's address hash.
+**The subjects and the scope.** ``SuppressionScope`` is ``person`` (the person's own keys) or
+``firm`` (those plus the firm's domain keys). ``SuppressionSubject`` is one of:
+
+- ``ContactSubject(contact_id)``: a stored Contact (a non-ULID ``contact_id`` raises
+  ``ValueError``);
+- ``AddressSubject(address)`` (Story 3.5): an email address the Operator typed or imported.
+  ``address`` must be a ``str`` (``TypeError`` otherwise) equal to its own
+  ``identity.normalize_email`` (``ValueError`` otherwise); the field is left out of ``repr``,
+  and no message holds the value;
+- ``DomainSubject(domain)`` (Story 3.5): a firm's domain the Operator typed or imported.
+  ``domain`` must be a ``str`` (``TypeError`` otherwise) equal to its own
+  ``identity.registrable_domain``, not free webmail (``is_free_webmail``) and not a shared
+  platform (``nextron.domain.leads.is_shared_platform``: ``facebook.com``, ``google.com``,
+  ``lawsociety.org.uk`` and the like), otherwise ``ValueError``: no caller can suppress a whole
+  webmail domain or shared platform.
+
+Story 3.11 adds a subject for a token's address hash.
 """
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
 from nextron.domain import identity
 from nextron.domain.ids import is_ulid
+from nextron.domain.leads import is_shared_platform
 from nextron.domain.markets import is_free_webmail
 
 KIND_SEPARATOR: Final = ":"
@@ -87,6 +101,52 @@ class ContactSubject:
     def __post_init__(self) -> None:
         if not is_ulid(self.contact_id):
             raise ValueError("ContactSubject.contact_id must be a ULID")
+
+
+@dataclass(frozen=True, slots=True)
+class AddressSubject:
+    """An email address to suppress, already normalised (Story 3.5)."""
+
+    address: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.address, str):
+            raise TypeError(
+                f"AddressSubject.address must be a str, not {type(self.address).__name__}"
+            )
+        try:
+            normalised = identity.normalize_email(self.address)
+        except identity.IdentityError:
+            normalised = None
+        if normalised != self.address:
+            raise ValueError("AddressSubject.address must be a normalised email address")
+
+
+@dataclass(frozen=True, slots=True)
+class DomainSubject:
+    """A firm's registrable domain to suppress, never a free webmail one or a shared platform
+    (Story 3.5)."""
+
+    domain: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.domain, str):
+            raise TypeError(
+                f"DomainSubject.domain must be a str, not {type(self.domain).__name__}"
+            )
+        try:
+            registrable = identity.registrable_domain(self.domain)
+        except identity.IdentityError:
+            registrable = None
+        if registrable != self.domain:
+            raise ValueError("DomainSubject.domain must be a registrable domain")
+        if is_free_webmail(self.domain):
+            raise ValueError("DomainSubject.domain must not be a free webmail domain")
+        if is_shared_platform(self.domain):
+            raise ValueError("DomainSubject.domain must not be a shared platform")
+
+
+SuppressionSubject = ContactSubject | AddressSubject | DomainSubject
 
 
 @dataclass(frozen=True, slots=True)

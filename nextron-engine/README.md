@@ -1271,19 +1271,21 @@ redacts it).
 **The SuppressionEntry machine** (`nextron/domain/suppression_entry.py`, AD-4): every entry is
 created `active` (`CREATION[source]`, cause the source); the only move is `void`, `active` to
 `voided`, cause `operator_reversal`, and `voided` is terminal (anything else raises
-`IllegalTransition`). Only a `reply_rule` entry can be voided (`VOIDABLE_SOURCES`); the command
-that does it, the Operator's `reverse_optout`, comes with the Suppression List panel (Story 3.5).
+`IllegalTransition`). Only a `reply_rule` entry can be voided (`VOIDABLE_SOURCES`), by the
+Operator's `reverse_optout` on the Suppression List panel (below).
 
-**Contract tests** (`tests/contracts/test_suppression_contracts.py`): the repository's writer
-(`nextron/db/repos/compliance/suppression_entries.py`: readers `get` and `active_for`, writer
-`insert`) is used only in `nextron/app/compliance/api.py`; `SuppressionEntryRecord` is named only
+**Contract tests** (`tests/contracts/test_suppression_contracts.py`): the repository's writers
+(`nextron/db/repos/compliance/suppression_entries.py`: readers `get`, `active_for`, `listed`,
+`count_listed`, `by_ids` and `active_ids_for_cause`; writers `insert` and `void`) are used only
+in `nextron/app/compliance/api.py`; `SuppressionEntryRecord` is named only
 under `nextron/db/models` and `nextron/db/repos/compliance`; no string outside the migrations
 holds SQL that inserts, updates, deletes or replaces `suppression_entries`; no string (outside
 docstrings) names the table at all except in its homes: `db/models/compliance.py`, the
 migrations, `db/repos/compliance`, `app/compliance`, `app/queries/compliance.py`,
 `domain/backup.py`, `db/owners.py` and `db/pii_registry.py`. This catches f-strings,
 `sa.table(...)` and `metadata.tables[...]`. Finally, the compliance repository, API and queries,
-`domain/contactability.py` and `domain/suppression_entry.py` hold none of the following:
+`domain/contactability.py`, `domain/suppression_entry.py` and `domain/suppression_list.py` hold
+none of the following:
 - a delete, remove, purge, expire, expiry, TTL, prune, evict, truncate or drop function or call;
 - an SQL `DELETE`, or an SQL date modifier;
 - a `timedelta` or `relativedelta`;
@@ -1292,6 +1294,102 @@ migrations, `db/repos/compliance`, `app/compliance`, `app/queries/compliance.py`
 Entries can't age out.
 
 Read one Contact with `queries.research.contact(contact_id)` (a `StoredContact`, or `None`).
+
+### The Suppression List panel
+
+The Suppression List panel (`/suppression`, Story 3.5; FR-50, FR-41, UX-DR25) honours a
+do-not-contact instruction that arrives outside the engine, checks a value and corrects a reply
+rule that misread a "no". It is linked from the Settings page ("Suppression List page"); it
+isn't in the navigation, whose six sections UX-DR1 fixes. Every action is a CSRF-checked POST
+(with the `Origin` and `Sec-Fetch-Site` checks), every answer is `Cache-Control: no-store`, and
+no typed value, file name, address, name, URL or reversal reason is ever rendered back: every
+form is empty after a POST. There is no delete control and no switch that turns suppression off
+(NFR-7).
+
+**What a typed value is** (`nextron/domain/suppression_list.py`). The text is stripped. With an
+`@` it is an address (`normalize_email`: no plus-tag or dot stripping); anything else is a
+domain, website or URL, normalised to its registrable domain (`https://www.Firm.co.uk/x` is
+`firm.co.uk`). Text the normalisers refuse, or an empty one, is "Not a valid email address or
+domain". So is an address whose local part holds a character RFC 5322 allows only inside a
+quoted string (`( ) < > [ ] : ; , \ "`), such as `mailto:jane@firm.co.uk`, `<jane@firm.co.uk>`
+or `https://medium.com/@jane.doe`: no Contact can hold one, so adding it would only seem to
+work. A free-webmail domain (`gmail.com`, `mail.yahoo.co.uk`, `comcast.net` and the rest of
+`is_free_webmail`) is refused with "Free-webmail domains can't be suppressed as a whole. Add the
+address instead." A shared platform (`nextron.domain.leads.is_shared_platform`:
+`https://facebook.com/firm`, `sites.google.com/view/firm`, `lawsociety.org.uk/...`,
+`linktr.ee` and the rest) is refused with "Shared platforms such as facebook.com or
+sites.google.com can't be suppressed as a whole. Add the firm's own domain or the address
+instead.", because a firm's page there must never suppress every firm on the platform. An
+address at a free-webmail domain is fine.
+
+**Add.** "Add to the list" suppresses the value with source `operator` (`Compliance.add_value`):
+an address writes its address key and, when it belongs to known Contacts (their stored email is
+exactly that address), every key known for each of them (person and profile keys too); a domain
+writes one domain key, shown with its `domain_plain`. The panel answers "Added to the
+Suppression List" with the written entries' rows, or, when nothing new was written, "Already on
+the list (active since <YYYY-MM-DD>, source <source>)" for the value's own entry. Manual adds and
+imports never close a Lead: `operator` and `import` aren't opt-out sources.
+
+**Import.** A UTF-8 text or CSV file (a BOM is fine) of at most 5 MB and 10,000 addresses and
+domains: one per line (`\r\n`, `\r` or `\n`), or in the first CSV column. Blank lines are
+skipped. Each valid line is suppressed with source `import`, exactly as an add (a known
+Contact's address writes all its keys). The answer is "Import finished: <n> added, <n> already
+suppressed, <n> invalid." and "Invalid lines: 4, 7, ..." (line numbers only, the first 100, then
+"and <n> more"). "Added" and "already" go by each line's own key, and a repeated line counts as
+already suppressed. A header line, a free-webmail domain, a shared platform or junk is
+invalid. A file that is empty ("The file has no addresses or domains"), not UTF-8 or holding a
+NUL ("The file isn't UTF-8 text"), over 5 MB ("The file is larger than 5 MB") or over 10,000
+non-blank lines ("The file has more than 10,000 addresses and domains. Split it and import each
+part.") is refused whole and nothing is written; when its first non-blank line is invalid (a
+header line), 10,001 are allowed, so a header and 10,000 values import. The file and its name are never stored. Values are written 500 per
+transaction, so the write lock is never held long; if an import fails part-way, the batches
+before it stay, and importing the same file again counts them as already suppressed.
+
+**Search.** "Check a value" hashes the value and looks up its exact key: "On the list (active
+since <YYYY-MM-DD>, source <source>)", with that entry's row under "Matching entry" (with its
+Reverse form when it is an `active` `reply_rule` entry, so Mac can find an opt-out from the
+address alone), or "Not on the list" (a voided entry, a free-webmail domain and a shared
+platform are not on the list). It is a POST, so the value never reaches a URL, the browser
+history or the access log.
+
+**The list.** Newest first, 50 per page, with each entry's kind, source, date (`YYYY-MM-DD`,
+UTC), status, the first 12 hex characters of its hash and, for a domain entry only, the domain.
+Filter by kind, source and status (`/suppression?kind=domain&source=operator&status=active&page=2`):
+each parameter at most once, a blank one unset; any other, repeated or unknown parameter, or a
+bad `page`, is refused with 400 "Request refused: malformed form". Every POST answers with the
+panel at page 1 with no filter.
+
+**Reverse.** Only an `active` `reply_rule` row (an opt-out a reply rule matched) has a Reverse
+form, with a required reason (1 to 500 characters on one line: no control, format, surrogate,
+private-use or unassigned character and no line or paragraph separator). Its reason box and its
+button are named for screen readers by the row ("Reason for reversing the address entry
+<hash prefix>", "Reverse the address entry <hash prefix>").
+`Compliance.reverse_optout(entry_id, reason)` checks, in order: an entry that doesn't exist
+("That entry isn't on the list"), a source other than `reply_rule` ("Only rule-matched opt-outs
+can be reversed", so a forged POST against any other entry changes nothing), an entry already
+voided ("This opt-out has already been reversed"), then the reason ("Enter a reason for
+reversing this opt-out" or "The reason must be at most 500 characters of plain text"). It sets
+the entry `voided` with `voided_at` and the reason in `void_reason` (never shown, logged or put
+in `events`), appends one `events` row (`active` to `voided`, cause `operator_reversal`, actor
+`operator`), publishes nothing and leaves the Lead's Pipeline Stage as it is. Reverse voids one
+entry: the answer "Opt-out reversed. <n> other entries from the same opt-out are still on the
+list." is followed by those entries' rows under "Still on the list from the same opt-out", each
+with its own Reverse form. They are the other `active` `reply_rule` entries with the same
+`cause_ref` (`reverse_optout` returns their ids, oldest first), so Mac can reverse the rest of
+that misread opt-out without mistaking another person's for it. A voided key can be suppressed
+again; the voided entry stays.
+
+**From code.** `Compliance.suppress` takes two more subjects (`nextron/domain/contactability.py`):
+`AddressSubject(address)` (scope `person` only; a normalised address) and `DomainSubject(domain)`
+(scope `firm` only; a registrable domain that is neither free webmail nor a shared platform).
+`SubjectSuppressed` goes out once per Contact holding the address (or once with no Contact), and
+once for a domain with the Lead whose web domain it is, followed to its merge survivor (a merged
+Lead keeps its web domain), or none. `import_values(values)` is the import's command. The
+panel reads through `queries.compliance`: `entry_list(kind=, source=, status=, page=)` (an
+`EntryListPage`), `entries(ids)` and `active_entry(kind, value_hash)`, each a `ListedEntry`
+without its `cause_ref`, `voided_at` or `void_reason`. `queries.research.contacts_with_email`
+and `queries.discovery.lead_by_web_domain` are the two reads `suppress` added. There is no index
+on `contacts.email`: the lookup scans the table, which is fine at Release 1 volumes.
 
 ## Sending Inboxes
 
