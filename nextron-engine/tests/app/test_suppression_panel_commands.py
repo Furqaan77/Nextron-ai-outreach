@@ -42,6 +42,7 @@ from nextron.db.uow import UnitOfWork, UnitOfWorkFactory
 from nextron.domain import seed_yaml
 from nextron.domain.contactability import (
     AddressSubject,
+    Allowed,
     DomainSubject,
     KeyKind,
     SuppressionScope,
@@ -163,6 +164,16 @@ def operator(
     return entry(entry_id, kind, value_hash, "operator", domain, None)
 
 
+@contextmanager
+def gate_bypassed() -> Iterator[None]:
+    """Story 3.4's gate (``compliance_api.assert_contactable``) answering ``Allowed()``. Since
+    3.4, ``add_contact`` refuses a Contact on a suppressed key, so a Contact stored in here
+    stands for one stored before its keys were suppressed by another path."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(compliance_api, "assert_contactable", lambda *_: Allowed())
+        yield
+
+
 # Add an address ---------------------------------------------------------------------------------
 
 
@@ -257,7 +268,11 @@ def test_a_contact_that_appears_later_gets_its_other_keys_on_the_next_add(
     world: World, published: list[Notification]
 ) -> None:
     [address] = add(world, EMAIL).written  # no Contact holds it yet
-    lead_id, contact_id = jane(world)
+    lead_id = world.lead()
+    jane_doe = {"name": "Jane Doe", "email": EMAIL, "linkedin_url": LINKEDIN}
+    assert world.contact(lead_id, **jane_doe) is None  # Story 3.4's gate refuses her now
+    with gate_bypassed():
+        contact_id = world.contact(lead_id, **jane_doe)
     world.clock.set(REVERSED_AT)
 
     again = add(world, EMAIL)
@@ -455,7 +470,9 @@ def test_an_import_counts_by_the_lines_own_key(world: World) -> None:
     lead_id = world.lead()
     contact_id = world.contact(lead_id, name="Jane Doe", linkedin_url=LINKEDIN)
     world.suppress(contact_id, SuppressionSource.OPERATOR)  # her person and profile keys
-    assert world.contact(lead_id, name="Jane Doe", email=EMAIL) == contact_id  # now her address
+    assert world.contact(lead_id, name="Jane Doe", email=EMAIL) is None  # Story 3.4's gate
+    with gate_bypassed():
+        assert world.contact(lead_id, name="Jane Doe", email=EMAIL) == contact_id  # her address
     add(world, "other@firm.co.uk")
 
     outcome = import_list(world, f"{EMAIL}\nother@firm.co.uk\n".encode())
