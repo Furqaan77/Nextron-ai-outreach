@@ -81,6 +81,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "ai_test_cases": ("playbook", Coverage.TOMBSTONED),  # Story 4.6's override cases
     "linkedin_accounts": ("pipeline", Coverage.NOT_HELD),  # Story 10.2: staff, never a Contact
     "leads": ("pipeline", Coverage.TOMBSTONED),  # Story 9.1: the notes
+    "channel_permissions": ("pipeline", Coverage.TOMBSTONED),  # Story 10.7
 }
 
 type Declarations = Mapping[str, object]  # owner -> its ERASURE (or None)
@@ -437,12 +438,12 @@ def test_each_declaring_owner_has_an_erase_pii_command(owner: str) -> None:
     module = importlib.import_module(declaring_module(owner))
 
     hook = getattr(module, HOOK, None)
-    if hook is None:  # compliance's, research's and playbook's are methods of their services
+    if hook is None:  # compliance's, research's, playbook's and pipeline's are methods
         service = {
             "compliance": Erasures,
             "research": Research,
             "playbook": Playbook,
-            "pipeline": Pipeline,  # Story 9.1
+            "pipeline": Pipeline,  # Stories 9.1 and 10.7
         }[owner]
         hook = getattr(service, HOOK)
 

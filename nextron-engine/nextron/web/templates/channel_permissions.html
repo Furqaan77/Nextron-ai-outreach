@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{#- The Channel Permission page of a Contact (nextron.web.permissions_page): the Contact and the
+    Lead it is on, then the panel. The names are imported text: they render through |plain inside
+    hx-disable. -#}
+{% block title %}Nextron: Channel permissions{% endblock %}
+{% block content %}
+<h1>Channel permissions</h1>
+<p class="erase-lead" hx-disable>{% if contact_name %}{{ contact_name|plain }}, on{% else %}On{% endif %} the Lead <a href="/leads/{{ lead_id }}">{{ lead_name|plain }}</a>.</p>
+{% include "channel_permissions_panel.html" %}
+{% endblock %}

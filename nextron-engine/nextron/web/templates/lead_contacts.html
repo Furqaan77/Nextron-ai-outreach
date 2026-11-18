@@ -3,8 +3,9 @@
     panel. Each Contact shows its live Eligibility (Story 3.6: evaluated on this render, never
     stored) and its recorded bases, then its Market and timezone facts, "Provenance missing"
     when it has no source record, and its Provenance Records (Story 3.7), and links to its erase
-    step; an erased Contact shows its tombstone line only (Story 3.13), then its erasure
-    receipts (Story 3.14). Every Contact,
+    step and, in its Action cell, its Channel Permission page (Story 10.7); an erased Contact
+    shows its tombstone line only (Story 3.13), then its erasure receipts (Story 3.14). Every
+    Contact,
     Provenance and Eligibility text is imported, crawled, extracted or built from stored Markets:
     it renders only through |plain or safe_link, inside an element carrying hx-disable. The
     "Make primary" and "Find email" forms (Story 2.13) sit outside those elements; a Contact
@@ -40,6 +41,7 @@
 <tr class="contact-row"><td hx-disable>{{ or_dash(contact.name) }}</td><td hx-disable>{{ or_dash(contact.role) }}</td><td hx-disable>{{ or_dash(contact.email) }}{% if contact.search_note %}<p class="email-search-note">{{ contact.search_note }}</p>{% endif %}{% if contact.check_note %}<p class="email-check-note">{{ contact.check_note }}</p>{% endif %}</td><td hx-disable>{{ or_dash(contact.address_class) }}</td><td hx-disable>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td><td>
 {%- if contact.can_make_primary %}<form method="post" action="/leads/{{ lead_id }}/primary" hx-post="/leads/{{ lead_id }}/primary" hx-target="#lead-contacts" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<input type="hidden" name="contact_id" value="{{ contact.contact_id }}"><button type="submit" class="secondary">Make primary</button></form>{% endif %}
 {%- if contact.can_find_email %}<form method="post" action="/leads/{{ lead_id }}/find-email" hx-post="/leads/{{ lead_id }}/find-email" hx-target="#lead-contacts" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<input type="hidden" name="contact_id" value="{{ contact.contact_id }}"><button type="submit" class="secondary">Find email</button></form>{% endif -%}
+{%- if contact.permissions_href %} <a class="permissions-link" href="{{ contact.permissions_href }}">{{ contact.permissions_label }}</a>{% endif -%}
 </td><td>{% if contact.erase_href %}<a class="erase-link" href="{{ contact.erase_href }}">{{ contact.erase_label }}</a>{% else %}—{% endif %}</td></tr>
 <tr class="eligibility-row"><td colspan="8" hx-disable>
 <p class="eligibility-summary {{ 'eligible' if contact.eligibility.eligible else 'not-eligible' }}">{{ contact.eligibility.summary|plain }}</p>

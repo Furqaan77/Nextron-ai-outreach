@@ -123,15 +123,15 @@ an opt-out closes the Lead ``lost``; AD-3's other subscribers go between them wh
 add them); ``ContactErased`` -> each owner's ``erase_pii`` hook (Story 3.13, AD-17):
 compliance's first (``Erasures(clock, Compliance(clock)).erase_pii``, which reads the Contact
 while it still holds its values), then research's (``Research(clock).erase_pii``, which
-tombstones the Contact last), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
+tombstones the Contact; the hooks after it touch only their own tables), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
 erases the Contact's override cases, ``erase_override_cases``), then
 ``Sequencing(clock).erase_pii`` (Story 4.8: the erased Contact's live Enrollments stop with
 ``contact_erased``), then the hooks of ``setup``, ``drafting`` (Story 4.12: it tombstones the
 text of the Contact's ``draft_revisions``), ``jobqueue``, ``ops`` and ``notify`` (the others
 no-ops: their tables never hold a Contact's data), then pipeline's, last
-(``Pipeline(clock).erase_pii``, Stories 9.1 and 10.2: the Contact's Lead's notes, and those of
-every Lead merged into it, become ``[erased]``; ``linkedin_accounts`` never holds a Contact's
-data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
+(``Pipeline(clock).erase_pii``, Stories 9.1 and 10.7: the Contact's Lead's notes, and those of
+every Lead merged into it, become ``[erased]``, and it revokes the Contact's Channel Permissions
+and NULLs their number and handle; ``linkedin_accounts`` never holds a Contact's data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
 ``queued``); ``FooterChanged`` -> ``Drafting(clock).recompose_ready`` (Story 4.12: the Market's
 ``ready`` Drafts get a ``footer_change`` revision). Each uses ``SystemClock()`` when no clock is
 given.
@@ -834,6 +834,7 @@ from nextron.app.ops.api import (
 )
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.assist_accounts import AssistAccounts
+from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import jobqueue as jobqueue_queries
@@ -1445,6 +1446,8 @@ def build_app(
         primary_contacts=primary_contacts,
         erasures=erasures,  # Story 3.13: on the same Compliance, with the queue
         pipeline=Pipeline(clock),  # Story 9.1: the Lead page's Pipeline panel
+        # Story 10.7: the Contact's Channel Permissions, on the same Research and Compliance
+        channel_permissions=ChannelPermissions(clock, research, compliance),
         domain_checks=domain_checks,
         email_finding=email_finding,
         lead_scores=lead_scores,
@@ -2323,8 +2326,9 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(ContactErased, Sequencing(chosen).erase_pii)
     for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
-    # Stories 9.1 and 10.2, last: the erased Contact's Lead's notes (linkedin_accounts never
-    # holds a Contact's data)
+    # Stories 9.1 and 10.7, last: the erased Contact's Lead's notes, then its Channel
+    # Permissions (revoked, number and handle NULL); linkedin_accounts never holds a Contact's
+    # data
     subscribers.register_subscriber(ContactErased, Pipeline(chosen).erase_pii)
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
     # Story 4.9: the next Step's due time, or the Enrollment's completion

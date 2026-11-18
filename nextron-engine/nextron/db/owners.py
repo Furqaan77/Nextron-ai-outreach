@@ -547,6 +547,24 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "footer_snapshots": {
         "drafting": ("id", "market_id", "sha256", "text", "created_at"),
     },
+    "channel_permissions": {  # Story 10.7
+        "pipeline": (
+            "id",
+            "contact_id",
+            "channel",
+            "prospect_action",
+            "occurred_at",
+            "evidence_id",
+            "whatsapp_number",
+            "instagram_handle",
+            "last_inbound_at",
+            "status",
+            "revoked_at",
+            "recorded_by",
+            "created_at",
+            "updated_at",
+        ),
+    },
     # Story 4.12: a Draft's text, one immutable row per revision
     "draft_revisions": {
         "drafting": (

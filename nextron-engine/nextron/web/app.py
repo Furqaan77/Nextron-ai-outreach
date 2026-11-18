@@ -262,6 +262,17 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   Lead page, Story 3.14), or, for any exception, the failure (logged as
   ``contact_erasure_failed`` with ``contact_id`` and ``error_type``). For an erased Contact both
   show its erasure receipts (``queries.compliance.receipts``).
+- ``GET /leads/{lead_id}/contacts/{contact_id}/permissions`` (``contact_permissions_page``),
+  ``POST`` to the same path (``contact_permission_record``) and ``POST
+  .../permissions/{permission_id}/inbound``, ``/revoke`` and ``/do-not-contact``
+  (``contact_permission_inbound``, ``contact_permission_revoke``,
+  ``contact_permission_do_not_contact``), every one ``@personal_data(True)`` and registered before
+  ``/leads/{lead_id}``: a Contact's Channel Permissions for WhatsApp and Instagram (Story 10.7,
+  FR-24, FR-47); see ``nextron.web.permissions_page``. A Contact that isn't on the Lead's
+  survivor answers 404 with ``lead_missing.html``. Each POST checks its fields
+  (``permissions_page.submitted``: anything else is ``MalformedForm``, 400), does nothing for an
+  erased Contact, otherwise runs its ``ChannelPermissions`` use case in its own unit of work
+  (a ``PermissionRefused`` stores nothing), then renders the panel in a read-only one, 200.
 - ``POST /contacts/{contact_id}/export`` (``contact_export``) and ``GET /exports/{ticket}``
   (``contact_export_download``), both ``@personal_data(True)``: the subject access export
   (Story 3.15, FR-52); see ``nextron.web.export_page``. The POST's fields, apart from
@@ -346,6 +357,7 @@ from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.assist_accounts import AssistAccounts
+from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.playbook.api import (
     ActivationRefused,
     ActivationTrigger,
@@ -380,6 +392,7 @@ from nextron.app.setup.api import (
     Setup,
 )
 from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
+from nextron.domain.channel_permission import PermissionRefused
 from nextron.domain.company_facts import InvalidFact
 from nextron.domain.contacts import PrimaryRefusal, PrimaryRefused
 from nextron.domain.data_subject_request import check_request_ref
@@ -419,6 +432,7 @@ from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import discovery_page as discovery_rows
 from nextron.web import erase_page as erase_rows
+from nextron.web import permissions_page as permission_rows
 from nextron.web import export_page as export_rows
 from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
@@ -608,6 +622,7 @@ def create_app(
     primary_contacts: PrimaryContacts,
     pipeline: Pipeline,
     erasures: Erasures,
+    channel_permissions: ChannelPermissions,
     domain_checks: DomainChecks,
     lead_scores: LeadScores,
     place_discovery: PlaceDiscovery,
@@ -637,8 +652,9 @@ def create_app(
     panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
-    subject access export; ``domain_checks`` reads the Sending Domain authentication section
-    and queues its Recheck; ``place_discovery`` queues the Discovery page's Places runs.
+    subject access export; ``channel_permissions`` runs a Contact's Channel Permission page
+    (Story 10.7); ``domain_checks`` reads the Sending Domain authentication section and queues
+    its Recheck; ``place_discovery`` queues the Discovery page's Places runs.
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1894,6 +1910,169 @@ def create_app(
             return erase_answer(
                 request, erase_rows.PANEL_TEMPLATE, lead_id, contact_id, notice=notice
             )
+
+    # Story 10.7: a Contact's Channel Permissions, before /leads/{lead_id} like the erase step
+
+    def permissions_answer(
+        request: Request,
+        template: str,
+        lead_id: str,
+        contact_id: str,
+        *,
+        notice: permission_rows.Notice | None = None,
+        refusal: permission_rows.Refusal | None = None,
+    ) -> HTMLResponse:
+        found = erase_target(lead_id, contact_id)
+        if found is None:
+            return missing_lead(request)
+        lead, contact = found
+        quotes = permission_rows.evidence_quotes(
+            contact.id, research_queries.evidence(contact.lead_id)
+        )
+        context = permission_rows.panel_context(
+            lead,
+            contact,
+            channel_permissions.view(contact.id),
+            quotes,
+            notice=notice,
+            refusal=refusal,
+        )
+        return page(request, template, **context)
+
+    def permission_action(
+        request: Request,
+        lead_id: str,
+        contact_id: str,
+        action: str,
+        permission_id: str | None,
+        values: Mapping[str, str],
+        run: Callable[[], permission_rows.Notice],
+    ) -> HTMLResponse:
+        """Run one Channel Permission use case, then answer the panel."""
+        with units.open(read_only=True):
+            found = erase_target(lead_id, contact_id)
+            if found is None:
+                return missing_lead(request)
+            if found[1].erased_at is not None:  # nothing runs for a tombstone
+                return permissions_answer(
+                    request,
+                    permission_rows.PANEL_TEMPLATE,
+                    lead_id,
+                    contact_id,
+                    notice=permission_rows.erased_unchanged(),
+                )
+        notice: permission_rows.Notice | None = None
+        refusal: permission_rows.Refusal | None = None
+        try:
+            with units.open():
+                notice = run()
+        except PermissionRefused as refused:  # nothing was stored
+            refusal = permission_rows.Refusal(action, permission_id, refused.problems, values)
+        with units.open(read_only=True):
+            return permissions_answer(
+                request,
+                permission_rows.PANEL_TEMPLATE,
+                lead_id,
+                contact_id,
+                notice=notice,
+                refusal=refusal,
+            )
+
+    @app.get(
+        "/leads/{lead_id}/contacts/{contact_id}/permissions", name="contact_permissions_page"
+    )
+    @personal_data(True)  # it names the Contact and shows their number or handle
+    def contact_permissions_page(request: Request, lead_id: str, contact_id: str) -> HTMLResponse:
+        return permissions_answer(request, permission_rows.PAGE_TEMPLATE, lead_id, contact_id)
+
+    @app.post(
+        "/leads/{lead_id}/contacts/{contact_id}/permissions", name="contact_permission_record"
+    )
+    @personal_data(True)
+    def contact_permission_record(
+        request: Request,
+        lead_id: str,
+        contact_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> HTMLResponse:
+        values = permission_rows.submitted(fields, permission_rows.RECORD_FIELDS)
+
+        def run() -> permission_rows.Notice:
+            channel_permissions.record(contact_id, *permission_rows.record_arguments(values))
+            return permission_rows.recorded()
+
+        return permission_action(
+            request, lead_id, contact_id, permission_rows.RECORD, None, values, run
+        )
+
+    @app.post(
+        "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/inbound",
+        name="contact_permission_inbound",
+    )
+    @personal_data(True)
+    def contact_permission_inbound(
+        request: Request,
+        lead_id: str,
+        contact_id: str,
+        permission_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> HTMLResponse:
+        values = permission_rows.submitted(fields, permission_rows.INBOUND_FIELDS)
+
+        def run() -> permission_rows.Notice:
+            channel_permissions.update_inbound(
+                contact_id, permission_id, values["last_inbound_at"]
+            )
+            return permission_rows.inbound_updated()
+
+        return permission_action(
+            request, lead_id, contact_id, permission_rows.INBOUND, permission_id, values, run
+        )
+
+    @app.post(
+        "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/revoke",
+        name="contact_permission_revoke",
+    )
+    @personal_data(True)
+    def contact_permission_revoke(
+        request: Request,
+        lead_id: str,
+        contact_id: str,
+        permission_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> HTMLResponse:
+        values = permission_rows.submitted(fields, permission_rows.NO_FIELDS)
+
+        def run() -> permission_rows.Notice:
+            channel_permissions.revoke(contact_id, permission_id)
+            return permission_rows.revoked()
+
+        return permission_action(
+            request, lead_id, contact_id, permission_rows.REVOKE, permission_id, values, run
+        )
+
+    @app.post(
+        "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/do-not-contact",
+        name="contact_permission_do_not_contact",
+    )
+    @personal_data(True)
+    def contact_permission_do_not_contact(
+        request: Request,
+        lead_id: str,
+        contact_id: str,
+        permission_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> HTMLResponse:
+        values = permission_rows.submitted(fields, permission_rows.NO_FIELDS)
+
+        def run() -> permission_rows.Notice:
+            return permission_rows.opted_out(
+                channel_permissions.opt_out(contact_id, permission_id)
+            )
+
+        return permission_action(
+            request, lead_id, contact_id, permission_rows.OPT_OUT, permission_id, values, run
+        )
 
     # after /leads/import, so that path stays the import page
     @app.get("/leads/{lead_id}", name="lead_page")

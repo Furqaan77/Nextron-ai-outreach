@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0050_2_14_email_checks"
+HEAD = "0051_10_7_channel_permissions"
 
 
 @pytest.fixture

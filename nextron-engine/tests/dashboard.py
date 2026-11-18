@@ -111,6 +111,7 @@ from nextron.app.ops.api import (
 )
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.assist_accounts import AssistAccounts
+from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
@@ -358,6 +359,7 @@ class Dashboard:
     lead_scores: LeadScores = field(init=False)
     discovery: Discovery = field(init=False)
     place_discovery: PlaceDiscovery = field(init=False)
+    channel_permissions: ChannelPermissions = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -462,6 +464,10 @@ class Dashboard:
             self.queue,
         )
         self.erasures = Erasures(self.clock, Compliance(self.clock), queue=self.queue)
+        # Story 10.7: on the dashboard's Research and Compliance
+        self.channel_permissions = ChannelPermissions(
+            self.clock, self.research, self.compliance
+        )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -490,6 +496,7 @@ class Dashboard:
             primary_contacts=self.primary_contacts,
             pipeline=Pipeline(self.clock),
             erasures=self.erasures,
+            channel_permissions=self.channel_permissions,
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,

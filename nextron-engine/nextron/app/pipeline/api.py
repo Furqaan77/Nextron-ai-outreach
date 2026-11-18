@@ -51,7 +51,8 @@ take another), at the clock's now.
   ``close(n.lead_id, lost, n.suppression_entry_id)``; the ``operator``, ``import`` and ``dsr``
   sources leave the stage unchanged. A closed Lead is a no-op, so it is idempotent.
 - The LinkedIn account commands are ``nextron.app.pipeline.assist_accounts.AssistAccounts``
-  (Story 10.2).
+  (Story 10.2); the Channel Permission commands
+  ``nextron.app.pipeline.channel_permissions.ChannelPermissions`` (Story 10.7).
 
 **The Operator's moves (Story 9.1, FR-45, FR-37, FR-63).** Each command takes a keyword-only
 ``actor`` (``operator`` from the dashboard; a value that isn't a non-blank ``str`` raises
@@ -100,12 +101,23 @@ leaves it rolled back and reaches the caller:
   ``book_call``; ``True`` when it was a rebooking (the Lead was at ``call_booked``).
 - ``@use_case operator_save_deal(lead_id, deal_value, notes) -> None``: runs ``save_deal``.
 
-**Erasure (Stories 9.1 and 10.2, AD-17).** ``ERASURE`` declares ``leads`` ``tombstoned`` and
-``linkedin_accounts`` ``not_held`` (a Nextron staff member's label and name, never a Contact's
-data). ``@command Pipeline.erase_pii(n: ContactErased)``, the last ``ContactErased`` subscriber,
-sets the ``notes`` (PII class ``redact``) of the erased Contact's Lead, and of every Lead merged
-into it (``queries.discovery.merged_lead_ids``), to ``[erased]`` when they hold any; an unknown
-Contact changes nothing. ``call_outcomes`` holds no personal data (the Contact is kept as its id).
+**Erasure (Stories 9.1, 10.2 and 10.7, AD-17).** ``ERASURE`` declares ``leads`` and
+``channel_permissions`` ``tombstoned`` and ``linkedin_accounts`` ``not_held`` (a Nextron staff
+member's label and name, never a Contact's data). ``@command Pipeline.erase_pii(n:
+ContactErased)`` is pipeline's one ``ContactErased`` subscriber, registered last
+(``nextron.main.build_subscribers``); a ``cause`` that isn't an ``ErasureCause`` raises
+``ValueError``. In the publisher's transaction it:
+
+- sets the ``notes`` (PII class ``redact``) of the erased Contact's Lead, and of every Lead
+  merged into it (``queries.discovery.merged_lead_ids``), to ``[erased]`` when they hold any
+  (Story 9.1; an unknown Contact's Leads are left alone);
+- turns each of the Contact's ``active`` Channel Permissions ``revoked`` (``revoked_at`` now)
+  through the Channel Permission machine (event ``erase``), each with one ``events`` row (entity
+  ``channel_permissions``, cause ``contact_erased``, actor ``system:pipeline``), then sets every
+  row's ``whatsapp_number`` and ``instagram_handle`` (PII class ``null``) to NULL (Story 10.7).
+  Research's hook tombstones the linked operator Evidence.
+
+``call_outcomes`` holds no personal data (the Contact is kept as its id).
 """
 
 from collections.abc import Mapping
@@ -118,8 +130,11 @@ from nextron.app.queries import research as research_queries
 from nextron.app.sequencing.api import Sequencing
 from nextron.db import eventlog
 from nextron.db.repos.pipeline import bookings as bookings_repo
+from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.channel_permission import PermissionEvent, PermissionStatus
+from nextron.domain.channel_permission import transition as permission_transition
 from nextron.domain.enrollment import StopCause
 from nextron.domain.erasure import REDACTED, Coverage, ErasureCause, TableErasure
 from nextron.domain.ids import is_ulid
@@ -148,6 +163,7 @@ from nextron.ports.clock import Clock
 
 ENTITY: Final = "leads"
 BOOKINGS_ENTITY: Final = "call_outcomes"
+PERMISSIONS_ENTITY: Final = "channel_permissions"  # Story 10.7
 ACTOR: Final = "system:pipeline"
 OPERATOR: Final = "operator"
 BOOKED: Final = "booked"
@@ -170,6 +186,11 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
             Coverage.NOT_HELD,
             "the LinkedIn account a Nextron staff member sends Tasks from: its label and the "
             "owner's name and role, never a Contact's data",
+        ),
+        "channel_permissions": TableErasure(
+            Coverage.TOMBSTONED,
+            "the Contact's WhatsApp number and Instagram handle become NULL and each active "
+            "permission is revoked; research tombstones the linked operator Evidence",
         ),
     }
 )
@@ -466,14 +487,33 @@ class Pipeline:
 
     @command
     def erase_pii(self, n: ContactErased) -> None:
-        """Pipeline's erasure hook (Stories 9.1 and 10.2), the last ``ContactErased``
-        subscriber: redact the erased Contact's Lead's notes; see the module docstring."""
+        """Pipeline's erasure hook (Stories 9.1 and 10.7), the last ``ContactErased``
+        subscriber: redact the erased Contact's Lead's notes, then revoke and clear its Channel
+        Permissions; see the module docstring."""
         ErasureCause(n.cause)  # a data subject request or a retention erasure
-        contact = research_queries.contact(n.contact_id) if is_ulid(n.contact_id) else None
-        if contact is None:
+        if not is_ulid(n.contact_id):
             return
-        for lead_id in (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id)):
-            stages_repo.redact_notes(lead_id, REDACTED)
+        contact = research_queries.contact(n.contact_id)
+        if contact is not None:
+            for lead_id in (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id)):
+                stages_repo.redact_notes(lead_id, REDACTED)
+        now = self._clock.now()
+        for permission in permissions_repo.for_contact(n.contact_id):
+            if permission.status != PermissionStatus.ACTIVE.value:
+                continue
+            change = permission_transition(PermissionStatus.ACTIVE, PermissionEvent.ERASE)
+            permissions_repo.revoke(permission.id, now)
+            eventlog.append(
+                entity=PERMISSIONS_ENTITY,
+                entity_id=permission.id,
+                from_status=permission.status,
+                to_status=change.to.value,
+                cause=change.cause.value,
+                cause_ref=None,
+                actor=ACTOR,
+                at=now,
+            )
+        permissions_repo.clear_identifiers(n.contact_id, now)
 
     # Story 9.1: the dashboard's use cases -------------------------------------------------------
 

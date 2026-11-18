@@ -814,7 +814,8 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
         ops_api.erase_pii,
         notify_api.erase_pii,
     ]
-    # Stories 9.1 and 10.2: the Lead's notes and the LinkedIn accounts, registered last
+    # Stories 9.1, 10.2 and 10.7: pipeline's hook, last: the Lead's notes, and the Channel
+    # Permissions revoked and cleared
     assert type(getattr(pipeline, "__self__", None)) is Pipeline
     [enrolled] = subscribers.subscribers_of(Enrolled)  # Story 4.8
     assert is_command(enrolled)
@@ -848,7 +849,7 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
         *subscribers.subscribers_of(ContactErased)[:4],  # the rest are module functions
-        *subscribers.subscribers_of(ContactErased)[-1:],  # Stories 9.1 and 10.2: pipeline's
+        *subscribers.subscribers_of(ContactErased)[-1:],  # Stories 9.1 and 10.7: pipeline's
         *subscribers.subscribers_of(Enrolled),
         *subscribers.subscribers_of(MessageSent),
         *subscribers.subscribers_of(FooterChanged),
@@ -908,7 +909,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0051_more", create_table("more")))
+    extend(location, ("0052_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -922,7 +923,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0051_more"
+    assert spy.calls[0]["db_revision"] == "0052_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade

@@ -20,7 +20,10 @@ violation.
   (``drafting.request_steps``, Story 4.9) before its ``drafts`` insert, and ``Blocked`` writes
   nothing. ``drafting.request_*`` (Story 4.9: ``Drafting.request_steps``) asks for Step 2 of an
   Enrollment made with Step 1 only: its gate call comes before its one ``drafts`` insert, and
-  ``Blocked`` adds no row.
+  ``Blocked`` adds no row. Story 10.7's ``pipeline.channel_permissions``
+  (``ChannelPermissions.record`` and ``update_inbound``) gates the Contact on ``whatsapp`` or
+  ``instagram`` for ``follow_up`` before any write; Blocked, it stores nothing, not even the
+  Evidence.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -85,6 +88,7 @@ from sqlalchemy import Engine, event
 
 from nextron import main
 from nextron.app.compliance import api as compliance_api
+from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
 from nextron.app.drafting.api import Drafting
 from nextron.app.discovery.place_ingest import PlaceDiscovery
@@ -92,6 +96,7 @@ from nextron.app.discovery.places import PlaceSearches
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.ops.api import Seeds
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PeopleExtractions
@@ -117,6 +122,7 @@ from nextron.domain.contactability import (
     NewContactSubject,
     NewLeadSubject,
 )
+from nextron.domain.channel_permission import PermissionRefused
 from nextron.domain.contacts import LINKEDIN_URL_SOURCES, ContactCandidate, ProvenanceSource
 from nextron.domain.crawl import CrawlOutcome, PageKind
 from nextron.domain.leads import LeadIdentity, LeadSource
@@ -239,6 +245,12 @@ MANIFEST: Final = (
         ("app/pipeline/",),
         ANY + r"(?!cancel_)\w*(?:task|call_sheet)\w*",
         inserts=frozenset({"linkedin_tasks"}),
+    ),
+    # Story 10.7: recording a Channel Permission and moving an Instagram one's last inbound
+    Caller(
+        "pipeline.channel_permissions",
+        ("app/pipeline/",),
+        r"ChannelPermissions\.(?:record|update_inbound)",
     ),
     Caller(
         "compliance.assert_sendable",
@@ -1347,6 +1359,8 @@ def _email_search_blocked(world: World) -> None:
             "SELECT COUNT(*) FROM contacts WHERE email LIKE 'jane.doe@%'"
         ).scalar_one()
     assert addresses == 1  # the allowed case's only
+
+
 def _seed_campaigns(world: World) -> str:
     """Every shipped seed file stored (once per world); the first Campaign's id."""
 
@@ -1462,6 +1476,74 @@ def _verify_blocked(world: World) -> None:
     assert [tuple(row) for row in rows] == [("verified", "valid"), ("guessed", "suppressed")]
 
 
+def _channel_permissions() -> ChannelPermissions:
+    clock = FrozenClock(T0)
+    return ChannelPermissions(clock, Research(clock), Compliance(clock))
+
+
+def _permission_contact(world: World, tag: str) -> str:
+    """A Contact on a new Lead, with ``sender_timezone`` set (permission times are local)."""
+    with world.units.open():
+        Setup(FrozenClock(T0)).save({"sender_timezone": "Europe/London"})
+    return world.contact(world.lead(f"firm-{tag}.co.uk"), ContactCandidate(name=NAME))
+
+
+def _quietly(run: Callable[[], object]) -> object:
+    """``run``, a refusal (the Blocked case) answered ``None``."""
+    try:
+        return run()
+    except PermissionRefused:
+        return None
+
+
+def _permission_record(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 10.7: recording an Instagram permission gates the Contact on its channel."""
+    contact_id = _permission_contact(world, tag)
+    service = _channel_permissions()
+
+    def action() -> object:
+        with world.units.open():
+            return _quietly(
+                lambda: service.record(
+                    contact_id,
+                    "instagram",
+                    "started_instagram_conversation",
+                    "2026-11-18T08:00",
+                    "They messaged us first on Instagram about the webinar",
+                    "",
+                    "jane.doe",
+                )
+            )
+
+    expected = (GateCall(ContactSubject(contact_id), "instagram", "follow_up"),)
+    return action, lambda: expected
+
+
+def _permission_inbound(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 10.7: moving an Instagram permission's last inbound message gates it again."""
+    contact_id = _permission_contact(world, tag)
+    service = _channel_permissions()
+    with world.units.open():
+        permission_id = service.record(
+            contact_id,
+            "instagram",
+            "started_instagram_conversation",
+            "2026-11-18T07:00",
+            "They messaged us first on Instagram",
+            "",
+            "jane.doe",
+        )
+
+    def action() -> object:
+        with world.units.open():
+            return _quietly(
+                lambda: service.update_inbound(contact_id, permission_id, "2026-11-18T08:30")
+            )
+
+    expected = (GateCall(ContactSubject(contact_id), "instagram", "follow_up"),)
+    return action, lambda: expected
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
         "verify_contact_email": Scenario(
@@ -1490,6 +1572,8 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             # blocked, the run still counts the candidate as suppressed
             blocked_writes=frozenset({("UPDATE", "discovery_runs")}),
         ),
+        # Story 10.7: Blocked stores nothing, not even the Evidence
+        "pipeline.channel_permissions": Scenario((_permission_record, _permission_inbound)),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1592,6 +1676,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "find_contact_email",
         "drafting.request_*",  # Story 4.9
         "verify_contact_email",  # Story 2.14
+        "pipeline.channel_permissions",  # Story 10.7
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

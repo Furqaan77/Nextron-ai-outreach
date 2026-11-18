@@ -116,6 +116,19 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
   basis record (the resolver's notes skip it). Nothing is logged and no ``events`` row is
   appended.
 
+- ``@command record_operator_quote(contact_id, quote, at) -> str`` (Story 10.7, FR-24): the
+  Operator's own Quote Evidence about a Contact, such as what the prospect did to open a
+  WhatsApp or Instagram conversation (``nextron.app.pipeline.channel_permissions`` calls it in
+  its unit). An unknown or erased Contact (a text that isn't a ULID included) raises
+  ``LookupError``; a ``quote`` that isn't a ``str`` of 1 to 300 characters equal to its own
+  strip, or an ``at`` that isn't an aware ``datetime``, raises ``ValueError`` or ``TypeError``.
+  It inserts one ``evidence`` row on the Contact's Lead (``signals_repo.insert_evidence``):
+  ``type`` ``quote``, ``source`` ``operator``, ``extracted_by`` ``operator``,
+  ``person_contact_id`` the Contact, ``pages_checked`` empty, no ``source_url``, retrieved and
+  created ``at``; and returns its id. No Signal links it, and no extraction, people step or
+  Absence check ever supersedes or retracts it (they touch only their own ``extracted_by``).
+  Research's erasure hook tombstones it with the Contact's other Evidence.
+
 **The Primary Contact (Story 2.10, FR-13).** ``Research`` is the only writer of
 ``contacts.is_primary`` and ``primary_set_by`` (kept set together) and of the Lead's
 ``no_decision_maker``. Each Primary change appends one ``events`` row: entity ``leads``, the
@@ -456,7 +469,13 @@ from nextron.domain.crawl import (
 )
 from nextron.domain.eligibility import Decision, basis_country
 from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
-from nextron.domain.extraction import EXTRACT_LEAD_JOB, EXTRACTED_BY_RULE, EvidenceSource
+from nextron.domain.extraction import (
+    EXTRACT_LEAD_JOB,
+    EXTRACTED_BY_OPERATOR,
+    EXTRACTED_BY_RULE,
+    MAX_QUOTE,
+    EvidenceSource,
+)
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
 from nextron.domain.geo import Location
 from nextron.domain.identity import IdentityError, normalize_name, registrable_domain
@@ -495,6 +514,7 @@ ACTOR: Final = "system:research"
 BLOCKED_ENTITY: Final = "leads"
 CONTACT_BLOCKED: Final = "contact_blocked"
 MAX_DETAIL_LENGTH: Final = 2048
+MAX_OPERATOR_QUOTE: Final = MAX_QUOTE  # Story 10.7: an operator Quote, like any quote
 # The Contact fields a later source fills when the Contact lacks them, besides the email and
 # the office.
 TEXT_FIELDS: Final = ("name", "role", "linkedin_url")
@@ -926,6 +946,38 @@ class Research:
             campaign_id=campaign.id,
             lia_ref=lia_ref,
             lia_date=lia_date,
+            at=at,
+        )
+
+    @command
+    def record_operator_quote(self, contact_id: str, quote: str, at: datetime) -> str:
+        """Store the Operator's Quote Evidence about the Contact ``contact_id``; return its id.
+        See the module docstring."""
+        if not isinstance(at, datetime) or at.utcoffset() is None:
+            raise TypeError("record_operator_quote: at must be an aware datetime")
+        if (
+            not isinstance(quote, str)
+            or not 1 <= len(quote) <= MAX_OPERATOR_QUOTE
+            or quote != quote.strip()
+        ):
+            raise ValueError("record_operator_quote: the quote must be 1 to 300 stripped characters")
+        contact = contacts_repo.get(contact_id) if is_ulid(contact_id) else None
+        if contact is None or contact.erased_at is not None:
+            raise LookupError("record_operator_quote: the Contact is unknown")
+        return signals_repo.insert_evidence(
+            lead_id=contact.lead_id,
+            evidence_type=EvidenceType.QUOTE.value,
+            quote=quote,
+            sought=None,
+            number=None,
+            fact=None,
+            value=None,
+            pages_checked=(),
+            source=EvidenceSource.OPERATOR.value,
+            source_url=None,
+            retrieved_at=at,
+            extracted_by=EXTRACTED_BY_OPERATOR,
+            person_contact_id=contact.id,
             at=at,
         )
 

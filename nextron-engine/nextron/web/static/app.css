@@ -967,3 +967,8 @@ button.secondary {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.window-closed {
+  font-weight: 600;
+  color: var(--refused);
+}

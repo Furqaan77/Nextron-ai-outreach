@@ -36,6 +36,7 @@ from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.setup.api import Setup
 from nextron.db.models import Base
 from nextron.db.pii_registry import PII, PiiClass
+from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import postings as postings_repo
@@ -403,6 +404,20 @@ def plant(world: World) -> Planted:
             OVERRIDE, "question", contact_id=contact_id, names=(NAME,)
         )
     )
+    # Story 10.7: an active Instagram permission naming her handle (pipeline's hook clears it)
+    world.transact(
+        lambda: permissions_repo.insert(
+            contact_id=contact_id,
+            channel="instagram",
+            prospect_action="started_instagram_conversation",
+            occurred_at=T0,
+            evidence_id=person_quote,
+            whatsapp_number=None,
+            instagram_handle="jane.plantdoe",
+            last_inbound_at=T0,
+            at=T0,
+        )
+    )
     return Planted(
         lead_id,
         contact_id,
@@ -589,6 +604,7 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("job_postings", "title"),  # Story 2.11
         ("job_postings", "description"),
         ("leads", "notes"),  # Story 9.1
+        ("channel_permissions", "instagram_handle"),  # Story 10.7: pipeline's hook NULLs it
     }
     not_planted = {
         (table, column)
@@ -619,6 +635,7 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("draft_revisions", "text_hash"),
         ("linkedin_accounts", "label"),  # Story 10.2: a staff member's, never a Contact's
         ("linkedin_accounts", "owner_name"),
+        ("channel_permissions", "whatsapp_number"),  # digits only: it can't hold the mark
     }
     assert world.sql(
         "SELECT office_country FROM contacts WHERE id = ?", (planted.contact_id,)

@@ -29,7 +29,8 @@ current unit of work, read-only ones included.
   ``moves`` (``operator_moves(stage)``) and ``close_ref``, the ``cause_ref`` of its latest close
   ``events`` row (``stages.last_close``), whether it is still closed or reopened since, or
   ``None``. ``None`` for an unknown Lead (a text that isn't a ULID included).
-- ``export_pii(contact_id, lead_ids, terms) -> {section: tuple[dict, ...]}`` (Story 9.1, the
+- ``export_pii(contact_id, lead_ids, terms) -> {section: tuple[dict, ...]}`` (Stories 9.1 and
+  10.7, the
   subject access export): ``call_bookings``, every ``call_outcomes`` row of the Contact (all
   its columns); ``lead_notes``, one row ``{"lead_id", "notes_excerpts"}`` for each of
   ``lead_ids`` (the Contact's Lead and every Lead merged into it) whose notes mention one of
@@ -43,12 +44,21 @@ current unit of work, read-only ones included.
 - ``health_issues()`` (Story 10.2): one ``linkedin_tasks_off`` issue (subject
   ``linkedin_tasks``, text ``nextron.domain.linkedin_caps.TASKS_OFF``) while ``assist_setup()``
   is ``None``; otherwise none.
+- ``sender_zone()`` (Story 10.7): the ``sender_timezone`` setting as a ``ZoneInfo``, or ``None``
+  while it is unset or its stored text no longer parses; Channel Permission times are read and
+  shown in it.
+- ``permissions(contact_id)`` (Story 10.7): the Contact's Channel Permissions, newest first, as
+  ``StoredPermission`` rows; none for a text that isn't a ULID.
+- Story 10.7 (FR-52) adds ``channel_permissions`` to ``export_pii``'s sections: every column of
+  each of the Contact's permissions, oldest first (``contact_export.COVERAGE``); none for a text
+  that isn't a ULID.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from math import ceil
+from zoneinfo import ZoneInfo
 from typing import Final
 
 from nextron.app.queries import setup as setup_queries
@@ -56,10 +66,12 @@ from nextron.db.repos.pipeline import assist_accounts as accounts_repo
 from nextron.db.repos.pipeline import board as board_repo
 from nextron.db.repos.pipeline import bookings as bookings_repo
 from nextron.db.repos.pipeline import stages as stages_repo
+from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline.assist_accounts import StoredAccount
 from nextron.db.repos.pipeline.board import BoardLead
 from nextron.db.repos.pipeline.bookings import StoredBooking
 from nextron.domain.contact_export import MentionTerm, excerpts
+from nextron.db.repos.pipeline.channel_permissions import StoredPermission
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.linkedin_caps import TASKS_OFF, AccountCaps, AccountStatus
@@ -86,12 +98,15 @@ __all__ = [
     "PipelineBoard",
     "StageGroup",
     "StoredBooking",
+    "StoredPermission",
     "accounts",
     "assist_setup",
     "board",
     "export_pii",
     "health_issues",
     "lead_pipeline",
+    "permissions",
+    "sender_zone",
     "stage",
 ]
 
@@ -159,14 +174,21 @@ def lead_pipeline(lead_id: str) -> LeadPipeline | None:
 def export_pii(
     contact_id: str, lead_ids: Sequence[str], terms: Sequence[MentionTerm]
 ) -> dict[str, tuple[dict[str, object], ...]]:
-    """The Contact's bookings and the lines of its Leads' notes that mention it."""
+    """The Contact's bookings, the lines of its Leads' notes that mention it and its Channel
+    Permissions; see the module docstring."""
     notes: list[dict[str, object]] = []
     for lead_id in lead_ids:
         deal = stages_repo.deal(lead_id) if is_ulid(lead_id) else None
         lines = () if deal is None else excerpts(deal.notes, terms)
         if lines:
             notes.append({"lead_id": lead_id, "notes_excerpts": list(lines)})
-    return {"call_bookings": bookings_repo.about(contact_id), "lead_notes": tuple(notes)}
+    return {
+        "call_bookings": bookings_repo.about(contact_id),
+        "lead_notes": tuple(notes),
+        "channel_permissions": (
+            permissions_repo.export_rows(contact_id) if is_ulid(contact_id) else ()
+        ),
+    }
 
 
 def _day_start(day: date) -> datetime:
@@ -323,3 +345,25 @@ def health_issues() -> tuple[HealthIssue, ...]:
     if assist_setup() is not None:
         return ()
     return (HealthIssue(TASKS_OFF_KIND, TASKS_OFF_SUBJECT, TASKS_OFF, detail=TASKS_OFF_DETAIL),)
+
+
+# Channel Permissions (Story 10.7) -------------------------------------------------------------
+
+
+def sender_zone() -> ZoneInfo | None:
+    """The ``sender_timezone`` setting, or ``None`` when it is unset or no longer parses."""
+    try:
+        name = setup_queries.get(Key.SENDER_TIMEZONE)
+    except (InvalidSettingValue, SettingNotSet):
+        return None
+    try:
+        return ZoneInfo(str(name))
+    except (ValueError, LookupError):  # ZoneInfoNotFoundError is a KeyError
+        return None
+
+
+def permissions(contact_id: str) -> tuple[StoredPermission, ...]:
+    """The Contact's Channel Permissions, newest first."""
+    if not is_ulid(contact_id):
+        return ()
+    return tuple(permissions_repo.for_contact(contact_id))

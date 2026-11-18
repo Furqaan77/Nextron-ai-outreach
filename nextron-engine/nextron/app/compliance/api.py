@@ -178,7 +178,7 @@ The two reapply writers (their caller is ``nextron.app.compliance.ledger.Erasure
   ``queries.drafting.export_pii`` (the revisions of their Drafts, Story 4.12),
   ``queries.pipeline.export_pii`` (Story 9.1: the Contact's booked calls, and the lines of the
   notes of its Lead and of every Lead merged into it, ``queries.discovery.merged_lead_ids``,
-  that mention it, by ``mention_terms(name, email)``) and
+  that mention it, by ``mention_terms(name, email)``; Story 10.7: its Channel Permissions) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.

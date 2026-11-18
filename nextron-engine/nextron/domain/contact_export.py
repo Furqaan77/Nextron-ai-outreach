@@ -39,6 +39,7 @@ Table                      Owner        Exported as / why not
                                         that mention the Contact)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
+``channel_permissions``    pipeline     ``channel_permissions`` (Story 10.7)
 ``linkedin_accounts``      pipeline     Nextron's own LinkedIn account (Story 10.2)
 ``jobs``                   jobqueue     never linked to a Contact
 ``backups``                ops          never linked to a Contact
@@ -190,6 +191,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "leads": Exported(
             "pipeline", "lead_notes", shown_as=MappingProxyType({"notes": "notes_excerpts"})
         ),
+        "channel_permissions": Exported("pipeline", "channel_permissions"),  # Story 10.7
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),
