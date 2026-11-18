@@ -4149,12 +4149,13 @@ so the extraction (Story 2.9) and the job-board check (Story 2.11) work from wha
 (FR-10, FR-49, FR-57, AD-7, AD-9, AD-18, NFR-6, NFR-34; Story 2.5).
 
 **What is never fetched** (`nextron/domain/fetch_policy.py`). The FR-49 denylist refuses
-LinkedIn, Instagram, Google Maps (a `maps` host under `google.*`, a `/maps` path, `goo.gl` maps
-links and `g.page`) and the job sites (Indeed, Glassdoor, ZipRecruiter, Reed, Totaljobs and
-CV-Library). The egress rules refuse a URL that isn't `http` or `https`, has credentials in it,
-uses a port other than 80 or 443, or names an IP address instead of a host; and an address that
-is private, loopback, link-local, multicast, CGNAT, unique-local, IPv4 hidden inside IPv6,
-otherwise not global, or this PC's own. No setting loosens any of this.
+LinkedIn, Instagram (and their static CDNs, `licdn.com` and `cdninstagram.com`), Google Maps
+(a `maps` host under `google.*`, a `/maps` path, `goo.gl` maps links and `g.page`) and the job
+sites (Indeed, Glassdoor, ZipRecruiter, Reed, Totaljobs and CV-Library). The egress rules
+refuse a URL that isn't `http` or `https`, has credentials in it, uses a port other than 80 or
+443, or names an IP address instead of a host; and an address that is private, loopback,
+link-local, multicast, CGNAT, unique-local, IPv4 hidden inside IPv6, otherwise not global, or
+this PC's own. No setting loosens any of this.
 
 **The crawler** (`nextron/adapters/crawler`, `HttpCrawler`) checks every hop itself:
 
@@ -4961,3 +4962,37 @@ contract tests fail until you do. An HTTP adapter also takes a required keyword 
 records each request it attempts (see [Metering, quotas and the AI
 budget](#metering-quotas-and-the-ai-budget)). A `mail` or `alert` adapter is also registered in
 `nextron.main.ROLE_ADAPTERS` (see [Dev and test sink](#dev-and-test-sink)).
+
+### LinkedIn and Instagram are never automated (Story 10.1)
+
+FR-49 is held by contracts that fail on any future code that could automate or fetch LinkedIn or
+Instagram:
+
+- `tests/contracts/test_no_linkedin_adapter.py` (`test_no_linkedin_adapter`): no module or
+  package named for either platform, no name holding either word (module level, under a
+  module-level `if`/`try`/`with`/loop, a method or nested class, or an import alias) except
+  seven named definitions in `nextron.domain` (`identity`, `lead_import`, `contacts`), no
+  `Protocol` in `nextron.ports` outside AD-9's ports and four approved extras, no job type
+  named for either
+  platform (its allowlist is empty; Stories 10.4 and 10.5 add their Task job types there with a
+  reason), and the platforms' hosts (`linkedin.com`, `lnkd.in`, `licdn.com`, `instagram.com`,
+  `instagr.am`, `cdninstagram.com`) in no Python string except the exact literals allowlisted
+  in `domain.fetch_policy`, `domain.identity` and `domain.lead_import`, and in no template or
+  static file.
+- Import contract `c4-banned-everywhere` also bans `pyautogui`, `undetected_chromedriver`,
+  `undetected_playwright`, `linkedin`, `linkedin_scraper`, `instagram_private_api`,
+  `seleniumwire`, `selenium_stealth`, `playwright_stealth` and `pyppeteer_stealth`, and
+  `tests/contracts/test_lockfile.py` keeps every LinkedIn, Instagram, browser-automation and
+  anti-bot distribution out of `uv.lock`.
+- The denylist (`nextron/domain/fetch_policy.py`) also holds the platforms' static CDNs,
+  `licdn.com` and `cdninstagram.com`. The renderer's request handler refuses any denylisted URL
+  itself, before any counter, lookup, fetch or metering, so a LinkedIn badge or an Instagram
+  embed on a firm's page is aborted.
+- A LinkedIn URL comes only from the Signal Inbox, the Lead's website, a CSV import, a referral
+  or an Operator entry (`nextron.domain.contacts.LINKEDIN_URL_SOURCES`), each with its
+  Provenance Record: `Research.add_contact` refuses one from any other source with
+  `ValueError` before any write. `tests/contracts/test_linkedin_url_write_path.py` pins every
+  write path (including direct writes to the contacts repository). A stored URL is never
+  fetched because every fetching adapter applies the FR-49 denylist to each first URL and
+  redirect; the same file adds a syntactic tripwire that flags a port fetch call whose argument
+  names LinkedIn or Instagram (it doesn't follow a URL bound to another name first).

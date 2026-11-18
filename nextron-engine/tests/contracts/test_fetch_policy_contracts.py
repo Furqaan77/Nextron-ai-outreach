@@ -48,6 +48,15 @@ PRIVATE_URL: Final = f"https://{PRIVATE_HOST}/robots.txt"
 
 DENIED_FIRST_URLS: Final = (
     "https://www.linkedin.com/company/smith-law",
+    # FR-49 (Story 10.1): LinkedIn bare and on any subdomain, its short links and CDN, and
+    # Instagram bare, on any subdomain, its short domain and CDN
+    "https://linkedin.com/in/jane-doe",
+    "https://uk.linkedin.com/in/jane-doe",
+    "https://platform.linkedin.com/badges/js/profile.js",
+    "https://static.licdn.com/sc/h/badge.png",
+    "https://instagram.com/smithlaw",
+    "https://instagr.am/p/x",
+    "https://scontent.cdninstagram.com/v/t51/photo.jpg",
     "https://lnkd.in/abc",
     "https://www.instagram.com/smithlaw/",
     "https://maps.google.com/?q=smith+law",
@@ -68,6 +77,15 @@ DENIED_REDIRECTS: Final = (
     "https://www.linkedin.com/company/smith-law",
     "https://www.instagram.com/smithlaw/",
     "https://uk.indeed.com/jobs",
+    # FR-49 (Story 10.1), as for the first URLs
+    "https://linkedin.com/in/jane-doe",
+    "https://uk.linkedin.com/in/jane-doe",
+    "https://lnkd.in/abc",
+    "https://static.licdn.com/sc/h/badge.png",
+    "https://instagram.com/smithlaw",
+    "https://instagr.am/p/x",
+    "https://www.instagram.com/embed.js",
+    "https://scontent.cdninstagram.com/v/t51/photo.jpg",
 )
 
 

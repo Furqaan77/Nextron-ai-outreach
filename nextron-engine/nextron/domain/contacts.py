@@ -4,6 +4,10 @@
 Provenance Record: ``csv``, ``website``, ``signal_inbox``, ``referral``, ``replier``,
 ``operator``, ``pattern``, ``finder`` and ``eligibility_basis``. **``ProvenanceSubject``** is
 what a record is about: the ``contact`` (its name, role or LinkedIn URL) or its ``address``.
+**``LINKEDIN_URL_SOURCES``** (FR-49, Story 10.1) are the only sources a LinkedIn URL may come
+from: ``signal_inbox``, ``website``, ``csv``, ``referral`` and ``operator``. A URL is never
+found by fetching LinkedIn, so ``finder``, ``pattern``, ``replier`` and ``eligibility_basis``
+never carry one; ``Research.add_contact`` refuses one from them.
 
 **``ContactCandidate(name=None, role=None, email=None, linkedin_url=None, office=None)``** is a
 person that ``Research.add_contact`` matches and stores on a Lead. It is frozen and checks itself
@@ -129,6 +133,17 @@ class ProvenanceSource(StrEnum):
     PATTERN = "pattern"
     FINDER = "finder"
     ELIGIBILITY_BASIS = "eligibility_basis"
+
+
+LINKEDIN_URL_SOURCES: Final = frozenset(
+    {
+        ProvenanceSource.SIGNAL_INBOX,
+        ProvenanceSource.WEBSITE,
+        ProvenanceSource.CSV,
+        ProvenanceSource.REFERRAL,
+        ProvenanceSource.OPERATOR,
+    }
+)
 
 
 class ProvenanceSubject(StrEnum):

@@ -48,10 +48,14 @@ busy-loops can hold ``page.content()`` forever. Past it the render is the retrya
 ``render_timeout`` and the worker is abandoned: it keeps its browser until it ends or the
 engine exits.
 
-**The request handler** aborts every request unless all of these hold: its method is GET; it
-comes before the deadline, within ``MAX_REQUESTS`` (100) fetches, and before ``MAX_BYTES``
-(20 MiB) have been read in this render (fetching stops once they have; a body that takes the
-total past them is read but never handed to the page); and its type is allowed (``ALLOWED``).
+**The request handler** first aborts any request whose URL ``nextron.domain.fetch_policy``'s
+``is_denied`` matches (FR-49, Story 10.1: a LinkedIn badge, an Instagram embed or anything else
+on the denylist, of any type and method), before any counter is touched and with no lookup or
+fetch; the crawler would refuse it too, but this refusal doesn't rest on it. Then it aborts
+every request unless all of these hold: its method is GET; it comes before the deadline,
+within ``MAX_REQUESTS`` (100) fetches, and before ``MAX_BYTES`` (20 MiB) have been read in
+this render (fetching stops once they have; a body that takes the total past them is read but
+never handed to the page); and its type is allowed (``ALLOWED``).
 A refused navigation of the main frame after its first document was fulfilled is aborted with
 ``"aborted"`` (``ERR_ABORTED`` leaves the current document in place, where
 ``"blockedbyclient"`` would commit Chromium's error page); every other refusal with
@@ -100,7 +104,7 @@ from nextron.domain.crawl import (
     USER_AGENT,
     request_interval,
 )
-from nextron.domain.fetch_policy import MAX_PAGE_BYTES
+from nextron.domain.fetch_policy import MAX_PAGE_BYTES, is_denied
 from nextron.ports.errors import AdapterError
 from nextron.ports.renderer import (
     RENDER_FAILED,
@@ -338,6 +342,8 @@ class _Render:
         return DOCUMENT_TYPE, True
 
     def _serve(self, route: Any, request: Any) -> bool:
+        if is_denied(request.url):  # FR-49 (Story 10.1): never fetched, whatever its type
+            return False
         if request.method != GET or self.monotonic() >= self.deadline:
             return False
         allowed = self._allowed(request)

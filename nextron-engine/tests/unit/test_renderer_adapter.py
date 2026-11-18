@@ -37,6 +37,7 @@ from tests.fakes.browser import (
     FakeBrowser,
     FakeBrowsers,
     FakePlaywright,
+    MAIN,
     FakeSite,
     Fulfilled,
     GotoCall,
@@ -394,6 +395,95 @@ def test_a_redirect_to_a_denylisted_or_private_host_is_aborted_after_one_request
 
     assert world.outcome(f"https://{CDN}/x.js") == Aborted("blockedbyclient")
     assert world.web.hosts() == [SITE, CDN]
+
+
+# FR-49 (Story 10.1): a LinkedIn badge or an Instagram embed on a firm's page is refused by the
+# handler itself, before any counter, lookup, fetch or meter call.
+PLATFORM_URLS = (
+    "https://platform.linkedin.com/badges/js/profile.js",
+    "https://static.licdn.com/sc/h/badge.png",
+    "https://www.instagram.com/embed.js",
+    "https://scontent.cdninstagram.com/v/t51/photo.jpg",
+)
+PLATFORM_TYPES = (
+    ("image", MAIN, False, "GET"),
+    ("script", MAIN, False, "GET"),
+    ("stylesheet", MAIN, False, "GET"),
+    ("font", MAIN, False, "GET"),
+    ("media", MAIN, False, "GET"),
+    ("ping", MAIN, False, "POST"),
+    ("document", CHILD, True, "GET"),  # an iframe
+    ("xhr", MAIN, False, "GET"),
+    ("xhr", MAIN, False, "POST"),
+    ("fetch", MAIN, False, "GET"),
+)
+
+
+@pytest.mark.parametrize("url", PLATFORM_URLS)
+@pytest.mark.parametrize(("kind", "frame", "navigation", "method"), PLATFORM_TYPES)
+def test_a_platform_sub_resource_is_aborted_with_no_lookup_fetch_or_metering(
+    world: World, url: str, kind: str, frame: str, navigation: bool, method: str
+) -> None:
+    world.site.requests = [Sub(url, kind, method=method, frame=frame, navigation=navigation)]
+
+    world.render()
+
+    assert world.outcome(url) == Aborted("blockedbyclient")
+    assert world.web.hosts() == [SITE]
+    assert world.resolver.lookups == [SITE]
+    assert [call.operation for call in world.meter.calls] == ["render"]  # the main document
+
+
+@pytest.mark.parametrize("url", PLATFORM_URLS)
+def test_a_later_main_frame_navigation_to_a_platform_is_aborted_in_place(
+    world: World, url: str
+) -> None:
+    world.site.requests = [Sub(url, "document", navigation=True)]
+
+    rendered = world.render()
+
+    # ERR_ABORTED leaves the firm's page in place, as for any refused later navigation
+    assert world.outcome(url) == Aborted("aborted")
+    assert rendered.final_url == HOME
+    assert world.web.hosts() == [SITE]
+    assert world.resolver.lookups == [SITE]
+    assert [call.operation for call in world.meter.calls] == ["render"]
+
+
+def test_platform_requests_take_nothing_from_the_request_cap(world: World) -> None:
+    """100 denied requests, then 99 allowed scripts: all 99 are fulfilled, so the denied ones
+    took nothing from ``MAX_REQUESTS`` (100, the main document included)."""
+    world.web.default = script()
+    denied = [Sub(PLATFORM_URLS[index % 4] + f"?n={index}", "script") for index in range(100)]
+    allowed = [Sub(f"https://{CDN}/s{index}.js", "script") for index in range(99)]
+    world.site.requests = [*denied, *allowed]
+
+    world.render()
+
+    assert all(world.outcome(sub.url) == Aborted("blockedbyclient") for sub in denied)
+    assert all(isinstance(world.outcome(sub.url), Fulfilled) for sub in allowed)
+    assert len(world.web.requests) == 100
+
+
+def test_the_handler_refuses_a_platform_url_even_if_the_fetcher_would_not(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is the handler's own: a platform request is never handed to the fetcher at
+    all, so it doesn't rest on the crawler's denylist (which the real ``fetch_resource`` still
+    applies behind this recorder)."""
+    asked: list[str] = []
+    fetch = world.crawler.fetch_resource
+
+    def recording(url: str, **kwargs: Any) -> Any:
+        asked.append(url)
+        return fetch(url, **kwargs)
+
+    monkeypatch.setattr(world.crawler, "fetch_resource", recording)
+    world.site.requests = [Sub(url, "script") for url in PLATFORM_URLS]
+
+    world.render()
+
+    assert asked == [HOME]
 
 
 def test_an_off_site_navigation_is_aborted_and_a_same_site_one_is_paced(world: World) -> None:

@@ -82,7 +82,7 @@ from nextron.domain.contactability import (
     NewContactSubject,
     NewLeadSubject,
 )
-from nextron.domain.contacts import ContactCandidate, ProvenanceSource
+from nextron.domain.contacts import LINKEDIN_URL_SOURCES, ContactCandidate, ProvenanceSource
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import validate_markets
 from nextron.domain.segments import validate_segments
@@ -937,18 +937,21 @@ def _add_new(source: ProvenanceSource) -> Prepare:
 
 
 def _add_match(source: ProvenanceSource) -> Prepare:
-    """A stored Contact matched by name that the candidate's LinkedIn URL would fill: the
-    candidate's values, then the match's own (decision 13)."""
+    """A stored Contact matched by name that the candidate's LinkedIn URL would fill (its role
+    instead from a source a LinkedIn URL never comes from, Story 10.1): the candidate's values,
+    then the match's own (decision 13)."""
 
     def prepare(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
         lead_id = world.lead(f"firm-{tag}.co.uk")
         stored_id = world.contact(lead_id, ContactCandidate(name=NAME))
-        linkedin = f"https://www.linkedin.com/in/jane-{tag}"
-        candidate = ContactCandidate(name=NAME, linkedin_url=linkedin)
-        expected = (
-            _gate(NewContactSubject(lead_id, name=NAME, linkedin_url=linkedin)),
-            _gate(ContactSubject(stored_id)),
-        )
+        if source in LINKEDIN_URL_SOURCES:
+            linkedin = f"https://www.linkedin.com/in/jane-{tag}"
+            candidate = ContactCandidate(name=NAME, linkedin_url=linkedin)
+            first = NewContactSubject(lead_id, name=NAME, linkedin_url=linkedin)
+        else:
+            candidate = ContactCandidate(name=NAME, role="Managing Partner")
+            first = NewContactSubject(lead_id, name=NAME)
+        expected = (_gate(first), _gate(ContactSubject(stored_id)))
         return world.adder(lead_id, candidate, source), lambda: expected
 
     return prepare

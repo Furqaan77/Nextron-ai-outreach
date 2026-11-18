@@ -179,7 +179,12 @@ forbidden_modules = [
 allow_indirect_imports = true
 
 # Also group 4: libraries no nextron module may import at all. pytz and dateutil timezones break
-# the zoneinfo convention; the LinkedIn and Instagram automation clients and selenium seed FR-49.
+# the zoneinfo convention. FR-49 (Story 10.1): the LinkedIn and Instagram clients and scrapers
+# (linkedin_api, linkedin, linkedin_scraper, instaloader, instagrapi, instagram_private_api) and
+# the browser and desktop automation and anti-bot tools (selenium, seleniumwire,
+# undetected_chromedriver, undetected_playwright, selenium_stealth, playwright_stealth,
+# pyppeteer_stealth, pyautogui) are banned; tests/contracts/test_lockfile.py keeps their
+# distributions out of uv.lock.
 # import-linter rejects subpackages of external packages as forbidden modules, so the ban on
 # dateutil.tz is written as a ban on dateutil.
 [[tool.importlinter.contracts]]
@@ -194,6 +199,16 @@ forbidden_modules = [
     "instaloader",
     "instagrapi",
     "selenium",
+    "pyautogui",
+    "undetected_chromedriver",
+    "linkedin",
+    "seleniumwire",
+    "playwright_stealth",
+    "linkedin_scraper",
+    "selenium_stealth",
+    "undetected_playwright",
+    "pyppeteer_stealth",
+    "instagram_private_api",
 ]
 
 # Also group 4: AD-1's placement of the other third-party libraries. Each contract's sources are
