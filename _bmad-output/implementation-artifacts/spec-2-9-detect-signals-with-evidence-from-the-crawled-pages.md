@@ -423,6 +423,7 @@ open, and where the code had to choose:
   - **Avoids:** with a date key, a second crawl on the same day would be absorbed by a live extraction and its changes missed.
   - **KEEP:** one extraction job per crawl run.
   - The frozen text is unchanged; Mac reviews it with the overnight decisions.
+- **Follow-up, 2026-11-18: "contact form only" (Decision 1's deferral) is built by Story 2.9a** (`spec-2-9a-contact-form-only-absence-signal.md`, migration `0028_2_9_tag_managers`). The rule runs in the transaction that sets the Lead's `contact_methods` (crawl or render), not in `extract_lead`, and stores the Absence Evidence (`extracted_by=rule`) and its score-only Attribute; this story's sprint key stays `review`.
 
 ## Review Triage Log
 

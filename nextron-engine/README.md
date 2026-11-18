@@ -1932,6 +1932,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0025_2_9_signals_evidence` | `evidence` (shape checks and two triggers, `trg_evidence_no_delete` and `trg_evidence_immutable`), `signals`, `signal_evidence` (unique on `signal_id` and `evidence_id`) and `extraction_runs`, each with foreign keys and no cascade; adds `leads.hq_tz` and `leads.hq_evidence_id` in place (`add_column`) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
 | `0026_4_4_playbook_snapshots` | `playbook_snapshots` (unique `sha256`, version and hash checks), `ai_route_tuples` (foreign keys to `prompt_snapshots` and `playbook_snapshots`, two partial unique indexes, one row per tuple) and `playbook_checks` (trigger, problem and outcome checks); rebuilds `ai_route_activations` from 0014's exact table with a nullable `playbook_sha256` (a foreign key to `playbook_snapshots`, no cascade, and a check) (see [The Sales Playbook snapshot and the candidate tuples (Story 4.4)](#the-sales-playbook-snapshot-and-the-candidate-tuples-story-44)) | `playbook` |
 | `0027_2_6_contact_methods` | `page_contact_methods` (a foreign key to `crawled_pages` with no cascade, `ix_page_contact_methods_page_id`, unique on `page_id`, `method`, `signature` and `source`, method and source checks); adds `leads.contact_methods` in place (`add_column`) (see [Rendering and contact methods](#rendering-and-contact-methods)) | `research` |
+| `0028_2_9_tag_managers` | adds `crawled_pages.tag_managers` in place (`add_column`, nullable text: the tag managers a page loads as a JSON array of keys, `[]` for none, NULL for a page never checked) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -3589,9 +3590,39 @@ counts for 90 days; Attributes don't age.
 inside the function, so `doctor`, `open` and `seed sync` still never load the SDK). It builds no
 HTTP client until the first call, and the Claude API key is read from Credential Manager then.
 
-**Not yet:** "contact form only" (an Absence Signal, `extracted_by=rule`) isn't stored; it is
-to be built on Story 2.6's contact methods (below). The job postings `extract_signals` returns
-are read by Story 2.11.
+**"Contact form only"** (the Law Segment's score-only Attribute `law_contact_form_only`,
+Tier 3) is decided by a rule, not by Claude (`nextron/domain/absence.py`,
+`nextron/app/research/absence.py`). It runs each time a crawl sets the Lead's contact methods
+(see [Rendering and contact methods](#rendering-and-contact-methods)), in the same transaction,
+so it never waits for the AI budget, the Claude key or the extraction's answer. It holds only
+when all of these do:
+
+1. the Lead's Segment has the type with Absence Evidence (an Ops-Automation Lead never gets it);
+2. the run checked at least one page, and no checked page shows a chat widget, an online
+   booking link or an after-hours line (a phone number doesn't count against it);
+3. a checked page shows a contact form;
+4. every checked page has at least 500 characters of text (a page whose render failed, or that
+   the 3-render cap skipped, may hide a widget);
+5. every checked page was checked for tag managers and loads none. A tag manager can inject a
+   chat widget the HTML never names: Google Tag Manager (a `gtm.js` container, its `ns.html`
+   frame or the `gtm.start` snippet), Segment, Tealium and Adobe Launch. The Google tag
+   (`googletagmanager.com/gtag/js`, for Analytics and Ads) isn't one. Pages crawled before
+   migration `0028_2_9_tag_managers` count as not checked until the next crawl.
+
+When it holds, one Absence row is kept (`type` `absence`, sought "a chat widget, an online
+booking link or an after-hours line", `pages_checked` every page the run checked, `source`
+`website` with no URL, `extracted_by` `rule`) and linked to the Lead's Signal (created when
+there is none, first seen now). A re-crawl of the same pages only moves its
+`last_confirmed_at`; a re-crawl of other pages supersedes it with a new row on the same Signal.
+When the rule doesn't hold, for any reason, the live Absence is retracted, and the Signal with
+it; a superseded or retracted row publishes `EvidenceChanged`. A crawl that stored nothing, or a
+render that was stale or whose Lead was merged, doesn't run the rule and leaves the Absence as it
+was. Each run logs `absence_checked` with the Lead, the crawl run, the reason (`holds`,
+`not_in_segment`, `no_pages`, `chat_found`, `booking_found`, `after_hours_found`, `no_form`,
+`page_needs_render`, `tag_manager_unknown` or `tag_manager`) and its counts; no `events` row is
+written. The AI extraction never touches these rows.
+
+**Not yet:** the job postings `extract_signals` returns are read by Story 2.11.
 
 ## Rendering and contact methods
 
@@ -3631,7 +3662,10 @@ visible text:
 
 Each page's findings are stored in `page_contact_methods` (one row per method, signature and
 source, with what matched: a host, never a full URL, or the words as the page writes them; at
-most 200 characters, classed as personal data because it may be a phone number).
+most 200 characters, classed as personal data because it may be a phone number). The tag
+managers a page loads (by script or iframe host, or by their snippet in the HTML) are stored
+in `crawled_pages.tag_managers`, for "contact form only" (see [Signals and
+Evidence](#signals-and-evidence)); a render adds the ones it finds.
 
 **Rendering** (`nextron/adapters/renderer`, `PlaywrightRenderer`). When any page a crawl stored
 has under 500 characters of text, the crawl queues `render_pages` (bulk lane, priority 40, key
@@ -3660,8 +3694,9 @@ to the page's contact methods. A failed render keeps the crawled text, adds one 
 **The Lead's contact methods.** Once a crawl's pages are all checked (straight away when none
 needs rendering, else after `render_pages`), the Lead's `contact_methods` is set: every page
 checked, and for each of the five methods the pages it was found on
-(`queries.research.contact_methods`, for the Lead page and Story 2.9). The run's `extract_lead`
-job (see [Signals and Evidence](#signals-and-evidence)) is queued at the same moment. A crawl
+(`queries.research.contact_methods`, for the Lead page and Story 2.9), and the "contact form
+only" rule runs on them. The run's `extract_lead` job (see [Signals and
+Evidence](#signals-and-evidence)) is queued at the same moment. A crawl
 that stored no page leaves the previous value; a `render_pages` job for a run that is no longer
 the Lead's latest, or a Lead merged meanwhile, writes and queues nothing.
 

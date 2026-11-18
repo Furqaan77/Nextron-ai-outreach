@@ -34,9 +34,19 @@ Story 2.6:
   signature, source)`` the page doesn't hold yet and returns how many;
   ``contact_methods_of(lead_id)`` lists the rows of every page of the Lead, by the page's URL,
   then method, signature and source.
+
+Story 2.9 (``crawled_pages.tag_managers``, stored as a JSON array of keys, sorted and without
+repeats, no spaces; NULL for a page never checked):
+
+- ``set_tag_managers(page_id, keys)``: the page's value is now ``keys``;
+- ``add_tag_managers(page_id, keys)``: the page's value is now its own keys (none when NULL)
+  with ``keys`` added;
+- ``tag_managers_of(page_ids) -> dict[page_id, tuple[str, ...] | None]``: the value of each of
+  those pages that exists (``None`` for NULL), its keys sorted.
 """
 
-from collections.abc import Iterable
+import json
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -490,6 +500,42 @@ def contact_methods_of(lead_id: str) -> tuple[StoredContactMethod, ...]:
         )
     )
     return tuple(StoredContactMethod(*row) for row in current().session.execute(statement))
+
+
+# Tag managers (Story 2.9) ---------------------------------------------------------------------
+
+
+def _tag_manager_text(keys: Iterable[str]) -> str:
+    return json.dumps(sorted(set(keys)), separators=(",", ":"))
+
+
+def set_tag_managers(page_id: str, keys: Iterable[str]) -> None:
+    """The page ``page_id`` loads the tag managers ``keys``, and only those."""
+    current().session.execute(
+        update_rows(CrawledPageRecord)
+        .where(CrawledPageRecord.id == page_id)
+        .values(tag_managers=_tag_manager_text(keys))
+    )
+
+
+def add_tag_managers(page_id: str, keys: Iterable[str]) -> None:
+    """The page ``page_id`` also loads the tag managers ``keys``."""
+    held = tag_managers_of((page_id,)).get(page_id)
+    set_tag_managers(page_id, (*(held or ()), *keys))
+
+
+def tag_managers_of(page_ids: Collection[str]) -> dict[str, tuple[str, ...] | None]:
+    """The tag managers of each page of ``page_ids`` that exists; ``None`` for a page never
+    checked."""
+    if not page_ids:
+        return {}
+    statement = select(CrawledPageRecord.id, CrawledPageRecord.tag_managers).where(
+        CrawledPageRecord.id.in_(list(page_ids))
+    )
+    return {
+        page_id: None if text is None else tuple(sorted(json.loads(text)))
+        for page_id, text in current().session.execute(statement)
+    }
 
 
 # Merges ---------------------------------------------------------------------------------------
