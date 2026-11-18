@@ -340,6 +340,7 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        test_runs=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     research = Research(clock)
@@ -917,6 +918,7 @@ def test_the_handler_defers_when_the_budget_refuses(world: World) -> None:
         research=no_jobs,
         extractions=lambda: extractions,
         primary=no_jobs,
+        test_runs=no_jobs,
     ).get("extract_lead").handler
     payload = {"v": 1, "lead_id": lead, "run_id": run_id}
     job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, payload, 1)
@@ -1117,6 +1119,7 @@ def test_the_extract_lead_job_runs_the_extraction(world: World) -> None:
         research=no_jobs,
         extractions=lambda: extractions,
         primary=no_jobs,
+        test_runs=no_jobs,
     ).get("extract_lead").handler
     [(_, _, payload, _)] = world.jobs("extract_lead")
     job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, json.loads(payload), 1)

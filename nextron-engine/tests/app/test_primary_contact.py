@@ -660,6 +660,7 @@ def test_the_select_primary_contact_job_runs_the_selection(world: World) -> None
         research=no_jobs,
         extractions=no_jobs,
         primary=lambda: contacts,
+        test_runs=no_jobs,
     ).get("select_primary_contact").handler
     [(_, _, payload, _)] = world.jobs("select_primary_contact")
     job = Job(

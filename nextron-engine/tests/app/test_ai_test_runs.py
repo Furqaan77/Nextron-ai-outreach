@@ -215,6 +215,8 @@ def world(db_engine: Engine) -> World:
         discovery=no_jobs,
         research=no_jobs,
         test_runs=lambda: found["runs"],
+        extractions=no_jobs,
+        primary=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     runs = AiTestRuns(clock, meter, llm, queue)
