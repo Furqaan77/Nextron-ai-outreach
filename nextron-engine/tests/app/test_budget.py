@@ -85,6 +85,7 @@ class World:
             extractions=no_crawls,
             primary=no_crawls,
             job_boards=no_crawls,
+            scores=no_crawls,
         )
         self.notify = Notify(
             self.clock,

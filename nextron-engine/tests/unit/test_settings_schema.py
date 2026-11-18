@@ -527,6 +527,8 @@ def test_the_declared_keys_in_order() -> None:
         "crawl_max_pages",
         "ats_hosts",
         "unsub_active_kid",
+        "lead_score_fit_weight",
+        "lead_score_signal_weight",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -553,6 +555,8 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
         setting(Key.UNSUB_ACTIVE_KID),
+        setting(Key.LEAD_SCORE_FIT_WEIGHT),
+        setting(Key.LEAD_SCORE_SIGNAL_WEIGHT),
     )
 
 
@@ -1284,10 +1288,11 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
-            "crawl_max_pages, legal_name, optout_line, postal_address, privacy_notice_url, "
-            "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
-            "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
-            "sender_timezone, sink_allowlist, unsub_active_kid, us_solicitation_label"
+            "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
+            "optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
+            "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
+            "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "
+            "sink_allowlist, unsub_active_kid, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

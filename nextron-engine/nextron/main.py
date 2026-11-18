@@ -145,7 +145,10 @@ only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(researc
 ``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
 minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``) and Story
 2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
-retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``).
+retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), and Story 2.15's
+``score_lead`` (bulk by default, or interactive, priority 40, 5 minutes, retry limit 3,
+``handlers.score_lead(scores)``, ``enrichment``) and ``recompute_tiers`` (bulk only, priority
+20, 10 minutes, retry limit 2, ``handlers.recompute_tiers(scores)``, ``enrichment``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -172,9 +175,16 @@ and Evidence.
 
 **Decision-makers and the Primary Contact (Story 2.10).** ``PeopleExtractions(clock, meter, llm,
 research, queue)`` (``nextron.app.research.people``) is ``SignalExtractions``' people step (its
-last argument), on the same gateway. ``PrimaryContacts(clock, research)`` runs the
+last argument), on the same gateway. ``PrimaryContacts(clock, research, queue)`` runs the
 ``select_primary_contact`` jobs, reached through ``primary=lambda: primary_contacts``, and the
 Lead page's "Make primary" (``create_app(..., primary_contacts=...)``).
+
+**Scores and the Lead Tier (Story 2.15).** ``Scoring(clock, Pipeline(clock), research)``
+(``nextron.app.scoring.api``) and ``LeadScores(clock, scoring, queue)``
+(``nextron.app.scoring.lead_scores``) run the ``score_lead`` jobs (the end of the research
+chain, queued by the Primary Contact's selection) and the daily ``recompute_tiers`` job, reached
+through ``scores=lambda: lead_scores``, and the Lead page's "Re-score"
+(``create_app(..., lead_scores=...)``).
 
 **Hiring Signals and job postings (Story 2.11).** ``JobBoards(clock, meter, boards, crawler,
 queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (between the
@@ -219,7 +229,8 @@ fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``, then ``check_recovery`` 
 ``Every(CHECK_PERIOD, at_startup=True, active=recovery_active)``: every minute, and at start,
 but the scheduler enqueues it only while ``recovery_active()`` returns ``True``, so no job row is
 made once recovery is over, then ``purge_page_text`` (Story 2.5), ``Every(1 day,
-at_startup=True)``: the PC is not on at fixed times, so it also runs at every start.
+at_startup=True)``: the PC is not on at fixed times, so it also runs at every start, then
+``recompute_tiers`` (Story 2.15), ``Every(1 day, at_startup=True)`` for the same reason.
 ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
@@ -611,6 +622,8 @@ from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
+from nextron.app.scoring.api import Scoring
+from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Campaigns,
@@ -671,6 +684,7 @@ from nextron.domain.notifications import LeadsMerged, SubjectSuppressed
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
+from nextron.domain.scoring import RECOMPUTE_TIERS_JOB, SCORE_LEAD_JOB
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
     InvalidPlaybook,
@@ -780,6 +794,7 @@ PRE_MIGRATE_BACKUP_CHECK: Final = "pre_migrate_backup"
 PROMPTS_CHECK: Final = "prompts"
 FALLBACK_TIMEZONE: Final = "UTC"
 PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
+RECOMPUTE_TIERS_PERIOD: Final = timedelta(days=1)
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -920,7 +935,7 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions, primary_contacts and job_boards are bound just below
+    # extractions, primary_contacts, job_boards and lead_scores are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -933,6 +948,7 @@ def build_app(
         extractions=lambda: extractions,
         primary=lambda: primary_contacts,
         job_boards=lambda: job_boards,
+        scores=lambda: lead_scores,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -954,7 +970,8 @@ def build_app(
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
-    primary_contacts = PrimaryContacts(clock, research)
+    primary_contacts = PrimaryContacts(clock, research, queue)
+    lead_scores = LeadScores(clock, Scoring(clock, Pipeline(clock), research), queue)
     job_boards = JobBoards(
         clock,
         meter,
@@ -1026,6 +1043,7 @@ def build_app(
         lead_signals=LeadSignals(clock),
         compliance=Compliance(clock),
         primary_contacts=primary_contacts,
+        lead_scores=lead_scores,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1074,6 +1092,7 @@ def build_job_types(
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
     job_boards: Callable[[], handlers.CheckingJobBoards],
+    scores: Callable[[], handlers.ScoringLeads],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1086,8 +1105,9 @@ def build_job_types(
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
     service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions`` that
     ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
-    ``select_primary_contact`` jobs call, and ``job_boards`` its ``JobBoards`` that
-    ``check_job_boards`` and ``recheck_event`` jobs call."""
+    ``select_primary_contact`` jobs call, ``job_boards`` its ``JobBoards`` that
+    ``check_job_boards`` and ``recheck_event`` jobs call, and ``scores`` the ``scoring``
+    service's ``LeadScores`` that ``score_lead`` and ``recompute_tiers`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1253,6 +1273,30 @@ def build_job_types(
             group=JobGroup.RECHECK,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=SCORE_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),  # interactive for "Re-score"
+            priority=40,
+            max_runtime=timedelta(minutes=5),
+            retry_limit=3,
+            handler=handlers.score_lead(scores),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RECOMPUTE_TIERS_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=20,
+            max_runtime=timedelta(minutes=10),
+            retry_limit=2,
+            handler=handlers.recompute_tiers(scores),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1301,6 +1345,10 @@ def build_triggers(
     # the PC is not on at fixed times: purge at every start too
     triggers.register_trigger(
         Trigger.PURGE_PAGE_TEXT, Every(PURGE_PAGE_TEXT_PERIOD, at_startup=True)
+    )
+    # Events age out by the day: re-tier daily, and at every start too
+    triggers.register_trigger(
+        Trigger.RECOMPUTE_TIERS, Every(RECOMPUTE_TIERS_PERIOD, at_startup=True)
     )
     triggers.freeze()
     return triggers

@@ -77,6 +77,11 @@ handling is reply-based) and ``HTTPS_URL_RULE`` (``https_url``: ``company_facts.
 ``https`` scheme). Being required puts the unset ones in ``nextron doctor``'s
 ``required_settings`` check, and a set one can't be cleared; no setting hides, shortens or
 reorders a footer line (``tests/contracts/test_footer_contracts.py``).
+
+**The Lead Score weights** (Story 2.15, FR-17): ``lead_score_fit_weight`` and
+``lead_score_signal_weight``, ``integer`` in Engine, 0 to 100, default 50 each (whole percents:
+50 means 0.5). That they add up to 100 spans two keys, so ``nextron.app.setup.api.Setup``
+checks it (rule ``weights_sum``, ``nextron.domain.scoring.WEIGHTS_SUM_RULE``), not a ``Rule``.
 """
 
 import re
@@ -107,6 +112,8 @@ from nextron.domain.fetch_policy import is_denied
 from nextron.domain.identity import IdentityError, url_host
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.prices import names_price
+from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
+from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
 from nextron.domain.sink import is_sink_recipient
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
@@ -178,6 +185,9 @@ class Key(StrEnum):
     CRAWL_MAX_PAGES = "crawl_max_pages"
     ATS_HOSTS = "ats_hosts"
     UNSUB_ACTIVE_KID = "unsub_active_kid"
+    # The Lead Score's weights (Story 2.15), whole percents summing to 100.
+    LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
+    LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
 
 
 class _Required(Enum):
@@ -1276,6 +1286,33 @@ SCHEMA: Mapping[str, Setting] = _declare(
             minimum(UNSUB_MIN_KID, str(UNSUB_MIN_KID)),
             maximum(UNSUB_MAX_KID, str(UNSUB_MAX_KID)),
         ),
+    ),
+    # The Lead Score's weights (Story 2.15, FR-17), read at each score: whole percents, 50 each
+    # (0.5). nextron.app.setup.api.Setup refuses a change that leaves them not summing to 100
+    # (rule weights_sum, on both keys).
+    Setting(
+        key=Key.LEAD_SCORE_FIT_WEIGHT,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Lead Score: Fit weight (%)",
+        unit=(
+            "0 to 100. The Fit Score's share of the Lead Score; with the Signal weight it must "
+            "add up to 100. A change applies to each Lead's next score."
+        ),
+        default=LEAD_SCORE_DEFAULT_WEIGHT,
+        rules=(minimum(0, "0"), maximum(LEAD_SCORE_WEIGHT_TOTAL, str(LEAD_SCORE_WEIGHT_TOTAL))),
+    ),
+    Setting(
+        key=Key.LEAD_SCORE_SIGNAL_WEIGHT,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Lead Score: Signal weight (%)",
+        unit=(
+            "0 to 100. The Signal Score's share of the Lead Score; with the Fit weight it must "
+            "add up to 100. A change applies to each Lead's next score."
+        ),
+        default=LEAD_SCORE_DEFAULT_WEIGHT,
+        rules=(minimum(0, "0"), maximum(LEAD_SCORE_WEIGHT_TOTAL, str(LEAD_SCORE_WEIGHT_TOTAL))),
     ),
 )
 

@@ -94,6 +94,7 @@ def test_the_events_and_causes_are_the_closed_lists() -> None:
         *(f"created_from_{source}" for source in LeadSource),
         "reopened",
         "leads_merged",
+        "segment_disqualifier",  # Story 2.15: the scoring service's close
     }
 
 

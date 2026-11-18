@@ -211,6 +211,7 @@ def registered_job_types(world_notify: Callable[[], Notify]) -> JobTypes:
         extractions=no_crawls,
         primary=no_crawls,
         job_boards=no_crawls,
+        scores=no_crawls,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))
@@ -317,6 +318,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
             extractions=no_crawls,
             primary=no_crawls,
             job_boards=no_crawls,
+            scores=no_crawls,
         ),
         issues=main.build_health_issues(budget=world.budget),
         readiness=world.readiness,
@@ -334,6 +336,8 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("extract_lead", None),
                 LastRun("select_primary_contact", None),
                 LastRun("check_job_boards", None),
+                LastRun("score_lead", None),  # Story 2.15
+                LastRun("recompute_tiers", None),
             ),
         ),
         GroupRuns(JobGroup.RECHECK, (LastRun("recheck_event", None),)),  # Story 2.11

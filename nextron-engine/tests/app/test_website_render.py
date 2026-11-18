@@ -385,6 +385,7 @@ def test_no_render_and_nothing_written_when_the_budget_is_spent(world: World) ->
         extractions=no_jobs,
         primary=no_jobs,
         job_boards=no_jobs,
+        scores=no_jobs,
     ).get("render_pages").handler
     payload = {"v": 1, "lead_id": lead, "run_id": world.run(lead).id}
     job = Job("01JD0000000000000000000099", "render_pages", Lane.BULK, payload, 1)

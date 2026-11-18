@@ -154,6 +154,7 @@ def build_world(
         extractions=no_crawls,
         primary=no_crawls,
         job_boards=no_crawls,
+        scores=no_crawls,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))  # the real, registered one

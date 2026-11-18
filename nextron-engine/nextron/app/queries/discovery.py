@@ -25,7 +25,10 @@ current unit of work, read-only ones included.
   ``int`` (a ``bool`` included), a ``stage`` that isn't a ``PipelineStage``, or a
   ``segment_id`` or ``search`` that isn't a ``str`` raises ``TypeError``; a ``page`` below 1
   raises ``ValueError``. It reads the pipeline group's ``pipeline_stage`` column of the same
-  rows, read-only.
+  rows, read-only. Story 2.15: each row also carries its ``tier`` and ``lead_score`` (the score
+  group's, read-only; ``None`` until scored), and ``sort=SORT_TIER`` (``"tier"``) orders by
+  Tier, A to C, unscored last, then Lead Score descending, then newest; ``sort`` ``None`` is
+  newest first, and any other value raises ``ValueError``.
 """
 
 from dataclasses import dataclass
@@ -40,6 +43,7 @@ from nextron.domain.pipeline_stage import PipelineStage
 __all__ = [
     "LEADS_PER_PAGE",
     "MAX_MERGE_HOPS",
+    "SORT_TIER",
     "LeadListPage",
     "ListedLead",
     "StoredLead",
@@ -51,6 +55,7 @@ __all__ = [
 
 LEADS_PER_PAGE: Final = 50
 MAX_MERGE_HOPS: Final = 32
+SORT_TIER: Final = leads_repo.TIER_SORT
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +101,7 @@ def lead_list(
     segment_id: str | None = None,
     search: str | None = None,
     page: int = 1,
+    sort: str | None = None,
 ) -> LeadListPage:
     """One page of the Leads that aren't merged and match the filters, newest first."""
     if not isinstance(page, int) or isinstance(page, bool):
@@ -107,6 +113,8 @@ def lead_list(
     for name, value in (("segment_id", segment_id), ("search", search)):
         if value is not None and not isinstance(value, str):
             raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    if sort is not None and sort != SORT_TIER:
+        raise ValueError("sort must be None or tier")
     if search is not None and not search.strip():
         search = None
     stored_stage = None if stage is None else stage.value
@@ -119,5 +127,6 @@ def lead_list(
         search=search,
         limit=LEADS_PER_PAGE,
         offset=(shown - 1) * LEADS_PER_PAGE,
+        sort=sort,
     )
     return LeadListPage(leads=rows, total=total, page=shown, pages=pages)

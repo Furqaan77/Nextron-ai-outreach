@@ -53,6 +53,11 @@ it, or ``None`` when it keeps its stage:
    that ``hot_reply`` and ``book_call`` move on from);
 4. a tie keeps the survivor's stage.
 
+**Segment disqualifiers (Story 2.15).** ``segment_disqualifier`` is a cause no transition gives:
+the ``scoring`` service closes a Lead whose Segment disqualifier matched through
+``Pipeline.close(lead, disqualified, cause_ref, cause=segment_disqualifier,
+actor="system:scoring")``, which applies ``close_disqualified`` and records that cause instead.
+
 ``reopen`` and ``merged`` are functions, not table rows, because their target depends on more
 than the event.
 """
@@ -154,6 +159,7 @@ class StageCause(StrEnum):
     CLOSED_DISQUALIFIED = "closed_disqualified"
     REOPENED = "reopened"
     LEADS_MERGED = "leads_merged"
+    SEGMENT_DISQUALIFIER = "segment_disqualifier"  # Story 2.15: the scoring service's close
 
 
 CREATION: Final[Mapping[LeadSource, Transition[PipelineStage, StageCause]]] = MappingProxyType(

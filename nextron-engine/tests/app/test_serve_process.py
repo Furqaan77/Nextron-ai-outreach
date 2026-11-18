@@ -305,7 +305,7 @@ def test_guarded_health_page_and_second_instance(
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        4,  # backup_db, restore_test, check_recovery and purge_page_text (Story 2.5)
+        5,  # backup_db, restore_test, check_recovery, purge_page_text and recompute_tiers
     )
     assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
     assert lines.index(daily) < lines.index(restore) < lines.index(scheduler_started)
@@ -321,7 +321,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0030_2_11_job_postings"
+    assert HEAD == "0031_2_15_scoring"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]

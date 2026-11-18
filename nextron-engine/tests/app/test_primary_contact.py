@@ -62,7 +62,7 @@ def ops(world: World) -> None:
 
 
 def primary(world: World) -> PrimaryContacts:
-    return PrimaryContacts(world.clock, world.research)
+    return PrimaryContacts(world.clock, world.research, world.queue)
 
 
 def select(world: World, lead: str) -> PrimaryChoice | None:
@@ -662,6 +662,7 @@ def test_the_select_primary_contact_job_runs_the_selection(world: World) -> None
         extractions=no_jobs,
         primary=lambda: contacts,
         job_boards=no_jobs,
+        scores=no_jobs,
     ).get("select_primary_contact").handler
     # Story 2.11: extract_lead queues check_job_boards, which queues the selection with this
     # payload (tests/app/test_job_boards.py)

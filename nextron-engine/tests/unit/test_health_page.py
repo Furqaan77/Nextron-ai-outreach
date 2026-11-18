@@ -286,6 +286,8 @@ NEVER_RUN = [
         ["extract_lead", "never"],
         ["select_primary_contact", "never"],
         ["check_job_boards", "never"],  # Story 2.11
+        ["score_lead", "never"],  # Story 2.15
+        ["recompute_tiers", "never"],  # Story 2.15
     ],
     [
         ["Job type", "Last success"],

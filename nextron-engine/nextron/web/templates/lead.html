@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{#- The Lead page (nextron.web.leads_page): the header facts, the Signals, the live Evidence,
+{#- The Lead page (nextron.web.leads_page): the header facts, the Score panel (lead_score.html:
+    the Tier, the scores and their factors, and the "Re-score" form), the Signals, the live Evidence,
     then the Contacts panel (lead_contacts.html: the Primary Contact and each Contact with its
     live Eligibility, evaluated on this render and never stored, and its Provenance Records).
     Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
@@ -25,6 +26,7 @@
 <dd>{{ lead.created }}</dd>
 </dl>
 </header>
+{% include "lead_score.html" %}
 <p><a href="/leads">All Leads</a></p>
 <section class="lead-signals" aria-labelledby="signals-heading" hx-disable>
 <h2 id="signals-heading">Signals</h2>
@@ -54,7 +56,7 @@
 </thead>
 <tbody>
 {%- for row in evidence %}
-<tr class="evidence-row"><td>{{ row.type|plain }}</td><td>
+<tr class="evidence-row"{% if row.evidence_id %} id="evidence-{{ row.evidence_id }}"{% endif %}><td>{{ row.type|plain }}</td><td>
 {%- if row.quote %}<q>{{ row.quote|plain }}</q>{% endif %}
 {%- if row.sought %}{{ row.sought|plain }}{% endif %}
 {%- if row.pages_checked %}<ul class="pages-checked">{% for url in row.pages_checked %}<li>{{ safe_link(url) }}</li>{% endfor %}</ul>{% endif -%}

@@ -21,7 +21,14 @@ Three owners write it, column by column (``nextron.db.owners``):
   ``nextron.domain.widgets.ContactMethods``: how the Lead's website lets a visitor get in
   touch, and every page checked; and ``no_decision_maker`` (Story 2.10, migration
   ``0028_2_10_primary_contact``), a nullable Boolean: NULL until the Primary Contact's
-  selection first runs, then whether it found no decision-maker.
+  selection first runs, then whether it found no decision-maker;
+- the score group, owner ``scoring`` (``nextron.db.repos.scoring.scores``; Story 2.15, migration
+  ``0031_2_15_scoring``), every column nullable and NULL until ``score_lead`` first runs:
+  ``fit_score``, ``signal_score`` and ``lead_score`` (0 to 100), ``tier`` (``A``, ``B`` or
+  ``C``), ``tier_computed_at``, ``score_segment_version`` (the Segment version applied),
+  ``score_factors`` (``nextron.domain.scoring.factors_text``), and for a Disqualified Lead
+  ``disqualified_rule`` (the disqualifier's key) and ``disqualified_evidence`` (a JSON array of
+  Evidence ids). No CHECK, because the columns were added in place.
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
@@ -31,7 +38,7 @@ organization data, PII class ``none``: erasing a Contact never touches the firm'
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -44,6 +51,8 @@ PLACE_ID_LENGTH: Final = 512
 COUNTRY_CODE_LENGTH: Final = 2
 STAGE_LENGTH: Final = 32
 HQ_TZ_LENGTH: Final = 64
+TIER_LENGTH: Final = 1
+RULE_KEY_LENGTH: Final = 31  # nextron.domain.segments.KEY_PATTERN
 
 STAGE_CHECK: Final = "pipeline_stage IN ({})".format(
     ",".join(f"'{stage}'" for stage in PipelineStage)
@@ -86,3 +95,12 @@ class LeadRecord(Base):
     hq_evidence_id: Mapped[str | None] = mapped_column(Ulid)
     contact_methods: Mapped[str | None] = mapped_column(Text)
     no_decision_maker: Mapped[bool | None] = mapped_column(Boolean)
+    fit_score: Mapped[int | None] = mapped_column(Integer)
+    signal_score: Mapped[int | None] = mapped_column(Integer)
+    lead_score: Mapped[int | None] = mapped_column(Integer)
+    tier: Mapped[str | None] = mapped_column(String(TIER_LENGTH))
+    tier_computed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    score_segment_version: Mapped[int | None] = mapped_column(Integer)
+    score_factors: Mapped[str | None] = mapped_column(Text)
+    disqualified_rule: Mapped[str | None] = mapped_column(String(RULE_KEY_LENGTH))
+    disqualified_evidence: Mapped[str | None] = mapped_column(Text)

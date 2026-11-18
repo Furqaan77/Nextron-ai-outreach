@@ -25,6 +25,13 @@ that reads the clock once and opens one ``uow.transaction()``.
   Any problem raises ``InvalidSettings`` (every refused key with its rule) before anything is
   written. It returns every stored text after the save, as ``{key: text}``.
 
+**The Lead Score weights** (Story 2.15, Decision 1). ``set`` and ``save`` refuse a change that
+leaves the effective ``lead_score_fit_weight`` and ``lead_score_signal_weight`` (the value
+written, else the stored one, else the default; a deleted key's default) not summing to 100:
+``InvalidSettings`` with rule ``weights_sum`` (``nextron.domain.scoring.WEIGHTS_SUM_RULE``) on
+both keys, and nothing is stored. ``save`` checks it only when it submitted a weight key that no
+other rule refused.
+
 Both log ``settings_changed`` with ``keys``, the changed key names comma-joined, when at least
 one key changed; never a value.
 
@@ -446,6 +453,7 @@ from nextron.domain.markets import (
 from nextron.domain.notifications import FooterChanged
 from nextron.domain.offers import OfferDef, offer_form, validate_offers
 from nextron.domain.render import FOOTER_SETTING_KEYS, PLACEHOLDER_OF
+from nextron.domain.scoring import WEIGHTS_SUM_REASON, WEIGHTS_SUM_RULE, weights_sum_ok
 from nextron.domain.segments import (
     InvalidSegments,
     SegmentDef,
@@ -707,6 +715,34 @@ def _publish_footer_changes(changed: Iterable[str]) -> None:
             uow.publish(FooterChanged(market_id=market_id))
 
 
+WEIGHT_KEYS: Final = (str(Key.LEAD_SCORE_FIT_WEIGHT), str(Key.LEAD_SCORE_SIGNAL_WEIGHT))
+
+
+def _weight(name: str, text: str | None) -> int:
+    """The weight ``text`` holds, or the default when it is ``None`` or no longer parses."""
+    found = settings_schema.setting(name)
+    if text is not None:
+        try:
+            value = settings_schema.parse(found, text)
+        except InvalidSettingValue:
+            pass
+        else:
+            if isinstance(value, int):
+                return value
+    default = found.default
+    return default if isinstance(default, int) else 0
+
+
+def _weights_problems(texts: Mapping[str, str | None]) -> dict[str, InvalidSettingValue]:
+    """The ``weights_sum`` refusals of both weight keys when their effective texts (``None``:
+    the default) don't sum to 100; ``{}`` when they do."""
+    fit, signal = (_weight(name, texts.get(name)) for name in WEIGHT_KEYS)
+    if weights_sum_ok(fit, signal):
+        return {}
+    refusal = {name: (name, WEIGHTS_SUM_RULE, WEIGHTS_SUM_REASON) for name in WEIGHT_KEYS}
+    return {name: InvalidSettingValue(*args) for name, args in refusal.items()}
+
+
 class Setup:
     """Operator settings, one typed value at a time or a whole Settings page at once, and the
     Segments, Markets, Sequences, Offers and Campaigns a seed sync loads."""
@@ -722,6 +758,12 @@ class Setup:
         text = settings_schema.encode(found, value)
         name = str(found.key)
         with current().transaction():
+            if name in WEIGHT_KEYS:
+                weights = {key: settings_repo.stored_text(key) for key in WEIGHT_KEYS}
+                weights[name] = text
+                problems = _weights_problems(weights)
+                if problems:
+                    raise InvalidSettings(problems)
             before = settings_repo.stored_text(name)
             # an unset key compares with its default text (None for a required one)
             effective = before if before is not None else settings_schema.default_text(found)
@@ -771,6 +813,12 @@ class Setup:
                 if canonical != unchanged:
                     writes[name] = canonical
                     changed.append(name)
+            submitted = {str(found.key) for found in chosen.values()}
+            if submitted & set(WEIGHT_KEYS) and not set(problems) & set(WEIGHT_KEYS):
+                weights: dict[str, str | None] = {}
+                for name in WEIGHT_KEYS:
+                    weights[name] = None if name in deletes else writes.get(name, stored.get(name))
+                problems.update(_weights_problems(weights))
             if problems:
                 raise InvalidSettings(problems)
             for name in deletes:

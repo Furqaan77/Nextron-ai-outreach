@@ -97,6 +97,8 @@ from nextron.app.playbook.api import CompanyFacts, Playbook
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.people import PrimaryContacts
+from nextron.app.scoring.api import Scoring
+from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
@@ -314,6 +316,7 @@ class Dashboard:
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
     primary_contacts: PrimaryContacts = field(init=False)
+    lead_scores: LeadScores = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -345,6 +348,7 @@ class Dashboard:
             extractions=no_crawl_jobs,
             primary=no_crawl_jobs,
             job_boards=no_crawl_jobs,
+            scores=lambda: self.lead_scores,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -385,7 +389,10 @@ class Dashboard:
         )
         self.research = Research(self.clock)
         self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
-        self.primary_contacts = PrimaryContacts(self.clock, self.research)
+        self.primary_contacts = PrimaryContacts(self.clock, self.research, self.queue)
+        self.lead_scores = LeadScores(
+            self.clock, Scoring(self.clock, Pipeline(self.clock), self.research), self.queue
+        )
         self.lead_imports = LeadImports(
             self.clock,
             Discovery(self.clock, Pipeline(self.clock), self.queue),
@@ -416,6 +423,7 @@ class Dashboard:
             lead_signals=LeadSignals(self.clock),
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,
+            lead_scores=self.lead_scores,
             units=self.units,
             **extra,
         )

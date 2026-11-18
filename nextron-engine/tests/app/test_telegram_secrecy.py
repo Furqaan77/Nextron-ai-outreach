@@ -207,6 +207,8 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             crawl_max_pages="",
             ats_hosts="",
             unsub_active_kid="",
+            lead_score_fit_weight="",
+            lead_score_signal_weight="",
         ),
     )
     assert saved.status == 200 and "Saved." in saved.text

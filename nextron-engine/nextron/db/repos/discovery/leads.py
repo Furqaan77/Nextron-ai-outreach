@@ -26,13 +26,16 @@ nothing; ``nextron.app.discovery`` does.
   ``listed`` orders newest first (``created_at DESC, id DESC``). They read the pipeline
   group's ``pipeline_stage`` column of the same rows, read-only, so the stage filter and the
   paging stay in one statement; only ``nextron.db.repos.pipeline.stages`` writes it (AD-3).
+  Story 2.15: ``listed`` also reads the score group's ``tier`` and ``lead_score`` (owner
+  ``scoring``) read-only, and ``sort="tier"`` (``TIER_SORT``) orders by Tier (A, B, C, then
+  unscored), then Lead Score descending, then newest first.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, case, func, or_, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
@@ -152,7 +155,8 @@ def mark_merged(loser_id: str, survivor_id: str, cleared_keys: tuple[str, ...]) 
 
 @dataclass(frozen=True, slots=True)
 class ListedLead:
-    """One row of the Leads list: a Lead's identity facts and its Pipeline Stage as stored."""
+    """One row of the Leads list: a Lead's identity facts, its Pipeline Stage, and its Tier and
+    Lead Score (Story 2.15; ``None`` until scored), as stored."""
 
     id: str
     name: str
@@ -161,6 +165,8 @@ class ListedLead:
     country_code: str | None
     pipeline_stage: str
     created_at: datetime
+    tier: str | None = None
+    lead_score: int | None = None
 
 
 _LISTED_COLUMNS = (
@@ -171,6 +177,15 @@ _LISTED_COLUMNS = (
     LeadRecord.country_code,
     LeadRecord.pipeline_stage,  # the pipeline group's column, read only
     LeadRecord.created_at,
+    LeadRecord.tier,  # the score group's columns (scoring's), read only
+    LeadRecord.lead_score,
+)
+TIER_SORT: Final = "tier"  # Tier A to C, unscored last, then Lead Score descending, then newest
+_TIER_RANK = case(
+    (LeadRecord.tier == "A", 0),
+    (LeadRecord.tier == "B", 1),
+    (LeadRecord.tier == "C", 2),
+    else_=3,
 )
 
 
@@ -199,13 +214,18 @@ def listed(
     search: str | None,
     limit: int,
     offset: int,
+    sort: str | None = None,
 ) -> tuple[ListedLead, ...]:
-    """At most ``limit`` Leads that aren't merged and match the filters, newest first, after
-    skipping ``offset``."""
+    """At most ``limit`` Leads that aren't merged and match the filters, newest first (with
+    ``sort`` ``tier``: by Tier, A to C, unscored last, then Lead Score descending, then newest),
+    after skipping ``offset``."""
+    order: list[ColumnElement[Any]] = []
+    if sort == TIER_SORT:
+        order = [_TIER_RANK, LeadRecord.lead_score.desc().nulls_last()]
     statement = (
         select(*_LISTED_COLUMNS)
         .where(*_listed_where(stage=stage, segment_id=segment_id, search=search))
-        .order_by(LeadRecord.created_at.desc(), LeadRecord.id.desc())
+        .order_by(*order, LeadRecord.created_at.desc(), LeadRecord.id.desc())
         .limit(limit)
         .offset(offset)
     )

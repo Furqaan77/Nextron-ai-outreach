@@ -122,6 +122,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         "pipeline": ("pipeline_stage",),
         # the profile group (Stories 2.9, 2.6 and 2.10)
         "research": ("hq_tz", "hq_evidence_id", "contact_methods", "no_decision_maker"),
+        # the score group (Story 2.15)
+        "scoring": (
+            "fit_score",
+            "signal_score",
+            "lead_score",
+            "tier",
+            "tier_computed_at",
+            "score_segment_version",
+            "score_factors",
+            "disqualified_rule",
+            "disqualified_evidence",
+        ),
     },
     "prompt_snapshots": {
         "playbook": ("id", "route", "prompt_version", "sha256", "text", "created_at"),

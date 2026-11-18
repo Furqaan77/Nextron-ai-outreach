@@ -189,6 +189,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/suppression/reverse",
         "/leads",
         "/leads/{lead_id}",
+        "/leads/{lead_id}/rescore",
         "/leads/{lead_id}/primary",
     ]
     assert async_route_handlers(app) == []
@@ -641,6 +642,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_import.html",
         "lead_import_form.html",
         "lead_missing.html",
+        "lead_score.html",
         "leads.html",
         "locked.html",
         "macros.html",

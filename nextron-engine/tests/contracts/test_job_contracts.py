@@ -8,10 +8,11 @@
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, and
-  ``check_job_boards`` and ``recheck_event``, Story 2.11, with their settings); the triggers
-  are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
-  ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
-  ``resolve_contact_markets`` has no trigger.
+  ``check_job_boards`` and ``recheck_event``, Story 2.11, and ``score_lead`` and
+  ``recompute_tiers``, Story 2.15, with their settings); the triggers are exactly
+  ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s ``Every`` with
+  ``active``, and ``purge_page_text``'s and ``recompute_tiers``' daily ``Every`` at startup:
+  the one-off ``resolve_contact_markets`` has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -404,6 +405,21 @@ class RecordingJobBoards:
         self.rechecks.append(signal_id)
 
 
+class RecordingScores:
+    """Stands in for the ``scoring`` service's ``LeadScores``."""
+
+    def __init__(self) -> None:
+        self.scored: list[str] = []
+        self.recomputes = 0
+
+    def score_lead(self, lead_id: str) -> None:
+        self.scored.append(lead_id)
+
+    def recompute_tiers(self) -> int:
+        self.recomputes += 1
+        return 0
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -418,6 +434,7 @@ def registry(**overrides: object) -> JobTypes:
         "extractions": RecordingExtractions,
         "primary": RecordingPrimary,
         "job_boards": RecordingJobBoards,
+        "scores": RecordingScores,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -475,6 +492,8 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "select_primary_contact",
         "check_job_boards",
         "recheck_event",
+        "score_lead",
+        "recompute_tiers",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -582,6 +601,8 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "select_primary_contact",
             "check_job_boards",
             "recheck_event",
+            "score_lead",
+            "recompute_tiers",
         )
         for found in [job_types.get(name)]
     }
@@ -631,6 +652,16 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             timedelta(minutes=5),
             3,
             JobGroup.RECHECK,
+        ),
+        # Story 2.15: the end of the research chain, and the daily re-tiering
+        "score_lead": (Lane.BULK, both, 40, timedelta(minutes=5), 3, JobGroup.ENRICHMENT),
+        "recompute_tiers": (
+            Lane.BULK,
+            frozenset({Lane.BULK}),
+            20,
+            timedelta(minutes=10),
+            2,
+            JobGroup.ENRICHMENT,
         ),
     }
 
@@ -809,7 +840,7 @@ def test_build_triggers_registers_backup_restore_test_recovery_check_then_purge(
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore, recovery, purge] = triggers.specs()
+    [spec, restore, recovery, purge, tiers] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
@@ -821,6 +852,8 @@ def test_build_triggers_registers_backup_restore_test_recovery_check_then_purge(
     )
     assert (purge.trigger, purge.job_type) == (Trigger.PURGE_PAGE_TEXT, "purge_page_text")
     assert purge.schedule == Every(timedelta(days=1), at_startup=True)
+    assert (tiers.trigger, tiers.job_type) == (Trigger.RECOMPUTE_TIERS, "recompute_tiers")
+    assert tiers.schedule == Every(timedelta(days=1), at_startup=True)
     built_again = main.build_triggers(
         job_types,
         backup_schedule=schedule,
@@ -1227,3 +1260,28 @@ def test_the_schema_check_catches_a_changed_check(db_engine: Engine) -> None:
     problems = schema_differences(db_engine)
 
     assert any(problem.startswith("jobs: check ck_jobs_attempts") for problem in problems)
+
+
+def test_score_lead_and_recompute_tiers_call_their_service_once() -> None:
+    scores = RecordingScores()
+    job_types = registry(scores=lambda: scores)
+
+    scored = job_types.get("score_lead").handler(
+        Job(RUN, "score_lead", Lane.INTERACTIVE, {"v": 1, "lead_id": LEAD}, 1)
+    )
+    recomputed = job_types.get("recompute_tiers").handler(
+        Job(RUN, "recompute_tiers", Lane.BULK, {"v": 1}, 1)
+    )
+
+    assert (scored, recomputed) == (None, None)
+    assert (scores.scored, scores.recomputes) == ([LEAD], 1)
+
+
+@pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])
+def test_a_score_lead_job_without_its_lead_is_invalid(payload: dict[str, object]) -> None:
+    scores = RecordingScores()
+    handler = registry(scores=lambda: scores).get("score_lead").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "score_lead", Lane.BULK, payload, 1))
+    assert scores.scored == []

@@ -224,6 +224,8 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "select_primary_contact",
         "check_job_boards",
         "recheck_event",
+        "score_lead",
+        "recompute_tiers",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -562,6 +564,7 @@ def dead_send_alert(units: UnitOfWorkFactory, clock: FrozenClock) -> str:
         extractions=no_crawls,
         primary=no_crawls,
         job_boards=no_crawls,
+        scores=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -765,6 +768,7 @@ def store_unresolved_contact(units: UnitOfWorkFactory) -> None:
         extractions=no_crawls,
         primary=no_crawls,
         job_boards=no_crawls,
+        scores=no_crawls,
     )
     queue = JobQueue(clock, job_types)
 
@@ -846,8 +850,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     [started] = [r for r in caplog.records if r.getMessage() == "job_runner_started"]
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
-    # backup_db, restore_test, check_recovery and purge_page_text
-    assert scheduled.triggers == 4  # type: ignore[attr-defined]
+    # backup_db, restore_test, check_recovery, purge_page_text and recompute_tiers
+    assert scheduled.triggers == 5  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1211,6 +1215,7 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         "backup_db",
         "check_recovery",
         "purge_page_text",
+        "recompute_tiers",
         "restore_test",
     ]
     [check] = [job for job in jobs if job.id == "check_recovery"]
@@ -1218,7 +1223,11 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
     assert check.trigger.interval == timedelta(minutes=1)
     assert (check.misfire_grace_time, check.coalesce, check.max_instances) == (60, True, 1)
     dailies = sorted(
-        (job for job in jobs if job.id not in {"check_recovery", "purge_page_text"}),
+        (
+            job
+            for job in jobs
+            if job.id not in {"check_recovery", "purge_page_text", "recompute_tiers"}
+        ),
         key=lambda job: job.id,
     )
     for job, hour in zip(dailies, ("10", "11"), strict=True):

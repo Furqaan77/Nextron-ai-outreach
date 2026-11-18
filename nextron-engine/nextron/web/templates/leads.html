@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {#- The Leads list (nextron.web.leads_page): the filter form, the count line, the table and the
-    pager. The filter form is a native GET form: no hx-post and no csrf_field(), so the session's
+    pager. The Tier heading links to the list sorted by Tier (then Lead Score),
+    and, while it is, the Created heading back to newest first, each keeping the filters (Story
+    2.15). The filter form is a native GET form: no hx-post and no csrf_field(), so the session's
     token never reaches a URL. A Lead's name and domain are imported or crawled text: they render
     only through |plain, inside the table's hx-disable. -#}
 {% block title %}Nextron: Leads{% endblock %}
@@ -41,11 +43,11 @@
 {%- if rows %}
 <table class="lead-table" hx-disable>
 <thead>
-<tr><th scope="col">Name</th><th scope="col">Website</th><th scope="col">Segment</th><th scope="col">Country</th><th scope="col">Stage</th><th scope="col">Created</th></tr>
+<tr><th scope="col">Name</th><th scope="col">Website</th><th scope="col">Segment</th><th scope="col">Country</th><th scope="col">Stage</th><th scope="col"{% if sorted_by_tier %} aria-sort="ascending"{% endif %}><a href="{{ tier_href }}">Tier</a></th><th scope="col">Lead Score</th><th scope="col">{% if sorted_by_tier %}<a href="{{ newest_href }}">Created</a>{% else %}Created{% endif %}</th></tr>
 </thead>
 <tbody>
 {%- for row in rows %}
-<tr><td><a href="{{ row.href }}">{{ row.name|plain }}</a></td><td>{% if row.website %}{{ row.website|plain }}{% else %}—{% endif %}</td><td>{{ row.segment|plain }}</td><td>{% if row.country %}{{ row.country|plain }}{% else %}—{% endif %}</td><td>{{ row.stage|plain }}</td><td>{{ row.created }}</td></tr>
+<tr><td><a href="{{ row.href }}">{{ row.name|plain }}</a></td><td>{% if row.website %}{{ row.website|plain }}{% else %}—{% endif %}</td><td>{{ row.segment|plain }}</td><td>{% if row.country %}{{ row.country|plain }}{% else %}—{% endif %}</td><td>{{ row.stage|plain }}</td><td>{{ row.tier }}</td><td>{{ row.lead_score }}</td><td>{{ row.created }}</td></tr>
 {%- endfor %}
 </tbody>
 </table>

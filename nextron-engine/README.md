@@ -4053,6 +4053,62 @@ first, then the newest first seen; "No job postings yet." when there are none.
 **Not yet:** the EU boards (`job-boards.eu.greenhouse.io`, `jobs.eu.lever.co`) aren't read
 (their endpoints and terms are unchecked); see `deferred-work.md`.
 
+## Scores and the Lead Tier
+
+Each enriched Lead gets a Fit Score, a Signal Score, a Lead Score and a Lead Tier, with the
+factors behind them, after its Segment's disqualifiers have run (FR-17, FR-62, FR-1, AD-3, AD-7;
+Story 2.15). The formulas are in `nextron/domain/scoring.py` (pure, with a `now`); the service is
+`nextron/app/scoring` (`Scoring` and `LeadScores`); the score group of `leads` (migration
+`0031_2_15_scoring`, owner `scoring`) is written only by `nextron/db/repos/scoring/scores.py`.
+
+**The scores.**
+
+- **Fit Score** = min(100, the size fit + the weight of each live Attribute type). The size fit
+  is 50 inside the Segment's size range, 25 when the size is unknown, 0 outside. Law reads its
+  firm-wide lawyer count (a size fact, else the people step's "lawyers listed" count); Ops
+  reads revenue, which no source gives yet, so an Ops Lead's size is always unknown (25).
+- **Signal Score** = min(100, the sum over live Events of the type's weight × its decay
+  factor). A Tier 1 Event keeps its full weight to day 30, falls to 0 at day 90; a Tier 2 or 3
+  Event counts through day 90. A job-posting Event counts only while its posting is open.
+- Each Signal type counts once (an Event type's strongest live Event; an Attribute type's
+  earliest). A type the Lead's Segment no longer lists counts for nothing.
+- **Lead Score** = (`lead_score_fit_weight` × Fit + `lead_score_signal_weight` × Signal) ÷
+  100, rounded half up. The weights are whole percents (Engine section, 50 each); a save
+  that leaves them not adding up to 100 is refused on both fields (rule `weights_sum`).
+- **Lead Tier**: A for any live Tier 1 Event, B for a live Tier 2 Event and no Tier 1, C
+  otherwise.
+
+**Disqualifiers.** The Segment's disqualifiers run first, in order (Law: fewer than 5 or more
+than 50 lawyers; Ops: fewer than 20 staff or a group of more than 1,000). A match closes the Lead
+as Disqualified through the pipeline (an `events` row with cause `segment_disqualifier`, the
+Evidence id as `cause_ref`, actor `system:scoring`) and stores the rule's key and its Evidence,
+with no score or Tier. An unknown size never disqualifies.
+
+**The jobs.**
+
+- `score_lead` (bulk lane by default, or interactive; priority 40; 5 minutes; retry limit 3;
+  group Enrichment; keyed `score_lead:<lead>:tick`; payload `{v, lead_id}`) ends the research
+  chain: the Primary Contact's selection queues it, and so does a re-check that closed or
+  reopened a posting. It skips (logging `score_skipped`) an unknown, merged, Lost or
+  Disqualified Lead, one with no `ok` signal extraction, and one whose Segment is missing. It
+  applies the Segment's current version and stores it.
+- `recompute_tiers` (bulk only; priority 20; 10 minutes; retry limit 2; daily and at every
+  start) re-tiers every scored Lead that isn't merged, Lost or Disqualified, one transaction
+  each, without a crawl: each stored Event is re-aged against its Signal's current row; one
+  that aged out, closed or was retracted is dropped, and then the Primary Contact's selection
+  runs again. The Fit Score and the Segment version stay as stored: a `nextron seed sync` that
+  changes a Segment changes no stored score until the Lead is re-scored. A re-score is a full
+  `score_lead` with the current Segment, whichever queued it: "Re-score", the research chain
+  (each Primary Contact selection) or a posting re-check that closed or reopened a posting.
+
+**The Lead page** shows a **Score** panel below the header: the Tier, the three scores, when
+they were computed and the Segment version, then each factor with its points and links to its
+Evidence rows (`#evidence-<id>`). A Disqualified Lead shows its rule and Evidence; a Lead never
+scored says "Not scored yet.". The panel's "Re-score" button queues `score_lead` on the
+interactive lane and answers "Re-score queued.". **The Leads list** shows Tier and Lead Score
+columns ("—" until scored); the Tier heading sorts by Tier (A to C, unscored last), then Lead
+Score, keeping the filters. "Re-score" on a merged or closed Lead queues nothing and says so.
+
 ## Engine health
 
 The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page

@@ -87,13 +87,15 @@ concurrency key ``domain:<web_domain>``. A people run is an ``extraction_runs`` 
 ``extract_people``, recorded like Story 2.9's (``actor``, ``crawl_run_id``, ``pages_sent``,
 ``pages_truncated``, ``started_at`` phase 1's now, ``ended_at``).
 
-**``PrimaryContacts(clock, research)``** runs the Primary Contact's selection:
+**``PrimaryContacts(clock, research, queue)``** runs the Primary Contact's selection:
 
 - ``@use_case select_primary_contact(lead_id) -> PrimaryChoice | None`` (the
   ``select_primary_contact`` job): in one transaction, ``research.select_primary(lead_id)``. An
   unknown or merged Lead logs ``primary_selection_skipped`` (``lead_id``, ``reason``) and
   returns ``None``; otherwise it logs ``primary_contact_selected`` (``lead_id``,
-  ``contact_id``: ``None`` for no decision-maker, ``set_by``).
+  ``contact_id``: ``None`` for no decision-maker, ``set_by``). When a selection ran, the same
+  transaction enqueues ``score_lead`` (Story 2.15, ``nextron.domain.scoring.SCORE_LEAD_JOB``,
+  the chain's current end): scope the Lead, discriminator ``tick``, payload ``{v, lead_id}``.
 - ``@use_case make_primary(lead_id, contact_id)`` (the Lead page's "Make primary"): in one
   transaction, ``research.make_primary(lead_id, contact_id)``; a ``PrimaryRefused`` leaves the
   transaction with nothing written and reaches the caller. It logs ``primary_contact_made``
@@ -138,6 +140,7 @@ from nextron.domain.extraction import (
     allot,
 )
 from nextron.domain.ids import is_ulid
+from nextron.domain.scoring import SCORE_LEAD_JOB
 from nextron.domain.job import TICK, VERSION_FIELD
 from nextron.domain.notifications import EvidenceChanged
 from nextron.domain.people import (
@@ -649,9 +652,10 @@ class PeopleExtractions:
 class PrimaryContacts:
     """The Primary Contact's selection and the operator's choice; see the module docstring."""
 
-    def __init__(self, clock: Clock, research: Research) -> None:
+    def __init__(self, clock: Clock, research: Research, queue: JobQueue) -> None:
         self._clock = clock
         self._research = research
+        self._queue = queue
 
     @use_case
     def select_primary_contact(self, lead_id: str) -> PrimaryChoice | None:
@@ -666,6 +670,12 @@ class PrimaryContacts:
                 skipped = MERGED_LEAD
             else:
                 choice = self._research.select_primary(lead.id)
+                self._queue.enqueue(
+                    SCORE_LEAD_JOB,
+                    scope=lead.id,
+                    discriminator=TICK,
+                    payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead.id},
+                )
         if choice is None:
             log.info(PRIMARY_SELECTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return None

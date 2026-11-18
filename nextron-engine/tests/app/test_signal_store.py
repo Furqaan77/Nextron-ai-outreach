@@ -122,6 +122,7 @@ def world(db_engine: Engine) -> World:
         extractions=no_jobs,
         primary=no_jobs,
         job_boards=no_jobs,
+        scores=no_jobs,
     )
     discovery = Discovery(clock, Pipeline(clock), JobQueue(clock, job_types))
     found = World(units, db_engine, discovery, "")

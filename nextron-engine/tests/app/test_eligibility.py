@@ -244,6 +244,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         extractions=no_jobs,
         primary=no_jobs,
         job_boards=no_jobs,
+        scores=no_jobs,
     )
     return JobQueue(clock, job_types)
 
