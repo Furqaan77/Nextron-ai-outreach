@@ -56,6 +56,9 @@ Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sen
 registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
 work.
+
+Its ``Compliance`` (``compliance``, Story 3.6) is ``Compliance(clock)``; the Lead page evaluates
+each Contact's live Eligibility through it, on real units of work.
 """
 
 import json
@@ -70,6 +73,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron import main
+from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -333,6 +337,7 @@ class Dashboard:
             queue=self.queue,
         )
         self.sending = Sending(self.clock, env=self.env)
+        self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter
         self.budget = Budget(self.clock, meter, self.notify)
@@ -369,6 +374,7 @@ class Dashboard:
             restore_tests=self.restore_tests,
             lead_imports=self.lead_imports,
             sending=self.sending,
+            compliance=self.compliance,
             units=self.units,
             **extra,
         )

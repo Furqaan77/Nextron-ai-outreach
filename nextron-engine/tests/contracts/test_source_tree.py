@@ -86,6 +86,7 @@ FILES = [
     "nextron/domain/campaign.py",
     "nextron/domain/contactability.py",
     "nextron/domain/suppression_entry.py",
+    "nextron/domain/eligibility.py",
     "nextron/domain/prices.py",
     "nextron/domain/render.py",
     "nextron/db/__init__.py",

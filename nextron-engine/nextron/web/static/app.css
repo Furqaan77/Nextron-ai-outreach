@@ -630,6 +630,16 @@ button.secondary {
   font-size: 0.875rem;
 }
 
+.eligibility-summary.not-eligible {
+  color: var(--refused);
+  font-weight: 700;
+}
+
+.eligibility-reasons {
+  margin: 0.25rem 0 0;
+  padding-left: 1.5rem;
+}
+
 .pager {
   display: flex;
   align-items: center;

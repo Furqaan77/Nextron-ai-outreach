@@ -1,8 +1,8 @@
 """The Leads list and the Lead page (FR-51, FR-13, UX-DR17, UX-DR18, AD-3, AD-13, AD-18): views
 for ``create_app``'s two routes, which stay thin. Both are GETs declaring
 ``@personal_data(True)`` (a Lead's name can be a sole trader's name, and a Contact is a person),
-so both send ``Cache-Control: no-store``. This module reads nothing itself, and imports from
-``nextron.app`` only ``nextron.app.queries.*``.
+so both send ``Cache-Control: no-store``. This module reads and evaluates nothing itself, and
+imports from ``nextron.app`` only ``nextron.app.queries.*``.
 
 **The Leads list** (``GET /leads``, route ``pipeline_page``, the navigation's Leads/Pipeline
 section) renders ``leads.html`` from ``queries.discovery.lead_list`` and
@@ -33,8 +33,12 @@ section) renders ``leads.html`` from ``queries.discovery.lead_list`` and
 ``https://<domain>/`` or "No website on record", the Segment, the country, the Pipeline Stage's
 label and the created date) and one ``ContactRow`` per Contact, oldest first (name, role,
 email, Address Class, LinkedIn URL, Primary ``Yes`` or ``No``; a blank shows "—"), each with
-its ``ProvenanceRow`` records (the record, "Contact" or "Address" and its address; the
-source's label; the detail; the retrieval date; the Address Class or "—"). A merged Lead's URL
+its live Eligibility (Story 3.6: an ``EligibilityRow`` from the ``Decision`` the route got from
+``compliance.evaluate_eligibility`` on this render: "Eligible: <basis>" or "Not eligible", then
+a ``ReasonRow`` per reason, its ``code`` the item's ``data-reason``; a Contact without a
+Decision raises ``KeyError``) and its ``ProvenanceRow`` records (the record, "Contact" or
+"Address" and its address; the source's label; the detail; the retrieval date; the Address
+Class or "—"). A merged Lead's URL
 answers 303 to its survivor's; a text that isn't a ULID, an unknown id or a broken merge chain
 answers 404 with ``lead_missing.html``, which never echoes the id.
 
@@ -56,6 +60,7 @@ from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLe
 from nextron.app.queries.research import StoredContact, StoredProvenance
 from nextron.app.queries.setup import SeededSegment
 from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
+from nextron.domain.eligibility import Decision
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, MalformedForm
 
@@ -79,6 +84,8 @@ NO_MATCHES: Final = "No Leads match these filters."
 DATE_FORMAT: Final = "%Y-%m-%d"
 YES: Final = "Yes"
 NO: Final = "No"
+ELIGIBLE: Final = "Eligible: {basis}"
+NOT_ELIGIBLE: Final = "Not eligible"
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -370,8 +377,28 @@ class ProvenanceRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ReasonRow:
+    """One failing Eligibility check as the Lead page shows it: its code (the item's
+    ``data-reason``) and its text."""
+
+    code: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilityRow:
+    """A Contact's live Eligibility as the Lead page shows it: "Eligible: <basis>" or "Not
+    eligible", then every reason."""
+
+    eligible: bool
+    summary: str
+    reasons: tuple[ReasonRow, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ContactRow:
-    """One Contact as the Lead page shows it, with its Provenance Records."""
+    """One Contact as the Lead page shows it, with its live Eligibility and its Provenance
+    Records."""
 
     name: str | None
     role: str | None
@@ -379,6 +406,7 @@ class ContactRow:
     address_class: str | None
     linkedin_url: str | None
     primary: str
+    eligibility: EligibilityRow
     records: tuple[ProvenanceRow, ...]
 
 
@@ -411,7 +439,21 @@ def provenance_row(record: StoredProvenance) -> ProvenanceRow:
     )
 
 
-def contact_row(contact: StoredContact, records: Iterable[StoredProvenance]) -> ContactRow:
+def eligibility_row(decision: Decision) -> EligibilityRow:
+    """A Contact's live Decision as the Lead page shows it."""
+    if not isinstance(decision, Decision):
+        raise TypeError(f"eligibility_row takes a Decision, not {type(decision).__name__}")
+    summary = ELIGIBLE.format(basis=decision.basis_rule) if decision.eligible else NOT_ELIGIBLE
+    return EligibilityRow(
+        eligible=decision.eligible,
+        summary=summary,
+        reasons=tuple(ReasonRow(reason.code, reason.text) for reason in decision.reasons),
+    )
+
+
+def contact_row(
+    contact: StoredContact, records: Iterable[StoredProvenance], decision: Decision
+) -> ContactRow:
     """One Contact as the Lead page shows it."""
     return ContactRow(
         name=contact.name,
@@ -420,6 +462,7 @@ def contact_row(contact: StoredContact, records: Iterable[StoredProvenance]) -> 
         address_class=contact.address_class,
         linkedin_url=contact.linkedin_url,
         primary=YES if contact.is_primary else NO,
+        eligibility=eligibility_row(decision),
         records=tuple(provenance_row(record) for record in records),
     )
 
@@ -430,12 +473,16 @@ def lead_context(
     segments: Iterable[SeededSegment],
     contacts: Iterable[StoredContact],
     provenance: Mapping[str, Iterable[StoredProvenance]],
+    decisions: Mapping[str, Decision],
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header and the Contacts (in the order given, oldest
-    first), each with its Provenance Records from ``provenance`` (by Contact id)."""
+    first), each with its live Eligibility from ``decisions`` and its Provenance Records from
+    ``provenance`` (both by Contact id). A Contact without a Decision raises ``KeyError``: the
+    page never shows a Contact whose Eligibility wasn't evaluated."""
     return {
         "lead": lead_header(lead, stage, segment_names(segments)),
         "contacts": tuple(
-            contact_row(contact, provenance.get(contact.id, ())) for contact in contacts
+            contact_row(contact, provenance.get(contact.id, ()), decisions[contact.id])
+            for contact in contacts
         ),
     }

@@ -1188,8 +1188,9 @@ has no `market_basis`. The job resolves them 200 per transaction. With no Market
 nothing, and the next start queues it again. A failed startup step is logged as
 `startup_step_failed` (ERROR, the error's type only) and never stops the engine.
 
-**Not yet.** Editing a Market (`seed sync`) doesn't re-resolve stored Contacts; Story 3.6 checks
-live that a Contact's Market is still enabled. The CSV has no office-location columns, so CSV
+**Not yet.** Editing a Market (`seed sync`) doesn't re-resolve stored Contacts; Story 3.6's
+live [Eligibility](#eligibility) checks that a Contact's Market is still stored, enabled and
+what a fresh resolution gives. The CSV has no office-location columns, so CSV
 Contacts resolve from the Lead's country; Story 2.10 passes office locations from team pages.
 
 **Email syntax.** The syntax check is `EmailSyntaxPort` (`nextron/ports/email_syntax.py`),
@@ -1378,6 +1379,74 @@ if isinstance(answer, Blocked):
   used only by its own module or a manifest caller that lists the table, and no string outside
   the migrations may hold `INSERT INTO` one of them (a quoted or bracketed schema included).
 
+## Eligibility
+
+Eligibility (FR-18, FR-2, FR-63, AD-16, NFR-5, NFR-7, Story 3.6) answers whether a Contact may
+lawfully receive cold email **now**, with every reason it may not. It is computed live on every
+call and **never stored**: no table, column, cache or setting holds a Decision, so an edit to a
+Market, a suppression or a stage change shows in the very next one.
+
+```python
+decision = Compliance(clock).evaluate_eligibility(contact_id)
+# Decision(eligible=True, basis_rule="US: cold email allowed (CAN-SPAM)", reasons=())
+# Decision(eligible=False, basis_rule=None, reasons=(Reason(kind, text, until), ...))
+```
+
+`Compliance.evaluate_eligibility(contact_id)` (`nextron/app/compliance/api.py`) is a plain
+method, not a command: it only reads, so it runs in a read-only unit of work (the Lead page
+renders it) and inside a caller's transaction alike, and it writes, caches and logs nothing. It
+reads the Contact (`queries.research.contact`; an unknown or non-ULID id raises
+`LookupError`), its Lead and stage, calls `assert_contactable(ContactSubject(contact_id),
+"email", "cold")` (a merged Lead raises its `ValueError`) and reads the Markets
+(`queries.setup.markets()`; a stored Market that no longer decodes fails closed). Every
+consumer calls it: the Lead page now, Enrollment (Story 4.8) and the send gate (6.9) later.
+
+**The pure core** is `nextron.domain.eligibility.evaluate(contact, lead, market_rules, now)`,
+standard library only and tested with a fixed `now`. It runs every check and collects every
+failing reason; the Contact is eligible only with none. The reasons, a closed enum, in order:
+
+| Reason | When | Text (examples) |
+|---|---|---|
+| `no_enabled_market` | the Markets can't be read; the Contact has no Market (the text follows `market_basis`, or "hasn't been resolved yet"); its Market is no longer stored or is disabled; its stored office isn't a valid location; or resolving it afresh against the current Markets gives no Market or another one | "No enabled Market: the United States Market is disabled" |
+| `cold_email_not_allowed` | the Market doesn't allow cold email, or its country isn't `US` or `GB` | "The Canada Market doesn't allow cold email" |
+| `uk_legal_form_ineligible` | a legal form the Market doesn't list (checked when the Market lists forms, and always for `GB`) | "The Lead's legal form (limited liability partnership) isn't a corporate subscriber the United Kingdom Market allows" |
+| `uk_legal_form_unconfirmed` | no legal form, or one no FR-12 Evidence confirms | "The Lead's legal form isn't confirmed: no Evidence links the Lead to its Companies House record" |
+| `uk_free_webmail` | a free-webmail address where the Market blocks it (always for `GB`) | "The address is on a free-webmail domain; the United Kingdom Market allows corporate addresses only" |
+| `address_not_sendable` | no email, or an Address Class other than Published or Verified | "The address is Guessed; only Published or Verified addresses can be emailed" |
+| `address_or_domain_suppressed` | the gate's `address_suppressed`, `address_domain_suppressed` or `lead_domain_suppressed` | "The address or its domain is on the Suppression List" |
+| `asked_not_to_be_contacted` | the gate's `person_suppressed` or `profile_suppressed` | "This person asked not to be contacted (Suppression List)" |
+| `recontact_not_allowed` | FR-63: an earlier Sequence ended without a Reply less than 90 days after its last Step, or no Event was first seen after it ended | "An earlier Sequence ended without a Reply: re-contact needs 90 days since its last Step and an Event first seen after it ended" |
+| `not_now_until` | a `not_now` Lead whose re-contact date is after today (UTC); its code is `not_now_until_<YYYY-MM-DD>` | "Parked Not Now until 2027-01-15" |
+| `not_now_undated` | a `not_now` Lead with no re-contact date recorded | "Parked Not Now with no re-contact date recorded" |
+| `lead_closed` | a Lost or Disqualified Lead (once, even with the gate's `lead_lost`) | "The Lead is closed (Lost)" |
+
+The texts hold Market names, Address Classes, legal-form labels and dates only, never an
+address, a name or a domain. An eligible Contact's `basis_rule` is "US: cold email allowed
+(CAN-SPAM)" or "UK: corporate subscriber (<legal form>), legitimate interests", the legal form
+by its label (`LEGAL_FORM_LABELS`: `ltd` is "private limited company", and so on for the eight
+Companies House types a GB Market may list). `Decision(eligible, basis_rule, reasons)` keeps
+`eligible` true exactly when there is no reason and exactly when there is a basis; its `kinds`
+are the reasons' kinds, in enum order.
+
+**A stored Market counts only when it is confirmed live.** Story 3.2 stores each Contact's
+Market; Eligibility re-checks it against the current Markets on every call. So `nextron seed
+sync` disabling a Market blocks its Contacts at once, and a Contact resolved as blocked stays
+blocked when its country's Market is enabled later, until something re-resolves it.
+
+**Not yet.** No legal form, Event history, Enrollment history or re-contact date is recorded,
+so `evaluate_eligibility` passes none: **no UK Contact is eligible** until Story 2.12 confirms
+the legal form (each fails with `uk_legal_form_unconfirmed`), every `not_now` Lead fails with
+`not_now_undated` until Epic 7 records the date, and the FR-63 history is empty until Story 4.8
+(Enrollments) and 2.9 (Events) pass it. A UK basis can be longer than 64 characters, so Story
+3.7 widens `provenance_records.basis_rule` before recording it.
+
+**Contract tests** (`tests/contracts/test_eligibility_contracts.py`), each with probes: no POST
+route names `eligib` in its path, name or endpoint; `eligib` is a protected settings stem and no
+setting can switch it off; no table or column name contains `eligib` (except the Market rule
+`markets.eligible_legal_forms`); an alias-aware AST scan finds `domain.eligibility.evaluate`
+named only in `app/compliance/api.py`; and the core and the API read no setting, no
+`queries.setup` reader but `markets`, and use no cache.
+
 ## Sending Inboxes
 
 A Sending Inbox (FR-32, AD-21, Story 4.7) is a mailbox cold email is sent from; every new
@@ -1504,13 +1573,17 @@ to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline S
 date, with a link back to **All Leads**. **Contacts** lists every Contact, oldest first, with its
 name, role, email, Address Class, LinkedIn URL (a link Mac can open; the engine never fetches
 it) and Primary (`Yes` or `No`), a blank showing "—"; or "No Contacts yet.". Under each
-Contact, its Provenance Records (FR-51): the record ("Contact", or "Address" and the address),
-the source (CSV import, Website, Signal Inbox (manual), Referral, Replier, Entered by Mac, Email
-pattern, Email finder or Eligibility basis), the detail (for a CSV, the list's origin), the
-retrieval date and the Address Class at the time; or "No Provenance Record.". Market, Tier,
-scores, Signals, Evidence, job postings, the timeline, stage actions, changing the Primary and
-the data-subject actions come with their stories (3.2 and 3.7, 2.9, 2.11, 2.15, Epics 5 and 9,
-2.10, 3.13 onwards).
+Contact, its live [Eligibility](#eligibility) (Story 3.6, UX-DR17), evaluated through
+`compliance.evaluate_eligibility` on every render and stored nowhere: "Eligible: <basis>" (such
+as "Eligible: US: cold email allowed (CAN-SPAM)") or "Not eligible", then every reason's text,
+each list item carrying its code as `data-reason` (`address_not_sendable`,
+`not_now_until_2027-01-15`). Then its Provenance Records (FR-51): the record ("Contact", or
+"Address" and the address), the source (CSV import, Website, Signal Inbox (manual), Referral,
+Replier, Entered by Mac, Email pattern, Email finder or Eligibility basis), the detail (for a
+CSV, the list's origin), the retrieval date and the Address Class at the time; or "No
+Provenance Record.". Market, Tier, scores, Signals, Evidence, job postings, the timeline, stage
+actions, changing the Primary and the data-subject actions come with their stories (3.2 and
+3.7, 2.9, 2.11, 2.15, Epics 5 and 9, 2.10, 3.13 onwards).
 
 A merged Lead's URL redirects (303) straight to the Lead at the end of its merge chain, following
 at most 32 merges; an id that isn't a ULID, an unknown id or a broken chain gets 404 "Lead not
@@ -1519,7 +1592,9 @@ trader's name), so both send `Cache-Control: no-store`. Every Lead, Contact and 
 is imported or crawled, so it renders escaped (`|plain`, or `safe_link` for the two links)
 inside an element carrying `hx-disable`.
 
-**Reads.** The pages read only through `nextron.app.queries`:
+**Reads.** The pages read only through `nextron.app.queries`, except the Lead page's
+Eligibility, which comes from `Compliance.evaluate_eligibility` (a read-only call;
+`nextron/web/leads_page.py` itself still imports only `nextron.app.queries.*` from the app):
 
 - `queries.discovery.lead_list(stage=, segment_id=, search=, page=)` returns a `LeadListPage`
   (`leads`, `total`, `page`, `pages`); a `page` that isn't an `int` raises `TypeError`, one below

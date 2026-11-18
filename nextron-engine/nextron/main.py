@@ -87,6 +87,10 @@ offline), and hands it to the dashboard (``create_app(..., lead_imports=...)``) 
 ``/leads/import`` page. A Lead the import creates with a website gets its ``enrich_lead`` job
 (Story 2.5) from ``Discovery.upsert_lead``.
 
+**Live Eligibility (Story 3.6).** ``build_app`` hands the dashboard a ``Compliance(clock)``
+(``create_app(..., compliance=...)``); the Lead page calls its ``evaluate_eligibility`` for
+each Contact on every render.
+
 **Contact Markets (Story 3.2).** ``build_app`` builds one ``ContactMarkets(clock, research,
 queue)`` (``nextron.app.research.api``): the ``resolve_contact_markets`` job calls its
 ``backfill``, and the lifespan's startup step, ``queue_contact_markets(units,
@@ -504,6 +508,7 @@ from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, L
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify.api import Notify
@@ -883,6 +888,7 @@ def build_app(
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=Sending(clock, env=config.env),
+        compliance=Compliance(clock),
         units=units,
         lifespan=engine_lifespan(
             runner,
