@@ -8,5 +8,6 @@ Only ``nextron.app.compliance`` and ``nextron.app.queries.compliance`` import th
 - ``unsub_tokens``: the ``unsub_tokens`` table, the record of every issued unsubscribe token
   (Story 3.8).
 - ``data_subject_requests``: the ``data_subject_requests`` table, every data subject request
-  (Story 3.13).
+  (Story 3.13; Story 3.15 adds ``for_contact``). Story 3.15 also adds
+  ``suppression_entries.for_export``.
 """

@@ -508,8 +508,15 @@ def test_everything_sits_inside_hx_disable_with_no_htmx_action(seeded: World) ->
             found.add(kind)
     assert len(found) == 4  # not vacuous: each kind shows
     forms = page.find("main").find_all("form")
-    # the only HTMX actions are Story 2.10's "Make primary" forms, outside every hx-disable
-    assert forms and all(form.attrs["action"] == f"/leads/{lead}/primary" for form in forms)
+    # the only HTMX actions are Story 2.10's "Make primary" forms and Story 3.15's "Export data
+    # (JSON)" form for each Contact, outside every hx-disable
+    exports = page.find("main").find_all("form", class_="contact-export")
+    contacts = [row[0] for row in seeded.sql("SELECT id FROM contacts WHERE lead_id = ?", (lead,))]
+    assert sorted(form.attrs["hx-post"] for form in exports) == sorted(
+        f"/contacts/{contact_id}/export" for contact_id in contacts
+    )
+    primary = [form for form in forms if form not in exports]
+    assert primary and all(form.attrs["action"] == f"/leads/{lead}/primary" for form in primary)
     actions = [  # base.html's own hx- attributes sit outside main
         node
         for node in page.find("main").walk()

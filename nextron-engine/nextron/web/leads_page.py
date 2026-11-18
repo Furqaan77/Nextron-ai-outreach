@@ -118,6 +118,11 @@ Story 3.7, so the panel the POST answers with shows them too):
   (``submitted_contact(fields)`` reads the form: exactly ``contact_id``, once, beside the CSRF
   token; anything else raises ``MalformedForm``).
 
+**Data subject requests (Story 3.15).** After the Contacts panel, outside its ``hx-disable``,
+the page's "Data subject requests" section holds one "Export data (JSON)" form per Contact
+(``nextron.web.export_page``, ``contact_export_form.html``). A Lead with no Contact has no
+such section.
+
 Every untrusted text (the Primary line's name, each Contact and Provenance cell) sits in an
 element carrying ``hx-disable``; the forms sit outside them. A person Evidence row (its
 ``person_contact_id`` set) reads "Contact: <name>" under Supports.

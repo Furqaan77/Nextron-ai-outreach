@@ -2,5 +2,6 @@
 
 Only ``nextron.app.notify`` and ``nextron.app.queries.notify`` import this package (contract
 group 7). ``alerts`` and ``notifications`` (Story 1.12) are the repositories of the ``alerts``
-and ``notifications`` tables.
+and ``notifications`` tables; Story 3.15 gives each ``about(subject)``, the rows a subject
+access export reads.
 """

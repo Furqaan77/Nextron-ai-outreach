@@ -14,7 +14,11 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
   source=, status=)``, how many match; ``by_ids(ids)``, the rows of those ids, in no set order;
   ``active_ids_for_cause(source=, cause_ref=)``, the ids of the ``active`` rows of that source
   with that ``cause_ref``, by ``created_at``, then ``id``; ``voided_for(kind, value_hash)``
-  (Story 3.13), the ``voided`` rows of that key, by ``id``;
+  (Story 3.13), the ``voided`` rows of that key, by ``id``; ``for_export(value_hashes,
+  cause_refs)`` (Story 3.15), every row, ``active`` or ``voided``, whose ``value_hash`` is in
+  ``value_hashes`` or whose ``cause_ref`` is in ``cause_refs``, as a ``dict`` of only its
+  ``EXPORT_COLUMNS`` (``kind``, ``status``, ``source``, ``created_at``, ``voided_at`` and
+  ``void_reason``: never its id, hash, domain or cause), by ``created_at``, then ``id``;
 - the writers: ``insert(...) -> id``, a new ``active`` row; ``void(entry_id, voided_at,
   void_reason) -> bool``, which sets one ``active`` row ``voided`` with its time and reason
   (``UPDATE ... WHERE id = ? AND status = 'active'``) and says whether it did;
@@ -32,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
@@ -178,6 +182,30 @@ def active_ids_for_cause(*, source: str, cause_ref: str) -> tuple[str, ...]:
         .order_by(SuppressionEntryRecord.created_at, SuppressionEntryRecord.id)
     )
     return tuple(current().session.execute(statement).scalars())
+
+
+EXPORT_COLUMNS: Final = ("kind", "status", "source", "created_at", "voided_at", "void_reason")
+
+
+def for_export(
+    value_hashes: Collection[str], cause_refs: Collection[str]
+) -> tuple[dict[str, object], ...]:
+    """The ``EXPORT_COLUMNS`` of every entry whose ``value_hash`` is in ``value_hashes`` or
+    whose ``cause_ref`` is in ``cause_refs``, by ``created_at``, then ``id``."""
+    matches: list[ColumnElement[bool]] = []
+    if value_hashes:
+        matches.append(SuppressionEntryRecord.value_hash.in_(sorted(value_hashes)))
+    if cause_refs:
+        matches.append(SuppressionEntryRecord.cause_ref.in_(sorted(cause_refs)))
+    if not matches:
+        return ()
+    table = SuppressionEntryRecord.__table__
+    statement = (
+        select(*(table.c[name] for name in EXPORT_COLUMNS))
+        .where(or_(*matches))
+        .order_by(SuppressionEntryRecord.created_at, SuppressionEntryRecord.id)
+    )
+    return tuple(dict(row._mapping) for row in current().session.execute(statement))
 
 
 def insert(

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-18-2026 08:52
+last_updated: 11-18-2026 09:09
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -93,7 +93,7 @@ development_status:
   3-12-monitor-unsubscribe-polling-and-re-poll-the-worker-after-a-r: backlog
   3-13-erase-a-contact-on-request: review
   3-14-erase-personal-data-outside-the-database-and-issue-a-receipt: backlog
-  3-15-export-everything-held-on-a-contact: backlog
+  3-15-export-everything-held-on-a-contact: review
   3-16-keep-an-erasure-ledger-and-reapply-it-after-a-restore: backlog
   epic-3-retrospective: optional
 

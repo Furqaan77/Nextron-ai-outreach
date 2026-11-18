@@ -1626,8 +1626,116 @@ test_erasure.py` plants a value in every personal-data column a Contact's data c
 checks that none survives anywhere in the database, that no `DELETE` runs and no row is lost.
 
 Not yet (later stories): files and stores outside the database, receipts and `erase_external`
-jobs (3.14), export (3.15), the erasure ledger (3.16). Until Story 3.16's ledger, restoring a
-backup taken before an erasure brings the Contact back: erase it again after any restore.
+jobs (3.14), the erasure ledger (3.16). Until Story 3.16's ledger, restoring a backup taken
+before an erasure brings the Contact back: erase it again after any restore.
+
+## Export everything held on a Contact
+
+A data subject can ask what Nextron holds on them (UK GDPR subject access, FR-52, AD-17, Story
+3.15). The Lead page answers with one JSON file per Contact, built from every owner's data and
+never written to disk.
+
+**On the Lead page.** After the Contacts panel, the "Data subject requests" section holds one
+form per Contact. Each form names the Contact (its name, else its email) and has a "Request
+reference" box (how the person asked, such as "Email of 18 Nov 2026", checked exactly as for
+an erasure: see [Erasing a Contact](#erasing-a-contact)) and the button "Export data (JSON)".
+The POST is CSRF-checked like every action. In one transaction it opens a data subject request
+of kind `export`, marks it `completed`, and builds the file. The browser then saves `contact-<ULID>-export.json` as an
+attachment (`Cache-Control: no-store`), and the page stays where it was. The engine keeps no
+copy; the browser saves the file to this PC's downloads, so delete it once it has been sent.
+
+**Answering the request.** The file is the copy of the data (UK GDPR Art. 15(3)). The reply
+must also give the Art. 15(1) information: the purposes, the legal basis, the recipients, the
+retention period, the source of the data, the rights to rectify, erase, object and complain to
+the ICO, and any automated processing. The privacy notice (the `privacy_notice_url` setting)
+covers these, so link it in the reply.
+
+- A reference that isn't 1 to 200 characters on one line, or has a space at either end,
+  answers "The request reference must be 1 to 200 characters on one line, with no space at
+  either end."
+- One holding an `@` answers "The request reference must not hold an email address (no @)."
+- One holding every word of the Contact's name answers "The request reference must not hold
+  the person's name."
+- None writes anything, and the typed text is never shown back.
+- An unknown Contact answers 404 "Contact not found".
+
+**How the download works.** The dashboard's guard refuses native form POSTs (they send
+`Origin: null`), and HTMX can't save a file. So the POST builds the file and answers 204 with
+`HX-Redirect: /exports/<ticket>`. The browser fetches that URL once, and the file comes back as
+an attachment.
+
+The ticket is `secrets.token_urlsafe(32)`. It is held in memory only (in `create_app`, under a
+lock) and bound to the session that asked. It works once, within 60 seconds. At most 16 are held,
+and the oldest is dropped first. A used, expired, unknown or other-session ticket answers 404
+"Export expired: export again from the Lead page", and a ticket presented by another session is
+burned. A restart drops every ticket.
+
+A ticket nobody fetches still leaves its request `completed`: export again. Nothing in the
+export path is logged. The access log's redaction masks a ticket in a URL as `<key>`.
+
+**The file** (`nextron/domain/contact_export.py`, `schema_version` 1). It holds `generated_at`
+(UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ`) and `contact_id`, then one object per owner. Each object
+holds every declared section as an array: `[]` when there is nothing, never left out. Every row
+carries every column of its table, read with a generic `select`, so a column a later story adds
+is exported without code.
+
+- **`research`:**
+  - `contact`: the Contact's row.
+  - `provenance_records`: every record, with every eligibility basis.
+  - `addresses`: each address its Provenance names, with its Address Class history.
+  - `evidence`: every Evidence row about the person (`person_contact_id`), with `pages_checked`
+    as a list.
+  - `signals`: the Signals that Evidence supports, each with its `evidence_ids`. Another
+    Contact's Evidence id never appears.
+  - `pages`: the Lead's crawled pages that mention the Contact. These come with `mentions` and
+    `text_excerpts` (the lines that mention them, each at most 300 characters, at most 20 per
+    page), never the whole page text.
+  - `contact_methods`: the contact methods whose matched text mentions the Contact, with
+    `page_url`.
+- **`compliance`:**
+  - `suppression`: every entry, active or voided, for a key the contactability gate checks for
+    the Contact (the firm's domain keys included, since they block the person too), the address
+    key of each address in its Provenance, a stored value that is already a hash (an erased
+    Contact), or an entry caused by one of its requests. Each shows only `kind`, `status`,
+    `source`, `created_at`, `voided_at` and `void_reason`: never its hash, id, domain or cause.
+    A firm's `domain` entry shows `void_reason` as `null`: it is in every Contact's file at
+    that firm, and its reason is the Operator's note about whoever opted the firm out, who may
+    be a colleague. A person's own entry keeps its reason.
+  - `requests`: every data subject request on the Contact.
+- **`notify`:** `alerts` and `notifications` whose subject is the Contact's id.
+- **`event_log`:** `contact_history`, the Contact's `events` rows (its Address Class changes).
+
+"Mentions" means the stored text holds the Contact's name, its email address or an earlier
+address in its Provenance. The name must have at least 3 characters besides whitespace and
+matches whole words, case-insensitive, with any whitespace between its words. An address must
+be the whole address, case-insensitive. A match that starts inside lines already given is
+skipped, so no line is exported twice. An erased Contact (`[erased]`, a hashed
+address) mentions nothing. Its file holds its tombstones and its suppression facts.
+
+**The coverage contract** (`tests/contracts/test_export_contracts.py`). `COVERAGE` in
+`contact_export.py` names, for every table with a personal-data column (from
+`pii_registry.PII`) or a foreign key to `contacts.id`, the owner that exports it and its
+section, or why the table holds nothing about a Contact (`settings`, `footer_snapshots`, and
+`jobs`, `backups` and `restore_tests`, whose rows are never linked to a Contact, so a name an
+error message carries by chance can't be attributed to anyone). The contract test derives the
+table list itself and fails when:
+
+- a table is missing, names the wrong owner or is stale;
+- a `shown_as` or `withheld` key isn't a personal-data column;
+- an owner lacks `queries.<owner>.export_pii`;
+- a seeded export lacks a personal-data column;
+- a withheld value (a suppression hash) appears in the file.
+
+A story that adds a personal-data table or column, or a table that references a Contact, must
+decide how it is exported.
+
+**Data subject requests.** The export reuses Story 3.13's `data_subject_requests` table and
+its request API on `Erasures` (`nextron/app/compliance/erasure.py`; see [Erasing a
+Contact](#erasing-a-contact)): `export_on_request(contact_id, request_ref)` is the POST's use
+case. In one transaction it runs `open_dsr(contact_id, export, request_ref)` and
+`complete_dsr(request_id)`, each appending one `events` row (`opened`, then `completed`,
+`cause_ref` the Contact, actor `operator`), then `Compliance.export_contact(contact_id)`, which
+only reads, so it also runs in a read-only unit of work. Any failure rolls all three back.
 
 ## Unsubscribe tokens
 

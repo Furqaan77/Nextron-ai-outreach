@@ -14,14 +14,17 @@ actor or a time, and ``append`` checks each one before writing anything, raising
   ``[A-Za-z0-9][A-Za-z0-9._-]{0,31}``;
 - ``at``: an aware ``datetime`` (stored as UTC).
 
-No code reads ``events`` to trigger behaviour; analytics read it.
+No code reads ``events`` to trigger behaviour; analytics read it, and so does
+``history(entity, entity_id)`` (Story 3.15): every column of each row about one entity, as a
+``dict``, by ``at``, then ``id``, for a subject access export. It only reads, so it works in a
+read-only unit of work too.
 """
 
 import re
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
 from nextron.db.models.base import new_id
 from nextron.db.models.events import EventRecord
@@ -104,3 +107,15 @@ def append(
         )
     )
     return event_id
+
+
+def history(entity: str, entity_id: str) -> tuple[dict[str, object], ...]:
+    """Every column of each ``events`` row about ``entity_id`` of ``entity``, by ``at``, then
+    ``id``."""
+    table = EventRecord.__table__
+    statement = (
+        select(table)
+        .where(table.c.entity == entity, table.c.entity_id == entity_id)
+        .order_by(table.c.at, table.c.id)
+    )
+    return tuple(dict(row._mapping) for row in current().session.execute(statement))

@@ -10,6 +10,10 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.notify`` only.
   undismissed notifications and the newest ``limit`` of them, newest first (the dashboard's
   notification area).
 
+- ``export_pii(contact_id)`` (Story 3.15, the subject access exporter): ``alerts`` and
+  ``notifications``, every column of each alert and notification whose ``subject`` is the
+  Contact's id, by ``created_at``, then ``id``.
+
 It reads through the current unit of work, read-only ones included.
 """
 
@@ -44,3 +48,11 @@ def open_notifications(limit: int) -> OpenNotifications:
     return OpenNotifications(
         notifications_repo.open_count(), tuple(notifications_repo.newest_open(limit))
     )
+
+
+def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
+    """The alerts and notifications about the Contact ``contact_id``."""
+    return {
+        "alerts": alerts_repo.about(contact_id),
+        "notifications": notifications_repo.about(contact_id),
+    }

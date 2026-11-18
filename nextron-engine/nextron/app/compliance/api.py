@@ -112,8 +112,26 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
 - ``@use_case reverse_entry(entry_id, reason) -> tuple[str, ...]``: one transaction running
   ``reverse_optout``, returning its ids.
 
+**The export (Story 3.15, FR-52).** The data subject requests themselves are Story 3.13's
+(``nextron.app.compliance.erasure.Erasures``: ``open_dsr``, ``complete_dsr`` and
+``export_on_request``, which opens and completes an ``export`` request and then calls
+``export_contact`` in the same transaction). ``Compliance`` builds the file:
+
+- ``export_contact(contact_id) -> ContactExport(filename, body)`` only reads, so it runs in a
+  caller's transaction or a read-only unit of work alike. It reads each owner's exporter:
+  ``queries.research.export_pii(contact_id)`` (``LookupError`` for an unknown Contact),
+  ``queries.compliance.export_pii(contact_id, export_hashes(...))`` with the hashes of every
+  key held for the Contact (its stored values, its Lead's ``web_domain`` through
+  ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii`` and
+  ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
+  ``contact_export.assemble`` at the clock's now and ``render``. The file is named
+  ``contact_export.filename(contact_id)``.
+
+The file is never written to disk, stored, queued or logged: the web layer hands it to the
+browser from memory (``nextron.web.export_page``).
+
 Nothing is logged: the ``events`` rows are the audit, and neither they nor the notifications
-hold an address, a name, a URL or a reason.
+hold an address, a name, a URL, a reason or a request reference.
 
 **The contactability gate (AD-16, FR-50, FR-15, FR-63, Story 3.4).** The module-level function
 ``assert_contactable(subject, channel, purpose) -> Allowed | Blocked`` is the only check of
@@ -172,8 +190,8 @@ Nothing is written, cached or logged: each call reads the current facts again, s
 Market, a suppression or a stage change shows in the very next Decision.
 
 **Erasure (Story 3.13).** ``nextron.app.compliance.erasure`` holds ``Erasures`` (``open_dsr``,
-``erase_contact``, compliance's ``erase_pii`` hook and the ``erase_on_request`` use case) and
-compliance's ``ERASURE`` declarations.
+``complete_dsr``, ``erase_contact``, compliance's ``erase_pii`` hook, the ``erase_on_request``
+use case and Story 3.15's ``export_on_request``) and compliance's ``ERASURE`` declarations.
 """
 
 from collections.abc import Iterable, Mapping
@@ -185,6 +203,7 @@ from typing import Final, Protocol
 from nextron.app.compliance.unsub_kid import active_unsub_kid
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
@@ -192,6 +211,14 @@ from nextron.db import eventlog
 from nextron.db.repos.compliance import suppression_entries as entries_repo
 from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.contact_export import (
+    EVENT_LOG,
+    ContactExport,
+    assemble,
+    export_hashes,
+    filename,
+    render,
+)
 from nextron.domain.contactability import (
     AddressSubject,
     Allowed,
@@ -246,6 +273,7 @@ from nextron.ports.clock import Clock
 from nextron.ports.token_codec import TokenCodecPort
 
 ENTITY: Final = "suppression_entries"
+CONTACTS_ENTITY: Final = "contacts"  # research's Address Class history, read for an export
 OPERATOR_ACTOR: Final = "operator"
 SYSTEM_ACTOR: Final = "system:compliance"
 ACTORS: Final[Mapping[SuppressionSource, str]] = MappingProxyType(
@@ -566,6 +594,32 @@ class Compliance:
             token_hash=token_hash(token), om_id=om_id, kid=kid, issued_at=issued_at
         )
         return token
+
+    def export_contact(self, contact_id: str) -> ContactExport:
+        """Everything held on the Contact as one JSON file; see the module docstring."""
+        research = research_queries.export_pii(contact_id)  # LookupError when unknown
+        contact = research_queries.contact(contact_id)
+        if contact is None:  # just exported, so it is there
+            raise LookupError("export_contact: the Contact is unknown")
+        lead = discovery_queries.lead(contact.lead_id)
+        hashes = export_hashes(
+            email=contact.email,
+            name=contact.name,
+            linkedin_url=contact.linkedin_url,
+            web_domain=None if lead is None else lead.web_domain,
+            addresses=[record.address for record in research_queries.provenance(contact_id)],
+        )
+        document = assemble(
+            contact_id,
+            self._clock.now(),
+            {
+                "research": research,
+                "compliance": compliance_queries.export_pii(contact_id, hashes),
+                "notify": notify_queries.export_pii(contact_id),
+                EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
+            },
+        )
+        return ContactExport(filename(contact_id), render(document))
 
     @use_case
     def add_value(self, text: str) -> AddedValue:

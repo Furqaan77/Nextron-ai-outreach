@@ -67,6 +67,7 @@ READERS = frozenset(
         "by_ids",
         "active_ids_for_cause",
         "voided_for",  # Story 3.13
+        "for_export",  # Story 3.15
     }
 )
 ALLOWED_WRITER = "app/compliance/api.py"
@@ -89,6 +90,7 @@ TABLE_NAME_HOMES = (
     "domain/backup.py",
     "db/owners.py",
     "db/pii_registry.py",
+    "domain/contact_export.py",  # Story 3.15's export coverage registry names every PII table
 )
 GUARDED = (
     "db/repos/compliance/",
@@ -567,6 +569,7 @@ def test_the_classification_check_catches_a_missing_function(tmp_path: Path) -> 
         "active_ids_for_cause is classified but missing",
         "by_ids is classified but missing",
         "count_listed is classified but missing",
+        "for_export is classified but missing",
         "insert is classified but missing",
         "listed is classified but missing",
         "redact_void_reason is classified but missing",

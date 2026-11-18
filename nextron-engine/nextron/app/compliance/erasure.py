@@ -23,6 +23,13 @@ whose ``suppress`` writes those keys.
      entity ``data_subject_requests``, ``None`` to ``open``, cause ``opened``, ``cause_ref`` the
      Contact, actor ``operator``.
 
+- ``@command complete_dsr(request_id)`` completes an ``open`` request (Story 3.15's export, and
+  this story's erasure): a ``request_id`` that isn't a ``str`` raises ``TypeError``, and one
+  that isn't a ULID or that no request has ``LookupError``. It applies ``transition(status,
+  complete)`` (``IllegalTransition`` for a request already ``completed``), sets ``status``
+  ``completed`` and ``completed_at`` now, and appends one ``events`` row: ``open`` to
+  ``completed``, cause ``completed``, ``cause_ref`` the request's Contact, actor ``operator``.
+
 - ``@command erase_contact(contact_id, request_ref, cause) -> ErasureResult(contact_id,
   request_id, erased)``, in the caller's transaction:
 
@@ -69,6 +76,12 @@ whose ``suppress`` writes those keys.
   and the exception propagates.
   After the commit it logs ``contact_erased`` (``contact_id``, ``request_id``, ``erased``).
 
+- ``@use_case export_on_request(contact_id, request_ref) -> ContactExport`` (Story 3.15, the
+  Lead page's "Export data (JSON)"): one transaction runs ``open_dsr(contact_id, export,
+  request_ref)``, ``complete_dsr`` and ``compliance.export_contact(contact_id)``, so the file
+  shows its own request ``completed``. Any failure (a refused reference, an unknown Contact, a
+  file that can't be built) rolls all three back, so nothing is written. Nothing is logged.
+
 Nothing logged, published or written to ``events`` holds a name, an address, a URL or the
 reference.
 """
@@ -86,6 +99,7 @@ from nextron.db import eventlog
 from nextron.db.repos.compliance import data_subject_requests as requests_repo
 from nextron.db.repos.compliance import suppression_entries as entries_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.contact_export import ContactExport
 from nextron.domain.contactability import (
     ContactSubject,
     SuppressionScope,
@@ -248,6 +262,15 @@ class Erasures:
             request_id,
         )
 
+    @command
+    def complete_dsr(self, request_id: str) -> None:
+        """Complete the ``open`` request ``request_id``; see the module docstring."""
+        _text(request_id, "request_id")
+        stored = requests_repo.get(request_id) if is_ulid(request_id) else None
+        if stored is None:
+            raise LookupError("complete_dsr: the request is unknown")
+        self._complete(stored.id, stored.contact_id)
+
     def _complete(self, request_id: str, contact_id: str) -> None:
         """Move the request ``request_id`` to ``completed`` and record it."""
         stored = requests_repo.get(request_id)
@@ -309,3 +332,12 @@ class Erasures:
             },
         )
         return result
+
+    @use_case
+    def export_on_request(self, contact_id: str, request_ref: str) -> ContactExport:
+        """Open, complete and answer an export request in one transaction; see the module
+        docstring."""
+        with current().transaction():
+            request_id = self.open_dsr(contact_id, RequestKind.EXPORT, request_ref)
+            self.complete_dsr(request_id)
+            return self._compliance.export_contact(contact_id)

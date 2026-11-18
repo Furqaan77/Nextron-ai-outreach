@@ -190,6 +190,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/suppression/import",
         "/suppression/search",
         "/suppression/reverse",
+        "/contacts/{contact_id}/export",
+        "/exports/{ticket}",
         "/leads",
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
@@ -315,6 +317,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "GET /inboxes",
         "GET /inboxes/auth",
         "GET /suppression",
+        "GET /exports/{ticket}",
     ):
         assert route in str(caught.value)
     for route in (
@@ -342,6 +345,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /suppression/search",
         "POST /suppression/reverse",
         "POST /leads/{lead_id}/primary",
+        "POST /contacts/{contact_id}/export",
     ):
         assert route in str(caught.value)
 
@@ -517,6 +521,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "GET /inboxes",
         "GET /inboxes/auth",
         "GET /suppression",
+        "GET /exports/{ticket}",
     ):
         assert f"{route}: a GET outside a read-only unit of work" in str(caught.value)
     for route in (
@@ -543,6 +548,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "POST /suppression/search",
         "POST /suppression/reverse",
         "POST /leads/{lead_id}/primary",
+        "POST /contacts/{contact_id}/export",
     ):
         assert f"{route}: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
@@ -638,6 +644,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "campaigns_panel.html",
         "contact_erase.html",
         "contact_erase_panel.html",
+        "contact_export_form.html",
         "credential_row.html",
         "credentials.html",
         "facts.html",

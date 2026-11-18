@@ -15,7 +15,10 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
 - ``completed_erasures(contact_ids)``: for each of those Contacts with a ``completed`` ``erase``
   request, its first one (by ``completed_at``, then ``id``: the one that erased it, or, after a
   retention erasure, the first request completed afterwards), as ``{contact_id:
-  StoredRequest}``.
+  StoredRequest}``;
+- ``for_contact(contact_id)`` (Story 3.15): every column of each of the Contact's requests, as a
+  ``dict`` (a generic ``select`` of the table, so a new column is exported without code), by
+  ``opened_at``, then ``id``.
 
 Nothing here removes a request: they are the proof of erasure, and the table's triggers refuse a
 ``DELETE`` too.
@@ -38,6 +41,7 @@ from nextron.domain.data_subject_request import RequestKind, RequestStatus
 OPEN: Final = str(RequestStatus.OPEN)
 COMPLETED: Final = str(RequestStatus.COMPLETED)
 ERASE: Final = str(RequestKind.ERASE)
+_TABLE: Final = DataSubjectRequestRecord.__table__
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,3 +139,13 @@ def completed_erasures(contact_ids: Iterable[str]) -> dict[str, StoredRequest]:
         request = StoredRequest(*row)
         found.setdefault(request.contact_id, request)  # the first one completed
     return found
+
+
+def for_contact(contact_id: str) -> tuple[dict[str, object], ...]:
+    """Every column of the Contact's requests, by ``opened_at``, then ``id``."""
+    statement = (
+        select(_TABLE)
+        .where(_TABLE.c.contact_id == contact_id)
+        .order_by(_TABLE.c.opened_at, _TABLE.c.id)
+    )
+    return tuple(dict(row._mapping) for row in current().session.execute(statement))
