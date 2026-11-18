@@ -1,6 +1,7 @@
 """The ``leads`` identity group's repository (FR-9, AD-3): the only code that writes ``id``,
 ``name``, ``web_domain``, ``ch_number``, ``place_id``, ``segment_id``, ``country_code``,
-``merged_into`` and ``created_at``.
+``merged_into``, ``created_at`` and the Places location ``place_lat``, ``place_lng`` and
+``place_coords_at`` (Story 8.2).
 
 Every function runs one explicit Core statement through the current unit of work's session
 (``nextron.db.uow.current()``), so writes run in the order they are called: reads work in a
@@ -17,6 +18,10 @@ nothing; ``nextron.app.discovery`` does.
   domain its website now lives on);
 - ``mark_merged(loser_id, survivor_id, cleared_keys)``: sets ``merged_into`` and clears each
   key column named in ``cleared_keys``, in one statement;
+- ``purge_place_coords(cutoff) -> int`` (Story 8.2): nulls ``place_lat``, ``place_lng`` and
+  ``place_coords_at`` on every row whose ``place_coords_at`` is strictly before ``cutoff``, and
+  on every row holding a coordinate without a ``place_coords_at`` (its age is unknown), and
+  keeps ``place_id``; the number of rows purged;
 - ``merged_from(lead_id)`` (Story 3.13): the ids of every Lead whose merge chain leads to
   ``lead_id`` (merged into it, or into one of those, and so on), by id; a loop is followed once;
 - ``ListedLead``, ``listed(*, stage, segment_id, search, limit, offset)`` and
@@ -37,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, case, func, or_, select
+from sqlalchemy import ColumnElement, and_, case, func, or_, select
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
@@ -153,6 +158,25 @@ def mark_merged(loser_id: str, survivor_id: str, cleared_keys: tuple[str, ...]) 
         .where(LeadRecord.id == loser_id)
         .values(merged_into=survivor_id, **values)
     )
+
+
+def purge_place_coords(cutoff: datetime) -> int:
+    """Null the Places coordinates stored strictly before ``cutoff``, or held without a time;
+    the number of rows."""
+    result = current().session.execute(
+        update_rows(LeadRecord)
+        .where(
+            or_(
+                LeadRecord.place_coords_at < cutoff,
+                and_(
+                    LeadRecord.place_coords_at.is_(None),
+                    or_(LeadRecord.place_lat.is_not(None), LeadRecord.place_lng.is_not(None)),
+                ),
+            )
+        )
+        .values(place_lat=None, place_lng=None, place_coords_at=None)
+    )
+    return int(result.rowcount)  # type: ignore[attr-defined]
 
 
 @dataclass(frozen=True, slots=True)

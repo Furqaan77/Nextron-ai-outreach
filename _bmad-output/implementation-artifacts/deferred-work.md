@@ -386,3 +386,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-3-11-poll-unsubscribe-requests-into-the-suppression-list.md`
   summary: Epic 5: a Contact whose email changed after a token was issued to its old address isn't matched by `contacts_with_address_hash`, so only the address key is suppressed and its person keys and Lead stay open; match through the token's `om_id` once `outbound_messages` exists.
   evidence: Story 3.11 review pass 1 (EC6, medium). The lookup reads only each Contact's current stored address (overnight decision 3).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-2-places-search-adapter-that-keeps-only-what-the-maps-terms-allow.md`
+  summary: The per-call budget/quota check and the metered request are not atomic, so concurrent blockable calls (e.g. several `discover_places` or `check_legal_form` jobs on the bulk lane) can each pass the check at 999/1,000 and overshoot a quota by the number of threads.
+  evidence: `PlaceSearches.search_page` and `LegalFormChecks.check_legal_form` read `meter.snapshot` in one transaction and record usage only when `Metered` exits after the request; nothing reserves a unit or serializes calls. Story 8.1 (per-call checks for every blockable job) or 8.3 (the concurrent caller) should serialize or reserve.

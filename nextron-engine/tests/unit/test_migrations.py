@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0043_3_11_unsub_requests"
+HEAD = "0044_8_2_place_coords"
 
 
 @pytest.fixture
@@ -1030,3 +1030,65 @@ def test_0039_keeps_every_inbox_unrecorded_with_the_default_ramp_and_checks_the_
     ):
         with pytest.raises(sqlite3.IntegrityError, match=rf"ck_sending_inboxes_{check}$"):
             run_sql(path, f"UPDATE sending_inboxes SET {assignment} WHERE id = '{inbox}'")
+
+
+
+PLACE_COORD_COLUMNS = ("place_lat", "place_lng", "place_coords_at")
+
+
+def test_0044_adds_the_place_coordinates_in_place_and_leaves_every_lead_without_them(
+    tmp_path: Path,
+) -> None:
+    """A Lead stored before 0044 (Story 8.2) keeps its row, its ``place_id`` included, and holds
+    no coordinates: the three columns are nullable, with no CHECK, at the end of the table."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0043_3_11_unsub_requests":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0043_3_11_unsub_requests",
+        )
+    at = "2026-11-18T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, place_id, segment_id, country_code, created_at) "
+        f"VALUES ('{lead}', 'Smith CPA', 'ChIJ-first', '{segment}', 'US', '{at}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0043_3_11_unsub_requests", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(
+            f"SELECT id, name, place_id, {', '.join(PLACE_COORD_COLUMNS)} FROM leads"
+        ).fetchall()
+        info = {row[1]: row for row in reader.execute("PRAGMA table_info(leads)")}
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(leads)")]
+        [(table_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'leads'"
+        ).fetchall()
+    finally:
+        reader.close()
+    assert rows == [(lead, "Smith CPA", "ChIJ-first", None, None, None)]
+    start = columns.index("place_lat")  # added at the end; later revisions add after them
+    assert tuple(columns[start : start + 3]) == PLACE_COORD_COLUMNS
+    assert columns[start - 1] == "disqualified_evidence"  # 0041 (Story 2.15) comes first
+    assert {name: (info[name][2], info[name][3]) for name in PLACE_COORD_COLUMNS} == {
+        "place_lat": ("FLOAT", 0),
+        "place_lng": ("FLOAT", 0),
+        "place_coords_at": ("VARCHAR(27)", 0),
+    }
+    checks = " ".join(line for line in table_sql.splitlines() if "CHECK" in line)
+    assert not any(name in checks for name in PLACE_COORD_COLUMNS)  # no CHECK: added in place
+    run_sql(
+        path,
+        "UPDATE leads SET place_lat = 39.96, place_lng = -82.99, "
+        f"place_coords_at = '{at}' WHERE id = '{lead}'",
+    )

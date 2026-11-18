@@ -14,7 +14,8 @@ given (kid 1 by default) and decodes only the tokens it encoded.
 recording every call;
 ``ScriptedUnsubscribe`` (``unsubscribe``) fakes ``UnsubscribePort``: it answers each
 ``fetch_pending`` with the next scripted ``PendingFetch`` or ``AdapterError`` (the last one
-repeats) and records every host;
+repeats) and records every host; ``ScriptedPlaces`` (``places``) fakes ``PlacesPort`` by
+``(query, location, page_token)``, recording every call;
 ``nextron.adapters.renderer`` itself is tested on the fake Playwright objects of ``browser``.
 ``FakeDns`` (``dns``) fakes ``DnsPort``: it answers TXT and MX queries from scripts keyed by
 name (``()`` for a name not scripted), raises the scripted ``AdapterError`` for a name in
@@ -45,6 +46,7 @@ from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOA
 from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
+from nextron.ports.places import PlacesPort
 from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
@@ -63,6 +65,7 @@ from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeG
 from tests.fakes.job_board import ScriptedJobBoards
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.mail import InMemoryMail
+from tests.fakes.places import ScriptedPlaces
 from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.secrets import InMemorySecrets
@@ -94,5 +97,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         EmailFinderPort: ScriptedFinder,
         DomainSearchPort: ScriptedDomainSearch,
         UnsubscribePort: ScriptedUnsubscribe,
+        PlacesPort: ScriptedPlaces,
     }
 )

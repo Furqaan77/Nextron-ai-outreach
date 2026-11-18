@@ -27,4 +27,11 @@ for one person's address and Hunter's Domain Search for a domain's pattern and p
 list (Story 3.11): ``fetch_pending(host)`` returns a ``PendingFetch`` of ``PendingUnsub``
 entries and a count of the malformed ones; ``nextron.adapters.unsubscribe`` implements it over
 ``GET https://<host>/pending``, metered.
+
+``PlacesPort`` (``places``) is the one way to search Google Places (Story 8.2):
+``text_search(query, location, page_token=None)`` returns a ``PlaceSearchPage`` of transient
+``PlaceCandidate`` values (place ID, website, display name, location). The Maps terms let only
+the place ID be stored for good and the coordinates for 30 days; the rest never reaches a store,
+a log or a prompt. ``nextron.adapters.places`` implements it (``GooglePlaces``, metered by SKU,
+and the no-request ``OfflinePlaces``).
 """

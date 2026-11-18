@@ -193,7 +193,8 @@ def no_crawl_jobs() -> Any:
     2.11 or 2.12 job."""
     raise AssertionError(
         "the dashboard runs no enrich_lead, canonicalize_lead, purge_page_text, extract_lead, "
-        "select_primary_contact, check_job_boards, recheck_event or check_legal_form"
+        "select_primary_contact, check_job_boards, recheck_event, check_legal_form or "
+        "purge_place_coords"
     )
 
 

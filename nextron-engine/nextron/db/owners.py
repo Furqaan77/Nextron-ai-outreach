@@ -118,6 +118,10 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "country_code",
             "merged_into",
             "created_at",
+            # Story 8.2: a Places location, kept at most 30 days
+            "place_lat",
+            "place_lng",
+            "place_coords_at",
         ),
         "pipeline": ("pipeline_stage",),
         # the profile group (Stories 2.9, 2.6, 2.10 and 2.12)

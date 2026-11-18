@@ -280,7 +280,8 @@ def test_reload_is_allowed_in_dev(
     try:
         status, headers, _ = get(factory(), "/health")
         assert [secrets.service for secrets in fake_keyring] == ["nextron-engine/dev"]
-        assert fake_keyring[0].calls == []
+        # only Story 8.2's Places key presence check (main.build_places; value discarded)
+        assert fake_keyring[0].calls == [("read", "google_places/api_key")]
         [units] = connected  # the worker reads through its own factory on the data dir's file
         assert units.engine.url.database == str(dev / "nextron.db")
     finally:
@@ -890,7 +891,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0044_more", create_table("more")))
+    extend(location, ("0045_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -904,7 +905,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0044_more"
+    assert spy.calls[0]["db_revision"] == "0045_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade

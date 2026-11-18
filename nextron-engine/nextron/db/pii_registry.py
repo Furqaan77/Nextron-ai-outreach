@@ -143,6 +143,10 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "score_factors": PiiClass.NONE,
         "disqualified_rule": PiiClass.NONE,
         "disqualified_evidence": PiiClass.NONE,
+        # Story 8.2: an organization's location from Google Places, kept at most 30 days
+        "place_lat": PiiClass.NONE,
+        "place_lng": PiiClass.NONE,
+        "place_coords_at": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.

@@ -41,6 +41,8 @@ handler runs in.
 - ``canonicalize_lead(discovery)`` (Story 2.5): calls ``discovery().canonicalize_lead(lead_id,
   run_id)`` once.
 - ``purge_page_text(research)`` (Story 2.5): calls ``research().purge_page_text()`` once.
+- ``purge_place_coords(discovery)`` (Story 8.2): calls ``discovery().purge_place_coords()``
+  once.
 - ``render_pages(crawls)`` (Story 2.6): calls ``crawls().render_pages(lead_id, run_id)`` once
   and returns ``DEFERRED`` when it returns ``False`` (the budget refused the renders).
 - ``extract_lead(extractions)`` (Story 2.9): calls ``extractions().extract_lead(lead_id,
@@ -273,6 +275,26 @@ def purge_page_text(research: Callable[[], PurgingPageText]) -> Handler:
         research().purge_page_text()
 
     return handle_purge_page_text
+
+
+class PurgingPlaceCoords(Protocol):
+    """What ``purge_place_coords`` needs of the ``discovery`` service."""
+
+    def purge_place_coords(self) -> int: ...
+
+
+class DiscoveryJobs(Canonicalizing, PurgingPlaceCoords, Protocol):
+    """What the ``discovery`` service's jobs need of it."""
+
+
+def purge_place_coords(discovery: Callable[[], PurgingPlaceCoords]) -> Handler:
+    """The ``purge_place_coords`` job's handler: null old Places coordinates through
+    ``discovery()``."""
+
+    def handle_purge_place_coords(job: Job) -> None:
+        discovery().purge_place_coords()
+
+    return handle_purge_place_coords
 
 
 class Extracting(Protocol):

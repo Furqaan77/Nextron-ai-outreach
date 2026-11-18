@@ -87,6 +87,16 @@ normaliser).
   A ``ch_number`` that came from a CSV is never Evidence: only this command, called by the
   legal-form check, links a number to a Lead from its website.
 
+- ``@use_case purge_place_coords() -> int`` (the daily ``purge_place_coords`` job, Story 8.2):
+  in one transaction it nulls ``place_lat``, ``place_lng`` and ``place_coords_at`` on every
+  Lead whose coordinates were stored strictly before ``now - 30 days``
+  (``nextron.domain.places.coords_cutoff``), and on any Lead holding a coordinate without a
+  ``place_coords_at``, keeps ``place_id``, logs ``place_coords_purged``
+  (``count``) and returns the count.
+
+**Google Places (Story 8.2).** ``PlaceSearches`` (``nextron.app.discovery.places``) runs one
+Places search page at a time, after the budget's per-call check.
+
 **The legal form (Story 2.12, FR-12).** ``LegalFormChecks`` (``nextron.app.discovery
 .legal_form``) runs the ``check_legal_form`` jobs: it links a GB Lead to its Companies House
 record through ``set_ch_number`` and records the finding through ``research.record_legal_form``.
@@ -182,12 +192,14 @@ from nextron.domain.leads import (
 )
 from nextron.domain.legal_form import COMPANY_NUMBER_PATTERN
 from nextron.domain.notifications import LeadsMerged
+from nextron.domain.places import coords_cutoff
 from nextron.ports.clock import Clock
 from nextron.ports.email_syntax import EmailSyntaxPort
 
 log = logging.getLogger(__name__)
 
 MAX_MERGE_CHAIN: Final = 64
+PLACE_COORDS_PURGED: Final = "place_coords_purged"
 BATCH_ROWS: Final = 200
 LEAD_CANONICALIZED: Final = "lead_canonicalized"
 # What canonicalize_lead did
@@ -347,6 +359,14 @@ class Discovery:
         older, newer = sorted((survivor, other), key=_age)
         self.merge(older.id, newer.id)
         return older.id, MERGED
+
+    @use_case
+    def purge_place_coords(self) -> int:
+        """Null every Places location older than 30 days; the number of Leads purged."""
+        with current().transaction():
+            count = leads_repo.purge_place_coords(coords_cutoff(self._clock.now()))
+        log.info(PLACE_COORDS_PURGED, extra={"count": count})
+        return count
 
     @command
     def set_ch_number(self, lead_id: str, number: str) -> str | None:

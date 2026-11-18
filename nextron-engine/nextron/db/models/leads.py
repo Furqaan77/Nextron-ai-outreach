@@ -35,6 +35,12 @@ Three owners write it, column by column (``nextron.db.owners``):
   ``disqualified_rule`` (the disqualifier's key) and ``disqualified_evidence`` (a JSON array of
   Evidence ids). No CHECK, because the columns were added in place.
 
+The identity group also holds a Google Places location (Story 8.2, migration
+``0044_8_2_place_coords``): ``place_lat`` and ``place_lng`` (floats) and ``place_coords_at``
+(when they were stored), all nullable with no CHECK (added in place). The Maps terms let them be
+kept for at most 30 days: the daily ``purge_place_coords`` job nulls all three after that, and
+keeps ``place_id``. No other column holds anything a Places search returned.
+
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
 organization data, PII class ``none``: erasing a Contact never touches the firm's Lead.
@@ -43,7 +49,17 @@ organization data, PII class ``none``: erasing a Contact never touches the firm'
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -117,3 +133,6 @@ class LeadRecord(Base):
     score_factors: Mapped[str | None] = mapped_column(Text)
     disqualified_rule: Mapped[str | None] = mapped_column(String(RULE_KEY_LENGTH))
     disqualified_evidence: Mapped[str | None] = mapped_column(Text)
+    place_lat: Mapped[float | None] = mapped_column(Float)
+    place_lng: Mapped[float | None] = mapped_column(Float)
+    place_coords_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
