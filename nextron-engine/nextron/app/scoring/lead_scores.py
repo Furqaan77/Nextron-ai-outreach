@@ -3,7 +3,7 @@ service, the sole writer of the score group of ``leads``. ``nextron.app.scoring.
 docstring holds the rules. No log line or job payload holds a name, a quote or a URL: IDs, codes
 and counts only.
 
-**``LeadScores(clock, scoring, queue)``.**
+**``LeadScores(clock, scoring, queue, *, selection=None)``.**
 
 - ``@use_case score_lead(lead_id) -> RescoreOutcome`` (the ``score_lead`` job, the end of the
   research chain): ``scoring.rescore(lead_id)`` in one transaction. After the commit it logs
@@ -13,7 +13,9 @@ and counts only.
   ``queries.scoring.retier_candidates()`` in one transaction, then calls
   ``scoring.retier(lead_id)`` for each in a transaction of its own, so one Lead's work never
   waits on another's. It logs ``tiers_recomputed`` (``leads``: the candidates, ``retiered``)
-  and returns how many were re-tiered.
+  and returns how many were re-tiered. Then, with a ``selection`` (Story 4.10), it calls
+  ``selection.record_capacity()`` in a transaction of its own, so a day with no picks still
+  gets its ``daily_capacity`` row and earlier days are finalised.
 - ``@use_case request_rescore(lead_id) -> RescoreRequest`` (the Lead page's "Re-score"): in
   one transaction, enqueues ``score_lead`` on the interactive lane (``enqueue_score_lead``) and
   returns ``QUEUED``. It enqueues nothing and returns ``UNKNOWN`` for an unknown Lead (a text
@@ -36,6 +38,7 @@ from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import scoring as scoring_queries
 from nextron.app.scoring.api import RescoreOutcome, RescoreResult, Scoring
+from nextron.app.scoring.selection import Selection
 from nextron.db.uow import current, use_case
 from nextron.domain.crawl import LEAD_ID_FIELD, PAYLOAD_VERSION
 from nextron.domain.job import TICK, VERSION_FIELD, Lane
@@ -74,10 +77,18 @@ def enqueue_score_lead(queue: JobQueue, lead_id: str, lane: Lane | None = None) 
 class LeadScores:
     """The scoring jobs and the Lead page's "Re-score"; see the module docstring."""
 
-    def __init__(self, clock: Clock, scoring: Scoring, queue: JobQueue) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        scoring: Scoring,
+        queue: JobQueue,
+        *,
+        selection: Selection | None = None,
+    ) -> None:
         self._clock = clock
         self._scoring = scoring
         self._queue = queue
+        self._selection = selection
 
     @use_case
     def score_lead(self, lead_id: str) -> RescoreOutcome:
@@ -113,6 +124,9 @@ class LeadScores:
             with uow.transaction():
                 if self._scoring.retier(lead_id):
                     retiered += 1
+        if self._selection is not None:
+            with uow.transaction():
+                self._selection.record_capacity()
         log.info(TIERS_RECOMPUTED, extra={"leads": len(candidates), "retiered": retiered})
         return retiered
 

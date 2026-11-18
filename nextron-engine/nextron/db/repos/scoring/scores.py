@@ -20,6 +20,10 @@ the running use case's transaction. It stores and returns what it is given and c
 - ``retier_candidates()``: the ids of the Leads with a stored ``tier`` that aren't merged and
   aren't ``lost`` or ``disqualified``, by id. It reads ``merged_into`` (discovery's) and
   ``pipeline_stage`` (pipeline's) read-only.
+- ``ready_candidates()`` (Story 4.10): ``(lead_id, tier, lead_score)`` of every Lead with a
+  stored ``tier`` and ``lead_score`` that isn't merged and whose stage is ``new``, ``queued`` or
+  ``contacted``, by id. It reads ``merged_into`` and ``pipeline_stage`` read-only, like
+  ``retier_candidates``.
 """
 
 from dataclasses import dataclass
@@ -31,9 +35,14 @@ from sqlalchemy import update as update_rows
 
 from nextron.db.models.leads import LeadRecord
 from nextron.db.uow import current
-from nextron.domain.pipeline_stage import CLOSED_STAGES
+from nextron.domain.pipeline_stage import CLOSED_STAGES, PipelineStage
 
 CLOSED: Final = tuple(str(stage) for stage in CLOSED_STAGES)
+READY_STAGES: Final = (
+    str(PipelineStage.NEW),
+    str(PipelineStage.QUEUED),
+    str(PipelineStage.CONTACTED),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,3 +159,21 @@ def retier_candidates() -> tuple[str, ...]:
         .order_by(LeadRecord.id)
     )
     return tuple(current().session.execute(statement).scalars())
+
+
+def ready_candidates() -> tuple[tuple[str, str, int], ...]:
+    """``(lead_id, tier, lead_score)`` of the Leads the "Ready to draft" list may show, by id."""
+    statement = (
+        select(LeadRecord.id, LeadRecord.tier, LeadRecord.lead_score)
+        .where(
+            LeadRecord.tier.is_not(None),
+            LeadRecord.lead_score.is_not(None),
+            LeadRecord.merged_into.is_(None),  # discovery's column, read only
+            LeadRecord.pipeline_stage.in_(READY_STAGES),  # pipeline's column, read only
+        )
+        .order_by(LeadRecord.id)
+    )
+    return tuple(
+        (str(lead_id), str(tier), int(score))
+        for lead_id, tier, score in current().session.execute(statement).all()
+    )

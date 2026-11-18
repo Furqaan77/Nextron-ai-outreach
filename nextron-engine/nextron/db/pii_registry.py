@@ -534,6 +534,17 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "text": PiiClass.REDACT,
         "created_at": PiiClass.NONE,
     },
+    # Story 4.10: dates, counts and times only.
+    "daily_capacity": {
+        "id": PiiClass.NONE,
+        "local_date": PiiClass.NONE,
+        "total_cold_capacity": PiiClass.NONE,
+        "follow_ups_reserved": PiiClass.NONE,
+        "new_sequence_capacity": PiiClass.NONE,
+        "picked": PiiClass.NONE,
+        "signal_shortfall": PiiClass.NONE,
+        "computed_at": PiiClass.NONE,
+    },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.
     "unsub_tokens": {

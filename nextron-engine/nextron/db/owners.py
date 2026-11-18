@@ -506,6 +506,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "footer_snapshots": {
         "drafting": ("id", "market_id", "sha256", "text", "created_at"),
     },
+    "daily_capacity": {  # Story 4.10
+        "scoring": (
+            "id",
+            "local_date",
+            "total_cold_capacity",
+            "follow_ups_reserved",
+            "new_sequence_capacity",
+            "picked",
+            "signal_shortfall",
+            "computed_at",
+        ),
+    },
     "unsub_tokens": {
         "compliance": (
             "id",

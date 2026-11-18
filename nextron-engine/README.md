@@ -2507,6 +2507,45 @@ Drafts in the same transaction; an `approved` one waits for Epic 5's `sending.ca
 Enrollments' unsent Steps after Step 1, due by the end of the day in `sender_timezone`,
 overdue ones included) are reserved before new Step 1s.
 
+## Today's capacity and Ready to draft
+
+Story 4.10 (FR-19, FR-59, UX-DR20) shows how many new Sequences the inboxes can carry today
+and lets you pick the Leads to start. Nothing is picked automatically.
+
+**Capacity.** Computed live each time, for today in `sender_timezone` (UTC while unset):
+`new_sequence_capacity = min(total − follow-ups due, total ÷ steps)` (whole numbers, never below
+0), where `total` is the sum of the inboxes' cold Daily Caps (Story 6.4), the follow-ups due are
+every inbox's unsent follow-ups due today (overdue included), and `steps` is the largest Step
+count of the stored Sequences (4 by default). Example: 3 inboxes at 30 with 61 follow-ups due
+and 4 Steps give 22. **Remaining today** is that capacity less today's picks.
+
+**The `daily_capacity` table** (migration `0043_4_10_daily_capacity`, owner `scoring`, every
+column PII class `none`) keeps one row per day: `local_date` (unique), `total_cold_capacity`,
+`follow_ups_reserved`, `new_sequence_capacity`, `picked`, `signal_shortfall` and
+`computed_at`. A row is written at each pick and by the daily `recompute_tiers` job. The first
+computation on a later day finalises each earlier row's `signal_shortfall` to the capacity it
+left unused (`max(0, capacity − picked)`).
+
+**The Ready to draft page (`/leads/ready`).** Linked from the Leads list. Its header reads
+"Remaining today: n of N", or "No cold capacity yet: inboxes need 14 days of recorded
+warm-up" while every cold cap is 0. It lists scored Leads that aren't merged, are at New,
+Queued or Contacted, have a Primary Contact who isn't erased and have no live Sequence: Tier A
+first by newest live Event, then Tier B and Tier C by Lead Score. Each row shows the name,
+Segment, Market, Tier, Lead Score, the Contact's role and the live Eligibility. Tier C carries a
+"generic copy" badge and a Lead Score below the **Minimum Lead Score** setting (Engine section,
+default 50) a "below minimum score" badge; both can still be picked.
+
+**Picking.** Tick Leads and press "Start Sequences for the picked Leads". In page order, each
+Lead is enrolled (origin `operator_pick`, every Step of its Campaign's Sequence, 4.9's Draft
+slots) in the first active Campaign for its Segment and the Contact's Market, until nothing
+remains today. Each gets a result line: "Enrolled" or "Refused: <reason>" (unknown or merged
+Lead, no Primary Contact, no Campaign, no capacity left today, or `enroll`'s own refusal such as
+a suppressed or ineligible Contact). A refusal uses no capacity. No email, AI call or job comes
+from a pick.
+
+**Signal shortfall.** While capacity remains today, the notification area shows "signal
+shortfall: n", linked to the page.
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
@@ -2892,6 +2931,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0040_2_13_email_domains` | creates `email_domains` (one row per mail domain: its address `pattern`, `pattern_source`, the example Evidence ids and `pattern_learned_at`, and `domain_search_at`), adds `contacts.email_search_tried`, `email_search_outcome` and `email_search_at`, and `crawled_pages.mailto` (the page's visible `mailto:` addresses as a JSON list), all in place, and creates `trg_contacts_tombstone` again with the three `email_search_*` columns fixed on an erased Contact (see [Finding email addresses](#finding-email-addresses)) | `research` |
 | `0041_2_15_scoring` | adds to `leads`, in place with no check, the nullable score group: `fit_score`, `signal_score` and `lead_score`, `tier` (1), `tier_computed_at`, `score_segment_version`, `score_factors`, `disqualified_rule` (31) and `disqualified_evidence` (see [Scores and the Lead Tier](#scores-and-the-lead-tier)) | `scoring` |
 | `0042_4_9_drafts` | `drafts` (a foreign key to `enrollments` with no cascade, nullable; kind, step slot, status and range checks; the partial unique index `uq_drafts_enrollment_step` on `enrollment_id` and `step_no` for `step` and `recontact`; indexes on `due_at` and `enrollment_id`), its content group owned by `drafting` and its status group by `approval` (see [Draft slots and due times](#draft-slots-and-due-times)) | `drafting` |
+| `0043_4_10_daily_capacity` | `daily_capacity` (one row per day: `local_date` unique, the day's total cold capacity, follow-ups reserved, new-Sequence capacity, `picked` and the `signal_shortfall` set when a later day finalises it; non-negative checks), owned by `scoring` (see [Today's capacity and Ready to draft](#todays-capacity-and-ready-to-draft)) | `scoring` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

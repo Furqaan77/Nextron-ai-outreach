@@ -10,7 +10,10 @@ occurrence).
 Story 6.4 (FR-33, FR-34, AD-11): the ramp row of the I/O matrix day by day, a warm level above
 the target, an unrecorded inbox, the ceiling and the tool send figure (never negative), the
 capacity forecast, the local-date day boundary, and the 6.4 acceptance examples (13 days 0, day
-14 the warm level, 30/25/50 gives 25)."""
+14 the warm level, 30/25/50 gives 25).
+
+Story 4.10: ``new_sequence_capacity`` (3 inboxes at 30 with 61 due and 4 Steps give 22, 80 due
+give 10, all caps 0 give 0) and its argument checks."""
 
 from datetime import UTC, date, datetime, timedelta
 
@@ -27,6 +30,7 @@ from nextron.domain.sending_policy import (
     daily_cap,
     inbox_capacity_forecast,
     local_date,
+    new_sequence_capacity,
     pick_inbox,
     step_due_at,
     tool_send_figure,
@@ -273,3 +277,42 @@ def test_the_local_date_is_the_calendar_date_in_the_sender_timezone() -> None:
 def test_the_local_date_needs_an_aware_now() -> None:
     with pytest.raises(ValueError, match="aware"):
         local_date(datetime(2026, 11, 14, 23, 30), "UTC")  # noqa: DTZ001 - the naive probe
+
+
+# Story 4.10: new Sequences today -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("total", "due", "steps", "expected"),
+    [
+        (90, 61, 4, 22),  # 3 inboxes at 30: 90 // 4 = 22 is less than 90 - 61 = 29
+        (90, 80, 4, 10),  # the follow-ups leave 10
+        (0, 0, 4, 0),  # all caps 0
+        (0, 5, 4, 0),  # never negative
+        (90, 0, 1, 90),
+        (90, 95, 4, 0),
+        (3, 0, 4, 0),  # one Sequence's Steps don't fit
+    ],
+)
+def test_new_sequence_capacity(total: int, due: int, steps: int, expected: int) -> None:
+    assert new_sequence_capacity(total, due, steps) == expected
+
+
+@pytest.mark.parametrize(
+    ("total", "due", "steps", "error"),
+    [
+        (90, 0, 0, ValueError),
+        (90, 0, -1, ValueError),
+        (-1, 0, 4, ValueError),
+        (90, -1, 4, ValueError),
+        (90, 0, True, TypeError),
+        (90, 0, 4.0, TypeError),
+        ("90", 0, 4, TypeError),
+        (90, None, 4, TypeError),
+    ],
+)
+def test_new_sequence_capacity_checks_its_arguments(
+    total: object, due: object, steps: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        new_sequence_capacity(total, due, steps)  # type: ignore[arg-type]

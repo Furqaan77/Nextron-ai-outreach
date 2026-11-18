@@ -371,3 +371,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-9-create-a-sequence-s-draft-slots-due-times-and-lifecycle-commands.md`
   summary: In Epic 5 (approval and `sending.cancel`), extend `Approval.cancel_pending` (and `cancel_pending_suppressed`) so a stop or suppression also moves each `approved` Draft of the stopped Enrollments to `cancelled` after `sending.cancel(om)` (AD-6 un-approve), so no approved message reaches a suppressed or stopped Contact.
   evidence: Review pass 1 of Story 4.9 (BH, medium, deferred). 4.9 cancels only `ready` Drafts (its spec's Never); nothing can be approved before Epic 5, so no approved Draft exists yet.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-10-show-today-s-capacity-and-pick-leads-to-draft.md`
+  summary: In Epic 6 (sending), keep the follow-ups already sent today counted in `queries.sequencing.follow_ups_due` (Story 4.10's reserved figure), so today's new-Sequence capacity doesn't rise during the day as follow-ups go out.
+  evidence: Story 4.10 overnight Decision 5 and review finding ECH4 (low). It counts only unsent (`ready` or `approved`) Step slots; nothing is sent before Epic 6, so the figure can't drift yet.

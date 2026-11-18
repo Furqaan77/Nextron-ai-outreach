@@ -194,6 +194,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/contacts/{contact_id}/export",
         "/exports/{ticket}",
         "/leads",
+        "/leads/ready",  # Story 4.10
+        "/leads/ready/pick",
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}",
@@ -673,6 +675,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_missing.html",
         "lead_score.html",
         "leads.html",
+        "leads_ready.html",
+        "leads_ready_list.html",
         "locked.html",
         "macros.html",
         "notifications.html",

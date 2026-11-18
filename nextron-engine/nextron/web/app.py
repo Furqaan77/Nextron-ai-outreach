@@ -62,8 +62,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   every page loads the area. Then it shows "Engine health: <n> error
   needs attention" (or "<n> errors need attention"), linked to the health panel, when
   ``health.issue_count()`` is above 0. It is empty when nothing is undismissed and no error
-  needs attention; otherwise it shows "Notifications (<count>)", the newest ``AREA_LIMIT`` (5),
-  each with its text (``|plain``), its time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and
+  needs attention. Then (Story 4.10) "signal shortfall: <n>" while today's remaining new-Sequence
+  capacity (``selection.today().remaining``) is above 0. It is empty when none of these shows
+  and nothing is undismissed; otherwise it shows "Notifications (<count>)", the newest
+  ``AREA_LIMIT`` (5), each with its text (``|plain``), its time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and
   "and <n> more" when there are more. The POST's fields, apart from ``csrf_token``, must be
   exactly one ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it
   dismisses through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the
@@ -197,6 +199,15 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``queries.scoring.stored`` (Story 2.15: the Score panel), with one "Export data (JSON)" form
   per Contact (``export_page.lead_forms``, Story 3.15). The list also passes its ``sort`` to
   ``lead_list``.
+- ``GET /leads/ready`` (``ready_page``) and ``POST /leads/ready/pick`` (``ready_pick``), Story
+  4.10, both ``@personal_data(True)`` and registered before ``/leads/{lead_id}``: the "Ready to
+  draft" page (``leads_ready.html``; see ``nextron.web.ready_page``), from ``selection``
+  (``Selection.today()`` and ``ready_list()``, read in the GET's read-only unit of work). The
+  form posts the checked ``lead`` ULIDs in page order (``ready_page.submitted_picks``: 1 to 200,
+  each a ULID and each once, else ``MalformedForm``, 400). The POST runs ``selection.pick`` in its
+  own unit of work, then answers 200 with the list alone (``leads_ready_list.html``, read in a
+  read-only unit of work) and one result row per picked Lead: "Enrolled" or "Refused: <plain
+  reason>". The Leads list links to the page; the navigation is unchanged.
 - ``POST /leads/{lead_id}/rescore`` (``lead_rescore``, Story 2.15, ``@personal_data(True)``):
   the Score panel's "Re-score". The form holds nothing but the CSRF token
   (``leads_page.submitted_rescore``). It runs ``lead_scores.request_rescore(lead_id)`` in its
@@ -325,6 +336,7 @@ from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.finding import EmailFinding, SearchQueued
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.scoring.lead_scores import LeadScores, RescoreRequest
+from nextron.app.scoring.selection import Selection
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import (
@@ -378,6 +390,7 @@ from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import leads_page as lead_rows
 from nextron.web import quotas_page as quota_rows
+from nextron.web import ready_page as ready_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
 from nextron.web.csrf import CSRF_SCOPE_KEY, SecurityCheckFailed, security_check_failed
@@ -472,11 +485,23 @@ def health_count_text(errors: int) -> str | None:
     return f"Engine health: {errors:,} errors need attention"
 
 
+def shortfall_text(shortfall: int) -> str | None:
+    """The area's signal shortfall line (Story 4.10), or ``None`` when there is none."""
+    if shortfall <= 0:
+        return None
+    return f"signal shortfall: {shortfall:,}"
+
+
 def area_context(
-    found: notify_queries.OpenNotifications, *, errors: int = 0, recovery: bool = False
+    found: notify_queries.OpenNotifications,
+    *,
+    errors: int = 0,
+    recovery: bool = False,
+    shortfall: int = 0,
 ) -> dict[str, object]:
     """What ``notifications.html`` renders: the recovery banner while ``recovery`` mode is on,
-    the engine health line, the count, the listed items and how many more."""
+    the engine health line, the signal shortfall line (today's remaining capacity), the count,
+    the listed items and how many more."""
     items = [
         NotificationItem(row.id, row.text, f"{row.created_at:{TIME_FORMAT}}")
         for row in found.newest
@@ -485,6 +510,7 @@ def area_context(
         "recovery": recovery,
         "RECOVERY_BANNER": RECOVERY_BANNER,
         "health_text": health_count_text(errors),
+        "shortfall_text": shortfall_text(shortfall),
         "count": found.count,
         "items": items,
         "more": max(found.count - len(items), 0),
@@ -556,6 +582,7 @@ def create_app(
     erasures: Erasures,
     domain_checks: DomainChecks,
     lead_scores: LeadScores,
+    selection: Selection,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -576,7 +603,9 @@ def create_app(
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
-    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``compliance`` runs the
+    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``selection`` gives the "Ready
+    to draft" page its list, capacity and picks and the notification area its signal shortfall
+    (Story 4.10); ``compliance`` runs the
     Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
@@ -1117,7 +1146,10 @@ def create_app(
     def notification_list(request: Request) -> HTMLResponse:
         found = notify_queries.open_notifications(AREA_LIMIT)
         context = area_context(
-            found, errors=engine_health.issue_count(), recovery=ops_queries.recovery_mode()
+            found,
+            errors=engine_health.issue_count(),
+            recovery=ops_queries.recovery_mode(),
+            shortfall=selection.today().remaining,
         )
         return page(request, NOTIFICATIONS_TEMPLATE, **context)
 
@@ -1602,6 +1634,36 @@ def create_app(
             lead, contact, notice=notice, request_ref=request_ref, receipts=receipts
         )
         return page(request, template, **context)
+
+    def ready_answer(
+        request: Request, template: str, results: tuple[ready_rows.ResultView, ...] = ()
+    ) -> HTMLResponse:
+        context = ready_rows.page_context(selection.today(), selection.ready_list(), results)
+        return page(request, template, **context)
+
+    # Story 4.10: before /leads/{lead_id}, like every /leads/<word> path
+    @app.get("/leads/ready", name="ready_page")
+    @personal_data(True)  # a Lead's name can be a sole trader's name; a Contact's role
+    def ready_page(request: Request) -> HTMLResponse:
+        return ready_answer(request, ready_rows.PAGE_TEMPLATE)
+
+    @app.post("/leads/ready/pick", name="ready_pick")
+    @personal_data(True)  # the list's Leads and Contacts' roles, and the picked Leads' names
+    def ready_pick(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        lead_ids = ready_rows.submitted_picks(fields)
+        with units.open():
+            outcomes = selection.pick(lead_ids)
+        with units.open(read_only=True):  # 200, so HTMX swaps the list in
+            names = {}
+            for outcome in outcomes:
+                found = discovery_queries.lead(outcome.lead_id)
+                names[outcome.lead_id] = None if found is None else found.name
+            results = tuple(
+                ready_rows.result_row(outcome, names[outcome.lead_id]) for outcome in outcomes
+            )
+            return ready_answer(request, ready_rows.LIST_TEMPLATE, results)
 
     # before /leads/{lead_id}, like every /leads/<word> path
     @app.get("/leads/{lead_id}/contacts/{contact_id}/erase", name="contact_erase_page")

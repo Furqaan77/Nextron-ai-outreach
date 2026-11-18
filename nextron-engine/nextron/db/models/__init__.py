@@ -17,6 +17,7 @@ from nextron.db.models import (
     ops,
     playbook,
     research,
+    scoring,
     sending,
     sequencing,
     setup,
@@ -60,6 +61,7 @@ from nextron.db.models.playbook import (
     PromptSnapshotRecord,
 )
 from nextron.db.models.research import ContactRecord, EmailDomainRecord, ProvenanceRecord
+from nextron.db.models.scoring import DailyCapacityRecord
 from nextron.db.models.sending import DomainCheckRecord, SendingDomainRecord, SendingInboxRecord
 from nextron.db.models.sequencing import EnrollmentRecord, VariantCounterRecord
 from nextron.db.models.setup import (
@@ -96,6 +98,7 @@ __all__ = [
     "EmailDomainRecord",
     "CrawlRunRecord",
     "CrawledPageRecord",
+    "DailyCapacityRecord",
     "DataSubjectRequestRecord",
     "DomainCheckRecord",
     "DraftRecord",
@@ -146,6 +149,7 @@ __all__ = [
     "ops",
     "playbook",
     "research",
+    "scoring",
     "sending",
     "sequencing",
     "setup",

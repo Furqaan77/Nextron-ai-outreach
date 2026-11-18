@@ -65,6 +65,10 @@ Its ``AiTestRuns`` (``test_runs``, Story 4.5) uses the same clock, ``meter`` and
 and ``llm``, a ``ScriptedLlm`` (empty unless a test passes one, so a test that runs a set
 scripts every answer); Check for changes queues its runs and the jobs run them.
 
+Its ``Selection`` (``selection``, Story 4.10) is ``Selection(clock, Sequencing(clock),
+compliance)`` on the same ``Compliance``; the "Ready to draft" page and the notification area's
+signal shortfall line read it, and ``lead_scores`` records the day's capacity through it.
+
 Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(clock),
 queue=queue)`` (Story 3.14: an erasure enqueues its ``erase_external`` jobs on the dashboard's
 queue, which nothing runs here); the Lead page's erase step runs it, on real units of work.
@@ -114,8 +118,10 @@ from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
+from nextron.app.scoring.selection import Selection
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
+from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.ai import RouteSpec
@@ -344,6 +350,7 @@ class Dashboard:
     erasures: Erasures = field(init=False)
     email_finding: EmailFinding = field(init=False)
     lead_scores: LeadScores = field(init=False)
+    selection: Selection = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -430,8 +437,12 @@ class Dashboard:
             hunter=ScriptedFinder(),
             prospeo=ScriptedFinder(),
         )
+        self.selection = Selection(self.clock, Sequencing(self.clock), self.compliance)
         self.lead_scores = LeadScores(
-            self.clock, Scoring(self.clock, Pipeline(self.clock), self.research), self.queue
+            self.clock,
+            Scoring(self.clock, Pipeline(self.clock), self.research),
+            self.queue,
+            selection=self.selection,
         )
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.lead_imports = LeadImports(
@@ -470,6 +481,7 @@ class Dashboard:
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
+            selection=self.selection,
             units=self.units,
             **extra,
         )

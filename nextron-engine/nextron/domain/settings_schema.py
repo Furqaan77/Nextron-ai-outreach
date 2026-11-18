@@ -82,6 +82,10 @@ reorders a footer line (``tests/contracts/test_footer_contracts.py``).
 ``lead_score_signal_weight``, ``integer`` in Engine, 0 to 100, default 50 each (whole percents:
 50 means 0.5). That they add up to 100 spans two keys, so ``nextron.app.setup.api.Setup``
 checks it (rule ``weights_sum``, ``nextron.domain.scoring.WEIGHTS_SUM_RULE``), not a ``Rule``.
+
+**The minimum Lead Score** (Story 4.10, FR-19): ``min_lead_score``, ``integer`` in Engine, label
+"Minimum Lead Score", 0 to 100, default 50 (``DEFAULT_MIN_LEAD_SCORE``). A Lead below it shows a
+"below minimum score" badge on the "Ready to draft" list and can still be picked.
 """
 
 import re
@@ -113,6 +117,7 @@ from nextron.domain.identity import IdentityError, url_host
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.prices import names_price
 from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
+from nextron.domain.scoring import DEFAULT_MIN_LEAD_SCORE, MAX_SCORE
 from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
 from nextron.domain.sending_policy import CEILING_RANGE, DEFAULT_CEILING
 from nextron.domain.sink import is_sink_recipient
@@ -190,6 +195,8 @@ class Key(StrEnum):
     # The Lead Score's weights (Story 2.15), whole percents summing to 100.
     LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
+    # The "Ready to draft" list's badge threshold (Story 4.10).
+    MIN_LEAD_SCORE = "min_lead_score"
 
 
 class _Required(Enum):
@@ -1333,6 +1340,20 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=LEAD_SCORE_DEFAULT_WEIGHT,
         rules=(minimum(0, "0"), maximum(LEAD_SCORE_WEIGHT_TOTAL, str(LEAD_SCORE_WEIGHT_TOTAL))),
+    ),
+    # The "Ready to draft" list's "below minimum score" badge (Story 4.10, FR-19); a Lead below
+    # it can still be picked.
+    Setting(
+        key=Key.MIN_LEAD_SCORE,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Minimum Lead Score",
+        unit=(
+            "0 to 100. A Lead whose Lead Score is below this shows a \"below minimum score\" "
+            "badge on the Ready to draft list; it can still be picked."
+        ),
+        default=DEFAULT_MIN_LEAD_SCORE,
+        rules=(minimum(0, "0"), maximum(MAX_SCORE, str(MAX_SCORE))),
     ),
 )
 
