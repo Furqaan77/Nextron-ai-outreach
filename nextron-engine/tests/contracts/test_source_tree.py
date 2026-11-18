@@ -62,6 +62,7 @@ FILES = [
     "nextron/domain/job.py",
     "nextron/domain/alert.py",
     "nextron/domain/budget.py",
+    "nextron/domain/budget_class.py",
     "nextron/domain/readiness.py",
     "nextron/domain/health.py",
     "nextron/domain/backup.py",

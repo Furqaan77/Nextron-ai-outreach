@@ -200,6 +200,11 @@ Story 2.12's ``check_legal_form`` (the same lanes, priority, runtime, retry limi
 ``discover_places`` (bulk only, priority 30, ``max_runtime`` 1 hour, retry limit 2,
 ``handlers.discover_places(place_discovery)``, ``discovery``), and Story 8.4's
 ``discover_registry`` (the same spec, ``handlers.discover_registry(registry_discovery)``).
+**Budget classes (Story 8.1).** ``enrich_lead``, ``render_pages``, ``extract_lead``,
+``check_legal_form``, ``run_ai_test_sets``, ``check_job_boards``, ``recheck_event``,
+``discover_places`` and ``discover_registry`` are registered ``budget_class=BLOCKABLE``; every
+other type is ``essential`` (``tests/contracts/test_budget_classes.py``). ``build_app`` keeps
+the registry on ``app.state.job_types``.
 ``domain_checks``, ``place_discovery`` and ``registry_discovery`` are the optional services:
 each defaults to a provider that raises
 ``RuntimeError`` when called, so a registry built without it (only tests do) fails that job;
@@ -509,7 +514,9 @@ health-issue registry: the only code that constructs ``HealthIssues`` or calls
 verified one), then ``IssueSource("playbook", queries.playbook.health_issues)`` (the newest
 Sales Playbook check's problem, Story 4.4), then ``IssueSource("sending", lambda:
 queries.sending.health_issues(clock.now()))`` (each listed Sending Domain whose cold sends are
-blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then freezes it; each later owner
+blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then ``IssueSource("discovery",
+lambda: queries.discovery.health_issues(budget.status()))`` ("Discovery stopped: ..." for the
+AI budget and each reached discovery quota, Story 8.1), then freezes it; each later owner
 registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
@@ -724,6 +731,7 @@ from nextron.app.ops.api import (
 )
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
+from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import playbook as playbook_queries
@@ -780,7 +788,7 @@ from nextron.domain.ai import RouteSpec
 from nextron.domain.ai_test_cases import InvalidTestCases, TestCase, extraction_case
 from nextron.domain.ai_test_gate import RUN_AI_TEST_SETS_JOB, TestSet
 from nextron.domain.ai_test_sets import set_case
-from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
+from nextron.domain.budget import AiCall, ApiCall, BudgetClass, Usage, month_of
 from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB
@@ -1080,7 +1088,8 @@ def build_app(
     ``PlaceSearches`` on ``app.state.place_searches``; ``PlaceDiscovery`` runs the Places
     discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``.
     ``RegistryDiscovery`` runs the Companies House discovery on that same ``registry``, those
-    ``PlaceSearches`` and the crawl's ``crawler``, kept on ``app.state.registry_discovery``."""
+    ``PlaceSearches`` and the crawl's ``crawler``, kept on ``app.state.registry_discovery``.
+    The job type registry is kept on ``app.state.job_types`` (Story 8.1)."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1249,6 +1258,7 @@ def build_app(
             startup=functools.partial(run_startup_steps, startup_steps),
         ),
     )
+    app.state.job_types = job_types  # Story 8.1: tests/contracts/test_budget_classes.py
     app.state.place_searches = place_searches  # Story 8.2
     app.state.place_discovery = place_discovery  # Story 8.3
     app.state.registry_discovery = registry_discovery  # Story 8.4
@@ -1322,7 +1332,10 @@ def build_job_types(
     registry_discovery: Callable[[], handlers.DiscoveringRegistry] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
-    ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
+    ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``; a type the
+    budget may stop also passes ``budget_class=BudgetClass.BLOCKABLE`` (Story 8.1: the
+    discovery, enrichment and re-check types and ``run_ai_test_sets``; every other type is
+    ``essential``, ``tests/contracts/test_budget_classes.py``). ``alerts``
     returns the ``notify`` service that ``send_alert`` jobs call, ``backups`` the ``ops``
     service's ``Backups`` that ``backup_db`` jobs call, ``restore_tests`` its
     ``RestoreTests`` that ``restore_test`` jobs call, ``recovery`` the ``RecoveryRunner`` that
@@ -1423,6 +1436,7 @@ def build_job_types(
             retry_limit=handlers.ENRICH_LEAD_RETRIES,  # the last attempt never fails a flaky site
             handler=handlers.enrich_lead(crawls),
             group=JobGroup.ENRICHMENT,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1448,6 +1462,7 @@ def build_job_types(
             retry_limit=2,  # a failed render never raises: only recording the run is retried
             handler=handlers.render_pages(crawls),
             group=JobGroup.ENRICHMENT,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1485,6 +1500,7 @@ def build_job_types(
             retry_limit=3,
             handler=handlers.extract_lead(extractions),
             group=JobGroup.ENRICHMENT,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1497,6 +1513,7 @@ def build_job_types(
             retry_limit=3,
             handler=handlers.check_legal_form(legal_forms),
             group=JobGroup.ENRICHMENT,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1522,6 +1539,7 @@ def build_job_types(
             retry_limit=3,  # a retryable gateway failure retries the whole run
             handler=handlers.run_ai_test_sets(test_runs),
             group=JobGroup.OTHER,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1548,6 +1566,7 @@ def build_job_types(
             retry_limit=3,
             handler=handlers.check_job_boards(job_boards),
             group=JobGroup.ENRICHMENT,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1560,6 +1579,7 @@ def build_job_types(
             retry_limit=3,
             handler=handlers.recheck_event(job_boards),
             group=JobGroup.RECHECK,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1573,6 +1593,7 @@ def build_job_types(
             retry_limit=2,
             handler=handlers.discover_places(discovering),
             group=JobGroup.DISCOVERY,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.register_job_type(
@@ -1587,6 +1608,7 @@ def build_job_types(
             retry_limit=2,
             handler=handlers.discover_registry(registry_runs),
             group=JobGroup.DISCOVERY,
+            budget_class=BudgetClass.BLOCKABLE,
         )
     )
     job_types.freeze()
@@ -1615,8 +1637,8 @@ def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> Health
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
     Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
-    ``clock`` is ``None``). Each later owner registers its ``queries.<owner>.health_issues``
-    here, before ``freeze()``."""
+    ``clock`` is ``None``), then discovery's "Discovery stopped" issues (Story 8.1). Each later
+    owner registers its ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
@@ -1624,6 +1646,9 @@ def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> Health
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
     issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
+    issues.register_source(
+        IssueSource("discovery", lambda: discovery_queries.health_issues(budget.status()))
+    )
     issues.freeze()
     return issues
 

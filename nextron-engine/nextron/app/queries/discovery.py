@@ -34,6 +34,13 @@ current unit of work, read-only ones included.
 - ``recent_runs(limit=20)`` (Story 8.3): the newest ``limit`` discovery runs, as ``StoredRun``
   rows, newest first (by ``started_at``, then ``id``). A ``limit`` that isn't an ``int`` from 1
   to ``MAX_RECENT_RUNS`` (200) raises ``ValueError``.
+- ``health_issues(assessment)`` (Story 8.1): the health panel's "Discovery stopped" issues from
+  the month's ``nextron.domain.budget.Assessment`` (``Budget.status()``; ``nextron.main``
+  registers it as source ``discovery``). First, when the AI budget is ``reached``,
+  ``HealthIssue(DISCOVERY_STOPPED, "ai_budget", "Discovery stopped: AI budget reached")``;
+  then, in ``QUOTAS`` order, one ``HealthIssue(DISCOVERY_STOPPED, <quota name>, "Discovery
+  stopped: <label> quota reached")`` per quota that stops ``discovery`` and is ``reached``. A
+  quota or budget at 0 (``off``) is never an issue. Pure: it reads nothing.
 """
 
 from dataclasses import dataclass
@@ -44,10 +51,13 @@ from nextron.db.repos.discovery import leads as leads_repo
 from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.repos.discovery.leads import ListedLead, StoredLead
 from nextron.db.repos.discovery.runs import StoredRun
+from nextron.domain.budget import AI_BUDGET_SUBJECT, AiState, Assessment, QuotaState
+from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.pipeline_stage import PipelineStage
 
 __all__ = [
+    "DISCOVERY_STOPPED",
     "LEADS_PER_PAGE",
     "MAX_MERGE_HOPS",
     "MAX_RECENT_RUNS",
@@ -55,6 +65,7 @@ __all__ = [
     "ListedLead",
     "StoredLead",
     "StoredRun",
+    "health_issues",
     "lead",
     "lead_by_web_domain",
     "lead_list",
@@ -66,6 +77,29 @@ __all__ = [
 LEADS_PER_PAGE: Final = 50
 MAX_MERGE_HOPS: Final = 32
 MAX_RECENT_RUNS: Final = 200
+DISCOVERY_STOPPED: Final = "discovery_stopped"  # the health issue's kind (Story 8.1)
+DISCOVERY_STOPS: Final = "discovery"  # a ``QuotaSpec.stops`` that stops discovery
+
+
+def health_issues(assessment: Assessment) -> tuple[HealthIssue, ...]:
+    """The health panel's "Discovery stopped" issues; see the module docstring."""
+    found: list[HealthIssue] = []
+    if assessment.ai.state is AiState.REACHED:
+        found.append(
+            HealthIssue(
+                DISCOVERY_STOPPED, AI_BUDGET_SUBJECT, "Discovery stopped: AI budget reached"
+            )
+        )
+    found.extend(
+        HealthIssue(
+            DISCOVERY_STOPPED,
+            line.spec.name,
+            f"Discovery stopped: {line.spec.label} quota reached",
+        )
+        for line in assessment.quotas
+        if line.spec.stops == DISCOVERY_STOPS and line.state is QuotaState.REACHED
+    )
+    return tuple(found)
 
 
 @dataclass(frozen=True, slots=True)

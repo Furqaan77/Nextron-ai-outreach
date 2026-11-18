@@ -695,12 +695,12 @@ def test_the_handler_runs_the_queued_job_and_defers_on_a_refusal(world: World) -
         result = world.handler()(job)
 
     assert result is DEFERRED
-    assert world.runs()[0]["status"] == "deferred"
+    assert world.runs() == []  # Story 8.1: refused before the run row is written
     world.set(Key.QUOTA_PLACES_ENTERPRISE, 1000)
     world.search(page())
     with world.units.open():
         assert world.handler()(job) is None
-    assert [run["status"] for run in world.runs()] == ["deferred", "finished"]
+    assert [run["status"] for run in world.runs()] == ["finished"]
 
 
 @pytest.mark.parametrize(

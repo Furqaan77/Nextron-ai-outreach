@@ -76,11 +76,18 @@ handler runs in.
   ``place_discovery().run(campaign_id, location, country_code)`` once (the discovery service's
   ``PlaceDiscovery``; ``location`` is the location's 16-hex hash and ``country_code`` two
   lowercase letters, else ``InvalidJob``) and returns ``DEFERRED`` when it returns ``False``
-  (the budget refused a Places page).
+  (the budget refused the run before its row was written, or a Places page: Story 8.1).
 - ``discover_registry(registry_discovery)`` (Story 8.4): calls
   ``registry_discovery().run(campaign_id)`` once (the discovery service's
-  ``RegistryDiscovery``) and returns ``DEFERRED`` when it returns ``False`` (the budget or the
-  register's rate limit deferred the run).
+  ``RegistryDiscovery``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused
+  the run before its row was written, or the budget or the register's rate limit deferred the
+  run: Story 8.1).
+
+**Budget classes (Story 8.1).** Every handler that may return ``DEFERRED`` belongs to a type
+``nextron.main.build_job_types`` registers ``blockable`` (``enrich_lead``, ``render_pages``,
+``extract_lead``, ``check_legal_form``, ``run_ai_test_sets``, ``check_job_boards``,
+``discover_places``, ``discover_registry``; ``recheck_event`` is ``blockable`` too, as Re-check
+work). Every other type is ``essential``: its handler never returns ``DEFERRED``.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """

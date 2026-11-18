@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1370,6 +1371,9 @@ def _no_budget() -> Any:
     class NoBudget:
         def health_issues(self) -> tuple[HealthIssue, ...]:
             return ()
+
+        def status(self) -> Any:  # Story 8.1's discovery source: nothing reached
+            return SimpleNamespace(ai=SimpleNamespace(state=None), quotas=())
 
     return NoBudget()
 

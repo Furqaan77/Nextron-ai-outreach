@@ -4,7 +4,8 @@ builds the ``Limits``).
 
 **Budget classes.** ``BudgetClass`` is ``blockable`` (discovery, enrichment, re-checks and their
 AI routes) or ``essential`` (everything else: sending, replies, unsubscribe polling). The budget
-never blocks ``essential`` work.
+never blocks ``essential`` work. It is defined in ``nextron.domain.budget_class`` (so
+``nextron.domain.job`` can use it without an import cycle) and re-exported here.
 
 **Call records.** What an adapter hands ``UsageMeterPort.record``; each is frozen and checked
 when it is built, raising ``TypeError`` or ``ValueError`` that names the field, never its value.
@@ -81,6 +82,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from nextron.domain.budget_class import BudgetClass as BudgetClass  # re-exported
 from nextron.domain.errors import DomainError
 from nextron.domain.health import HealthIssue
 
@@ -111,13 +113,6 @@ QUOTA_REACHED: Final = "quota_reached"
 AI_BUDGET_STOPPED: Final = "AI budget reached"
 AI_STOPS: Final = "discovery, enrichment and re-checks"
 NEVER_BLOCKED: Final = "Sending, reply handling and unsubscribe polling are never blocked."
-
-
-class BudgetClass(StrEnum):
-    """Whether the budget may stop a piece of work."""
-
-    BLOCKABLE = "blockable"  # discovery, enrichment, re-checks and their AI routes
-    ESSENTIAL = "essential"  # sending, replies, unsubscribe polling: never blocked
 
 
 class UnknownQuota(DomainError):
