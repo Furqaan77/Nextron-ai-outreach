@@ -115,6 +115,7 @@ from nextron.app.research.people import PrimaryContacts
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.setup.segment_editing import SegmentEditor
+from nextron.app.setup.sequence_editing import SequenceEditor
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
@@ -346,6 +347,7 @@ class Dashboard:
     email_finding: EmailFinding = field(init=False)
     lead_scores: LeadScores = field(init=False)
     segment_editor: SegmentEditor = field(init=False)
+    sequence_editor: SequenceEditor = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -436,6 +438,7 @@ class Dashboard:
             self.clock, Scoring(self.clock, Pipeline(self.clock), self.research), self.queue
         )
         self.segment_editor = SegmentEditor(self.clock)
+        self.sequence_editor = SequenceEditor(self.clock)
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.lead_imports = LeadImports(
             self.clock,
@@ -474,6 +477,7 @@ class Dashboard:
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
             segment_editor=self.segment_editor,
+            sequence_editor=self.sequence_editor,
             units=self.units,
             **extra,
         )

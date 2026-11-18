@@ -104,7 +104,9 @@ owner's command in one transaction (decision 1).
   transaction reads the stored Segment keys (``queries.setup.segment_keys``), runs
   ``setup.api.check_seed`` (the Segments, Markets, Sequences, Offers and Campaigns; when the
   database holds Segments, Story 11.5's managed mode, the references are checked against the
-  **stored** Segment keys, since the file's Segments are ignored), then
+  **stored** Segment keys, since the file's Segments are ignored; likewise, once the database
+  holds Sequences, Story 11.7, Campaign Variant steps are checked against the **stored**
+  Sequences' Step counts, ``queries.setup.sequence_steps``), then
   ``playbook.api.check_seed_facts`` against those Segment keys and this sync's Market
   countries, with ``latest`` the UTC date of now plus one day, then runs
   ``Setup(clock).seed_sync(...)``, then ``CompanyFacts(clock).seed_facts(...)``, so a failure
@@ -653,6 +655,7 @@ class Seeds:
         now = self._clock.now()
         with current().transaction():
             stored_keys = setup_queries.segment_keys()  # Story 11.5: managed once any exists
+            stored_steps = setup_queries.sequence_steps()  # Story 11.7: likewise
             checked = check_seed(
                 segments,
                 markets,
@@ -660,6 +663,7 @@ class Seeds:
                 offers,
                 campaigns,
                 stored_segment_keys=stored_keys if stored_keys else None,
+                stored_sequence_steps=stored_steps if stored_steps else None,
             )
             checked_facts = check_seed_facts(
                 company_facts, checked.segment_keys, checked.market_countries, latest_allowed(now)

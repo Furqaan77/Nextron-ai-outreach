@@ -375,3 +375,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-11-5-edit-segments-in-the-dashboard.md`
   summary: A stored Segment or segment_versions row that no longer decodes (after a future validator change) makes /segments/{id}, its versions page and score_lead raise instead of degrading.
   evidence: maybe-false, medium if true; only reachable when a later story tightens nextron.domain.segments' validator. Settle by adding such a rule and checking the pages and score_lead; fix with an "unreadable version" row and a skip reason.
+- source_spec: `_bmad-output/implementation-artifacts/spec-11-7-edit-sequences-and-step-briefs.md`
+  summary: Story 4.10's capacity reservation should decide whether `steps_per_sequence()` must also count the Step counts of older Sequence versions that live Enrollments are still bound to (today it counts active Campaigns' current versions only).
+  evidence: Review of 11.7 (B1/E6, medium). After an edit shortens a Sequence from 6 to 3 Steps, Enrollments bound to the 6-Step version still send 6 Steps, but `steps_per_sequence()` reports 3.
+- source_spec: `_bmad-output/implementation-artifacts/spec-11-7-edit-sequences-and-step-briefs.md`
+  summary: In Story 11.8's Variant editing, handle Variant `step_angles` notes when a middle Step of their Sequence is removed (today the later notes silently shift onto the next Step).
+  evidence: 11.7 Design Note 4. The edit refuses only a Step count below a note's Step; it can't remap notes.
+- source_spec: `_bmad-output/implementation-artifacts/spec-11-7-edit-sequences-and-step-briefs.md`
+  summary: Story 4.13 (grounding rules) must check a Draft against the word limit and briefs of the Enrollment's bound Sequence version (`enrollments.sequence_version_id`), not the current Sequence.
+  evidence: 11.7 Design Note 6. Running Enrollments keep their bound version after an edit.

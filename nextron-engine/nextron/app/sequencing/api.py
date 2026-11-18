@@ -44,7 +44,9 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
    live Enrollments wins, then the earliest registered.
 4. **Writes**, in order: the Campaign's ``variant_counters`` row upserted; the Enrollment
    inserted ``active`` with its ``variant_id``, ``sending_inbox_id``, ``sequence_id``,
-   ``sequence_version``, ``offer_id`` and ``origin`` bound for good, and one ``events`` row
+   ``sequence_version``, ``offer_id`` and ``origin`` bound for good (and, Story 11.7,
+   ``sequence_version_id``: the ``sequence_versions`` row of the Sequence's current version,
+   ``queries.setup.current_sequence_version_id``), and one ``events`` row
    (``None`` to ``active``, cause ``enrolled``, ``cause_ref`` the Campaign);
    ``research.record_eligibility_basis(contact_id, decision, campaign_id, lia_ref, lia_date,
    now)`` with the Campaign's LIA only when ``needs_lia`` of its Market's country, else
@@ -381,6 +383,7 @@ class Sequencing:
             origin=str(chosen_origin),
             status=str(CREATION.to),
             at=now,
+            sequence_version_id=setup_queries.current_sequence_version_id(sequence.id),
         )
         eventlog.append(
             entity=ENTITY,

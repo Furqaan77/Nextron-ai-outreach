@@ -26,11 +26,13 @@ from nextron.app.setup.api import (
     MarketSync,
     OfferSync,
     SegmentSync,
+    SequenceDifference,
     SequenceSync,
 )
 from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
-from nextron.db.uow import UnitOfWorkFactory
+from nextron.db.repos.setup import sequences as sequences_repo
+from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.campaign import CampaignDef, validate_campaigns
 from nextron.domain.company_facts import SeedFact, validate_company_facts
@@ -78,7 +80,10 @@ OTHERS_FIRST = (
 )
 OTHERS_UNCHANGED = "segments: Segments are managed in the dashboard; seed/segments.yaml ignored\nmarkets: 0 changed, 2 unchanged\n"
 SEQUENCES_FIRST = "sequences: 1 changed, 0 unchanged\n  default: created (version 1)\n"
-SEQUENCES_UNCHANGED = "sequences: 0 changed, 1 unchanged\n"
+# Story 11.7: once the database holds a Sequence, the dashboard owns them
+SEQUENCES_UNCHANGED = (
+    "sequences: Sequences are managed in the dashboard; seed/sequences.yaml ignored\n"
+)
 # Story 4.3: the company_facts block follows the sequences block
 FACTS_FIRST = (
     "company_facts: 8 changed, 0 unchanged\n"
@@ -208,6 +213,22 @@ def sync(folder: Path | None = None, *, clock: FrozenClock | None = None) -> Run
         err=err,
     )
     return Run(code, out.getvalue(), err.getvalue())
+
+
+def store(units: UnitOfWorkFactory, text: str, at: Any = LATER) -> None:
+    """Story 11.7: seed sync no longer changes a stored Sequence, so these tests change one
+    through the repository's ``update`` (what ``SequenceEditor.edit`` calls), at ``at``."""
+    [sequence] = shipped_sequences(text)
+
+    @use_case
+    def write() -> None:
+        with current().transaction():
+            stored = sequences_repo.by_key(sequence.key)
+            assert stored is not None
+            sequences_repo.update(stored.id, sequence, stored.version + 1, at, "operator")
+
+    with units.open():
+        write()
 
 
 def query(path: Path, sql: str) -> list[tuple[Any, ...]]:
@@ -373,8 +394,28 @@ def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> N
 # The I/O matrix: changed, grown, shrunk -----------------------------------------------------------
 
 
-def test_a_changed_ask_gets_version_2_one_event_and_only_its_brief_row(
+def test_a_changed_file_writes_no_sequence_and_lists_the_difference(
     database: Path, tmp_path: Path
+) -> None:
+    sync()
+    before = table_dump(database)
+    changed = edited(STEP_3_ASK, "        ask: Offer to send a short case study by reply\n")
+
+    run = sync(seed_dir(tmp_path, changed), clock=FrozenClock(LATER))
+
+    assert (run.code, run.err) == (0, "")
+    assert run.out == (
+        OTHERS_UNCHANGED
+        + SEQUENCES_UNCHANGED
+        + "  default: differs in steps[3].ask\n"
+        + FACTS_UNCHANGED
+        + OFFERS_CAMPAIGNS_UNCHANGED
+    )
+    assert table_dump(database) == before
+
+
+def test_a_changed_ask_through_the_repository_rewrites_only_its_brief_row(
+    database: Path, units: UnitOfWorkFactory
 ) -> None:
     sync()
     [before] = sequence_rows(database)
@@ -382,13 +423,8 @@ def test_a_changed_ask_gets_version_2_one_event_and_only_its_brief_row(
     events_before = event_rows(database)
     changed = edited(STEP_3_ASK, "        ask: Offer to send a short case study by reply\n")
 
-    run = sync(seed_dir(tmp_path, changed), clock=FrozenClock(LATER))
+    store(units, changed)
 
-    assert (run.code, run.err) == (0, "")
-    assert run.out == (
-        OTHERS_UNCHANGED + "sequences: 1 changed, 0 unchanged\n"
-        "  default: changed (version 1 -> 2)\n" + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
-    )
     [after] = sequence_rows(database)
     assert (after[0], after[3], after[4], after[5]) == (before[0], 2, STAMP, LATER_STAMP)
     briefs_after = brief_rows(database)
@@ -400,59 +436,46 @@ def test_a_changed_ask_gets_version_2_one_event_and_only_its_brief_row(
         STAMP,
         LATER_STAMP,
     )
-    assert event_rows(database) == [
-        *events_before,
-        ("sequences", before[0], "v1", "v2", "seed_sync", None, "seed", LATER_STAMP),
-    ]
-    assert len(event_rows(database, "segments")) == 2  # nothing else changed
-    # and the next sync of the same file changes nothing
-    again = sync(seed_dir(tmp_path, changed, "again"))
-    assert again.out == (
-        OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
-    )
+    assert event_rows(database) == events_before  # the repository writes no event
+    versions = query(database, "SELECT version, actor FROM sequence_versions ORDER BY version")
+    assert versions == [(1, "seed"), (2, "operator")]
 
 
-def test_a_renamed_sequence_changes_only_its_sequence_row(database: Path, tmp_path: Path) -> None:
+def test_a_renamed_sequence_changes_only_its_sequence_row(
+    database: Path, units: UnitOfWorkFactory
+) -> None:
     sync()
     briefs_before = brief_rows(database)
 
-    run = sync(
-        seed_dir(tmp_path, edited("name: Default four-Step Sequence", "name: Default")),
-        clock=FrozenClock(LATER),
-    )
+    store(units, edited("name: Default four-Step Sequence", "name: Default"))
 
-    assert "  default: changed (version 1 -> 2)\n" in run.out
     assert sequence_rows(database)[0][2:4] == ("Default", 2)
     assert brief_rows(database) == briefs_before
 
 
-def test_a_step_5_is_added_then_removed(database: Path, tmp_path: Path) -> None:
+def test_a_step_5_is_added_then_removed(database: Path, units: UnitOfWorkFactory) -> None:
     sync()
     briefs_v1 = brief_rows(database)
     grown = SEQUENCES_TEXT + STEP_5
 
-    run = sync(seed_dir(tmp_path, grown, "grown"), clock=FrozenClock(LATER))
+    store(units, grown)
 
-    assert "  default: changed (version 1 -> 2)\n" in run.out
     briefs_v2 = brief_rows(database)
     assert sequence_rows(database)[0][3] == 2
     assert [row[2:4] for row in briefs_v2] == [(1, 0), (2, 3), (3, 7), (4, 14), (5, 21)]
     assert briefs_v2[:4] == briefs_v1  # the first four rows untouched
     assert (briefs_v2[4][14], briefs_v2[4][15]) == (LATER_STAMP, LATER_STAMP)
 
-    run = sync(seed_dir(tmp_path, SEQUENCES_TEXT, "shrunk"), clock=FrozenClock(LATER))
+    store(units, SEQUENCES_TEXT)
 
-    assert "  default: changed (version 2 -> 3)\n" in run.out
     assert sequence_rows(database)[0][3] == 3
     assert brief_rows(database) == briefs_v1
     assert query(database, "SELECT count(*) FROM step_briefs") == [(4,)]
-    statuses = [(row[2], row[3]) for row in event_rows(database)]
-    assert statuses == [(None, "v1"), ("v1", "v2"), ("v2", "v3")]
+    versions = query(database, "SELECT version FROM sequence_versions ORDER BY version")
+    assert versions == [(1,), (2,), (3,)]
 
 
-def test_an_added_angle_changes_its_column(
-    database: Path, tmp_path: Path, units: UnitOfWorkFactory
-) -> None:
+def test_an_added_angle_changes_its_column(database: Path, units: UnitOfWorkFactory) -> None:
     sync()
     angle = (
         "          - segment: ops_automation\n"
@@ -464,9 +487,8 @@ def test_an_added_angle_changes_its_column(
         "            angle: What the SRA notice means for their intake or document work\n" + angle,
     )
 
-    run = sync(seed_dir(tmp_path, text), clock=FrozenClock(LATER))
+    store(units, text)
 
-    assert "  default: changed (version 1 -> 2)\n" in run.out
     assert brief_rows(database)[1][13].endswith(
         ',{"angle":"Their month-end close","market":"uk","segment":"ops_automation"}]'
     )
@@ -477,7 +499,7 @@ def test_an_added_angle_changes_its_column(
 
 
 def test_edited_subject_guidance_and_allowed_content_change_only_their_rows(
-    database: Path, tmp_path: Path, units: UnitOfWorkFactory
+    database: Path, units: UnitOfWorkFactory
 ) -> None:
     sync()
     before = brief_rows(database)
@@ -488,9 +510,8 @@ def test_edited_subject_guidance_and_allowed_content_change_only_their_rows(
         text,
     )
 
-    run = sync(seed_dir(tmp_path, text), clock=FrozenClock(LATER))
+    store(units, text)
 
-    assert "  default: changed (version 1 -> 2)\n" in run.out
     after = brief_rows(database)
     assert after[0][12] == (
         '{"guidance":["About the prospect\'s world","Never misleading or vague"],'
@@ -506,14 +527,10 @@ def test_edited_subject_guidance_and_allowed_content_change_only_their_rows(
         seeded = setup_queries.sequence("default")
     assert seeded is not None
     assert seeded.definition == shipped_sequences(text)[0]
-    again = sync(seed_dir(tmp_path, text, "again"))
-    assert again.out == (
-        OTHERS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
-    )
 
 
 def test_a_removed_middle_step_moves_the_later_steps_up(
-    database: Path, tmp_path: Path, units: UnitOfWorkFactory
+    database: Path, units: UnitOfWorkFactory
 ) -> None:
     sync()
     [before] = sequence_rows(database)
@@ -522,17 +539,10 @@ def test_a_removed_middle_step_moves_the_later_steps_up(
     step_3_start = SEQUENCES_TEXT.index("      # Step 3, day 7\n")
     text = SEQUENCES_TEXT[:step_2_start] + SEQUENCES_TEXT[step_3_start:]
 
-    run = sync(seed_dir(tmp_path, text), clock=FrozenClock(LATER))
+    store(units, text)
 
-    assert (run.code, run.err) == (0, "")
-    assert run.out == (
-        OTHERS_UNCHANGED + "sequences: 1 changed, 0 unchanged\n"
-        "  default: changed (version 1 -> 2)\n" + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
-    )
     assert sequence_rows(database)[0][3] == 2
-    assert event_rows(database)[1:] == [
-        ("sequences", before[0], "v1", "v2", "seed_sync", None, "seed", LATER_STAMP)
-    ]
+    assert sequence_rows(database)[0][0] == before[0]
     after = brief_rows(database)
     assert [row[2:5] for row in after] == [
         (1, 0, "Event-led cold email"),
@@ -554,7 +564,7 @@ def test_a_removed_middle_step_moves_the_later_steps_up(
 # The I/O matrix: not in file ----------------------------------------------------------------------
 
 
-def test_a_stored_sequence_not_in_the_file_is_left_as_it_is(
+def test_a_stored_sequence_not_in_the_file_is_listed_and_left_as_it_is(
     database: Path, tmp_path: Path
 ) -> None:
     with_old = SEQUENCES_TEXT.replace("sequences:\n", "sequences:\n" + OLD_SEQUENCE, 1)
@@ -569,12 +579,47 @@ def test_a_stored_sequence_not_in_the_file_is_left_as_it_is(
     assert run.out == (
         OTHERS_UNCHANGED
         + SEQUENCES_UNCHANGED
-        + "  old: not in seed/sequences.yaml, left as it is (version 1)\n"
+        + "  old: only in the dashboard\n"
         + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
     )
     assert sequence_rows(database)[1] == old_before
     assert brief_rows(database, "old") == old_briefs
     assert event_rows(database) == events_before
+
+
+def test_managed_mode_checks_variant_steps_against_the_stored_step_counts(
+    database: Path, units: UnitOfWorkFactory, tmp_path: Path
+) -> None:
+    """Story 11.7: once Sequences are managed, a Variant's angle note is checked against the
+    stored Step count (3 here), not the file's (still the shipped 4 Steps)."""
+    sync()
+    [shipped] = shipped_sequences()
+
+    @use_case
+    def shorten() -> None:
+        with current().transaction():
+            stored = sequences_repo.by_key(shipped.key)
+            assert stored is not None
+            three = dataclasses.replace(shipped, steps=shipped.steps[:3])
+            sequences_repo.update(stored.id, three, stored.version + 1, LATER, "operator")
+
+    with units.open():
+        shorten()
+    before = table_dump(database)
+    folder = seed_dir(tmp_path, SEQUENCES_TEXT, "step_4_note")
+    old = "    variants:\n      - name: A\n        status: active\n"
+    start = CAMPAIGNS_TEXT.index("  - key: law_private_ai_us\n")
+    at = CAMPAIGNS_TEXT.index(old, start)
+    note = old + "        step_angles:\n          - step: 4\n            note: A fourth-Step angle\n"
+    campaigns = CAMPAIGNS_TEXT[:at] + note + CAMPAIGNS_TEXT[at + len(old) :]
+    (folder / main.CAMPAIGNS_FILE_NAME).write_text(campaigns, encoding="utf-8", newline="")
+
+    run = sync(folder, clock=FrozenClock(LATER))
+
+    assert run.code == 1
+    assert "campaigns[law_private_ai_us].variants[A].step_angles[0].step" in run.err
+    assert "the Sequence default has 3 Steps" in run.err
+    assert table_dump(database) == before
 
 
 # The I/O matrix: invalid files --------------------------------------------------------------------
@@ -875,8 +920,31 @@ def test_sync_seed_returns_what_it_did_to_the_sequences(units: UnitOfWorkFactory
         OfferSync((("default", 1),), (), (), ()),
         CampaignSync(tuple((key, 1) for key in CAMPAIGN_KEYS), (), (), ()),
     )
-    assert second.sequences == SequenceSync((), (("default", 1, 2),), (), (("aa_other", 1),))
-    assert third.sequences == SequenceSync((), (), (), (("aa_other", 1), ("default", 2)))
+    # Story 11.7: once Sequences are stored, a sync writes none and lists the differences
+    assert second.sequences == SequenceSync(
+        (),
+        (),
+        (),
+        (),
+        True,
+        (
+            SequenceDifference("default", None, ("name",)),
+            SequenceDifference("aa_other", "dashboard"),
+        ),
+    )
+    assert third.sequences == SequenceSync(
+        (),
+        (),
+        (),
+        (),
+        True,
+        (SequenceDifference("aa_other", "dashboard"), SequenceDifference("default", "dashboard")),
+    )
+    with units.open(read_only=True):
+        assert [(s.key, s.version) for s in setup_queries.sequences()] == [
+            ("aa_other", 1),
+            ("default", 1),
+        ]
 
 
 def test_sync_seed_logs_the_sequences_counts(
@@ -888,8 +956,10 @@ def test_sync_seed_logs_the_sequences_counts(
 
     sync()
     sync(clock=FrozenClock(LATER))
-    sync(seed_dir(tmp_path, with_old, "with_old"))
+    third = sync(seed_dir(tmp_path, with_old, "with_old"))
     run = sync(seed_dir(tmp_path, edited(STEP_3_ASK, "        ask: Shorter\n"), "changed"))
+    assert "  old: only in the file\n" in third.out
+    assert "  default: differs in steps[3].ask\n" in run.out
 
     assert run.code == 0
     records = [r for r in caplog.records if r.getMessage() == "sequences_synced"]
@@ -897,9 +967,15 @@ def test_sync_seed_logs_the_sequences_counts(
     counts = ("created_count", "changed_count", "unchanged_count", "not_in_file_count")
     assert [[getattr(r, name) for name in counts] for r in records] == [
         [1, 0, 0, 0],  # the first sync
-        [0, 0, 1, 0],  # the same file again
-        [1, 0, 1, 0],  # old added
-        [0, 1, 0, 1],  # default changed, old not in the file
+        [0, 0, 0, 0],  # Story 11.7: managed from here on, nothing written
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+    ]
+    assert [(r.managed, r.differences_count) for r in records] == [
+        (False, 0),
+        (True, 0),  # the same file again
+        (True, 1),  # "old: only in the file" (the run wrote nothing, so old isn't stored)
+        (True, 1),  # "default: differs in steps[3].ask" (old left the file; it was never stored)
     ]
     names = [r.getMessage() for r in caplog.records if r.getMessage().endswith("_synced")]
     assert names == [
@@ -1045,7 +1121,7 @@ def test_a_hand_built_sequence_is_stored_as_validation_returns_it(
             segments, markets, [loose], shipped_facts(), shipped_offers(), shipped_campaigns()
         )
 
-    assert result.sequences.unchanged == ("default",)
+    assert result.sequences == SequenceSync((), (), (), (), True, ())  # no difference
 
 
 # The queries --------------------------------------------------------------------------------------

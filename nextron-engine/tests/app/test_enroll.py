@@ -728,6 +728,7 @@ def test_a_real_uk_contact_is_not_eligible_yet(world: World) -> None:
         ("origin", "referral"),
         ("created_at", "2026-11-19T09:00:00.000000Z"),
         ("id", "01JD3QZ8X5V9K2M7N4P6R8T0AB"),
+        ("sequence_version_id", None),  # Story 11.7: migration 0044 recreated the trigger
     ],
 )
 def test_the_trigger_refuses_a_change_to_a_bound_column(
@@ -784,6 +785,7 @@ def test_the_repository_has_no_setter_for_a_bound_column() -> None:
         "live",
         "ended_with_step",
         "live_counts_by_inbox",
+        "live_counts_by_version",  # Story 11.7
         "insert",
         "set_status",
         "record_step_sent",  # Story 4.9

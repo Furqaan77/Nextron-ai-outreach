@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Sequence {{ sequence.key|plain }}{% endblock %}
+{% block content %}
+<h1>Sequence {{ sequence.key|plain }}</h1>
+<p>Saving keeps the earlier versions (<a href="/sequences/{{ sequence.id }}/versions">see every version</a>). A Sequence's key never changes. Back to <a href="/sequences">all Sequences</a>.</p>
+{% include "sequence_panel.html" %}
+{% endblock %}

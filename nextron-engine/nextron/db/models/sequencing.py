@@ -11,10 +11,14 @@ migration ``0038_4_8_enrollments``), owned by ``sequencing`` (``nextron.db.repos
   ``stop_cause`` (``ck_enrollments_stop_cause``; ``ck_enrollments_stopped``: set exactly when
   ``stopped``); ``created_at`` and ``updated_at``; ``last_step_sent_at``; and ``ended_at``
   (``ck_enrollments_ended``: set exactly when ``stopped`` or ``completed``;
-  ``ck_enrollments_ended_after_last_step``: never before ``last_step_sent_at``).
+  ``ck_enrollments_ended_after_last_step``: never before ``last_step_sent_at``); and
+  ``sequence_version_id`` (Story 11.7: the ``sequence_versions`` row the Enrollment started
+  with, a foreign key with no cascade; NULL for an Enrollment made before 11.7 whose version was
+  never kept).
   ``uq_enrollments_one_live_per_lead`` (partial, ``status IN ('active','paused')``): at most one
   live Enrollment per Lead. Indexes on ``contact_id`` and ``sending_inbox_id``. Two triggers:
   ``trg_enrollments_bound`` refuses an update of ``id`` or any bound column (``BOUND_COLUMNS``),
+  recreated by migration ``0044_11_7_sequence_editing`` to cover ``sequence_version_id`` too,
   and ``trg_enrollments_erased_insert`` refuses an insert for an erased Contact.
 - ``variant_counters``: one row per Campaign that has enrolled anyone: ``id``, the
   ``campaign_id`` (unique: ``uq_variant_counters_campaign_id``), the ``last_variant_id``
@@ -51,6 +55,7 @@ BOUND_COLUMNS: Final = (
     "offer_id",
     "origin",
     "created_at",
+    "sequence_version_id",
 )
 LIVE_WHERE: Final = "status IN ('active','paused')"
 
@@ -113,6 +118,9 @@ class EnrollmentRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
     last_step_sent_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    sequence_version_id: Mapped[str | None] = mapped_column(
+        Ulid, ForeignKey("sequence_versions.id")
+    )
 
 
 class VariantCounterRecord(Base):

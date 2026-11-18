@@ -6,9 +6,9 @@ violation.
   alias of ``nextron.db.repos.setup.sequences``: ``import ... as s``, a plain dotted import,
   ``from nextron.db.repos.setup import sequences as x``, a relative import, or ``from
   ...sequences import insert as y``) only inside ``_sync_sequences`` of
-  ``nextron/app/setup/api.py``, whatever a future writer is called. So Sequences and their Step
-  briefs change only through ``seed/sequences.yaml`` and ``nextron seed sync`` until Story 11.7's
-  editing screen.
+  ``nextron/app/setup/api.py`` (the seed bootstrap) and ``SequenceEditor.edit`` of
+  ``nextron/app/setup/sequence_editing.py`` (Story 11.7's editing screen), whatever a future
+  writer is called. So Sequences and their Step briefs change only through those two.
 """
 
 import ast
@@ -23,6 +23,8 @@ REPO_NAME = "sequences"
 REPO_MODULE = f"{REPO_PACKAGE}.{REPO_NAME}"
 REPO_WRITERS = frozenset({"insert", "update"})
 ALLOWED_WRITER = ("app/setup/api.py", "_sync_sequences")
+EDITOR = ("app/setup/sequence_editing.py", "SequenceEditor.edit")
+ALLOWED_WRITERS = frozenset({ALLOWED_WRITER, EDITOR})
 
 
 def _package_of(path: Path, root: Path) -> str:
@@ -107,11 +109,12 @@ def sequence_repo_writes(root: Path) -> list[tuple[str, int, str, str]]:
 
 
 def sequence_writer_problems(root: Path) -> list[str]:
-    """Each use of the sequences repository's writers outside ``_sync_sequences``."""
+    """Each use of the sequences repository's writers outside ``_sync_sequences`` and
+    ``SequenceEditor.edit``."""
     return [
         f"{path}:{line} {function} uses the sequences repository's {writer}"
         for path, line, function, writer in sequence_repo_writes(root)
-        if (path, function) != ALLOWED_WRITER
+        if (path, function) not in ALLOWED_WRITERS
     ]
 
 
@@ -120,7 +123,7 @@ def test_only_sync_sequences_writes_the_sequences() -> None:
 
     assert sequence_writer_problems(PACKAGE) == []
     assert sorted(writer for *_, writer in writes) == ["insert", "update"]  # not vacuous
-    assert {(path, function) for path, _, function, _ in writes} == {ALLOWED_WRITER}
+    assert {(path, function) for path, _, function, _ in writes} == ALLOWED_WRITERS
 
 
 def probe_tree(tmp_path: Path, relative: str, source: str) -> Path:

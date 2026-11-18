@@ -68,6 +68,16 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "actor": PiiClass.NONE,
     },
+    # Story 11.7. Each version of a Sequence and its Step briefs, as immutable rows: never a
+    # person.
+    "sequence_versions": {
+        "id": PiiClass.NONE,
+        "sequence_id": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "definition": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "actor": PiiClass.NONE,
+    },
     # Story 3.1. A Market's rules and footer template hold codes, flags and placeholders, never
     # a person.
     "markets": {
@@ -407,6 +417,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "updated_at": PiiClass.NONE,
         "last_step_sent_at": PiiClass.NONE,
         "ended_at": PiiClass.NONE,
+        "sequence_version_id": PiiClass.NONE,
     },
     "variant_counters": {
         "id": PiiClass.NONE,

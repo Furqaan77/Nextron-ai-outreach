@@ -14,6 +14,9 @@ current unit of work, read-only ones included.
   history: a Contact never emailed hasn't been contacted. A text that isn't a ULID gives ``()``.
 - ``live_counts_by_inbox()``: ``{sending_inbox_id: live Enrollments}`` for each inbox that has
   any (``pick_inbox`` spreads new Enrollments with it);
+- ``live_enrollments_by_version(sequence_id)`` (Story 11.7): ``{sequence_version: live
+  Enrollments}`` of the Sequence, for each version that has any (the Sequences page's "n active
+  Enrollments keep version k"); ``{}`` for a text that isn't a ULID;
 - ``export_pii(contact_id) -> {"enrollments": tuple[dict, ...]}`` (Story 3.15's subject access
   exporter, ``nextron.domain.contact_export``; added at the merge of Story 4.8): every column of
   each of the Contact's Enrollments (Campaign, Variant, Sending Inbox, Sequence, Offer, origin,
@@ -64,6 +67,13 @@ def ended_sequences(contact_id: str) -> tuple[EndedSequence, ...]:
 def live_counts_by_inbox() -> Mapping[str, int]:
     """The number of live Enrollments bound to each Sending Inbox that has any."""
     return MappingProxyType(enrollments_repo.live_counts_by_inbox())
+
+
+def live_enrollments_by_version(sequence_id: str) -> Mapping[int, int]:
+    """The number of live Enrollments of the Sequence at each version that has any."""
+    if not is_ulid(sequence_id):
+        return MappingProxyType({})
+    return MappingProxyType(enrollments_repo.live_counts_by_version(sequence_id))
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
