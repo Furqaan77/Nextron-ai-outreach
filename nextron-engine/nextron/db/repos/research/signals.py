@@ -25,9 +25,10 @@ tuple of URLs.
   ``signal_evidence`` row of the Lead's Signals.
 - ``retract_unsupported(lead_id, at) -> ids``: retracts each of the Lead's Signals that isn't
   retracted and has no live Evidence; returns their ids.
-- ``insert_run(...) -> id``; ``last_ok_run(lead_id)``: the Lead's ``ok`` run started last (then
-  the greatest id), or ``None``; ``runs(lead_id)``: every run of the Lead, by ``started_at``,
-  then ``id``.
+- ``insert_run(...) -> id``; ``last_ok_run(lead_id, route)``: the Lead's ``ok`` run of that
+  route started last (then the greatest id), or ``None`` (Story 2.10's ``extract_people`` runs
+  share the table with Story 2.9's ``extract_signals`` runs); ``runs(lead_id)``: every run of
+  the Lead, by ``started_at``, then ``id``.
 - ``reparent(loser_id, survivor_id)``: moves every ``evidence`` and ``signals`` row of the Lead
   ``loser_id`` to ``survivor_id``; ``extraction_runs`` stay.
 """
@@ -402,11 +403,15 @@ def insert_run(
     return run_id
 
 
-def last_ok_run(lead_id: str) -> StoredExtractionRun | None:
-    """The Lead's ``ok`` run started last, or ``None``."""
+def last_ok_run(lead_id: str, route: str) -> StoredExtractionRun | None:
+    """The Lead's ``ok`` run of ``route`` started last, or ``None``."""
     statement = (
         select(*_RUN_COLUMNS)
-        .where(ExtractionRunRecord.lead_id == lead_id, ExtractionRunRecord.outcome == OK)
+        .where(
+            ExtractionRunRecord.lead_id == lead_id,
+            ExtractionRunRecord.route == route,
+            ExtractionRunRecord.outcome == OK,
+        )
         .order_by(ExtractionRunRecord.started_at.desc(), ExtractionRunRecord.id.desc())
         .limit(1)
     )

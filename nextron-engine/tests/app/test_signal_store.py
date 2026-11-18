@@ -120,6 +120,7 @@ def world(db_engine: Engine) -> World:
         discovery=no_jobs,
         research=no_jobs,
         extractions=no_jobs,
+        primary=no_jobs,
     )
     discovery = Discovery(clock, Pipeline(clock), JobQueue(clock, job_types))
     found = World(units, db_engine, discovery, "")
@@ -220,16 +221,16 @@ def test_the_profile_group_reads_and_writes_the_headquarters(world: World) -> No
     assert world.read(lambda: profile_repo.headquarters("01KA0000000000000000000000")) is None
 
 
-def test_last_ok_run_is_the_ok_run_started_last(world: World) -> None:
+def test_last_ok_run_is_the_ok_run_of_its_route_started_last(world: World) -> None:
     lead = world.lead()
 
-    def run(outcome: str, minutes: int) -> str:
+    def run(outcome: str, minutes: int, route: str = "extract_signals") -> str:
         at = T0 + timedelta(minutes=minutes)
         return world.transact(
             lambda: signals_repo.insert_run(
                 lead_id=lead,
                 crawl_run_id=None,
-                route="extract_signals",
+                route=route,
                 actor=ACTOR,
                 outcome=outcome,
                 error_code=None,
@@ -242,17 +243,21 @@ def test_last_ok_run_is_the_ok_run_started_last(world: World) -> None:
             )
         )
 
-    assert world.read(lambda: signals_repo.last_ok_run(lead)) is None
+    assert world.read(lambda: signals_repo.last_ok_run(lead, "extract_signals")) is None
     run("ok", 0)
     latest = run("ok", 10)
     run("failed", 20)
+    people = run("ok", 30, route="extract_people")  # Story 2.10: another route's run
 
-    found = world.read(lambda: signals_repo.last_ok_run(lead))
+    found = world.read(lambda: signals_repo.last_ok_run(lead, "extract_signals"))
     assert found is not None and found.id == latest
+    found_people = world.read(lambda: signals_repo.last_ok_run(lead, "extract_people"))
+    assert found_people is not None and found_people.id == people
     assert [row.outcome for row in world.read(lambda: signals_repo.runs(lead))] == [
         "ok",
         "ok",
         "failed",
+        "ok",
     ]
 
 

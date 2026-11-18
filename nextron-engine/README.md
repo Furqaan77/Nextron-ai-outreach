@@ -1509,6 +1509,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0019_3_2_contact_markets` | rebuilds `contacts` (from 0015's exact table, which 0016 to 0018 leave unchanged, every row, check, foreign key and index kept) with four nullable columns after `market_id`: `market_basis`, `tz_basis`, `office_country` and `office_region`, and six checks (`ck_contacts_market_basis`, `ck_contacts_tz_basis`, `ck_contacts_resolved`, `ck_contacts_market_tz`, `ck_contacts_office_country`, `ck_contacts_office_region`) (see [Contact Markets and timezones](#contact-markets-and-timezones)) | `research` |
 | `0020_2_5_crawl` | `crawl_runs` (`ix_crawl_runs_lead_id`, a foreign key to `leads`, `ck_crawl_runs_outcome` and `ck_crawl_runs_counts`), `crawled_pages` (unique on `lead_id` and `url`, foreign keys to `leads` and `crawl_runs`, `ck_crawled_pages_kind`) and `ats_links` (unique on `lead_id` and `url`, foreign keys to `leads`, `crawl_runs` and `crawled_pages`, `ck_ats_links_tag`); no foreign key cascades (see [Website crawling](#website-crawling)) | `research` |
 | `0021_4_2_campaigns` | `offers` (unique `key`, `ck_offers_version`), `campaigns` (foreign keys to `segments`, `markets`, `offers` and `sequences` with no cascade; unique `key` and (`segment_id`, `market_id`); status, LIA-pair and version checks; two triggers refusing a non-draft GB Campaign without its assessment) and `variants` (a foreign key to `campaigns`; unique per Campaign by name; a status check; a trigger refusing a third Variant) (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)) | `setup` |
+| `0023_2_10_primary_contact` | `contacts.primary_set_by` (nullable, `system` or `operator`) and `leads.no_decision_maker` (nullable Boolean), both added in place with no check, and the partial unique index `uq_contacts_one_primary` on `contacts (lead_id)` where `is_primary = 1` (see [Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -1592,9 +1593,10 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 `resolve_contact_markets` (bulk lane, priority 40, 30 minutes, retry limit 3,
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
 `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
-crawling](#website-crawling)), and `extract_lead` (see [Signals and
-Evidence](#signals-and-evidence)); the stories that add work add theirs, with a thin handler in
-`nextron/jobs/handlers.py`.
+crawling](#website-crawling)), `extract_lead` (see [Signals and
+Evidence](#signals-and-evidence)) and `select_primary_contact` (see [Decision-makers and the
+Primary Contact](#decision-makers-and-the-primary-contact)); the stories that add work add
+theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -2828,7 +2830,9 @@ number of crawl runs (one job per run), one site at a time (`domain:<site>`). It
    types: by page kind, then URL, sharing 180,000 characters (about 90,000 tokens at worst; a
    long page is cut to its share, never dropped);
 6. validates every proposal and stores what passes (below), reconciles it with the Lead's
-   earlier Evidence, recomputes the headquarters zone and records an `ok` run.
+   earlier Evidence, recomputes the headquarters zone and records an `ok` run;
+7. then finds the Lead's decision-makers (see [Decision-makers and the Primary
+   Contact](#decision-makers-and-the-primary-contact)).
 
 A refused, truncated or invalid answer, or a failed request, records that outcome and stores
 nothing; the job completes. A retryable failure (the API unavailable) records a `failed` run and
@@ -2893,6 +2897,93 @@ HTTP client until the first call, and the Claude API key is read from Credential
 
 **Not yet:** "contact form only" (an Absence Signal, `extracted_by=rule`) needs Story 2.6's
 widget detection; the job postings `extract_signals` returns are read by Story 2.11.
+
+## Decision-makers and the Primary Contact
+
+Each Lead gets the named people its own website lists in a decision-maker role, and one of them
+becomes the Primary Contact the engine writes to, or the Lead says plainly that it has none
+(FR-10, FR-13, FR-51, AD-7, AD-17, AD-18; Story 2.10). The rules are in
+`nextron/domain/people.py`, `nextron/domain/contacts.py` (roles and the choice) and
+`nextron/domain/signals.py` (the strongest Event); the services are `PeopleExtractions` and
+`PrimaryContacts` in `nextron/app/research/people.py`.
+
+**The people step** runs inside the `extract_lead` job, after the Signals step (whatever its
+outcome, except a budget refusal, an unknown or merged Lead, or a raise). It:
+
+1. checks the month's AI budget again (the Signals call may have spent it); a refusal defers the
+   whole job;
+2. reads the active `extract_people` tuple; with none, it records a `no_activation` run;
+3. when any of the Lead's team, about or contact pages changed since its last successful
+   people run (or there is none), sends all of them, by page kind, then URL, in one call
+   (180,000 characters shared); otherwise it records a `no_pages` run;
+4. keeps a proposed person only when the quote is 1 to 300 characters and appears exactly in
+   the cited page, and the name and the role are each in that quote (case-sensitive) as whole
+   words: "Ann Lee" isn't in "Joann Lee, Managing Partner". Each
+   refusal writes one `events` row (`person_discarded`, its cause, the page's id, the AI
+   actor); a repeat of the same person on the same page is dropped silently;
+5. stores each kept person whose role matches one of the Segment's decision-maker titles as a
+   Contact, unless one of the three words just before the role in their quote takes it away
+   ("Assistant to the Managing Partner", "Former Managing Partner")
+   (`research.add_contact`, source `website`, the page's URL and fetch time as its
+   Provenance Record), with their office when their own quote names a place in the Lead's
+   country (or in a stricter Market, never a looser one). People in other roles are never
+   stored; their names stay only in page text, purged after 30 days;
+6. stores one Quote Evidence row per person and page (`person_contact_id`, `extracted_by
+   ai:extract_people@v1`), reconciled with the earlier ones like Signal Evidence: a person gone
+   from a re-crawled page has their Evidence retracted;
+7. for a Law Lead whose team page was sent and whose pages weren't cut by the page budget,
+   stores the number of distinct lawyers listed (attorney, lawyer, partner, associate, counsel,
+   solicitor, barrister; never an assistant, a secretary or a paralegal, nor a retired, former,
+   emeritus, ex, summer, intern, marketing, business development, client or relations role,
+   nor a person whose quote takes the role away) as Count Evidence (`lawyers listed`, every
+   page checked, `extracted_by rule`); a zero is never stored. The same count on the same
+   pages is confirmed and any other live count retracted; a new count supersedes every live
+   one (a merge can bring a second);
+8. records the run (`extraction_runs`, route `extract_people`) and queues
+   `select_primary_contact` in the same transaction.
+
+**Roles.** A role matches a title when the title's words appear together in it, after
+casefolding, `&` as "and", the forms `COO`/`CEO`/`CFO` (for "Chief Operating/Executive/Financial
+Officer", "Chief Operations Officer" and "Chief Executive"), `VP` (for "Vice President"),
+"operations" (for "Ops") and "finance" (for "Financial"), and with "of", "the", "and", "for",
+"at", "a" and "an" dropped. A one-word Controller or Owner doesn't match after a junior
+qualifier ("Credit Controller", "Stock Controller", "Product Owner", "Account Owner", ...), while
+"Financial Controller", "Business Owner" and "Co-Owner" do. "Director of
+Finance" also reads "Finance Director", and "Vice President, Operations" also "Operations Vice
+President". A role holding "assistant", "deputy", "former", "retired", "emeritus", "intern",
+"secretary", "PA", "EA", "ex" or "to" never matches. The Segment's ranks order the titles
+(Law: Managing Partner, then Owner; Ops: COO or VP Operations, then Owner or CEO); a title only
+in a Signal type's preferred roles (Ops: Controller, CFO, Finance Director) ranks after them.
+
+**The `select_primary_contact` job** (bulk lane by default, or interactive; priority 45; 5
+minutes; retry limit 3; group Enrichment; keyed `select_primary_contact:<lead>:tick`, one site
+at a time). It picks, in order:
+
+1. the Contact Mac made Primary, while its address isn't Invalid;
+2. among the eligible Contacts (a decision-maker role, not gone from a re-crawled page, an
+   address that isn't Invalid), the one matching the earliest preferred role of the Lead's
+   strongest live Event (the highest weight times its age factor; an AP/AR posting prefers
+   the Controller, CFO or Finance Director), when its Evidence names a trigger term;
+3. otherwise the eligible Contact with the best-ranked role.
+
+Ties go to the earliest found. With none, the Lead's `no_decision_maker` is set and the Lead
+page says "no decision-maker found". Only changes are written, each with one `events` row on
+the Lead (`primary_contact_set` or `primary_contact_cleared`). A partial unique index
+(`uq_contacts_one_primary`) allows one Primary per Lead. When both merged Leads have a
+Primary, a merge keeps the merged Lead's when Mac chose it and the engine chose the survivor's,
+else the survivor's; the one cleared gets a `primary_contact_cleared` row, and then the
+survivor's selection runs again.
+
+**The Lead page's Contacts panel** shows "Primary Contact: <name> (chosen by you)" or "(chosen
+by the engine)", or "Primary Contact: no decision-maker found", and a **Make primary** button
+on every Contact but Mac's own Primary and a Contact whose address is Invalid. Mac may pick any Contact on the Lead except one whose
+address is Invalid; picking the engine's choice pins it. The button posts to
+`/leads/<id>/primary` and the panel answers in place with "Primary Contact set." or why not
+("This Lead was merged into another Lead.", "That Contact isn't on this Lead.", "That Contact's
+address is Invalid."). A person's Evidence reads "Contact: <name>" under Supports.
+
+**Not yet:** finding the Primary Contact's address (Story 2.13), job postings (Story 2.11),
+scores (Story 2.15); folding duplicate Contacts after a merge is deferred.
 
 ## Engine health
 

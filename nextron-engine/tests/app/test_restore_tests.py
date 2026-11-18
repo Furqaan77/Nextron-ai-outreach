@@ -136,6 +136,7 @@ class World:
             discovery=no_crawls,
             research=no_crawls,
             extractions=no_crawls,
+            primary=no_crawls,
         )
         self.queue = JobQueue(self.clock, job_types)
         self.notify = Notify(

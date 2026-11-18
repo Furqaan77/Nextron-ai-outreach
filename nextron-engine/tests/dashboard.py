@@ -86,6 +86,7 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import CompanyFacts
 from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
+from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
@@ -140,10 +141,11 @@ def no_recovery() -> Any:
 
 
 def no_crawl_jobs() -> Any:
-    """``build_job_types``'s ``crawls``, ``discovery``, ``research`` and ``extractions``: the
-    dashboard runs no Story 2.5 or 2.9 job."""
+    """``build_job_types``'s ``crawls``, ``discovery``, ``research``, ``extractions`` and
+    ``primary``: the dashboard runs no Story 2.5, 2.9 or 2.10 job."""
     raise AssertionError(
-        "the dashboard runs no enrich_lead, canonicalize_lead, purge_page_text or extract_lead"
+        "the dashboard runs no enrich_lead, canonicalize_lead, purge_page_text, extract_lead or "
+        "select_primary_contact"
     )
 
 
@@ -281,6 +283,7 @@ class Dashboard:
     sending: Sending = field(init=False)
     research: Research = field(init=False)
     contact_markets: ContactMarkets = field(init=False)
+    primary_contacts: PrimaryContacts = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -309,6 +312,7 @@ class Dashboard:
             discovery=no_crawl_jobs,
             research=no_crawl_jobs,
             extractions=no_crawl_jobs,
+            primary=no_crawl_jobs,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -348,6 +352,7 @@ class Dashboard:
         )
         self.research = Research(self.clock)
         self.contact_markets = ContactMarkets(self.clock, self.research, self.queue)
+        self.primary_contacts = PrimaryContacts(self.clock, self.research)
         self.lead_imports = LeadImports(
             self.clock,
             Discovery(self.clock, Pipeline(self.clock), self.queue),
@@ -374,6 +379,7 @@ class Dashboard:
             lead_imports=self.lead_imports,
             sending=self.sending,
             lead_signals=LeadSignals(self.clock),
+            primary_contacts=self.primary_contacts,
             units=self.units,
             **extra,
         )

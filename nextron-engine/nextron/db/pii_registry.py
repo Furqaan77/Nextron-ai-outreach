@@ -116,6 +116,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "pipeline_stage": PiiClass.NONE,
         "hq_tz": PiiClass.NONE,  # Story 2.9: a zone and an Evidence id, firm data
         "hq_evidence_id": PiiClass.NONE,
+        "no_decision_maker": PiiClass.NONE,  # Story 2.10: a flag about the firm
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.
@@ -161,6 +162,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "office_region": PiiClass.NULL,
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
+        "primary_set_by": PiiClass.NONE,  # Story 2.10: who chose the Primary (a code)
     },
     # Story 2.3. A record's source detail (a CSV's origin, a URL) and notes are free text; its
     # address is the Contact's address at the time, kept as a hash like contacts.email.

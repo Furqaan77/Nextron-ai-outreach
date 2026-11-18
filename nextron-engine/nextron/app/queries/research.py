@@ -27,8 +27,9 @@ Lead: empty, or ``None``):
 - ``evidence(lead_id)``: the Lead's live Evidence (neither superseded nor retracted), as
   ``StoredEvidence`` rows (``pages_checked`` a tuple of URLs), oldest first.
 - ``hq_tz(lead_id)``: the Lead's headquarters zone, or ``None``.
-- ``last_ok_extraction(lead_id)``: the Lead's ``ok`` extraction run started last, as a
-  ``StoredExtractionRun``, or ``None``; ``extraction_runs(lead_id)``: every run, oldest first.
+- ``last_ok_extraction(lead_id)``: the Lead's ``ok`` ``extract_signals`` run started last, as
+  a ``StoredExtractionRun``, or ``None``; ``extraction_runs(lead_id)``: every run (of every
+  route), oldest first.
 - ``lead_signals(lead_id, now, type_names) -> LeadSignalsView``: what the Lead page shows, read
   at once: ``hq_tz``; each current Signal as a ``SignalStatus(signal, name, age, live)``, its
   ``name`` from ``type_names`` (a Signal type key to its Segment's name) or else its key, its
@@ -36,6 +37,11 @@ Lead: empty, or ``None``):
   (a Signal whose stored class or Tier the domain refuses counts as expired); and each live
   Evidence row as an ``EvidenceSupport(evidence, supports)``, ``supports`` being the names of
   the current Signals it supports, in the Signals' order.
+
+Story 2.10 adds ``no_decision_maker(lead_id)``: ``True`` when the Lead's last Primary Contact
+selection found no decision-maker, ``False`` when it found one, ``None`` before the first
+selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
+``primary_set_by`` (``system`` or ``operator``) beside ``is_primary``.
 """
 
 from collections.abc import Mapping
@@ -51,6 +57,7 @@ from nextron.db.repos.research.contacts import StoredContact
 from nextron.db.repos.research.crawl import StoredAtsLink, StoredCrawlRun, StoredPage
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
+from nextron.domain.extraction import ROUTE as SIGNALS_ROUTE
 from nextron.domain.ids import is_ulid
 from nextron.domain.segments import SignalClass
 from nextron.domain.signals import age_days, is_live
@@ -78,6 +85,7 @@ __all__ = [
     "latest_crawl_run",
     "lead_provenance",
     "lead_signals",
+    "no_decision_maker",
     "provenance",
     "signals",
 ]
@@ -173,8 +181,14 @@ def hq_tz(lead_id: str) -> str | None:
 
 
 def last_ok_extraction(lead_id: str) -> StoredExtractionRun | None:
-    """The Lead's ``ok`` extraction run started last, or ``None``."""
-    return signals_repo.last_ok_run(lead_id) if is_ulid(lead_id) else None
+    """The Lead's ``ok`` ``extract_signals`` run started last, or ``None``."""
+    return signals_repo.last_ok_run(lead_id, SIGNALS_ROUTE) if is_ulid(lead_id) else None
+
+
+def no_decision_maker(lead_id: str) -> bool | None:
+    """Whether the Lead's last Primary Contact selection found no decision-maker; ``None``
+    before the first selection."""
+    return profile_repo.no_decision_maker(lead_id) if is_ulid(lead_id) else None
 
 
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:

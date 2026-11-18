@@ -1,0 +1,47 @@
+{#- The Lead page's Contacts panel (nextron.web.leads_page, Story 2.10): rendered inside lead.html,
+    and alone as the answer to POST /leads/{lead_id}/primary, which HTMX swaps in for this whole
+    panel. Every Contact and Provenance text is imported, crawled or extracted: it renders only
+    through |plain or safe_link, inside an element carrying hx-disable. The "Make primary" forms
+    sit outside those elements. -#}
+{%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
+<section class="lead-contacts" id="lead-contacts" aria-labelledby="contacts-heading">
+<h2 id="contacts-heading">Contacts</h2>
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
+{%- endif %}
+{%- if primary %}
+<p class="primary-contact" hx-disable>{{ primary|plain }}</p>
+{%- endif %}
+{%- if not contacts %}
+<p>No Contacts yet.</p>
+{%- else %}
+<table class="lead-table contact-table">
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Email</th><th scope="col">Address Class</th><th scope="col">LinkedIn</th><th scope="col">Primary</th><th scope="col">Action</th></tr>
+</thead>
+<tbody>
+{%- for contact in contacts %}
+<tr class="contact-row"><td hx-disable>{{ or_dash(contact.name) }}</td><td hx-disable>{{ or_dash(contact.role) }}</td><td hx-disable>{{ or_dash(contact.email) }}</td><td hx-disable>{{ or_dash(contact.address_class) }}</td><td hx-disable>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td><td>
+{%- if contact.can_make_primary %}<form method="post" action="/leads/{{ lead_id }}/primary" hx-post="/leads/{{ lead_id }}/primary" hx-target="#lead-contacts" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<input type="hidden" name="contact_id" value="{{ contact.contact_id }}"><button type="submit" class="secondary">Make primary</button></form>{% endif -%}
+</td></tr>
+<tr class="provenance-row"><td colspan="7" hx-disable>
+{%- if contact.records %}
+<table class="provenance-table">
+<thead>
+<tr><th scope="col">Record</th><th scope="col">Source</th><th scope="col">Detail</th><th scope="col">Retrieved</th><th scope="col">Address Class</th></tr>
+</thead>
+<tbody>
+{%- for record in contact.records %}
+<tr><td>{{ record.record|plain }}{% if record.address %} {{ record.address|plain }}{% endif %}</td><td>{{ record.source|plain }}</td><td>{{ record.detail|plain }}</td><td>{{ record.retrieved }}</td><td>{{ or_dash(record.address_class) }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="no-provenance">No Provenance Record.</p>
+{%- endif %}
+</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>

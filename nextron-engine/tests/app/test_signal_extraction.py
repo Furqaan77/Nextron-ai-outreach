@@ -8,7 +8,12 @@ the Evidence, the Signal, the run, the headquarters zone), unknown types and quo
 a re-extraction, changed and vanished quotes, no work (no activation, no changed page, the
 budget), bad results, a retryable failure and a merge during the call. Also the headquarters
 change re-resolving the Lead's Contacts, reparenting on a merge, the ``extract_lead`` job the
-crawl enqueues and its handler. No real Claude request is made."""
+crawl enqueues and its handler. No real Claude request is made.
+
+Story 2.10 runs a people step after the Signals (``PeopleExtractions``, on its own
+``ScriptedLlm`` here, answering no people by default), and its runs share ``extraction_runs``:
+``World.runs`` and ``World.calls`` keep to the ``extract_signals`` route; Story 2.10's tests
+(``tests/app/test_people_extraction.py``) cover the people step."""
 
 import contextvars
 import json
@@ -29,6 +34,7 @@ from nextron.app.playbook.api import Playbook
 from nextron.app.queries import research as research_queries
 from nextron.app.research.api import Research, WebsiteCrawls
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
+from nextron.app.research.people import PeopleExtractions
 from nextron.app.setup.api import Setup
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import Subscribers, UnitOfWorkFactory, command, current, use_case
@@ -98,6 +104,9 @@ def no_jobs() -> Any:
     raise AssertionError("no job runs in these tests")
 
 
+NO_PEOPLE = LlmOk({"people": []}, model=HAIKU, usage=LlmUsage(requests=1))
+
+
 def ok(**lists: list[dict[str, Any]]) -> LlmOk:
     parsed = {
         "signals": lists.get("signals", []),
@@ -140,6 +149,10 @@ class World:
     calls: list[tuple[RouteTuple, tuple[UntrustedBlock, ...], Urgency]] = field(
         default_factory=list
     )
+    people_calls: list[tuple[RouteTuple, tuple[UntrustedBlock, ...], Urgency]] = field(
+        default_factory=list
+    )
+    _people_llms: list[ScriptedLlm] = field(default_factory=list)
 
     def transact[R](self, fn: Callable[[], R]) -> R:
         @use_case
@@ -195,23 +208,39 @@ class World:
         pages = self.read(lambda: research_queries.crawled_pages(lead_id))
         return {page.url: page.id for page in pages}
 
+    def extractions(
+        self, llm: Any, people: Sequence[LlmResult | AdapterError] = (NO_PEOPLE,)
+    ) -> SignalExtractions:
+        """``SignalExtractions`` on ``llm``, its people step (Story 2.10) on a ``ScriptedLlm`` of
+        its own answering ``people``, whose calls go to ``people_calls``."""
+        people_llm = ScriptedLlm(*people)
+        self._people_llms.append(people_llm)
+        step = PeopleExtractions(self.clock, self.meter, people_llm, self.research, self.queue)
+        return SignalExtractions(self.clock, self.meter, llm, self.research, step)
+
     def extract(
-        self, lead_id: str, run_id: str, *script: LlmResult | AdapterError, llm: Any = None
+        self,
+        lead_id: str,
+        run_id: str,
+        *script: LlmResult | AdapterError,
+        llm: Any = None,
+        people: Sequence[LlmResult | AdapterError] = (NO_PEOPLE,),
     ) -> bool:
         scripted = ScriptedLlm(*script)
-        extractions = SignalExtractions(
-            self.clock, self.meter, scripted if llm is None else llm, self.research
-        )
+        extractions = self.extractions(scripted if llm is None else llm, people)
         try:
             with self.units.open():
                 return extractions.extract_lead(lead_id, run_id)
         finally:
             self.calls.extend(scripted.calls)
+            self.people_calls.extend(self._people_llms.pop().calls)
 
     def runs(self, lead_id: str) -> list[tuple[Any, ...]]:
+        """The Lead's ``extract_signals`` runs (Story 2.10's people runs share the table)."""
         return self.sql(
             "SELECT outcome, error_code, actor, route, pages_sent, pages_truncated, stored, "
-            "discarded FROM extraction_runs WHERE lead_id = ? ORDER BY rowid",
+            "discarded FROM extraction_runs WHERE lead_id = ? AND route = 'extract_signals' "
+            "ORDER BY rowid",
             (lead_id,),
         )
 
@@ -293,6 +322,7 @@ def build_world(engine: Engine, *, prompts: bool = True) -> World:
         discovery=no_jobs,
         research=no_jobs,
         extractions=no_jobs,
+        primary=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     research = Research(clock)
@@ -397,7 +427,9 @@ def test_the_first_extraction_sends_every_page_and_stores_what_validates(world: 
     )
     assert world.links() == {(signal_id, rows[HIRING]["id"])}
     assert world.runs(lead) == [("ok", None, ACTOR, "extract_signals", 3, 0, 3, 0)]
-    [(crawl_run,)] = world.sql("SELECT crawl_run_id FROM extraction_runs")
+    [(crawl_run,)] = world.sql(
+        "SELECT crawl_run_id FROM extraction_runs WHERE route = 'extract_signals'"
+    )
     assert crawl_run == run_id
     # the headquarters zone, from the location quote
     assert world.hq(lead) == ("America/Chicago", rows[CHICAGO]["id"])
@@ -766,7 +798,9 @@ def test_the_log_lines_hold_ids_and_counts_only(
     world.sql("UPDATE crawled_pages SET changed_at = ?", (utc(T0 + timedelta(minutes=30)),))
     world.extract(lead, run_id, refused)
 
-    [ok_run, refused_run] = world.sql("SELECT id FROM extraction_runs ORDER BY rowid")
+    [ok_run, refused_run] = world.sql(
+        "SELECT id FROM extraction_runs WHERE route = 'extract_signals' ORDER BY rowid"
+    )
     [extracted] = lines(caplog, "signals_extracted")
     [finished] = lines(caplog, "extraction_finished")
     assert extras(extracted) == {
@@ -853,7 +887,7 @@ def test_when_the_budget_refuses_nothing_is_called_or_written(world: World) -> N
 def test_the_handler_defers_when_the_budget_refuses(world: World) -> None:
     lead, run_id, _ = crawled(world)
     spend_the_budget(world)
-    extractions = SignalExtractions(world.clock, world.meter, ScriptedLlm(), world.research)
+    extractions = world.extractions(ScriptedLlm())
     handler = main.build_job_types(
         alerts=no_jobs,
         backups=no_jobs,
@@ -864,6 +898,7 @@ def test_the_handler_defers_when_the_budget_refuses(world: World) -> None:
         discovery=no_jobs,
         research=no_jobs,
         extractions=lambda: extractions,
+        primary=no_jobs,
     ).get("extract_lead").handler
     payload = {"v": 1, "lead_id": lead, "run_id": run_id}
     job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, payload, 1)
@@ -1047,9 +1082,7 @@ def test_a_crawl_that_stored_nothing_enqueues_no_extraction(world: World) -> Non
 
 def test_the_extract_lead_job_runs_the_extraction(world: World) -> None:
     lead, run_id, pages = crawled(world)
-    extractions = SignalExtractions(
-        world.clock, world.meter, ScriptedLlm(first_answer(pages)), world.research
-    )
+    extractions = world.extractions(ScriptedLlm(first_answer(pages)))
     handler = main.build_job_types(
         alerts=no_jobs,
         backups=no_jobs,
@@ -1060,6 +1093,7 @@ def test_the_extract_lead_job_runs_the_extraction(world: World) -> None:
         discovery=no_jobs,
         research=no_jobs,
         extractions=lambda: extractions,
+        primary=no_jobs,
     ).get("extract_lead").handler
     [(_, _, payload, _)] = world.jobs("extract_lead")
     job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, json.loads(payload), 1)
