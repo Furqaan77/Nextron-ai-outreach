@@ -158,8 +158,18 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts``,
   ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
-  Evidence and the headquarters zone), with each Contact's live Eligibility from
-  ``compliance.evaluate_eligibility`` (Story 3.6), evaluated on every render and never stored.
+  Evidence and the headquarters zone), ``queries.research.no_decision_maker`` (Story 2.10), and
+  each Contact's live Eligibility from ``compliance.evaluate_eligibility`` (Story 3.6), evaluated
+  on every render and never stored.
+- ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
+  ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
+  ``contact_id`` (``leads_page.submitted_contact``). It runs
+  ``primary_contacts.make_primary(lead_id, contact_id)`` in its own unit of work, then answers
+  200 with the Contacts panel (``lead_contacts.html``, read in a read-only unit of work, each
+  Contact's live Eligibility evaluated there too) and the notice "Primary Contact set.", or,
+  when it was refused (nothing written), the refusal's notice. An unknown Lead (a text that
+  isn't a ULID included) answers 404 with the plain text "That Lead doesn't exist.", which
+  never echoes the id.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -220,6 +230,7 @@ from nextron.app.queries import research as research_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.extraction import LeadSignals
+from nextron.app.research.people import PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
     Campaigns,
@@ -231,6 +242,7 @@ from nextron.app.setup.api import (
 )
 from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.company_facts import InvalidFact
+from nextron.domain.contacts import PrimaryRefusal, PrimaryRefused
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
@@ -441,6 +453,7 @@ def create_app(
     sending: Sending,
     lead_signals: LeadSignals,
     compliance: Compliance,
+    primary_contacts: PrimaryContacts,
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -457,9 +470,10 @@ def create_app(
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
-    page its Signals, Evidence and headquarters zone; ``compliance`` runs the Suppression List
-    panel's add, import and Reverse, and evaluates each Contact's live Eligibility on the Lead
-    page (that only reads).
+    page its Signals, Evidence and headquarters zone, and ``primary_contacts`` runs its "Make
+    primary"; ``compliance`` runs the Suppression List panel's add, import and Reverse, and
+    evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
+    reads).
     ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
     ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
     runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1310,8 +1324,38 @@ def create_app(
             research_queries.lead_provenance(found.id),
             lead_signals.view(found.id),
             decisions,
+            research_queries.no_decision_maker(found.id),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
+
+    @app.post("/leads/{lead_id}/primary", name="lead_make_primary")
+    @personal_data(True)  # the panel shows Contacts, who are people
+    def lead_make_primary(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        contact_id = lead_rows.submitted_contact(fields)
+        notice = lead_rows.primary_set()
+        try:
+            with units.open():
+                primary_contacts.make_primary(lead_id, contact_id)
+        except PrimaryRefused as refused:  # nothing was written
+            if refused.reason is PrimaryRefusal.UNKNOWN_LEAD:  # never echoes the id
+                text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
+                return PlainTextResponse(text, status_code=404, headers=NO_STORE)
+            notice = lead_rows.primary_refused(refused)
+        with units.open(read_only=True):  # 200, so HTMX swaps the panel in
+            contacts = research_queries.contacts(lead_id)
+            # live on every render, never stored (FR-18, AD-16)
+            decisions = {each.id: compliance.evaluate_eligibility(each.id) for each in contacts}
+            context = lead_rows.contacts_context(
+                lead_id,
+                contacts,
+                research_queries.lead_provenance(lead_id),
+                decisions,
+                research_queries.no_decision_maker(lead_id),
+                notice,
+            )
+            return page(request, lead_rows.CONTACTS_TEMPLATE, **context)
 
     require_declared(app)
     require_route_rules(app)

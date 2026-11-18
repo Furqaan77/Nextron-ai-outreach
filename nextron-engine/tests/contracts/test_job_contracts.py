@@ -6,8 +6,8 @@
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
-  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6, and
-  ``extract_lead``, Story 2.9,
+  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
+  ``extract_lead``, Story 2.9, and ``select_primary_contact``, Story 2.10,
   with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
@@ -377,6 +377,16 @@ class RecordingExtractions:
         return self.allowed
 
 
+class RecordingPrimary:
+    """Stands in for the ``research`` service's ``PrimaryContacts``."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def select_primary_contact(self, lead_id: str) -> None:
+        self.calls.append(lead_id)
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -389,6 +399,7 @@ def registry(**overrides: object) -> JobTypes:
         "discovery": RecordingDiscovery,
         "research": RecordingResearch,
         "extractions": RecordingExtractions,
+        "primary": RecordingPrimary,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -443,6 +454,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "render_pages",
         "purge_page_text",
         "extract_lead",
+        "select_primary_contact",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -547,6 +559,7 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "render_pages",
             "purge_page_text",
             "extract_lead",
+            "select_primary_contact",
         )
         for found in [job_types.get(name)]
     }
@@ -562,6 +575,14 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             40,
             timedelta(minutes=5),
             2,
+            JobGroup.ENRICHMENT,
+        ),
+        "select_primary_contact": (
+            Lane.BULK,
+            both,
+            45,
+            timedelta(minutes=5),
+            3,
             JobGroup.ENRICHMENT,
         ),
         "purge_page_text": (
@@ -636,6 +657,28 @@ def test_an_extract_lead_job_without_its_ids_is_invalid(payload: dict[str, objec
     with pytest.raises(InvalidJob, match="must be a ULID"):
         handler(Job(RUN, "extract_lead", Lane.BULK, payload, 1))
     assert extractions.calls == []
+
+
+def test_select_primary_contact_calls_its_service_once() -> None:
+    primary = RecordingPrimary()
+    handler = registry(primary=lambda: primary).get("select_primary_contact").handler
+
+    result = handler(Job(RUN, "select_primary_contact", Lane.BULK, {"v": 1, "lead_id": LEAD}, 1))
+
+    assert result is None
+    assert primary.calls == [LEAD]
+
+
+@pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])
+def test_a_select_primary_contact_job_without_its_lead_is_invalid(
+    payload: dict[str, object],
+) -> None:
+    primary = RecordingPrimary()
+    handler = registry(primary=lambda: primary).get("select_primary_contact").handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, "select_primary_contact", Lane.BULK, payload, 1))
+    assert primary.calls == []
 
 
 @pytest.mark.parametrize(

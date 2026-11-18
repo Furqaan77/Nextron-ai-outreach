@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {#- The Lead page (nextron.web.leads_page): the header facts, the Signals, the live Evidence,
-    then each Contact with its live Eligibility (evaluated on this render, never stored) and its
-    Provenance Records. Every Lead, Signal, Evidence, Contact and Provenance text is imported,
-    crawled or extracted: it renders only through |plain or safe_link, inside an element carrying
-    hx-disable. The Signals and Evidence sections hold no HTMX action. -#}
+    then the Contacts panel (lead_contacts.html: the Primary Contact and each Contact with its
+    live Eligibility, evaluated on this render and never stored, and its Provenance Records).
+    Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
+    it renders only through |plain or safe_link, inside an element carrying hx-disable. The
+    Signals and Evidence sections hold no HTMX action. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}
@@ -63,47 +64,5 @@
 </table>
 {%- endif %}
 </section>
-<section class="lead-contacts" aria-labelledby="contacts-heading">
-<h2 id="contacts-heading">Contacts</h2>
-{%- if not contacts %}
-<p>No Contacts yet.</p>
-{%- else %}
-<table class="lead-table contact-table" hx-disable>
-<thead>
-<tr><th scope="col">Name</th><th scope="col">Role</th><th scope="col">Email</th><th scope="col">Address Class</th><th scope="col">LinkedIn</th><th scope="col">Primary</th></tr>
-</thead>
-<tbody>
-{%- for contact in contacts %}
-<tr class="contact-row"><td>{{ or_dash(contact.name) }}</td><td>{{ or_dash(contact.role) }}</td><td>{{ or_dash(contact.email) }}</td><td>{{ or_dash(contact.address_class) }}</td><td>{% if contact.linkedin_url %}{{ safe_link(contact.linkedin_url) }}{% else %}—{% endif %}</td><td>{{ contact.primary }}</td></tr>
-<tr class="eligibility-row"><td colspan="6">
-<p class="eligibility-summary {{ 'eligible' if contact.eligibility.eligible else 'not-eligible' }}">{{ contact.eligibility.summary|plain }}</p>
-{%- if contact.eligibility.reasons %}
-<ul class="eligibility-reasons">
-{%- for reason in contact.eligibility.reasons %}
-<li data-reason="{{ reason.code }}">{{ reason.text|plain }}</li>
-{%- endfor %}
-</ul>
-{%- endif %}
-</td></tr>
-<tr class="provenance-row"><td colspan="6">
-{%- if contact.records %}
-<table class="provenance-table">
-<thead>
-<tr><th scope="col">Record</th><th scope="col">Source</th><th scope="col">Detail</th><th scope="col">Retrieved</th><th scope="col">Address Class</th></tr>
-</thead>
-<tbody>
-{%- for record in contact.records %}
-<tr><td>{{ record.record|plain }}{% if record.address %} {{ record.address|plain }}{% endif %}</td><td>{{ record.source|plain }}</td><td>{{ record.detail|plain }}</td><td>{{ record.retrieved }}</td><td>{{ or_dash(record.address_class) }}</td></tr>
-{%- endfor %}
-</tbody>
-</table>
-{%- else %}
-<p class="no-provenance">No Provenance Record.</p>
-{%- endif %}
-</td></tr>
-{%- endfor %}
-</tbody>
-</table>
-{%- endif %}
-</section>
+{% include "lead_contacts.html" %}
 {% endblock %}

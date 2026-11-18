@@ -198,6 +198,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         discovery=no_jobs,
         research=no_jobs,
         extractions=no_jobs,
+        primary=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -700,18 +701,25 @@ def test_a_merge_clears_moved_primaries_when_the_survivor_has_one(world: World) 
     kept = world.add(a, ContactCandidate(name="Ann")).contact_id
     cleared = world.add(b, ContactCandidate(name="Bo")).contact_id
     carried = world.add(c, ContactCandidate(name="Cy")).contact_id
-    world.sql("UPDATE contacts SET is_primary = 1")
+    # the operator's choices (Story 2.10): the selection a merge re-runs keeps them, though
+    # none of these Contacts has a decision-maker role
+    world.sql("UPDATE contacts SET is_primary = 1, primary_set_by = 'operator'")
 
     world.transact(lambda: world.discovery.merge(a, b))
 
-    primary = dict(world.sql("SELECT id, is_primary FROM contacts"))
-    assert primary == {kept: 1, cleared: 0, carried: 1}
-    world.sql("UPDATE contacts SET is_primary = 0 WHERE id = ?", (kept,))
+    primary = {
+        row[0]: row[1:] for row in world.sql("SELECT id, is_primary, primary_set_by FROM contacts")
+    }
+    assert primary == {kept: (1, "operator"), cleared: (0, None), carried: (1, "operator")}
+    world.sql("UPDATE contacts SET is_primary = 0, primary_set_by = NULL WHERE id = ?", (kept,))
 
     world.transact(lambda: world.discovery.merge(a, c))
 
-    primary = dict(world.sql("SELECT id, is_primary FROM contacts"))
-    assert primary == {kept: 0, cleared: 0, carried: 1}  # A had no Primary: C's carries over
+    primary = {
+        row[0]: row[1:] for row in world.sql("SELECT id, is_primary, primary_set_by FROM contacts")
+    }
+    # A had no Primary: C's carries over
+    assert primary == {kept: (0, None), cleared: (0, None), carried: (1, "operator")}
 
 
 def test_an_import_that_merges_two_leads_moves_their_contacts(world: World) -> None:

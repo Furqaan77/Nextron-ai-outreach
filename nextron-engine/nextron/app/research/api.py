@@ -57,19 +57,57 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
 
 - ``@command reparent_lead(n: LeadsMerged)``: the ``LeadsMerged`` subscriber
   (``nextron.main.build_subscribers``, after ``pipeline``'s). Every Contact of the merged Lead
-  moves to the survivor (``updated_at`` now); when the survivor already has a Primary Contact,
-  the moved Contacts' Primary flags are cleared. Provenance Records follow their Contact. It
-  appends no ``events`` row. Duplicate Contacts on the survivor are kept (Story 2.10 folds
-  them). Each moved Contact is then resolved, since the survivor's country may differ. Every
-  ``crawl_runs`` row of the merged Lead moves to the survivor too (Story 2.5), and so does each
-  ``crawled_pages`` and ``ats_links`` row whose ``url`` the survivor doesn't already hold (the
-  rest stay on the merged Lead). Every ``evidence`` and ``signals`` row of the merged Lead
-  moves to the survivor (Story 2.9); its ``extraction_runs`` and its ``hq_tz`` and
-  ``hq_evidence_id`` stay.
+  moves to the survivor (``updated_at`` now). When both Leads have a Primary Contact, one is
+  cleared (``is_primary`` and ``primary_set_by``): the survivor's when the merged Lead's was
+  chosen by the operator and the survivor's wasn't (Mac's pick beats the engine's), else the
+  merged Lead's; each Primary the merge clears appends one ``primary_contact_cleared`` row
+  (entity ``leads``, the survivor's id, ``cause_ref`` the Contact, cause ``selection``, actor
+  ``system:research``). Provenance Records follow their Contact. Duplicate Contacts on the
+  survivor are kept (folding them is deferred: ``deferred-work.md``). Each moved Contact is
+  then resolved, since the survivor's country may differ. Every ``crawl_runs`` row of the merged
+  Lead moves to the survivor too (Story 2.5), and so does each ``crawled_pages`` and
+  ``ats_links`` row whose ``url`` the survivor doesn't already hold (the rest stay on the
+  merged Lead). Every ``evidence`` and ``signals`` row of the merged Lead moves to the survivor
+  (Story 2.9); its ``extraction_runs``, its ``hq_tz`` and ``hq_evidence_id`` and its
+  ``no_decision_maker`` stay. Last, the survivor's Primary Contact is selected again (Story
+  2.10), as ``select_primary`` does.
 
 - ``@command resolve_market(contact_id)`` resolves one Contact, for the later paths that change
   its email, office location or Lead outside ``add_contact`` (Stories 2.10, 2.13, 2.14, 2.16);
   an unknown Contact (an id that isn't a ULID included) raises ``LookupError``.
+
+**The Primary Contact (Story 2.10, FR-13).** ``Research`` is the only writer of
+``contacts.is_primary`` and ``primary_set_by`` (kept set together) and of the Lead's
+``no_decision_maker``. Each Primary change appends one ``events`` row: entity ``leads``, the
+Lead's id, ``None`` to ``primary_contact_set`` (``cause_ref`` the new Primary) or to
+``primary_contact_cleared`` (``cause_ref`` the Contact cleared, when no other takes its place);
+cause ``selection`` with actor ``system:research``, or cause and actor ``operator``.
+
+- ``@command select_primary(lead_id) -> PrimaryChoice``: an unknown Lead raises
+  ``LookupError``, a merged one ``ValueError``. It reads the Lead's Segment, Contacts, current
+  Signals and Evidence. The strongest Event (``domain.signals.strongest_event`` over the
+  current Event Signals whose type the Segment still has, each with its type's weight) gives the
+  preferred roles (``domain.signals.preferred_roles``, from the quotes of its live linked
+  Evidence). Each Contact is a ``PrimaryCandidate``; it is ``departed`` when it has
+  ``extract_people`` Evidence (an ``ai:extract_people@`` actor) and none of it is live. A
+  Contact the contactability gate blocks (``compliance_api.assert_contactable(ContactSubject(id),
+  email, cold)``: a suppressed address, domain, person or profile, or a Lost or Disqualified
+  Lead; Story 3.4) is no candidate at all, the operator's Primary included, so a blocked Primary
+  is cleared and, when every Contact is blocked, the Lead has no Primary.
+  ``choose_primary`` decides, and only what changed is written, at the clock's now: the old
+  Primary is cleared, then the new one set (``primary_set_by`` the choice's);
+  ``no_decision_maker`` becomes whether the choice has no Contact; one ``events`` row per
+  Primary change (a new ``primary_set_by`` on the same Contact is a change).
+- ``@command make_primary(lead_id, contact_id)``: the operator's choice. Before any write it
+  raises ``PrimaryRefused``: ``unknown_lead`` (a text that isn't a ULID included),
+  ``merged_lead``, ``not_on_lead`` (an unknown Contact, or another Lead's) or
+  ``address_invalid`` (its Address Class is ``invalid``). Otherwise the Contact becomes Primary
+  with ``primary_set_by`` ``operator`` (picking the engine's Primary pins it), any other Primary
+  is cleared and ``no_decision_maker`` becomes false. Picking the operator's own Primary again
+  writes nothing.
+
+``PeopleExtractions`` and ``PrimaryContacts`` (``nextron.app.research.people``) find the
+decision-makers and run the selection.
 
 - ``@use_case purge_page_text() -> int`` (the daily ``purge_page_text`` job, Story 2.5): in one
   transaction, nulls ``text`` on every page whose ``text_purge_after`` is now or earlier, keeping
@@ -238,6 +276,7 @@ from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.contacts import StoredContact
+from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import command, current, use_case
 from nextron.domain.address_class import AddressCause, AddressClass, assign
 from nextron.domain.budget import BudgetClass, allow
@@ -251,7 +290,18 @@ from nextron.domain.contactability import (
     NewContactSubject,
     Purpose,
 )
-from nextron.domain.contacts import ContactCandidate, ProvenanceSource, ProvenanceSubject
+from nextron.domain.contacts import (
+    NO_PRIMARY,
+    ContactCandidate,
+    PrimaryCandidate,
+    PrimaryChoice,
+    PrimaryRefusal,
+    PrimaryRefused,
+    PrimarySetBy,
+    ProvenanceSource,
+    ProvenanceSubject,
+    choose_primary,
+)
 from nextron.domain.crawl import (
     CANONICALIZE_LEAD_JOB,
     HTML_MEDIA_TYPES,
@@ -283,7 +333,10 @@ from nextron.domain.job import VERSION_FIELD
 from nextron.domain.leads import is_shared_platform
 from nextron.domain.machines import Transition
 from nextron.domain.notifications import LeadsMerged
+from nextron.domain.people import ROUTE as PEOPLE_ROUTE
+from nextron.domain.segments import SegmentDef, SignalClass
 from nextron.domain.settings_schema import Key
+from nextron.domain.signals import EventSignal, preferred_roles, strongest_event
 from nextron.domain.widgets import Detection, detect, encode, summarize
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import (
@@ -312,6 +365,13 @@ MAX_DETAIL_LENGTH: Final = 2048
 # the office.
 TEXT_FIELDS: Final = ("name", "role", "linkedin_url")
 BACKFILL_BATCH: Final = 200  # Contacts resolved per transaction by ContactMarkets.backfill
+# The Primary Contact's events rows (Story 2.10)
+LEAD_ENTITY: Final = "leads"
+PRIMARY_CONTACT_SET: Final = "primary_contact_set"
+PRIMARY_CONTACT_CLEARED: Final = "primary_contact_cleared"
+SELECTION: Final = "selection"  # the cause of the engine's change
+OPERATOR: Final = "operator"  # the cause and actor of the operator's change
+PEOPLE_ACTOR_PREFIX: Final = f"ai:{PEOPLE_ROUTE}@"
 
 CRAWL_RETRY: Final = "crawl_retry"
 CRAWL_SKIPPED: Final = "crawl_skipped"
@@ -379,6 +439,28 @@ def _check_arguments(
         )
 
 
+def _departed(evidence: Iterable[StoredEvidence]) -> set[str]:
+    """The Contacts with ``extract_people`` Evidence none of which is live."""
+    found: set[str] = set()
+    live: set[str] = set()
+    for row in evidence:
+        if row.person_contact_id is None or not row.extracted_by.startswith(PEOPLE_ACTOR_PREFIX):
+            continue
+        found.add(row.person_contact_id)
+        if row.live:
+            live.add(row.person_contact_id)
+    return found - live
+
+
+def _set_by(value: str | None) -> PrimarySetBy | None:
+    """A stored ``primary_set_by`` as a ``PrimarySetBy``: ``None`` for NULL, or for a value the
+    domain doesn't know."""
+    try:
+        return None if value is None else PrimarySetBy(value)
+    except ValueError:
+        return None
+
+
 def _name_key(contact: StoredContact) -> str | None:
     return None if contact.name is None else normalize_name(contact.name)
 
@@ -429,6 +511,16 @@ def _blocked(answers: Iterable[object]) -> Blocked | None:
             raise TypeError(f"assert_contactable answered a {type(answer).__name__}")
     ordered = tuple(reason for reason in BlockReason if reason in reasons)
     return Blocked(ordered) if ordered else None
+
+
+def _contactable(contact_id: str) -> bool:
+    """Whether the contactability gate (AD-16) allows the stored Contact: one it blocks (a
+    suppressed address, domain, person or profile, or a Lost or Disqualified Lead) is never the
+    Primary Contact."""
+    answer = compliance_api.assert_contactable(
+        ContactSubject(contact_id), Channel.EMAIL, Purpose.COLD
+    )
+    return _blocked([answer]) is None
 
 
 class Research:
@@ -617,20 +709,180 @@ class Research:
 
     @command
     def reparent_lead(self, n: LeadsMerged) -> None:
-        """Move the merged Lead's Contacts, crawl rows, Evidence and Signals to the survivor;
-        see the module docstring."""
-        survivor_has_primary = contacts_repo.has_primary(n.survivor_lead_id)
+        """Move the merged Lead's Contacts, crawl rows, Evidence and Signals to the survivor,
+        then select its Primary Contact again; see the module docstring."""
+        now = self._clock.now()
+        survivors = contacts_repo.for_lead(n.survivor_lead_id)
+        held = next((contact for contact in survivors if contact.is_primary), None)
         moved = contacts_repo.for_lead(n.merged_lead_id)
+        incoming = next((contact for contact in moved if contact.is_primary), None)
+        operator = str(PrimarySetBy.OPERATOR)
+        keep_incoming = (
+            held is not None
+            and incoming is not None
+            and incoming.primary_set_by == operator
+            and held.primary_set_by != operator
+        )
+        cleared: list[str] = []
+        if held is not None and incoming is not None:
+            cleared.append(held.id if keep_incoming else incoming.id)
+        if keep_incoming and held is not None:
+            contacts_repo.clear_primary(held.id, now)  # before the move: one Primary per Lead
         contacts_repo.move_to_lead(
             n.merged_lead_id,
             n.survivor_lead_id,
-            self._clock.now(),
-            clear_primary=survivor_has_primary,
+            now,
+            clear_primary=held is not None and not keep_incoming,
         )
+        for contact_id in cleared:
+            self._primary_event(
+                n.survivor_lead_id, PRIMARY_CONTACT_CLEARED, contact_id, SELECTION, ACTOR, now
+            )
         for contact in moved:
             self._resolve(contact.id)
         crawl_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
         signals_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
+        survivor = discovery_queries.lead(n.survivor_lead_id)
+        if survivor is not None and survivor.merged_into is None:
+            self._select(survivor.id, survivor.segment_id)
+
+    # The Primary Contact (Story 2.10) -----------------------------------------------------------
+
+    @command
+    def select_primary(self, lead_id: str) -> PrimaryChoice:
+        """Pick the Lead's Primary Contact and write what changed; see the module docstring."""
+        lead = discovery_queries.lead(lead_id)
+        if lead is None:
+            raise LookupError("select_primary: the Lead is unknown")
+        if lead.merged_into is not None:
+            raise ValueError("select_primary: the Lead was merged into another Lead")
+        return self._select(lead.id, lead.segment_id)
+
+    @command
+    def make_primary(self, lead_id: str, contact_id: str) -> None:
+        """Make the Contact the Lead's Primary, chosen by the operator; see the module
+        docstring."""
+        lead = discovery_queries.lead(lead_id)
+        if lead is None:
+            raise PrimaryRefused(PrimaryRefusal.UNKNOWN_LEAD)
+        if lead.merged_into is not None:
+            raise PrimaryRefused(PrimaryRefusal.MERGED_LEAD)
+        contact = contacts_repo.get(contact_id) if is_ulid(contact_id) else None
+        if contact is None or contact.lead_id != lead.id:
+            raise PrimaryRefused(PrimaryRefusal.NOT_ON_LEAD)
+        if contact.address_class == AddressClass.INVALID:
+            raise PrimaryRefused(PrimaryRefusal.ADDRESS_INVALID)
+        self._write_primary(
+            lead.id,
+            contacts_repo.for_lead(lead.id),
+            PrimaryChoice(contact.id, PrimarySetBy.OPERATOR),
+            cause=OPERATOR,
+            actor=OPERATOR,
+        )
+
+    def _select(self, lead_id: str, segment_id: str) -> PrimaryChoice:
+        """The selection of ``select_primary`` on a Lead that isn't merged."""
+        seeded = setup_queries.segment_by_id(segment_id)
+        if seeded is None:  # leads.segment_id is a foreign key
+            raise RuntimeError(f"Lead {lead_id}'s Segment has no row")
+        segment = seeded.definition
+        contacts = contacts_repo.for_lead(lead_id)
+        evidence = signals_repo.evidence(lead_id, live_only=False)
+        departed = _departed(evidence)
+        candidates = [  # a Contact the contactability gate blocks is never a candidate
+            PrimaryCandidate(
+                contact_id=contact.id,
+                role=contact.role,
+                created_at=contact.created_at,
+                address_class=contact.address_class,
+                departed=contact.id in departed,
+                is_primary=contact.is_primary,
+                set_by=_set_by(contact.primary_set_by),
+            )
+            for contact in contacts
+            if _contactable(contact.id)
+        ]
+        preferred = self._preferred_roles(lead_id, segment, evidence)
+        choice = choose_primary(candidates, segment, preferred)
+        self._write_primary(lead_id, contacts, choice, cause=SELECTION, actor=ACTOR)
+        return choice
+
+    def _preferred_roles(
+        self, lead_id: str, segment: SegmentDef, evidence: Iterable[StoredEvidence]
+    ) -> tuple[str, ...]:
+        """The roles the Lead's strongest live Event prefers; ``()`` without one."""
+        types = {signal_type.key: signal_type for signal_type in segment.signal_types}
+        events = [
+            EventSignal(
+                signal.id,
+                signal.signal_type,
+                signal.tier,
+                types[signal.signal_type].weight,
+                signal.event_date,
+                signal.first_seen_at,
+            )
+            for signal in signals_repo.signals(lead_id, current_only=True)
+            if signal.signal_class == SignalClass.EVENT and signal.signal_type in types
+        ]
+        strongest = strongest_event(events, self._clock.now())
+        if strongest is None:
+            return ()
+        linked = {
+            link.evidence_id
+            for link in signals_repo.links(lead_id)
+            if link.signal_id == strongest.signal_id
+        }
+        quotes = [
+            row.quote for row in evidence if row.id in linked and row.live and row.quote is not None
+        ]
+        return preferred_roles(types[strongest.signal_type], quotes)
+
+    def _write_primary(
+        self,
+        lead_id: str,
+        contacts: Iterable[StoredContact],
+        choice: PrimaryChoice,
+        *,
+        cause: str,
+        actor: str,
+    ) -> None:
+        """Write the choice where it differs from what the Lead holds; see the module
+        docstring."""
+        now = self._clock.now()
+        held = next((contact for contact in contacts if contact.is_primary), None)
+        wanted, set_by = choice.contact_id, choice.set_by
+        unchanged = (
+            held is not None
+            and held.id == wanted
+            and set_by is not None
+            and held.primary_set_by == str(set_by)
+        )
+        if not unchanged:
+            if held is not None and held.id != wanted:
+                contacts_repo.clear_primary(held.id, now)  # first: one Primary per Lead
+            if wanted is not None and set_by is not None:
+                contacts_repo.set_primary(wanted, str(set_by), now)
+                self._primary_event(lead_id, PRIMARY_CONTACT_SET, wanted, cause, actor, now)
+            elif held is not None:
+                self._primary_event(lead_id, PRIMARY_CONTACT_CLEARED, held.id, cause, actor, now)
+        no_decision_maker = choice == NO_PRIMARY
+        if profile_repo.no_decision_maker(lead_id) is not no_decision_maker:
+            profile_repo.set_no_decision_maker(lead_id, no_decision_maker)
+
+    @staticmethod
+    def _primary_event(
+        lead_id: str, to_status: str, contact_id: str, cause: str, actor: str, at: datetime
+    ) -> None:
+        eventlog.append(
+            entity=LEAD_ENTITY,
+            entity_id=lead_id,
+            from_status=None,
+            to_status=to_status,
+            cause=cause,
+            cause_ref=contact_id,
+            actor=actor,
+            at=at,
+        )
 
     @use_case
     def purge_page_text(self) -> int:

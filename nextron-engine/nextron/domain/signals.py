@@ -21,12 +21,29 @@ still worth; the scores (Story 2.15) and the Lead page read them here.
 Each raises ``TypeError`` unless ``signal_class`` is a ``SignalClass``, ``tier`` and ``age`` are
 ``int``s (not ``bool``s), the dates are a ``date`` (not a ``datetime``) or ``None`` and the times
 aware ``datetime``s; and ``ValueError`` for a Tier outside 1 to 3 or a negative age.
+
+**The strongest Event (Story 2.10)**, which steers the Primary Contact's choice:
+
+- ``EventSignal(signal_id, signal_type, tier, weight, event_date, first_seen_at)``: a current
+  Event of the Lead, with its type's ``weight`` from the Segment.
+- ``strongest_event(events, now) -> EventSignal | None``: among the live Events
+  (``is_live``), the one with the highest ``weight * weight_factor``. A tie goes to the lower
+  Tier, then the younger (the smaller ``age_days``), then the earlier ``first_seen_at``, then
+  the smaller ``signal_id``. No live Event gives ``None``.
+- ``preferred_roles(signal_type, quotes) -> tuple[str, ...]``: the roles of each of the type's
+  ``preferred_roles`` entries one of whose ``when_terms`` appears in one of ``quotes`` (the
+  quotes of the Event's live Evidence) as a whole phrase: both normalised
+  (``quotes.normalise``) and casefolded, with no letter or digit just before or after it. The
+  roles keep the entries' order, each once (case-insensitive); no entry gives ``()``.
 """
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Final
 
-from nextron.domain.segments import TIERS, SignalClass
+from nextron.domain.quotes import normalise
+from nextron.domain.segments import TIERS, SignalClass, SignalType
 
 FULL_WEIGHT_DAYS: Final = 30  # a Tier 1 Event keeps its full weight through this day
 EVENT_LIFE_DAYS: Final = 90  # a Tier 1 Event is worth 0 from this day; others expire after it
@@ -89,3 +106,71 @@ def is_live(signal_class: SignalClass, tier: int, age: int) -> bool:
     if tier == 1:
         return age < EVENT_LIFE_DAYS
     return age <= EVENT_LIFE_DAYS
+
+
+# The strongest Event (Story 2.10) --------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EventSignal:
+    """A current Event of a Lead, with its type's weight."""
+
+    signal_id: str
+    signal_type: str
+    tier: int
+    weight: int
+    event_date: date | None
+    first_seen_at: datetime
+
+
+def strongest_event(events: Iterable[EventSignal], now: datetime) -> EventSignal | None:
+    """The live Event with the highest weight times its factor, or ``None``; see the module
+    docstring."""
+    best: EventSignal | None = None
+    best_key: tuple[float, int, int, datetime, str] | None = None
+    for event in events:
+        if not isinstance(event, EventSignal):
+            raise TypeError("strongest_event takes EventSignals")
+        age = age_days(event.event_date, event.first_seen_at, now)
+        if not is_live(SignalClass.EVENT, event.tier, age):
+            continue
+        score = event.weight * weight_factor(SignalClass.EVENT, event.tier, age)
+        key = (-score, event.tier, age, event.first_seen_at, event.signal_id)
+        if best_key is None or key < best_key:
+            best, best_key = event, key
+    return best
+
+
+def _has_phrase(text: str, phrase: str) -> bool:
+    """Whether ``phrase`` is in ``text`` with no letter or digit just before or after it."""
+    if not phrase:
+        return False
+    start = text.find(phrase)
+    while start != -1:
+        end = start + len(phrase)
+        before = text[start - 1] if start > 0 else " "
+        after = text[end] if end < len(text) else " "
+        if not before.isalnum() and not after.isalnum():
+            return True
+        start = text.find(phrase, start + 1)
+    return False
+
+
+def preferred_roles(signal_type: SignalType, quotes: Iterable[str]) -> tuple[str, ...]:
+    """The roles the type prefers given its Event's quotes; see the module docstring."""
+    if not isinstance(signal_type, SignalType):
+        raise TypeError("preferred_roles takes a SignalType")
+    if isinstance(quotes, str):
+        raise TypeError("quotes must be an iterable of str, not a str")
+    texts = [normalise(quote).casefold() for quote in quotes]
+    roles: list[str] = []
+    seen: set[str] = set()
+    for preferred in signal_type.preferred_roles:
+        terms = [normalise(term).casefold() for term in preferred.when_terms]
+        if not any(_has_phrase(text, term) for term in terms for text in texts):
+            continue
+        for role in preferred.roles:
+            if role.casefold() not in seen:
+                seen.add(role.casefold())
+                roles.append(role)
+    return tuple(roles)

@@ -189,6 +189,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/suppression/reverse",
         "/leads",
         "/leads/{lead_id}",
+        "/leads/{lead_id}/primary",
     ]
     assert async_route_handlers(app) == []
 
@@ -332,6 +333,7 @@ def test_create_app_refuses_undeclared_routes(monkeypatch: pytest.MonkeyPatch) -
         "POST /suppression/import",
         "POST /suppression/search",
         "POST /suppression/reverse",
+        "POST /leads/{lead_id}/primary",
     ):
         assert route in str(caught.value)
 
@@ -529,6 +531,7 @@ def test_create_app_refuses_an_app_that_breaks_the_route_rules(
         "POST /suppression/import",
         "POST /suppression/search",
         "POST /suppression/reverse",
+        "POST /leads/{lead_id}/primary",
     ):
         assert f"{route}: a POST whose first dependency isn't require_csrf" in str(caught.value)
 
@@ -634,6 +637,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "inboxes.html",
         "inboxes_panel.html",
         "lead.html",
+        "lead_contacts.html",
         "lead_import.html",
         "lead_import_form.html",
         "lead_missing.html",

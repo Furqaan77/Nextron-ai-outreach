@@ -60,6 +60,31 @@ answers 404 with ``lead_missing.html``, which never echoes the id.
 
 Neither section holds an HTMX action.
 
+**Decision-makers and the Primary Contact (Story 2.10).** The Contacts section is its own panel,
+``lead_contacts.html`` (``<section id="lead-contacts">``), rendered inside ``lead.html`` and
+alone as the answer to ``POST /leads/{lead_id}/primary``, which HTMX swaps in for the whole
+panel. ``contacts_context(lead_id, contacts, provenance, decisions, no_decision_maker,
+notice=None)`` gives (``decisions``: each Contact's live Eligibility ``Decision``, Story 3.6, so
+the panel the POST answers with shows it too):
+
+- the Primary line: "Primary Contact: <name> (chosen by you)" for the operator's Primary,
+  "Primary Contact: <name> (chosen by the engine)" for the engine's (the name, else the email,
+  else "—"); "Primary Contact: no decision-maker found" when the Lead has no Primary and
+  ``no_decision_maker`` is true; otherwise no line;
+- each ``ContactRow`` with its ``contact_id`` and, on every row but the operator's Primary and
+  a Contact whose address is Invalid (always refused), a "Make primary" form: ``method="post"``, ``hx-post`` to ``/leads/{lead_id}/primary``,
+  ``hx-target="#lead-contacts"``, ``hx-swap="outerHTML"``, ``csrf_field()`` and a hidden
+  ``contact_id``;
+- the POST's ``notice``: ``primary_set()`` ("Primary Contact set.", role ``status``) or
+  ``primary_refused(refusal)`` (role ``alert``): "This Lead was merged into another Lead.",
+  "That Contact isn't on this Lead." or "That Contact's address is Invalid."
+  (``submitted_contact(fields)`` reads the form: exactly ``contact_id``, once, beside the CSRF
+  token; anything else raises ``MalformedForm``).
+
+Every untrusted text (the Primary line's name, each Contact and Provenance cell) sits in an
+element carrying ``hx-disable``; the forms sit outside them. A person Evidence row (its
+``person_contact_id`` set) reads "Contact: <name>" under Supports.
+
 ``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source,
 ``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every Signal class, Evidence type
 and fact kind; a stored value none knows renders as its own text. Every Lead, Contact,
@@ -85,16 +110,41 @@ from nextron.app.queries.research import (
     StoredProvenance,
 )
 from nextron.app.queries.setup import SeededSegment
-from nextron.domain.contacts import ProvenanceSource, ProvenanceSubject
+from nextron.domain.contacts import (
+    INVALID_ADDRESS,
+    PrimaryRefusal,
+    PrimaryRefused,
+    PrimarySetBy,
+    ProvenanceSource,
+    ProvenanceSubject,
+)
 from nextron.domain.eligibility import Decision
 from nextron.domain.extraction import FactKind
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import EvidenceType, SignalClass
-from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, MalformedForm
+from nextron.web.credentials_page import Notice, Role
+from nextron.web.csrf import CSRF_FIELD
+from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
 LIST_TEMPLATE: Final = "leads.html"
 LEAD_TEMPLATE: Final = "lead.html"
 MISSING_TEMPLATE: Final = "lead_missing.html"
+CONTACTS_TEMPLATE: Final = "lead_contacts.html"
+CONTACT_FIELD: Final = "contact_id"
+PRIMARY_SET: Final = "Primary Contact set."
+PRIMARY_PREFIX: Final = "Primary Contact: "
+NO_DECISION_MAKER: Final = "Primary Contact: no decision-maker found"
+CHOSEN_BY: Final[Mapping[str, str]] = MappingProxyType(
+    {PrimarySetBy.OPERATOR: "(chosen by you)", PrimarySetBy.SYSTEM: "(chosen by the engine)"}
+)
+REFUSALS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        PrimaryRefusal.UNKNOWN_LEAD: "That Lead doesn't exist.",
+        PrimaryRefusal.MERGED_LEAD: "This Lead was merged into another Lead.",
+        PrimaryRefusal.NOT_ON_LEAD: "That Contact isn't on this Lead.",
+        PrimaryRefusal.ADDRESS_INVALID: "That Contact's address is Invalid.",
+    }
+)
 LIST_PATH: Final = "/leads"
 
 STAGE_FIELD: Final = "stage"
@@ -121,6 +171,7 @@ AI_ACTOR_PREFIX: Final = "ai:"
 SUPPORTS_SEPARATOR: Final = "; "
 ELIGIBLE: Final = "Eligible: {basis}"
 NOT_ELIGIBLE: Final = "Not eligible"
+CONTACT_SUPPORT: Final = "Contact: "
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -451,9 +502,10 @@ class EligibilityRow:
 
 @dataclass(frozen=True, slots=True)
 class ContactRow:
-    """One Contact as the Lead page shows it, with its live Eligibility and its Provenance
-    Records."""
+    """One Contact as the Lead page shows it, with its live Eligibility, its Provenance Records
+    and whether it gets a "Make primary" form."""
 
+    contact_id: str
     name: str | None
     role: str | None
     email: str | None
@@ -462,6 +514,7 @@ class ContactRow:
     primary: str
     eligibility: EligibilityRow
     records: tuple[ProvenanceRow, ...]
+    can_make_primary: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,10 +594,12 @@ def signal_row(status: SignalStatus) -> SignalRow:
     )
 
 
-def _supports(row: EvidenceSupport) -> str:
+def _supports(row: EvidenceSupport, contact_names: Mapping[str, str]) -> str:
     if row.supports:
         return SUPPORTS_SEPARATOR.join(row.supports)
     evidence = row.evidence
+    if evidence.person_contact_id is not None:
+        return CONTACT_SUPPORT + contact_names.get(evidence.person_contact_id, NO_VALUE)
     if evidence.fact is None:
         return NO_VALUE
     label = FACT_LABELS.get(evidence.fact, evidence.fact)
@@ -565,8 +620,11 @@ def _sought(row: EvidenceSupport) -> str | None:
     return f"Sought: {evidence.sought}"
 
 
-def evidence_row(row: EvidenceSupport) -> EvidenceRow:
-    """One live Evidence row as the Lead page shows it."""
+def evidence_row(
+    row: EvidenceSupport, contact_names: Mapping[str, str] = MappingProxyType({})
+) -> EvidenceRow:
+    """One live Evidence row as the Lead page shows it; ``contact_names`` names the Contact a
+    person Evidence row is about (by Contact id)."""
     evidence = row.evidence
     is_quote = evidence.type == EvidenceType.QUOTE
     return EvidenceRow(
@@ -574,7 +632,7 @@ def evidence_row(row: EvidenceSupport) -> EvidenceRow:
         quote=evidence.quote if is_quote else None,
         sought=_sought(row),
         pages_checked=() if is_quote else evidence.pages_checked,
-        supports=_supports(row),
+        supports=_supports(row, contact_names),
         source_url=evidence.source_url,
         retrieved=moment(evidence.retrieved_at),
         extraction=AI_EXTRACTED if evidence.extracted_by.startswith(AI_ACTOR_PREFIX) else NO_VALUE,
@@ -606,11 +664,16 @@ def eligibility_row(decision: Decision) -> EligibilityRow:
     )
 
 
+def _operators_primary(contact: StoredContact) -> bool:
+    return contact.is_primary and contact.primary_set_by == PrimarySetBy.OPERATOR
+
+
 def contact_row(
     contact: StoredContact, records: Iterable[StoredProvenance], decision: Decision
 ) -> ContactRow:
     """One Contact as the Lead page shows it."""
     return ContactRow(
+        contact_id=contact.id,
         name=contact.name,
         role=contact.role,
         email=contact.email,
@@ -619,7 +682,64 @@ def contact_row(
         primary=YES if contact.is_primary else NO,
         eligibility=eligibility_row(decision),
         records=tuple(provenance_row(record) for record in records),
+        can_make_primary=not _operators_primary(contact)
+        and contact.address_class != INVALID_ADDRESS,
     )
+
+
+def primary_line(contacts: Iterable[StoredContact], no_decision_maker: bool | None) -> str | None:
+    """The Contacts panel's Primary line, or ``None``; see the module docstring."""
+    primary = next((contact for contact in contacts if contact.is_primary), None)
+    if primary is None:
+        return NO_DECISION_MAKER if no_decision_maker else None
+    who = primary.name or primary.email or NO_VALUE
+    chosen = CHOSEN_BY.get(primary.primary_set_by or "", CHOSEN_BY[PrimarySetBy.SYSTEM])
+    return f"{PRIMARY_PREFIX}{who} {chosen}"
+
+
+def primary_set() -> Notice:
+    """The notice of a Primary Contact the operator set."""
+    return Notice(Role.STATUS, PRIMARY_SET)
+
+
+def primary_refused(refusal: PrimaryRefused) -> Notice:
+    """The notice of a "Make primary" that was refused (nothing was written)."""
+    return Notice(Role.ALERT, REFUSALS[refusal.reason])
+
+
+def submitted_contact(fields: FormFields) -> str:
+    """The ``contact_id`` the "Make primary" form posts, once; ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD} != {CONTACT_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+    values = fields[CONTACT_FIELD]
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    return values[0]
+
+
+def contacts_context(
+    lead_id: str,
+    contacts: Iterable[StoredContact],
+    provenance: Mapping[str, Iterable[StoredProvenance]],
+    decisions: Mapping[str, Decision],
+    no_decision_maker: bool | None,
+    notice: Notice | None = None,
+) -> dict[str, object]:
+    """What ``lead_contacts.html`` renders: the Lead's id (for the forms' path), the Primary
+    line, the Contacts (in the order given, oldest first), each with its live Eligibility from
+    ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id), and the
+    POST's notice. A Contact without a Decision raises ``KeyError``: the panel never shows a
+    Contact whose Eligibility wasn't evaluated."""
+    found = tuple(contacts)
+    return {
+        "lead_id": lead_id,
+        "primary": primary_line(found, no_decision_maker),
+        "contacts": tuple(
+            contact_row(contact, provenance.get(contact.id, ()), decisions[contact.id])
+            for contact in found
+        ),
+        "notice": notice,
+    }
 
 
 def lead_context(
@@ -630,18 +750,16 @@ def lead_context(
     provenance: Mapping[str, Iterable[StoredProvenance]],
     signals: LeadSignalsView,
     decisions: Mapping[str, Decision],
+    no_decision_maker: bool | None = None,
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
-    given), and the Contacts (in the order given, oldest first), each with its live Eligibility
-    from ``decisions`` and its Provenance Records from ``provenance`` (both by Contact id). A
-    Contact without a Decision raises ``KeyError``: the page never shows a Contact whose
-    Eligibility wasn't evaluated."""
+    given), and the Contacts panel (``contacts_context``), each Contact with its live
+    Eligibility from ``decisions`` (by Contact id)."""
+    found = tuple(contacts)
+    names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
-        "evidence": tuple(evidence_row(row) for row in signals.evidence),
-        "contacts": tuple(
-            contact_row(contact, provenance.get(contact.id, ()), decisions[contact.id])
-            for contact in contacts
-        ),
+        "evidence": tuple(evidence_row(row, names) for row in signals.evidence),
+        **contacts_context(lead.id, found, provenance, decisions, no_decision_maker),
     }

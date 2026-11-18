@@ -53,7 +53,7 @@ from nextron.web.leads_page import (
 )
 from tests.asgi import Reply
 from tests.contracts.support import PACKAGE
-from tests.dashboard import Dashboard, upload
+from tests.dashboard import FORM, Dashboard, form, upload
 from tests.fakes.clock import FrozenClock
 
 T = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -63,7 +63,7 @@ ORIGIN = "Law Society directory, Manchester"
 UNKNOWN = "01KA0000000000000000000000"  # a ULID no Lead has
 VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"})
 LIST_HEADER = ["Name", "Website", "Segment", "Country", "Stage", "Created"]
-CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary"]
+CONTACT_HEADER = ["Name", "Role", "Email", "Address Class", "LinkedIn", "Primary", "Action"]
 RECORD_HEADER = ["Record", "Source", "Detail", "Retrieved", "Address Class"]
 SIGNAL_HEADER = ["Signal", "Class", "Tier", "Date", "Age", "Status", "Score only"]
 EVIDENCE_HEADER = ["Type", "Evidence", "Supports", "Source", "Retrieved", "Extraction"]
@@ -305,6 +305,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         discovery=no_jobs,
         research=no_jobs,
         extractions=no_jobs,
+        primary=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -629,7 +630,6 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     assert page.find("main").find("a", href="/leads").text == "All Leads"
     assert [h2.text for h2 in page.find_all("h2")] == ["Signals", "Evidence", "Contacts"]
     table = page.find("table", class_="contact-table")
-    assert "hx-disable" in table.attrs
     assert table_rows(table)[0] == CONTACT_HEADER
     [contact] = table.find_all("tr", class_="contact-row")
     assert cells(contact) == [
@@ -639,7 +639,11 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "guessed",
         "https://www.linkedin.com/in/jane-doe",
         "No",
+        "Make primary",
     ]
+    # Story 2.10: each untrusted cell carries hx-disable, the "Make primary" cell doesn't
+    untrusted = [n for n in contact.children if isinstance(n, Node) and n.tag == "td"][:5]
+    assert all("hx-disable" in cell.attrs for cell in untrusted)
     linkedin = contact.find("a")
     assert linkedin.attrs["href"] == "https://www.linkedin.com/in/jane-doe"
     assert linkedin.attrs["rel"] == "noopener noreferrer"
@@ -676,8 +680,8 @@ def test_the_empty_cases(world: World) -> None:
     assert nothing.find("section", class_="lead-evidence").text == "Evidence No Evidence yet."
     assert not nothing.find_all("table")
     first, second = page.find_all("tr", class_="contact-row")
-    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No"]
-    assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No"]
+    assert cells(first) == ["Jane Doe", "—", "—", "—", "—", "No", "Make primary"]
+    assert cells(second) == ["—", "—", "info@jones.co.uk", "guessed", "—", "No", "Make primary"]
     rows = page.find_all("tr", class_="provenance-row")
     assert rows[0].text == "No Provenance Record."
     assert rows[1].find_all("table", class_="provenance-table")
@@ -1105,10 +1109,11 @@ def test_each_contact_shows_its_live_eligibility_under_its_row(world: World) -> 
     assert summary_class(uk_row) == "eligibility-summary not-eligible"
     assert summary_class(us_row) == "eligibility-summary eligible"
     for row in (uk_row, us_row):
-        assert row.find("td").attrs["colspan"] == "6"
+        cell = row.find("td")
+        assert cell.attrs["colspan"] == "7"  # the Contacts panel's seven columns (Story 2.10)
+        assert "hx-disable" in cell.attrs  # each untrusted cell carries it (Story 2.10)
         table = next(node for node in row.ancestors() if node.tag == "table")
         assert "contact-table" in (table.attrs.get("class") or "")
-        assert "hx-disable" in table.attrs
 
 
 def summary_class(row: Node) -> str:
@@ -1357,3 +1362,263 @@ def test_the_view_module_reads_only_through_queries() -> None:
     assert app_modules  # not vacuous
     assert all(name.startswith("nextron.app.queries.") for name in app_modules), app_modules
     assert not [name for name in modules if name.startswith("nextron.db")]
+
+
+# The Primary Contact (Story 2.10) ---------------------------------------------------------------
+
+HOSTILE_NAME = '<script>alert(1)</script> Cy <b hx-get="/x">Ceo</b>'
+
+
+def set_primary(world: World, contact: str, set_by: str) -> None:
+    world.sql(
+        "UPDATE contacts SET is_primary = 1, primary_set_by = ? WHERE id = ?", (set_by, contact)
+    )
+
+
+def primary_paragraphs(page: Tree) -> list[Node]:
+    return page.find_all("p", **{"class": "primary-contact"})
+
+
+def make_primary_forms(page: Tree) -> list[Node]:
+    panel = page.find("section", id="lead-contacts")
+    return panel.find_all("form")
+
+
+def post_primary(world: World, lead: str, contact: str, *, token: bool = True) -> Reply:
+    return world.dashboard.post(
+        f"/leads/{lead}/primary",
+        cookie=world.cookie,
+        token=world.dashboard.csrf_token(world.cookie) if token else None,
+        headers=[(b"content-type", FORM)],
+        body=form(contact_id=contact),
+    )
+
+
+def flags(world: World, lead: str) -> list[tuple[Any, ...]]:
+    return world.sql(
+        "SELECT name, is_primary, primary_set_by FROM contacts WHERE lead_id = ? "
+        "ORDER BY created_at, id",
+        (lead,),
+    )
+
+
+def test_the_operators_primary_line_and_the_make_primary_forms(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    ceo = world.add(lead, ContactCandidate(name="Cy Ceo", role="Managing Partner"))
+    other = world.add(lead, ContactCandidate(name="Ann Fox", role="Owner"), seconds=1)
+    set_primary(world, ceo, "operator")
+
+    page = world.page(f"/leads/{lead}")
+
+    [line] = primary_paragraphs(page)
+    assert line.text == "Primary Contact: Cy Ceo (chosen by you)"
+    assert "hx-disable" in line.attrs
+    panel = page.find("section", id="lead-contacts")
+    assert panel.attrs["class"] == "lead-contacts" and "hx-disable" not in panel.attrs
+    rows = page.find_all("tr", class_="contact-row")
+    assert [cells(row)[5] for row in rows] == ["Yes", "No"]
+    # the operator's Primary has no form; every other row has one
+    [form_node] = make_primary_forms(page)
+    assert form_node.attrs == {
+        "method": "post",
+        "action": f"/leads/{lead}/primary",
+        "hx-post": f"/leads/{lead}/primary",
+        "hx-target": "#lead-contacts",
+        "hx-swap": "outerHTML",
+        "hx-sync": "this:drop",
+    }
+    inputs = {node.attrs["name"]: node.attrs for node in form_node.find_all("input")}
+    assert inputs["contact_id"] == {"type": "hidden", "name": "contact_id", "value": other}
+    assert inputs["csrf_token"]["type"] == "hidden"
+    assert form_node.find("button").text == "Make primary"
+    # no form sits inside an element that turns HTMX off, and every Contact cell does
+    assert not any("hx-disable" in node.attrs for node in form_node.ancestors())
+    for row in rows:
+        data = [cell for cell in row.children if isinstance(cell, Node) and cell.tag == "td"]
+        assert ["hx-disable" in cell.attrs for cell in data] == [True] * 5 + [False, False]
+
+
+def test_the_engines_primary_line_keeps_its_form(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    set_primary(world, jane, "system")
+
+    page = world.page(f"/leads/{lead}")
+
+    [line] = primary_paragraphs(page)
+    assert line.text == "Primary Contact: Jane Roe (chosen by the engine)"
+    [form_node] = make_primary_forms(page)
+    assert {n.attrs["name"]: n.attrs.get("value") for n in form_node.find_all("input")}[
+        "contact_id"
+    ] == jane
+
+
+def test_a_contact_with_an_invalid_address_has_no_make_primary_form(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    world.add(lead, ContactCandidate(name="Cy Ceo", email="cy@smith-law.co.uk"))
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Owner"), seconds=1)
+    world.sql("UPDATE contacts SET address_class = 'invalid' WHERE name = 'Cy Ceo'")
+
+    page = world.page(f"/leads/{lead}")
+
+    [form_node] = make_primary_forms(page)  # the Invalid address's row has none: always refused
+    values = {n.attrs["name"]: n.attrs.get("value") for n in form_node.find_all("input")}
+    assert values["contact_id"] == jane
+    first, _ = page.find_all("tr", class_="contact-row")
+    assert cells(first)[6] == ""
+
+
+def test_no_decision_maker_found_is_shown_only_after_a_selection_found_none(
+    world: World,
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    world.add(lead, ContactCandidate(name="Pat Moe", role="Paralegal"))
+
+    assert primary_paragraphs(world.page(f"/leads/{lead}")) == []  # never selected
+
+    world.transact(lambda: profile_repo.set_no_decision_maker(lead, True))
+    [line] = primary_paragraphs(world.page(f"/leads/{lead}"))
+    assert line.text == "Primary Contact: no decision-maker found"
+
+    world.transact(lambda: profile_repo.set_no_decision_maker(lead, False))
+    assert primary_paragraphs(world.page(f"/leads/{lead}")) == []
+
+
+def test_make_primary_answers_the_panel_with_a_notice(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    owner = world.add(lead, ContactCandidate(name="Ann Fox", role="Owner"), seconds=1)
+
+    reply = post_primary(world, lead, owner)
+
+    assert reply.status == 200
+    assert reply.header(b"cache-control") == b"no-store"
+    panel = Tree(reply.text)
+    [section] = panel.find_all("section")
+    assert section.attrs["id"] == "lead-contacts"
+    assert panel.find("p", role="status").text == "Primary Contact set."
+    [line] = primary_paragraphs(panel)
+    assert line.text == "Primary Contact: Ann Fox (chosen by you)"
+    assert flags(world, lead) == [("Jane Roe", 0, None), ("Ann Fox", 1, "operator")]
+    assert not panel.find_all("nav")  # the panel alone, not the page
+    # Story 3.6: the panel answered shows each Contact's live Eligibility too (no email here)
+    rows = panel.find_all("tr", class_="eligibility-row")
+    assert [eligibility(row)[0] for row in rows] == ["Not eligible", "Not eligible"]
+    assert all(
+        "address_not_sendable" in [code for code, _ in eligibility(row)[1]] for row in rows
+    )
+    assert world.sql(
+        "SELECT to_status, cause, cause_ref, actor FROM events WHERE entity = 'leads' "
+        "AND entity_id = ? AND to_status LIKE 'primary_%'",
+        (lead,),
+    ) == [("primary_contact_set", "operator", owner, "operator")]
+
+
+def test_each_refusal_answers_the_panel_with_its_notice_and_writes_nothing(
+    world: World,
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    invalid = world.add(
+        lead, ContactCandidate(name="Cy Ceo", email="cy@smith-law.co.uk"), seconds=1
+    )
+    world.sql("UPDATE contacts SET address_class = 'invalid' WHERE id = ?", (invalid,))
+    other = world.lead("Jones Law", "jones-law.co.uk", minutes=1)
+    elsewhere = world.add(other, ContactCandidate(name="Bo Day", role="Owner"))
+    merged = world.lead("Smith Law Two", "smith-law-two.co.uk", minutes=2)
+    world.merge(lead, merged)
+    before = (flags(world, lead), world.sql("SELECT COUNT(*) FROM events"))
+
+    for target, contact, notice in [
+        (lead, elsewhere, "That Contact isn't on this Lead."),
+        (lead, "not-a-ulid", "That Contact isn't on this Lead."),
+        (lead, invalid, "That Contact's address is Invalid."),
+        (merged, jane, "This Lead was merged into another Lead."),
+    ]:
+        reply = post_primary(world, target, contact)
+        assert reply.status == 200, reply
+        alert = Tree(reply.text).find("p", role="alert")
+        assert alert.text == notice
+        assert "notice-refused" in alert.attrs["class"]
+
+    assert (flags(world, lead), world.sql("SELECT COUNT(*) FROM events")) == before
+
+
+@pytest.mark.parametrize("lead", [UNKNOWN, "not-a-ulid"])
+def test_make_primary_on_an_unknown_lead_is_404_without_echoing_the_id(
+    world: World, lead: str
+) -> None:
+    known = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(known, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+
+    reply = post_primary(world, lead, jane)
+
+    assert reply.status == 404
+    assert reply.text == "That Lead doesn't exist."
+    assert lead not in reply.text and jane not in reply.text
+    assert flags(world, known) == [("Jane Roe", 0, None)]
+
+
+def test_make_primary_needs_the_csrf_token_and_exactly_its_field(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name="Jane Roe", role="Managing Partner"))
+    token = world.dashboard.csrf_token(world.cookie)
+
+    assert post_primary(world, lead, jane, token=False).status == 403
+    for body in (
+        form(contact_id=jane, extra="x"),
+        b"contact_id=" + jane.encode() + b"&contact_id=" + jane.encode(),
+        b"",
+    ):
+        reply = world.dashboard.post(
+            f"/leads/{lead}/primary",
+            cookie=world.cookie,
+            token=token,
+            headers=[(b"content-type", FORM)],
+            body=body,
+        )
+        assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert flags(world, lead) == [("Jane Roe", 0, None)]
+
+
+def test_the_make_primary_route_is_a_post_declaring_personal_data(world: World) -> None:
+    [route] = [
+        route
+        for route in world.dashboard.app.routes
+        if getattr(route, "name", None) == "lead_make_primary"
+    ]
+
+    assert getattr(route, "path") == "/leads/{lead_id}/primary"
+    assert getattr(route, "methods") == {"POST"}
+    assert getattr(getattr(route, "endpoint"), "__nextron_personal_data__") is True
+
+
+def test_a_hostile_primary_name_is_escaped_inside_hx_disable(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    ceo = world.add(lead, ContactCandidate(name=HOSTILE_NAME, role="Managing Partner"))
+    set_primary(world, ceo, "operator")
+
+    reply = world.get(f"/leads/{lead}")
+
+    assert "<script>alert" not in reply.text and '<b hx-get="/x">' not in reply.text
+    page = Tree(reply.text)
+    assert page.disabled("alert(1)") == [True, True]  # the Primary line and the Contact row
+
+
+def test_a_person_evidence_row_supports_its_contact(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    jane = world.add(lead, ContactCandidate(name=HOSTILE_NAME, role="Managing Partner"))
+    evidence_row(
+        world,
+        lead,
+        1,
+        quote="Jane Roe, Managing Partner",
+        extracted_by="ai:extract_people@v1",
+        person_contact_id=jane,
+    )
+
+    page = world.page(f"/leads/{lead}")
+
+    [row] = page.find_all("tr", class_="evidence-row")
+    assert cells(row)[2] == f"Contact: {HOSTILE_NAME}"
+    assert page.disabled("Contact: <script>") == [True]

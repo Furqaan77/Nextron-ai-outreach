@@ -187,6 +187,7 @@ def world_on(
         discovery=no_crawls,
         research=no_crawls,
         extractions=no_crawls,
+        primary=no_crawls,
     )
     queue = JobQueue(clock, job_types)
     factory: Any = port if callable(port) and not isinstance(port, AlertPort) else lambda: port

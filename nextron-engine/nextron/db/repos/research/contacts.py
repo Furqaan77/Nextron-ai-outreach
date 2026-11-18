@@ -19,9 +19,14 @@ nothing; ``nextron.app.research`` does.
   (``market_basis`` NULL) with an id after ``after`` (``None``: from the first), by id;
 - ``has_unresolved()``: whether any Contact is not yet resolved;
 - ``has_primary(lead_id)``: whether one of the Lead's Contacts is its Primary;
+- ``set_primary(contact_id, set_by, updated_at)`` (Story 2.10): makes the Contact Primary
+  (``is_primary`` true, ``primary_set_by`` ``set_by``); ``clear_primary(contact_id,
+  updated_at)``: makes it not Primary (``is_primary`` false, ``primary_set_by`` NULL). The
+  partial unique index ``uq_contacts_one_primary`` refuses a second Primary on a Lead, so the
+  caller clears the old one first;
 - ``move_to_lead(from_lead, to_lead, updated_at, clear_primary)``: gives every Contact of
-  ``from_lead`` to ``to_lead`` (and clears their Primary flags when ``clear_primary``), in one
-  statement.
+  ``from_lead`` to ``to_lead`` (and, when ``clear_primary``, clears their Primary flags and
+  ``primary_set_by``), in one statement.
 """
 
 from dataclasses import dataclass
@@ -48,6 +53,7 @@ class StoredContact:
     address_class: str | None
     linkedin_url: str | None
     is_primary: bool
+    primary_set_by: str | None
     tz: str | None
     market_id: str | None
     market_basis: str | None
@@ -67,6 +73,7 @@ _COLUMNS = (
     ContactRecord.address_class,
     ContactRecord.linkedin_url,
     ContactRecord.is_primary,
+    ContactRecord.primary_set_by,
     ContactRecord.tz,
     ContactRecord.market_id,
     ContactRecord.market_basis,
@@ -175,6 +182,24 @@ def has_primary(lead_id: str) -> bool:
     return bool(current().session.execute(statement).scalar_one())
 
 
+def set_primary(contact_id: str, set_by: str, updated_at: datetime) -> None:
+    """Make the Contact ``contact_id`` its Lead's Primary, chosen by ``set_by``."""
+    current().session.execute(
+        update_rows(ContactRecord)
+        .where(ContactRecord.id == contact_id)
+        .values(is_primary=True, primary_set_by=set_by, updated_at=updated_at)
+    )
+
+
+def clear_primary(contact_id: str, updated_at: datetime) -> None:
+    """Make the Contact ``contact_id`` not Primary."""
+    current().session.execute(
+        update_rows(ContactRecord)
+        .where(ContactRecord.id == contact_id)
+        .values(is_primary=False, primary_set_by=None, updated_at=updated_at)
+    )
+
+
 def move_to_lead(
     from_lead: str, to_lead: str, updated_at: datetime, *, clear_primary: bool
 ) -> None:
@@ -183,6 +208,7 @@ def move_to_lead(
     values: dict[str, object] = {"lead_id": to_lead, "updated_at": updated_at}
     if clear_primary:
         values["is_primary"] = False
+        values["primary_set_by"] = None
     current().session.execute(
         update_rows(ContactRecord).where(ContactRecord.lead_id == from_lead).values(**values)
     )

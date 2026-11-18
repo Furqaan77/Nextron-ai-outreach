@@ -23,7 +23,12 @@ violation.
   subjects (compared by value), channel and purpose, before the first write (all of them before
   it, except for the CSV import, which gates row by row), and once before each insert into a
   guarded table. With ``Blocked``, no table gains a row (jobs included) and no write runs,
-  except the one ``contact_blocked`` ``events`` insert of ``add_contact``.
+  except the one ``contact_blocked`` ``events`` insert of ``add_contact``. Story 2.10's people
+  step (``research.people_extraction``: ``PeopleExtractions._contacts``, each decision-maker
+  through ``add_contact(source=website)``) runs the real ``PeopleExtractions.extract`` on Story
+  2.9's research world (``tests.app.test_signal_extraction.build_world``) on the same engine;
+  blocked, it still records its run, its lawyer count and its selection job, but no Contact
+  and no person Evidence.
 - **Call sites.** Every use of ``upsert_lead`` or ``add_contact`` (a call or a reference) under
   ``nextron/`` sits lexically inside a manifest def, so a new caller (Epic 8 discovery, Epic 7
   replies) can't skip the manifest.
@@ -60,6 +65,7 @@ from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, L
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import AddedContact, Research
+from nextron.app.research.people import PeopleExtractions
 from nextron.app.setup.api import Setup
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
@@ -78,9 +84,15 @@ from nextron.domain.contacts import ContactCandidate, ProvenanceSource
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import validate_markets
 from nextron.domain.segments import validate_segments
+from nextron.ports.llm import LlmOk, LlmUsage
+from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
+from tests.app.test_signal_extraction import HOME_HTML as RESEARCH_HOME_HTML
+from tests.app.test_signal_extraction import build_world as research_world
 from tests.contracts.support import PACKAGE
 from tests.fakes.clock import FrozenClock
+from tests.fakes.crawler import html_page, robots_txt
 from tests.fakes.email_syntax import FakeEmailSyntax
+from tests.fakes.llm import ScriptedLlm
 
 GUARDED_TABLES: Final = frozenset(
     {
@@ -128,6 +140,13 @@ MANIFEST: Final = (
             inserts=frozenset({"contacts"}),
         )
         for source in ProvenanceSource
+    ),
+    # Story 2.10's people step: each decision-maker on a team page through add_contact(website)
+    Caller(
+        "research.people_extraction",
+        ("app/research/",),
+        r"PeopleExtractions\._contacts",
+        calls="add_contact",
     ),
     Caller("find_contact_email", ("app/",), ANY + r"\w*find\w*email\w*"),
     Caller("verify_contact_email", ("app/",), ANY + r"\w*verify\w*email\w*"),
@@ -749,6 +768,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         discovery=no_jobs,
         research=no_jobs,
         extractions=no_jobs,
+        primary=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -934,10 +954,90 @@ def _contact_blocked(world: World) -> None:
     )
 
 
+PERSON_QUOTE = f"{NAME}, Managing Partner"
+
+
+def _people(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 2.10's people step (``PeopleExtractions.extract``) on a Law Lead whose crawled team
+    page names one decision-maker: one gate call, through ``add_contact(source=website)``.
+    Story 2.9's research world (a scripted crawler and the shipped prompts) shares the engine."""
+    site = research_world(world.engine)
+    origin = f"https://firm-{tag}.com"
+    site.crawler.robots[f"{origin}/robots.txt"] = robots_txt(
+        f"{origin}/robots.txt", "User-agent: *\nDisallow:\n"
+    )
+    site.crawler.pages[f"{origin}/"] = html_page(f"{origin}/", RESEARCH_HOME_HTML)
+    site.crawler.pages[f"{origin}/team"] = html_page(f"{origin}/team", f"<p>{PERSON_QUOTE}</p>")
+    for missing in ("about", "news"):
+        site.crawler.pages[f"{origin}/{missing}"] = html_page(f"{origin}/{missing}", status=404)
+    lead_id = site.lead(web_domain=f"firm-{tag}.com")
+    run_id = site.crawl(lead_id)
+    team = site.page_ids(lead_id)[f"{origin}/team"]
+    answer = LlmOk(
+        {
+            "people": [
+                {"name": NAME, "role": "Managing Partner", "block_id": team, "quote": PERSON_QUOTE}
+            ]
+        },
+        model=RESEARCH_MODEL,
+        usage=LlmUsage(requests=1),
+    )
+    step = PeopleExtractions(site.clock, site.meter, ScriptedLlm(answer), site.research, site.queue)
+
+    @use_case
+    def extract_people() -> bool:  # as extract_lead runs it: inside a use case
+        return step.extract(lead_id, run_id)
+
+    def action() -> object:
+        with site.units.open():
+            return extract_people()
+
+    return action, lambda: (_gate(NewContactSubject(lead_id, name=NAME)),)
+
+
+def _no_person_evidence_without_a_contact(world: World) -> None:
+    """A blocked decision-maker leaves no person Evidence (Story 2.10's deferred entry O) and
+    one ``contact_blocked`` row."""
+    with world.engine.connect() as connection:
+        orphans = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM evidence WHERE person_contact_id IS NULL "
+            "AND extracted_by LIKE 'ai:extract_people@%'"
+        ).scalar_one()
+        blocked = connection.exec_driver_sql(
+            "SELECT entity, from_status, to_status, cause, actor FROM events "
+            "WHERE to_status = 'contact_blocked' ORDER BY rowid DESC LIMIT 1"
+        ).one()
+    assert orphans == 0
+    assert tuple(blocked) == (
+        "leads",
+        None,
+        "contact_blocked",
+        str(BLOCKED.reasons[0]),
+        "system:research",
+    )
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
         "discovery.upsert_lead": Scenario((_upsert,)),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
+        "research.people_extraction": Scenario(
+            (_people,),
+            gates_first=False,  # one gate call per decision-maker, each before its own writes
+            # what a run still records: the contact_blocked event, the lawyer count, the run
+            # and the selection job (with its queued event); never a Contact, a Provenance
+            # Record or person Evidence
+            blocked_rows={"events": 2, "evidence": 1, "extraction_runs": 1, "jobs": 1},
+            blocked_writes=frozenset(
+                {
+                    ("INSERT", "events"),
+                    ("INSERT", "evidence"),
+                    ("INSERT", "extraction_runs"),
+                    ("INSERT", "jobs"),
+                }
+            ),
+            after_blocked=_no_person_evidence_without_a_contact,
+        ),
         **{
             f"research.add_contact[{source}]": Scenario(
                 (_add_new(source), _add_match(source)),
@@ -1015,6 +1115,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "discovery.upsert_lead",
         "discovery.csv_import",
         *(f"research.add_contact[{source}]" for source in ProvenanceSource),
+        "research.people_extraction",
     }
     assert scenario_problems(package_index(), SCENARIOS) == []
 

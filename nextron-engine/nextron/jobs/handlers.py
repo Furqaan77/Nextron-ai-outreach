@@ -47,6 +47,9 @@ handler runs in.
   run_id)`` once (the research service's ``SignalExtractions``) and returns ``DEFERRED`` when it
   returns ``False`` (the budget refused the call). A retryable ``AdapterError`` it raises is
   retried by the runner; any other error fails the job.
+- ``select_primary_contact(primary)`` (Story 2.10): calls
+  ``primary().select_primary_contact(lead_id)`` once (the research service's
+  ``PrimaryContacts``) and returns ``None``.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -231,6 +234,23 @@ class Extracting(Protocol):
     """What ``extract_lead`` needs of the ``research`` service's ``SignalExtractions``."""
 
     def extract_lead(self, lead_id: str, run_id: str) -> bool: ...
+
+
+class SelectingPrimary(Protocol):
+    """What ``select_primary_contact`` needs of the ``research`` service's ``PrimaryContacts``."""
+
+    def select_primary_contact(self, lead_id: str) -> object: ...
+
+
+def select_primary_contact(primary: Callable[[], SelectingPrimary]) -> Handler:
+    """The ``select_primary_contact`` job's handler: pick the payload's Lead's Primary Contact
+    through ``primary()``."""
+
+    def handle_select_primary_contact(job: Job) -> None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        primary().select_primary_contact(lead_id)
+
+    return handle_select_primary_contact
 
 
 def extract_lead(extractions: Callable[[], Extracting]) -> Handler:

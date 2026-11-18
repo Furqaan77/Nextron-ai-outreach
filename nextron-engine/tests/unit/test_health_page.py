@@ -284,6 +284,7 @@ NEVER_RUN = [
         ["canonicalize_lead", "never"],
         ["render_pages", "never"],
         ["extract_lead", "never"],
+        ["select_primary_contact", "never"],
     ],
     [
         ["Job type", "Last success"],

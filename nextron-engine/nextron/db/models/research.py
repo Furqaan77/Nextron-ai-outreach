@@ -1,5 +1,6 @@
-"""The ``research`` service's tables (FR-2, FR-14, FR-15, FR-51, AD-3, AD-7, AD-11, AD-17;
-migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). Owner
+"""The ``research`` service's tables (FR-2, FR-13, FR-14, FR-15, FR-51, AD-3, AD-7, AD-11, AD-17;
+migrations ``0015_2_3_contacts_provenance``, ``0019_3_2_contact_markets`` and
+``0028_2_10_primary_contact``). Owner
 ``research`` writes every column (``nextron.db.repos.research``). No foreign key cascades.
 
 **``contacts``**: one person on a Lead.
@@ -10,7 +11,11 @@ migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). O
   one of ``nextron.domain.address_class.AddressClass``: ``ck_contacts_address_class``); an
   address has a class and a class has an address (``ck_contacts_email_class``);
 - ``linkedin_url`` (nullable, normalised, never fetched);
-- ``is_primary`` (server default false); ``tz`` and ``market_id``
+- ``is_primary`` (server default false) and ``primary_set_by`` (Story 2.10, migration
+  ``0028_2_10_primary_contact``; nullable, ``system`` or ``operator``: who chose the Primary
+  Contact, set exactly when ``is_primary`` is, which the code keeps, since the column was added
+  in place with no CHECK); at most one Contact per Lead is Primary (the partial unique index
+  ``uq_contacts_one_primary`` on ``lead_id`` where ``is_primary = 1``); ``tz`` and ``market_id``
   (``fk_contacts_market_id_markets``), both nullable: the Contact's IANA timezone and Market,
   set together or not at all (``ck_contacts_market_tz``);
 - ``market_basis`` and ``tz_basis`` (Story 3.2, each nullable, one of
@@ -44,7 +49,8 @@ migrations ``0015_2_3_contacts_provenance`` and ``0019_3_2_contact_markets``). O
 PII classes (``nextron.db.pii_registry``): a Contact's ``name`` and ``role`` and a record's
 ``source_detail`` and ``notes`` are ``redact``; ``email`` and a record's ``address`` are
 ``keep_hash``, so suppression still matches after an erasure; ``linkedin_url``,
-``office_country`` and ``office_region`` are ``null``; the bases are ``none``.
+``office_country`` and ``office_region`` are ``null``; the bases and ``primary_set_by`` are
+``none``.
 """
 
 from datetime import date, datetime
@@ -79,6 +85,8 @@ BASIS_RULE_LENGTH: Final = 64
 LIA_REF_LENGTH: Final = 200
 BASIS_LENGTH: Final = 32
 COUNTRY_LENGTH: Final = 2
+SET_BY_LENGTH: Final = 8  # nextron.domain.contacts.PrimarySetBy
+ONE_PRIMARY_WHERE: Final = "is_primary = 1"
 
 type _Values = type[AddressClass | ProvenanceSource | ProvenanceSubject | MarketBasis | TzBasis]
 
@@ -114,6 +122,12 @@ class ContactRecord(Base):
     __tablename__ = "contacts"
     __table_args__ = (
         Index("ix_contacts_lead_id", "lead_id"),
+        Index(
+            "uq_contacts_one_primary",
+            "lead_id",
+            unique=True,
+            sqlite_where=text(ONE_PRIMARY_WHERE),
+        ),
         CheckConstraint(CONTACT_CLASS_CHECK, name="address_class"),
         CheckConstraint(CONTACT_EMAIL_CLASS_CHECK, name="email_class"),
         CheckConstraint(CONTACT_IDENTITY_CHECK, name="identity"),
@@ -141,6 +155,7 @@ class ContactRecord(Base):
     office_region: Mapped[str | None] = mapped_column(String(COUNTRY_LENGTH))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    primary_set_by: Mapped[str | None] = mapped_column(String(SET_BY_LENGTH))
 
 
 class ProvenanceRecord(Base):

@@ -16,10 +16,12 @@ Three owners write it, column by column (``nextron.db.owners``):
   the IANA zone of the Lead's headquarters, and ``hq_evidence_id``, the ``evidence`` row it
   comes from (Story 2.9, migration ``0025_2_9_signals_evidence``), both nullable and kept NULL
   together by the code (no CHECK, because the columns were added in place; the Evidence id has
-  no foreign key: one would make a ``leads``/``evidence`` cycle); and ``contact_methods``
+  no foreign key: one would make a ``leads``/``evidence`` cycle); ``contact_methods``
   (Story 2.6, migration ``0027_2_6_contact_methods``), nullable, the canonical JSON of
   ``nextron.domain.widgets.ContactMethods``: how the Lead's website lets a visitor get in
-  touch, and every page checked.
+  touch, and every page checked; and ``no_decision_maker`` (Story 2.10, migration
+  ``0028_2_10_primary_contact``), a nullable Boolean: NULL until the Primary Contact's
+  selection first runs, then whether it found no decision-maker.
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
@@ -29,7 +31,7 @@ organization data, PII class ``none``: erasing a Contact never touches the firm'
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -83,3 +85,4 @@ class LeadRecord(Base):
     hq_tz: Mapped[str | None] = mapped_column(String(HQ_TZ_LENGTH))
     hq_evidence_id: Mapped[str | None] = mapped_column(Ulid)
     contact_methods: Mapped[str | None] = mapped_column(Text)
+    no_decision_maker: Mapped[bool | None] = mapped_column(Boolean)

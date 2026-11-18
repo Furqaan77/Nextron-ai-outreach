@@ -8,28 +8,30 @@ liveness in ``nextron.domain.signals``. This module reads and writes, and makes 
 call. No log line, ``events`` row, error or job payload holds prompt text, page text, a quote
 or a URL: IDs, codes and counts only.
 
-**``SignalExtractions(clock, meter, llm, research)``** runs the ``extract_lead`` jobs that
-``WebsiteCrawls`` enqueues after a crawl stored pages. ``@use_case extract_lead(lead_id,
-run_id) -> bool`` (``run_id`` is the crawl run that queued it) has three phases:
+**``SignalExtractions(clock, meter, llm, research, people)``** runs the ``extract_lead`` jobs
+that ``WebsiteCrawls`` enqueues after a crawl stored pages. ``@use_case extract_lead(lead_id,
+run_id) -> bool`` (``run_id`` is the crawl run that queued it) has three phases, then the people
+step (below):
 
 1. **First transaction.** When ``nextron.domain.budget.allow(BUDGET_CLASS,
    meter.snapshot(now), queries.setup.budget_limits())`` refuses, it returns ``False`` (the job
    is deferred) and nothing else happens. An unknown Lead (a text that isn't a ULID included)
    or a merged one logs ``extraction_skipped`` (``lead_id``, ``reason``) and returns ``True``.
    Otherwise it reads the Lead's Segment (``queries.setup.segment_by_id``) and
-   ``queries.playbook.active_tuple(ROUTE)``. With no tuple it records a ``no_activation`` run
-   and returns ``True``. The pages are the Lead's pages with text whose ``changed_at`` is later
-   than the ``started_at`` of the Lead's last ``ok`` run (every page with text when there is
-   none); with none it records a ``no_pages`` run and returns ``True``. The pages go in
-   ``PageKind`` order, then by URL, each cut by ``allot(texts, PAGE_TEXT_BUDGET)``; the call's
+   ``queries.playbook.active_tuple(ROUTE)``. With no tuple it records a ``no_activation`` run.
+   The pages are the Lead's pages with text whose ``changed_at`` is later than the
+   ``started_at`` of the Lead's last ``ok`` ``extract_signals`` run (every page with text when
+   there is none; Story 2.10's ``extract_people`` runs don't count); with none it records a
+   ``no_pages`` run. The pages go in ``PageKind`` order, then by URL, each cut by
+   ``allot(texts, PAGE_TEXT_BUDGET)``; the call's
    blocks are the ``signal_types`` block (``signal_catalogue([segment])``, block id and source
    ``signal_types``) and one ``website`` block per page (block id: the page's id), all of
    subject ``lead:<id>``. The full stored text of each page sent is kept for phase 3.
 2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, Urgency.BULK)``. An
    ``AdapterError`` records a ``failed`` run with its code (in a transaction of its own) and is
    raised again, so the runner retries only a retryable one. ``LlmRefused`` (``error_code``: its
-   category), ``LlmTruncated``, ``LlmInvalid`` and ``LlmFailed`` (its code) record that outcome,
-   store nothing and return ``True``.
+   category), ``LlmTruncated``, ``LlmInvalid`` and ``LlmFailed`` (its code) record that outcome
+   and store nothing.
 3. **Apply transaction** after ``LlmOk``. A Lead merged meanwhile records a ``lead_merged`` run
    and nothing else. Otherwise:
 
@@ -65,6 +67,13 @@ run_id) -> bool`` (``run_id`` is the crawl run that queued it) has three phases:
    Then it logs ``signals_extracted`` with IDs and counts only. Every other recorded run logs
    ``extraction_finished`` (``lead_id``, ``run_id``, ``outcome``, ``error_code``).
 
+**The people step (Story 2.10).** Whatever the Signals phases' outcome, except a budget
+refusal, an unknown or merged Lead (phase 1's skip, or phase 3's ``lead_merged`` run) or a
+raise, ``extract_lead`` then returns ``people.extract(lead_id, run_id)``
+(``nextron.app.research.people.PeopleExtractions``, typed here by the ``PeopleStep`` protocol):
+``False`` when its own budget check refused (the job is deferred), else ``True``.
+``RecordedRun``, ``outcome_of`` and ``page_order`` serve both steps.
+
 An extraction run records ``route`` (``ROUTE``), ``actor`` (the tuple's, ``None`` without one),
 ``crawl_run_id`` (``run_id`` when such a crawl run exists, else ``None``), ``pages_sent``,
 ``pages_truncated`` (pages cut by the budget), ``started_at`` (phase 1's now) and ``ended_at``.
@@ -79,7 +88,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import playbook as playbook_queries
@@ -137,6 +146,12 @@ MERGED_LEAD: Final = "merged_lead"
 KIND_ORDER: Final = {str(kind): index for index, kind in enumerate(PageKind)}
 
 
+class PeopleStep(Protocol):
+    """What ``extract_lead`` needs of the people step (Story 2.10)."""
+
+    def extract(self, lead_id: str, run_id: str) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _Call:
     """What phase 1 prepared for the call and phase 3."""
@@ -152,7 +167,7 @@ class _Call:
 
 
 @dataclass(frozen=True, slots=True)
-class _Recorded:
+class RecordedRun:
     """A run recorded without storing anything, to log once its transaction commits."""
 
     lead_id: str
@@ -177,7 +192,7 @@ class _Applied:
     """What phase 3 did, for its run and its log line."""
 
     run_id: str = ""
-    merged: _Recorded | None = None
+    merged: RecordedRun | None = None
     stored: int = 0
     confirmed: int = 0
     superseded: int = 0
@@ -189,11 +204,11 @@ class _Applied:
     hq_changed: bool = False
 
 
-def _page_order(page: StoredPage) -> tuple[int, str]:
+def page_order(page: StoredPage) -> tuple[int, str]:
     return KIND_ORDER.get(page.kind, len(KIND_ORDER)), page.url
 
 
-def _outcome_of(result: LlmResult) -> tuple[ExtractionOutcome, str | None]:
+def outcome_of(result: LlmResult) -> tuple[ExtractionOutcome, str | None]:
     """The run outcome and error code of a result other than ``LlmOk``."""
     if isinstance(result, LlmRefused):
         return ExtractionOutcome.REFUSED, result.category
@@ -208,21 +223,27 @@ class SignalExtractions:
     """The ``extract_lead`` jobs; see the module docstring."""
 
     def __init__(
-        self, clock: Clock, meter: UsageMeterPort, llm: LlmPort, research: Research
+        self,
+        clock: Clock,
+        meter: UsageMeterPort,
+        llm: LlmPort,
+        research: Research,
+        people: PeopleStep,
     ) -> None:
         self._clock = clock
         self._meter = meter
         self._llm = llm
         self._research = research
+        self._people = people
 
     @use_case
     def extract_lead(self, lead_id: str, run_id: str) -> bool:
-        """Extract the Lead's Signals and Evidence from its changed pages; see the module
-        docstring. ``False`` when the budget refused the work."""
+        """Extract the Lead's Signals and Evidence from its changed pages, then its people; see
+        the module docstring. ``False`` when a budget check refused the work."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
-        call: _Call | _Recorded | None = None
+        call: _Call | RecordedRun | None = None
         with uow.transaction():
             limits = setup_queries.budget_limits()
             if not allow(BUDGET_CLASS, self._meter.snapshot(started_at), limits):
@@ -237,9 +258,9 @@ class SignalExtractions:
         if call is None:  # an unknown or merged Lead
             log.info(EXTRACTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return True
-        if isinstance(call, _Recorded):  # phase 1 recorded its run
+        if isinstance(call, RecordedRun):  # phase 1 recorded its run
             call.log()
-            return True
+            return self._people.extract(lead_id, run_id)
         try:
             result = self._llm.run(call.route_tuple, call.blocks, Urgency.BULK)
         except AdapterError as error:
@@ -248,41 +269,41 @@ class SignalExtractions:
             recorded.log()
             raise  # the runner retries only a retryable one
         if not isinstance(result, LlmOk):
-            outcome, code = _outcome_of(result)
+            outcome, code = outcome_of(result)
             with uow.transaction():
                 recorded = self._finished(call, outcome, code)
             recorded.log()
-            return True
+            return self._people.extract(lead_id, run_id)
         with uow.transaction():
             applied = self._apply(call, result.parsed)
         if applied.merged is not None:
             applied.merged.log()
-        else:
-            log.info(
-                SIGNALS_EXTRACTED,
-                extra={
-                    "lead_id": call.lead_id,
-                    "run_id": applied.run_id,
-                    "pages_sent": len(call.pages),
-                    "pages_truncated": call.pages_truncated,
-                    "stored": applied.stored,
-                    "confirmed": applied.confirmed,
-                    "superseded": applied.superseded,
-                    "retracted": applied.retracted,
-                    "discarded": applied.discarded,
-                    "dates_dropped": applied.dates_dropped,
-                    "signals_created": applied.signals_created,
-                    "signals_retracted": applied.signals_retracted,
-                    "hq_changed": applied.hq_changed,
-                },
-            )
-        return True
+            return True  # a merged Lead's people are its survivor's
+        log.info(
+            SIGNALS_EXTRACTED,
+            extra={
+                "lead_id": call.lead_id,
+                "run_id": applied.run_id,
+                "pages_sent": len(call.pages),
+                "pages_truncated": call.pages_truncated,
+                "stored": applied.stored,
+                "confirmed": applied.confirmed,
+                "superseded": applied.superseded,
+                "retracted": applied.retracted,
+                "discarded": applied.discarded,
+                "dates_dropped": applied.dates_dropped,
+                "signals_created": applied.signals_created,
+                "signals_retracted": applied.signals_retracted,
+                "hq_changed": applied.hq_changed,
+            },
+        )
+        return self._people.extract(lead_id, run_id)
 
     # Phase 1 ------------------------------------------------------------------------------------
 
     def _prepare(
         self, lead_id: str, segment_id: str, run_id: str, started_at: datetime
-    ) -> _Call | _Recorded:
+    ) -> _Call | RecordedRun:
         """The call to make, or the ``no_activation`` or ``no_pages`` run it recorded."""
         crawl_run_id = run_id if is_ulid(run_id) and crawl_repo.run(run_id) is not None else None
         seeded = setup_queries.segment_by_id(segment_id)
@@ -292,22 +313,22 @@ class SignalExtractions:
         if route_tuple is None:
             outcome = ExtractionOutcome.NO_ACTIVATION
             run = self._record(lead_id, crawl_run_id, outcome, actor=None, started_at=started_at)
-            return _Recorded(lead_id, run, outcome, None)
-        last = signals_repo.last_ok_run(lead_id)
+            return RecordedRun(lead_id, run, outcome, None)
+        last = signals_repo.last_ok_run(lead_id, ROUTE)
         pages = sorted(
             (
                 page
                 for page in crawl_repo.pages(lead_id)
                 if page.text and (last is None or page.changed_at > last.started_at)
             ),
-            key=_page_order,
+            key=page_order,
         )
         if not pages:
             outcome = ExtractionOutcome.NO_PAGES
             run = self._record(
                 lead_id, crawl_run_id, outcome, actor=route_tuple.actor, started_at=started_at
             )
-            return _Recorded(lead_id, run, outcome, None)
+            return RecordedRun(lead_id, run, outcome, None)
         full = [page.text or "" for page in pages]
         cut = allot(full, PAGE_TEXT_BUDGET)
         subject = f"lead:{lead_id}"
@@ -372,7 +393,7 @@ class SignalExtractions:
 
     def _finished(
         self, call: _Call, outcome: ExtractionOutcome, code: str | None
-    ) -> _Recorded:
+    ) -> RecordedRun:
         """Record a run that stored nothing after the call."""
         run_id = self._record(
             call.lead_id,
@@ -384,7 +405,7 @@ class SignalExtractions:
             pages_sent=len(call.pages),
             pages_truncated=call.pages_truncated,
         )
-        return _Recorded(call.lead_id, run_id, outcome, code)
+        return RecordedRun(call.lead_id, run_id, outcome, code)
 
     # Phase 3 ------------------------------------------------------------------------------------
 
