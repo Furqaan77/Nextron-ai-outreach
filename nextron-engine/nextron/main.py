@@ -287,6 +287,13 @@ chain, queued by the Primary Contact's selection) and the daily ``recompute_tier
 through ``scores=lambda: lead_scores``, and the Lead page's "Re-score"
 (``create_app(..., lead_scores=...)``).
 
+**Today's capacity and the picks (Story 4.10).** ``Selection(clock, Sequencing(clock),
+compliance)`` (``nextron.app.scoring.selection``, on the dashboard's one ``Compliance``) gives
+the "Ready to draft" page (``GET /leads/ready``, ``POST /leads/ready/pick``) its list, today's
+capacity and the picks, and the notification area its "signal shortfall" line
+(``create_app(..., selection=...)``); ``LeadScores(..., selection=selection)`` records the day's
+capacity after each daily ``recompute_tiers`` run.
+
 **Hiring Signals and job postings (Story 2.11).** ``JobBoards(clock, meter, boards, crawler,
 queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (after the
 people step; each enqueues the legal-form check) and the ``recheck_event`` jobs, reached through
@@ -851,6 +858,7 @@ from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.app.research.verification import EmailVerification
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
+from nextron.app.scoring.selection import Selection
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.sequencing.api import Sequencing
@@ -1301,7 +1309,6 @@ def build_app(
     primary_contacts = PrimaryContacts(clock, research, queue)
     site_dns = dns if dns is not None else DnspythonDns(meter=meter)
     domain_checks = DomainChecks(clock, site_dns, queue)
-    lead_scores = LeadScores(clock, Scoring(clock, Pipeline(clock), research), queue)
     job_boards = JobBoards(
         clock,
         meter,
@@ -1365,6 +1372,12 @@ def build_app(
         clock, codec=TokenCodec(secrets), ledger=LedgerAppender(ledger_file, notify)
     )
     erasures = Erasures(clock, compliance, queue=queue)  # Story 3.13: on the same Compliance
+    # Story 4.10: today's capacity and the picks, on the same Compliance; the daily
+    # recompute_tiers job also records the day's capacity through it
+    selection = Selection(clock, Sequencing(clock), compliance)
+    lead_scores = LeadScores(
+        clock, Scoring(clock, Pipeline(clock), research), queue, selection=selection
+    )
     erasure_ledger = ErasureLedger(clock, ledger_file, compliance, erasures)
     recovery_runner = RecoveryRunner(
         units,
@@ -1452,6 +1465,7 @@ def build_app(
         email_finding=email_finding,
         lead_scores=lead_scores,
         place_discovery=place_discovery,
+        selection=selection,
         units=units,
         lifespan=engine_lifespan(
             runner,

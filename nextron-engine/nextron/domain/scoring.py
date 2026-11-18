@@ -70,6 +70,14 @@ no spaces, ``ensure_ascii=False``): ``{"fit": [...], "signal": [...]}``, each fa
 ``evidence_text(ids)`` and ``evidence_from_text(text)`` store a Disqualified rule's Evidence ids
 the same way (a JSON array).
 
+**"Ready to draft"** (Story 4.10). ``ReadyCandidate(lead_id, tier, lead_score,
+newest_event_age)``: ``newest_event_age`` is the smallest ``signals.age_days`` over the Lead's
+stored Event factors' Signals that aren't retracted (``None`` without one).
+``ready_order(candidates)``: Tier A by newest live Event first (a tie, then a Tier A Lead with
+no such Event, after: by the higher Lead Score), then Tier B by Lead Score, then Tier C by Lead
+Score; the final tie-break is the Lead id. ``below_minimum(score, minimum)``: ``score <
+minimum`` (the ``min_lead_score`` badge; such a Lead can still be picked).
+
 Every function raises ``TypeError`` for an argument of the wrong type.
 """
 
@@ -102,6 +110,7 @@ SIZE_UNKNOWN_POINTS: Final = 25
 SIZE_OUTSIDE_POINTS: Final = 0
 WEIGHT_TOTAL: Final = 100  # the two Lead Score weights are whole percents summing to this
 DEFAULT_WEIGHT: Final = 50
+DEFAULT_MIN_LEAD_SCORE: Final = 50  # the min_lead_score setting's default (Story 4.10)
 WEIGHTS_SUM_RULE: Final = "weights_sum"
 WEIGHTS_SUM_REASON: Final = "the fit and signal weights must add up to 100"
 POINTS_DECIMALS: Final = 2
@@ -682,3 +691,48 @@ def evidence_from_text(text: str) -> tuple[str, ...]:
         return _ids(json.loads(text))
     except json.JSONDecodeError as error:
         raise ValueError("the Evidence ids aren't JSON") from error
+
+
+# "Ready to draft" (Story 4.10) ----------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ReadyCandidate:
+    """A Lead the "Ready to draft" list may show: its Tier, its Lead Score and the age in days
+    of its newest live Event (``None`` without one)."""
+
+    lead_id: str
+    tier: Tier
+    lead_score: int
+    newest_event_age: int | None
+
+
+_TIER_RANK: Final[Mapping[Tier, int]] = {Tier.A: 0, Tier.B: 1, Tier.C: 2}
+
+
+def _ready_key(candidate: ReadyCandidate) -> tuple[Any, ...]:
+    if not isinstance(candidate, ReadyCandidate):
+        raise TypeError("ready_order takes ReadyCandidate values")
+    if not isinstance(candidate.lead_id, str):
+        raise TypeError("ReadyCandidate.lead_id must be a str")
+    tier_value = Tier(candidate.tier)
+    score_value = _int("lead_score", candidate.lead_score)
+    age = candidate.newest_event_age
+    if tier_value is Tier.A:
+        if age is not None:
+            _int("newest_event_age", age)
+        no_event = age is None
+        return (_TIER_RANK[tier_value], no_event, age or 0, -score_value, candidate.lead_id)
+    return (_TIER_RANK[tier_value], False, 0, -score_value, candidate.lead_id)
+
+
+def ready_order(candidates: Iterable[ReadyCandidate]) -> tuple[ReadyCandidate, ...]:
+    """The "Ready to draft" order: Tier A by newest live Event first (smallest age; a Lead with
+    none after those with one; a tie to the higher Lead Score), then Tier B and then Tier C by
+    Lead Score (highest first); the final tie-break is the Lead id."""
+    return tuple(sorted(candidates, key=_ready_key))
+
+
+def below_minimum(score_value: int, minimum: int) -> bool:
+    """Whether a Lead Score is below the ``min_lead_score`` setting."""
+    return _int("score", score_value) < _int("minimum", minimum)

@@ -20,10 +20,13 @@ violation.
   (``drafting.request_steps``, Story 4.9) before its ``drafts`` insert, and ``Blocked`` writes
   nothing. ``drafting.request_*`` (Story 4.9: ``Drafting.request_steps``) asks for Step 2 of an
   Enrollment made with Step 1 only: its gate call comes before its one ``drafts`` insert, and
-  ``Blocked`` adds no row. Story 10.7's ``pipeline.channel_permissions``
-  (``ChannelPermissions.record`` and ``update_inbound``) gates the Contact on ``whatsapp`` or
-  ``instagram`` for ``follow_up`` before any write; Blocked, it stores nothing, not even the
-  Evidence.
+  ``Blocked`` adds no row. ``scoring.pick`` (Story 4.10: ``Selection.pick``) picks an eligible
+  US Lead whose Contact is its Primary, with one warmed-up active inbox: ``enroll``'s three gate
+  calls, the first two before the first write; ``Blocked`` adds only the day's
+  ``daily_capacity`` row (or updates it) and no Enrollment. Story 10.7's
+  ``pipeline.channel_permissions`` (``ChannelPermissions.record`` and ``update_inbound``) gates
+  the Contact on ``whatsapp`` or ``instagram`` for ``follow_up`` before any write; Blocked, it
+  stores nothing, not even the Evidence.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -101,6 +104,7 @@ from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PeopleExtractions
 from nextron.app.research.verification import EmailVerification
+from nextron.app.scoring.selection import Selection
 from nextron.app.sending.api import Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
@@ -240,6 +244,8 @@ MANIFEST: Final = (
         inserts=frozenset({"drafts", "call_preps"}),
     ),
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
+    # Story 4.10: the Operator's picks enroll through sequencing.enroll
+    Caller("scoring.pick", ("app/scoring/",), r"Selection\.pick"),
     Caller(
         "pipeline.tasks_and_call_sheets",
         ("app/pipeline/",),
@@ -1282,6 +1288,53 @@ def _enrolled(world: World) -> None:
         assert connection.exec_driver_sql("SELECT COUNT(*) FROM enrollments").scalar_one() == 1
 
 
+def _pickable(world: World, tag: str) -> str:
+    """Story 4.10: an eligible US Lead whose Contact is its Primary, and the one inbox active
+    and warmed up for 14 days and more (so today has capacity); the Lead's id."""
+    contact_id, _ = _enrollable_contact(world, tag)
+    with world.engine.begin() as connection:
+        lead_id = str(
+            connection.exec_driver_sql(
+                "SELECT lead_id FROM contacts WHERE id = ?", (contact_id,)
+            ).scalar_one()
+        )
+        connection.exec_driver_sql(
+            "UPDATE sending_inboxes SET status = 'active', warmup_started_on = '2026-10-01', "
+            "warmup_method = 'manual', warm_level = 30"
+        )
+    world.transact(lambda: Research(FrozenClock(T0)).make_primary(lead_id, contact_id))
+    return lead_id
+
+
+def _pick(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.10: the Operator picks one eligible Lead: ``enroll``'s gate calls (its own and
+    ``evaluate_eligibility``'s before the first write, then ``request_steps``'), and the
+    ``daily_capacity`` row after them."""
+    lead_id = _pickable(world, tag)
+    clock = FrozenClock(T0)
+    selection = Selection(clock, Sequencing(clock), compliance_api.Compliance(clock))
+    with world.engine.connect() as connection:
+        contact_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM contacts WHERE lead_id = ?", (lead_id,)
+            ).scalar_one()
+        )
+
+    def action() -> object:  # as the dashboard runs it: the use case in a unit of work
+        with world.units.open():
+            return selection.pick([lead_id])
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate, gate)
+
+
+def _picked(world: World) -> None:
+    """An allowed pick enrolled its Lead and counted it; the blocked one enrolled nothing."""
+    with world.engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM enrollments").scalar_one() == 1
+        assert connection.exec_driver_sql("SELECT picked FROM daily_capacity").all() == [(1,)]
+
+
 def _published_page(lead_id: str, domain: str, text: str) -> None:
     """Store one crawl run of the Lead with one team page holding ``text``."""
     run_id = crawl_repo.insert_run(
@@ -1574,6 +1627,15 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
         ),
         # Story 10.7: Blocked stores nothing, not even the Evidence
         "pipeline.channel_permissions": Scenario((_permission_record, _permission_inbound)),
+        # Story 4.10: enroll gates as above; a Blocked pick still records the day's capacity
+        "scoring.pick": Scenario(
+            (_pick,),
+            gates_first=False,
+            gates_before_first_write=2,
+            blocked_rows={"daily_capacity": 1},
+            blocked_writes=frozenset({("INSERT", "daily_capacity"), ("UPDATE", "daily_capacity")}),
+            after_blocked=_picked,
+        ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1677,6 +1739,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.request_*",  # Story 4.9
         "verify_contact_email",  # Story 2.14
         "pipeline.channel_permissions",  # Story 10.7
+        "scoring.pick",  # Story 4.10
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

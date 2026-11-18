@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{#- The "Ready to draft" page (nextron.web.ready_page, Story 4.10): GET /leads/ready. The list
+    itself is leads_ready_list.html, which the POST /leads/ready/pick answer replaces. -#}
+{% block title %}Nextron: Ready to draft{% endblock %}
+{% block content %}
+<h1>Ready to draft</h1>
+<p><a href="/leads">Back to Leads</a></p>
+{% include "leads_ready_list.html" %}
+{% endblock %}

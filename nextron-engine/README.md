@@ -2664,6 +2664,44 @@ Step, status, due time (or "after Step N is sent"), the current composed message
 prospect would receive it (escaped, inside `hx-disable`), "Sending blocked: footer incomplete
 (…)" while the Market's footer is incomplete, the Playbook version and the revision history
 (revision, origin, time and the first 12 characters of the hash), or "No text yet".
+## Today's capacity and Ready to draft
+
+Story 4.10 (FR-19, FR-59, UX-DR20) shows how many new Sequences the inboxes can carry today
+and lets you pick the Leads to start. Nothing is picked automatically.
+
+**Capacity.** Computed live each time, for today in `sender_timezone` (UTC while unset):
+`new_sequence_capacity = min(total − follow-ups due, total ÷ steps)` (whole numbers, never below
+0), where `total` is the sum of the inboxes' cold Daily Caps (Story 6.4), the follow-ups due are
+every inbox's unsent follow-ups due today (overdue included), and `steps` is the largest Step
+count of the stored Sequences (4 by default). Example: 3 inboxes at 30 with 61 follow-ups due
+and 4 Steps give 22. **Remaining today** is that capacity less today's picks.
+
+**The `daily_capacity` table** (migration `0052_4_10_daily_capacity`, owner `scoring`, every
+column PII class `none`) keeps one row per day: `local_date` (unique), `total_cold_capacity`,
+`follow_ups_reserved`, `new_sequence_capacity`, `picked`, `signal_shortfall` and
+`computed_at`. A row is written at each pick and by the daily `recompute_tiers` job. The first
+computation on a later day finalises each earlier row's `signal_shortfall` to the capacity it
+left unused (`max(0, capacity − picked)`).
+
+**The Ready to draft page (`/leads/ready`).** Linked from the Leads list. Its header reads
+"Remaining today: n of N", or "No cold capacity yet: inboxes need 14 days of recorded
+warm-up" while every cold cap is 0. It lists scored Leads that aren't merged, are at New,
+Queued or Contacted, have a Primary Contact who isn't erased and have no live Sequence: Tier A
+first by newest live Event, then Tier B and Tier C by Lead Score. Each row shows the name,
+Segment, Market, Tier, Lead Score, the Contact's role and the live Eligibility. Tier C carries a
+"generic copy" badge and a Lead Score below the **Minimum Lead Score** setting (Engine section,
+default 50) a "below minimum score" badge; both can still be picked.
+
+**Picking.** Tick Leads and press "Start Sequences for the picked Leads". In page order, each
+Lead is enrolled (origin `operator_pick`, every Step of its Campaign's Sequence, 4.9's Draft
+slots) in the first active Campaign for its Segment and the Contact's Market, until nothing
+remains today. Each gets a result line: "Enrolled" or "Refused: <reason>" (unknown or merged
+Lead, no Primary Contact, no Campaign, no capacity left today, or `enroll`'s own refusal such as
+a suppressed or ineligible Contact). A refusal uses no capacity. No email, AI call or job comes
+from a pick.
+
+**Signal shortfall.** While capacity remains today, the notification area shows "signal
+shortfall: n", linked to the page.
 
 ## Leads list and Lead page
 
@@ -3134,6 +3172,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0049_9_1_manual_stages` | adds to `leads`, in place with no check, the nullable `deal_value` (BigInteger micro-dollars) and `notes` (Text, PII class `redact`), and creates `call_outcomes` (one row per booked discovery call: foreign keys to `leads` and `contacts` with no cascade, `ix_call_outcomes_lead_id`) | `pipeline` |
 | `0050_2_14_email_checks` | adds to `contacts`, in place with no check, the nullable `email_check_result`, `email_checked_at`, `email_invalid_reason` and `email_verifier_at` (codes and times only), and creates `trg_contacts_tombstone` again with the four columns fixed on an erased Contact (22 fixed columns; see [Validating addresses](#validating-addresses)) | `research` |
 | `0051_10_7_channel_permissions` | `channel_permissions` (one row per opening a prospect gave on WhatsApp or Instagram: foreign keys to `contacts` and `evidence` with no cascade, `ix_channel_permissions_contact_id`; channel, action, identifier, last-inbound, status, revoked-at and recorded-by checks; the partial unique index `uq_channel_permissions_active` allows one `active` permission per Contact and channel; `whatsapp_number` and `instagram_handle` are PII class `null`) | `pipeline` |
+| `0052_4_10_daily_capacity` | `daily_capacity` (one row per day: `local_date` unique, the day's total cold capacity, follow-ups reserved, new-Sequence capacity, `picked` and the `signal_shortfall` set when a later day finalises it; non-negative checks), owned by `scoring` (see [Today's capacity and Ready to draft](#todays-capacity-and-ready-to-draft)) | `scoring` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

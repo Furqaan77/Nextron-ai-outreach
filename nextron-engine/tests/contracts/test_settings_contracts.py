@@ -142,7 +142,7 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
             "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
-            "linkedin_owner_chat, optout_line, places_discovery_locations, "
+            "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
             "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "

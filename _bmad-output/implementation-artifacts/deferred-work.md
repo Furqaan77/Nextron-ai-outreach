@@ -422,3 +422,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-10-7-record-channel-permissions-for-whatsapp-and-instagram.md`
   summary: Story 10.8 must make `ChannelPermissions.revoke` and `opt_out` (and pipeline's erasure hook) cancel the Contact's `ready` WhatsApp or Instagram Drafts on that channel (opt-out: every channel) in the same transaction, and must refuse to draft a WhatsApp or Instagram message, or log one as sent, without an `active` Channel Permission (Instagram: also inside the 24-hour window, `nextron.domain.channel_permission.window_open`).
   evidence: Story 10.7 decision (pending user review): no Draft table with a channel kind exists yet, so revoking cancels no Draft; epics.md Story 10.7's AC 'ready Drafts on that channel for the Contact are cancelled' is met only once 10.8 adds them.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-10-show-today-s-capacity-and-pick-leads-to-draft.md`
+  summary: In Epic 6 (sending), keep the follow-ups already sent today counted in `queries.sequencing.follow_ups_due` (Story 4.10's reserved figure), so today's new-Sequence capacity doesn't rise during the day as follow-ups go out.
+  evidence: Story 4.10 overnight Decision 5 and review finding ECH4 (low). It counts only unsent (`ready` or `approved`) Step slots; nothing is sent before Epic 6, so the figure can't drift yet.

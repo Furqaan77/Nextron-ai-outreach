@@ -534,6 +534,7 @@ def test_the_declared_keys_in_order() -> None:
         "lead_score_signal_weight",
         "unsub_worker_host",
         "linkedin_owner_chat",
+        "min_lead_score",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -567,6 +568,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.LEAD_SCORE_SIGNAL_WEIGHT),
         setting(Key.UNSUB_WORKER_HOST),
         setting(Key.LINKEDIN_OWNER_CHAT),
+        setting(Key.MIN_LEAD_SCORE),
     )
 
 
@@ -1318,7 +1320,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
             "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
-            "linkedin_owner_chat, optout_line, places_discovery_locations, "
+            "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
             "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "

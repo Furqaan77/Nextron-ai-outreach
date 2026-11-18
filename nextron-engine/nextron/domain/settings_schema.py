@@ -88,6 +88,10 @@ per line (``LOCATION_RULE``: ``nextron.domain.place_discovery.is_location_item``
 Campaign's locations are those whose code is its Market's country code.
 ``places_max_pages_per_run`` (``integer``, Budget and limits, 1 to 3, default 3) caps the
 Places pages one run fetches.
+
+**The minimum Lead Score** (Story 4.10, FR-19): ``min_lead_score``, ``integer`` in Engine, label
+"Minimum Lead Score", 0 to 100, default 50 (``DEFAULT_MIN_LEAD_SCORE``). A Lead below it shows a
+"below minimum score" badge on the "Ready to draft" list and can still be picked.
 """
 
 import re
@@ -124,6 +128,7 @@ from nextron.domain.place_discovery import (
 )
 from nextron.domain.prices import names_price
 from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
+from nextron.domain.scoring import DEFAULT_MIN_LEAD_SCORE, MAX_SCORE
 from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
 from nextron.domain.sending_policy import CEILING_RANGE, DEFAULT_CEILING
 from nextron.domain.sink import is_sink_recipient
@@ -207,6 +212,8 @@ class Key(StrEnum):
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
     LINKEDIN_OWNER_CHAT = "linkedin_owner_chat"  # Story 10.2
+    # The "Ready to draft" list's badge threshold (Story 4.10).
+    MIN_LEAD_SCORE = "min_lead_score"
 
 
 class _Required(Enum):
@@ -1429,6 +1436,20 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(OPTIONAL_TELEGRAM_CHAT_ID_RULE,),
+    ),
+    # The "Ready to draft" list's "below minimum score" badge (Story 4.10, FR-19); a Lead below
+    # it can still be picked.
+    Setting(
+        key=Key.MIN_LEAD_SCORE,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Minimum Lead Score",
+        unit=(
+            "0 to 100. A Lead whose Lead Score is below this shows a \"below minimum score\" "
+            "badge on the Ready to draft list; it can still be picked."
+        ),
+        default=DEFAULT_MIN_LEAD_SCORE,
+        rules=(minimum(0, "0"), maximum(MAX_SCORE, str(MAX_SCORE))),
     ),
 )
 

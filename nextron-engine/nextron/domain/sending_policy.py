@@ -29,6 +29,12 @@ the gap draw and ``approval_expired`` here.
   ``bool`` delay, a non-``str`` zone, a ``not_before`` that isn't a plain ``date``) raises
   ``TypeError``; a negative delay or an unknown zone ``ValueError``.
 
+**Story 4.10.** ``new_sequence_capacity(total_cold, follow_ups_due, steps) -> int``: the new
+Sequences all inboxes can carry today: ``min(capacity_forecast(total_cold, follow_ups_due),
+total_cold // steps)``, never negative. The first two arguments are checked as
+``capacity_forecast``'s; ``steps`` (the largest stored Sequence's Step count) is an ``int`` of
+at least 1 (``bool`` refused): another type raises ``TypeError``, a smaller one ``ValueError``.
+
 **Story 6.4: the cold-send volume policy.**
 
 **Ranges** (shared by the warm-up form, ``Sending.record_warmup`` and the ``sending_inboxes``
@@ -155,6 +161,19 @@ def capacity_forecast(cold_daily_cap: int, follow_ups_due: int) -> int:
     cap = _count(cold_daily_cap, "cold_daily_cap")
     due = _count(follow_ups_due, "follow_ups_due")
     return max(0, cap - due)
+
+
+def new_sequence_capacity(total_cold: int, follow_ups_due: int, steps: int) -> int:
+    """New Sequences the inboxes can carry today (Story 4.10, FR-19 S1): the cold capacity left
+    after the follow-ups due, limited so each new Sequence's Steps fit a day's total; never
+    negative."""
+    total = _count(total_cold, "total_cold")
+    due = _count(follow_ups_due, "follow_ups_due")
+    if isinstance(steps, bool) or not isinstance(steps, int):
+        raise TypeError(f"steps must be an int, not {type(steps).__name__}")
+    if steps < 1:
+        raise ValueError("steps must be at least 1")
+    return max(0, min(capacity_forecast(total, due), total // steps))
 
 
 @dataclass(frozen=True, slots=True)

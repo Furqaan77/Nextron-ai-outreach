@@ -1,0 +1,48 @@
+{#- The "Ready to draft" list (nextron.web.ready_page, Story 4.10): rendered inside
+    leads_ready.html, and alone as the answer to POST /leads/ready/pick, which HTMX swaps in for
+    this whole section. The capacity line, the results of the last pick (one row per picked
+    Lead: "Enrolled" or "Refused: <reason>"), then the pick form: one checkbox per Lead, in the
+    list's order, with its name linked to its page, Segment, Market, Tier, Lead Score, the
+    Primary Contact's role, the badges and the live Eligibility. A Lead's name and a Contact's
+    role are imported or crawled text: they render only through |plain, inside hx-disable. -#}
+<section class="ready-list" id="ready-list" aria-labelledby="ready-heading">
+<p class="lead-count" id="ready-heading" role="status">{{ header_text }}</p>
+{%- if results %}
+<table class="lead-table pick-results" hx-disable>
+<caption>Last pick</caption>
+<thead>
+<tr><th scope="col">Lead</th><th scope="col">Result</th></tr>
+</thead>
+<tbody>
+{%- for result in results %}
+<tr class="{{ 'pick-enrolled' if result.enrolled else 'pick-refused' }}"><td>{{ result.name|plain }}</td><td>{{ result.text|plain }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if rows %}
+<form method="post" action="/leads/ready/pick" hx-post="/leads/ready/pick" hx-target="#ready-list" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<table class="lead-table ready-table" hx-disable>
+<thead>
+<tr><th scope="col">Pick</th><th scope="col">Name</th><th scope="col">Segment</th><th scope="col">Market</th><th scope="col">Tier</th><th scope="col">Lead Score</th><th scope="col">Contact role</th><th scope="col">Eligibility</th></tr>
+</thead>
+<tbody>
+{%- for row in rows %}
+<tr class="ready-row"><td><input type="checkbox" id="pick-{{ row.lead_id }}" name="lead" value="{{ row.lead_id }}"></td><td><label for="pick-{{ row.lead_id }}"><a href="{{ row.href }}">{{ row.name|plain }}</a></label>{% for badge in row.badges %}<span class="ready-badge">{{ badge }}</span>{% endfor %}</td><td>{{ row.segment|plain }}</td><td>{{ row.market|plain }}</td><td>{{ row.tier }}</td><td>{{ row.lead_score }}</td><td>{{ row.role|plain }}</td><td><p class="eligibility-summary {{ 'eligible' if row.eligibility.eligible else 'not-eligible' }}">{{ row.eligibility.summary|plain }}</p>
+{%- if row.eligibility.reasons %}
+<ul class="eligibility-reasons">
+{%- for reason in row.eligibility.reasons %}
+<li data-reason="{{ reason.code }}">{{ reason.text|plain }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+<button type="submit">Start Sequences for the picked Leads</button>
+</form>
+{%- else %}
+<p class="empty">No Leads are ready to draft.</p>
+{%- endif %}
+</section>

@@ -40,8 +40,9 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
    recorded and 14 days old). An inbox's follow-ups due that day (``_follow_ups_due``, Story
    4.9) are its live Enrollments' unsent (``ready`` or ``approved``) Step slots with ``step_no
    > 1`` due before the end of that date in the ``sender_timezone``, overdue ones included
-   (``queries.drafting.follow_ups_due_before``). While every cap is 0 the inbox with the fewest
-   live Enrollments wins, then the earliest registered.
+   (``queries.sequencing.follow_ups_due``, over ``queries.drafting.follow_ups_due_before``).
+   While every cap is 0 the inbox with the fewest live Enrollments wins, then the earliest
+   registered.
 4. **Writes**, in order: the Campaign's ``variant_counters`` row upserted; the Enrollment
    inserted ``active`` with its ``variant_id``, ``sending_inbox_id``, ``sequence_id``,
    ``sequence_version``, ``offer_id`` and ``origin`` bound for good, and one ``events`` row
@@ -116,8 +117,7 @@ Enrollment raises ``LookupError``, a non-``str`` id ``TypeError``.
 
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
-from types import MappingProxyType
+from datetime import UTC, date, datetime, tzinfo
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -238,17 +238,9 @@ def _local_date(now: datetime) -> date:
 
 
 def _follow_ups_due(local_date: date) -> Mapping[str, int]:
-    """Each inbox's follow-ups due on ``local_date``, overdue ones included: its live
-    Enrollments' unsent Step slots after Step 1 due before the end of that date in the
-    ``sender_timezone``."""
-    end = datetime.combine(local_date + timedelta(days=1), time(), tzinfo=_sender_zone())
-    due = drafting_queries.follow_ups_due_before(end.astimezone(UTC))
-    found: dict[str, int] = {}
-    for row in enrollments_repo.live():
-        count = due.get(row.id, 0)
-        if count:
-            found[row.sending_inbox_id] = found.get(row.sending_inbox_id, 0) + count
-    return MappingProxyType(found)
+    """Each inbox's follow-ups due on ``local_date`` in the ``sender_timezone``
+    (``queries.sequencing.follow_ups_due``, Story 4.10)."""
+    return sequencing_queries.follow_ups_due(local_date, _sender_zone())
 
 
 def _picked_inbox(inboxes: Sequence[sending_queries.SendingInboxView], now: datetime) -> str:

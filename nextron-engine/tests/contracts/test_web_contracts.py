@@ -198,6 +198,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/discovery",  # Story 8.3
         "/leads/discovery/places",
         "/leads",
+        "/leads/ready",  # Story 4.10
+        "/leads/ready/pick",
         "/leads/pipeline",  # Story 9.7
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
@@ -697,6 +699,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_pipeline.html",
         "lead_score.html",
         "leads.html",
+        "leads_ready.html",
+        "leads_ready_list.html",
         "locked.html",
         "macros.html",
         "notifications.html",

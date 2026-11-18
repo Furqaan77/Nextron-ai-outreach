@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0051_10_7_channel_permissions"
+HEAD = "0052_4_10_daily_capacity"
 
 
 @pytest.fixture

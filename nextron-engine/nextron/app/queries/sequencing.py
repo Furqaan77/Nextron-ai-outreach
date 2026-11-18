@@ -1,7 +1,8 @@
 """Read API of the ``sequencing`` service (AD-3, AD-21, FR-63; Story 4.8).
 
-Import rule: ``nextron.domain`` and ``nextron.db.repos.sequencing`` only. All read through the
-current unit of work, read-only ones included.
+Import rule: ``nextron.domain``, ``nextron.db.repos.sequencing`` and
+``nextron.app.queries.drafting`` only. All read through the current unit of work, read-only ones
+included.
 
 - ``enrollment(enrollment_id)``: the Enrollment as a ``StoredEnrollment``, or ``None`` (a text
   that isn't a ULID included);
@@ -17,6 +18,12 @@ current unit of work, read-only ones included.
   history: a Contact never emailed hasn't been contacted. A text that isn't a ULID gives ``()``.
 - ``live_counts_by_inbox()``: ``{sending_inbox_id: live Enrollments}`` for each inbox that has
   any (``pick_inbox`` spreads new Enrollments with it);
+- ``follow_ups_due(local_date, zone) -> Mapping[str, int]`` (Story 4.10; moved from Story 4.9's
+  ``sequencing`` service): ``{sending_inbox_id: n}`` for each inbox with any follow-ups due on
+  ``local_date``, overdue ones included: its live Enrollments' unsent (``ready`` or
+  ``approved``) Step slots with ``step_no > 1`` due before the end of that date in ``zone``
+  (``queries.drafting.follow_ups_due_before``). Both ``pick_inbox``'s weighing and the
+  "Ready to draft" capacity read it.
 - ``export_pii(contact_id) -> {"enrollments": tuple[dict, ...]}`` (Story 3.15's subject access
   exporter, ``nextron.domain.contact_export``; added at the merge of Story 4.8): every column of
   each of the Contact's Enrollments (Campaign, Variant, Sending Inbox, Sequence, Offer, origin,
@@ -24,8 +31,10 @@ current unit of work, read-only ones included.
 """
 
 from collections.abc import Mapping
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from types import MappingProxyType
 
+from nextron.app.queries import drafting as drafting_queries
 from nextron.db.repos.sequencing import enrollments as enrollments_repo
 from nextron.db.repos.sequencing.enrollments import StoredEnrollment
 from nextron.domain.eligibility import EndedSequence
@@ -81,6 +90,23 @@ def ended_sequences(contact_id: str) -> tuple[EndedSequence, ...]:
 def live_counts_by_inbox() -> Mapping[str, int]:
     """The number of live Enrollments bound to each Sending Inbox that has any."""
     return MappingProxyType(enrollments_repo.live_counts_by_inbox())
+
+
+def follow_ups_due(local_date: date, zone: tzinfo) -> Mapping[str, int]:
+    """Each inbox's follow-ups due on ``local_date`` in ``zone``, overdue ones included; see
+    the module docstring."""
+    if isinstance(local_date, datetime) or not isinstance(local_date, date):
+        raise TypeError("follow_ups_due takes a date")
+    if not isinstance(zone, tzinfo):
+        raise TypeError("follow_ups_due takes a tzinfo")
+    end = datetime.combine(local_date + timedelta(days=1), time(), tzinfo=zone)
+    due = drafting_queries.follow_ups_due_before(end.astimezone(UTC))
+    found: dict[str, int] = {}
+    for row in enrollments_repo.live():
+        count = due.get(row.id, 0)
+        if count:
+            found[row.sending_inbox_id] = found.get(row.sending_inbox_id, 0) + count
+    return MappingProxyType(found)
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
