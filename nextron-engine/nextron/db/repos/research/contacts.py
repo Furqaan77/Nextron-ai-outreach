@@ -36,6 +36,9 @@ nothing; ``nextron.app.research`` does.
   ``erased_at`` and ``updated_at`` to ``at``, in one statement; nothing for an unknown
   Contact.
 
+- ``erased()`` (Story 3.16): ``(id, erased_at)`` of every erased Contact, by ``erased_at``,
+  then ``id``.
+
 ``StoredContact.erased_at`` (last, default ``None``) is when the Contact was erased.
 """
 
@@ -231,6 +234,16 @@ def move_to_lead(
     current().session.execute(
         update_rows(ContactRecord).where(ContactRecord.lead_id == from_lead).values(**values)
     )
+
+
+def erased() -> tuple[tuple[str, datetime], ...]:
+    """``(id, erased_at)`` of every erased Contact, by ``erased_at``, then ``id``."""
+    statement = (
+        select(ContactRecord.id, ContactRecord.erased_at)
+        .where(ContactRecord.erased_at.is_not(None))
+        .order_by(ContactRecord.erased_at, ContactRecord.id)
+    )
+    return tuple((row.id, row.erased_at) for row in current().session.execute(statement))
 
 
 def tombstone(contact_id: str, at: datetime) -> None:

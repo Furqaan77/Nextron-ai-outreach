@@ -18,11 +18,12 @@ from sqlalchemy.exc import OperationalError
 from nextron import main
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.app.setup.api import Setup
-from nextron.bootstrap import ENV_ERROR
+from nextron.bootstrap import ENV_ERROR, load_bootstrap
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current, head_revision
 from nextron.db.uow import Subscribers, UnitOfWorkFactory
 from nextron.domain import credentials
+from nextron.domain.backup import ERASURE_LEDGER_FILE
 from nextron.domain.budget import ApiCall
 from nextron.domain.google_oauth import (
     CLIENT_META_NAME,
@@ -56,6 +57,7 @@ CHECKS = [
     "required_credentials",
     "internal_notify_grant",
     "offpc_backup",
+    "erasure_ledger",  # Story 3.16
     "required_settings",
     "database_revision",
     "unsub_token_keys",
@@ -142,6 +144,9 @@ def make_database(
             Setup(FrozenClock()).save(chosen)
     finally:
         engine.dispose()
+    ledger = load_bootstrap().backup_dir / ERASURE_LEDGER_FILE  # the engine's first start made it
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.touch()
     return path
 
 
@@ -215,7 +220,7 @@ def table_rows(out: str) -> list[tuple[str, str, str]]:
 # Row: All ok ------------------------------------------------------------------------------------
 
 
-def test_all_ok_prints_thirteen_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
+def test_all_ok_prints_fourteen_ok_rows_and_changes_no_database_byte(healthy: Path) -> None:
     before = sha256(healthy)
     oauth = FakeGoogleOAuth()
 
@@ -228,8 +233,8 @@ def test_all_ok_prints_thirteen_ok_rows_and_changes_no_database_byte(healthy: Pa
     assert [(status, check) for status, check, _ in table_rows(out)] == [
         ("ok", check) for check in CHECKS
     ]
-    assert lines[-1] == "13 ok, 0 warn, 0 fail"
-    assert len(lines) == 15
+    assert lines[-1] == "14 ok, 0 warn, 0 fail"
+    assert len(lines) == 16
     assert out.endswith("\n") and not out.endswith("\n\n")
     assert sha256(healthy) == before
     assert stored_revisions(healthy) == [head_revision()]
@@ -343,6 +348,7 @@ def test_a_fresh_install_fails_on_what_it_lacks_and_creates_nothing(data_dir: Pa
         "required_credentials": "fail",
         "internal_notify_grant": "fail",
         "offpc_backup": "warn",
+        "erasure_ledger": "warn",  # no database yet: the first engine start creates it
         "required_settings": "fail",
         "database_revision": "warn",
         "unsub_token_keys": "fail",
@@ -583,7 +589,8 @@ def test_a_backup_dir_that_is_not_separate_fails(
     code, results = run_doctor(probes=fake_probes(environ=environ))
 
     assert code == 1
-    assert statuses(results) == ALL_OK | {"backup_dir_separate": "fail"}
+    # the ledger is in the default backup dir, not in this one (Story 3.16)
+    assert statuses(results) == ALL_OK | {"backup_dir_separate": "fail", "erasure_ledger": "fail"}
     assert not (data_dir / "backups").exists()
 
 

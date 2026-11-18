@@ -82,6 +82,12 @@ The doctor checks here, in the order ``doctor`` runs them:
   not set, too long or unreadable. It warns when the folder is on the data dir's drive
   (``nextron.domain.backup.same_volume``: a lost disk would take both); otherwise it is
   ``ok``.
+- ``erasure_ledger`` (Story 3.16): ``<backup dir>\\erasure-ledger.jsonl``, the erasure ledger,
+  exists and is writable (``os.access(W_OK)``): ``ok``. It fails when the file is missing while
+  the database exists (start the engine to create it; after a restore, put the ledger's copy
+  there, since recovery mode holds sending until it is reapplied) or when it isn't writable;
+  it warns when it is missing and there is no database yet ("created at the first engine
+  start"). It never opens the file.
 - ``required_settings``: every required setting is set and parses; it fails listing
   ``<label> (<key>)`` for each one that isn't, or naming the error type when the settings can't
   be read.
@@ -110,7 +116,7 @@ import time
 import zoneinfo
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any, Final
 
 from nextron.domain import credentials
@@ -154,6 +160,7 @@ PORT_FREE: Final = "port_free"
 REQUIRED_CREDENTIALS: Final = "required_credentials"
 INTERNAL_NOTIFY_GRANT: Final = "internal_notify_grant"
 OFFPC_BACKUP: Final = "offpc_backup"
+ERASURE_LEDGER: Final = "erasure_ledger"
 REQUIRED_SETTINGS: Final = "required_settings"
 DATABASE_REVISION: Final = "database_revision"
 UNSUB_TOKEN_KEYS: Final = "unsub_token_keys"
@@ -716,6 +723,44 @@ def check_offpc_backup(
         Status.OK,
         f"off-PC backup folder {folder} is set and the Backup passphrase is set; each daily "
         "and manual backup is encrypted and copied there",
+    )
+
+
+def check_erasure_ledger(ledger: Path, database_exists: Callable[[], bool]) -> CheckResult:
+    """``ok`` when the erasure ledger ``ledger`` exists and is writable; see the module
+    docstring. It never opens the file."""
+    if ledger.is_file():
+        if os.access(ledger, os.W_OK):
+            return CheckResult(
+                ERASURE_LEDGER, Status.OK, f"erasure ledger {ledger} exists and is writable"
+            )
+        return CheckResult(
+            ERASURE_LEDGER,
+            Status.FAIL,
+            f"erasure ledger {ledger} is not writable; make it writable for this user, or "
+            "opt-outs and erasures are not mirrored",
+        )
+    try:
+        has_database = database_exists()
+    except Exception as exc:  # noqa: BLE001 - an unreadable answer is a failure, not a crash
+        return CheckResult(
+            ERASURE_LEDGER,
+            Status.FAIL,
+            f"erasure ledger {ledger} not found, and the database could not be checked "
+            f"({type(exc).__name__})",
+        )
+    if not has_database:
+        return CheckResult(
+            ERASURE_LEDGER,
+            Status.WARN,
+            f"erasure ledger {ledger} not found yet; it is created at the first engine start",
+        )
+    return CheckResult(
+        ERASURE_LEDGER,
+        Status.FAIL,
+        f"erasure ledger {ledger} not found; start the engine to create it, or after a "
+        "restore put the ledger's copy there (recovery mode holds sending until it is "
+        "reapplied)",
     )
 
 

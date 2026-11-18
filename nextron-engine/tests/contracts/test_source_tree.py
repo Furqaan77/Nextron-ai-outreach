@@ -103,6 +103,7 @@ FILES = [
     "nextron/domain/people.py",
     "nextron/domain/erasure.py",
     "nextron/domain/data_subject_request.py",
+    "nextron/domain/erasure_ledger.py",
     "nextron/db/__init__.py",
     "nextron/db/engine.py",
     "nextron/db/uow.py",

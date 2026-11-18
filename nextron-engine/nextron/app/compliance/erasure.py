@@ -45,7 +45,9 @@ whose ``suppress`` writes those keys.
      ``erased_at`` is set it raises ``RuntimeError("erasure incomplete")`` (fail closed: the
      transaction rolls back). Last, the request is completed: ``completed``, ``completed_at``
      now, and one ``events`` row ``open`` to ``completed``, cause ``completed``, ``cause_ref``
-     the Contact, actor ``operator``. ``erased=True``.
+     the Contact, actor ``operator``. ``erased=True``. When ``compliance.ledger`` is set
+     (Story 3.16), one ``Erased(contact_id, cause, erased_at)`` line is recorded, and
+     appended to the erasure ledger after the commit.
 
   Any exception (a hook's included) dooms the caller's transaction, so nothing is half erased.
 
@@ -101,6 +103,7 @@ from nextron.domain.data_subject_request import (
     transition,
 )
 from nextron.domain.erasure import REDACTED, Coverage, ErasureCause, TableErasure
+from nextron.domain.erasure_ledger import Erased
 from nextron.domain.ids import is_ulid
 from nextron.domain.notifications import ContactErased
 from nextron.domain.suppression_entry import SuppressionSource
@@ -237,6 +240,9 @@ class Erasures:
             raise RuntimeError(ERASURE_INCOMPLETE)
         if request_id is not None:
             self._complete(request_id, contact.id)
+        ledger = self._compliance.ledger
+        if ledger is not None:  # Story 3.16: appended once the transaction commits
+            ledger.record([Erased(contact.id, found_cause, after.erased_at)])
         return ErasureResult(contact.id, request_id, erased=True)
 
     def _suppress(self, contact_id: str, request_id: str) -> None:

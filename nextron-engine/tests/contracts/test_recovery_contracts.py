@@ -3,7 +3,9 @@
 - **One step registry.** Only ``build_recovery_steps()`` in ``nextron/main.py`` constructs
   ``RecoverySteps`` or calls ``register_step``, under any alias (the same AST check as the job,
   trigger, doctor and health registries, ``tests/contracts/test_job_contracts.py``). It ships
-  frozen and empty until Stories 3.12, 3.16 and 6.12 register their handlers.
+  frozen; with no argument it is empty, and with ``reapply`` it holds Story 3.16's one startup
+  step, ``reapply_erasure_ledger`` (owner ``compliance``), until Stories 3.12 and 6.12 register
+  theirs.
 - **The gate.** ``nextron.app.queries.ops.recovery_mode`` exists with the signature
   ``() -> bool``: every later send path calls it and holds its sends while it is true.
 - **The trigger.** ``Trigger.CHECK_RECOVERY`` is registered as an ``Every(CHECK_PERIOD,
@@ -134,6 +136,19 @@ def test_the_registry_ships_frozen_and_empty() -> None:
     assert steps.frozen
     assert steps.registered() == frozenset()
     assert main.build_recovery_steps() is not steps  # a new registry each time
+
+
+def test_with_reapply_the_registry_holds_the_ledger_step_as_a_startup_step() -> None:
+    def reapply(context: object) -> bool:
+        return True
+
+    steps = main.build_recovery_steps(reapply=reapply)
+
+    assert steps.frozen
+    assert steps.registered() == frozenset({RecoveryStep.REAPPLY_ERASURE_LEDGER})
+    handler = steps.get(RecoveryStep.REAPPLY_ERASURE_LEDGER)
+    assert handler is not None
+    assert (handler.owner, handler.run, handler.startup) == ("compliance", reapply, True)
 
 
 # The gate ---------------------------------------------------------------------------------------

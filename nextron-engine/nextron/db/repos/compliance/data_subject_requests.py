@@ -15,7 +15,9 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
 - ``completed_erasures(contact_ids)``: for each of those Contacts with a ``completed`` ``erase``
   request, its first one (by ``completed_at``, then ``id``: the one that erased it, or, after a
   retention erasure, the first request completed afterwards), as ``{contact_id:
-  StoredRequest}``.
+  StoredRequest}``;
+- ``completed_erase_contact_ids()`` (Story 3.16): the ids of every Contact with a ``completed``
+  ``erase`` request.
 
 Nothing here removes a request: they are the proof of erasure, and the table's triggers refuse a
 ``DELETE`` too.
@@ -135,3 +137,16 @@ def completed_erasures(contact_ids: Iterable[str]) -> dict[str, StoredRequest]:
         request = StoredRequest(*row)
         found.setdefault(request.contact_id, request)  # the first one completed
     return found
+
+
+def completed_erase_contact_ids() -> frozenset[str]:
+    """The ids of every Contact with a ``completed`` ``erase`` request."""
+    statement = (
+        select(DataSubjectRequestRecord.contact_id)
+        .where(
+            DataSubjectRequestRecord.kind == ERASE,
+            DataSubjectRequestRecord.status == COMPLETED,
+        )
+        .distinct()
+    )
+    return frozenset(current().session.execute(statement).scalars())

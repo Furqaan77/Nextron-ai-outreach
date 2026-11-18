@@ -32,6 +32,7 @@ import pytest
 from nextron import __version__
 from nextron.bootstrap import DEFAULT_PLAYBOOK_PATH, ENGINE_ROOT
 from nextron.db.migrations import head_revision
+from nextron.domain.backup import ERASURE_LEDGER_FILE
 from tests.live_guard import child_env
 from tests.migration_chains import stored_revisions
 
@@ -345,8 +346,11 @@ def test_guarded_health_page_and_second_instance(
     )
     assert lines.index(runner_started) < lines.index(daily) < lines.index(scheduler_started)
     assert lines.index(daily) < lines.index(restore) < lines.index(scheduler_started)
-    # a new database takes no pre_migrate copy and no catch-up backup: the backup dir is empty
-    assert not (tmp_path / "backups").exists()
+    # a new database takes no pre_migrate copy and no catch-up backup: the backup dir holds
+    # only the empty erasure ledger the startup sync creates (Story 3.16)
+    backups = tmp_path / "backups"
+    assert sorted(path.name for path in backups.rglob("*")) == [ERASURE_LEDGER_FILE]
+    assert (backups / ERASURE_LEDGER_FILE).read_bytes() == b""
     assert not [line for line in lines if str(line["event"]).startswith("backup")]
     [(row_id, pid, started_at, beat_at)] = heartbeat_rows(data_dir / "nextron.db")
     assert (row_id, pid > 0) == ("00000000000000000000000000", True)
