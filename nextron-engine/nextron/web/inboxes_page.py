@@ -1,5 +1,6 @@
 """The Sending Inboxes panel (FR-32, AD-14, AD-21, UX-DR3, UX-DR26): register the inboxes that
-Sequences bind to, and list them.
+Sequences bind to, and list them; and its Sending Domain authentication section (Story 6.5,
+FR-64).
 
 ``create_app`` serves it from ``queries.sending.inboxes()`` through ``panel_context``; both
 routes are ``@personal_data(True)`` (the panel shows inbox addresses), so every answer is
@@ -26,13 +27,34 @@ Sending Domain and Status, oldest first, where a ``connecting`` inbox's status a
 ``CONNECTING_NOTE`` ("Gmail connection and warm-up not set up yet; nothing can be sent from
 it"). With no inboxes the table is replaced by "No Sending Inboxes registered yet." Every value
 is autoescaped; nothing here is marked safe.
+
+**Sending Domain authentication (Story 6.5).** ``inboxes.html`` includes
+``inbox_auth_panel.html`` after the panel: ``<section id="domain-auth">``, headed "Sending Domain
+authentication", which HTMX re-fetches every 30 seconds from ``GET /inboxes/auth``
+(``inbox_auth_panel``) so a Recheck's result appears without resetting the registration form.
+``auth_context`` renders it from ``DomainChecks.auths()`` (``queries.sending.domain_auths`` at
+the clock's now): one row per listed Sending Domain, by domain, with the Sending Domain, Last
+checked (``YYYY-MM-DD HH:MM UTC`` or "Not checked yet"), SPF, DKIM, DMARC and Alignment (each
+``Pass``, ``Fail: <reason text>`` or ``Not checked yet``), Cold sends (the verdict text; when
+blocked the cell has ``class="auth-blocked"``) and a Recheck form. With no listed domain it
+shows "No Sending Domains to check yet." Both its routes are ``@personal_data(False)``: they
+show domain names and check results only.
+
+``POST /inboxes/auth/recheck`` (``inbox_auth_recheck``) takes exactly one ``sending_domain_id``,
+a ULID (``csrf_token`` aside; ``submitted_recheck``); anything else raises ``MalformedForm``
+(400). It runs ``DomainChecks.recheck`` in its own unit of work, then renders the section alone
+in a read-only one with ``Recheck queued for <domain>; the result appears here when it lands.``
+(``role="status"``) or ``That Sending Domain has no inboxes to check.`` (``role="alert"``).
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Final
 
-from nextron.app.queries.sending import SendingInboxView
+from nextron.app.queries.sending import DomainAuthView, SendingInboxView
+from nextron.domain.domain_auth import REASON_TEXTS, AuthItem, AuthReason
+from nextron.domain.ids import is_ulid
 from nextron.domain.sending_inbox import (
     CONNECTING_NOTE,
     InboxRefused,
@@ -46,6 +68,15 @@ from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, Malforme
 
 PAGE_TEMPLATE: Final = "inboxes.html"
 PANEL_TEMPLATE: Final = "inboxes_panel.html"
+AUTH_TEMPLATE: Final = "inbox_auth_panel.html"
+SENDING_DOMAIN_ID_FIELD: Final = "sending_domain_id"
+NO_DOMAINS: Final = "No Sending Domains to check yet."
+PASS: Final = "Pass"
+FAIL_PREFIX: Final = "Fail: "
+NOT_CHECKED: Final = "Not checked yet"
+LAST_CHECKED_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
+RECHECK_QUEUED: Final = "Recheck queued for {domain}; the result appears here when it lands."
+RECHECK_REFUSED: Final = "That Sending Domain has no inboxes to check."
 ADDRESS_FIELD: Final = "address"
 LABEL_FIELD: Final = "label"
 FORM_FIELDS: Final = frozenset({ADDRESS_FIELD, LABEL_FIELD})
@@ -108,3 +139,77 @@ def submitted_inbox(fields: FormFields) -> tuple[str, str]:
     if len(address) != 1 or len(label) != 1:
         raise MalformedForm(REPEATED_FIELD)
     return address[0], label[0]
+
+
+# Sending Domain authentication (Story 6.5) ----------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AuthRow:
+    """One listed Sending Domain as the authentication table shows it; ``items`` are the SPF,
+    DKIM, DMARC and Alignment cells, in that order."""
+
+    sending_domain_id: str
+    domain: str
+    last_checked: str
+    items: tuple[str, ...]
+    cold_sends: str
+    blocked: bool
+
+
+def _item_cell(reason: AuthReason | None) -> str:
+    if reason is None:
+        return NOT_CHECKED
+    if reason is AuthReason.OK:
+        return PASS
+    return f"{FAIL_PREFIX}{REASON_TEXTS[reason]}"
+
+
+def auth_row(view: DomainAuthView) -> AuthRow:
+    """``view`` as a table row."""
+    latest = view.latest
+    if latest is None:
+        last_checked = NOT_CHECKED
+        items = tuple(_item_cell(None) for _ in AuthItem)
+    else:
+        last_checked = f"{latest.checked_at.astimezone(UTC):{LAST_CHECKED_FORMAT}}"
+        items = tuple(_item_cell(latest.reasons.get(item)) for item in AuthItem)
+    return AuthRow(
+        view.sending_domain_id,
+        view.domain,
+        last_checked,
+        items,
+        view.verdict.text,
+        view.verdict.blocked,
+    )
+
+
+def recheck_queued(domain: str) -> Notice:
+    return Notice(Role.STATUS, RECHECK_QUEUED.format(domain=domain))
+
+
+def recheck_refused() -> Notice:
+    return Notice(Role.ALERT, RECHECK_REFUSED)
+
+
+def auth_context(
+    views: Iterable[DomainAuthView], *, notice: Notice | None = None
+) -> dict[str, object]:
+    """What ``inbox_auth_panel.html`` renders: the Recheck notice and the rows."""
+    return {
+        "auth_notice": notice,
+        "auth_rows": [auth_row(view) for view in views],
+        "no_domains": NO_DOMAINS,
+    }
+
+
+def submitted_recheck(fields: FormFields) -> str:
+    """The one ``sending_domain_id`` ULID a Recheck form posts; ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD} != {SENDING_DOMAIN_ID_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+    values = fields[SENDING_DOMAIN_ID_FIELD]
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    if not is_ulid(values[0]):
+        raise MalformedForm(WRONG_FIELDS)
+    return values[0]

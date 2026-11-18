@@ -4,4 +4,7 @@ Import rule: ``nextron.domain``, ``nextron.ports``, ``nextron.db.uow``, ``nextro
 ``nextron.db.repos.sending`` (never another owner's repositories), any ``nextron.app.queries.*``
 module, and the ``api`` of these owners below it: ``compliance``, ``playbook``, ``setup``,
 ``notify``, ``jobqueue``.
+
+- ``api``: ``Sending``, the Sending Inboxes (Story 4.7);
+- ``checks``: ``DomainChecks``, the Sending Domain authentication checks (Story 6.5).
 """

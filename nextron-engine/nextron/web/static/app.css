@@ -578,6 +578,33 @@ button.secondary {
   font-size: 0.875rem;
 }
 
+/* The Sending Domain authentication section: the results table and a blocked verdict. */
+.auth-table {
+  margin: 1rem 0 1.5rem;
+  border-collapse: collapse;
+}
+
+.auth-table th,
+.auth-table td {
+  padding: 0.35rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.auth-table td {
+  overflow-wrap: anywhere;
+}
+
+.auth-table form {
+  margin: 0;
+}
+
+.auth-blocked {
+  font-weight: 600;
+  color: var(--refused);
+}
+
 /* The Leads list and the Lead page: the filter form, the tables (imported text wraps anywhere),
    the pager and the header facts. */
 .lead-filters {

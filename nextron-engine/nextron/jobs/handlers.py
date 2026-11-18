@@ -47,6 +47,13 @@ handler runs in.
   run_id)`` once (the research service's ``SignalExtractions``) and returns ``DEFERRED`` when it
   returns ``False`` (the budget refused the call). A retryable ``AdapterError`` it raises is
   retried by the runner; any other error fails the job.
+- ``check_domains(checks)`` (Story 6.5): ``checks`` returns the ``sending`` service's
+  ``DomainChecks`` (``nextron.main`` passes ``lambda: domain_checks``). A payload holding
+  ``sending_domain_id`` (a per-domain job: a Recheck, the daily fan-out or, from Story 6.2, a
+  connect) calls ``checks().check_domain(sending_domain_id)`` once; a trigger's tick payload
+  (``{"v": 1}``) calls ``checks().queue_daily()`` once, which queues one per-domain job per
+  listed Sending Domain. A retryable ``AdapterError`` (a DNS timeout) is retried by the runner;
+  any other error fails the job, and nothing is recorded either way.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -56,6 +63,7 @@ from typing import Final, Protocol
 
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
+from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
 from nextron.domain.restore_test import RestoreTestKind
@@ -245,3 +253,24 @@ def extract_lead(extractions: Callable[[], Extracting]) -> Handler:
         return None
 
     return handle_extract_lead
+
+
+class DomainChecking(Protocol):
+    """What ``check_domains`` needs of the ``sending`` service's ``DomainChecks``."""
+
+    def check_domain(self, sending_domain_id: str) -> object: ...
+
+    def queue_daily(self) -> int: ...
+
+
+def check_domains(checks: Callable[[], DomainChecking]) -> Handler:
+    """The ``check_domains`` job's handler: check the payload's Sending Domain, or queue the
+    daily checks for a trigger's tick, through ``checks()``."""
+
+    def handle_check_domains(job: Job) -> None:
+        if SENDING_DOMAIN_ID_FIELD in job.payload:
+            checks().check_domain(_ulid_field(job, SENDING_DOMAIN_ID_FIELD))
+        else:
+            checks().queue_daily()
+
+    return handle_check_domains

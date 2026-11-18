@@ -50,7 +50,7 @@ from nextron.db.models.playbook import (
     PromptSnapshotRecord,
 )
 from nextron.db.models.research import ContactRecord, ProvenanceRecord
-from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
+from nextron.db.models.sending import DomainCheckRecord, SendingDomainRecord, SendingInboxRecord
 from nextron.db.models.setup import (
     CampaignRecord,
     MarketRecord,
@@ -82,6 +82,7 @@ __all__ = [
     "ContactRecord",
     "CrawlRunRecord",
     "CrawledPageRecord",
+    "DomainCheckRecord",
     "EventRecord",
     "EvidenceRecord",
     "ExtractionRunRecord",

@@ -9,7 +9,9 @@ the running use case's transaction. It checks nothing; ``nextron.app.sending`` d
 - ``id_by_address(address)``: the id of the inbox holding that address, at any status, or
   ``None``;
 - ``insert(...) -> id``: a new row at the given status;
-- ``listed(statuses)``: the inboxes at those statuses, by ``created_at``, then ``id``.
+- ``listed(statuses)``: the inboxes at those statuses, by ``created_at``, then ``id``;
+- ``addresses_of(sending_domain_id, statuses)``: the addresses of that Sending Domain's inboxes
+  at those statuses, sorted (Story 6.5).
 """
 
 from collections.abc import Iterable
@@ -90,3 +92,15 @@ def listed(statuses: Iterable[str]) -> list[StoredInbox]:
         .order_by(SendingInboxRecord.created_at, SendingInboxRecord.id)
     )
     return [StoredInbox(*row) for row in rows]
+
+
+def addresses_of(sending_domain_id: str, statuses: Iterable[str]) -> list[str]:
+    """The addresses of ``sending_domain_id``'s inboxes at ``statuses``, sorted."""
+    wanted = [str(status) for status in statuses]
+    rows = current().session.execute(
+        select(SendingInboxRecord.address)
+        .where(SendingInboxRecord.sending_domain_id == sending_domain_id)
+        .where(SendingInboxRecord.status.in_(wanted))
+        .order_by(SendingInboxRecord.address)
+    )
+    return list(rows.scalars())

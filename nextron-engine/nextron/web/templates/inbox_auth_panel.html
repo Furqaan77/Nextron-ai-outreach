@@ -1,0 +1,32 @@
+{#- The Sending Domain authentication section (nextron.web.inboxes_page, Story 6.5): rendered
+    inside inboxes.html after the inboxes panel, and alone as the answer to GET /inboxes/auth
+    (which HTMX fetches every 30 seconds) and to POST /inboxes/auth/recheck, each swapped in for
+    this whole section. Every value is autoescaped; nothing here is marked safe. -#}
+<section id="domain-auth" hx-get="/inboxes/auth" hx-trigger="every 30s" hx-swap="outerHTML" aria-labelledby="domain-auth-heading">
+<h2 id="domain-auth-heading">Sending Domain authentication</h2>
+<p class="hint">Each Sending Domain needs an SPF record that includes _spf.google.com, a DKIM key at google._domainkey and one v=DMARC1 record at _dmarc. It is checked every day at 07:00 in the Sender's timezone (set on the Settings page; a change takes effect at the next engine start) and when you press Recheck; a failure, or no passing check in the last 26 hours, blocks cold sends from it.</p>
+{%- if auth_notice %}
+<p class="notice{% if auth_notice.role == 'alert' %} notice-refused{% endif %}" role="{{ auth_notice.role }}">{{ auth_notice.text }}</p>
+{%- endif %}
+{%- if auth_rows %}
+<table class="auth-table">
+<thead>
+<tr><th scope="col">Sending Domain</th><th scope="col">Last checked</th><th scope="col">SPF</th><th scope="col">DKIM</th><th scope="col">DMARC</th><th scope="col">Alignment</th><th scope="col">Cold sends</th><th scope="col">Recheck</th></tr>
+</thead>
+<tbody>
+{%- for row in auth_rows %}
+<tr><td>{{ row.domain }}</td><td>{{ row.last_checked }}</td>
+{%- for cell in row.items %}<td>{{ cell }}</td>{% endfor %}
+<td{% if row.blocked %} class="auth-blocked"{% endif %}>{{ row.cold_sends }}</td><td>
+<form method="post" hx-post="/inboxes/auth/recheck" hx-target="#domain-auth" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="sending_domain_id" value="{{ row.sending_domain_id }}">
+<button type="submit" class="secondary" aria-label="Recheck {{ row.domain }}">Recheck</button>
+</form></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="auth-empty">{{ no_domains }}</p>
+{%- endif %}
+</section>

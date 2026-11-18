@@ -227,6 +227,7 @@ def _main_registries() -> tuple[Triggers, JobTypes]:
         backup_schedule=lambda: DailyRun(time(10), "UTC"),
         restore_test_schedule=lambda: DailyRun(time(11), "UTC"),
         recovery_active=lambda: False,
+        domain_check_schedule=lambda: DailyRun(time(7), "UTC"),
     )
     return triggers, job_types
 

@@ -6,12 +6,12 @@
 - **They ship frozen.** The job types are exactly the ones the stories registered so far
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
-  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6, and
-  ``extract_lead``, Story 2.9,
+  ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
+  ``extract_lead``, Story 2.9, and ``check_domains``, Story 6.5,
   with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
-  ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
-  ``resolve_contact_markets`` has no trigger.
+  ``Every`` with ``active``, ``purge_page_text``'s daily ``Every`` at startup and
+  ``check_domains``'s daily schedule: the one-off ``resolve_contact_markets`` has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -364,6 +364,21 @@ class RecordingResearch:
         return 0
 
 
+class RecordingDomainChecks:
+    """Stands in for the ``sending`` service's ``DomainChecks``."""
+
+    def __init__(self) -> None:
+        self.checked: list[str] = []
+        self.daily = 0
+
+    def check_domain(self, sending_domain_id: str) -> None:
+        self.checked.append(sending_domain_id)
+
+    def queue_daily(self) -> int:
+        self.daily += 1
+        return 0
+
+
 class RecordingExtractions:
     """Stands in for the ``research`` service's ``SignalExtractions``; ``allowed`` is what
     ``extract_lead`` returns (``False``: the budget refused)."""
@@ -389,6 +404,7 @@ def registry(**overrides: object) -> JobTypes:
         "discovery": RecordingDiscovery,
         "research": RecordingResearch,
         "extractions": RecordingExtractions,
+        "domain_checks": RecordingDomainChecks,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -443,6 +459,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "render_pages",
         "purge_page_text",
         "extract_lead",
+        "check_domains",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -575,6 +592,60 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
     }
 
 
+def test_build_job_types_registers_check_domains_as_specified() -> None:
+    """Story 6.5: the interactive lane only, priority 60, 2 minutes, retry limit 3, group
+    Sending."""
+    found = registry().get("check_domains")
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (
+        Lane.INTERACTIVE,
+        frozenset({Lane.INTERACTIVE}),
+        60,
+        timedelta(minutes=2),
+        3,
+        JobGroup.SENDING,
+    )
+
+
+def test_check_domains_checks_the_payload_domain_or_queues_the_daily_checks() -> None:
+    checks = RecordingDomainChecks()
+    handler = registry(domain_checks=lambda: checks).get("check_domains").handler
+    payload = {"v": 1, "sending_domain_id": LEAD}
+
+    handler(Job(RUN, "check_domains", Lane.INTERACTIVE, payload, 1))
+    handler(Job(RUN, "check_domains", Lane.INTERACTIVE, {"v": 1}, 1))  # the trigger's tick
+
+    assert (checks.checked, checks.daily) == ([LEAD], 1)
+
+
+def test_a_registry_built_without_domain_checks_fails_a_check_domains_job() -> None:
+    """``domain_checks`` is optional, so unrelated callers stay as they were; a registry built
+    without it fails the job rather than checking nothing."""
+    services: dict[str, object] = {
+        "alerts": RecordingAlerts,
+        "backups": RecordingBackups,
+        "restore_tests": RecordingRestoreTests,
+        "recovery": RecordingRecovery,
+        "contact_markets": RecordingContactMarkets,
+        "crawls": RecordingCrawls,
+        "discovery": RecordingDiscovery,
+        "research": RecordingResearch,
+        "extractions": RecordingExtractions,
+    }
+    job_types = main.build_job_types(**services)  # type: ignore[arg-type]
+    handler = job_types.get("check_domains").handler
+
+    with pytest.raises(RuntimeError, match="without domain_checks"):
+        handler(Job(RUN, "check_domains", Lane.INTERACTIVE, {"v": 1}, 1))
+
+
 @pytest.mark.parametrize(("attempts", "may_retry"), [(1, True), (3, True), (4, False)])
 def test_enrich_lead_may_retry_until_its_last_allowed_attempt(
     attempts: int, may_retry: bool
@@ -671,22 +742,24 @@ def test_render_pages_calls_its_service_once_and_is_deferred_when_the_budget_ref
     assert (crawls.renders, crawls.calls) == ([(LEAD, RUN)], [])
 
 
-def test_build_triggers_registers_backup_restore_test_recovery_check_then_purge() -> None:
+def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -> None:
     job_types = registry()
     schedule = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
     restore_schedule = lambda: DailyRun(time(4, 15), "UTC")  # noqa: E731
     recovery_active = lambda: True  # noqa: E731
+    domain_schedule = lambda: DailyRun(time(7, 0), "Asia/Kolkata")  # noqa: E731
 
     triggers = main.build_triggers(
         job_types,
         backup_schedule=schedule,
         restore_test_schedule=restore_schedule,
         recovery_active=recovery_active,
+        domain_check_schedule=domain_schedule,
     )
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore, recovery, purge] = triggers.specs()
+    [spec, restore, recovery, purge, domains] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
@@ -698,11 +771,14 @@ def test_build_triggers_registers_backup_restore_test_recovery_check_then_purge(
     )
     assert (purge.trigger, purge.job_type) == (Trigger.PURGE_PAGE_TEXT, "purge_page_text")
     assert purge.schedule == Every(timedelta(days=1), at_startup=True)
+    assert (domains.trigger, domains.job_type) == (Trigger.CHECK_DOMAINS, "check_domains")
+    assert domains.schedule == DailyAt(domain_schedule, fallback=DailyRun(time(7, 0), "UTC"))
     built_again = main.build_triggers(
         job_types,
         backup_schedule=schedule,
         restore_test_schedule=restore_schedule,
         recovery_active=recovery_active,
+        domain_check_schedule=domain_schedule,
     )
     assert built_again is not triggers  # a new registry each time
 

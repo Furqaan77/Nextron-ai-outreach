@@ -280,6 +280,19 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "status": PiiClass.NONE,
         "created_at": PiiClass.NONE,
     },
+    # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
+    # time, about Nextron's own domains.
+    "domain_checks": {
+        "id": PiiClass.NONE,
+        "sending_domain_id": PiiClass.NONE,
+        "checked_at": PiiClass.NONE,
+        "spf_ok": PiiClass.NONE,
+        "dkim_ok": PiiClass.NONE,
+        "dmarc_ok": PiiClass.NONE,
+        "aligned_ok": PiiClass.NONE,
+        "passed": PiiClass.NONE,
+        "details": PiiClass.NONE,
+    },
     # Story 2.5. A page's visible text may quote a person, so it is redacted; the URLs are of an
     # organization's public pages, and the rest are IDs, codes, counts, hashes and times.
     "crawl_runs": {

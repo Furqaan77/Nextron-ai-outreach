@@ -1696,6 +1696,80 @@ causes are `operator`, `bounce_rate`, `policy_bounce`, `blocklist` and `spam_rat
 | `reconsent` | `auth_failed` | `active` | `reconsented` |
 | `remove` | every status except `removed` | `removed` | `operator_removed` |
 
+### Sending Domain authentication
+
+No cold email leaves from a Sending Domain that Gmail, Yahoo or Microsoft would reject or
+distrust (FR-64, NFR-4, NFR-20, Story 6.5). Each *listed* Sending Domain (one with at least one
+inbox that isn't `removed`, whatever its status, so DNS problems show before the inbox
+connects) is checked every day and on the Operator's Recheck; Story 6.2 also queues a check
+when an inbox connects (`DomainChecks.queue_check`, inside its connect transaction).
+
+**What a check reads.** Three TXT lookups through the `DnsPort`, outside any transaction: the
+domain itself (SPF), `google._domainkey.<domain>` (DKIM) and `_dmarc.<domain>` (DMARC). The
+rules live in `nextron/domain/domain_auth.py`:
+
+| Item | Passes when | Fails as |
+|---|---|---|
+| SPF | the one `v=spf1` record has a term `include:_spf.google.com` or `+include:_spf.google.com` (any case) | `spf_missing` (none), `spf_multiple` (two or more), `spf_no_google` (no direct include; nested includes and `redirect=` are never followed) |
+| DKIM | some record at `google._domainkey` has a `p=` tag whose value, without whitespace, isn't empty | `dkim_missing` (no record), `dkim_empty_key` |
+| DMARC | exactly one record's first tag is `v=DMARC1` (whitespace allowed around `=` and `;`) | `dmarc_missing` (none, NXDOMAIN or only `v=DMARC2`), `dmarc_multiple` |
+| Alignment (relaxed) | SPF or DKIM passes, and every From domain (the domain parts of the domain's listed inbox addresses) has the Sending Domain as its organizational domain (the vendored PSL) | `unauthenticated` (neither SPF nor DKIM passes), `from_domain_mismatch` |
+
+**The verdict.** Cold sends from a domain are allowed only when its newest check passed and is
+less than 26 hours old (`CHECK_WINDOW`; a check stamped in the future, after the clock was set
+back, doesn't count). The newest check is the last one recorded, whatever its stamp, so a
+future-stamped pass never hides a later failure. Otherwise they are blocked: "Cold sends
+blocked: not checked yet", "Cold sends blocked: SPF, DMARC failing" (the latest check's failed
+items) or "Cold sends blocked: no check passed in the last 26 hours".
+`queries.sending.domain_auth(sending_domain_id, now)` is the read the send gate (Story 6.9)
+uses; it returns `None` for an unknown id, a non-ULID or a domain with no listed inbox, and
+`None` means cold sends are blocked: the gate fails closed. `domain_auths(now)` lists every
+listed domain, and
+`health_issues(now)` raises one `domain_auth_failing` issue per blocked domain on the health
+panel, with a hint to fix the DNS and press Recheck. Nothing here pauses an inbox, changes its
+status or sends an ops alert: authentication is a send-gate predicate (AD-4).
+
+**A check that couldn't run records nothing.** A DNS timeout or an unreachable DNS server
+(`dns_timeout`, `dns_unavailable`) fails the job, which retries with backoff up to 3 times and
+then shows as a dead job on the health panel; any other DNS error fails it at once. The previous
+result stands until its 26 hours run out. A job whose domain has lost its last inbox meanwhile
+is skipped (`domain_check_skipped`): no query, nothing recorded.
+
+**The `domain_checks` table** (owner `sending`, migration `0028_6_5_domain_checks`) is
+append-only: one row per check that ran, with `checked_at`, the flags `spf_ok`, `dkim_ok`,
+`dmarc_ok`, `aligned_ok` and `passed` (a CHECK keeps `passed` the AND of the four) and
+`details`, each item's reason as compact JSON. Every column is PII class `none`.
+
+**The job and the trigger.** `check_domains` runs on the interactive lane only (priority 60,
+2 minutes, retry limit 3, group Sending), so a Recheck lands in seconds rather than behind
+crawls. The `check_domains` trigger fires daily at 07:00 in `sender_timezone` (UTC while it is
+unset); its tick runs `DomainChecks.queue_daily`, which queues one per-domain job (key
+`check_domains:<id>:tick`, payload `{"v": 1, "sending_domain_id": <id>}`) per listed domain,
+each retrying on its own. A Recheck while that domain's check is queued or running is absorbed
+by it. If a listed domain has no check since the latest 07:00 (or its newest check is stamped
+in the future), the engine checks once at start; a domain registered after start waits for the
+next 07:00 or a Recheck. A change to `sender_timezone` takes effect at the next engine start.
+
+**The DNS adapter** (`nextron/adapters/dns`, `DnspythonDns(meter=...)`, the only module that
+imports dnspython) builds its resolver from the system configuration on its first query, never
+when the app is built, and builds it again after a timeout or an unreachable server (the PC may
+have changed network or VPN). A resolver that can't be built yet (no network at logon, say) is
+the retryable `dns_unavailable`, so the job retries. Each query makes one `resolve(name, type,
+lifetime=5.0, search=False)`
+call on the absolute name and records one `api_usage` row (provider `dns`, operation `txt` or
+`mx`); a name that isn't a DNS name is refused (`dns_invalid_name`) before any query and
+records nothing. `DnsPort.mx` is there for Story 2.14's MX checks; Story 6.6 adds the DNSBL
+lookup.
+
+**On the dashboard.** The Sending Inboxes page (`/inboxes`) shows a "Sending Domain
+authentication" section under the inboxes, refreshed every 30 seconds from `GET /inboxes/auth`:
+one row per listed domain with Last checked (in UTC; the daily check runs at 07:00 in the
+Sender's timezone), SPF, DKIM, DMARC and Alignment (each `Pass`,
+`Fail: <reason>` or `Not checked yet`), the Cold sends verdict (highlighted when blocked) and a
+**Recheck** button. Recheck (`POST /inboxes/auth/recheck`, the one field `sending_domain_id`)
+queues the check and says "Recheck queued for <domain>; the result appears here when it
+lands."; a domain with no listed inbox gets "That Sending Domain has no inboxes to check.".
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
@@ -2030,6 +2104,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0025_2_9_signals_evidence` | `evidence` (shape checks and two triggers, `trg_evidence_no_delete` and `trg_evidence_immutable`), `signals`, `signal_evidence` (unique on `signal_id` and `evidence_id`) and `extraction_runs`, each with foreign keys and no cascade; adds `leads.hq_tz` and `leads.hq_evidence_id` in place (`add_column`) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
 | `0026_4_4_playbook_snapshots` | `playbook_snapshots` (unique `sha256`, version and hash checks), `ai_route_tuples` (foreign keys to `prompt_snapshots` and `playbook_snapshots`, two partial unique indexes, one row per tuple) and `playbook_checks` (trigger, problem and outcome checks); rebuilds `ai_route_activations` from 0014's exact table with a nullable `playbook_sha256` (a foreign key to `playbook_snapshots`, no cascade, and a check) (see [The Sales Playbook snapshot and the candidate tuples (Story 4.4)](#the-sales-playbook-snapshot-and-the-candidate-tuples-story-44)) | `playbook` |
 | `0027_2_6_contact_methods` | `page_contact_methods` (a foreign key to `crawled_pages` with no cascade, `ix_page_contact_methods_page_id`, unique on `page_id`, `method`, `signature` and `source`, method and source checks); adds `leads.contact_methods` in place (`add_column`) (see [Rendering and contact methods](#rendering-and-contact-methods)) | `research` |
+| `0028_6_5_domain_checks` | `domain_checks`: one append-only row per Sending Domain authentication check that ran (a foreign key to `sending_domains` with no cascade, `ix_domain_checks_sending_domain_id_checked_at`, and `ck_domain_checks_passed`: `passed` is the AND of the four item flags) (see [Sending Domain authentication](#sending-domain-authentication)) | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2113,9 +2188,10 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 `resolve_contact_markets` (bulk lane, priority 40, 30 minutes, retry limit 3,
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
 `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
-crawling](#website-crawling)), and `extract_lead` (see [Signals and
-Evidence](#signals-and-evidence)); the stories that add work add theirs, with a thin handler in
-`nextron/jobs/handlers.py`.
+crawling](#website-crawling)), `extract_lead` (see [Signals and
+Evidence](#signals-and-evidence)), and `check_domains` (see [Sending Domain
+authentication](#sending-domain-authentication)); the stories that add work add theirs, with a
+thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -2624,11 +2700,13 @@ table (`tests/unit/test_triggers.py` checks it against the spine). A trigger onl
 firing enqueues one job of the job type with the trigger's own name, with the key
 `<type>:global:tick` and the payload `{"v": 1}` (`JobQueue.enqueue_tick`); while that job is
 still `queued` or `running`, a firing adds nothing. The runner's lanes run it like any other
-job. So far four triggers are registered: `backup_db`, daily (see [Backups](#backups)),
+job. So far five triggers are registered: `backup_db`, daily (see [Backups](#backups)),
 `restore_test`, daily an hour later, whose job tests once per calendar month (see [The restore
 test](#the-restore-test)), `check_recovery`, every minute and at start, but only while
-recovery mode is on (see [Restore and recovery mode](#restore-and-recovery-mode)), and
-`purge_page_text`, every 24 hours and at start (see [Website crawling](#website-crawling)).
+recovery mode is on (see [Restore and recovery mode](#restore-and-recovery-mode)),
+`purge_page_text`, every 24 hours and at start (see [Website crawling](#website-crawling)), and
+`check_domains`, daily at 07:00 in `sender_timezone`, and once at start when a listed Sending
+Domain missed it (see [Sending Domain authentication](#sending-domain-authentication)).
 
 **Register a trigger** in `nextron.main.build_triggers`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), after its job type is registered in
@@ -3865,8 +3943,10 @@ view; the area isn't polled.
 `HealthIssue(kind, subject, text, detail=None)` values (`nextron/domain/health.py`), and
 registers it in `nextron.main.build_health_issues`, the only code that builds the registry
 (`tests/contracts/test_health_contracts.py`). The sources so far, in order: `jobqueue` (dead
-jobs), `budget` (AI spend and quotas) and `backups` (failed backups, then failed off-PC copies,
-then failed restore tests).
+jobs), `budget` (AI spend and quotas), `backups` (failed backups, then failed off-PC copies,
+then failed restore tests), `playbook` (the Sales Playbook's problem) and `sending` (each
+listed Sending Domain whose cold sends are blocked, `domain_auth_failing`, read at the engine's
+clock; see [Sending Domain authentication](#sending-domain-authentication)).
 
 ## Logs
 
@@ -3929,7 +4009,9 @@ uv run lint-imports                      # the import contracts on their own
   with the next scripted result or error),
   `InMemoryMail` for `MailPort`, `InMemoryBackupTarget` for `BackupTargetPort` (it stores
   plaintext and can be scripted to fail any call), `FakeTokenCodec` for `TokenCodecPort` (it
-  encodes under the kids it is given, kid 1 by default, and decodes only what it encoded), and
+  encodes under the kids it is given, kid 1 by default, and decodes only what it encoded),
+  `FakeDns` for `DnsPort` (TXT and MX answers scripted by name, `()` for any other name,
+  scripted `AdapterError`s, and every query recorded), and
   in `tests/fakes/google_oauth.py`
   `FakeGoogleOAuth` for
   `GoogleOAuthPort`, `FakeConsentListener` for `ConsentListener` and `FakeClientFiles` for
@@ -3962,7 +4044,8 @@ uv run lint-imports                      # the import contracts on their own
   on a `GoogleOAuthClient`'s first call), `nextron.adapters.telegram.default_http_client` (the
   Telegram Bot API, built on a `TelegramAlert`'s first send),
   `nextron.adapters.ai.default_http_client` (the Claude API, built on a `ClaudeGateway`'s first
-  `run`) and the `build` of every `ROLE_ADAPTERS` entry raise
+  `run`), `nextron.adapters.dns.default_resolver` (the system's DNS servers, built on a
+  `DnspythonDns`'s first query) and the `build` of every `ROLE_ADAPTERS` entry raise
   `LiveAdapterInTests`, so `KeyringSecrets("test")`, or `main.build_app` without injected
   secrets, fails. Inject a fake
   (or patch `main.KeyringSecrets`). A test that has neutralised what a constructor reaches may

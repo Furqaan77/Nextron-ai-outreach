@@ -5,7 +5,13 @@ cleared) or shows each refusal's message with the typed values kept; the crowdin
 empty state; malformed and repeated fields (400) and a POST without the CSRF token (403);
 ``no-store``; a label holding ``<script>`` renders escaped; the Settings page link; a
 ``removed`` inbox left out of the crowding count; the form's ``hx-sync="this:drop"``; and
-``main.build_app`` building ``Sending`` on its clock and environment."""
+``main.build_app`` building ``Sending`` on its clock and environment.
+
+Story 6.5's Sending Domain authentication section (``GET /inboxes/auth`` and ``POST
+/inboxes/auth/recheck``): the section on the page and its empty state, a listed domain never
+checked, the partial showing a newly recorded result, a Recheck queuing one job and saying so,
+an unlisted or unknown domain's alert, malformed forms (400), a POST without the CSRF token
+(403), and a hostile stored domain rendered escaped."""
 
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -21,10 +27,12 @@ from nextron.app.setup.api import Setup
 from nextron.bootstrap import load_bootstrap
 from nextron.db.models.base import new_id
 from nextron.db.uow import UnitOfWorkFactory
+from nextron.domain.domain_auth import REASON_TEXTS, AuthReason
 from nextron.domain.sending_inbox import CONNECTING_NOTE
 from tests.asgi import Reply
 from tests.dashboard import FORM, Dashboard, form
 from tests.fakes.clock import FrozenClock
+from tests.fakes.dns import FakeDns
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 
@@ -426,7 +434,8 @@ def test_a_hostile_label_renders_as_escaped_text(
 
     assert "<script>" not in reply.text and "<b hx-post" not in reply.text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in reply.text
-    assert reply.text.count('hx-post="') == 1  # only the form's own
+    # only the forms' own: the panel's and the domain's Recheck (Story 6.5)
+    assert reply.text.count('hx-post="') == 2
     assert panel_of(reply).rows[1][0] == hostile
 
 
@@ -485,3 +494,374 @@ def test_build_app_builds_sending_on_its_clock_and_environment(
 
     [clock] = clocks
     assert given == [(clock, {"env": "test"})]
+
+
+# Sending Domain authentication (Story 6.5) ------------------------------------------------------
+
+AUTH = "/inboxes/auth"
+RECHECK = "/inboxes/auth/recheck"
+AUTH_HEADINGS = [
+    "Sending Domain",
+    "Last checked",
+    "SPF",
+    "DKIM",
+    "DMARC",
+    "Alignment",
+    "Cold sends",
+    "Recheck",
+]
+AUTH_SECTION = {
+    "id": "domain-auth",
+    "hx-get": "/inboxes/auth",
+    "hx-trigger": "every 30s",
+    "hx-swap": "outerHTML",
+    "aria-labelledby": "domain-auth-heading",
+}
+RECHECK_FORM = {
+    "method": "post",
+    "hx-post": "/inboxes/auth/recheck",
+    "hx-target": "#domain-auth",
+    "hx-swap": "outerHTML",
+    "hx-sync": "this:drop",
+}
+DOMAIN = "nextron-ai.com"
+SPF_OK = "v=spf1 include:_spf.google.com ~all"
+DKIM_OK = "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA"
+DMARC_OK = "v=DMARC1; p=none"
+UNKNOWN_ID = "01JD3QZ8X5V9K2M7N4P6R8T0D9"
+
+
+class AuthSection(HTMLParser):
+    """The ``#domain-auth`` section: its attributes, heading, notices (role and text), other
+    paragraphs (class and text), table rows (cells), the cells marked ``auth-blocked`` and its
+    forms (attributes and inputs)."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sections: list[dict[str, str | None]] = []
+        self.heading = ""
+        self.notices: list[tuple[str | None, str]] = []
+        self.paragraphs: list[tuple[str, str]] = []
+        self.rows: list[list[str]] = []
+        self.blocked: list[str] = []
+        self.forms: list[tuple[dict[str, str | None], list[dict[str, str | None]]]] = []
+        self._inside = False
+        self._text: list[str] | None = None
+        self._kind: tuple[str, str | None] | None = None
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._cell_blocked = False
+        self._heading: list[str] | None = None
+        self.feed(html)
+        self.close()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        found = dict(attrs)
+        if tag == "section" and found.get("id") == "domain-auth":
+            self.sections.append(found)
+            self._inside = True
+            return
+        if not self._inside:
+            return
+        if tag == "h2":
+            self._heading = []
+        elif tag == "form":
+            self.forms.append((found, []))
+        elif tag == "input" and self.forms:
+            self.forms[-1][1].append(found)
+        elif tag == "tr":
+            self._row = []
+        elif tag in ("td", "th"):
+            self._cell = []
+            self._cell_blocked = found.get("class") == "auth-blocked"
+        elif tag == "p":
+            self._text = []
+            self._kind = (found.get("class") or "", found.get("role"))
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._inside:
+            return
+        if tag == "section":
+            self._inside = False
+        elif tag == "h2" and self._heading is not None:
+            self.heading = "".join(self._heading)
+            self._heading = None
+        elif tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+        elif tag in ("td", "th") and self._cell is not None and self._row is not None:
+            text = " ".join(" ".join(self._cell).split())
+            self._row.append(text)
+            if self._cell_blocked:
+                self.blocked.append(text)
+            self._cell = None
+        elif tag == "p" and self._text is not None and self._kind is not None:
+            text = " ".join("".join(self._text).split())
+            css, role = self._kind
+            if "notice" in css.split():
+                self.notices.append((role, text))
+            else:
+                self.paragraphs.append((css, text))
+            self._text = None
+            self._kind = None
+
+    def handle_data(self, data: str) -> None:
+        if not self._inside:
+            return
+        if self._heading is not None:
+            self._heading.append(data)
+        if self._cell is not None:
+            self._cell.append(data)
+        elif self._text is not None:
+            self._text.append(data)
+
+
+def auth_of(reply: Reply) -> AuthSection:
+    found = AuthSection(reply.text)
+    assert len(found.sections) == 1
+    assert found.sections[0] == AUTH_SECTION
+    assert found.heading == "Sending Domain authentication"
+    return found
+
+
+def get_auth(dashboard: Dashboard, cookie: bytes) -> Reply:
+    reply = dashboard.get(AUTH, cookie=cookie)
+    assert reply.status == 200, reply
+    assert reply.header(b"content-type") == b"text/html; charset=utf-8"
+    assert reply.header(b"cache-control") == b"no-store"  # it carries the CSRF token
+    return reply
+
+
+def recheck(dashboard: Dashboard, session: tuple[bytes, str], body: bytes) -> Reply:
+    cookie, token = session
+    return dashboard.post(
+        RECHECK, cookie=cookie, token=token, headers=[(b"content-type", FORM)], body=body
+    )
+
+
+def domain_id(units: UnitOfWorkFactory) -> str:
+    with units.open(read_only=True):
+        [view] = sending_queries.inboxes()
+    return view.sending_domain_id
+
+
+def check_jobs(db_engine: Engine) -> list[tuple[str, str, str]]:
+    with db_engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT type, lane, idempotency_key FROM jobs WHERE type = 'check_domains'"
+        ).all()
+    return [tuple(row) for row in rows]  # type: ignore[misc]
+
+
+def recorded_check(dashboard: Dashboard, units: UnitOfWorkFactory, sending_domain_id: str) -> None:
+    with units.open():
+        dashboard.domain_checks.check_domain(sending_domain_id)
+
+
+def test_the_page_shows_the_authentication_section_after_the_panel_with_its_empty_state(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = get(dashboard, session[0])
+    section = auth_of(reply)
+
+    assert reply.text.index('id="inboxes-panel"') < reply.text.index('id="domain-auth"')
+    assert ("auth-empty", "No Sending Domains to check yet.") in section.paragraphs
+    assert (section.rows, section.forms, section.notices) == ([], [], [])
+    assert auth_of(get_auth(dashboard, session[0])).paragraphs == section.paragraphs
+
+
+def test_a_listed_domain_never_checked_is_blocked_with_a_recheck_form(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(ready, session, FIRST)
+    found_id = domain_id(units)
+
+    reply = get_auth(ready, session[0])
+    section = auth_of(reply)
+
+    assert "<title>" not in reply.text  # the section alone, swapped in by HTMX
+    assert section.rows == [
+        AUTH_HEADINGS,
+        [DOMAIN, *["Not checked yet"] * 5, "Cold sends blocked: not checked yet", "Recheck"],
+    ]
+    assert section.blocked == ["Cold sends blocked: not checked yet"]
+    [(attrs, inputs)] = section.forms
+    assert attrs == RECHECK_FORM
+    assert inputs == [
+        {"type": "hidden", "name": "csrf_token", "value": session[1]},
+        {"type": "hidden", "name": "sending_domain_id", "value": found_id},
+    ]
+    assert f'aria-label="Recheck {DOMAIN}"' in reply.text
+
+
+def test_the_section_shows_a_newly_recorded_result(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(ready, session, FIRST)
+    found_id = domain_id(units)
+    dns = ready.dns
+    assert isinstance(dns, FakeDns)
+    dns.txt_answers.update(
+        {
+            DOMAIN: [SPF_OK],
+            f"google._domainkey.{DOMAIN}": [DKIM_OK],
+            f"_dmarc.{DOMAIN}": [DMARC_OK],
+        }
+    )
+    recorded_check(ready, units, found_id)
+
+    passing = auth_of(get_auth(ready, session[0]))
+
+    assert passing.rows[1] == [
+        DOMAIN,
+        "2026-11-17 09:00 UTC",
+        "Pass",
+        "Pass",
+        "Pass",
+        "Pass",
+        "Cold sends allowed",
+        "Recheck",
+    ]
+    assert passing.blocked == []
+    ready.clock.set(datetime(2026, 11, 17, 10, 30, tzinfo=UTC))
+    dns.txt_answers[DOMAIN] = ["v=spf1 include:_spf.example.net -all"]
+    dns.txt_answers[f"_dmarc.{DOMAIN}"] = []
+    recorded_check(ready, units, found_id)
+
+    failing = auth_of(get(ready, session[0]))  # the page shows it too
+
+    assert failing.rows[1] == [
+        DOMAIN,
+        "2026-11-17 10:30 UTC",
+        f"Fail: {REASON_TEXTS[AuthReason.SPF_NO_GOOGLE]}",
+        "Pass",
+        f"Fail: {REASON_TEXTS[AuthReason.DMARC_MISSING]}",
+        "Pass",
+        "Cold sends blocked: SPF, DMARC failing",
+        "Recheck",
+    ]
+    assert failing.blocked == ["Cold sends blocked: SPF, DMARC failing"]
+
+
+def test_a_recheck_queues_one_job_and_says_so_each_time(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    register(ready, session, FIRST)
+    found_id = domain_id(units)
+    body = form(csrf_token=session[1], sending_domain_id=found_id)
+    notice = ("status", f"Recheck queued for {DOMAIN}; the result appears here when it lands.")
+
+    first = recheck(ready, session, body)
+    second = recheck(ready, session, body)
+
+    for reply in (first, second):
+        assert reply.status == 200, reply
+        assert "<title>" not in reply.text
+        assert auth_of(reply).notices == [notice]
+    assert check_jobs(db_engine) == [
+        ("check_domains", "interactive", f"check_domains:{found_id}:tick")
+    ]
+
+
+def test_a_recheck_of_an_unlisted_or_unknown_domain_alerts_and_queues_nothing(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    register(ready, session, FIRST)
+    found_id = domain_id(units)
+    with db_engine.connect() as connection:
+        connection.exec_driver_sql("UPDATE sending_inboxes SET status = 'removed'")
+        connection.commit()
+    alert = ("alert", "That Sending Domain has no inboxes to check.")
+
+    for target in (found_id, UNKNOWN_ID):
+        reply = recheck(ready, session, form(csrf_token=session[1], sending_domain_id=target))
+
+        assert reply.status == 200, reply
+        section = auth_of(reply)
+        assert section.notices == [alert]
+        assert ("auth-empty", "No Sending Domains to check yet.") in section.paragraphs
+    assert check_jobs(db_engine) == []
+
+
+@pytest.mark.parametrize(
+    ("fields", "why"),
+    [
+        ({}, "nothing"),
+        ({"sending_domain_id": "not-a-ulid"}, "not a ULID"),
+        ({"sending_domain_id": UNKNOWN_ID, "domain": DOMAIN}, "an extra field"),
+        ({"domain": DOMAIN}, "the wrong field"),
+    ],
+)
+def test_a_recheck_form_without_exactly_one_ulid_is_malformed(
+    ready: Dashboard,
+    session: tuple[bytes, str],
+    db_engine: Engine,
+    fields: dict[str, str],
+    why: str,
+) -> None:
+    reply = recheck(ready, session, form(csrf_token=session[1], **fields))
+
+    assert reply.status == 400, why
+    assert reply.body == MALFORMED
+    assert check_jobs(db_engine) == []
+
+
+def test_a_repeated_domain_id_is_malformed(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    register(ready, session, FIRST)
+    found_id = domain_id(units)
+    body = form(csrf_token=session[1], sending_domain_id=found_id) + (
+        f"&sending_domain_id={found_id}".encode()
+    )
+
+    reply = recheck(ready, session, body)
+
+    assert reply.status == 400
+    assert reply.body == MALFORMED
+    assert check_jobs(db_engine) == []
+
+
+def test_a_recheck_without_the_csrf_token_is_refused_with_403(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    register(ready, session, FIRST)
+    reply = ready.post(
+        RECHECK,
+        cookie=session[0],
+        headers=[(b"content-type", FORM)],
+        body=form(sending_domain_id=domain_id(units)),
+    )
+
+    assert reply.status == 403
+    assert reply.body == REFUSED
+    assert check_jobs(db_engine) == []
+
+
+def test_the_section_needs_a_session(dashboard: Dashboard) -> None:
+    assert dashboard.get(AUTH).status == 401
+    assert dashboard.post(RECHECK, headers=[(b"content-type", FORM)]).status == 401
+
+
+def test_a_hostile_stored_domain_renders_as_escaped_text(
+    dashboard: Dashboard, session: tuple[bytes, str], db_engine: Engine
+) -> None:
+    hostile = '<script>alert(1)</script>"><b hx-post="/x">.com'
+    stored_id = new_id()
+    with db_engine.connect() as connection:  # past the app's checks, as a corrupted row would be
+        connection.exec_driver_sql(
+            "INSERT INTO sending_domains (id, domain, created_at) VALUES (?, ?, ?)",
+            (stored_id, hostile, "2026-11-17T09:00:00.000000Z"),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
+            "status, created_at) VALUES (?, 'a@b.example', 'Main', ?, 'F', 'active', ?)",
+            (new_id(), stored_id, "2026-11-17T09:00:00.000000Z"),
+        )
+        connection.commit()
+
+    reply = get_auth(dashboard, session[0])
+
+    assert "<script>" not in reply.text and "<b hx-post" not in reply.text
+    assert reply.text.count('hx-post="') == 1  # only the Recheck form's own
+    assert auth_of(reply).rows[1][0] == hostile
