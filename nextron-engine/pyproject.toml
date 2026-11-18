@@ -299,7 +299,8 @@ allow_indirect_imports = true
 # Group 5. Sources are every package except nextron.adapters.ai: the non-adapter packages, then
 # each non-AI adapter subpackage by name (ats, backup_target, clock, companies_house, crawler,
 # crypto (the backup format and the unsubscribe token codec, TokenCodec), dns, email_syntax,
-# google_oauth, hunter, prospeo, renderer, secrets, sink and telegram so far).
+# google_oauth, hunter, prospeo, renderer, secrets, sink, telegram and unsubscribe (the
+# unsubscribe Worker's pending list, WorkerUnsubscribe) so far).
 # Add each new adapter here; test_contract_coverage.py fails until you do.
 [[tool.importlinter.contracts]]
 id = "c5-anthropic-only-in-ai"
@@ -333,6 +334,7 @@ source_modules = [
     "nextron.adapters.secrets",
     "nextron.adapters.sink",
     "nextron.adapters.telegram",
+    "nextron.adapters.unsubscribe",
 ]
 forbidden_modules = ["anthropic"]
 allow_indirect_imports = true

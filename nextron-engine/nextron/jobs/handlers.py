@@ -84,6 +84,11 @@ handler runs in.
   ``scoring`` service's ``LeadScores``) and returns ``None``.
 - ``recompute_tiers(scores)`` (Story 2.15): calls ``scores().recompute_tiers()`` once and returns
   ``None``; the payload is a trigger's tick, ``{"v": 1}``.
+- ``poll_unsubscribes(polls)`` (Story 3.11): calls ``polls().poll()`` once (the ``compliance``
+  service's ``UnsubscribePolls``; ``nextron.main`` passes ``lambda: unsubscribes``) and returns
+  ``None``. The payload is a trigger's tick, ``{"v": 1}``. It is never budget-gated. A
+  retryable ``AdapterError`` (the Worker unavailable) is retried by the runner; any other error
+  fails the job, and nothing is applied either way.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -467,3 +472,19 @@ def recompute_tiers(scores: Callable[[], ScoringLeads]) -> Handler:
         scores().recompute_tiers()
 
     return handle_recompute_tiers
+
+
+class PollingUnsubscribes(Protocol):
+    """What ``poll_unsubscribes`` needs of the ``compliance`` service's ``UnsubscribePolls``."""
+
+    def poll(self) -> object: ...
+
+
+def poll_unsubscribes(polls: Callable[[], PollingUnsubscribes]) -> Handler:
+    """The ``poll_unsubscribes`` job's handler: poll the unsubscribe Worker through
+    ``polls()``."""
+
+    def handle_poll_unsubscribes(job: Job) -> None:
+        polls().poll()
+
+    return handle_poll_unsubscribes

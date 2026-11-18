@@ -28,6 +28,7 @@ from nextron.db.models.compliance import (
     ErasureReceiptRecord,
     ErasureReceiptStoreRecord,
     SuppressionEntryRecord,
+    UnsubRequestRecord,
     UnsubTokenRecord,
 )
 from nextron.db.models.crawl import (
@@ -130,6 +131,7 @@ __all__ = [
     "StepBriefRecord",
     "SuppressionEntryRecord",
     "Ulid",
+    "UnsubRequestRecord",
     "UnsubTokenRecord",
     "UtcDateTime",
     "VariantCounterRecord",

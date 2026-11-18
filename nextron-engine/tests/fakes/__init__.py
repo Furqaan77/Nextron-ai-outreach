@@ -12,6 +12,9 @@ given (kid 1 by default) and decodes only the tokens it encoded.
 ``ScriptedRenderer`` (``renderer``) fakes ``RendererPort`` the same way, by URL;
 ``ScriptedRegistry`` (``registry``) fakes ``RegistryPort`` by company number and search name,
 recording every call;
+``ScriptedUnsubscribe`` (``unsubscribe``) fakes ``UnsubscribePort``: it answers each
+``fetch_pending`` with the next scripted ``PendingFetch`` or ``AdapterError`` (the last one
+repeats) and records every host;
 ``nextron.adapters.renderer`` itself is tested on the fake Playwright objects of ``browser``.
 ``FakeDns`` (``dns``) fakes ``DnsPort``: it answers TXT and MX queries from scripts keyed by
 name (``()`` for a name not scripted), raises the scripted ``AdapterError`` for a name in
@@ -47,6 +50,7 @@ from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.sink import SinkFilesPort
 from nextron.ports.token_codec import TokenCodecPort
+from nextron.ports.unsubscribe import UnsubscribePort
 from nextron.ports.usage_meter import UsageMeterPort
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
@@ -64,6 +68,7 @@ from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.sink import InMemorySinkFiles
 from tests.fakes.token_codec import FakeTokenCodec
+from tests.fakes.unsubscribe import ScriptedUnsubscribe
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
@@ -88,5 +93,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         SinkFilesPort: InMemorySinkFiles,
         EmailFinderPort: ScriptedFinder,
         DomainSearchPort: ScriptedDomainSearch,
+        UnsubscribePort: ScriptedUnsubscribe,
     }
 )

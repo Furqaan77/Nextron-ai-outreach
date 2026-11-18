@@ -33,9 +33,11 @@ request builder and prices; live constructor ``default_http_client``), ``crawler
 Companies House API over ``httpx2``, self rate-limited to 600 requests per 5 minutes; live
 constructor ``default_http_client``), ``hunter`` (``HunterFinder``, the ``EmailFinderPort`` and
 the ``DomainSearchPort``: Hunter's Email Finder and Domain Search over ``httpx2``; live
-constructor ``default_http_client``) and ``prospeo`` (``ProspeoFinder``, the
-``EmailFinderPort``: Prospeo's Enrich Person over ``httpx2``; live constructor
-``default_http_client``).
+constructor ``default_http_client``), ``prospeo`` (``ProspeoFinder``, the ``EmailFinderPort``:
+Prospeo's Enrich Person over ``httpx2``; live constructor ``default_http_client``) and
+``unsubscribe`` (``WorkerUnsubscribe``, the ``UnsubscribePort``: the unsubscribe Worker's
+pending list, ``GET https://<host>/pending`` with the bearer secret over ``httpx2``; live
+constructor ``default_http_client``).
 
 Every adapter whose ``__init__`` takes an ``http`` client lets only ``AdapterError`` out of its
 port calls, whatever the transport raises or answers, and never carries a secret into an error.

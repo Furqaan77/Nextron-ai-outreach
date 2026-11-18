@@ -13,6 +13,11 @@ current unit of work, read-only ones included.
   normalised, ``identity.normalize_email``) is exactly ``email``, oldest first; empty for a
   value that isn't a ``str``. ``Compliance.suppress`` reads it for an address the Operator
   typed.
+- ``contacts_with_address_hash(address_hash)`` (Story 3.11): the Contacts whose stored ``email``
+  hashes (``key_hash("address", email)``) to ``address_hash``, plus the erased Contacts whose
+  stored ``email`` (the tombstone: the address hash itself) is ``address_hash``, oldest first;
+  empty for a value that isn't a 64-character lowercase hex hash. It scans every Contact with
+  an ``email``: no column holds an address hash. ``Compliance.unsubscribe_by_token`` reads it.
 - ``provenance(contact_id)``: the Contact's Provenance Records as ``StoredProvenance`` rows, by
   ``retrieved_at``, then ``id``; empty for an unknown Contact.
 - ``lead_provenance(lead_id)`` (Story 2.4): the Provenance Records of every Contact of the
@@ -133,8 +138,9 @@ from nextron.db.repos.research.profile import StoredLegalForm
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.contact_export import address_history, excerpts, mention_terms, mentions
-from nextron.domain.contactability import KeyKind, SuppressionKey, person_keys
+from nextron.domain.contactability import KeyKind, SuppressionKey, is_hash, key_hash, person_keys
 from nextron.domain.extraction import ROUTE as SIGNALS_ROUTE
+from nextron.domain.identity import IdentityError
 from nextron.domain.ids import is_ulid
 from nextron.domain.segments import SignalClass
 from nextron.domain.signals import age_days, is_live
@@ -158,6 +164,7 @@ __all__ = [
     "contact",
     "contact_methods",
     "contacts",
+    "contacts_with_address_hash",
     "contacts_with_email",
     "crawl_run",
     "crawled_pages",
@@ -230,6 +237,29 @@ def contacts_with_email(email: str) -> tuple[StoredContact, ...]:
     if not isinstance(email, str):
         return ()
     return contacts_repo.with_email(email)
+
+
+def _holds_address(contact: StoredContact, address_hash: str) -> bool:
+    """Whether the Contact's stored ``email`` is the address ``address_hash`` hashes."""
+    if contact.email is None:
+        return False
+    if contact.erased_at is not None:  # a tombstone holds the address hash itself
+        return contact.email == address_hash
+    try:
+        return key_hash(KeyKind.ADDRESS, contact.email) == address_hash
+    except (IdentityError, TypeError, ValueError):  # a stored value that no longer normalises
+        return False
+
+
+def contacts_with_address_hash(address_hash: str) -> tuple[StoredContact, ...]:
+    """The Contacts holding the address ``address_hash`` hashes, oldest first."""
+    if not is_hash(address_hash):
+        return ()
+    return tuple(
+        contact
+        for contact in contacts_repo.with_any_email()
+        if _holds_address(contact, address_hash)
+    )
 
 
 def provenance(contact_id: str) -> tuple[StoredProvenance, ...]:

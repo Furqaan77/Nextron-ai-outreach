@@ -517,10 +517,14 @@ Not relevant? Reply 'no' and I won't contact you again.
 Advertisement
 ```
 
-**The unsubscribe token key id** (`unsub_active_kid`, "Unsubscribe token key id", the only
-setting in Sending so far; Story 3.8) is an integer from 1 to 255, 1 by default: the key id new
-unsubscribe tokens are encoded under. Its keys live in Credential Manager; see [Unsubscribe
+**The unsubscribe token key id** (`unsub_active_kid`, "Unsubscribe token key id", in Sending;
+Story 3.8) is an integer from 1 to 255, 1 by default: the key id new unsubscribe tokens are
+encoded under. Its keys live in Credential Manager; see [Unsubscribe
 tokens](#unsubscribe-tokens) for how to change it.
+
+**The unsubscribe Worker host** (`unsub_worker_host`, "Unsub Worker host", in Sending; Story
+3.11) is blank by default, which turns polling off. Set it to the Worker's `u.` host, such as
+`u.example.com`; see [Polling unsubscribe requests](#polling-unsubscribe-requests).
 
 ## Seeds
 
@@ -2108,6 +2112,60 @@ stops before wrangler starts. Once 3.9 is done, from `workers/unsubscribe/`:
 with a fresh random value (or remove it from the dashboard). For a new token key id, add its
 `K_EDGE_<kid>` before switching `unsub_active_kid` (see "Rotating the keys" above).
 
+## Polling unsubscribe requests
+
+A prospect's one-click unsubscribe lands in the Cloudflare Worker's KV (Story 3.10). The engine
+brings it back to the PC and adds it to the Suppression List (FR-70, FR-41, FR-50, AD-10,
+AD-15, AD-16; Story 3.11). Requests made while the PC was off still land (the Worker keeps each
+for 30 days), and none is applied twice.
+
+**Setting it up:**
+
+1. Settings, Sending: set **Unsub Worker host** to the Worker's host, such as `u.example.com`
+   (lowercase, starting with `u.`, at least three labels, no scheme, port or path, never on
+   `workers.dev`). One host per environment is enough: every Sending Domain's `u.` route serves
+   the same Worker and KV. Blank means polling is off: no request is made.
+2. Credentials: set the **Unsubscribe Endpoint bearer secret** (`unsubscribe_bearer`, keyring
+   entry `unsub/bearer`), the same value as the Worker's bearer secret. It must be at least 43
+   visible characters (32 random bytes as base64url); a shorter one is refused as
+   `unsub_bearer_invalid` with no request.
+3. The active kid's unsubscribe token keys must be set (see [Unsubscribe
+   tokens](#unsubscribe-tokens)): the engine decodes each token with `k_tok`.
+
+**What the poll does.** The `poll_unsubscribes` job (realtime lane only; priority 80; 5 minutes;
+retry limit 3; health group "Unsubscribe Endpoint poll") fires at every engine start and then
+every 5 minutes in `prod` (30 minutes in `dev` and `test`). The budget never blocks it. Each
+poll, in `UnsubscribePolls.poll` (`nextron/app/compliance/unsub_poll.py`):
+
+1. reads `unsub_worker_host`; blank logs `unsub_poll_skipped` and stops;
+2. makes one `GET https://<host>/pending` with `Authorization: Bearer <secret>`, through
+   `WorkerUnsubscribe` (`nextron/adapters/unsubscribe`), outside any transaction, never
+   following a redirect, metered as provider `unsub_worker`, operation `kv_list`. The answer is
+   `{"format": "nextron-unsub-pending/1", "entries": [{"token", "received_at", ...}]}`; an entry
+   without a text token or an ISO 8601 `received_at` with an offset is counted as malformed.
+   Errors: `unsub_unavailable` (429, a 5xx or a transport failure) is retried;
+   `unsub_unauthorized` (401/403), `unsub_refused` (a bad host or any other status),
+   `unsub_bad_response` (over 10 MB, not JSON, the wrong format) and `unsub_bearer_invalid`
+   aren't. Nothing is applied when the fetch fails;
+3. in **one transaction**, applies every entry through `Compliance.unsubscribe_by_token(token,
+   "one_click", received_at)`: a token already recorded in `unsub_requests` (by its
+   `token_hash`) is a duplicate; a token that doesn't decode is invalid; otherwise the address
+   key is suppressed, then every Contact holding that address (found by hashing the stored
+   addresses; an erased Contact by its tombstone) is suppressed with source `one_click` and its
+   Lead closed `lost`, and one `unsub_requests` row is written (id, `token_hash`, `received_at`,
+   `processed_at`). The request id is the suppression entries' `cause_ref`. If anything fails,
+   nothing is kept and the next poll applies it all again, once;
+4. logs `unsub_poll_applied` (`fetched`, `applied`, `duplicate`, `invalid`, `malformed`).
+
+**Invalid tokens** (and malformed entries) are not recorded, so each poll tries them again while
+the Worker keeps them: a token whose key was missing lands once the key is restored. They log a
+WARNING `unsub_tokens_invalid` (the count) on every poll and raise one dashboard notification a
+day ("<n> unsubscribe requests from the Worker could not be decoded and were not applied; check
+the unsubscribe token keys"). No token, address, address hash, bearer or host is logged,
+stored, notified or put in a job payload; `unsub_requests` holds only the token's hash.
+
+Mailto opt-outs (Epic 7) call the same `unsubscribe_by_token` with source `mailto`.
+
 ## Eligibility
 
 Eligibility (FR-18, FR-2, FR-63, AD-16, NFR-5, NFR-7, Story 3.6) answers whether a Contact may
@@ -2927,6 +2985,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0040_2_13_email_domains` | creates `email_domains` (one row per mail domain: its address `pattern`, `pattern_source`, the example Evidence ids and `pattern_learned_at`, and `domain_search_at`), adds `contacts.email_search_tried`, `email_search_outcome` and `email_search_at`, and `crawled_pages.mailto` (the page's visible `mailto:` addresses as a JSON list), all in place, and creates `trg_contacts_tombstone` again with the three `email_search_*` columns fixed on an erased Contact (see [Finding email addresses](#finding-email-addresses)) | `research` |
 | `0041_2_15_scoring` | adds to `leads`, in place with no check, the nullable score group: `fit_score`, `signal_score` and `lead_score`, `tier` (1), `tier_computed_at`, `score_segment_version`, `score_factors`, `disqualified_rule` (31) and `disqualified_evidence` (see [Scores and the Lead Tier](#scores-and-the-lead-tier)) | `scoring` |
 | `0042_4_9_drafts` | `drafts` (a foreign key to `enrollments` with no cascade, nullable; kind, step slot, status and range checks; the partial unique index `uq_drafts_enrollment_step` on `enrollment_id` and `step_no` for `step` and `recontact`; indexes on `due_at` and `enrollment_id`), its content group owned by `drafting` and its status group by `approval` (see [Draft slots and due times](#draft-slots-and-due-times)) | `drafting` |
+| `0043_3_11_unsub_requests` | `unsub_requests`: one row per applied unsubscribe request, holding only its token's hash (`ck_unsub_requests_token_hash`, the unique index `uq_unsub_requests_token_hash`, and three triggers refusing a delete, any update and a reused id or hash) (see [Polling unsubscribe requests](#polling-unsubscribe-requests)) | `compliance` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

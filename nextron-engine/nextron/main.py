@@ -148,14 +148,14 @@ files) outside ``prod`` and ``None`` in ``prod``; the registry reaches it throug
 
 **The erasure ledger (Story 3.16).** ``build_app`` builds one ``LedgerFile(<backup
 dir>\\erasure-ledger.jsonl)`` (``nextron.app.compliance.ledger``), one ``LedgerAppender(file,
-notify)``, the one ``Compliance(clock, ledger=appender)`` (so the panel, the erasure and every
-other writer through it append their lines after each commit) and one ``ErasureLedger(clock,
-file, compliance, erasures)``. ``build_recovery_steps(reapply=ledger.reapply)`` registers the
-``reapply_erasure_ledger`` startup step; the first startup step, ``sync_erasure_ledger(units,
-ledger)``, runs ``ledger.sync()`` in a unit of work of its own (inside a fresh
-``contextvars.Context()``) after the recovery pass; ``build_health_issues(..., ledger=<path>)``
-registers the ``compliance`` source; and the doctor registry checks the file
-(``erasure_ledger``).
+notify)``, the one ``Compliance(clock, codec=TokenCodec(secrets), ledger=appender)`` (so the
+panel, the erasure, the unsubscribe poll and every other writer through it append their lines
+after each commit) and one ``ErasureLedger(clock, file, compliance, erasures)``.
+``build_recovery_steps(reapply=ledger.reapply)`` registers the ``reapply_erasure_ledger``
+startup step; the first startup step, ``sync_erasure_ledger(units, ledger)``, runs
+``ledger.sync()`` in a unit of work of its own (inside a fresh ``contextvars.Context()``) after
+the recovery pass; ``build_health_issues(..., ledger=<path>)`` registers the ``compliance``
+source; and the doctor registry checks the file (``erasure_ledger``).
 
 **The CSV import (Story 2.3).** ``build_app`` builds one ``research = Research(clock)`` and one
 ``LeadImports(clock, discovery, research, EmailValidatorSyntax())``, on the same ``discovery =
@@ -190,7 +190,7 @@ the registry cycle.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
 contact_markets, crawls, discovery, research, extractions, primary, test_runs,
-domain_checks=...)`` is the job type registry: the only
+domain_checks=..., unsubscribes=...)`` is the job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -229,11 +229,14 @@ limit 3, ``handlers.find_contact_email(finding)``, ``enrichment``) after it, and
 ``finding`` left out its handler raises a ``RuntimeError``; Story 2.15's ``score_lead`` (bulk by
 default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score_lead(scores)``,
 ``enrichment``) and ``recompute_tiers`` (bulk only, priority 20, 10 minutes, retry limit 2,
-``handlers.recompute_tiers(scores)``, ``enrichment``) are registered last.
-``domain_checks`` is the one optional service: it defaults to a provider that raises ``RuntimeError`` when called, so a registry built
-without it (only tests do) fails a ``check_domains`` job; ``build_app`` always passes the real
-one. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
-job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
+``handlers.recompute_tiers(scores)``, ``enrichment``) after them, and Story 3.11's
+``poll_unsubscribes`` (the realtime lane only, priority 80, ``max_runtime`` 5 minutes, retry
+limit 3, ``handlers.poll_unsubscribes(unsubscribes)``, ``unsubscribe_poll``; never budget-gated)
+is registered last. ``domain_checks`` and ``unsubscribes`` are optional services: each defaults
+to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
+tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
+``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
+dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
 **The website crawl (Story 2.5, AD-9, AD-18).** ``build_app`` builds one
 ``HttpCrawler(meter=meter)`` (``nextron.adapters.crawler``) unless a ``crawler=`` is injected;
@@ -319,10 +322,10 @@ dashboard notice once a month. The meter needs the hook, the hook needs ``budget
 Building the app builds no adapter or HTTP client and records nothing.
 
 **Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule, restore_test_schedule,
-recovery_active, domain_check_schedule)`` is the trigger registry: the only code that constructs
-``Triggers`` or calls
-``register_trigger``. Register each AD-10 ``Trigger`` there, after its job type (a firing
-enqueues the job type with the trigger's own name), then it is frozen. So far: ``backup_db``
+recovery_active, domain_check_schedule, unsub_poll_period=POLL_PERIOD_OTHER)`` is the trigger
+registry: the only code that constructs ``Triggers`` or calls ``register_trigger``. Register
+each AD-10 ``Trigger`` there, after its job type (a firing enqueues the job type with the
+trigger's own name), then it is frozen. So far: ``backup_db``
 (Story 1.16), a ``DailyAt(backup_schedule, fallback=DailyRun(DEFAULT_BACKUP_TIME, "UTC"))``, then
 ``restore_test`` (Story 1.18), a ``DailyAt(restore_test_schedule,
 fallback=DailyRun(DEFAULT_RESTORE_TEST_TIME, "UTC"))``, then ``check_recovery`` (Story 1.19), an
@@ -332,7 +335,9 @@ made once recovery is over, then ``purge_page_text`` (Story 2.5), ``Every(1 day,
 at_startup=True)``: the PC is not on at fixed times, so it also runs at every start, then
 ``check_domains`` (Story 6.5), a ``DailyAt(domain_check_schedule,
 fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``, then ``recompute_tiers`` (Story 2.15),
-``Every(1 day, at_startup=True)``, like ``purge_page_text``.
+``Every(1 day, at_startup=True)``, like ``purge_page_text``, then ``poll_unsubscribes`` (Story
+3.11), an ``Every(unsub_poll_period, at_startup=True)``: ``build_app`` passes
+``poll_period(config.env)``, 5 minutes in ``prod`` and 30 elsewhere.
 ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
@@ -478,10 +483,18 @@ domain_checks=...)``) for the Sending Inboxes page's Recheck. Story 6.2 calls
 ``DomainChecks.queue_check`` inside its connect transaction.
 
 **The Suppression List panel (Story 3.5; AD-16, FR-50, FR-41).** ``build_app`` builds one
-``Compliance(clock)`` (``nextron.app.compliance.api``) and hands it to ``create_app(...,
-compliance=compliance)``: the panel's add, import and Reverse run its use cases. Its
-``SubjectSuppressed`` goes to the subscribers ``build_subscribers`` registers, on the units of
-work ``build_app`` is given.
+``Compliance(clock, codec=TokenCodec(secrets), ledger=...)`` (``nextron.app.compliance.api``;
+``nextron.adapters.crypto.unsub_token``, which reads no key until it decodes) and hands it to
+``create_app(..., compliance=compliance)``: the panel's add, import and Reverse run its use
+cases. Its ``SubjectSuppressed`` goes to the subscribers ``build_subscribers`` registers, on the
+units of work ``build_app`` is given.
+
+**The unsubscribe poll (Story 3.11; FR-70, AD-10, AD-15).** ``build_app(..., unsubscribe=None)``
+builds one ``WorkerUnsubscribe(secrets, meter=meter)`` (``nextron.adapters.unsubscribe``) unless
+an ``unsubscribe=`` is injected; building it builds no HTTP client and reads no bearer.
+``UnsubscribePolls(clock, compliance, unsubscribe, notify)``
+(``nextron.app.compliance.unsub_poll``), on that same ``Compliance``, runs the
+``poll_unsubscribes`` jobs, reached through ``unsubscribes=lambda: unsubscribes``.
 
 **The lifespan.** ``build_app`` hands ``engine_lifespan(runner, scheduler, writer,
 recovery_runner.startup, startup=...)`` to ``create_app``, so all three start when the server
@@ -721,6 +734,7 @@ from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
+from nextron.adapters.crypto.unsub_token import TokenCodec
 from nextron.adapters.dns import DnspythonDns
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
@@ -730,11 +744,13 @@ from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.adapters.secrets import KeyringSecrets
 from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
+from nextron.adapters.unsubscribe import WorkerUnsubscribe
 from nextron.app.approval.api import Approval
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.compliance.erasure_stores import ErasureStores
 from nextron.app.compliance.ledger import ErasureLedger, LedgerAppender, LedgerFile
+from nextron.app.compliance.unsub_poll import UnsubscribePolls
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.drafting import api as drafting_api
@@ -891,6 +907,7 @@ from nextron.domain.segments import InvalidSegments, validate_segments
 from nextron.domain.sequences import InvalidSequences, validate_sequences
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
+from nextron.domain.unsub_requests import POLL_PERIOD_OTHER, POLL_UNSUBSCRIBES_JOB, poll_period
 from nextron.jobs import handlers
 from nextron.jobs.heartbeat import HeartbeatWriter
 from nextron.jobs.recovery import RecoveryRunner
@@ -913,6 +930,7 @@ from nextron.ports.mail import MailPort
 from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
+from nextron.ports.unsubscribe import UnsubscribePort
 from nextron.ports.usage_meter import UsageMeterPort
 from nextron.startup_checks import (
     BACKUP_DIR_SEPARATE,
@@ -1076,6 +1094,7 @@ def build_app(
     domain_search: DomainSearchPort | None = None,
     hunter: EmailFinderPort | None = None,
     prospeo: EmailFinderPort | None = None,
+    unsubscribe: UnsubscribePort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -1118,7 +1137,10 @@ def build_app(
     builds its HTTP client on its first call. The email search (Story 2.13) calls Hunter's Domain
     Search and Email Finder through ``domain_search`` and ``hunter`` (one ``HunterFinder(secrets,
     meter=meter)`` unless injected) and Prospeo through ``prospeo`` (``ProspeoFinder(secrets,
-    meter=meter)`` unless injected); each builds its HTTP client on its first call."""
+    meter=meter)`` unless injected); each builds its HTTP client on its first call. The unsubscribe
+    poll reads the Worker's pending list through ``unsubscribe`` (``WorkerUnsubscribe(secrets,
+    meter=meter)`` unless injected), which builds its HTTP client on its first fetch, and applies
+    it through a ``Compliance`` with the ``TokenCodec``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1134,7 +1156,7 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding and lead_scores are bound just below
+    # erasure_stores, email_finding, lead_scores and unsubscribes are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1153,6 +1175,7 @@ def build_app(
         erasure_stores=lambda: erasure_stores,
         finding=lambda: email_finding,
         scores=lambda: lead_scores,
+        unsubscribes=lambda: unsubscribes,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1225,8 +1248,10 @@ def build_app(
     contact_markets = ContactMarkets(clock, research, queue)
     # Story 3.16: one ledger file; every suppression, void and erasure is appended after commit
     ledger_file = LedgerFile(config.backup_dir / ERASURE_LEDGER_FILE)
-    # the Suppression List panel, Eligibility and erasure
-    compliance = Compliance(clock, ledger=LedgerAppender(ledger_file, notify))
+    # the Suppression List panel, Eligibility, erasure and the unsubscribe poll
+    compliance = Compliance(
+        clock, codec=TokenCodec(secrets), ledger=LedgerAppender(ledger_file, notify)
+    )
     erasures = Erasures(clock, compliance, queue=queue)  # Story 3.13: on the same Compliance
     erasure_ledger = ErasureLedger(clock, ledger_file, compliance, erasures)
     recovery_runner = RecoveryRunner(
@@ -1237,6 +1262,12 @@ def build_app(
             if recovery_steps is not None
             else build_recovery_steps(reapply=erasure_ledger.reapply)
         ),
+    )
+    unsubscribes = UnsubscribePolls(
+        clock,
+        compliance,
+        unsubscribe if unsubscribe is not None else WorkerUnsubscribe(secrets, meter=meter),
+        notify,
     )
     test_runs = AiTestRuns(clock, meter, llm, queue)
     startup_steps = (
@@ -1252,6 +1283,7 @@ def build_app(
         restore_test_schedule=functools.partial(read_restore_test_schedule, units, restore_tests),
         recovery_active=functools.partial(read_recovery_mode, units),
         domain_check_schedule=functools.partial(read_domain_check_schedule, units, domain_checks),
+        unsub_poll_period=poll_period(config.env),
     )
     scheduler = Scheduler(units, queue, triggers)
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
@@ -1393,6 +1425,7 @@ def build_job_types(
     domain_checks: Callable[[], handlers.DomainChecking] | None = None,
     erasure_stores: Callable[[], handlers.StoreErasing] | None = None,
     finding: Callable[[], handlers.FindingEmail] | None = None,
+    unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1417,9 +1450,12 @@ def build_job_types(
     the ``research`` service's ``EmailFinding`` that ``find_contact_email`` jobs call (left
     out, as in tests that never run one, the handler raises ``RuntimeError`` when a job
     runs), and ``scores`` the ``scoring`` service's ``LeadScores`` that ``score_lead`` and
-    ``recompute_tiers`` jobs call."""
+    ``recompute_tiers`` jobs call, and ``unsubscribes`` the ``compliance`` service's
+    ``UnsubscribePolls`` that ``poll_unsubscribes`` jobs call (``None``: a provider that raises
+    ``RuntimeError``, as for ``domain_checks``)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
+    polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1674,6 +1710,19 @@ def build_job_types(
             group=JobGroup.ENRICHMENT,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=POLL_UNSUBSCRIBES_JOB,
+            default_lane=Lane.REALTIME,
+            lanes=frozenset({Lane.REALTIME}),  # an opt-out lands within one polling cycle
+            priority=80,
+            # one GET (10 s connect, 15 s per phase), then the apply transaction
+            max_runtime=timedelta(minutes=5),
+            retry_limit=3,  # the next firing retries anyway: the Worker keeps every request
+            handler=handlers.poll_unsubscribes(polls),
+            group=JobGroup.UNSUBSCRIBE_POLL,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1682,6 +1731,12 @@ def no_domain_checks() -> handlers.DomainChecking:
     """``build_job_types``'s default ``domain_checks``: a registry built without the service
     fails a ``check_domains`` job instead of checking nothing."""
     raise RuntimeError("this job type registry was built without domain_checks")
+
+
+def no_unsubscribes() -> handlers.PollingUnsubscribes:
+    """``build_job_types``'s default ``unsubscribes``: a registry built without the service fails
+    a ``poll_unsubscribes`` job instead of polling nothing."""
+    raise RuntimeError("this job type registry was built without unsubscribes")
 
 
 def _no_erasure_stores() -> handlers.StoreErasing:
@@ -1724,6 +1779,7 @@ def build_triggers(
     restore_test_schedule: Callable[[], DailyRun],
     recovery_active: Callable[[], bool],
     domain_check_schedule: Callable[[], DailyRun],
+    unsub_poll_period: timedelta = POLL_PERIOD_OTHER,
 ) -> Triggers:
     """The trigger registry (AD-10), frozen: register each trigger with
     ``register_trigger(Trigger.X, Every(...))`` or ``DailyAt(...)``, after its job type, before
@@ -1731,7 +1787,9 @@ def build_triggers(
     ``restore_test_schedule`` the daily restore-test check's; the scheduler calls them when it
     starts. ``recovery_active`` says whether recovery mode is on; the scheduler calls it before
     each ``check_recovery`` firing. ``domain_check_schedule`` returns the daily domain checks'
-    ``DailyRun``, read when the scheduler starts."""
+    ``DailyRun``, read when the scheduler starts. ``unsub_poll_period`` is how often
+    ``poll_unsubscribes`` fires (``build_app`` passes ``poll_period(config.env)``: 5 minutes in
+    ``prod``, 30 elsewhere)."""
     triggers = Triggers(job_types)
     triggers.register_trigger(
         Trigger.BACKUP_DB,
@@ -1759,6 +1817,9 @@ def build_triggers(
     triggers.register_trigger(
         Trigger.RECOMPUTE_TIERS, Every(RECOMPUTE_TIERS_PERIOD, at_startup=True)
     )
+    # the PC is not on at fixed times: poll at every start too, so requests made while it was
+    # off land at once
+    triggers.register_trigger(Trigger.POLL_UNSUBSCRIBES, Every(unsub_poll_period, at_startup=True))
     triggers.freeze()
     return triggers
 

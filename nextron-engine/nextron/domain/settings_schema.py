@@ -116,6 +116,7 @@ from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
 from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
 from nextron.domain.sending_policy import CEILING_RANGE, DEFAULT_CEILING
 from nextron.domain.sink import is_sink_recipient
+from nextron.domain.unsub_requests import MAX_HOST_LENGTH, is_worker_host
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 REQUIRED_RULE: Final = "required"
@@ -190,6 +191,7 @@ class Key(StrEnum):
     # The Lead Score's weights (Story 2.15), whole percents summing to 100.
     LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
+    UNSUB_WORKER_HOST = "unsub_worker_host"
 
 
 class _Required(Enum):
@@ -960,6 +962,12 @@ OPTOUT_REPLY_RULE: Final = Rule(
     _holds_reply,
 )
 HTTPS_URL_RULE: Final = Rule("https_url", "must be an https link", _is_https_link)
+WORKER_HOST_RULE: Final = Rule(
+    "worker_host",
+    "must be a lowercase host name starting with u. (such as u.example.com), with no scheme, "
+    "port or path, and not on workers.dev",
+    is_worker_host,
+)
 
 SCHEMA: Mapping[str, Setting] = _declare(
     # The From name of every cold email (Story 4.7, FR-32). Required: until it is set,
@@ -1333,6 +1341,24 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=LEAD_SCORE_DEFAULT_WEIGHT,
         rules=(minimum(0, "0"), maximum(LEAD_SCORE_WEIGHT_TOTAL, str(LEAD_SCORE_WEIGHT_TOTAL))),
+    ),
+    # Where the engine polls the unsubscribe Worker's pending list (Story 3.11, AD-15):
+    # https://<host>/pending, every 5 minutes in prod and 30 elsewhere. One host per
+    # environment: every Sending Domain's u. route serves the same Worker and KV. Blank turns
+    # polling off. Not a secret: the bearer lives in Windows Credential Manager.
+    Setting(
+        key=Key.UNSUB_WORKER_HOST,
+        type=SettingType.STRING,
+        section=Section.SENDING,
+        label="Unsub Worker host",
+        unit=(
+            "Blank by default, which turns polling off. The host of the opt-out Worker, such as "
+            "u.example.com: the engine reads https://<host>/pending every 5 minutes (every 30 "
+            "outside prod) and adds each opt-out to the Suppression List. Its bearer secret "
+            "is on the Credentials page."
+        ),
+        default="",
+        rules=(max_length(MAX_HOST_LENGTH), WORKER_HOST_RULE),
     ),
 )
 

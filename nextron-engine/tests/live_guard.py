@@ -23,9 +23,11 @@ a real external system to raise ``LiveAdapterInTests``:
   servers), so a ``DnspythonDns`` without an injected ``resolver`` raises on its first query,
   and ``nextron.adapters.companies_house.default_http_client`` (the Companies House API), so a
   ``CompaniesHouseRegistry`` without an injected ``http`` raises on its first call, and
-  ``nextron.adapters.hunter.default_http_client`` (Hunter's API) and
-  ``nextron.adapters.prospeo.default_http_client`` (Prospeo's API), so a ``HunterFinder`` or
-  ``ProspeoFinder`` without an injected ``http`` raises on its first request;
+  ``nextron.adapters.hunter.default_http_client`` (Hunter's API),
+  ``nextron.adapters.prospeo.default_http_client`` (Prospeo's API) and
+  ``nextron.adapters.unsubscribe.default_http_client`` (the unsubscribe Worker), so a
+  ``HunterFinder``, ``ProspeoFinder`` or ``WorkerUnsubscribe`` without an injected ``http``
+  raises on its first request;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
 
@@ -121,6 +123,7 @@ LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.companies_house", "default_http_client"),
     ("nextron.adapters.hunter", "default_http_client"),
     ("nextron.adapters.prospeo", "default_http_client"),
+    ("nextron.adapters.unsubscribe", "default_http_client"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -188,6 +191,7 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "companies_house": Guarded(("default_http_client",)),
     "hunter": Guarded(("default_http_client",)),
     "prospeo": Guarded(("default_http_client",)),
+    "unsubscribe": Guarded(("default_http_client",)),
 }
 
 

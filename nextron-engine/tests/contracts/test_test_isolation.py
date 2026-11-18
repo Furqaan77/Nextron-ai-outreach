@@ -162,6 +162,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "SecretsPort",
         "SinkFilesPort",
         "TokenCodecPort",
+        "UnsubscribePort",
         "UsageMeterPort",
     }
     assert fake_problems(protocols, PORT_FAKES) == []
@@ -442,6 +443,7 @@ def test_every_adapter_package_is_classified_once() -> None:
         "secrets",
         "sink",
         "telegram",
+        "unsubscribe",
     }
     assert classification_problems(packages, ADAPTER_PACKAGES, LIVE_CONSTRUCTORS) == []
 
@@ -483,6 +485,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "renderer",
         "secrets",
         "sink",
+        "unsubscribe",
     )
     for name in (*names, "telegram", "gmail"):
         (tmp_path / name).mkdir()
@@ -505,6 +508,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "nextron.adapters.secrets": package_modules("nextron.adapters.secrets"),
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),
         "nextron.adapters.telegram": package_modules("nextron.adapters.telegram"),
+        "nextron.adapters.unsubscribe": package_modules("nextron.adapters.unsubscribe"),
         "nextron.adapters.gmail": [probe_module("nextron.adapters.gmail", "x = 1")],
     }
     classified = {

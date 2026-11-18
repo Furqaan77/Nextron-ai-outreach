@@ -1068,6 +1068,7 @@ def test_build_app_builds_compliance_on_its_clock(
     monkeypatch.setenv("NEXTRON_DATA_DIR", str(tmp_path / "data"))
     clocks: list[FrozenClock] = []
     given: list[object] = []
+    codecs: list[object] = []
     real_compliance = main.Compliance
 
     def system_clock() -> FrozenClock:
@@ -1080,6 +1081,7 @@ def test_build_app_builds_compliance_on_its_clock(
 
     def compliance(clock: Any, **kwargs: Any) -> Any:
         given.append(clock)
+        codecs.append(kwargs.get("codec"))
         built.append(real_compliance(clock, **kwargs))
         return built[-1]
 
@@ -1108,3 +1110,5 @@ def test_build_app_builds_compliance_on_its_clock(
     assert compliance_source.name == "compliance"
     assert compliance_source.read.func is main.compliance_queries.ledger_health_issues
     assert compliance_source.read.args == (ledger_path,)
+    [codec] = codecs  # Story 3.11: the poll decodes unsubscribe tokens through it
+    assert isinstance(codec, main.TokenCodec)

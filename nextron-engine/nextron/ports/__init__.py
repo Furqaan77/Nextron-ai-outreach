@@ -22,4 +22,9 @@ self rate-limited.
 ``EmailFinderPort`` and ``DomainSearchPort`` (``email_finder``, Story 2.13) ask a paid finder
 for one person's address and Hunter's Domain Search for a domain's pattern and people;
 ``nextron.adapters.hunter`` implements both and ``nextron.adapters.prospeo`` the first.
+
+``UnsubscribePort`` (``unsubscribe``) is the one way to read the unsubscribe Worker's pending
+list (Story 3.11): ``fetch_pending(host)`` returns a ``PendingFetch`` of ``PendingUnsub``
+entries and a count of the malformed ones; ``nextron.adapters.unsubscribe`` implements it over
+``GET https://<host>/pending``, metered.
 """

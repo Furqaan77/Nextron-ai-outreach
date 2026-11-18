@@ -89,7 +89,7 @@ development_status:
   3-8-issue-and-decode-unsubscribe-tokens: review
   3-9-spike-confirm-the-sending-domains-dns-zones-can-host-the-wor: backlog
   3-10-deploy-the-unsubscribe-worker: review
-  3-11-poll-unsubscribe-requests-into-the-suppression-list: backlog
+  3-11-poll-unsubscribe-requests-into-the-suppression-list: review
   3-12-monitor-unsubscribe-polling-and-re-poll-the-worker-after-a-r: backlog
   3-13-erase-a-contact-on-request: review
   3-14-erase-personal-data-outside-the-database-and-issue-a-receipt: review

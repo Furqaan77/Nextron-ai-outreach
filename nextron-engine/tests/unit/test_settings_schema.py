@@ -530,6 +530,7 @@ def test_the_declared_keys_in_order() -> None:
         "total_daily_ceiling",
         "lead_score_fit_weight",
         "lead_score_signal_weight",
+        "unsub_worker_host",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -559,6 +560,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.TOTAL_DAILY_CEILING),
         setting(Key.LEAD_SCORE_FIT_WEIGHT),
         setting(Key.LEAD_SCORE_SIGNAL_WEIGHT),
+        setting(Key.UNSUB_WORKER_HOST),
     )
 
 
@@ -1294,7 +1296,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
             "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "
-            "sink_allowlist, total_daily_ceiling, unsub_active_kid, us_solicitation_label"
+            "sink_allowlist, total_daily_ceiling, unsub_active_kid, unsub_worker_host, "
+            "us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]

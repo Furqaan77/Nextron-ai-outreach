@@ -10,11 +10,13 @@
   ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, ``run_ai_test_sets``,
   Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
   2.11, ``check_legal_form``, Story 2.12, ``erase_external``, Story 3.14,
-  ``find_contact_email``, Story 2.13, and ``score_lead`` and ``recompute_tiers``, Story 2.15,
-  with their settings); the triggers are exactly ``backup_db``'s and ``restore_test``'s daily
-  schedules, ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s daily
-  ``Every`` at startup, ``check_domains``'s daily schedule and ``recompute_tiers``' daily
-  ``Every`` at startup: the one-off ``resolve_contact_markets`` has no trigger.
+  ``find_contact_email``, Story 2.13, ``score_lead`` and ``recompute_tiers``, Story 2.15, and
+  ``poll_unsubscribes``, Story 3.11, with their settings); the triggers are exactly
+  ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s ``Every`` with
+  ``active``, ``purge_page_text``'s daily ``Every`` at startup, ``check_domains``'s daily
+  schedule, ``recompute_tiers``' daily ``Every`` at startup and ``poll_unsubscribes``' ``Every``
+  at startup (5 minutes in ``prod``, 30 elsewhere): the one-off ``resolve_contact_markets`` has
+  no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -51,6 +53,7 @@ from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
 from nextron.domain.job import DEFERRED, InvalidJob, Job, JobGroup, JobTypes, Lane
+from nextron.domain.unsub_requests import poll_period
 from nextron.jobs import handlers
 from nextron.jobs.triggers import DailyAt, DailyRun, Every, Trigger, Triggers
 from tests.contracts.support import ENGINE_ROOT, copy_with_probe
@@ -476,6 +479,16 @@ class RecordingScores:
         return 0
 
 
+class RecordingUnsubscribes:
+    """Stands in for the ``compliance`` service's ``UnsubscribePolls``."""
+
+    def __init__(self) -> None:
+        self.polls = 0
+
+    def poll(self) -> None:
+        self.polls += 1
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -495,6 +508,7 @@ def registry(**overrides: object) -> JobTypes:
         "legal_forms": RecordingLegalForms,
         "finding": RecordingFinding,
         "scores": RecordingScores,
+        "unsubscribes": RecordingUnsubscribes,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -581,6 +595,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "find_contact_email",
         "score_lead",
         "recompute_tiers",
+        "poll_unsubscribes",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -821,6 +836,61 @@ def test_a_registry_built_without_domain_checks_fails_a_check_domains_job() -> N
 
     with pytest.raises(RuntimeError, match="without domain_checks"):
         handler(Job(RUN, "check_domains", Lane.INTERACTIVE, {"v": 1}, 1))
+
+
+def test_build_job_types_registers_poll_unsubscribes_as_specified() -> None:
+    """Story 3.11: the realtime lane only, priority 80, 5 minutes, retry limit 3, group
+    Unsubscribe Endpoint poll."""
+    found = registry().get("poll_unsubscribes")
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (
+        Lane.REALTIME,
+        frozenset({Lane.REALTIME}),
+        80,
+        timedelta(minutes=5),
+        3,
+        JobGroup.UNSUBSCRIBE_POLL,
+    )
+
+
+def test_poll_unsubscribes_polls_once_per_job() -> None:
+    polls = RecordingUnsubscribes()
+    handler = registry(unsubscribes=lambda: polls).get("poll_unsubscribes").handler
+
+    result = handler(Job(RUN, "poll_unsubscribes", Lane.REALTIME, {"v": 1}, 1))
+
+    assert (result, polls.polls) == (None, 1)
+
+
+def test_a_registry_built_without_unsubscribes_fails_a_poll_unsubscribes_job() -> None:
+    services: dict[str, object] = {
+        "alerts": RecordingAlerts,
+        "backups": RecordingBackups,
+        "restore_tests": RecordingRestoreTests,
+        "recovery": RecordingRecovery,
+        "contact_markets": RecordingContactMarkets,
+        "crawls": RecordingCrawls,
+        "discovery": RecordingDiscovery,
+        "research": RecordingResearch,
+        "extractions": RecordingExtractions,
+        "primary": RecordingPrimary,
+        "test_runs": RecordingTestRuns,
+        "job_boards": RecordingJobBoards,
+        "legal_forms": RecordingLegalForms,
+        "scores": RecordingScores,
+    }
+    job_types = main.build_job_types(**services)  # type: ignore[arg-type]
+    handler = job_types.get("poll_unsubscribes").handler
+
+    with pytest.raises(RuntimeError, match="without unsubscribes"):
+        handler(Job(RUN, "poll_unsubscribes", Lane.REALTIME, {"v": 1}, 1))
 
 
 @pytest.mark.parametrize(("attempts", "may_retry"), [(1, True), (3, True), (4, False)])
@@ -1177,7 +1247,7 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore, recovery, purge, domains, tiers] = triggers.specs()
+    [spec, restore, recovery, purge, domains, tiers, unsub] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
@@ -1193,6 +1263,8 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
     assert domains.schedule == DailyAt(domain_schedule, fallback=DailyRun(time(7, 0), "UTC"))
     assert (tiers.trigger, tiers.job_type) == (Trigger.RECOMPUTE_TIERS, "recompute_tiers")
     assert tiers.schedule == Every(timedelta(days=1), at_startup=True)
+    assert (unsub.trigger, unsub.job_type) == (Trigger.POLL_UNSUBSCRIBES, "poll_unsubscribes")
+    assert unsub.schedule == Every(timedelta(minutes=30), at_startup=True)  # the default
     built_again = main.build_triggers(
         job_types,
         backup_schedule=schedule,
@@ -1201,6 +1273,28 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
         domain_check_schedule=domain_schedule,
     )
     assert built_again is not triggers  # a new registry each time
+
+
+@pytest.mark.parametrize(
+    ("env", "period"),
+    [("prod", timedelta(minutes=5)), ("dev", timedelta(minutes=30)), ("test", timedelta(minutes=30))],
+)
+def test_poll_unsubscribes_fires_every_5_minutes_in_prod_and_30_elsewhere(
+    env: str, period: timedelta
+) -> None:
+    """Story 3.11: ``build_app`` passes ``poll_period(config.env)``."""
+    daily = lambda: DailyRun(time(3, 15), "UTC")  # noqa: E731
+    triggers = main.build_triggers(
+        registry(),
+        backup_schedule=daily,
+        restore_test_schedule=daily,
+        recovery_active=lambda: False,
+        domain_check_schedule=daily,
+        unsub_poll_period=poll_period(env),
+    )
+
+    [unsub] = [spec for spec in triggers.specs() if spec.trigger is Trigger.POLL_UNSUBSCRIBES]
+    assert unsub.schedule == Every(period, at_startup=True)
 
 
 # The jobs modules' imports ----------------------------------------------------------------------
