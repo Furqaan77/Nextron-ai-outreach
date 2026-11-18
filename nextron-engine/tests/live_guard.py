@@ -96,6 +96,7 @@ LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.crawler", "default_resolver"),
     ("nextron.adapters.crawler", "default_own_addresses"),
     ("nextron.adapters.renderer", "default_browser"),
+    ("nextron.adapters.ats", "default_fetcher"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -158,6 +159,7 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     ),
     "crawler": Guarded(("default_http_client", "default_resolver", "default_own_addresses")),
     "renderer": Guarded(("default_browser",)),
+    "ats": Guarded(("default_fetcher",)),
 }
 
 

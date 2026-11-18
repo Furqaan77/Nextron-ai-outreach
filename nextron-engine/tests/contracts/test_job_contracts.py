@@ -7,8 +7,8 @@
   (``send_alert``, Story 1.12, ``backup_db``, Story 1.16, ``restore_test``, Story 1.18,
   ``check_recovery``, Story 1.19, ``resolve_contact_markets``, Story 3.2, ``enrich_lead``,
   ``canonicalize_lead`` and ``purge_page_text``, Story 2.5, ``render_pages``, Story 2.6,
-  ``extract_lead``, Story 2.9, and ``select_primary_contact``, Story 2.10,
-  with their settings); the triggers
+  ``extract_lead``, Story 2.9, ``select_primary_contact``, Story 2.10, and
+  ``check_job_boards`` and ``recheck_event``, Story 2.11, with their settings); the triggers
   are exactly ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s
   ``Every`` with ``active`` and ``purge_page_text``'s daily ``Every`` at startup: the one-off
   ``resolve_contact_markets`` has no trigger.
@@ -387,6 +387,23 @@ class RecordingPrimary:
         self.calls.append(lead_id)
 
 
+class RecordingJobBoards:
+    """Stands in for the ``research`` service's ``JobBoards``; ``allowed`` is what
+    ``check_job_boards`` returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.checks: list[tuple[str, str]] = []
+        self.rechecks: list[str] = []
+
+    def check_job_boards(self, lead_id: str, run_id: str) -> bool:
+        self.checks.append((lead_id, run_id))
+        return self.allowed
+
+    def recheck_event(self, signal_id: str) -> None:
+        self.rechecks.append(signal_id)
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -400,6 +417,7 @@ def registry(**overrides: object) -> JobTypes:
         "research": RecordingResearch,
         "extractions": RecordingExtractions,
         "primary": RecordingPrimary,
+        "job_boards": RecordingJobBoards,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -455,6 +473,8 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "purge_page_text",
         "extract_lead",
         "select_primary_contact",
+        "check_job_boards",
+        "recheck_event",
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -560,6 +580,8 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             "purge_page_text",
             "extract_lead",
             "select_primary_contact",
+            "check_job_boards",
+            "recheck_event",
         )
         for found in [job_types.get(name)]
     }
@@ -592,6 +614,23 @@ def test_build_job_types_registers_the_crawl_jobs_as_specified() -> None:
             timedelta(minutes=10),
             2,
             JobGroup.OTHER,
+        ),
+        # Story 2.11: between the people step and the selection, and before a send
+        "check_job_boards": (
+            Lane.BULK,
+            both,
+            45,
+            timedelta(minutes=10),
+            3,
+            JobGroup.ENRICHMENT,
+        ),
+        "recheck_event": (
+            Lane.BULK,
+            both,
+            50,
+            timedelta(minutes=5),
+            3,
+            JobGroup.RECHECK,
         ),
     }
 
@@ -679,6 +718,47 @@ def test_a_select_primary_contact_job_without_its_lead_is_invalid(
     with pytest.raises(InvalidJob, match="must be a ULID"):
         handler(Job(RUN, "select_primary_contact", Lane.BULK, payload, 1))
     assert primary.calls == []
+
+
+def test_check_job_boards_calls_its_service_once_and_defers_on_a_refusal() -> None:
+    boards, refused = RecordingJobBoards(), RecordingJobBoards(allowed=False)
+    payload = {"v": 1, "lead_id": LEAD, "run_id": RUN}
+    job = Job(RUN, "check_job_boards", Lane.BULK, payload, 1)
+
+    assert registry(job_boards=lambda: boards).get("check_job_boards").handler(job) is None
+    assert registry(job_boards=lambda: refused).get("check_job_boards").handler(job) is DEFERRED
+    assert (boards.checks, refused.checks) == ([(LEAD, RUN)], [(LEAD, RUN)])
+
+
+def test_recheck_event_calls_its_service_once() -> None:
+    boards = RecordingJobBoards()
+    handler = registry(job_boards=lambda: boards).get("recheck_event").handler
+
+    result = handler(Job(RUN, "recheck_event", Lane.INTERACTIVE, {"v": 1, "signal_id": LEAD}, 1))
+
+    assert result is None
+    assert boards.rechecks == [LEAD]
+    assert boards.checks == []
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [
+        ("check_job_boards", {"v": 1, "lead_id": LEAD}),
+        ("check_job_boards", {"v": 1, "run_id": RUN}),
+        ("check_job_boards", {"v": 1, "lead_id": "not-a-ulid", "run_id": RUN}),
+        ("recheck_event", {"v": 1}),
+        ("recheck_event", {"v": 1, "signal_id": "not-a-ulid"}),
+        ("recheck_event", {"v": 1, "signal_id": 7}),
+    ],
+)
+def test_a_job_boards_job_without_its_ids_is_invalid(name: str, payload: dict[str, object]) -> None:
+    boards = RecordingJobBoards()
+    handler = registry(job_boards=lambda: boards).get(name).handler
+
+    with pytest.raises(InvalidJob, match="must be a ULID"):
+        handler(Job(RUN, name, Lane.BULK, payload, 1))
+    assert (boards.checks, boards.rechecks) == ([], [])
 
 
 @pytest.mark.parametrize(

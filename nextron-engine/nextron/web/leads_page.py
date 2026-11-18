@@ -85,6 +85,14 @@ Every untrusted text (the Primary line's name, each Contact and Provenance cell)
 element carrying ``hx-disable``; the forms sit outside them. A person Evidence row (its
 ``person_contact_id`` set) reads "Contact: <name>" under Supports.
 
+**Job postings (Story 2.11).** ``lead_context`` also takes the Lead's job postings
+(``queries.research.job_postings``: live first, then the newest first seen) and gives one
+``PostingRow`` each: its title, its source's label (``POSTING_SOURCE_LABELS``: "Careers page",
+"Greenhouse", "Lever", "Ashby"), its posted date (``YYYY-MM-DD``, else "—"), its first-seen
+date and its status ("Live" or "Closed"); "No job postings yet." when there are none. The
+section (``lead-postings``) carries ``hx-disable`` and holds no HTMX action; a title renders
+through ``|plain``.
+
 ``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source,
 ``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every Signal class, Evidence type
 and fact kind; a stored value none knows renders as its own text. Every Lead, Contact,
@@ -107,6 +115,7 @@ from nextron.app.queries.research import (
     LeadSignalsView,
     SignalStatus,
     StoredContact,
+    StoredPosting,
     StoredProvenance,
 )
 from nextron.app.queries.setup import SeededSegment
@@ -121,6 +130,7 @@ from nextron.domain.contacts import (
 from nextron.domain.eligibility import Decision
 from nextron.domain.extraction import FactKind
 from nextron.domain.pipeline_stage import PipelineStage
+from nextron.domain.postings import PostingSource, PostingStatus
 from nextron.domain.segments import EvidenceType, SignalClass
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
@@ -206,6 +216,17 @@ SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
 )
 RECORD_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {ProvenanceSubject.CONTACT: "Contact", ProvenanceSubject.ADDRESS: "Address"}
+)
+POSTING_SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        PostingSource.CAREERS_PAGE: "Careers page",
+        PostingSource.GREENHOUSE: "Greenhouse",
+        PostingSource.LEVER: "Lever",
+        PostingSource.ASHBY: "Ashby",
+    }
+)
+POSTING_STATUS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {PostingStatus.LIVE: "Live", PostingStatus.CLOSED: "Closed"}
 )
 CLASS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {SignalClass.EVENT: "Event", SignalClass.ATTRIBUTE: "Attribute"}
@@ -546,6 +567,30 @@ class EvidenceRow:
     extraction: str
 
 
+@dataclass(frozen=True, slots=True)
+class PostingRow:
+    """One job posting as the Lead page shows it (Story 2.11)."""
+
+    title: str
+    source: str
+    posted: str
+    first_seen: str
+    status: str
+
+
+def posting_row(posting: StoredPosting) -> PostingRow:
+    """One job posting as the Lead page shows it."""
+    return PostingRow(
+        title=posting.title,
+        source=POSTING_SOURCE_LABELS.get(posting.source, posting.source),
+        posted=(
+            NO_VALUE if posting.posted_date is None else format(posting.posted_date, DATE_FORMAT)
+        ),
+        first_seen=day(posting.first_seen_at),
+        status=POSTING_STATUS_LABELS.get(posting.status, posting.status),
+    )
+
+
 def lead_header(
     lead: StoredLead,
     stage: PipelineStage | None,
@@ -751,15 +796,18 @@ def lead_context(
     signals: LeadSignalsView,
     decisions: Mapping[str, Decision],
     no_decision_maker: bool | None = None,
+    postings: Iterable[StoredPosting] = (),
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
-    given), and the Contacts panel (``contacts_context``), each Contact with its live
-    Eligibility from ``decisions`` (by Contact id)."""
+    given), the job postings (in the order given), and the Contacts panel
+    (``contacts_context``), each Contact with its live Eligibility from ``decisions`` (by
+    Contact id)."""
     found = tuple(contacts)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
         "signals": tuple(signal_row(status) for status in signals.signals),
         "evidence": tuple(evidence_row(row, names) for row in signals.evidence),
+        "postings": tuple(posting_row(posting) for posting in postings),
         **contacts_context(lead.id, found, provenance, decisions, no_decision_maker),
     }

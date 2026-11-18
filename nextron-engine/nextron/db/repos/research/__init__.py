@@ -6,5 +6,6 @@ group 7): ``contacts`` (the ``contacts`` table) and ``provenance`` (``provenance
 ``ats_links`` tables, and of ``page_contact_methods`` (Story 2.6). ``signals`` (Story 2.9) is
 the repository of ``evidence``, ``signals``, ``signal_evidence`` and ``extraction_runs``, and
 ``profile`` (Stories 2.6 and 2.9) reads and writes the Lead's profile group, the ``research``
-columns of ``leads`` (``hq_tz``, ``hq_evidence_id`` and ``contact_methods``).
+columns of ``leads`` (``hq_tz``, ``hq_evidence_id`` and ``contact_methods``). ``postings``
+(Story 2.11) is the repository of ``job_postings``.
 """

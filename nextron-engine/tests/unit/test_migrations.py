@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0029_2_9_tag_managers"
+HEAD = "0030_2_11_job_postings"
 
 
 @pytest.fixture
@@ -556,3 +556,72 @@ def test_0029_leaves_every_existing_page_unchecked(tmp_path: Path) -> None:
         reader.close()
     assert rows == [(page, "Smith Law LLP", None)]  # kept, and never checked
     assert columns[-1] == "tag_managers"
+
+
+def test_0030_keeps_every_crawl_run_and_checks_each_job_posting(tmp_path: Path) -> None:
+    """A crawl run stored before 0030 keeps its row and reads NULL for every posting count
+    (never checked); ``job_postings`` refuses a careers posting with a board token, an ATS one
+    without, a closed one with no ``closed_at``, an unknown source and a repeated
+    ``(lead, url, title)``."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0029_2_9_tag_managers":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0029_2_9_tag_managers")
+    at = "2026-11-17T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    run = "01JD3QZ8X5V9K2M7N4P6R8T0D2"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'law_private_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at) "
+        f"VALUES ('{lead}', 'Smith Law LLP', 'smith-law.com', '{segment}', '{at}')",
+        "INSERT INTO crawl_runs (id, lead_id, site_domain, started_at, ended_at, outcome, "
+        "pages_fetched, pages_skipped_robots, renders, errors) "
+        f"VALUES ('{run}', '{lead}', 'smith-law.com', '{at}', '{at}', 'ok', 1, 0, 0, 0)",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0029_2_9_tag_managers", HEAD)
+
+    counts = (
+        "careers_postings, careers_events, greenhouse_postings, greenhouse_events, "
+        "lever_postings, lever_events, ashby_postings, ashby_events, board_errors"
+    )
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(f"SELECT id, pages_fetched, {counts} FROM crawl_runs").fetchall()
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(crawl_runs)")]
+    finally:
+        reader.close()
+    assert rows == [(run, 1, *([None] * 9))]  # kept, and never checked
+    assert columns[-9:] == counts.split(", ")
+    insert = (
+        "INSERT INTO job_postings (id, lead_id, source, board_token, url, title, description, "
+        "posted_date, first_seen_at, last_checked_at, status, closed_at, signal_id, evidence_id) "
+        "VALUES ('{id}', '" + lead + "', '{source}', {token}, 'https://smith-law.com/careers', "
+        "'Legal Operations Manager', NULL, NULL, '" + at + "', '" + at + "', '{status}', "
+        "{closed}, NULL, NULL)"
+    )
+
+    def posting(
+        id_: str, source: str, token: str, status: str = "live", closed: str = "NULL"
+    ) -> str:
+        return insert.format(id=id_, source=source, token=token, status=status, closed=closed)
+
+    run_sql(path, posting("01JD3QZ8X5V9K2M7N4P6R8T0D3", "careers_page", "NULL"))
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+        run_sql(path, posting("01JD3QZ8X5V9K2M7N4P6R8T0D4", "careers_page", "NULL"))
+    for id_, source, token, status, closed, check in (
+        ("01JD3QZ8X5V9K2M7N4P6R8T0D5", "careers_page", "'acme'", "live", "NULL", "board_token"),
+        ("01JD3QZ8X5V9K2M7N4P6R8T0D6", "greenhouse", "NULL", "live", "NULL", "board_token"),
+        ("01JD3QZ8X5V9K2M7N4P6R8T0D7", "indeed", "'acme'", "live", "NULL", "source"),
+        ("01JD3QZ8X5V9K2M7N4P6R8T0D8", "lever", "'acme'", "closed", "NULL", "closed_at"),
+        ("01JD3QZ8X5V9K2M7N4P6R8T0D9", "ashby", "'acme'", "live", f"'{at}'", "closed_at"),
+        ("01JD3QZ8X5V9K2M7N4P6R8T0DA", "ashby", "'acme'", "gone", "NULL", "status"),
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=rf"ck_job_postings_{check}$"):
+            run_sql(path, posting(id_, source, token, status, closed).replace("careers'", "x'"))

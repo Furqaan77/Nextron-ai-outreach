@@ -2,14 +2,15 @@
 web obeys the denylist on its first URL and on every redirect.
 
 - **Every fetching adapter is listed.** ``FETCHING_ADAPTERS`` holds a driver for every built
-  adapter package among ``FETCHING_PACKAGES`` (``crawler`` and ``renderer`` today; ``ats``,
-  Story 2.11, once it is built). A package is built once it has an ``__init__.py``; the check
-  fails until its driver is added here. A driver builds the adapter on a ``Recorder`` (an
+  adapter package among ``FETCHING_PACKAGES`` (``crawler``, ``renderer`` and, since Story 2.11,
+  ``ats``). A package is built once it has an ``__init__.py``; the check fails until its driver
+  is added here. A driver builds the adapter on a ``Recorder`` (an
   ``httpx2.MockTransport`` and a resolver that record what they are asked) and returns each of
   its fetching calls, by name. The renderer's driver is a ``PlaywrightRenderer`` on the
   recorder's ``HttpCrawler`` and the fake browser of ``tests/fakes/browser.py``: the page's
   main document goes through the route handler, so its first URL and every redirect are
-  judged as the crawler's are.
+  judged as the crawler's are. The ATS boards' driver is ``AtsBoards.fetch_json`` (``site=None``)
+  on the recorder's ``HttpCrawler``.
 - **A denylisted first URL** (LinkedIn, Instagram, a Google Maps host or path, a job site) is
   refused with ``AdapterError`` code ``fetch_refused`` naming ``denylisted``, with no host name
   looked up and no request sent.
@@ -29,6 +30,7 @@ from typing import Final
 
 import httpx2
 
+from nextron.adapters.ats import AtsBoards
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.renderer import PlaywrightRenderer
 from nextron.ports.errors import AdapterError
@@ -132,10 +134,16 @@ def renderer_driver(recorder: Recorder) -> Sequence[tuple[str, Fetch]]:
     return (("render", lambda url: renderer.render(url, site=None, min_interval_s=1.0)),)
 
 
+def ats_driver(recorder: Recorder) -> Sequence[tuple[str, Fetch]]:
+    boards = AtsBoards(meter=InMemoryUsageMeter(), fetcher=recorded_crawler(recorder))
+    return (("fetch_json", lambda url: boards.fetch_json(url, site=None)),)
+
+
 # Every built fetching adapter package, with its driver.
 FETCHING_ADAPTERS: Final[dict[str, Driver]] = {
     "crawler": crawler_driver,
     "renderer": renderer_driver,
+    "ats": ats_driver,
 }
 
 
@@ -219,7 +227,7 @@ def private_problems(driver: Driver) -> list[str]:
 
 
 def test_every_built_fetching_adapter_has_a_driver() -> None:
-    assert {"crawler", "renderer"} <= built_fetching_packages()
+    assert {"crawler", "renderer", "ats"} <= built_fetching_packages()
     assert set(FETCHING_ADAPTERS) == built_fetching_packages()
 
 

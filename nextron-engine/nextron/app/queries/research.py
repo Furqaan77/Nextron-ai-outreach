@@ -50,6 +50,12 @@ Lead: empty, or ``None``):
   Evidence row as an ``EvidenceSupport(evidence, supports)``, ``supports`` being the names of
   the current Signals it supports, in the Signals' order.
 
+Story 2.11 adds ``job_postings(lead_id)``: the Lead's job postings as ``StoredPosting`` rows
+(title and description hidden from the ``repr``), the live ones first, then the newest first
+seen (then by ``id``); empty for an unknown Lead (a text that isn't a ULID included). A crawl
+run's ``StoredCrawlRun`` carries its posting counts (``careers_postings``, ...,
+``board_errors``; ``None`` until a check writes them).
+
 Story 2.10 adds ``no_decision_maker(lead_id)``: ``True`` when the Lead's last Primary Contact
 selection found no decision-maker, ``False`` when it found one, ``None`` before the first
 selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
@@ -62,6 +68,7 @@ from datetime import datetime
 
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -72,6 +79,7 @@ from nextron.db.repos.research.crawl import (
     StoredCrawlRun,
     StoredPage,
 )
+from nextron.db.repos.research.postings import StoredPosting
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.extraction import ROUTE as SIGNALS_ROUTE
@@ -239,6 +247,16 @@ def no_decision_maker(lead_id: str) -> bool | None:
     """Whether the Lead's last Primary Contact selection found no decision-maker; ``None``
     before the first selection."""
     return profile_repo.no_decision_maker(lead_id) if is_ulid(lead_id) else None
+
+
+def job_postings(lead_id: str) -> tuple[StoredPosting, ...]:
+    """The Lead's job postings: live first, then the newest first seen; see the module
+    docstring."""
+    if not is_ulid(lead_id):
+        return ()
+    found = postings_repo.for_lead(lead_id)
+    newest = sorted(found, key=lambda row: (row.first_seen_at, row.id), reverse=True)
+    return tuple(sorted(newest, key=lambda row: not row.live))
 
 
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:

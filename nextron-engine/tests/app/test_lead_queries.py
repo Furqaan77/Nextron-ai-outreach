@@ -143,6 +143,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        job_boards=no_jobs,
     )
     return JobQueue(clock, job_types)
 

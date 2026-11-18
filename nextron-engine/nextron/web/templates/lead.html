@@ -4,7 +4,7 @@
     live Eligibility, evaluated on this render and never stored, and its Provenance Records).
     Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
     it renders only through |plain or safe_link, inside an element carrying hx-disable. The
-    Signals and Evidence sections hold no HTMX action. -#}
+    Signals, Evidence and Job postings sections hold no HTMX action. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}
@@ -65,4 +65,21 @@
 {%- endif %}
 </section>
 {% include "lead_contacts.html" %}
+<section class="lead-postings" aria-labelledby="postings-heading" hx-disable>
+<h2 id="postings-heading">Job postings</h2>
+{%- if not postings %}
+<p>No job postings yet.</p>
+{%- else %}
+<table class="lead-table posting-table">
+<thead>
+<tr><th scope="col">Title</th><th scope="col">Source</th><th scope="col">Posted</th><th scope="col">First seen</th><th scope="col">Status</th></tr>
+</thead>
+<tbody>
+{%- for posting in postings %}
+<tr class="posting-row"><td>{{ posting.title|plain }}</td><td>{{ posting.source|plain }}</td><td>{{ posting.posted }}</td><td>{{ posting.first_seen }}</td><td>{{ posting.status }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>
 {% endblock %}

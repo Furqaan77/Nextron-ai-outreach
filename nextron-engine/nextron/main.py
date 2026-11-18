@@ -165,16 +165,24 @@ which break the same cycle as ``notify``.
 ``ClaudeGateway(secrets, meter=meter)`` (``nextron.adapters.ai``, imported inside the function, so
 importing this module still loads neither the AI package nor the SDK) unless an ``llm=`` is
 injected; building it builds no HTTP client and makes no call. ``SignalExtractions(clock, meter,
-llm, research)`` (``nextron.app.research.extraction``) runs the ``extract_lead`` jobs that the
-crawl enqueues, reached through ``extractions=lambda: extractions``, and the dashboard gets
-``LeadSignals(clock)`` (``create_app(..., lead_signals=...)``) for the Lead page's Signals and
-Evidence.
+llm, research, people)`` (``nextron.app.research.extraction``) runs the ``extract_lead`` jobs
+that the crawl enqueues, reached through ``extractions=lambda: extractions``, and the dashboard
+gets ``LeadSignals(clock)`` (``create_app(..., lead_signals=...)``) for the Lead page's Signals
+and Evidence.
 
 **Decision-makers and the Primary Contact (Story 2.10).** ``PeopleExtractions(clock, meter, llm,
 research, queue)`` (``nextron.app.research.people``) is ``SignalExtractions``' people step (its
 last argument), on the same gateway. ``PrimaryContacts(clock, research)`` runs the
 ``select_primary_contact`` jobs, reached through ``primary=lambda: primary_contacts``, and the
 Lead page's "Make primary" (``create_app(..., primary_contacts=...)``).
+
+**Hiring Signals and job postings (Story 2.11).** ``JobBoards(clock, meter, boards, crawler,
+queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (between the
+people step and the Primary Contact's selection) and the ``recheck_event`` jobs, reached through
+``job_boards=lambda: job_boards``. ``build_app(..., job_board=None)`` reads the boards through
+``AtsBoards(meter=meter, fetcher=http_crawler)`` (``nextron.adapters.ats``, on the crawl's own
+``HttpCrawler``, so every board request is filtered, paced and metered as ``ats`` there) unless
+a ``job_board=`` is injected; building it fetches nothing.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -562,6 +570,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from nextron import __version__
+from nextron.adapters.ats import AtsBoards
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
 from nextron.adapters.crawler import HttpCrawler
@@ -600,6 +609,7 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
+from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.app.sending.api import Sending
 from nextron.app.setup.api import (
@@ -660,6 +670,7 @@ from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import LeadsMerged, SubjectSuppressed
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
+from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
     InvalidPlaybook,
@@ -708,6 +719,7 @@ from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
 from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
+from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
 from nextron.ports.renderer import RendererPort
@@ -855,6 +867,7 @@ def build_app(
     crawler: CrawlerPort | None = None,
     llm: LlmPort | None = None,
     renderer: RendererPort | None = None,
+    job_board: JobBoardPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -884,7 +897,10 @@ def build_app(
     (``PlaywrightRenderer(meter=meter)`` on that same ``HttpCrawler`` unless injected), which
     starts a browser only for each render. The Signal extraction calls Claude through ``llm``
     (``ClaudeGateway(secrets, meter=meter)`` unless injected, imported here so that importing
-    this module loads no AI package), which builds its HTTP client on its first call."""
+    this module loads no AI package), which builds its HTTP client on its first call. The ATS
+    boards are read through ``job_board`` (``AtsBoards(meter=meter, fetcher=<that same
+    HttpCrawler>)`` unless injected), and a careers posting's recheck fetches through the
+    crawl's ``crawler``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -904,7 +920,7 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions and primary_contacts are bound just below
+    # extractions, primary_contacts and job_boards are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -916,14 +932,17 @@ def build_app(
         research=lambda: research,
         extractions=lambda: extractions,
         primary=lambda: primary_contacts,
+        job_boards=lambda: job_boards,
     )
     queue = JobQueue(clock, job_types)
-    # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
+    # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
+    # pacing table
     http_crawler = HttpCrawler(meter=meter)
+    site_crawler = crawler if crawler is not None else http_crawler
     crawls = WebsiteCrawls(
         clock,
         meter,
-        crawler if crawler is not None else http_crawler,
+        site_crawler,
         renderer if renderer is not None else PlaywrightRenderer(meter=meter, fetcher=http_crawler),
         queue,
     )
@@ -936,6 +955,13 @@ def build_app(
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research)
+    job_boards = JobBoards(
+        clock,
+        meter,
+        job_board if job_board is not None else AtsBoards(meter=meter, fetcher=http_crawler),
+        site_crawler,
+        queue,
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1047,6 +1073,7 @@ def build_job_types(
     research: Callable[[], handlers.PurgingPageText],
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
+    job_boards: Callable[[], handlers.CheckingJobBoards],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1058,8 +1085,9 @@ def build_job_types(
     ``WebsiteCrawls`` that ``enrich_lead`` and ``render_pages`` jobs call, ``discovery`` the
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
     service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions`` that
-    ``extract_lead`` jobs call, and ``primary`` its ``PrimaryContacts`` that
-    ``select_primary_contact`` jobs call."""
+    ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
+    ``select_primary_contact`` jobs call, and ``job_boards`` its ``JobBoards`` that
+    ``check_job_boards`` and ``recheck_event`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1198,6 +1226,31 @@ def build_job_types(
             retry_limit=3,
             handler=handlers.select_primary_contact(primary),
             group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_JOB_BOARDS_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            # one paced request per board, then the apply transaction
+            max_runtime=timedelta(minutes=10),
+            retry_limit=3,
+            handler=handlers.check_job_boards(job_boards),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RECHECK_EVENT_JOB,
+            default_lane=Lane.BULK,  # AD-10: re-checks run on the bulk lane
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),  # interactive before a send (AD-5)
+            priority=50,
+            max_runtime=timedelta(minutes=5),
+            retry_limit=3,
+            handler=handlers.recheck_event(job_boards),
+            group=JobGroup.RECHECK,
         )
     )
     job_types.freeze()

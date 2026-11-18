@@ -193,6 +193,7 @@ def world(db_engine: Engine) -> AbsenceWorld:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        job_boards=no_jobs,
     )
     queue = JobQueue(clock, job_types)
     found = AbsenceWorld(
@@ -766,7 +767,7 @@ def test_an_ai_extraction_leaves_the_absence_and_its_signal_alone(db_engine: Eng
     assert [(row["id"], row["type"]) for row in live] == [(absence["id"], "absence")]
     current = [s for s in ext.signals(lead) if s[-1] is None]
     assert [s[1] for s in current] == [CONTACT_FORM_ONLY]
-    assert [s[1] for s in ext.signals(lead) if s[-1] is not None] == ["law_hiring_legal_ops"]
+    assert [s[1] for s in ext.signals(lead) if s[-1] is not None] == [extraction.QUOTED]
 
 
 PARTNER = "Jane Roe, Managing Partner"

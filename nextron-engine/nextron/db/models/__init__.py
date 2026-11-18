@@ -27,6 +27,7 @@ from nextron.db.models.crawl import (
     AtsLinkRecord,
     CrawledPageRecord,
     CrawlRunRecord,
+    JobPostingRecord,
     PageContactMethodRecord,
 )
 from nextron.db.models.drafting import FooterSnapshotRecord
@@ -87,6 +88,7 @@ __all__ = [
     "ExtractionRunRecord",
     "FooterSnapshotRecord",
     "HeartbeatRecord",
+    "JobPostingRecord",
     "JobRecord",
     "LeadRecord",
     "MarketRecord",

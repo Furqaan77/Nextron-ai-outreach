@@ -54,9 +54,21 @@ step (below):
      share one). With none, a Signal is created with its class, Tier and ``score_only`` from the
      Segment, the date for an Event, and ``first_seen_at`` the earliest ``retrieved_at`` of the
      rows that create it;
-   - every current Signal of the Lead left with no live Evidence is retracted;
    - ``EvidenceChanged(lead_id, evidence_id)`` is published for each Evidence superseded or
-     retracted (an ``EventClosed`` is left to the job postings of Story 2.11);
+     retracted;
+   - **the careers step (Story 2.11):** ``nextron.domain.postings.validate_postings`` reads the
+     answer's ``job_postings`` against the pages sent and the careers pages among them; each
+     refusal, and each dropped posted date, appends one ``events`` row (entity ``leads``, the
+     Lead's id, ``None`` to ``job_posting_discarded`` or ``job_posting_date_discarded``, the
+     cause, ``cause_ref`` the cited page's id when it was sent, actor ``tuple_.actor``), and the
+     refusals count in the run's ``discarded``. Each careers page sent then goes through
+     ``nextron.app.research.postings.apply_page`` (its kept postings stored with source
+     ``careers_page``, checked at the page's ``fetched_at``; each other live posting of the page
+     kept while its title is still in the page's text, closed otherwise). When a careers page
+     was sent and the crawl run exists, its ``careers_postings`` (listed) and
+     ``careers_events`` (created) are written;
+   - every current Signal of the Lead left with no live Evidence is retracted, then
+     ``EventClosed`` is published for each closed posting that had an Event;
    - the headquarters is recomputed from all the Lead's live ``location`` Evidence
      (``headquarters``); when the zone or its Evidence differs from what the Lead holds, both
      are written (``hq_tz`` and ``hq_evidence_id``, NULL together) and
@@ -94,6 +106,7 @@ from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research import postings
 from nextron.app.research.api import Research
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
@@ -129,6 +142,7 @@ from nextron.domain.extraction import (
 )
 from nextron.domain.ids import is_ulid
 from nextron.domain.notifications import EvidenceChanged
+from nextron.domain.postings import PostingSource, validate_postings
 from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass, signal_catalogue
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
@@ -164,6 +178,7 @@ class _Call:
     pages: Mapping[str, SentPage] = field(repr=False)
     blocks: tuple[UntrustedBlock, ...] = field(repr=False)
     pages_truncated: int
+    careers_ids: tuple[str, ...] = ()  # the careers pages sent, in send order (Story 2.11)
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +373,7 @@ class SignalExtractions:
             pages_truncated=sum(
                 len(short) < len(text) for short, text in zip(cut, full, strict=True)
             ),
+            careers_ids=tuple(page.id for page in pages if page.kind == PageKind.CAREERS),
         )
 
     # Runs ---------------------------------------------------------------------------------------
@@ -430,7 +446,9 @@ class SignalExtractions:
         changed = self._carry_out(call, plan, live, live_rows, now, applied)
         for evidence_id in changed:
             current().publish(EvidenceChanged(lead_id=call.lead_id, evidence_id=evidence_id))
+        tally = self._careers(call, parsed, now, applied)
         applied.signals_retracted = len(signals_repo.retract_unsupported(call.lead_id, now))
+        postings.publish_closed(call.lead_id, tally)
         applied.hq_changed = self._headquarters(call.lead_id)
         applied.run_id = self._record(
             call.lead_id,
@@ -457,6 +475,37 @@ class SignalExtractions:
                 actor=call.route_tuple.actor,
                 at=now,
             )
+
+    @staticmethod
+    def _careers(
+        call: _Call, parsed: Mapping[str, Any], now: datetime, applied: _Applied
+    ) -> postings.Tally:
+        """Story 2.11's careers step: validate the answer's job postings, store those of each
+        careers page sent and apply the page rule; see the module docstring."""
+        validation = validate_postings(parsed, call.pages, call.careers_ids, now)
+        for discard in (*validation.discards, *validation.dropped_dates):
+            eventlog.append(
+                entity=ENTITY,
+                entity_id=call.lead_id,
+                from_status=None,
+                to_status=str(discard.status),
+                cause=str(discard.cause),
+                cause_ref=discard.page_id,
+                actor=call.route_tuple.actor,
+                at=now,
+            )
+        applied.discarded += len(validation.discards)
+        tally = postings.Tally()
+        for page_id in call.careers_ids:
+            page = call.pages[page_id]
+            kept = [posting for posting in validation.postings if posting.page_id == page_id]
+            postings.apply_page(
+                call.lead_id, call.segment, page.url, page.text, kept, page.fetched_at, now, tally
+            )
+        if call.careers_ids and call.crawl_run_id is not None:
+            counts = postings.tally_counts(tally, (PostingSource.CAREERS_PAGE,))
+            crawl_repo.set_posting_counts(call.crawl_run_id, counts)
+        return tally
 
     @staticmethod
     def _in_scope(call: _Call, rows: Sequence[StoredEvidence]) -> list[LiveEvidence]:

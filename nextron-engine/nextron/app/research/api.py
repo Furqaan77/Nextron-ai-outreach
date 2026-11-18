@@ -69,8 +69,13 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
   ``ats_links`` row whose ``url`` the survivor doesn't already hold (the rest stay on the
   merged Lead). Every ``evidence`` and ``signals`` row of the merged Lead moves to the survivor
   (Story 2.9); its ``extraction_runs``, its ``hq_tz`` and ``hq_evidence_id`` and its
-  ``no_decision_maker`` stay. Last, the survivor's Primary Contact is selected again (Story
-  2.10), as ``select_primary`` does.
+  ``no_decision_maker`` stay. Then each ``job_postings`` row whose ``(url, title)`` the
+  survivor doesn't hold moves to the survivor (Story 2.11); a colliding one stays on the merged
+  Lead, and when it is live it is closed (``nextron.app.research.postings.close_and_publish``
+  on the survivor, which now holds its Evidence and Event: the Evidence retracted, the Signal
+  left without live Evidence retracted, ``EvidenceChanged`` and ``EventClosed`` published), so
+  the survivor keeps one Event per posting. Last, the survivor's Primary Contact is selected
+  again (Story 2.10), as ``select_primary`` does.
 
 - ``@command resolve_market(contact_id)`` resolves one Contact, for the later paths that change
   its email, office location or Lead outside ``add_contact`` (Stories 2.10, 2.13, 2.14, 2.16);
@@ -265,6 +270,13 @@ id), its payload ``{v, lead_id, run_id}`` and its concurrency key ``domain:<site
 
 No page text, HTML, URL or matched text is logged; the run's row holds codes and counts only.
 
+``robots_rule(answer)`` is step 2's reading of one robots.txt answer, shared with Story 2.11's
+``recheck_event``.
+
+**Job postings (Story 2.11)** live in ``nextron.app.research.postings`` (storing, closing and the
+careers page rule) and ``nextron.app.research.job_boards`` (``JobBoards``: the
+``check_job_boards`` and ``recheck_event`` jobs).
+
 **Signals and Evidence (Story 2.9)** live in ``nextron.app.research.extraction``:
 ``SignalExtractions`` runs the ``extract_lead`` jobs (the Lead's changed pages through Claude's
 ``extract_signals`` route, validated and reconciled into ``evidence``, ``signals`` and
@@ -283,10 +295,12 @@ from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.research import postings
 from nextron.app.research.absence import AbsenceApplied, apply_contact_form_only
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -759,9 +773,21 @@ class Research:
             self._resolve(contact.id)
         crawl_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
         signals_repo.reparent(n.merged_lead_id, n.survivor_lead_id)
+        self._reparent_postings(n, now)
         survivor = discovery_queries.lead(n.survivor_lead_id)
         if survivor is not None and survivor.merged_into is None:
             self._select(survivor.id, survivor.segment_id)
+
+    @staticmethod
+    def _reparent_postings(n: LeadsMerged, now: datetime) -> None:
+        """Story 2.11: move the merged Lead's job postings the survivor lacks; close each
+        colliding live one, whose Evidence and Event the survivor now holds."""
+        stayed = set(postings_repo.reparent(n.merged_lead_id, n.survivor_lead_id))
+        colliding = [
+            row for row in postings_repo.for_lead(n.merged_lead_id) if row.id in stayed
+        ]
+        if any(row.live for row in colliding):
+            postings.close_and_publish(n.survivor_lead_id, colliding, now, postings.Tally())
 
     # The Primary Contact (Story 2.10) -----------------------------------------------------------
 
@@ -961,6 +987,22 @@ def _allow_all(url: str) -> bool:
 
 def _disallow_all(url: str) -> bool:
     return False
+
+
+def robots_rule(answer: Robots | AdapterError) -> tuple[RobotsRule, float, str | None]:
+    """The crawl's reading of one robots.txt answer (step 2 of ``enrich_lead``; Story 2.11's
+    ``recheck_event`` reads a careers page's the same way): the rule, the interval and the code
+    of a failure (``None`` for a 2xx or a 4xx other than 429)."""
+    if isinstance(answer, AdapterError):
+        return _disallow_all, MIN_INTERVAL_S, answer.code
+    status = answer.status
+    if 200 <= status < 300:
+        if answer.allows is None:  # a 2xx always carries its rules; fail closed
+            return _disallow_all, MIN_INTERVAL_S, None
+        return answer.allows, crawl_interval(answer.crawl_delay_s), None
+    if 400 <= status < 500 and status != TOO_MANY_REQUESTS:
+        return _allow_all, MIN_INTERVAL_S, None
+    return _disallow_all, MIN_INTERVAL_S, http_code(status)
 
 
 def _target(url: str) -> FetchTarget | None:
@@ -1183,21 +1225,6 @@ class WebsiteCrawls:
         except AdapterError as error:
             return error
 
-    @staticmethod
-    def _rule(answer: Robots | AdapterError) -> tuple[RobotsRule, float, str | None]:
-        """Step 2's reading of one robots.txt answer: the rule, the interval and the code of a
-        failure (``None`` for a 2xx or a 4xx other than 429)."""
-        if isinstance(answer, AdapterError):
-            return _disallow_all, MIN_INTERVAL_S, answer.code
-        status = answer.status
-        if 200 <= status < 300:
-            if answer.allows is None:  # a 2xx always carries its rules; fail closed
-                return _disallow_all, MIN_INTERVAL_S, None
-            return answer.allows, crawl_interval(answer.crawl_delay_s), None
-        if 400 <= status < 500 and status != TOO_MANY_REQUESTS:
-            return _allow_all, MIN_INTERVAL_S, None
-        return _disallow_all, MIN_INTERVAL_S, http_code(status)
-
     def _robots(self, run: _Run) -> _Origin | None:
         """Step 2: the run's origin, robots rule and interval; ``None`` when unreachable."""
         unreachable: str | None = None
@@ -1206,7 +1233,7 @@ class WebsiteCrawls:
             if isinstance(answer, AdapterError) and answer.code in UNREACHABLE_CODES:
                 unreachable = answer.code
                 continue
-            allows, interval, code = self._rule(answer)
+            allows, interval, code = robots_rule(answer)
             run.error_code = code
             return _Origin(origin, allows, interval)
         run.outcome = CrawlOutcome.UNREACHABLE
@@ -1218,7 +1245,7 @@ class WebsiteCrawls:
         failure's code becomes the run's ``error_code`` when it has none."""
         landed = check_url(home.final_url)  # _home read the final domain from it
         origin = f"{landed.scheme}://{urllib.parse.urlsplit(landed.url).netloc}"
-        allows, interval, code = self._rule(self._read_robots(f"{origin}/robots.txt"))
+        allows, interval, code = robots_rule(self._read_robots(f"{origin}/robots.txt"))
         if code is not None and run.error_code is None:
             run.error_code = code
         return _Origin(origin, allows, interval)

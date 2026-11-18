@@ -28,6 +28,7 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries.setup import SeededSegment
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
+from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
@@ -306,6 +307,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        job_boards=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -628,7 +630,12 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     website = header.find("a")
     assert website.attrs == {"href": "https://smith-law.co.uk/", "rel": "noopener noreferrer"}
     assert page.find("main").find("a", href="/leads").text == "All Leads"
-    assert [h2.text for h2 in page.find_all("h2")] == ["Signals", "Evidence", "Contacts"]
+    assert [h2.text for h2 in page.find_all("h2")] == [
+        "Signals",
+        "Evidence",
+        "Contacts",
+        "Job postings",
+    ]
     table = page.find("table", class_="contact-table")
     assert table_rows(table)[0] == CONTACT_HEADER
     [contact] = table.find_all("tr", class_="contact-row")
@@ -1622,3 +1629,99 @@ def test_a_person_evidence_row_supports_its_contact(world: World) -> None:
     [row] = page.find_all("tr", class_="evidence-row")
     assert cells(row)[2] == f"Contact: {HOSTILE_NAME}"
     assert page.disabled("Contact: <script>") == [True]
+
+
+# Job postings (Story 2.11) -----------------------------------------------------------------------
+
+POSTING_HEADER = ["Title", "Source", "Posted", "First seen", "Status"]
+HOSTILE_TITLE = '<b hx-get="/x">Legal Operations</b> Manager <script>alert(1)</script>'
+
+
+def stored_posting(
+    world: World,
+    lead: str,
+    title: str,
+    *,
+    source: str = "greenhouse",
+    url: str = "https://boards.greenhouse.io/smith/jobs/1",
+    posted: date | None = None,
+    days_ago: int = 0,
+    closed: bool = False,
+) -> str:
+    """A ``job_postings`` row written through the repository, first seen ``days_ago``."""
+
+    def write() -> str:
+        seen = T - timedelta(days=days_ago)
+        posting_id = postings_repo.insert_posting(
+            lead_id=lead,
+            source=source,
+            board_token=None if source == "careers_page" else "smith",
+            url=url,
+            title=title,
+            description=None,
+            posted_date=posted,
+            checked_at=seen,
+        )
+        if closed:
+            postings_repo.close(posting_id, T)
+        return posting_id
+
+    return world.transact(write)
+
+
+def test_the_job_postings_section_shows_live_postings_first_then_the_newest(
+    world: World,
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    stored_posting(world, lead, "Intake Coordinator", days_ago=20, closed=True)
+    stored_posting(
+        world,
+        lead,
+        "Legal Operations Manager",
+        source="careers_page",
+        url="https://smith-law.co.uk/careers",
+        posted=date(2026, 11, 10),
+        days_ago=8,
+    )
+    stored_posting(world, lead, "Paralegal", source="lever", days_ago=2, closed=True)
+    stored_posting(world, lead, "Knowledge Lawyer", source="ashby", days_ago=30)
+
+    page = world.page(f"/leads/{lead}")
+
+    section = page.find("section", class_="lead-postings")
+    assert "hx-disable" in section.attrs
+    assert table_rows(section.find("table", class_="posting-table")) == [
+        POSTING_HEADER,
+        ["Legal Operations Manager", "Careers page", "2026-11-10", "2026-11-09", "Live"],
+        ["Knowledge Lawyer", "Ashby", "—", "2026-10-18", "Live"],
+        ["Paralegal", "Lever", "—", "2026-11-15", "Closed"],
+        ["Intake Coordinator", "Greenhouse", "—", "2026-10-28", "Closed"],
+    ]
+    for node in (section, *section.walk()):  # the section holds no HTMX action
+        assert not [key for key in node.attrs if key.startswith("hx-") and key != "hx-disable"]
+
+
+def test_a_lead_with_no_job_postings_says_so(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    page = world.page(f"/leads/{lead}")
+
+    section = page.find("section", class_="lead-postings")
+    assert section.text == "Job postings No job postings yet."
+
+
+def test_a_hostile_posting_title_is_escaped_inside_hx_disable(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    stored_posting(world, lead, HOSTILE_TITLE)
+    stored_posting(world, lead, f"Old {HOSTILE_TITLE}", days_ago=3, closed=True)
+
+    reply = world.get(f"/leads/{lead}")
+
+    assert reply.status == 200
+    for raw in ("<script>alert", '<b hx-get="/x">'):
+        assert raw not in reply.text
+    tree = Tree(reply.text)
+    assert tree.disabled("alert(1)") == [True, True]
+    assert not tree.find_all("b")
+    rows = table_rows(tree.find("table", class_="posting-table"))
+    assert [row[0] for row in rows[1:]] == [HOSTILE_TITLE, f"Old {HOSTILE_TITLE}"]

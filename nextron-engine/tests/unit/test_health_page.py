@@ -285,6 +285,11 @@ NEVER_RUN = [
         ["render_pages", "never"],
         ["extract_lead", "never"],
         ["select_primary_contact", "never"],
+        ["check_job_boards", "never"],  # Story 2.11
+    ],
+    [
+        ["Job type", "Last success"],
+        ["recheck_event", "never"],  # Story 2.11, group Re-check
     ],
     [
         ["Job type", "Last success"],
@@ -345,6 +350,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "No errors need attention.",
         "Last successful runs",
         "Enrichment",
+        "Re-check",
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
@@ -398,13 +404,15 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Dismiss",
         "Last successful runs",
         "Enrichment",
+        "Re-check",
         "Backup",
         "Other",
         "Readiness (nextron doctor)",
         "13 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables[:3] == [
+    assert panel.tables[:4] == [
         NEVER_RUN[0],
+        NEVER_RUN[1],
         [
             ["Job type", "Last success"],
             ["backup_db", "never"],

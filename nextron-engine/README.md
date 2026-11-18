@@ -1813,9 +1813,11 @@ CSV, the list's origin), the retrieval date and the Address Class at the time; o
 Provenance Record.". The header's **HQ timezone**, and the **Signals** and **Evidence**
 sections above Contacts, are Story 2.9's (see [Signals and Evidence](#signals-and-evidence)),
 and the Primary Contact line and the **Make primary** buttons Story 2.10's (see
-[Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)). Market,
-Tier, scores, job postings, the timeline, stage actions and the data-subject actions come with
-their stories (3.2 and 3.7, 2.11, 2.15, Epics 5 and 9, 3.13 onwards).
+[Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)), and the
+**Job postings** section below them Story 2.11's (see [Hiring Signals and job
+postings](#hiring-signals-and-job-postings)). Market, Tier, scores, the timeline, stage actions
+and the data-subject actions come with their stories (3.2 and 3.7, 2.15, Epics 5 and 9, 3.13
+onwards).
 
 A merged Lead's URL redirects (303) straight to the Lead at the end of its merge chain, following
 at most 32 merges; an id that isn't a ULID, an unknown id or a broken chain gets 404 "Lead not
@@ -2109,6 +2111,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0027_2_6_contact_methods` | `page_contact_methods` (a foreign key to `crawled_pages` with no cascade, `ix_page_contact_methods_page_id`, unique on `page_id`, `method`, `signature` and `source`, method and source checks); adds `leads.contact_methods` in place (`add_column`) (see [Rendering and contact methods](#rendering-and-contact-methods)) | `research` |
 | `0028_2_10_primary_contact` | `contacts.primary_set_by` (nullable, `system` or `operator`) and `leads.no_decision_maker` (nullable Boolean), both added in place with no check, and the partial unique index `uq_contacts_one_primary` on `contacts (lead_id)` where `is_primary = 1` (see [Decision-makers and the Primary Contact](#decision-makers-and-the-primary-contact)) | `research` |
 | `0029_2_9_tag_managers` | adds `crawled_pages.tag_managers` in place (`add_column`, nullable text: the tag managers a page loads as a JSON array of keys, `[]` for none, NULL for a page never checked) (see [Signals and Evidence](#signals-and-evidence)) | `research` |
+| `0030_2_11_job_postings` | `job_postings` (foreign keys to `leads`, `signals` and `evidence` with no cascade; `ix_job_postings_lead_id`, `ix_job_postings_signal_id`; unique on `lead_id`, `url` and `title`; `ck_job_postings_source`, `ck_job_postings_board_token`, `ck_job_postings_status` and `ck_job_postings_closed_at`); adds nine nullable counts to `crawl_runs` in place (`add_column`, no check): `careers_postings`, `careers_events`, `<source>_postings` and `<source>_events` for `greenhouse`, `lever` and `ashby`, and `board_errors` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2193,9 +2196,10 @@ job types so far: `send_alert` (see [Alerts and notifications](#alerts-and-notif
 group `other`, no trigger; see [Contact Markets and timezones](#contact-markets-and-timezones)),
 `enrich_lead`, `canonicalize_lead` and `purge_page_text` (see [Website
 crawling](#website-crawling)), `extract_lead` (see [Signals and
-Evidence](#signals-and-evidence)) and `select_primary_contact` (see [Decision-makers and the
-Primary Contact](#decision-makers-and-the-primary-contact)); the stories that add work add
-theirs, with a thin handler in `nextron/jobs/handlers.py`.
+Evidence](#signals-and-evidence)), `select_primary_contact` (see [Decision-makers and the
+Primary Contact](#decision-makers-and-the-primary-contact)), and `check_job_boards` and
+`recheck_event` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)); the
+stories that add work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
 (`tests/contracts/test_job_contracts.py` checks it), before `freeze()`:
@@ -3801,7 +3805,9 @@ was. Each run logs `absence_checked` with the Lead, the crawl run, the reason (`
 `page_needs_render`, `tag_manager_unknown` or `tag_manager`) and its counts; no `events` row is
 written. The AI extraction never touches these rows.
 
-**Not yet:** the job postings `extract_signals` returns are read by Story 2.11.
+The job postings `extract_signals` returns are read by Story 2.11's careers step (see [Hiring
+Signals and job postings](#hiring-signals-and-job-postings)), which also refuses a hiring type's
+Signal here (`hiring_type`): hiring Events come only from postings.
 
 ## Rendering and contact methods
 
@@ -3923,8 +3929,10 @@ outcome, except a budget refusal, an unknown or merged Lead, or a raise). It:
    page checked, `extracted_by rule`); a zero is never stored. The same count on the same
    pages is confirmed and any other live count retracted; a new count supersedes every live
    one (a merge can bring a second);
-8. records the run (`extraction_runs`, route `extract_people`) and queues
-   `select_primary_contact` in the same transaction.
+8. records the run (`extraction_runs`, route `extract_people`) and queues the next stage in
+   the same transaction: `check_job_boards` (Story 2.11, see [Hiring Signals and job
+   postings](#hiring-signals-and-job-postings)), which queues `select_primary_contact` when it
+   is done, so the selection sees the hiring Events.
 
 **Roles.** A role matches a title when the title's words appear together in it, after
 casefolding, `&` as "and", the forms `COO`/`CEO`/`CFO` (for "Chief Operating/Executive/Financial
@@ -3968,8 +3976,82 @@ address is Invalid; picking the engine's choice pins it. The button posts to
 ("This Lead was merged into another Lead.", "That Contact isn't on this Lead.", "That Contact's
 address is Invalid."). A person's Evidence reads "Contact: <name>" under Supports.
 
-**Not yet:** finding the Primary Contact's address (Story 2.13), job postings (Story 2.11),
-scores (Story 2.15); folding duplicate Contacts after a merge is deferred.
+**Not yet:** finding the Primary Contact's address (Story 2.13), scores (Story 2.15); folding
+duplicate Contacts after a merge is deferred.
+
+## Hiring Signals and job postings
+
+"They're hiring for this problem right now" becomes a dated Event with Evidence: each Lead's job
+postings come from its own careers pages and the public job boards its website links to, and a
+posting that matches one of the Segment's hiring Signal types becomes one Event (FR-7, FR-11,
+FR-49, AD-7, AD-9, INT-10, NFR-6; Story 2.11). The rules are in `nextron/domain/postings.py`
+and `nextron/domain/signals.py` (`match_hiring`); storing and closing postings in
+`nextron/app/research/postings.py`; the jobs in `nextron/app/research/job_boards.py`
+(`JobBoards`); the boards' adapter in `nextron/adapters/ats` (`AtsBoards`).
+
+**Where postings come from.**
+
+- **Careers pages.** The `extract_lead` job's Claude answer already lists `job_postings` for the
+  pages it was sent. A posting is kept only when it cites a page whose kind is `careers` and its
+  title (normalised, 1 to 300 characters) is an exact substring of that page's text; the
+  model's URL is ignored (the posting's URL is the page's), its quote becomes the description
+  when it is in the page, and a posted date counts only when that quote writes it and it isn't
+  in the future. Each refusal writes one `events` row (`job_posting_discarded`: `unknown_block`,
+  `not_careers_page`, `title_empty`, `title_too_long`, `title_not_in_page`; or
+  `job_posting_date_discarded`) and counts in the run's `discarded`. On each careers page sent,
+  a live posting the answer didn't propose stays live while its title is still in the text, and
+  closes otherwise.
+- **ATS boards.** The `check_job_boards` job reads the board tokens from the Lead's current ATS
+  links (Story 2.5's `ats_links` that its latest crawl saw): Greenhouse (`boards.greenhouse.io`,
+  `job-boards.greenhouse.io`: the first path segment, or `for=` on an embed), Lever
+  (`jobs.lever.co`) and Ashby (`jobs.ashbyhq.com`). A link is used only when its host is in the
+  `ats_hosts` setting **and** has an endpoint in code; the call goes to the provider's fixed
+  public JSON endpoint, through the crawler's egress filter (every hop checked against the FR-49
+  denylist, redirects pinned to the provider's domain), paced at 1 s and metered as provider
+  `ats`. No job site is ever queried. The boards of the Lead's live ATS postings are checked
+  too, so a board whose link left the site still closes its postings.
+
+**The Event.** A posting is matched once, when it is stored or reopened: the Segment's hiring
+types (`sources` with `careers_page` or `ats_board`) and their `match_terms`, whole phrases,
+case-insensitive, the title first, then the description (Law: intake, legal operations,
+knowledge management, innovation; Ops: data entry, order entry, accounts payable, accounts
+receivable, AP/AR, dispatch). A match stores one Quote Evidence row (`extracted_by rule`,
+`source` `ats` or `website`, the posting's URL) of the title, or of the description excerpt
+holding the term (at most 300 characters, cut on whitespace), and one Signal of that type and
+Tier dated by the posted date (else it ages from first seen). The Story 2.9 extraction no
+longer stores a hiring type's Signal (`hiring_type`), so one posting never makes two Events.
+
+**Closing.** A posting that a successful board answer no longer lists, whose board answers 404
+or 410, or whose title left its careers page, becomes `closed` (`closed_at`): its Evidence is
+retracted, its Signal is no longer live, and `EvidenceChanged` and `EventClosed` are published.
+Any other failure (a 429, a 5xx, a timeout, a malformed answer) changes nothing and counts in
+the run's `board_errors`; the next check tries again. A closed posting listed again reopens with
+a new Event.
+
+**The jobs.**
+
+- `check_job_boards` (bulk lane by default, or interactive; priority 45; 10 minutes; retry
+  limit 3; group Enrichment; keyed `check_job_boards:<lead>:tick`, one site at a time; payload
+  `{v, lead_id, run_id}`) runs after the people step, checks the month's budget first (a refusal
+  defers it), writes the run's `greenhouse_*`, `lever_*` and `ashby_*` counts (postings listed
+  and hiring Events created) and `board_errors`, then queues `select_primary_contact`.
+- `recheck_event` (bulk lane by default, or interactive; priority 50; 5 minutes; retry limit 3;
+  group Re-check; payload `{v, signal_id}`) re-checks the one posting of an Event before a send
+  (AD-5): an ATS posting's board, or a careers posting's page (robots.txt first, its crawl
+  delay obeyed; the page text is never stored; a 404 or 410 closes it; a page that needs a
+  render isn't judged). It isn't budget-checked; a retryable failure (a timeout, a 429 or a
+  5xx, from the board, robots.txt or the page) is retried, any other is logged as
+  `recheck_failed`.
+
+**Merges.** A merge moves each posting whose URL and title the survivor doesn't hold; a
+colliding live one stays on the merged Lead and is closed, with its Event.
+
+**The Lead page** shows a **Job postings** section: each posting's title, source ("Careers
+page", "Greenhouse", "Lever", "Ashby"), posted date, first-seen date and status, the live ones
+first, then the newest first seen; "No job postings yet." when there are none.
+
+**Not yet:** the EU boards (`job-boards.eu.greenhouse.io`, `jobs.eu.lever.co`) aren't read
+(their endpoints and terms are unchecked); see `deferred-work.md`.
 
 ## Engine health
 

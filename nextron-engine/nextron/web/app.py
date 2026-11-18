@@ -1325,6 +1325,7 @@ def create_app(
             lead_signals.view(found.id),
             decisions,
             research_queries.no_decision_maker(found.id),
+            research_queries.job_postings(found.id),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 

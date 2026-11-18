@@ -54,9 +54,10 @@ decimal point (``1.5``, ``12.25``) is no whole number, so none of its digits cou
 aren't thousands groups split their digits into separate runs (``12,34`` is 12 and 34).
 
 **``validate(parsed, segment, pages, now) -> Validation``** reads an ``extract_signals`` answer
-(``LlmOk.parsed``: ``signals``, ``profile_facts``, ``size_clues``; ``job_postings`` are left to
-Story 2.11). ``segment`` is the Lead's ``SegmentDef``; ``pages`` maps each page id sent to a
-``SentPage(url, fetched_at, text)`` holding its full stored text. A Signal's ``signal_type`` is
+(``LlmOk.parsed``: ``signals``, ``profile_facts``, ``size_clues``; its ``job_postings`` are read
+by Story 2.11's ``nextron.domain.postings.validate_postings``). ``segment`` is the Lead's
+``SegmentDef``; ``pages`` maps each page id sent to a ``SentPage(url, fetched_at, text)``
+holding its full stored text. A Signal's ``signal_type`` is
 stripped and lowercased first. Each proposal is checked in this order, and the first failure
 discards it (``Discard(status, cause, page_id)``; ``page_id`` is the cited page when it was one
 of the pages sent, else ``None``):
@@ -66,7 +67,9 @@ of the pages sent, else ``None``):
    (``quote_too_long``) and passes ``quote_in`` against the page's full stored text
    (``quote_not_in_page``);
 3. a Signal's type is one of the Segment's types whose Evidence includes ``quote``
-   (``unknown_signal_type``);
+   (``unknown_signal_type``), and isn't a hiring type, whose ``sources`` include
+   ``careers_page`` or ``ats_board`` (``hiring_type``: Story 2.11's hiring Events come only
+   from job postings, so one posting never makes two Events);
 4. a size clue's number is from 1 to ``MAX_SIZE_NUMBER`` (``number_out_of_range``) and
    ``number_in`` its quote (``number_not_in_quote``);
 5. a profile fact's value, stripped, has 1 to ``MAX_VALUE`` characters and no control
@@ -123,7 +126,13 @@ from typing import Any, Final
 from nextron.domain.budget import BudgetClass
 from nextron.domain.geo import location_zone, place_in
 from nextron.domain.quotes import normalise, quote_in
-from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass, SignalType
+from nextron.domain.segments import (
+    HIRING_SOURCES,
+    EvidenceType,
+    SegmentDef,
+    SignalClass,
+    SignalType,
+)
 
 EXTRACT_LEAD_JOB: Final = "extract_lead"
 ROUTE: Final = "extract_signals"
@@ -210,6 +219,7 @@ class DiscardCause(StrEnum):
     VALUE_INVALID = "value_invalid"
     DATE_NOT_IN_QUOTE = "date_not_in_quote"
     DATE_IN_FUTURE = "date_in_future"
+    HIRING_TYPE = "hiring_type"  # Story 2.11: hiring Events come only from job postings
 
 
 # Values ---------------------------------------------------------------------------------------
@@ -552,6 +562,9 @@ class _Validator:
             self.discards.append(
                 Discard(Discarded.SIGNAL, DiscardCause.UNKNOWN_SIGNAL_TYPE, page_id)
             )
+            return
+        if HIRING_SOURCES & set(signal_type.sources):
+            self.discards.append(Discard(Discarded.SIGNAL, DiscardCause.HIRING_TYPE, page_id))
             return
         kept_date = None
         if proposed_date is not None and signal_type.signal_class is SignalClass.EVENT:

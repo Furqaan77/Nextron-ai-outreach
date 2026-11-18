@@ -25,6 +25,27 @@ never checked for them.
 (``ck_ats_links_tag``: ``a``, ``iframe`` or ``script``), ``first_seen_at`` and
 ``last_seen_at``.
 
+``job_postings`` (Story 2.11, migration ``0030_2_11_job_postings``): one row per Lead, posting
+URL and title (``uq_job_postings_lead_id_url_title``): ``lead_id``
+(``fk_job_postings_lead_id_leads``, indexed by ``ix_job_postings_lead_id``); ``source``
+(``ck_job_postings_source``: one of ``nextron.domain.postings.PostingSource``) and
+``board_token`` (100), NULL exactly for a ``careers_page`` posting
+(``ck_job_postings_board_token``); ``url`` (2,048), ``title`` (300) and the nullable
+``description`` (an excerpt of at most 300 characters); the nullable ``posted_date`` (a date);
+``first_seen_at`` and ``last_checked_at``; ``status`` (``ck_job_postings_status``: ``live`` or
+``closed``) and ``closed_at``, set exactly when the posting is closed
+(``ck_job_postings_closed_at``); and the nullable ``signal_id``
+(``fk_job_postings_signal_id_signals``, indexed by ``ix_job_postings_signal_id``) and
+``evidence_id`` (``fk_job_postings_evidence_id_evidence``): the posting's Event and its Quote
+Evidence. A title or description may name a person, so both are PII class ``redact``.
+
+``crawl_runs`` also holds, since migration ``0030_2_11_job_postings``, nullable counts with no
+CHECK (NULL: not checked in this run): ``careers_postings`` and ``careers_events`` (the careers
+postings listed and the hiring Events created by the run's extraction), ``greenhouse_postings``,
+``greenhouse_events``, ``lever_postings``, ``lever_events``, ``ashby_postings`` and
+``ashby_events`` (per board source, by ``check_job_boards``) and ``board_errors`` (the boards it
+couldn't read).
+
 ``page_contact_methods`` (Story 2.6, migration ``0027_2_6_contact_methods``): one row per page
 and contact method detected on it, by signature and source
 (``uq_page_contact_methods_page_id_method_signature_source``): ``page_id``
@@ -39,14 +60,24 @@ A page's text may quote a person, so ``crawled_pages.text`` is PII class ``redac
 of public pages, codes, counts, hashes and times) is ``none``.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.crawl import LINK_TAGS, CrawlOutcome, PageKind
+from nextron.domain.postings import MAX_EXCERPT, MAX_TITLE, PostingSource, PostingStatus
 from nextron.domain.widgets import MAX_MATCHED, ContactMethod, MatchSource
 
 DOMAIN_LENGTH: Final = 253  # nextron.domain.identity.MAX_DOMAIN_LENGTH
@@ -72,6 +103,23 @@ METHOD_CHECK: Final = "method IN ({})".format(
     ",".join(f"'{method}'" for method in ContactMethod)
 )
 SOURCE_CHECK: Final = "source IN ({})".format(",".join(f"'{source}'" for source in MatchSource))
+POSTING_SOURCE_LENGTH: Final = 16
+BOARD_TOKEN_LENGTH: Final = 100
+POSTING_STATUS_LENGTH: Final = 8
+POSTING_SOURCE_CHECK: Final = "source IN ({})".format(
+    ",".join(f"'{source}'" for source in PostingSource)
+)
+BOARD_TOKEN_CHECK: Final = (
+    f"(source = '{PostingSource.CAREERS_PAGE}' AND board_token IS NULL)"
+    f" OR (source <> '{PostingSource.CAREERS_PAGE}' AND board_token IS NOT NULL)"
+)
+POSTING_STATUS_CHECK: Final = "status IN ({})".format(
+    ",".join(f"'{status}'" for status in PostingStatus)
+)
+CLOSED_AT_CHECK: Final = (
+    f"(status = '{PostingStatus.CLOSED}' AND closed_at IS NOT NULL)"
+    f" OR (status = '{PostingStatus.LIVE}' AND closed_at IS NULL)"
+)
 
 
 class CrawlRunRecord(Base):
@@ -96,6 +144,16 @@ class CrawlRunRecord(Base):
     pages_skipped_robots: Mapped[int] = mapped_column(Integer)
     renders: Mapped[int] = mapped_column(Integer)
     errors: Mapped[int] = mapped_column(Integer)
+    # Story 2.11: the job postings and hiring Events the run found, per source (NULL: unchecked)
+    careers_postings: Mapped[int | None] = mapped_column(Integer)
+    careers_events: Mapped[int | None] = mapped_column(Integer)
+    greenhouse_postings: Mapped[int | None] = mapped_column(Integer)
+    greenhouse_events: Mapped[int | None] = mapped_column(Integer)
+    lever_postings: Mapped[int | None] = mapped_column(Integer)
+    lever_events: Mapped[int | None] = mapped_column(Integer)
+    ashby_postings: Mapped[int | None] = mapped_column(Integer)
+    ashby_events: Mapped[int | None] = mapped_column(Integer)
+    board_errors: Mapped[int | None] = mapped_column(Integer)
 
 
 class CrawledPageRecord(Base):
@@ -140,6 +198,36 @@ class AtsLinkRecord(Base):
     tag: Mapped[str] = mapped_column(String(TAG_LENGTH))
     first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
     last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class JobPostingRecord(Base):
+    """One job posting of a Lead, from a careers page or an ATS board (Story 2.11)."""
+
+    __tablename__ = "job_postings"
+    __table_args__ = (
+        Index("ix_job_postings_lead_id", "lead_id"),
+        Index("ix_job_postings_signal_id", "signal_id"),
+        UniqueConstraint("lead_id", "url", "title"),
+        CheckConstraint(POSTING_SOURCE_CHECK, name="source"),
+        CheckConstraint(BOARD_TOKEN_CHECK, name="board_token"),
+        CheckConstraint(POSTING_STATUS_CHECK, name="status"),
+        CheckConstraint(CLOSED_AT_CHECK, name="closed_at"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    lead_id: Mapped[str] = mapped_column(Ulid, ForeignKey("leads.id"))
+    source: Mapped[str] = mapped_column(String(POSTING_SOURCE_LENGTH))
+    board_token: Mapped[str | None] = mapped_column(String(BOARD_TOKEN_LENGTH))
+    url: Mapped[str] = mapped_column(String(URL_LENGTH))
+    title: Mapped[str] = mapped_column(String(MAX_TITLE))
+    description: Mapped[str | None] = mapped_column(String(MAX_EXCERPT))
+    posted_date: Mapped[date | None] = mapped_column(Date)
+    first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    last_checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    status: Mapped[str] = mapped_column(String(POSTING_STATUS_LENGTH))
+    closed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    signal_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("signals.id"))
+    evidence_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("evidence.id"))
 
 
 class PageContactMethodRecord(Base):
