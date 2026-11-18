@@ -56,7 +56,15 @@ REPO_NAME = "suppression_entries"
 REPO_MODULE = f"{REPO_PACKAGE}.{REPO_NAME}"
 REPO_FILE = PACKAGE / "db" / "repos" / "compliance" / "suppression_entries.py"
 READERS = frozenset(
-    {"get", "active_for", "listed", "count_listed", "by_ids", "active_ids_for_cause"}
+    {
+        "get",
+        "active_for",
+        "listed",
+        "count_listed",
+        "by_ids",
+        "active_ids_for_cause",
+        "for_export",  # Story 3.15
+    }
 )
 WRITERS = frozenset({"insert", "void"})
 ALLOWED_WRITER = "app/compliance/api.py"
@@ -72,6 +80,7 @@ TABLE_NAME_HOMES = (
     "domain/backup.py",
     "db/owners.py",
     "db/pii_registry.py",
+    "domain/contact_export.py",  # Story 3.15's export coverage registry names every PII table
 )
 GUARDED = (
     "db/repos/compliance/",
@@ -512,6 +521,7 @@ def test_the_classification_check_catches_a_missing_function(tmp_path: Path) -> 
         "active_ids_for_cause is classified but missing",
         "by_ids is classified but missing",
         "count_listed is classified but missing",
+        "for_export is classified but missing",
         "insert is classified but missing",
         "listed is classified but missing",
         "void is classified but missing",

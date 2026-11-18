@@ -346,6 +346,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "issued_at",
         ),
     },
+    "data_subject_requests": {
+        "compliance": (
+            "id",
+            "contact_id",
+            "kind",
+            "status",
+            "request_ref",
+            "opened_at",
+            "completed_at",
+            "receipt_id",
+        ),
+    },
     "evidence": {
         "research": (
             "id",

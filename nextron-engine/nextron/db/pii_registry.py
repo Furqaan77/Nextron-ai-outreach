@@ -365,6 +365,18 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "kid": PiiClass.NONE,
         "issued_at": PiiClass.NONE,
     },
+    # Story 3.15 (Story 3.13's schema). The request reference is the Operator's free text about
+    # how the person asked, which may name them; the rest are IDs, codes and times.
+    "data_subject_requests": {
+        "id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "request_ref": PiiClass.REDACT,
+        "opened_at": PiiClass.NONE,
+        "completed_at": PiiClass.NONE,
+        "receipt_id": PiiClass.NONE,
+    },
     # Story 2.9. A quote or a fact's value is a page's words and may quote a person, so both are
     # redacted; the rest are IDs, codes, numbers, public page URLs and times.
     "evidence": {

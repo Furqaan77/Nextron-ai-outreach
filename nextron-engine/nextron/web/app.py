@@ -158,7 +158,23 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts``,
   ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
-  Evidence and the headquarters zone).
+  Evidence and the headquarters zone), with one "Export data (JSON)" form per Contact
+  (``export_page.lead_forms``, Story 3.15).
+- ``POST /contacts/{contact_id}/export`` (``contact_export``) and ``GET /exports/{ticket}``
+  (``contact_export_download``), both ``@personal_data(True)``: the subject access export
+  (Story 3.15, FR-52); see ``nextron.web.export_page``. The POST's fields, apart from
+  ``csrf_token``, must be exactly one ``request_ref`` (anything else is ``MalformedForm``,
+  400). It runs ``compliance.export_on_request`` (``Compliance``) in its own unit of work,
+  which opens and completes a request of kind ``export`` and builds the file; then it holds
+  the file in ``ExportTickets`` (in memory only, made here, bound to the session's CSRF token,
+  one fetch within 60 s, at most 16) and answers 204 with ``HX-Redirect: /exports/<ticket>``.
+  ``RequestRefused`` answers 200 with the form alone and its message (the Contact read in a
+  read-only unit), never the typed reference; an unknown Contact answers a plain 404 "Contact
+  not found" (a ``LookupError`` is answered 404 only when a read-only re-read finds no such
+  Contact, so a ``KeyError`` from a bug stays a 500). The GET takes the ticket for the session
+  (``ExportTickets.take``) and answers the attachment (``export_page.download_response``), or a
+  plain 404 "Export expired: export again from the Lead page". Like ``GET /enter``, it changes in-memory state only. Nothing is logged,
+  and the file is never written to disk.
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -244,6 +260,7 @@ from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
+from nextron.domain.subject_request import RequestRefused
 from nextron.domain.suppression_list import (
     ADDED,
     FILE_TOO_LARGE,
@@ -260,6 +277,7 @@ from nextron.domain.unsub_token import UnsubKeyInUse
 from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
+from nextron.web import export_page as export_rows
 from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
@@ -457,16 +475,17 @@ def create_app(
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone; ``compliance`` runs the Suppression List
-    panel's add, import and Reverse.
-    ``monotonic`` is injectable so tests control the uptime. ``lifespan`` goes to
-    ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts and stops the job
-    runner, the scheduler and the heartbeat writer (``engine_lifespan``).
+    panel's add, import and Reverse, and the Lead page's subject access export.
+    ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
+    ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
+    and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
     Raises ``RuntimeError`` when a route doesn't declare ``personal_data`` or breaks the route
     rules."""
     started = monotonic()
     engine_health = health  # the name health is the GET /health handler's below
     templates = template_environment()
     sessions = SessionStore()
+    tickets = export_rows.ExportTickets(monotonic)  # built export files, in memory only
     assets = {name: (STATIC_DIR / name).read_bytes() for name in STATIC_TYPES}
     locked_page = templates.get_template("locked.html").render().encode("utf-8")
     app = FastAPI(
@@ -490,6 +509,9 @@ def create_app(
 
     def locked() -> HTMLResponse:
         return HTMLResponse(locked_page, status_code=401, headers=NO_STORE)
+
+    def not_found_text(text: str) -> PlainTextResponse:
+        return PlainTextResponse(text, status_code=404, headers=NO_STORE)
 
     @app.get("/enter", name="enter")
     @personal_data(False)
@@ -1272,6 +1294,41 @@ def create_app(
                 caption=suppression_rows.SAME_OPT_OUT_CAPTION,
             )
 
+    @app.post(export_rows.EXPORT_PATH, name="contact_export")
+    @personal_data(True)
+    def contact_export(
+        request: Request, contact_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        reference = export_rows.submitted_reference(fields)
+        try:
+            with units.open():
+                export = compliance.export_on_request(contact_id, reference)
+        except RequestRefused as refusal:  # nothing was written; the typed text isn't shown
+            with units.open(read_only=True):
+                contact = research_queries.contact(contact_id)
+                if contact is None:
+                    return not_found_text(export_rows.CONTACT_NOT_FOUND)
+                context = export_rows.form_context(
+                    contact.id, contact.name, contact.email, notice=refusal.message
+                )
+                return page(request, export_rows.FORM_TEMPLATE, **context)
+        except LookupError:  # a KeyError or IndexError from a bug is no missing Contact
+            with units.open(read_only=True):
+                missing = research_queries.contact(contact_id) is None
+            if not missing:
+                raise
+            return not_found_text(export_rows.CONTACT_NOT_FOUND)  # never echoes the id
+        ticket = tickets.issue(str(request.scope[CSRF_SCOPE_KEY]), export)
+        return Response(status_code=204, headers={"HX-Redirect": f"/exports/{ticket}", **NO_STORE})
+
+    @app.get(export_rows.DOWNLOAD_PATH, name="contact_export_download")
+    @personal_data(True)
+    def contact_export_download(request: Request, ticket: str) -> Response:
+        export = tickets.take(ticket, request.scope.get(CSRF_SCOPE_KEY))
+        if export is None:  # never echoes the ticket
+            return not_found_text(export_rows.EXPORT_EXPIRED)
+        return export_rows.download_response(export)
+
     @app.get("/leads", name="pipeline_page")
     @personal_data(True)  # a Lead's name can be a sole trader's name
     def pipeline_page(request: Request) -> HTMLResponse:
@@ -1297,15 +1354,21 @@ def create_app(
             return missing
         if found.id != lead_id:
             return RedirectResponse(f"/leads/{found.id}", status_code=303, headers=NO_STORE)
+        contacts = research_queries.contacts(found.id)
         context = lead_rows.lead_context(
             found,
             pipeline_queries.stage(found.id),
             setup_queries.segments(),
-            research_queries.contacts(found.id),
+            contacts,
             research_queries.lead_provenance(found.id),
             lead_signals.view(found.id),
         )
-        return page(request, lead_rows.LEAD_TEMPLATE, **context)
+        return page(
+            request,
+            lead_rows.LEAD_TEMPLATE,
+            **context,
+            export_forms=export_rows.lead_forms(contacts),
+        )
 
     require_declared(app)
     require_route_rules(app)

@@ -11,7 +11,10 @@ as ``NotificationRow``, a frozen copy of every column.
 - ``open_count()``: how many are undismissed; ``newest_open(limit)``: the newest ``limit``
   undismissed ones, newest first (``created_at`` then id, descending);
 - ``dismiss(notification_id, at)``: sets ``dismissed_at`` only while it is ``NULL`` (the
-  fence); returns the row count.
+  fence); returns the row count;
+- ``about(subject)`` (Story 3.15): every column of each notification about ``subject``, of
+  any kind, as a ``dict`` (a generic ``select`` of the table), by ``created_at``, then
+  ``id``.
 """
 
 from dataclasses import dataclass, fields
@@ -114,3 +117,14 @@ def dismiss(notification_id: str, at: datetime) -> int:
     )
     result = current().session.execute(statement)
     return int(result.rowcount)  # type: ignore[attr-defined]
+
+
+def about(subject: str) -> tuple[dict[str, object], ...]:
+    """Every column of each notification about ``subject``, by ``created_at``, then ``id``."""
+    table = NotificationRecord.__table__
+    statement = (
+        select(table)
+        .where(table.c.subject == subject)
+        .order_by(table.c.created_at, table.c.id)
+    )
+    return tuple(dict(row._mapping) for row in current().session.execute(statement))

@@ -1,0 +1,18 @@
+{#- One Contact's "Export data (JSON)" form (nextron.web.export_page): included once per Contact
+    in the Lead page's "Data subject requests" section, and rendered alone as the 200 answer to a
+    refused POST /contacts/<id>/export, which HTMX swaps in for this form. A 204 answer swaps
+    nothing: its HX-Redirect sends the browser to the one-time download, saved as an attachment.
+    The Contact's name or email is imported or crawled text: it renders only through |plain,
+    inside a span carrying hx-disable. The typed reference is never rendered back. -#}
+<form class="contact-export" method="post" hx-post="{{ export_form.action }}" hx-target="this" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+{%- if export_form.notice %}
+<p class="notice notice-refused" role="alert">{{ export_form.notice }}</p>
+{%- endif %}
+<div class="field">
+<label for="{{ export_form.input_id }}">Request reference for <span hx-disable>{{ export_form.label|plain }}</span></label>
+<input type="text" id="{{ export_form.input_id }}" name="request_ref" maxlength="200" autocomplete="off" aria-describedby="{{ export_form.input_id }}-hint">
+<p class="hint" id="{{ export_form.input_id }}-hint">How the person asked, such as "Email of 18 Nov 2026": at most 200 characters on one line. The file holds everything the engine holds on this Contact.</p>
+</div>
+<button type="submit">Export data (JSON)</button>
+</form>

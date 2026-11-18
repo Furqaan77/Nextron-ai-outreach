@@ -56,6 +56,11 @@ answers 404 with ``lead_missing.html``, which never echoes the id.
 
 Neither section holds an HTMX action.
 
+**Data subject requests (Story 3.15).** After the Contacts table, outside its ``hx-disable``,
+the page's "Data subject requests" section holds one "Export data (JSON)" form per Contact
+(``nextron.web.export_page``, ``contact_export_form.html``); each ``ContactRow`` carries the
+Contact's ``id`` for its form's action. A Lead with no Contact has no such section.
+
 ``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source,
 ``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every Signal class, Evidence type
 and fact kind; a stored value none knows renders as its own text. Every Lead, Contact,
@@ -425,8 +430,10 @@ class ProvenanceRow:
 
 @dataclass(frozen=True, slots=True)
 class ContactRow:
-    """One Contact as the Lead page shows it, with its Provenance Records."""
+    """One Contact as the Lead page shows it, with its Provenance Records; ``id`` names it in
+    its export form's action (Story 3.15)."""
 
+    id: str
     name: str | None
     role: str | None
     email: str | None
@@ -569,6 +576,7 @@ def provenance_row(record: StoredProvenance) -> ProvenanceRow:
 def contact_row(contact: StoredContact, records: Iterable[StoredProvenance]) -> ContactRow:
     """One Contact as the Lead page shows it."""
     return ContactRow(
+        id=contact.id,
         name=contact.name,
         role=contact.role,
         email=contact.email,

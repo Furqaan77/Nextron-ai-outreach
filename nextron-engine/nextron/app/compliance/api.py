@@ -107,8 +107,43 @@ removes one or ages one out. It also issues the unsubscribe tokens (``unsub_toke
 - ``@use_case reverse_entry(entry_id, reason) -> tuple[str, ...]``: one transaction running
   ``reverse_optout``, returning its ids.
 
+**Data subject requests and the export (Story 3.15, FR-52; the request table to Story 3.13's
+schema).** ``compliance`` owns ``data_subject_requests`` and applies the request machine
+(``nextron.domain.subject_request``):
+
+- ``@command open_dsr(contact_id, kind, request_ref) -> str``: in order, ``kind`` must be a
+  ``RequestKind`` or its ``str`` value (a non-``str`` raises ``TypeError``, an unknown text
+  ``ValueError``), ``contact_id`` and ``request_ref`` each a ``str`` (``TypeError``), and
+  ``request_ref`` passes ``checked_request_ref`` (``RequestRefused``); a ``contact_id`` that
+  isn't a ULID, or that no Contact has (``queries.research.contact``), raises ``LookupError``,
+  whose message holds no id. It inserts one ``open`` request (the stripped reference, opened
+  at the clock's now) and one ``events`` row (entity ``data_subject_requests``, ``None`` to
+  ``open``, cause ``opened``, no ``cause_ref``, actor ``operator``), and returns its id.
+- ``@command complete_dsr(request_id)``: a non-``str`` raises ``TypeError``, and an id that
+  isn't a ULID or that no request has ``LookupError``. It applies ``transition(status,
+  complete)`` (``IllegalTransition`` for a request already ``completed``), sets ``status``
+  ``completed`` and ``completed_at`` the clock's now, and appends one ``events`` row (``open`` to
+  ``completed``, cause ``completed``, no ``cause_ref``, actor ``operator``).
+- ``export_contact(contact_id) -> ContactExport(filename, body)`` only reads, so it runs in a
+  caller's transaction or a read-only unit of work alike. It reads each owner's exporter:
+  ``queries.research.export_pii(contact_id)`` (``LookupError`` for an unknown Contact),
+  ``queries.compliance.export_pii(contact_id, export_hashes(...))`` with the hashes of every
+  key held for the Contact (its stored values, its Lead's ``web_domain`` through
+  ``queries.discovery.lead``, and its Provenance addresses), ``queries.notify.export_pii`` and
+  ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
+  ``contact_export.assemble`` at the clock's now and ``render``. The file is named
+  ``contact_export.filename(contact_id)``.
+- ``@use_case export_on_request(contact_id, request_ref) -> ContactExport``:
+  ``checked_request_ref`` first (``RequestRefused`` before any transaction: nothing is
+  written), then one transaction: ``open_dsr(contact_id, export, request_ref)``,
+  ``complete_dsr`` and ``export_contact``, so the file shows its own request ``completed``. Any
+  failure rolls all three back.
+
+The file is never written to disk, stored, queued or logged: the web layer hands it to the
+browser from memory (``nextron.web.export_page``).
+
 Nothing is logged: the ``events`` rows are the audit, and neither they nor the notifications
-hold an address, a name, a URL or a reason.
+hold an address, a name, a URL, a reason or a request reference.
 
 **The contactability gate (AD-16, FR-50, FR-15, FR-63, Story 3.4).** The module-level function
 ``assert_contactable(subject, channel, purpose) -> Allowed | Blocked`` is the only check of
@@ -141,13 +176,23 @@ from typing import Final, Protocol
 
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
+from nextron.db.repos.compliance import subject_requests as requests_repo
 from nextron.db.repos.compliance import suppression_entries as entries_repo
 from nextron.db.repos.compliance import unsub_tokens as unsub_tokens_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.contact_export import (
+    EVENT_LOG,
+    ContactExport,
+    assemble,
+    export_hashes,
+    filename,
+    render,
+)
 from nextron.domain.contactability import (
     AddressSubject,
     Allowed,
@@ -173,8 +218,18 @@ from nextron.domain.contactability import (
     suppression_key,
 )
 from nextron.domain.ids import is_ulid
+from nextron.domain.machines import IllegalTransition
 from nextron.domain.notifications import SubjectSuppressed
 from nextron.domain.settings_schema import Key
+from nextron.domain.subject_request import CREATION as REQUEST_CREATION
+from nextron.domain.subject_request import MACHINE as REQUEST_MACHINE
+from nextron.domain.subject_request import (
+    RequestEvent,
+    RequestKind,
+    RequestStatus,
+    checked_request_ref,
+)
+from nextron.domain.subject_request import transition as request_transition
 from nextron.domain.suppression_entry import (
     CREATION,
     OPT_OUT_SOURCES,
@@ -199,6 +254,8 @@ from nextron.ports.clock import Clock
 from nextron.ports.token_codec import TokenCodecPort
 
 ENTITY: Final = "suppression_entries"
+REQUESTS_ENTITY: Final = "data_subject_requests"
+CONTACTS_ENTITY: Final = "contacts"  # research's Address Class history, read for an export
 OPERATOR_ACTOR: Final = "operator"
 SYSTEM_ACTOR: Final = "system:compliance"
 ACTORS: Final[Mapping[SuppressionSource, str]] = MappingProxyType(
@@ -283,6 +340,19 @@ def _unique(keys: tuple[SuppressionKey, ...]) -> tuple[SuppressionKey, ...]:
             seen.add(identity)
             found.append(key)
     return tuple(found)
+
+
+def _request_kind(kind: object) -> RequestKind:
+    """``kind`` as a ``RequestKind``: ``TypeError`` for a non-``str``, ``ValueError`` for an
+    unknown text."""
+    if isinstance(kind, RequestKind):
+        return kind
+    if not isinstance(kind, str):
+        raise TypeError(f"open_dsr: kind must be a str, not {type(kind).__name__}")
+    try:
+        return RequestKind(kind)
+    except ValueError:
+        raise ValueError("open_dsr: kind must be erase or export") from None
 
 
 def _scope_of(subject: AddressSubject | DomainSubject) -> SuppressionScope:
@@ -504,6 +574,92 @@ class Compliance:
             token_hash=token_hash(token), om_id=om_id, kid=kid, issued_at=issued_at
         )
         return token
+
+    @command
+    def open_dsr(self, contact_id: str, kind: RequestKind | str, request_ref: str) -> str:
+        """Open a data subject request of ``kind`` on the Contact; see the module docstring."""
+        found_kind = _request_kind(kind)
+        if not isinstance(contact_id, str) or not isinstance(request_ref, str):
+            raise TypeError("open_dsr takes a contact id and a request reference, each a str")
+        reference = checked_request_ref(request_ref)
+        if research_queries.contact(contact_id) is None:
+            raise LookupError("open_dsr: the Contact is unknown")
+        now = self._clock.now()
+        request_id = requests_repo.insert(
+            contact_id=contact_id, kind=str(found_kind), request_ref=reference, opened_at=now
+        )
+        eventlog.append(
+            entity=REQUESTS_ENTITY,
+            entity_id=request_id,
+            from_status=None,
+            to_status=str(REQUEST_CREATION.to),
+            cause=str(REQUEST_CREATION.cause),
+            cause_ref=None,
+            actor=OPERATOR_ACTOR,
+            at=now,
+        )
+        return request_id
+
+    @command
+    def complete_dsr(self, request_id: str) -> None:
+        """Mark the ``open`` request ``completed``; see the module docstring."""
+        if not isinstance(request_id, str):
+            raise TypeError(f"complete_dsr takes a str, not {type(request_id).__name__}")
+        request = requests_repo.get(request_id) if is_ulid(request_id) else None
+        if request is None:
+            raise LookupError("complete_dsr: the request is unknown")
+        change = request_transition(RequestStatus(request.status), RequestEvent.COMPLETE)
+        now = self._clock.now()
+        if not requests_repo.complete(request.id, now):  # completed since it was read
+            raise IllegalTransition(
+                REQUEST_MACHINE, RequestEvent.COMPLETE, RequestStatus.COMPLETED
+            )
+        eventlog.append(
+            entity=REQUESTS_ENTITY,
+            entity_id=request.id,
+            from_status=request.status,
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=None,
+            actor=OPERATOR_ACTOR,
+            at=now,
+        )
+
+    def export_contact(self, contact_id: str) -> ContactExport:
+        """Everything held on the Contact as one JSON file; see the module docstring."""
+        research = research_queries.export_pii(contact_id)  # LookupError when unknown
+        contact = research_queries.contact(contact_id)
+        if contact is None:  # just exported, so it is there
+            raise LookupError("export_contact: the Contact is unknown")
+        lead = discovery_queries.lead(contact.lead_id)
+        hashes = export_hashes(
+            email=contact.email,
+            name=contact.name,
+            linkedin_url=contact.linkedin_url,
+            web_domain=None if lead is None else lead.web_domain,
+            addresses=[record.address for record in research_queries.provenance(contact_id)],
+        )
+        document = assemble(
+            contact_id,
+            self._clock.now(),
+            {
+                "research": research,
+                "compliance": compliance_queries.export_pii(contact_id, hashes),
+                "notify": notify_queries.export_pii(contact_id),
+                EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
+            },
+        )
+        return ContactExport(filename(contact_id), render(document))
+
+    @use_case
+    def export_on_request(self, contact_id: str, request_ref: str) -> ContactExport:
+        """Open, complete and answer an export request in one transaction; see the module
+        docstring."""
+        reference = checked_request_ref(request_ref)
+        with current().transaction():
+            request_id = self.open_dsr(contact_id, RequestKind.EXPORT, reference)
+            self.complete_dsr(request_id)
+            return self.export_contact(contact_id)
 
     @use_case
     def add_value(self, text: str) -> AddedValue:

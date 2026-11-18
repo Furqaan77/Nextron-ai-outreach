@@ -48,14 +48,39 @@ Lead: empty, or ``None``):
   (a Signal whose stored class or Tier the domain refuses counts as expired); and each live
   Evidence row as an ``EvidenceSupport(evidence, supports)``, ``supports`` being the names of
   the current Signals it supports, in the Signals' order.
+
+Story 3.15 adds the subject access exporter (``nextron.domain.contact_export``):
+
+- ``export_pii(contact_id) -> {section: tuple[dict, ...]}``: everything ``research`` holds on
+  the Contact, every row read with every column (``nextron.db.repos.research.export``), so a
+  column a later story adds is exported without code. An unknown Contact (a text that isn't a
+  ULID included) raises ``LookupError``, whose message holds no id. The sections:
+
+  - ``contact``: the one ``contacts`` row;
+  - ``provenance_records``: every record, every eligibility basis included, oldest first;
+  - ``addresses``: ``contact_export.address_history`` of those records and the stored email;
+  - ``evidence``: every row whose ``person_contact_id`` is the Contact (superseded and
+    retracted ones too), its ``pages_checked`` decoded to a list;
+  - ``signals``: the Signals that Evidence supports, each with its ``evidence_ids``;
+  - ``pages``: the Lead's crawled pages whose stored ``text`` mentions the Contact
+    (``contact_export.mentions`` of the terms: ``mention_terms(name, email)``, then one
+    ``email`` term, ``mention_terms(None, address)``, per other distinct ``address`` in the
+    Contact's Provenance, so a page naming only an earlier address is found): every column but
+    ``text``, plus ``mentions`` (``name``, ``email``, each once) and ``text_excerpts``
+    (``contact_export.excerpts``); never a whole page, since the rest is the firm's and other
+    people's data;
+  - ``contact_methods``: the Lead's pages' contact methods whose ``matched`` text mentions the
+    Contact (the same terms), each with ``page_url`` and ``mentions``.
 """
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import export as export_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -68,6 +93,7 @@ from nextron.db.repos.research.crawl import (
 )
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
+from nextron.domain.contact_export import address_history, excerpts, mention_terms, mentions
 from nextron.domain.ids import is_ulid
 from nextron.domain.segments import SignalClass
 from nextron.domain.signals import age_days, is_live
@@ -94,6 +120,7 @@ __all__ = [
     "crawl_run",
     "crawled_pages",
     "evidence",
+    "export_pii",
     "extraction_runs",
     "hq_tz",
     "last_ok_extraction",
@@ -267,3 +294,57 @@ def lead_signals(lead_id: str, now: datetime, type_names: Mapping[str, str]) -> 
             for row in evidence(lead_id)
         ),
     )
+
+
+# The subject access exporter (Story 3.15) -------------------------------------------------------
+
+type ExportRows = tuple[dict[str, object], ...]
+PAGE_TEXT = "text"
+
+
+def _text_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _evidence_row(row: dict[str, object]) -> dict[str, object]:
+    pages = row.get("pages_checked")
+    return {**row, "pages_checked": json.loads(pages) if isinstance(pages, str) else pages}
+
+
+def export_pii(contact_id: str) -> dict[str, ExportRows]:
+    """Everything ``research`` holds on the Contact, by section; see the module docstring."""
+    found = export_repo.contact(contact_id) if is_ulid(contact_id) else None
+    if found is None:
+        raise LookupError("export: the Contact is unknown")
+    lead_id = str(found["lead_id"])
+    email = _text_or_none(found.get("email"))
+    records = export_repo.provenance(contact_id)
+    terms = mention_terms(_text_or_none(found.get("name")), email)
+    earlier = dict.fromkeys(_text_or_none(record.get("address")) for record in records)
+    for address in earlier:
+        if address is not None and address != email:
+            terms += mention_terms(None, address)
+    evidence_rows = tuple(_evidence_row(row) for row in export_repo.person_evidence(contact_id))
+    pages: list[dict[str, object]] = []
+    for page in export_repo.lead_pages(lead_id):
+        text = _text_or_none(page.get(PAGE_TEXT))
+        named = mentions(text, terms)
+        if named:
+            shown = {key: value for key, value in page.items() if key != PAGE_TEXT}
+            pages.append(
+                {**shown, "mentions": list(named), "text_excerpts": list(excerpts(text, terms))}
+            )
+    methods: list[dict[str, object]] = []
+    for method in export_repo.lead_contact_methods(lead_id):
+        named = mentions(_text_or_none(method.get("matched")), terms)
+        if named:
+            methods.append({**method, "mentions": list(named)})
+    return {
+        "contact": (found,),
+        "provenance_records": records,
+        "addresses": address_history(records, email),
+        "evidence": evidence_rows,
+        "signals": export_repo.signals_of([str(row["id"]) for row in evidence_rows]),
+        "pages": tuple(pages),
+        "contact_methods": tuple(methods),
+    }

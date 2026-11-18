@@ -57,6 +57,7 @@ PARAMETER_VALUES: Final = {
     "name": ["app.css", "htmx-2.0.11.min.js", "nope.js"],
     "grant": [*(str(spec.grant) for spec in GRANTS), "gmail", "start_grant"],
     "lead_id": ["01KA0000000000000000000000", "start_grant"],
+    "ticket": ["Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7dEf0hIj3", "start_grant"],
 }
 QUERIES: Final = [b"", b"grant=internal_notify", b"grant=postmaster&confirm=yes&path=C:%5Cx.json"]
 

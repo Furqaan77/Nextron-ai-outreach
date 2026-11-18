@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {#- The Lead page (nextron.web.leads_page): the header facts, the Signals, the live Evidence,
-    then each Contact with its Provenance Records. Every Lead, Signal, Evidence, Contact and
-    Provenance text is imported, crawled or extracted: it renders only through |plain or
-    safe_link, inside an element carrying hx-disable. The Signals and Evidence sections hold no
-    HTMX action. -#}
+    then each Contact with its Provenance Records, then the Data subject requests section (Story
+    3.15): one "Export data (JSON)" form per Contact, outside any hx-disable so HTMX posts it.
+    Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
+    it renders only through |plain or safe_link, inside an element carrying hx-disable. The
+    Signals and Evidence sections hold no HTMX action. -#}
 {% block title %}Nextron: Lead{% endblock %}
 {%- macro or_dash(value) %}{% if value %}{{ value|plain }}{% else %}—{% endif %}{% endmacro %}
 {% block content %}
@@ -96,4 +97,13 @@
 </table>
 {%- endif %}
 </section>
+{%- if export_forms %}
+<section class="lead-requests" aria-labelledby="requests-heading">
+<h2 id="requests-heading">Data subject requests</h2>
+<p class="hint">Export everything the engine holds on a Contact as one JSON file, to answer a subject access request. The engine keeps no copy; the browser saves the file to this PC's downloads, so delete it once it has been sent.</p>
+{%- for export_form in export_forms %}
+{% include "contact_export_form.html" %}
+{%- endfor %}
+</section>
+{%- endif %}
 {% endblock %}
