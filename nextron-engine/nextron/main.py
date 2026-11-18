@@ -163,7 +163,8 @@ the registry cycle.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
 contact_markets, crawls, discovery, research, extractions, primary, test_runs,
-domain_checks=..., place_discovery=...)`` is the job type registry: the only
+domain_checks=..., place_discovery=..., registry_discovery=...)`` is the job type registry:
+the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -197,8 +198,10 @@ Story 2.12's ``check_legal_form`` (the same lanes, priority, runtime, retry limi
 (the interactive lane only, priority 60, 2 minutes, retry limit 3,
 ``handlers.check_domains(domain_checks)``, ``sending``), and Story 8.3's
 ``discover_places`` (bulk only, priority 30, ``max_runtime`` 1 hour, retry limit 2,
-``handlers.discover_places(place_discovery)``, ``discovery``). ``domain_checks`` and
-``place_discovery`` are the optional services: each defaults to a provider that raises
+``handlers.discover_places(place_discovery)``, ``discovery``), and Story 8.4's
+``discover_registry`` (the same spec, ``handlers.discover_registry(registry_discovery)``).
+``domain_checks``, ``place_discovery`` and ``registry_discovery`` are the optional services:
+each defaults to a provider that raises
 ``RuntimeError`` when called, so a registry built without it (only tests do) fails that job;
 ``build_app`` always passes the real ones. ``build_app`` builds one ``JobQueue(clock,
 job_types)`` and one ``Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))``
@@ -261,6 +264,14 @@ discovery, queue)`` (``nextron.app.discovery.place_ingest``) runs the ``discover
 (reached through ``place_discovery=lambda: place_discovery``) on the crawl's own crawler, and
 the Discovery page's "Run Places discovery" (``create_app(..., place_discovery=...)``); it is
 also kept on ``app.state.place_discovery``.
+
+**Companies House discovery (Story 8.4).** ``RegistryDiscovery(clock, meter, registry,
+place_searches, site_crawler, discovery, research, queue)``
+(``nextron.app.discovery.registry_ingest``) runs the ``discover_registry`` jobs (reached through
+``registry_discovery=lambda: registry_discovery``) on the SAME ``registry`` instance the
+legal-form check uses, so both share its rate window, and the Discovery page's "Run Companies
+House discovery" (``create_app(..., registry_discovery=...)``); it is also kept on
+``app.state.registry_discovery``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -686,6 +697,7 @@ from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.place_ingest import PlaceDiscovery
+from nextron.app.discovery.registry_ingest import RegistryDiscovery
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
@@ -789,6 +801,7 @@ from nextron.domain.notifications import ContactErased, LeadsMerged, SubjectSupp
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
 from nextron.domain.place_discovery import DISCOVER_PLACES_JOB
+from nextron.domain.registry_discovery import DISCOVER_REGISTRY_JOB
 from nextron.domain.places import PURGE_PLACE_COORDS_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
 from nextron.domain.playbook import (
@@ -1065,7 +1078,9 @@ def build_app(
     builds its HTTP client on its first call. Google Places is searched through ``places``
     (``build_places(config.env, secrets, meter)`` unless injected), kept with its
     ``PlaceSearches`` on ``app.state.place_searches``; ``PlaceDiscovery`` runs the Places
-    discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``."""
+    discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``.
+    ``RegistryDiscovery`` runs the Companies House discovery on that same ``registry``, those
+    ``PlaceSearches`` and the crawl's ``crawler``, kept on ``app.state.registry_discovery``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1085,8 +1100,8 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms and
-    # place_discovery are bound just below
+    # extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
+    # place_discovery and registry_discovery are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1103,6 +1118,7 @@ def build_app(
         job_boards=lambda: job_boards,
         legal_forms=lambda: legal_forms,
         place_discovery=lambda: place_discovery,
+        registry_discovery=lambda: registry_discovery,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1135,18 +1151,18 @@ def build_app(
         site_crawler,
         queue,
     )
-    legal_forms = LegalFormChecks(
-        clock,
-        meter,
-        registry if registry is not None else CompaniesHouseRegistry(secrets, meter=meter),
-        discovery,
-        research,
-        queue,
+    # one registry serves the legal-form check and the discovery, so they share its rate window
+    companies_house = (
+        registry if registry is not None else CompaniesHouseRegistry(secrets, meter=meter)
     )
+    legal_forms = LegalFormChecks(clock, meter, companies_house, discovery, research, queue)
     place_searches = PlaceSearches(
         clock, meter, places if places is not None else build_places(config.env, secrets, meter)
     )
     place_discovery = PlaceDiscovery(clock, place_searches, site_crawler, discovery, queue)
+    registry_discovery = RegistryDiscovery(
+        clock, meter, companies_house, place_searches, site_crawler, discovery, research, queue
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1222,6 +1238,8 @@ def build_app(
         erasures=Erasures(clock, compliance),  # Story 3.13: on the same Compliance
         domain_checks=domain_checks,
         place_discovery=place_discovery,
+        registry_discovery=registry_discovery,
+        discovery=discovery,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1233,6 +1251,7 @@ def build_app(
     )
     app.state.place_searches = place_searches  # Story 8.2
     app.state.place_discovery = place_discovery  # Story 8.3
+    app.state.registry_discovery = registry_discovery  # Story 8.4
     return app
 
 
@@ -1300,6 +1319,7 @@ def build_job_types(
     legal_forms: Callable[[], handlers.CheckingLegalForm],
     domain_checks: Callable[[], handlers.DomainChecking] | None = None,
     place_discovery: Callable[[], handlers.DiscoveringPlaces] | None = None,
+    registry_discovery: Callable[[], handlers.DiscoveringRegistry] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1318,11 +1338,15 @@ def build_job_types(
     ``legal_forms`` the ``discovery`` service's ``LegalFormChecks`` that ``check_legal_form``
     jobs call, ``domain_checks`` the ``sending`` service's ``DomainChecks`` that
     ``check_domains`` jobs call, and ``place_discovery`` the ``discovery`` service's
-    ``PlaceDiscovery`` that ``discover_places`` jobs call (when either of the last two is
+    ``PlaceDiscovery`` that ``discover_places`` jobs call, and ``registry_discovery`` its
+    ``RegistryDiscovery`` that ``discover_registry`` jobs call (when any of the last three is
     ``None``, a provider that raises ``RuntimeError`` when a job calls it: ``build_app`` always
     passes the real ones)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     discovering = place_discovery if place_discovery is not None else no_place_discovery
+    registry_runs = (
+        registry_discovery if registry_discovery is not None else no_registry_discovery
+    )
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1551,6 +1575,20 @@ def build_job_types(
             group=JobGroup.DISCOVERY,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=DISCOVER_REGISTRY_JOB,
+            default_lane=Lane.BULK,  # AD-10: supply work runs on the bulk lane
+            lanes=frozenset({Lane.BULK}),
+            priority=30,
+            # up to 10 search pages of 20 companies, each a profile, a Places lookup, a paced
+            # robots.txt and homepage fetch and an officers list
+            max_runtime=timedelta(hours=1),
+            retry_limit=2,
+            handler=handlers.discover_registry(registry_runs),
+            group=JobGroup.DISCOVERY,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1559,6 +1597,12 @@ def no_place_discovery() -> handlers.DiscoveringPlaces:
     """``build_job_types``'s default ``place_discovery``: a registry built without the service
     fails a ``discover_places`` job instead of discovering nothing."""
     raise RuntimeError("this job type registry was built without place_discovery")
+
+
+def no_registry_discovery() -> handlers.DiscoveringRegistry:
+    """``build_job_types``'s default ``registry_discovery``: a registry built without the
+    service fails a ``discover_registry`` job instead of discovering nothing."""
+    raise RuntimeError("this job type registry was built without registry_discovery")
 
 
 def no_domain_checks() -> handlers.DomainChecking:

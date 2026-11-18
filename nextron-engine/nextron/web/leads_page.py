@@ -10,18 +10,31 @@ section) renders ``leads.html`` from ``queries.discovery.lead_list`` and
 ``queries.setup.segments``:
 
 - ``list_filters(query_items, segments)`` reads the query string into ``ListFilters``: ``stage``
-  (a ``PipelineStage`` value), ``segment`` (a Segment key), ``q`` and ``page``, each at most
-  once. A blank one (empty or whitespace only) is unset. In ``q``, whitespace characters (tabs,
+  (a ``PipelineStage`` value), ``segment`` (a Segment key), ``q``, ``page`` and (Story 8.4)
+  ``website`` (``needed``: only the Leads with no website), each at most once. A blank one (empty or whitespace only) is unset. In ``q``, whitespace characters (tabs,
   line breaks and the like) count as spaces: it is stripped and each run collapses to one
   space. It must be at most 200 characters with no other control character. ``page`` is 1 to 7
   ASCII digits worth at least 1. Any other parameter, a repeated one, an unknown stage or
-  Segment key, or a bad ``q`` or ``page`` raises ``MalformedForm`` (400 "Request refused:
-  malformed form"), so a hand-edited URL never shows an unfiltered list that looks filtered.
+  Segment key, a bad ``q`` or ``page``, or a ``website`` other than ``needed`` raises
+  ``MalformedForm`` (400 "Request refused: malformed form"), so a hand-edited URL never shows
+  an unfiltered list that looks filtered.
 - The filter form is ``method="get" action="/leads"``, with no ``hx-post`` and no
   ``csrf_field()`` (a token must never reach a URL): a stage select ("All stages", then each
   stage in machine order by its label), a Segment select ("All Segments", then each by name,
-  its value the key), the ``q`` text input ("Name or website", at most 200 characters) and a
-  Filter button; "Clear filters" links to ``/leads`` while a stage, Segment or ``q`` is set.
+  its value the key), the ``q`` text input ("Name or website", at most 200 characters), the
+  website select ("Any", "Website needed") and a Filter button; "Clear filters" links to
+  ``/leads`` while a stage, Segment, ``q`` or the website filter is set.
+- **Website needed (Story 8.4).** With ``website=needed`` the list holds only the Leads with no
+  ``web_domain`` (Companies House discovery's Leads whose lookup found none), and each row
+  carries the website form (``lead_website_form.html``): ``method="post"``, ``hx-post`` to
+  ``/leads/<id>/website``, ``{{ csrf_field() }}``, one ``website`` text input (at most 2,048
+  characters) and a "Save website" button. That table puts ``hx-disable`` on each text cell
+  instead of on the table, so the forms work. ``submitted_website(fields)`` needs exactly
+  ``website`` (and ``csrf_token``), once, else ``MalformedForm``; ``website_cell(lead_id,
+  notice=None, saved=None)`` is the cell's context: the form until a website is saved, then
+  "Website saved; the Lead is queued for research." or, after a merge, "That website belongs to
+  another Lead: the two were merged and the older one kept." with a link to the Lead that kept
+  it. A refusal shows its message above the form. The cell never shows the Lead's name.
 - ``list_context`` gives the count line ("Showing <a>–<b> of <total> Leads", "No Leads yet."
   or "No Leads match these filters."), one ``LeadRow`` per Lead (its name linked to its page,
   the website domain or "—", the Segment's name or "Unknown Segment", the country or "—", the
@@ -230,7 +243,18 @@ STAGE_FIELD: Final = "stage"
 SEGMENT_FIELD: Final = "segment"
 SEARCH_FIELD: Final = "q"
 PAGE_FIELD: Final = "page"
-FILTER_FIELDS: Final = frozenset({STAGE_FIELD, SEGMENT_FIELD, SEARCH_FIELD, PAGE_FIELD})
+WEBSITE_FILTER_FIELD: Final = "website"  # Story 8.4
+WEBSITE_NEEDED: Final = "needed"
+FILTER_FIELDS: Final = frozenset(
+    {STAGE_FIELD, SEGMENT_FIELD, SEARCH_FIELD, PAGE_FIELD, WEBSITE_FILTER_FIELD}
+)
+WEBSITE_TEMPLATE: Final = "lead_website_form.html"  # Story 8.4
+WEBSITE_FIELD: Final = "website"
+MAX_WEBSITE_LENGTH: Final = 2048
+WEBSITE_SAVED: Final = "Website saved; the Lead is queued for research."
+WEBSITE_MERGED: Final = (
+    "That website belongs to another Lead: the two were merged and the older one kept."
+)
 MAX_SEARCH_LENGTH: Final = 200
 PAGE_PATTERN: Final = re.compile(r"[0-9]{1,7}")  # ASCII digits only; matched with fullmatch
 
@@ -308,6 +332,7 @@ SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
         ProvenanceSource.PATTERN: "Email pattern",
         ProvenanceSource.FINDER: "Email finder",
         ProvenanceSource.ELIGIBILITY_BASIS: "Eligibility basis",
+        ProvenanceSource.REGISTRY: "Companies House",
     }
 )
 RECORD_LABELS: Final[Mapping[str, str]] = MappingProxyType(
@@ -380,11 +405,17 @@ class ListFilters:
     segment_id: str | None = None
     search: str | None = None
     page: int = 1
+    website_needed: bool = False
 
     @property
     def filtered(self) -> bool:
-        """Whether a stage, a Segment or a search text is set."""
-        return self.stage is not None or self.segment is not None or self.search is not None
+        """Whether a stage, a Segment, a search text or the website filter is set."""
+        return (
+            self.stage is not None
+            or self.segment is not None
+            or self.search is not None
+            or self.website_needed
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +438,15 @@ class LeadRow:
     country: str | None
     stage: str
     created: str
+    lead_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class WebsiteSaved:
+    """A saved website: the Lead that holds it now and whether a merge happened."""
+
+    lead_id: str
+    merged: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +491,14 @@ def _search(value: str) -> str | None:
     return text
 
 
+def _website_needed(value: str) -> bool:
+    if not value.strip():
+        return False
+    if value != WEBSITE_NEEDED:
+        raise MalformedForm(WRONG_FIELDS)
+    return True
+
+
 def _page(value: str) -> int:
     if not value.strip():
         return 1
@@ -480,6 +528,7 @@ def list_filters(
         segment_id=segment_id,
         search=_search(values.get(SEARCH_FIELD, "")),
         page=_page(values.get(PAGE_FIELD, "")),
+        website_needed=_website_needed(values.get(WEBSITE_FILTER_FIELD, "")),
     )
 
 
@@ -492,6 +541,8 @@ def page_href(filters: ListFilters, page: int) -> str:
         params.append((SEGMENT_FIELD, filters.segment))
     if filters.search is not None:
         params.append((SEARCH_FIELD, filters.search))
+    if filters.website_needed:
+        params.append((WEBSITE_FILTER_FIELD, WEBSITE_NEEDED))
     params.append((PAGE_FIELD, str(page)))
     return f"{LIST_PATH}?{urlencode(params)}"
 
@@ -558,6 +609,7 @@ def lead_row(lead: ListedLead, names: Mapping[str, str]) -> LeadRow:
         country=lead.country_code,
         stage=stage_label(lead.pipeline_stage),
         created=day(lead.created_at),
+        lead_id=lead.id,
     )
 
 
@@ -587,6 +639,35 @@ def list_context(
         "count_text": count_text(found, filters),
         "rows": tuple(lead_row(lead, names) for lead in found.leads),
         "pager": pager(found, filters),
+        "website_needed": filters.website_needed,
+    }
+
+
+def submitted_website(fields: FormFields) -> str:
+    """The website the form sent (Story 8.4); ``MalformedForm`` for any other field, a missing
+    or repeated one, or one longer than 2,048 characters."""
+    if set(fields) - {CSRF_FIELD} != {WEBSITE_FIELD} or any(
+        len(values) != 1 for values in fields.values()
+    ):
+        raise MalformedForm(WRONG_FIELDS)
+    website = fields[WEBSITE_FIELD][0]
+    if len(website) > MAX_WEBSITE_LENGTH:
+        raise MalformedForm(WRONG_FIELDS)
+    return website
+
+
+def website_cell(
+    lead_id: str, notice: Notice | None = None, saved: WebsiteSaved | None = None
+) -> dict[str, object]:
+    """What ``lead_website_form.html`` renders for the Lead ``lead_id``: the form, a refusal's
+    ``notice`` above it, or what saving did (Story 8.4)."""
+    if saved is not None:
+        notice = Notice(Role.STATUS, WEBSITE_MERGED if saved.merged else WEBSITE_SAVED)
+    return {
+        "lead_id": lead_id,
+        "notice": notice,
+        "saved": saved is not None,
+        "kept_href": None if saved is None else f"{LIST_PATH}/{saved.lead_id}",
     }
 
 

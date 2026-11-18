@@ -1,5 +1,6 @@
 {#- The Discovery panel (nextron.web.discovery_page): rendered inside discovery.html, and alone
-    as the answer to POST /leads/discovery/places, which HTMX swaps in for this block. Every
+    as the answer to POST /leads/discovery/places and POST /leads/discovery/companies-house
+    (Story 8.4), which HTMX swaps in for this block. Every
     value is autoescaped; nothing here is marked safe. -#}
 <div class="discovery" id="discovery">
 {%- if notice %}
@@ -33,15 +34,33 @@
 <button type="submit">Run Places discovery</button>
 </form>
 {%- endif %}
+<h2>Run Companies House discovery</h2>
+{%- if not uk_campaigns %}
+<p class="discovery-empty">No active UK Campaign. Companies House discovery runs only for an active Campaign whose Market is the UK.</p>
+{%- else %}
+<form class="discovery-form" method="post" hx-post="/leads/discovery/companies-house" hx-target="#discovery" hx-swap="outerHTML" hx-disabled-elt="find button">
+{{ csrf_field() }}
+<div class="field">
+<label for="registry-campaign">Campaign</label>
+<select id="registry-campaign" name="campaign_id" aria-describedby="hint-registry-campaign">
+{%- for option in uk_campaigns %}
+<option value="{{ option.value }}"{% if option.value == chosen_uk_campaign %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+<p class="hint" id="hint-registry-campaign">Searches the Companies House register for active companies matching the Campaign's Segment keywords and SIC codes.</p>
+</div>
+<button type="submit">Run Companies House discovery</button>
+</form>
+{%- endif %}
 <h2>Recent runs</h2>
 {%- if runs %}
 <table class="discovery-table">
 <thead>
-<tr><th scope="col">Source</th><th scope="col">Campaign</th><th scope="col">Location</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Seen</th><th scope="col">Created</th><th scope="col">Merged</th><th scope="col">Suppressed</th><th scope="col">No own website</th><th scope="col">Market blocked</th></tr>
+<tr><th scope="col">Source</th><th scope="col">Campaign</th><th scope="col">Location</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Seen</th><th scope="col">Created</th><th scope="col">Merged</th><th scope="col">Suppressed</th><th scope="col">No own website</th><th scope="col">Market blocked</th><th scope="col">Inactive</th></tr>
 </thead>
 <tbody>
 {%- for run in runs %}
-<tr><td>{{ run.source }}</td><td>{{ run.campaign }}</td><td>{{ run.location }}</td><td>{{ run.status }}</td><td>{{ run.started_at }}</td><td class="number">{{ run.seen }}</td><td class="number">{{ run.created }}</td><td class="number">{{ run.merged }}</td><td class="number">{{ run.suppressed }}</td><td class="number">{{ run.no_website }}</td><td class="number">{{ run.market_blocked }}</td></tr>
+<tr><td>{{ run.source }}</td><td>{{ run.campaign }}</td><td>{{ run.location }}</td><td>{{ run.status }}</td><td>{{ run.started_at }}</td><td class="number">{{ run.seen }}</td><td class="number">{{ run.created }}</td><td class="number">{{ run.merged }}</td><td class="number">{{ run.suppressed }}</td><td class="number">{{ run.no_website }}</td><td class="number">{{ run.market_blocked }}</td><td class="number">{{ run.inactive }}</td></tr>
 {%- endfor %}
 </tbody>
 </table>

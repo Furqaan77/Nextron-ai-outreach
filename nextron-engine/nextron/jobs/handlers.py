@@ -77,6 +77,10 @@ handler runs in.
   ``PlaceDiscovery``; ``location`` is the location's 16-hex hash and ``country_code`` two
   lowercase letters, else ``InvalidJob``) and returns ``DEFERRED`` when it returns ``False``
   (the budget refused a Places page).
+- ``discover_registry(registry_discovery)`` (Story 8.4): calls
+  ``registry_discovery().run(campaign_id)`` once (the discovery service's
+  ``RegistryDiscovery``) and returns ``DEFERRED`` when it returns ``False`` (the budget or the
+  register's rate limit deferred the run).
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -453,3 +457,22 @@ def discover_places(place_discovery: Callable[[], DiscoveringPlaces]) -> Handler
         return None
 
     return handle_discover_places
+
+
+class DiscoveringRegistry(Protocol):
+    """What ``discover_registry`` needs of the ``discovery`` service's ``RegistryDiscovery``."""
+
+    def run(self, campaign_id: str) -> bool: ...
+
+
+def discover_registry(registry_discovery: Callable[[], DiscoveringRegistry]) -> Handler:
+    """The ``discover_registry`` job's handler (Story 8.4): run the payload's Campaign's
+    Companies House discovery through ``registry_discovery()``."""
+
+    def handle_discover_registry(job: Job) -> HandlerResult | None:
+        campaign_id = _ulid_field(job, CAMPAIGN_ID_FIELD)
+        if not registry_discovery().run(campaign_id):
+            return DEFERRED
+        return None
+
+    return handle_discover_registry

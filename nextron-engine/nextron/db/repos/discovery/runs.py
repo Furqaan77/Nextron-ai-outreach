@@ -8,8 +8,10 @@ Every function runs one explicit Core statement through the current unit of work
 - ``count(run_id, outcome)``: adds 1 to ``seen`` and, unless ``outcome`` is ``None``, 1 to the
   outcome's count column (a ``nextron.domain.place_discovery.Outcome`` value), in one
   statement;
+- ``add_outcome(run_id, outcome)`` (Story 8.4): adds 1 to the outcome's count alone;
 - ``finish(run_id, status, at)``: sets ``status`` and ``finished_at``;
-- ``fail_running(at) -> int``: ends every ``running`` row ``failed`` at ``at``; the count;
+- ``fail_running(source, at) -> int``: ends every ``running`` row of ``source`` ``failed`` at
+  ``at``; the count (Story 8.4: each source's runs recover only their own rows);
 - ``get(run_id)``: the row, or ``None``;
 - ``recent(limit)``: the newest ``limit`` runs (by ``started_at``, then ``id``, descending).
 """
@@ -36,7 +38,7 @@ class StoredRun:
     campaign_id: str
     segment_id: str
     country_code: str
-    location: str
+    location: str | None
     query_hash: str
     status: str
     started_at: datetime
@@ -47,6 +49,7 @@ class StoredRun:
     suppressed: int
     no_website: int
     market_blocked: int
+    inactive: int
 
 
 _COLUMNS = (
@@ -66,6 +69,7 @@ _COLUMNS = (
     DiscoveryRunRecord.suppressed,
     DiscoveryRunRecord.no_website,
     DiscoveryRunRecord.market_blocked,
+    DiscoveryRunRecord.inactive,
 )
 
 
@@ -75,7 +79,7 @@ def insert(
     campaign_id: str,
     segment_id: str,
     country_code: str,
-    location: str,
+    location: str | None,
     query_hash: str,
     status: RunStatus,
     started_at: datetime,
@@ -101,6 +105,7 @@ def insert(
             suppressed=0,
             no_website=0,
             market_blocked=0,
+            inactive=0,
         )
     )
     return run_id
@@ -117,6 +122,17 @@ def count(run_id: str, outcome: Outcome | None) -> None:
     )
 
 
+def add_outcome(run_id: str, outcome: Outcome) -> None:
+    """Add 1 to the run's ``outcome`` count alone, ``seen`` unchanged (Story 8.4: a created Lead
+    left without a website also counts ``no_website``)."""
+    column = getattr(DiscoveryRunRecord, str(Outcome(outcome)))
+    current().session.execute(
+        update_rows(DiscoveryRunRecord)
+        .where(DiscoveryRunRecord.id == run_id)
+        .values(**{str(outcome): column + 1})
+    )
+
+
 def finish(run_id: str, status: RunStatus, at: datetime) -> None:
     """End the run with ``status`` at ``at``."""
     current().session.execute(
@@ -126,11 +142,14 @@ def finish(run_id: str, status: RunStatus, at: datetime) -> None:
     )
 
 
-def fail_running(at: datetime) -> int:
-    """End every ``running`` run ``failed`` at ``at``; the number of rows."""
+def fail_running(source: str, at: datetime) -> int:
+    """End every ``running`` run of ``source`` ``failed`` at ``at``; the number of rows."""
     result = current().session.execute(
         update_rows(DiscoveryRunRecord)
-        .where(DiscoveryRunRecord.status == str(RunStatus.RUNNING))
+        .where(
+            DiscoveryRunRecord.status == str(RunStatus.RUNNING),
+            DiscoveryRunRecord.source == source,
+        )
         .values(status=str(RunStatus.FAILED), finished_at=at)
     )
     return int(result.rowcount)  # type: ignore[attr-defined]

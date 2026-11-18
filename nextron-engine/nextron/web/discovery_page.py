@@ -1,5 +1,5 @@
-"""The Discovery page (Story 8.3; FR-5, UX-DR28, UX-DR29, AD-13): views for ``create_app``'s two
-routes, which stay thin.
+"""The Discovery page (Stories 8.3 and 8.4; FR-5, FR-6, UX-DR28, UX-DR29, AD-13): views for
+``create_app``'s three routes, which stay thin.
 
 - ``GET /leads/discovery`` (``discovery_page``, ``@personal_data(False)``: Campaign names,
   Operator locations, statuses and counts) renders ``discovery.html``, which extends
@@ -9,6 +9,8 @@ routes, which stay thin.
 - ``POST /leads/discovery/places`` (``discovery_places``, ``@personal_data(False)``) runs
   ``PlaceDiscovery.request_run`` in its own unit of work and answers 200 with
   ``discovery_panel.html`` alone, which HTMX swaps in for the page's ``#discovery`` block.
+- ``POST /leads/discovery/companies-house`` (``discovery_companies_house``,
+  ``@personal_data(False)``, Story 8.4) does the same with ``RegistryDiscovery.request_run``.
 
 **The "Run Places discovery" form** (``method="post"``, ``hx-post``, ``{{ csrf_field() }}``)
 holds the Campaign (each active Campaign by name, its value the Campaign's id) and the location
@@ -18,13 +20,21 @@ allows ``csrf_token`` besides, each once; anything else is ``MalformedForm("wron
 (400). With no
 active Campaign or no location the page says so instead of showing the form.
 
-**The answers:** queued ("Places discovery queued.") or already queued ("Places discovery is
-already queued for that Campaign and location."), both ``role="status"``; or the refusal's
-message (``role="alert"``), with nothing queued.
+**The "Run Companies House discovery" form** (Story 8.4; ``method="post"``, ``hx-post``,
+``{{ csrf_field() }}``) holds one Campaign select: each active UK Campaign (its Market's country
+``GB`` and that Market enabled) by name. ``submitted_registry_run`` needs ``campaign_id`` (and
+allows ``csrf_token``), each once, else ``MalformedForm``. With no active UK Campaign the page
+says so instead of showing the form.
 
-**Recent runs:** the newest 20 runs, each with its source, Campaign (its name, or "Unknown
-Campaign"), location and country, status, start time and the counts seen, created, merged,
-suppressed, no own website and Market blocked.
+**The answers:** queued ("Places discovery queued." / "Companies House discovery queued.") or
+already queued ("Places discovery is already queued for that Campaign and location." /
+"Companies House discovery is already queued for that Campaign."), both ``role="status"``; or
+the refusal's message (``role="alert"``), with nothing queued.
+
+**Recent runs:** the newest 20 runs, each with its source ("Google Places" or "Companies
+House"), Campaign (its name, or "Unknown Campaign"), location and country ("—" and the country
+for a run without a location), status, start time and the counts seen, created, merged,
+suppressed, no own website, Market blocked and inactive.
 """
 
 from collections.abc import Iterable
@@ -42,10 +52,14 @@ PANEL_TEMPLATE: Final = "discovery_panel.html"
 CAMPAIGN_FIELD: Final = "campaign_id"
 LOCATION_FIELD: Final = "location"
 RUN_FIELDS: Final = frozenset({CAMPAIGN_FIELD, LOCATION_FIELD})
+REGISTRY_RUN_FIELDS: Final = frozenset({CAMPAIGN_FIELD})  # Story 8.4
 QUEUED: Final = "Places discovery queued."
 ALREADY_QUEUED: Final = "Places discovery is already queued for that Campaign and location."
+REGISTRY_QUEUED: Final = "Companies House discovery queued."
+REGISTRY_ALREADY_QUEUED: Final = "Companies House discovery is already queued for that Campaign."
 UNKNOWN_CAMPAIGN: Final = "Unknown Campaign"
-SOURCE_LABELS: Final = {"places": "Google Places"}
+NO_LOCATION: Final = "—"
+SOURCE_LABELS: Final = {"places": "Google Places", "companies_house": "Companies House"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +93,7 @@ class RunRow:
     suppressed: int
     no_website: int
     market_blocked: int
+    inactive: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +111,16 @@ def submitted_run(fields: FormFields) -> SubmittedRun:
     ):
         raise MalformedForm(WRONG_FIELDS)
     return SubmittedRun(fields[CAMPAIGN_FIELD][0], fields[LOCATION_FIELD][0])
+
+
+def submitted_registry_run(fields: FormFields) -> str:
+    """The Campaign id the Companies House form sent (Story 8.4); ``MalformedForm`` for any
+    other field, a missing or repeated one."""
+    if set(fields) - {CSRF_FIELD} != REGISTRY_RUN_FIELDS or any(
+        len(values) != 1 for values in fields.values()
+    ):
+        raise MalformedForm(WRONG_FIELDS)
+    return fields[CAMPAIGN_FIELD][0]
 
 
 def campaign_options(campaigns: Iterable[SeededCampaign]) -> tuple[Option, ...]:
@@ -118,7 +143,11 @@ def run_rows(runs: Iterable[StoredRun], names: dict[str, str]) -> tuple[RunRow, 
         RunRow(
             source=SOURCE_LABELS.get(run.source, run.source),
             campaign=names.get(run.campaign_id, UNKNOWN_CAMPAIGN),
-            location=f"{run.location} ({run.country_code})",
+            location=(
+                f"{NO_LOCATION} ({run.country_code})"
+                if run.location is None
+                else f"{run.location} ({run.country_code})"
+            ),
             status=run.status,
             started_at=run.started_at.strftime("%Y-%m-%d %H:%M UTC"),
             seen=run.seen,
@@ -127,6 +156,7 @@ def run_rows(runs: Iterable[StoredRun], names: dict[str, str]) -> tuple[RunRow, 
             suppressed=run.suppressed,
             no_website=run.no_website,
             market_blocked=run.market_blocked,
+            inactive=run.inactive,
         )
         for run in runs
     )
@@ -139,6 +169,8 @@ def panel_context(
     runs: tuple[RunRow, ...],
     notice: Notice | None = None,
     chosen: SubmittedRun | None = None,
+    uk_campaigns: tuple[Option, ...] = (),
+    chosen_uk_campaign: str = "",
 ) -> dict[str, object]:
     """What ``discovery_panel.html`` renders."""
     return {
@@ -148,4 +180,6 @@ def panel_context(
         "notice": notice,
         "chosen_campaign": "" if chosen is None else chosen.campaign_id,
         "chosen_location": "" if chosen is None else chosen.location,
+        "uk_campaigns": uk_campaigns,
+        "chosen_uk_campaign": chosen_uk_campaign,
     }

@@ -1,8 +1,9 @@
-"""The Discovery page (Story 8.3; FR-5, UX-DR28, UX-DR29, AD-13) through ``Dashboard`` on a
-temporary database at head seeded with the shipped files: ``GET /leads/discovery`` (the form,
-the recent runs, ``Cache-Control: no-store``, the Leads list's link) and ``POST
-/leads/discovery/places`` (CSRF, a queued job, a double submit, refusals and malformed forms,
-nothing queued)."""
+"""The Discovery page (Stories 8.3 and 8.4; FR-5, FR-6, UX-DR28, UX-DR29, AD-13) through
+``Dashboard`` on a temporary database at head seeded with the shipped files: ``GET
+/leads/discovery`` (the forms, the recent runs, ``Cache-Control: no-store``, the Leads list's
+link), ``POST /leads/discovery/places`` and ``POST /leads/discovery/companies-house`` (CSRF, a
+queued job, a double submit, refusals and malformed forms, nothing queued), and Story 8.4's
+Leads list "Website needed" filter and ``POST /leads/{lead_id}/website``."""
 
 from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
@@ -219,6 +220,7 @@ def test_recent_runs_show_source_campaign_location_status_and_counts(
             "0",
             "1",
             "0",
+            "0",
         ]
     ]
 
@@ -373,3 +375,307 @@ def test_recent_runs_takes_a_limit_from_1_to_200(
 ) -> None:
     with seeded.open(read_only=True), pytest.raises(ValueError, match="limit"):
         discovery_queries.recent_runs(limit)  # type: ignore[arg-type]
+
+
+# Story 8.4: Companies House discovery ------------------------------------------------------------
+
+REGISTRY_QUEUED: Final = "Companies House discovery queued."
+REGISTRY_ALREADY: Final = "Companies House discovery is already queued for that Campaign."
+
+
+@pytest.fixture
+def uk(seeded: UnitOfWorkFactory, ids: dict[str, str]) -> str:
+    with seeded.open():
+        Campaigns(FrozenClock(T0)).activate(ids["law_private_ai_uk"], "LIA-2026-01", "2026-11-16")
+    return ids["law_private_ai_uk"]
+
+
+def post_registry(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    fields: list[tuple[str, str]],
+    *,
+    token: bool = True,
+) -> Reply:
+    cookie, csrf = session
+    return dashboard.post(
+        "/leads/discovery/companies-house",
+        cookie=cookie,
+        token=csrf if token else None,
+        headers=[(b"content-type", FORM)],
+        body=urlencode(fields).encode("ascii"),
+    )
+
+
+def registry_jobs(db_engine: Any) -> list[tuple[Any, ...]]:
+    with db_engine.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.exec_driver_sql(
+                "SELECT idempotency_key, lane FROM jobs WHERE type = 'discover_registry'"
+            ).all()
+        ]
+
+
+def test_the_page_offers_companies_house_discovery_for_active_uk_campaigns_only(
+    dashboard: Dashboard, session: tuple[bytes, str], active: str, uk: str
+) -> None:
+    reply = dashboard.get("/leads/discovery", cookie=session[0])
+
+    found = Page(reply.text)
+    places_form, registry_form = found.forms
+    assert (registry_form["method"], registry_form["hx-post"]) == (
+        "post",
+        "/leads/discovery/companies-house",
+    )
+    assert places_form["hx-post"] == "/leads/discovery/places"
+    # the parser keeps the last select of a name: the Companies House one
+    assert found.options["campaign_id"] == [(uk, "Law-PrivateAI × UK", False)]
+    assert reply.text.count('name="csrf_token"') == 2
+
+
+def test_without_an_active_uk_campaign_the_page_says_so(
+    dashboard: Dashboard, session: tuple[bytes, str], active: str
+) -> None:
+    reply = dashboard.get("/leads/discovery", cookie=session[0])
+
+    assert "No active UK Campaign." in reply.text
+    assert [form["hx-post"] for form in Page(reply.text).forms] == ["/leads/discovery/places"]
+
+
+def test_a_companies_house_request_queues_one_job_and_a_double_submit_returns_it(
+    dashboard: Dashboard, session: tuple[bytes, str], uk: str, db_engine: Any
+) -> None:
+    first = post_registry(dashboard, session, [("campaign_id", uk)])
+    again = post_registry(dashboard, session, [("csrf_token", session[1]), ("campaign_id", uk)])
+
+    assert first.status == again.status == 200
+    assert Page(first.text).notices == [("status", REGISTRY_QUEUED)]
+    assert Page(again.text).notices == [("status", REGISTRY_ALREADY)]
+    assert 'id="discovery"' in first.text and "<html" not in first.text
+    [(key, lane)] = registry_jobs(db_engine)
+    assert key.startswith(f"discover_registry:{uk}:") and lane == "bulk"
+
+
+@pytest.mark.parametrize(
+    ("campaign", "message"),
+    [
+        ("law_private_ai_us", "Companies House discovery runs only for a Campaign whose Market"),
+        ("ops_automation_uk", "That Campaign isn't active"),
+        ("01JD0000000000000000000000", "That Campaign isn't active"),
+    ],
+)
+def test_a_non_uk_or_inactive_campaign_is_refused_and_nothing_queued(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    active: str,
+    ids: dict[str, str],
+    db_engine: Any,
+    campaign: str,
+    message: str,
+) -> None:
+    reply = post_registry(dashboard, session, [("campaign_id", ids.get(campaign, campaign))])
+
+    [(role, text)] = Page(reply.text).notices
+    assert reply.status == 200
+    assert role == "alert" and text.startswith(message) and text.endswith("Nothing was queued.")
+    assert registry_jobs(db_engine) == []
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [[], [("campaign_id", "x"), ("campaign_id", "x")], [("campaign_id", "x"), ("extra", "1")]],
+    ids=["no-campaign", "repeated", "extra"],
+)
+def test_a_malformed_companies_house_form_is_refused(
+    dashboard: Dashboard, session: tuple[bytes, str], db_engine: Any, fields: list[tuple[str, str]]
+) -> None:
+    reply = post_registry(dashboard, session, fields)
+
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert registry_jobs(db_engine) == []
+
+
+def test_a_companies_house_post_without_the_csrf_token_is_refused(
+    dashboard: Dashboard, session: tuple[bytes, str], uk: str, db_engine: Any
+) -> None:
+    reply = post_registry(dashboard, session, [("campaign_id", uk)], token=False)
+
+    assert reply.status == 403
+    assert registry_jobs(db_engine) == []
+
+
+def test_a_companies_house_run_shows_no_location_and_its_inactive_count(
+    dashboard: Dashboard, session: tuple[bytes, str], seeded: UnitOfWorkFactory, uk: str
+) -> None:
+    segment = segment_of(seeded)
+
+    @use_case
+    def store() -> None:
+        with current().transaction():
+            run_id = runs_repo.insert(
+                source="companies_house",
+                campaign_id=uk,
+                segment_id=segment,
+                country_code="GB",
+                location=None,
+                query_hash="0" * 16,
+                status=RunStatus.RUNNING,
+                started_at=T0,
+                finished_at=None,
+            )
+            for outcome in ("created", "inactive", "inactive"):
+                runs_repo.count(run_id, outcome)  # type: ignore[arg-type]
+            runs_repo.add_outcome(run_id, "no_website")  # type: ignore[arg-type]
+            runs_repo.finish(run_id, RunStatus.FINISHED, T0)
+
+    with seeded.open():
+        store()
+
+    reply = dashboard.get("/leads/discovery", cookie=session[0])
+
+    rows = [cells for cells in Page(reply.text).cells if cells]
+    assert rows == [
+        [
+            "Companies House",
+            "Law-PrivateAI × UK",
+            "— (GB)",
+            "finished",
+            "2026-11-18 09:00 UTC",
+            "3",
+            "1",
+            "0",
+            "0",
+            "1",
+            "0",
+            "2",
+        ]
+    ]
+
+
+# Story 8.4: the Leads list's "Website needed" filter and website form --------------------------
+
+
+def registry_lead(seeded: UnitOfWorkFactory, name: str = "Beta Law LLP") -> str:
+    from nextron.app.discovery.api import Discovery  # noqa: PLC0415
+    from nextron.app.pipeline.api import Pipeline  # noqa: PLC0415
+    from nextron.domain.leads import LeadIdentity, LeadSource  # noqa: PLC0415
+    from tests.app.test_leads import queue_on  # noqa: PLC0415
+
+    clock = FrozenClock(T0)
+    discovery = Discovery(clock, Pipeline(clock), queue_on(clock))
+    segment = segment_of(seeded)
+
+    @use_case
+    def create(identity: LeadIdentity) -> str:
+        with current().transaction():
+            upserted = discovery.upsert_lead(identity, LeadSource.COMPANIES_HOUSE)
+        assert upserted.lead_id is not None
+        return upserted.lead_id
+
+    with seeded.open():
+        return create(LeadIdentity(name, segment, ch_number="01234567", country_code="GB"))
+
+
+def post_website(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    lead_id: str,
+    fields: list[tuple[str, str]],
+) -> Reply:
+    cookie, csrf = session
+    return dashboard.post(
+        f"/leads/{lead_id}/website",
+        cookie=cookie,
+        token=csrf,
+        headers=[(b"content-type", FORM)],
+        body=urlencode(fields).encode("ascii"),
+    )
+
+
+def test_the_website_needed_filter_lists_leads_without_a_website_with_a_form(
+    dashboard: Dashboard, session: tuple[bytes, str], seeded: UnitOfWorkFactory
+) -> None:
+    lead_id = registry_lead(seeded)
+
+    reply = dashboard.get("/leads", cookie=session[0], query=b"website=needed")
+
+    assert reply.status == 200
+    found = Page(reply.text)
+    [form] = [form for form in found.forms if form.get("method") == "post"]
+    assert (form["action"], form["hx-post"]) == (
+        f"/leads/{lead_id}/website",
+        f"/leads/{lead_id}/website",
+    )
+    assert 'name="csrf_token"' in reply.text
+    assert found.options["website"] == [("", "Any", False), ("needed", "Website needed", True)]
+    assert "Beta Law LLP" in reply.text
+
+
+def test_a_bad_website_filter_is_refused(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = dashboard.get("/leads", cookie=session[0], query=b"website=always")
+
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+
+
+def test_an_entered_website_is_saved_and_the_cell_says_so(
+    dashboard: Dashboard, session: tuple[bytes, str], seeded: UnitOfWorkFactory, db_engine: Any
+) -> None:
+    lead_id = registry_lead(seeded)
+
+    reply = post_website(dashboard, session, lead_id, [("website", "www.beta-law.co.uk")])
+
+    assert reply.status == 200
+    assert Page(reply.text).notices == [
+        ("status", "Website saved; the Lead is queued for research.")
+    ]
+    assert f'href="/leads/{lead_id}"' in reply.text
+    assert "Beta Law LLP" not in reply.text and "<html" not in reply.text
+    with db_engine.connect() as connection:
+        domain = connection.exec_driver_sql(
+            "SELECT web_domain FROM leads WHERE id = ?", (lead_id,)
+        ).scalar_one()
+        crawls = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM jobs WHERE type = 'enrich_lead'"
+        ).scalar_one()
+    assert (domain, crawls) == ("beta-law.co.uk", 1)
+
+
+def test_a_refused_website_shows_why_above_the_form_and_saves_nothing(
+    dashboard: Dashboard, session: tuple[bytes, str], seeded: UnitOfWorkFactory, db_engine: Any
+) -> None:
+    lead_id = registry_lead(seeded)
+
+    reply = post_website(
+        dashboard, session, lead_id, [("website", "https://www.linkedin.com/company/beta")]
+    )
+
+    [(role, text)] = Page(reply.text).notices
+    assert role == "alert" and text.endswith("Nothing was saved.")
+    assert "linkedin" not in reply.text  # nothing typed is rendered back
+    assert [form["hx-post"] for form in Page(reply.text).forms] == [f"/leads/{lead_id}/website"]
+    with db_engine.connect() as connection:
+        domain = connection.exec_driver_sql(
+            "SELECT web_domain FROM leads WHERE id = ?", (lead_id,)
+        ).scalar_one()
+    assert domain is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [[], [("website", "a"), ("website", "b")], [("website", "a"), ("x", "1")], [("website", "a" * 2049)]],
+    ids=["none", "repeated", "extra", "too-long"],
+)
+def test_a_malformed_website_form_is_refused(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    seeded: UnitOfWorkFactory,
+    fields: list[tuple[str, str]],
+) -> None:
+    lead_id = registry_lead(seeded)
+
+    reply = post_website(dashboard, session, lead_id, fields)
+
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)

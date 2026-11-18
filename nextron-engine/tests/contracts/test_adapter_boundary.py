@@ -228,6 +228,8 @@ def companies_house_calls(
     adapter = CompaniesHouseRegistry(secrets, meter=meter, http=http)
     yield "search_companies", lambda: adapter.search_companies("Smith & Jones LLP")
     yield "company", lambda: adapter.company("01234567")
+    yield "search", lambda: adapter.search("solicitors", ("69102",), 1)  # Story 8.4
+    yield "officers", lambda: adapter.officers("01234567")  # Story 8.4
 
 
 def places_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:

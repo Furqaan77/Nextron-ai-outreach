@@ -519,6 +519,7 @@ def test_the_declared_keys_in_order() -> None:
         "ai_budget_monthly",
         "ai_budget_alert_pct",
         "places_max_pages_per_run",
+        "registry_max_pages_per_run",
         "sender_signature",
         "legal_name",
         "postal_address",
@@ -547,6 +548,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.AI_BUDGET_MONTHLY),
         setting(Key.AI_BUDGET_ALERT_PCT),
         setting(Key.PLACES_MAX_PAGES_PER_RUN),
+        setting(Key.REGISTRY_MAX_PAGES_PER_RUN),
         setting(Key.SENDER_SIGNATURE),
         setting(Key.LEGAL_NAME),
         setting(Key.POSTAL_ADDRESS),
@@ -1291,7 +1293,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "crawl_max_pages, legal_name, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, "
             "quota_hunter_credits, quota_job_aggregator, quota_places_enterprise, "
-            "quota_places_pro, quota_prospeo_credits, sender_name, sender_signature, "
+            "quota_places_pro, quota_prospeo_credits, registry_max_pages_per_run, "
+            "sender_name, sender_signature, "
             "sender_timezone, sink_allowlist, unsub_active_kid, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",

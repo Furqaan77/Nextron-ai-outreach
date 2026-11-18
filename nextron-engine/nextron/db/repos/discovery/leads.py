@@ -1,7 +1,7 @@
 """The ``leads`` identity group's repository (FR-9, AD-3): the only code that writes ``id``,
 ``name``, ``web_domain``, ``ch_number``, ``place_id``, ``segment_id``, ``country_code``,
-``merged_into``, ``created_at`` and the Places location ``place_lat``, ``place_lng`` and
-``place_coords_at`` (Story 8.2).
+``merged_into``, ``created_at``, the Places location ``place_lat``, ``place_lng`` and
+``place_coords_at`` (Story 8.2) and ``website_lookup_at`` (Story 8.4).
 
 Every function runs one explicit Core statement through the current unit of work's session
 (``nextron.db.uow.current()``), so writes run in the order they are called: reads work in a
@@ -15,7 +15,9 @@ nothing; ``nextron.app.discovery`` does.
 - ``insert(...) -> id``: a new row; ``pipeline_stage`` is left to its server default (``new``);
 - ``set_keys(lead_id, **keys)``: sets the named key columns;
 - ``set_web_domain(lead_id, web_domain)``: replaces the Lead's ``web_domain`` (Story 2.5: the
-  domain its website now lives on);
+  domain its website now lives on; Story 8.4: a registry Lead's website, found or entered);
+- ``set_website_lookup_at(lead_id, at)`` (Story 8.4): when the Lead's website lookup was
+  decided;
 - ``mark_merged(loser_id, survivor_id, cleared_keys)``: sets ``merged_into`` and clears each
   key column named in ``cleared_keys``, in one statement;
 - ``set_place_coords(lead_id, lat, lng, at)`` (Story 8.3): sets ``place_lat``, ``place_lng``
@@ -26,12 +28,14 @@ nothing; ``nextron.app.discovery`` does.
   keeps ``place_id``; the number of rows purged;
 - ``merged_from(lead_id)`` (Story 3.13): the ids of every Lead whose merge chain leads to
   ``lead_id`` (merged into it, or into one of those, and so on), by id; a loop is followed once;
-- ``ListedLead``, ``listed(*, stage, segment_id, search, limit, offset)`` and
-  ``count_listed(*, stage, segment_id, search)`` (Story 2.4): the Leads list's page of rows
-  and their count. Both keep only Leads that aren't merged (``merged_into IS NULL``) and, for
-  each argument that isn't ``None``, those at ``pipeline_stage == stage``, those in
-  ``segment_id``, and those whose name or ``web_domain`` contains ``search`` (SQLite ``LIKE``,
-  so ASCII letters ignore case; ``%``, ``_`` and the escape character are matched literally).
+- ``ListedLead``, ``listed(*, stage, segment_id, search, limit, offset, website_needed=False)``
+  and ``count_listed(*, stage, segment_id, search, website_needed=False)`` (Story 2.4): the
+  Leads list's page of rows and their count. Both keep only Leads that aren't merged
+  (``merged_into IS NULL``) and, for each argument that isn't ``None``, those at
+  ``pipeline_stage == stage``, those in ``segment_id``, and those whose name or ``web_domain``
+  contains ``search`` (SQLite ``LIKE``, so ASCII letters ignore case; ``%``, ``_`` and the
+  escape character are matched literally); with ``website_needed`` (Story 8.4) only those whose
+  ``web_domain`` is NULL.
   ``listed`` orders newest first (``created_at DESC, id DESC``). They read the pipeline
   group's ``pipeline_stage`` column of the same rows, read-only, so the stage filter and the
   paging stay in one statement; only ``nextron.db.repos.pipeline.stages`` writes it (AD-3).
@@ -148,6 +152,13 @@ def set_web_domain(lead_id: str, web_domain: str) -> None:
     )
 
 
+def set_website_lookup_at(lead_id: str, at: datetime) -> None:
+    """Record when the Lead ``lead_id``'s website lookup was decided."""
+    current().session.execute(
+        update_rows(LeadRecord).where(LeadRecord.id == lead_id).values(website_lookup_at=at)
+    )
+
+
 def mark_merged(loser_id: str, survivor_id: str, cleared_keys: tuple[str, ...]) -> None:
     """Set the Lead ``loser_id``'s ``merged_into`` to ``survivor_id`` and clear each key column
     in ``cleared_keys``."""
@@ -225,9 +236,11 @@ def merged_from(lead_id: str) -> tuple[str, ...]:
 
 
 def _listed_where(
-    *, stage: str | None, segment_id: str | None, search: str | None
+    *, stage: str | None, segment_id: str | None, search: str | None, website_needed: bool
 ) -> list[ColumnElement[bool]]:
     conditions: list[ColumnElement[bool]] = [LeadRecord.merged_into.is_(None)]
+    if website_needed:
+        conditions.append(LeadRecord.web_domain.is_(None))
     if stage is not None:
         conditions.append(LeadRecord.pipeline_stage == stage)
     if segment_id is not None:
@@ -249,12 +262,20 @@ def listed(
     search: str | None,
     limit: int,
     offset: int,
+    website_needed: bool = False,
 ) -> tuple[ListedLead, ...]:
     """At most ``limit`` Leads that aren't merged and match the filters, newest first, after
     skipping ``offset``."""
     statement = (
         select(*_LISTED_COLUMNS)
-        .where(*_listed_where(stage=stage, segment_id=segment_id, search=search))
+        .where(
+            *_listed_where(
+                stage=stage,
+                segment_id=segment_id,
+                search=search,
+                website_needed=website_needed,
+            )
+        )
         .order_by(LeadRecord.created_at.desc(), LeadRecord.id.desc())
         .limit(limit)
         .offset(offset)
@@ -262,11 +283,24 @@ def listed(
     return tuple(ListedLead(*row) for row in current().session.execute(statement))
 
 
-def count_listed(*, stage: str | None, segment_id: str | None, search: str | None) -> int:
+def count_listed(
+    *,
+    stage: str | None,
+    segment_id: str | None,
+    search: str | None,
+    website_needed: bool = False,
+) -> int:
     """How many Leads that aren't merged match the filters."""
     statement = (
         select(func.count())
         .select_from(LeadRecord)
-        .where(*_listed_where(stage=stage, segment_id=segment_id, search=search))
+        .where(
+            *_listed_where(
+                stage=stage,
+                segment_id=segment_id,
+                search=search,
+                website_needed=website_needed,
+            )
+        )
     )
     return int(current().session.execute(statement).scalar_one())

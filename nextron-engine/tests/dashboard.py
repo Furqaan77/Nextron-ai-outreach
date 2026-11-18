@@ -95,6 +95,7 @@ from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.place_ingest import PlaceDiscovery
+from nextron.app.discovery.registry_ingest import RegistryDiscovery
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -138,6 +139,7 @@ from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.places import ScriptedPlaces
+from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -318,6 +320,7 @@ class Dashboard:
     llm: ScriptedLlm = field(default_factory=ScriptedLlm)
     places: ScriptedPlaces = field(default_factory=ScriptedPlaces)
     crawler: ScriptedCrawler = field(default_factory=ScriptedCrawler)
+    registry: ScriptedRegistry = field(default_factory=ScriptedRegistry)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -346,6 +349,7 @@ class Dashboard:
     erasures: Erasures = field(init=False)
     discovery: Discovery = field(init=False)
     place_discovery: PlaceDiscovery = field(init=False)
+    registry_discovery: RegistryDiscovery = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -381,6 +385,7 @@ class Dashboard:
             job_boards=no_crawl_jobs,
             legal_forms=no_crawl_jobs,
             place_discovery=lambda: self.place_discovery,
+            registry_discovery=lambda: self.registry_discovery,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -428,11 +433,18 @@ class Dashboard:
         self.lead_imports = LeadImports(
             self.clock, self.discovery, self.research, self.email_syntax
         )
+        place_searches = PlaceSearches(self.clock, meter, self.places)
         self.place_discovery = PlaceDiscovery(
+            self.clock, place_searches, self.crawler, self.discovery, self.queue
+        )
+        self.registry_discovery = RegistryDiscovery(
             self.clock,
-            PlaceSearches(self.clock, meter, self.places),
+            meter,
+            self.registry,
+            place_searches,
             self.crawler,
             self.discovery,
+            self.research,
             self.queue,
         )
         self.erasures = Erasures(self.clock, Compliance(self.clock))
@@ -464,6 +476,8 @@ class Dashboard:
             erasures=self.erasures,
             domain_checks=self.domain_checks,
             place_discovery=self.place_discovery,
+            registry_discovery=self.registry_discovery,
+            discovery=self.discovery,
             units=self.units,
             **extra,
         )

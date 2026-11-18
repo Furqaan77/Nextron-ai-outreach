@@ -14,7 +14,8 @@ current unit of work, read-only ones included.
   the Lead itself when it isn't merged. ``None`` for a text that isn't a ULID, an unknown id,
   a chain that leads to no Lead, and a chain longer than the bound (a loop included). Story
   2.5's jobs reuse it.
-- ``lead_list(*, stage=None, segment_id=None, search=None, page=1)`` (Story 2.4): one page of
+- ``lead_list(*, stage=None, segment_id=None, search=None, page=1, website_needed=False)``
+  (Story 2.4): one page of
   the Leads list as a ``LeadListPage``: at most ``LEADS_PER_PAGE`` (50) ``ListedLead`` rows,
   newest first (by ``created_at``, then ``id``), the ``total`` that match, the ``page`` shown
   and the number of ``pages`` (``max(1, ceil(total / 50))``). Merged Leads are left out; every
@@ -25,7 +26,8 @@ current unit of work, read-only ones included.
   ``int`` (a ``bool`` included), a ``stage`` that isn't a ``PipelineStage``, or a
   ``segment_id`` or ``search`` that isn't a ``str`` raises ``TypeError``; a ``page`` below 1
   raises ``ValueError``. It reads the pipeline group's ``pipeline_stage`` column of the same
-  rows, read-only.
+  rows, read-only. ``website_needed`` (Story 8.4, the "Website needed" filter) keeps only the
+  Leads with no ``web_domain``; a value that isn't a ``bool`` raises ``TypeError``.
 - ``merged_lead_ids(lead_id)`` (Story 3.13): the ids of every Lead whose merge chain leads to
   ``lead_id``, by id; ``()`` for a text that isn't a ULID. An erasure nulls their pages' text
   too, since a merge leaves a page whose URL the survivor holds on the merged Lead.
@@ -109,8 +111,11 @@ def lead_list(
     segment_id: str | None = None,
     search: str | None = None,
     page: int = 1,
+    website_needed: bool = False,
 ) -> LeadListPage:
     """One page of the Leads that aren't merged and match the filters, newest first."""
+    if not isinstance(website_needed, bool):
+        raise TypeError("website_needed must be a bool")
     if not isinstance(page, int) or isinstance(page, bool):
         raise TypeError(f"page must be an int, not {type(page).__name__}")
     if page < 1:
@@ -123,7 +128,9 @@ def lead_list(
     if search is not None and not search.strip():
         search = None
     stored_stage = None if stage is None else stage.value
-    total = leads_repo.count_listed(stage=stored_stage, segment_id=segment_id, search=search)
+    total = leads_repo.count_listed(
+        stage=stored_stage, segment_id=segment_id, search=search, website_needed=website_needed
+    )
     pages = max(1, ceil(total / LEADS_PER_PAGE))
     shown = min(page, pages)
     rows = leads_repo.listed(
@@ -132,6 +139,7 @@ def lead_list(
         search=search,
         limit=LEADS_PER_PAGE,
         offset=(shown - 1) * LEADS_PER_PAGE,
+        website_needed=website_needed,
     )
     return LeadListPage(leads=rows, total=total, page=shown, pages=pages)
 

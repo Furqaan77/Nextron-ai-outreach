@@ -194,7 +194,9 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/exports/{ticket}",
         "/leads/discovery",  # Story 8.3
         "/leads/discovery/places",
+        "/leads/discovery/companies-house",  # Story 8.4
         "/leads",
+        "/leads/{lead_id}/website",  # Story 8.4
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}",
@@ -667,6 +669,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_import_form.html",
         "lead_legal_form.html",
         "lead_missing.html",
+        "lead_website_form.html",
         "leads.html",
         "locked.html",
         "macros.html",

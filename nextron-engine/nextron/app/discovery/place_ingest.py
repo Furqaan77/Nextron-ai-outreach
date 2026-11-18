@@ -21,9 +21,10 @@ or ``places_run_refused`` (the reason).
 ``@use_case run(campaign_id, location_hash, country_code) -> bool`` (the job): ``False`` means
 the budget refused a page (the handler returns ``DEFERRED``).
 
-1. **Start** (a transaction). First every ``running`` run row is ended ``failed`` (finished
-   now; logged ``places_runs_recovered`` with the count): all ``discover_places`` jobs share
-   one concurrency key, so such a row was left by a crash. Then an unknown Campaign, or a
+1. **Start** (a transaction). First every ``running`` ``places`` run row is ended ``failed``
+   (finished now; logged ``places_runs_recovered`` with the count): all ``discover_places``
+   jobs share one concurrency key, so such a row was left by a crash (a Companies House run's
+   row is never touched: Story 8.4). Then an unknown Campaign, or a
    location hash and code that no item of the setting holds any more: logs
    ``places_run_skipped`` and returns ``True`` with no run row.
    A Campaign that can't run now: a ``stopped`` run row (finished at once) and ``True``, with
@@ -76,7 +77,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Final
 
-from nextron.app.discovery.api import Discovery, UpsertedLead
+from nextron.app.discovery.api import Discovery, UpsertedLead, website_domain
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.jobqueue.api import Enqueued, JobQueue
 from nextron.app.queries import setup as setup_queries
@@ -86,10 +87,10 @@ from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.uow import current, use_case
 from nextron.domain.crawl import HTML_MEDIA_TYPES, MIN_INTERVAL_S
 from nextron.domain.errors import DomainError
-from nextron.domain.fetch_policy import check_url, url_refusal
-from nextron.domain.identity import IdentityError, normalize_place_id, registrable_domain
+from nextron.domain.fetch_policy import check_url
+from nextron.domain.identity import IdentityError, normalize_place_id
 from nextron.domain.job import VERSION_FIELD, Lane
-from nextron.domain.leads import LeadIdentity, LeadSource, is_shared_platform
+from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import market_for_country
 from nextron.domain.place_discovery import (
     CAMPAIGN_ID_FIELD,
@@ -162,8 +163,9 @@ class _Run:
 
 
 @dataclass(frozen=True, slots=True)
-class _Site:
-    """A candidate's own website, as its homepage's final URL gave it."""
+class OwnSite:
+    """An organization's own website, as its homepage's final URL gave it: its registrable
+    domain and the name the homepage shows (else the domain)."""
 
     web_domain: str
     name: str
@@ -206,16 +208,27 @@ def _origin(url: str) -> str:
     return f"{target.scheme}://{urllib.parse.urlsplit(target.url).netloc}"
 
 
-def _domain(url: str) -> str | None:
-    """The registrable domain of an egress-allowed URL that isn't a shared platform, else
-    ``None``."""
-    if not isinstance(url, str) or url_refusal(url) is not None:
+def own_site(crawler: CrawlerPort, website_uri: str | None) -> OwnSite | None:
+    """The organization's own website at ``website_uri``, or ``None`` when it has none it may
+    fetch (step 3d of the module docstring; Story 8.4's website lookup reuses it). Call it
+    with no transaction open."""
+    if website_uri is None or website_domain(website_uri) is None:
+        return None  # nothing fetched: missing, refused, denylisted or a shared platform
+    origin = _origin(website_uri)
+    try:
+        robots = crawler.fetch_robots(f"{origin}/robots.txt", min_interval_s=MIN_INTERVAL_S)
+    except AdapterError as error:
+        allows, interval, _ = robots_rule(error)
+    else:
+        allows, interval, _ = robots_rule(robots)
+    home = f"{origin}/"
+    if not allows(home):
         return None
     try:
-        domain = registrable_domain(check_url(url).host)
-    except IdentityError:
+        fetched = crawler.fetch_page(home, site=None, min_interval_s=interval)
+    except AdapterError:
         return None
-    return None if is_shared_platform(domain) else domain
+    return _site_of(fetched)
 
 
 class PlaceDiscovery:
@@ -307,7 +320,7 @@ class PlaceDiscovery:
         code = country_code.upper() if isinstance(country_code, str) else ""
         with current().transaction():
             # every discover_places job shares one concurrency key, so a running row is stale
-            stale = runs_repo.fail_running(now)
+            stale = runs_repo.fail_running(SOURCE_PLACES, now)
             if stale:
                 log.warning(PLACES_RUNS_RECOVERED, extra={"count": stale})
             campaign = setup_queries.campaign(campaign_id)
@@ -393,7 +406,7 @@ class PlaceDiscovery:
         lead_id: str | None = None
         outcome, place_id = self._prechecked(run_id, candidate, location.country_code)
         if outcome is False and place_id is not None:
-            site = self._site(candidate.website_uri)
+            site = own_site(self._crawler, candidate.website_uri)
             with current().transaction():
                 if site is None:
                     outcome = Outcome.NO_WEBSITE
@@ -437,29 +450,6 @@ class PlaceDiscovery:
                 return Outcome.MERGED, place_id
         return False, place_id
 
-    def _site(self, website_uri: str | None) -> _Site | None:
-        """The candidate's own website, or ``None`` when it has none it may fetch; no
-        transaction is open."""
-        if website_uri is None or _domain(website_uri) is None:
-            return None  # nothing fetched: missing, refused, denylisted or a shared platform
-        origin = _origin(website_uri)
-        try:
-            robots = self._crawler.fetch_robots(
-                f"{origin}/robots.txt", min_interval_s=MIN_INTERVAL_S
-            )
-        except AdapterError as error:
-            allows, interval, _ = robots_rule(error)
-        else:
-            allows, interval, _ = robots_rule(robots)
-        home = f"{origin}/"
-        if not allows(home):
-            return None
-        try:
-            fetched = self._crawler.fetch_page(home, site=None, min_interval_s=interval)
-        except AdapterError:
-            return None
-        return _site_of(fetched)
-
     def _upserted(
         self, candidate: PlaceCandidate, upserted: UpsertedLead
     ) -> tuple[Outcome, str | None]:
@@ -474,11 +464,11 @@ class PlaceDiscovery:
         return Outcome.CREATED, upserted.lead_id
 
 
-def _site_of(fetched: FetchedPage) -> _Site | None:
+def _site_of(fetched: FetchedPage) -> OwnSite | None:
     """The website a fetched homepage shows, or ``None`` when it shows none of its own."""
     if not fetched.ok or fetched.media_type not in HTML_MEDIA_TYPES:
         return None
-    domain = _domain(fetched.final_url)
+    domain = website_domain(fetched.final_url)
     if domain is None:
         return None
-    return _Site(domain, site_name(fetched.html) or domain)
+    return OwnSite(domain, site_name(fetched.html) or domain)

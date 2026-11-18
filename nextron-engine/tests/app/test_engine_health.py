@@ -329,7 +329,10 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
     report = world.read(health.report)
 
     assert report.groups == (
-        GroupRuns(JobGroup.DISCOVERY, (LastRun("discover_places", None),)),  # Story 8.3
+        GroupRuns(  # Stories 8.3 and 8.4
+            JobGroup.DISCOVERY,
+            (LastRun("discover_places", None), LastRun("discover_registry", None)),
+        ),
         GroupRuns(
             JobGroup.ENRICHMENT,
             (

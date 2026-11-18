@@ -2479,6 +2479,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
 | `0037_8_2_place_coords` | adds to `leads`, in place with no check, the nullable `place_lat` and `place_lng` (floats) and `place_coords_at` (UTC text), purged after 30 days (see [Google Places search](#google-places-search)) | `discovery` |
 | `0038_8_3_discovery_runs` | `discovery_runs` (foreign keys to `campaigns` and `segments` with no cascade; `ix_discovery_runs_started_at`; `ck_discovery_runs_source`, `ck_discovery_runs_status`, `ck_discovery_runs_country_code`, `ck_discovery_runs_finished_at` and `ck_discovery_runs_counts`) (see [Places discovery](#places-discovery)) | `discovery` |
+| `0039_8_4_registry_discovery` | rebuilds `discovery_runs` (`ck_discovery_runs_source` also `companies_house`; `location` nullable with `ck_discovery_runs_location`; new count `inactive`), adds `leads.website_lookup_at`, rebuilds `provenance_records` (`ck_provenance_records_source_kind` also `registry`) and re-creates its two erasure triggers (see [Companies House discovery](#companies-house-discovery)) | `discovery`, `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2569,9 +2570,10 @@ form](#companies-house-legal-form)), `select_primary_contact` (see [Decision-mak
 Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` (see [The AI
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
 authentication](#sending-domain-authentication)), `check_job_boards` and `recheck_event`
-(see [Hiring Signals and job postings](#hiring-signals-and-job-postings)), and `discover_places`
+(see [Hiring Signals and job postings](#hiring-signals-and-job-postings)), `discover_places`
 (bulk only, priority 30, 1 hour, retry limit 2, group `discovery`; see [Places
-discovery](#places-discovery)); the stories that add
+discovery](#places-discovery)) and `discover_registry` (the same spec; see [Companies House
+discovery](#companies-house-discovery)); the stories that add
 work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
@@ -4804,6 +4806,45 @@ coordinate text; `tests/contracts/test_ad16_callers.py` checks the gate precedes
 
 **Not yet:** the job budget class (Story 8.1), Companies House and aggregator discovery (8.4,
 8.6), the daily top-up (8.10), and the pool and quota figures on the Discovery page.
+
+## Companies House discovery
+
+A Companies House discovery run finds active UK companies in a Campaign's Segment through the
+official register (Story 8.4; FR-6, FR-9, FR-12, FR-13, AD-16).
+
+**Queries.** Each Segment in `seed/segments.yaml` carries `discovery_queries.registry`:
+`keywords` (company-name words) and `sic_codes` (5-digit SIC codes). Law-PrivateAI searches
+`solicitors`, `law` and `legal` with SIC 69102; Ops-Automation searches by SIC alone (wholesale
+46190, 46690, 46900; freight 49410, 52103, 52290; light manufacturing 22290, 25990, 28290,
+32990). Each keyword runs one search with all the codes; no keywords means one SIC-only search.
+"Companies House pages per discovery run" (`registry_max_pages_per_run`, Budget and limits,
+1 to 10, default 3) caps the search pages (20 companies each) of one run.
+
+**Running it.** On the Discovery page (`/leads/discovery`) choose an active UK Campaign and
+press **Run Companies House discovery**. That queues one `discover_registry` job (bulk lane,
+priority 30, 1 hour, retry limit 2, group `discovery`), keyed `discover_registry:<Campaign
+ULID>:<query hash>`, with concurrency key `domain:api.company-information.service.gov.uk`. A
+Campaign that isn't active, isn't in the UK Market, or whose Segment has no SIC codes is refused.
+
+**Each company.** A company number any Lead already holds is counted `merged` and nothing is
+fetched. Otherwise its profile is read; a company that isn't `active` or whose latest accounts
+are `dormant` is counted `inactive`. A new company becomes a Lead under its registered name, with
+its company number and country GB, after the Suppression List check; its registry legal form is
+recorded as Evidence but stays **unconfirmed** until the firm's own website shows the number or
+the registered name and postcode (the `check_legal_form` stage). The run then makes one Google
+Places lookup for the registered name and office postcode (gated by the Places quota) and keeps
+the first result's website only when it loads, passes the denylist and no other Lead holds it;
+that queues the Lead's crawl. Active directors and LLP designated members whose occupation
+matches one of the Segment's decision-maker titles become Contacts with no email (Provenance
+`Companies House`). Corporate and resigned officers are ignored.
+
+**Website needed.** A Lead left without a website shows on the Leads list under the
+**Website needed** filter (`/leads?website=needed`), where you can enter its website; a website
+another Lead already holds merges the two (the older one is kept), then the crawl is queued.
+
+**Deferral.** The AI budget is checked before each search page, and a Companies House rate
+limit (HTTP 429) also ends the run `deferred`: the job is re-queued an hour later and the Leads
+already created stay.
 
 ## Engine health
 

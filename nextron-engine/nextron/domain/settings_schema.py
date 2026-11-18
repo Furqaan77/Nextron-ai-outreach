@@ -84,6 +84,10 @@ per line (``LOCATION_RULE``: ``nextron.domain.place_discovery.is_location_item``
 Campaign's locations are those whose code is its Market's country code.
 ``places_max_pages_per_run`` (``integer``, Budget and limits, 1 to 3, default 3) caps the
 Places pages one run fetches.
+
+**Companies House discovery** (Story 8.4, FR-6): ``registry_max_pages_per_run`` (``integer``,
+Budget and limits, 1 to 10, default 3) caps the Companies House search pages (20 companies
+each) one run fetches, across all its searches.
 """
 
 import re
@@ -115,7 +119,9 @@ from nextron.domain.identity import IdentityError, url_host
 from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.place_discovery import (
     DEFAULT_PAGES_PER_RUN,
+    DEFAULT_REGISTRY_PAGES_PER_RUN,
     MAX_PAGES_PER_RUN,
+    MAX_REGISTRY_PAGES_PER_RUN,
     is_location_item,
 )
 from nextron.domain.prices import names_price
@@ -181,6 +187,7 @@ class Key(StrEnum):
     AI_BUDGET_MONTHLY = "ai_budget_monthly"
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
     PLACES_MAX_PAGES_PER_RUN = "places_max_pages_per_run"  # Story 8.3
+    REGISTRY_MAX_PAGES_PER_RUN = "registry_max_pages_per_run"  # Story 8.4
     # The footer (Story 4.11, FR-23), in footer order.
     SENDER_SIGNATURE = "sender_signature"
     LEGAL_NAME = "legal_name"
@@ -1185,6 +1192,22 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=DEFAULT_PAGES_PER_RUN,
         rules=(minimum(1, "1"), maximum(MAX_PAGES_PER_RUN, str(MAX_PAGES_PER_RUN))),
+    ),
+    # Companies House discovery (Story 8.4): read when each run starts.
+    Setting(
+        key=Key.REGISTRY_MAX_PAGES_PER_RUN,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Companies House pages per discovery run",
+        unit=(
+            f"1 to {MAX_REGISTRY_PAGES_PER_RUN}. The most Companies House search pages (20 "
+            "companies each) one Companies House discovery run fetches, across all its searches."
+        ),
+        default=DEFAULT_REGISTRY_PAGES_PER_RUN,
+        rules=(
+            minimum(1, "1"),
+            maximum(MAX_REGISTRY_PAGES_PER_RUN, str(MAX_REGISTRY_PAGES_PER_RUN)),
+        ),
     ),
     # The footer (Story 4.11, FR-23, CAN-SPAM, PECR, UK GDPR Art. 14), in footer order:
     # nextron.domain.render fills each Market's footer template with these values. The four

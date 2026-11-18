@@ -903,6 +903,9 @@ def test_definition_text_is_canonical_json_of_the_file_form() -> None:
     for item in expected["signal_types"]:
         item.setdefault("match_terms", [])
         item.setdefault("preferred_roles", [])
+    expected["discovery_queries"].setdefault(  # Story 8.4: always written
+        "registry", {"keywords": [], "sic_codes": []}
+    )
     assert json.loads(text) == expected
 
 

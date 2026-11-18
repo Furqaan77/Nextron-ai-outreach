@@ -7,7 +7,7 @@
 {% block content %}
 <h1>Leads</h1>
 <p><a href="/leads/import">Import Leads from a CSV file</a></p>
-<p><a href="/leads/discovery">Discovery: find new Leads through Google Places</a></p>
+<p><a href="/leads/discovery">Discovery: find new Leads through Google Places or Companies House</a></p>
 <form class="lead-filters" method="get" action="/leads" role="search">
 <div class="field">
 <label for="filter-stage">Pipeline Stage</label>
@@ -31,6 +31,13 @@
 <label for="filter-q">Name or website</label>
 <input type="text" id="filter-q" name="q" maxlength="200" value="{{ search }}">
 </div>
+<div class="field">
+<label for="filter-website">Website</label>
+<select id="filter-website" name="website">
+<option value=""{% if not website_needed %} selected{% endif %}>Any</option>
+<option value="needed"{% if website_needed %} selected{% endif %}>Website needed</option>
+</select>
+</div>
 <div class="filter-actions">
 <button type="submit">Filter</button>
 {%- if filtered %}
@@ -39,7 +46,21 @@
 </div>
 </form>
 <p class="lead-count" role="status">{{ count_text }}</p>
-{%- if rows %}
+{%- if rows and website_needed %}
+{#- Story 8.4: hx-disable on each text cell instead of the table, so each row's website form
+    works. -#}
+<table class="lead-table website-needed-table">
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Segment</th><th scope="col">Country</th><th scope="col">Stage</th><th scope="col">Created</th><th scope="col">Enter website</th></tr>
+</thead>
+<tbody>
+{%- for row in rows %}
+<tr><td hx-disable><a href="{{ row.href }}">{{ row.name|plain }}</a></td><td hx-disable>{{ row.segment|plain }}</td><td hx-disable>{% if row.country %}{{ row.country|plain }}{% else %}—{% endif %}</td><td hx-disable>{{ row.stage|plain }}</td><td>{{ row.created }}</td>
+{%- with lead_id=row.lead_id, notice=None, saved=False, kept_href=None %}{% include "lead_website_form.html" %}{% endwith %}</tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- elif rows %}
 <table class="lead-table" hx-disable>
 <thead>
 <tr><th scope="col">Name</th><th scope="col">Website</th><th scope="col">Segment</th><th scope="col">Country</th><th scope="col">Stage</th><th scope="col">Created</th></tr>

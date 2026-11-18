@@ -15,7 +15,7 @@ import nextron.adapters.companies_house as adapter
 from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.domain.budget import ApiCall
 from nextron.ports.errors import AdapterError
-from nextron.ports.registry import RegistryCompany, RegistryPort
+from nextron.ports.registry import RegistryCompany, RegistryOfficer, RegistryPort
 from nextron.ports.secrets import CREDENTIAL_NOT_SET
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -449,3 +449,272 @@ def test_the_client_is_built_once(monkeypatch: pytest.MonkeyPatch) -> None:
     registry.company(NUMBER)
 
     assert len(built) == 1 and len(recorder.requests) == 2
+
+
+
+# Story 8.4: the advanced search and the officers ------------------------------------------------
+
+ADVANCED = {
+    "items": [
+        {
+            "company_number": NUMBER,
+            "company_name": "SMITH AND JONES SOLICITORS LIMITED",
+            "company_type": "ltd",
+            "company_status": "active",
+            "registered_office_address": {"postal_code": "LS1 4AP"},
+            "sic_codes": ["69102", "69102", "6910", 69109, "70229"],
+        },
+        {"company_number": "bad", "company_name": "NOT A NUMBER LTD"},
+        "not an object",
+    ],
+    "hits": 2,
+}
+OFFICERS = {
+    "items": [
+        {
+            "name": "SMITH,  Jane   Mary",
+            "officer_role": "director",
+            "occupation": "  Managing   Partner ",
+        },
+        {
+            "name": "JONES, Ann",
+            "officer_role": "llp-designated-member",
+            "occupation": "",
+            "resigned_on": "2020-01-31",
+        },
+        {"name": "ACME HOLDINGS LIMITED", "officer_role": "corporate-director"},
+        {"name": "", "officer_role": "director"},
+        {"name": "BROWN, Tom", "officer_role": "Not A Role"},
+        {"name": "GREEN, Amy", "officer_role": "director", "occupation": "x" * 201},
+        "not an object",
+    ]
+}
+
+
+def test_search_sends_the_advanced_search_params_and_reads_the_hits() -> None:
+    recorder = Recorder(answer(200, ADVANCED))
+    meter = InMemoryUsageMeter()
+
+    hits = registry_on(recorder, meter=meter).search(" Smith   Jones ", ("69102", "69109"), 2)
+
+    [request] = recorder.requests
+    assert request.method == "GET"
+    assert request.url.path == "/advanced-search/companies"
+    assert dict(request.url.params) == {
+        "company_status": "active",
+        "company_name_includes": "Smith Jones",
+        "sic_codes": "69102,69109",
+        "size": "20",
+        "start_index": "40",
+    }
+    assert request.headers["authorization"] == basic(KEY)
+    assert hits == (
+        RegistryCompany(
+            NUMBER,
+            "SMITH AND JONES SOLICITORS LIMITED",
+            "ltd",
+            "active",
+            "LS1 4AP",
+            None,
+            ("69102", "70229"),
+        ),
+    )
+    assert meter.calls == [ApiCall("companies_house", "search_registry", ok=True)]
+
+
+def test_a_sic_only_search_leaves_out_the_keyword() -> None:
+    recorder = Recorder(answer(200, {"items": []}))
+
+    assert registry_on(recorder).search(None, ("46190",), 0) == ()
+
+    [request] = recorder.requests
+    assert dict(request.url.params) == {
+        "company_status": "active",
+        "sic_codes": "46190",
+        "size": "20",
+        "start_index": "0",
+    }
+
+
+def test_a_search_answered_404_has_no_hits() -> None:
+    meter = InMemoryUsageMeter()
+
+    assert registry_on(Recorder(answer(404)), meter=meter).search(None, ("46190",), 0) == ()
+    assert meter.calls == [ApiCall("companies_house", "search_registry", ok=True)]
+
+
+def test_a_search_answered_429_is_retryable_rate_limited() -> None:
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as raised:
+        registry_on(Recorder(answer(429)), meter=meter).search("law", ("69102",), 0)
+
+    assert (raised.value.retryable, raised.value.code) == (True, "registry_rate_limited")
+    assert meter.calls == [
+        ApiCall(
+            "companies_house", "search_registry", ok=False, error_code="registry_rate_limited"
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("keyword", "codes", "page"),
+    [
+        (None, (), 0),
+        ("  ", ("69102",), 0),
+        ("law", ("6910",), 0),
+        ("law", ["69102"], 0),
+        ("law", ("69102",), -1),
+        ("law", ("69102",), True),
+    ],
+)
+def test_a_search_without_a_keyword_or_valid_codes_is_refused_with_no_request(
+    keyword: object, codes: object, page: object
+) -> None:
+    recorder = Recorder(answer(200, ADVANCED))
+    meter = InMemoryUsageMeter()
+
+    with pytest.raises(AdapterError) as raised:
+        registry_on(recorder, meter=meter).search(keyword, codes, page)  # type: ignore[arg-type]
+
+    assert (raised.value.retryable, raised.value.code) == (False, "registry_refused")
+    assert recorder.requests == [] and meter.calls == []
+
+
+def test_officers_reads_each_valid_officer() -> None:
+    recorder = Recorder(answer(200, OFFICERS))
+    meter = InMemoryUsageMeter()
+
+    found = registry_on(recorder, meter=meter).officers(NUMBER)
+
+    [request] = recorder.requests
+    assert request.url.path == f"/company/{NUMBER}/officers"
+    assert dict(request.url.params) == {"items_per_page": "100"}
+    assert found == (
+        RegistryOfficer("SMITH, Jane Mary", "director", "Managing Partner", False),
+        RegistryOfficer("JONES, Ann", "llp-designated-member", None, True),
+        RegistryOfficer("ACME HOLDINGS LIMITED", "corporate-director", None, False),
+        RegistryOfficer("GREEN, Amy", "director", None, False),
+    )
+    assert "Jane" not in repr(found) and "Managing" not in repr(found)
+    assert meter.calls == [ApiCall("companies_house", "list_officers", ok=True)]
+
+
+def test_officers_of_a_company_answered_404_are_none() -> None:
+    assert registry_on(Recorder(answer(404))).officers(NUMBER) == ()
+
+
+def test_officers_answered_429_or_503_are_retryable() -> None:
+    for status, code in ((429, "registry_rate_limited"), (503, "registry_unavailable")):
+        with pytest.raises(AdapterError) as raised:
+            registry_on(Recorder(answer(status))).officers(NUMBER)
+        assert (raised.value.retryable, raised.value.code) == (True, code)
+
+
+def test_officers_of_a_bad_number_are_refused_with_no_request() -> None:
+    recorder = Recorder(answer(200, OFFICERS))
+
+    with pytest.raises(AdapterError) as raised:
+        registry_on(recorder).officers("123")
+
+    assert raised.value.code == "registry_refused"
+    assert recorder.requests == []
+
+
+def test_officers_whose_items_are_not_a_list_are_a_bad_response() -> None:
+    with pytest.raises(AdapterError) as raised:
+        registry_on(Recorder(answer(200, {"items": {}}))).officers(NUMBER)
+
+    assert raised.value.code == "registry_bad_response"
+
+
+def test_a_profile_reads_the_accounts_category_and_sic_codes() -> None:
+    profile = {
+        **PROFILE,
+        "accounts": {"last_accounts": {"type": "dormant", "made_up_to": "2025-03-31"}},
+        "sic_codes": ["69102"],
+    }
+
+    found = registry_on(Recorder(answer(200, profile))).company(NUMBER)
+
+    assert found is not None
+    assert (found.accounts_category, found.sic_codes) == ("dormant", ("69102",))
+
+
+@pytest.mark.parametrize(
+    "accounts",
+    [None, "full", {"last_accounts": None}, {"last_accounts": {"type": "Not A Code"}}],
+)
+def test_a_profile_without_a_valid_accounts_category_reads_none(accounts: object) -> None:
+    found = registry_on(Recorder(answer(200, {**PROFILE, "accounts": accounts}))).company(NUMBER)
+
+    assert found is not None
+    assert (found.accounts_category, found.sic_codes) == (None, ())
+
+
+def test_the_search_and_officers_share_the_rate_window_with_the_lookups() -> None:
+    clock = Clock()
+    recorder = Recorder(answer(200, {"items": []}))
+    registry = registry_on(recorder, monotonic=clock)
+    for _ in range(adapter.RATE_LIMIT - 2):
+        registry.search(None, ("69102",), 0)
+    registry.officers(NUMBER)
+    registry.search_companies(NAME)
+
+    with pytest.raises(AdapterError) as raised:
+        registry.officers(NUMBER)
+
+    assert raised.value.code == "registry_rate_limited"
+    assert len(recorder.requests) == adapter.RATE_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"accounts_category": "Dormant"}, ValueError),
+        ({"accounts_category": 1}, TypeError),
+        ({"sic_codes": ["69102"]}, TypeError),
+        ({"sic_codes": ("6910",)}, ValueError),
+        ({"sic_codes": ("69102", "69102")}, ValueError),
+    ],
+)
+def test_a_registry_company_checks_its_accounts_and_codes(
+    changes: dict[str, object], error: type[Exception]
+) -> None:
+    values: dict[str, object] = {
+        "number": NUMBER,
+        "name": "X LTD",
+        "company_type": "ltd",
+        "company_status": "active",
+        "office_postcode": None,
+    }
+    with pytest.raises(error):
+        RegistryCompany(**{**values, **changes})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (("", "director", None, False), ValueError),
+        ((" SMITH, Jane", "director", None, False), ValueError),
+        (("SMITH, Jane", "Director", None, False), ValueError),
+        (("SMITH, Jane", "director", "", False), ValueError),
+        (("SMITH, Jane", "director", None, "no"), TypeError),
+        ((1, "director", None, False), TypeError),
+    ],
+)
+def test_a_registry_officer_checks_itself(values: tuple[object, ...], error: type[Exception]) -> None:
+    with pytest.raises(error):
+        RegistryOfficer(*values)  # type: ignore[arg-type]
+
+
+def test_null_items_are_no_hits_for_every_list_answer() -> None:
+    meter = InMemoryUsageMeter()
+
+    def on_null() -> CompaniesHouseRegistry:
+        return registry_on(Recorder(answer(200, {"items": None})), meter=meter)
+
+    assert on_null().search_companies(NAME) == ()
+    assert on_null().search(None, ("46190",), 0) == ()
+    assert on_null().officers(NUMBER) == ()
+    assert [call.ok for call in meter.calls] == [True, True, True]

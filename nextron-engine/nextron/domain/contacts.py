@@ -2,7 +2,8 @@
 
 **``ProvenanceSource``** is where a Contact or an address came from, the ``source_kind`` of its
 Provenance Record: ``csv``, ``website``, ``signal_inbox``, ``referral``, ``replier``,
-``operator``, ``pattern``, ``finder`` and ``eligibility_basis``. **``ProvenanceSubject``** is
+``operator``, ``pattern``, ``finder``, ``eligibility_basis`` and ``registry`` (Story 8.4: a
+Companies House officer, stored without an email). **``ProvenanceSubject``** is
 what a record is about: the ``contact`` (its name, role or LinkedIn URL) or its ``address``.
 
 **``ContactCandidate(name=None, role=None, email=None, linkedin_url=None, office=None)``** is a
@@ -129,6 +130,7 @@ class ProvenanceSource(StrEnum):
     PATTERN = "pattern"
     FINDER = "finder"
     ELIGIBILITY_BASIS = "eligibility_basis"
+    REGISTRY = "registry"  # Story 8.4: a Companies House officer, never with an email
 
 
 class ProvenanceSubject(StrEnum):

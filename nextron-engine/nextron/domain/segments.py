@@ -8,7 +8,8 @@ ship; the ``segments`` table (owner ``setup``) stores each one as ``definition_t
 **Types** (frozen, slotted; every list is a tuple): ``SizeRange(minimum, maximum, unit)``,
 ``Disqualifier(key, kind, size_clue, threshold, description)``, ``PreferredRoles(when_terms,
 roles)``, ``SignalType(key, name, signal_class, tier, evidence, sources, score_only, weight,
-match_terms, preferred_roles)``, ``DiscoveryQueries(places)`` and ``SegmentDef(key, name,
+match_terms, preferred_roles)``, ``RegistryQueries(keywords, sic_codes)``,
+``DiscoveryQueries(places, registry=RegistryQueries((), ()))`` and ``SegmentDef(key, name,
 industry_keywords, size_range, decision_maker_roles, disqualifiers, signal_types,
 discovery_queries)``. ``decision_maker_roles`` is a tuple of ranks, best first; each rank is a
 tuple of equal titles. ``SegmentDef.titles()`` is every decision-maker title: the ranked titles
@@ -18,7 +19,8 @@ in rank order, then each preferred role not already listed, in file order.
 is ``class``. The top level is exactly ``segments: [<segment>, ...]``. A segment has exactly
 ``key``, ``name``, ``industry_keywords``, ``size_range`` (``minimum``, ``maximum``, ``unit``),
 ``decision_maker_roles``, ``disqualifiers``, ``signal_types`` and ``discovery_queries``
-(``places``); a disqualifier exactly ``key``, ``kind``, ``size_clue``, ``threshold`` and
+(``places``, and optionally ``registry``: exactly ``keywords`` and ``sic_codes``, Story 8.4);
+a disqualifier exactly ``key``, ``kind``, ``size_clue``, ``threshold`` and
 ``description``; a signal type ``key``, ``name``, ``class``, ``tier``, ``evidence``,
 ``sources``, ``score_only`` and ``weight``, plus optional ``match_terms`` and
 ``preferred_roles`` (each exactly ``when_terms`` and ``roles``). Missing and unknown fields are
@@ -39,7 +41,10 @@ repeats a value longer than 40 characters.
   ``Zl`` or ``Zp`` character: ``name`` and ``description`` at most 200 characters, terms,
   titles, keywords and queries at most 100.
 - Lists hold 1 to 50 items with no duplicates (case-insensitive for texts); ``disqualifiers``,
-  ``match_terms`` and ``preferred_roles`` may be empty.
+  ``match_terms``, ``preferred_roles`` and the ``registry`` ``keywords`` and ``sic_codes`` may
+  be empty. A ``registry`` keyword follows the query rule; a SIC code is a text of exactly 5
+  ASCII digits (``legal_form.SIC_CODE_PATTERN``). A missing ``registry`` (a file or a stored
+  definition from before Story 8.4) reads as no keywords and no SIC codes.
 - Integers are an ``int``, never a ``bool``: ``tier`` 1 to 3, ``weight`` 1 to 100,
   ``threshold`` at least 1, and ``0 <= minimum <= maximum``. ``score_only`` is a ``bool``.
 - The rules, each failing on its own field: (1) within a Segment every weight of a lower Tier
@@ -83,6 +88,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from nextron.domain.errors import DomainError
+from nextron.domain.legal_form import SIC_CODE_PATTERN
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 MAX_TEXT: Final = 200  # name, description
@@ -192,8 +198,17 @@ class SignalType:
 
 
 @dataclass(frozen=True, slots=True)
+class RegistryQueries:
+    """A Segment's Companies House discovery queries (Story 8.4): name keywords and SIC codes."""
+
+    keywords: tuple[str, ...] = ()
+    sic_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryQueries:
     places: tuple[str, ...]
+    registry: RegistryQueries = RegistryQueries()
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,9 +446,36 @@ def _preferred_roles(value: object, path: str) -> tuple[PreferredRoles, ...]:
     return tuple(result)
 
 
+def _sic_codes(value: object, path: str) -> tuple[str, ...]:
+    codes = _texts(value, path, may_be_empty=True)
+    for index, code in enumerate(codes):
+        if SIC_CODE_PATTERN.fullmatch(code) is None:
+            raise InvalidSegments(f"{path}[{index}]", "must be a 5-digit SIC code")
+    return codes
+
+
+def _registry_queries(value: object, path: str) -> RegistryQueries:
+    checked = _fields(
+        value,
+        path,
+        {
+            "keywords": lambda v, p: _texts(v, p, may_be_empty=True),
+            "sic_codes": _sic_codes,
+        },
+    )
+    return RegistryQueries(keywords=checked["keywords"], sic_codes=checked["sic_codes"])
+
+
 def _queries(value: object, path: str) -> DiscoveryQueries:
-    checked = _fields(value, path, {"places": lambda v, p: _texts(v, p)})
-    return DiscoveryQueries(places=checked["places"])
+    checked = _fields(
+        value,
+        path,
+        {"places": lambda v, p: _texts(v, p), "registry": _registry_queries},
+        required=("places",),
+    )
+    return DiscoveryQueries(
+        places=checked["places"], registry=checked.get("registry", RegistryQueries())
+    )
 
 
 def _folded(texts: Iterable[str]) -> frozenset[str]:
@@ -682,7 +724,13 @@ def _file_form(segment: SegmentDef) -> dict[str, object]:
             }
             for signal_type in segment.signal_types
         ],
-        "discovery_queries": {"places": list(segment.discovery_queries.places)},
+        "discovery_queries": {
+            "places": list(segment.discovery_queries.places),
+            "registry": {
+                "keywords": list(segment.discovery_queries.registry.keywords),
+                "sic_codes": list(segment.discovery_queries.registry.sic_codes),
+            },
+        },
     }
 
 

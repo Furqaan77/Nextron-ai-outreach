@@ -137,6 +137,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "place_lat": PiiClass.NONE,
         "place_lng": PiiClass.NONE,
         "place_coords_at": PiiClass.NONE,
+        # Story 8.4: when a registry Lead's website lookup was decided
+        "website_lookup_at": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.
@@ -354,6 +356,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "suppressed": PiiClass.NONE,
         "no_website": PiiClass.NONE,
         "market_blocked": PiiClass.NONE,
+        "inactive": PiiClass.NONE,  # Story 8.4
     },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.

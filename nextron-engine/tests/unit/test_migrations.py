@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0038_8_3_discovery_runs"
+HEAD = "0039_8_4_registry_discovery"
 
 
 @pytest.fixture
@@ -1031,8 +1031,15 @@ def test_0038_creates_an_empty_discovery_runs_table_with_its_checks(tmp_path: Pa
         f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
     )
 
+    shutil.copy2(  # 0038 alone: 0039 (Story 8.4) widens these checks
+        SCRIPT_LOCATION / "versions" / "0038_8_3_discovery_runs.py",
+        location / "versions" / "0038_8_3_discovery_runs.py",
+    )
     with engine_on(path) as engine:
-        assert ensure_current(engine) == ("0037_8_2_place_coords", HEAD)
+        assert ensure_current(engine, script_location=location) == (
+            "0037_8_2_place_coords",
+            "0038_8_3_discovery_runs",
+        )
 
     reader = sqlite3.connect(path)
     try:
@@ -1107,6 +1114,177 @@ def test_0038_creates_an_empty_discovery_runs_table_with_its_checks(tmp_path: Pa
                 insert(id=f"01JD3QZ8X5V9K2M7N4P6R8T1{number:02d}", **changes)
         insert()  # the good row is accepted
         insert(id="01JD3QZ8X5V9K2M7N4P6R8T0E1", status="running", finished_at=None)
+        writer.commit()
+    finally:
+        writer.close()
+
+
+def _chain_to(tmp_path: Path, last: str) -> Path:
+    """A copy of the real chain up to and including ``last``."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= last:
+            shutil.copy2(revision, location / "versions" / revision.name)
+    return location
+
+
+def test_0039_rebuilds_discovery_runs_and_provenance_and_adds_website_lookup_at(
+    tmp_path: Path,
+) -> None:
+    """0039 (Story 8.4) keeps a Lead and a Provenance Record stored at 0038; then
+    ``discovery_runs`` allows a Companies House run without a location and counts ``inactive``,
+    ``leads.website_lookup_at`` is added in place, and ``provenance_records`` allows ``registry``
+    and keeps its erasure triggers."""
+    location = _chain_to(tmp_path, "0038_8_3_discovery_runs")
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0038_8_3_discovery_runs",
+        )
+    at = "2026-11-19T09:00:00.000000Z"
+    segment = "01JD3QZ8X5V9K2M7N4P6R8T0D0"
+    lead = "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    contact = "01JD3QZ8X5V9K2M7N4P6R8T0D2"
+    campaign = "01JD3QZ8X5V9K2M7N4P6R8T0D9"
+    record = "01JD3QZ8X5V9K2M7N4P6R8T0E1"
+    places_run = "01JD3QZ8X5V9K2M7N4P6R8T0E2"
+    market = "01JD3QZ8X5V9K2M7N4P6R8T0E3"
+    offer = "01JD3QZ8X5V9K2M7N4P6R8T0E4"
+    sequence = "01JD3QZ8X5V9K2M7N4P6R8T0E5"
+    zeros = "0" * 16
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, country_code, created_at) "
+        f"VALUES ('{lead}', 'Acme Law', 'acme-law.com', '{segment}', 'US', '{at}')",
+        "INSERT INTO contacts (id, lead_id, name, is_primary, created_at, updated_at) "
+        f"VALUES ('{contact}', '{lead}', 'Ann Lee', 0, '{at}', '{at}')",
+        "INSERT INTO provenance_records (id, contact_id, subject, source_kind, source_detail, "
+        f"retrieved_at) VALUES ('{record}', '{contact}', 'contact', 'website', 'x', '{at}')",
+        # a 0038 Places run of a real Campaign (the upgrade checks the foreign keys)
+        "INSERT INTO markets (id, code, name, enabled, country_code, cctlds, cold_email_allowed, "
+        "free_webmail_blocked, default_timezone, unknown_timezone, english_variant, "
+        "footer_template, privacy_line_required, version, created_at, updated_at) VALUES "
+        f"('{market}', 'uk', 'UK', 1, 'GB', '[]', 1, 1, 'Europe/London', "
+        f"'Europe/London', 'en-GB', 'x', 1, 1, '{at}', '{at}')",
+        "INSERT INTO offers (id, key, name, ladder, version, created_at, updated_at) VALUES "
+        f"('{offer}', 'audit', 'Audit', '[]', 1, '{at}', '{at}')",
+        "INSERT INTO sequences (id, key, name, version, created_at, updated_at) VALUES "
+        f"('{sequence}', 'default', 'Default', 1, '{at}', '{at}')",
+        "INSERT INTO campaigns (id, key, name, segment_id, market_id, offer_id, sequence_id, "
+        "status, version, created_at, updated_at) VALUES "
+        f"('{campaign}', 'ops_uk', 'Ops UK', '{segment}', '{market}', '{offer}', "
+        f"'{sequence}', 'draft', 1, '{at}', '{at}')",
+        "INSERT INTO discovery_runs (id, source, campaign_id, segment_id, country_code, location, "
+        "query_hash, status, started_at, finished_at, seen, created, merged, suppressed, "
+        f"no_website, market_blocked) VALUES ('{places_run}', 'places', '{campaign}', "
+        f"'{segment}', 'GB', 'Leeds', '{zeros}', 'finished', '{at}', '{at}', 9, 4, 2, 1, 1, 1)",
+    )
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0038_8_3_discovery_runs", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        runs = reader.execute(
+            "SELECT id, source, location, status, seen, created, merged, suppressed, no_website, "
+            "market_blocked, inactive FROM discovery_runs"
+        ).fetchall()
+        integrity = reader.execute("PRAGMA integrity_check").fetchall()
+        run_columns = [row[1] for row in reader.execute("PRAGMA table_info(discovery_runs)")]
+        run_indexes = [row[1] for row in reader.execute("PRAGMA index_list(discovery_runs)")]
+        lead_columns = [row[1] for row in reader.execute("PRAGMA table_info(leads)")]
+        leads = reader.execute("SELECT id, name, website_lookup_at FROM leads").fetchall()
+        records = reader.execute("SELECT id, source_kind FROM provenance_records").fetchall()
+        provenance_indexes = [
+            row[1] for row in reader.execute("PRAGMA index_list(provenance_records)")
+        ]
+        triggers = {
+            name
+            for (name,) in reader.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = 'provenance_records'"
+            )
+        }
+    finally:
+        reader.close()
+    assert runs == [(places_run, "places", "Leeds", "finished", 9, 4, 2, 1, 1, 1, 0)]
+    assert integrity == [("ok",)]  # the copied row passes the new CHECKs
+    assert run_columns[-1] == "inactive"
+    assert "ix_discovery_runs_started_at" in run_indexes
+    assert lead_columns[-1] == "website_lookup_at"
+    assert leads == [(lead, "Acme Law", None)]
+    assert records == [(record, "website")]
+    assert "ix_provenance_records_contact_id" in provenance_indexes
+    assert triggers == {
+        "trg_provenance_records_erased_update",
+        "trg_provenance_records_erased_insert",
+    }
+
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA foreign_keys = OFF")  # only the CHECKs and triggers are tested
+        good = {
+            "id": "01JD3QZ8X5V9K2M7N4P6R8T0F0",
+            "source": "companies_house",
+            "campaign_id": campaign,
+            "segment_id": segment,
+            "country_code": "GB",
+            "location": None,
+            "query_hash": zeros,
+            "status": "finished",
+            "started_at": at,
+            "finished_at": at,
+            "seen": 0,
+            "created": 0,
+            "merged": 0,
+            "suppressed": 0,
+            "no_website": 0,
+            "market_blocked": 0,
+            "inactive": 0,
+        }
+
+        def insert(**changes: object) -> None:
+            row = {**good, **changes}
+            names = ", ".join(row)
+            marks = ", ".join("?" for _ in row)
+            writer.execute(
+                f"INSERT INTO discovery_runs ({names}) VALUES ({marks})",  # noqa: S608
+                tuple(row.values()),
+            )
+
+        bad = [
+            {"source": "aggregator"},
+            {"location": "Leeds"},  # a Companies House run has no location
+            {"source": "places"},  # a Places run has one
+            {"inactive": -1},
+        ]
+        for number, changes in enumerate(bad):
+            with pytest.raises(sqlite3.IntegrityError):
+                insert(id=f"01JD3QZ8X5V9K2M7N4P6R8T1{number:02d}", **changes)
+        insert()  # a Companies House run without a location is accepted
+        # rewriting the copied Places run re-checks it against the new CHECKs
+        writer.execute("UPDATE discovery_runs SET seen = seen WHERE id = ?", (places_run,))
+
+        def provenance(record_id: str, kind: str) -> None:
+            writer.execute(
+                "INSERT INTO provenance_records (id, contact_id, subject, source_kind, "
+                "source_detail, retrieved_at) VALUES (?, ?, 'contact', ?, 'x', ?)",
+                (record_id, contact, kind, at),
+            )
+
+        provenance("01JD3QZ8X5V9K2M7N4P6R8T0F1", "registry")
+        with pytest.raises(sqlite3.IntegrityError):
+            provenance("01JD3QZ8X5V9K2M7N4P6R8T0F2", "maps")
+        writer.execute(
+            "UPDATE contacts SET erased_at = ?, name = '[erased]' WHERE id = ?", (at, contact)
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="tombstone"):
+            provenance("01JD3QZ8X5V9K2M7N4P6R8T0F3", "registry")
+        with pytest.raises(sqlite3.IntegrityError, match="tombstone"):
+            writer.execute("UPDATE provenance_records SET notes = 'n' WHERE id = ?", (record,))
+        writer.execute("UPDATE leads SET website_lookup_at = ? WHERE id = ?", (at, lead))
         writer.commit()
     finally:
         writer.close()

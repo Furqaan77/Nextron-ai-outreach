@@ -34,6 +34,10 @@ The identity group also holds a Google Places location (Story 8.2, migration
 kept for at most 30 days: the daily ``purge_place_coords`` job nulls all three after that, and
 keeps ``place_id``. No other column holds anything a Places search returned.
 
+``website_lookup_at`` (Story 8.4, migration ``0039_8_4_registry_discovery``, nullable, no
+CHECK, added in place): when Companies House discovery decided a registry Lead's one website
+lookup through Places (attached, or none usable); NULL until then, and after a budget refusal.
+
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
 organization data, PII class ``none``: erasing a Contact never touches the firm's Lead.
@@ -108,3 +112,4 @@ class LeadRecord(Base):
     place_lat: Mapped[float | None] = mapped_column(Float)
     place_lng: Mapped[float | None] = mapped_column(Float)
     place_coords_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    website_lookup_at: Mapped[datetime | None] = mapped_column(UtcDateTime)

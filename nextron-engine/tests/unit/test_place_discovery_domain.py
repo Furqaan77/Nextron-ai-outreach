@@ -158,6 +158,7 @@ def test_the_counts_are_seen_then_each_outcome() -> None:
         "suppressed",
         "no_website",
         "market_blocked",
+        "inactive",  # Story 8.4
     )
     assert {str(outcome) for outcome in Outcome} == set(COUNT_FIELDS[1:])
     assert [str(status) for status in RunStatus] == [

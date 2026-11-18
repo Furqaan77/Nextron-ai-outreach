@@ -122,6 +122,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "place_lat",
             "place_lng",
             "place_coords_at",
+            "website_lookup_at",  # Story 8.4: a registry Lead's website lookup
         ),
         "pipeline": ("pipeline_stage",),
         # the profile group (Stories 2.9, 2.6, 2.10 and 2.12)
@@ -331,6 +332,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "suppressed",
             "no_website",
             "market_blocked",
+            "inactive",  # Story 8.4
         ),
     },
     "domain_checks": {

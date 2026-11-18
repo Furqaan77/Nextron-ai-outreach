@@ -554,6 +554,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "ai_budget_monthly",
         "ai_budget_alert_pct",
         "places_max_pages_per_run",
+        "registry_max_pages_per_run",
         "sink_allowlist",
         "bulk_threads",
         "backup_time",

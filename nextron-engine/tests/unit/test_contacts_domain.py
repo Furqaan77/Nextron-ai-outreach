@@ -34,6 +34,7 @@ def test_the_sources_and_subjects() -> None:
         "pattern",
         "finder",
         "eligibility_basis",
+        "registry",
     ]
     assert [str(subject) for subject in ProvenanceSubject] == ["contact", "address"]
 

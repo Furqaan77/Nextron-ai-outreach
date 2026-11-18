@@ -10,7 +10,8 @@
   themselves (relative imports resolved), are imported only by the
   modules ``PLACES_IMPORTERS`` allows: the ports package, the Places adapter, the search seam
   (``nextron/app/discovery/places.py``), Story 8.3's ingest
-  (``nextron/app/discovery/place_ingest.py``) and ``nextron/main.py``. No module of the AI and prompt
+  (``nextron/app/discovery/place_ingest.py``), Story 8.4's Companies House ingest
+  (``nextron/app/discovery/registry_ingest.py``, its website lookup) and ``nextron/main.py``. No module of the AI and prompt
   packages (``AI_PACKAGES``) imports them, whatever the allowlist says.
 - **A planted run.** ``PlaceSearches.search_page`` runs on a database migrated to head through a
   ``GooglePlaces`` on a mock transport (metered by the real ``UsageMeter``, so ``api_usage`` rows
@@ -65,6 +66,7 @@ PLACES_IMPORTERS: Final = (
     "nextron/adapters/places/",
     "nextron/app/discovery/places.py",
     "nextron/app/discovery/place_ingest.py",  # Story 8.3: the candidates, in memory only
+    "nextron/app/discovery/registry_ingest.py",  # Story 8.4: one website lookup, in memory
     "nextron/main.py",
 )
 AI_PACKAGES: Final = (
