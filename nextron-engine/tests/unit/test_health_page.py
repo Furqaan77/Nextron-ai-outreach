@@ -283,6 +283,7 @@ RESTORE_FORM = {
 }
 RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
+    [["Job type", "Last success"], ["discover_places", "never"]],  # Discovery, Story 8.3
     [
         ["Job type", "Last success"],
         ["enrich_lead", "never"],
@@ -365,6 +366,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Errors needing attention (0)",
         "No errors need attention.",
         "Last successful runs",
+        "Discovery",
         "Enrichment",
         "Re-check",
         "Sending",
@@ -424,6 +426,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Last error: ValueError: broken",
         "Dismiss",
         "Last successful runs",
+        "Discovery",
         "Enrichment",
         "Re-check",
         "Sending",

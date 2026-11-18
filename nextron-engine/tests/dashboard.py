@@ -95,6 +95,8 @@ from nextron import main
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.discovery.place_ingest import PlaceDiscovery
+from nextron.app.discovery.places import PlaceSearches
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -134,11 +136,13 @@ from tests.asgi import DEFAULT_HOST, Headers, Reply, request
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.backup_target import InMemoryBackupTarget
 from tests.fakes.clock import FrozenClock
+from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.dns import FakeDns
 from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
+from tests.fakes.places import ScriptedPlaces
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -319,6 +323,8 @@ class Dashboard:
         [], tuple[Sequence[PromptFile], Sequence[RouteSpec], PlaybookSnapshot | PlaybookProblem]
     ] = shipped_ai_content
     llm: ScriptedLlm = field(default_factory=ScriptedLlm)
+    places: ScriptedPlaces = field(default_factory=ScriptedPlaces)
+    crawler: ScriptedCrawler = field(default_factory=ScriptedCrawler)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -347,6 +353,8 @@ class Dashboard:
     erasures: Erasures = field(init=False)
     email_finding: EmailFinding = field(init=False)
     lead_scores: LeadScores = field(init=False)
+    discovery: Discovery = field(init=False)
+    place_discovery: PlaceDiscovery = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -382,6 +390,7 @@ class Dashboard:
             job_boards=no_crawl_jobs,
             legal_forms=no_crawl_jobs,
             scores=lambda: self.lead_scores,
+            place_discovery=lambda: self.place_discovery,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -437,11 +446,16 @@ class Dashboard:
             self.clock, Scoring(self.clock, Pipeline(self.clock), self.research), self.queue
         )
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
+        self.discovery = Discovery(self.clock, Pipeline(self.clock), self.queue)
         self.lead_imports = LeadImports(
+            self.clock, self.discovery, self.research, self.email_syntax
+        )
+        self.place_discovery = PlaceDiscovery(
             self.clock,
-            Discovery(self.clock, Pipeline(self.clock), self.queue),
-            self.research,
-            self.email_syntax,
+            PlaceSearches(self.clock, meter, self.places),
+            self.crawler,
+            self.discovery,
+            self.queue,
         )
         self.erasures = Erasures(self.clock, Compliance(self.clock), queue=self.queue)
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
@@ -473,6 +487,7 @@ class Dashboard:
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
+            place_discovery=self.place_discovery,
             units=self.units,
             **extra,
         )

@@ -82,6 +82,12 @@ reorders a footer line (``tests/contracts/test_footer_contracts.py``).
 ``lead_score_signal_weight``, ``integer`` in Engine, 0 to 100, default 50 each (whole percents:
 50 means 0.5). That they add up to 100 spans two keys, so ``nextron.app.setup.api.Setup``
 checks it (rule ``weights_sum``, ``nextron.domain.scoring.WEIGHTS_SUM_RULE``), not a ``Rule``.
+**Places discovery** (Story 8.3, FR-5): ``places_discovery_locations`` (``list``, Engine, empty
+by default) holds the locations a Places discovery run may search, one ``<location> | <CC>``
+per line (``LOCATION_RULE``: ``nextron.domain.place_discovery.is_location_item``); a
+Campaign's locations are those whose code is its Market's country code.
+``places_max_pages_per_run`` (``integer``, Budget and limits, 1 to 3, default 3) caps the
+Places pages one run fetches.
 """
 
 import re
@@ -111,6 +117,11 @@ from nextron.domain.errors import DomainError
 from nextron.domain.fetch_policy import is_denied
 from nextron.domain.identity import IdentityError, url_host
 from nextron.domain.job import MAX_BULK_THREADS
+from nextron.domain.place_discovery import (
+    DEFAULT_PAGES_PER_RUN,
+    MAX_PAGES_PER_RUN,
+    is_location_item,
+)
 from nextron.domain.prices import names_price
 from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
 from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
@@ -177,6 +188,7 @@ class Key(StrEnum):
     QUOTA_JOB_AGGREGATOR = "quota_job_aggregator"
     AI_BUDGET_MONTHLY = "ai_budget_monthly"
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
+    PLACES_MAX_PAGES_PER_RUN = "places_max_pages_per_run"  # Story 8.3
     # The footer (Story 4.11, FR-23), in footer order.
     SENDER_SIGNATURE = "sender_signature"
     LEGAL_NAME = "legal_name"
@@ -186,6 +198,7 @@ class Key(StrEnum):
     US_SOLICITATION_LABEL = "us_solicitation_label"
     CRAWL_MAX_PAGES = "crawl_max_pages"
     ATS_HOSTS = "ats_hosts"
+    PLACES_DISCOVERY_LOCATIONS = "places_discovery_locations"
     UNSUB_ACTIVE_KID = "unsub_active_kid"
     TOTAL_DAILY_CEILING = "total_daily_ceiling"
     # The Lead Score's weights (Story 2.15), whole percents summing to 100.
@@ -913,6 +926,13 @@ ATS_HOST_RULE: Final = Rule(
     lambda value: all(is_ats_host(item) for item in value),
 )
 
+LOCATION_RULE: Final = Rule(
+    "location",
+    "each line must be a location of 1 to 100 characters, a |, then its country's two-letter "
+    "code in capitals, such as Columbus, OH | US",
+    lambda value: all(is_location_item(item) for item in value),
+)
+
 # The website crawl (Story 2.5, FR-10, NFR-6): at most 15 pages per Lead, homepage included.
 MAX_CRAWL_PAGES: Final = 15
 DEFAULT_ATS_HOSTS: Final = (
@@ -1172,6 +1192,19 @@ SCHEMA: Mapping[str, Setting] = _declare(
         default=80,
         rules=(minimum(1, "1"), maximum(MAX_PERCENT, "100")),
     ),
+    # Places discovery (Story 8.3): read when each run starts.
+    Setting(
+        key=Key.PLACES_MAX_PAGES_PER_RUN,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Places pages per discovery run",
+        unit=(
+            f"1 to {MAX_PAGES_PER_RUN}. The most Google Places result pages one Places discovery "
+            "run fetches, across all its search queries; each page is one request."
+        ),
+        default=DEFAULT_PAGES_PER_RUN,
+        rules=(minimum(1, "1"), maximum(MAX_PAGES_PER_RUN, str(MAX_PAGES_PER_RUN))),
+    ),
     # The footer (Story 4.11, FR-23, CAN-SPAM, PECR, UK GDPR Art. 14), in footer order:
     # nextron.domain.render fills each Market's footer template with these values. The four
     # lines every footer holds are required, so doctor's required_settings check lists them
@@ -1275,6 +1308,20 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=DEFAULT_ATS_HOSTS,
         rules=(ATS_HOST_RULE,),
+    ),
+    # Places discovery (Story 8.3, FR-5): where a "Run Places discovery" may search, read when
+    # the Discovery page is shown and again when each run starts.
+    Setting(
+        key=Key.PLACES_DISCOVERY_LOCATIONS,
+        type=SettingType.LIST,
+        section=Section.ENGINE,
+        label="Places discovery locations",
+        unit=(
+            "One location per line, as <location> | <country code>, such as Columbus, OH | US. "
+            "A Campaign can search the locations in its Market's country."
+        ),
+        default=(),
+        rules=(LOCATION_RULE,),
     ),
     # Which unsubscribe token key id new tokens are encoded under (Story 3.8, AD-15), read at
     # each issue. The kid's keys live in Windows Credential Manager (Credentials page,

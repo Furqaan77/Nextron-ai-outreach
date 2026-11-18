@@ -8,6 +8,7 @@ it. ``tests/contracts/test_persistence_contracts.py`` fails on a module left out
 from nextron.db.models import (
     compliance,
     crawl,
+    discovery,
     drafting,
     events,
     jobqueue,
@@ -39,6 +40,7 @@ from nextron.db.models.crawl import (
     JobPostingRecord,
     PageContactMethodRecord,
 )
+from nextron.db.models.discovery import DiscoveryRunRecord
 from nextron.db.models.drafting import DraftRecord, FooterSnapshotRecord
 from nextron.db.models.events import EventRecord
 from nextron.db.models.jobqueue import JobRecord
@@ -99,6 +101,7 @@ __all__ = [
     "CrawlRunRecord",
     "CrawledPageRecord",
     "DataSubjectRequestRecord",
+    "DiscoveryRunRecord",
     "DomainCheckRecord",
     "DraftRecord",
     "EnrollmentRecord",

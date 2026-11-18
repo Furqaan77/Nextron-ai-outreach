@@ -81,7 +81,10 @@ from nextron import main
 from nextron.app.compliance import api as compliance_api
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
 from nextron.app.drafting.api import Drafting
+from nextron.app.discovery.place_ingest import PlaceDiscovery
+from nextron.app.discovery.places import PlaceSearches
 from nextron.app.jobqueue.api import JobQueue
+from nextron.app.ops.api import Seeds
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.finding import EmailFinding
@@ -91,11 +94,13 @@ from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
+from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.address_class import ASSIGNMENT
 from nextron.domain.ai import Urgency
+from nextron.domain.company_facts import validate_company_facts
 from nextron.domain.contactability import (
     Allowed,
     Blocked,
@@ -111,9 +116,11 @@ from nextron.domain.campaign import validate_campaigns
 from nextron.domain.enrollment import EnrollmentOrigin, NewEnrollment
 from nextron.domain.markets import validate_markets
 from nextron.domain.offers import validate_offers
+from nextron.domain.place_discovery import DiscoveryLocation, RunStatus
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
 from nextron.ports.llm import LlmOk, LlmUsage
+from nextron.ports.places import PlaceCandidate
 from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
 from tests.app.test_signal_extraction import HOME_HTML as RESEARCH_HOME_HTML
 from tests.app.test_signal_extraction import build_world as research_world
@@ -122,7 +129,9 @@ from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import html_page, robots_txt
 from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
+from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.llm import ScriptedLlm
+from tests.fakes.places import ScriptedPlaces
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 GUARDED_TABLES: Final = frozenset(
@@ -147,6 +156,7 @@ REPOS: Final = "db/repos/"
 MIGRATIONS: Final = "db/alembic/versions/"
 ANY: Final = r"(?:\w+\.)*"  # any enclosing classes and defs
 BULK_INSERTS: Final = ("bulk_insert_mappings", "bulk_save_objects")
+ALLOW_ALL: Final = "User-agent: *\nDisallow:\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +178,13 @@ MANIFEST: Final = (
         inserts=frozenset({"leads"}),
     ),
     Caller("discovery.csv_import", ("app/discovery/",), r"LeadImports\.run"),
+    # Story 8.3: each Places candidate through upsert_lead(places)
+    Caller(
+        "discovery.places_ingest",
+        ("app/discovery/",),
+        r"PlaceDiscovery\.ingest_candidate",
+        calls="upsert_lead",
+    ),
     *(
         Caller(
             f"research.add_contact[{source}]",
@@ -1319,6 +1336,74 @@ def _email_search_blocked(world: World) -> None:
             "SELECT COUNT(*) FROM contacts WHERE email LIKE 'jane.doe@%'"
         ).scalar_one()
     assert addresses == 1  # the allowed case's only
+def _seed_campaigns(world: World) -> str:
+    """Every shipped seed file stored (once per world); the first Campaign's id."""
+
+    def read(name: str) -> object:
+        return seed_yaml.parse((main.SEED_DIR / name).read_text(encoding="utf-8"))
+
+    with world.engine.connect() as connection:
+        found = connection.exec_driver_sql("SELECT id FROM campaigns ORDER BY key").first()
+    if found is None:
+        with world.units.open():
+            Seeds(FrozenClock(T0)).sync_seed(
+                validate_segments(read(main.SEGMENTS_FILE_NAME)),
+                validate_markets(read(main.MARKETS_FILE_NAME)),
+                validate_sequences(read(main.SEQUENCES_FILE_NAME)),
+                validate_company_facts(read(main.COMPANY_FACTS_FILE_NAME)),
+                validate_offers(read(main.OFFERS_FILE_NAME)),
+                validate_campaigns(read(main.CAMPAIGNS_FILE_NAME)),
+            )
+        with world.engine.connect() as connection:
+            found = connection.exec_driver_sql("SELECT id FROM campaigns ORDER BY key").first()
+    assert found is not None
+    return str(found[0])
+
+
+def _places(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.3's Places ingest (``PlaceDiscovery.ingest_candidate``) of one candidate whose
+    own website is ``firm-<tag>.com``, inside a stored run: one gate call, through
+    ``upsert_lead(places)``."""
+    campaign = _seed_campaigns(world)
+    location = DiscoveryLocation("Columbus, OH", "US")
+    run_id = world.transact(
+        lambda: runs_repo.insert(
+            source="places",
+            campaign_id=campaign,
+            segment_id=world.segment,
+            country_code="US",
+            location=location.location,
+            query_hash="0" * 16,
+            status=RunStatus.RUNNING,
+            started_at=T0,
+            finished_at=None,
+        )
+    )
+    domain = f"firm-{tag}.com"
+    origin = f"https://www.{domain}"
+    crawler = ScriptedCrawler(
+        robots={f"{origin}/robots.txt": robots_txt(f"{origin}/robots.txt", ALLOW_ALL)},
+        pages={f"{origin}/": html_page(f"{origin}/", f"<title>Firm {tag}</title>")},
+    )
+    clock = FrozenClock(T0)
+    ingest = PlaceDiscovery(
+        clock,
+        PlaceSearches(clock, InMemoryUsageMeter(clock), ScriptedPlaces()),
+        crawler,
+        world.discovery,
+        queue_on(clock),
+    )
+    candidate = PlaceCandidate(f"ChIJ-{tag}", f"{origin}/?utm=maps", "Maps Name", 39.96, -82.99)
+
+    @use_case
+    def ingest_one() -> object:  # as the discover_places run calls it: inside a use case
+        return ingest.ingest_candidate(run_id, candidate, world.segment, location)
+
+    def action() -> object:
+        with world.units.open():
+            return ingest_one()
+
+    return action, lambda: (_gate(NewLeadSubject(domain)),)
 
 
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
@@ -1338,6 +1423,11 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
         ),
         # Story 4.9: Blocked answers before any write, so nothing at all is added
         "drafting.request_*": Scenario((_request_steps,), after_blocked=_requested),
+        "discovery.places_ingest": Scenario(
+            (_places,),
+            # blocked, the run still counts the candidate as suppressed
+            blocked_writes=frozenset({("UPDATE", "discovery_runs")}),
+        ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1433,6 +1523,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
     assert {name for name, defs in found.items() if defs} == {
         "discovery.upsert_lead",
         "discovery.csv_import",
+        "discovery.places_ingest",
         *(f"research.add_contact[{source}]" for source in CONTACT_SOURCES),
         "research.people_extraction",
         "sequencing.enroll",  # Story 4.8

@@ -518,6 +518,7 @@ def test_the_declared_keys_in_order() -> None:
         "quota_job_aggregator",
         "ai_budget_monthly",
         "ai_budget_alert_pct",
+        "places_max_pages_per_run",
         "sender_signature",
         "legal_name",
         "postal_address",
@@ -526,6 +527,7 @@ def test_the_declared_keys_in_order() -> None:
         "us_solicitation_label",
         "crawl_max_pages",
         "ats_hosts",
+        "places_discovery_locations",
         "unsub_active_kid",
         "total_daily_ceiling",
         "lead_score_fit_weight",
@@ -548,6 +550,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.QUOTA_JOB_AGGREGATOR),
         setting(Key.AI_BUDGET_MONTHLY),
         setting(Key.AI_BUDGET_ALERT_PCT),
+        setting(Key.PLACES_MAX_PAGES_PER_RUN),
         setting(Key.SENDER_SIGNATURE),
         setting(Key.LEGAL_NAME),
         setting(Key.POSTAL_ADDRESS),
@@ -556,6 +559,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.US_SOLICITATION_LABEL),
         setting(Key.CRAWL_MAX_PAGES),
         setting(Key.ATS_HOSTS),
+        setting(Key.PLACES_DISCOVERY_LOCATIONS),
         setting(Key.UNSUB_ACTIVE_KID),
         setting(Key.TOTAL_DAILY_CEILING),
         setting(Key.LEAD_SCORE_FIT_WEIGHT),
@@ -1293,11 +1297,11 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
             "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
-            "optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
-            "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
-            "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "
-            "sink_allowlist, total_daily_ceiling, unsub_active_kid, unsub_worker_host, "
-            "us_solicitation_label"
+            "optout_line, places_discovery_locations, places_max_pages_per_run, postal_address, "
+            "privacy_notice_url, quota_hunter_credits, quota_job_aggregator, "
+            "quota_places_enterprise, quota_places_pro, quota_prospeo_credits, sender_name, "
+            "sender_signature, sender_timezone, sink_allowlist, total_daily_ceiling, "
+            "unsub_active_kid, unsub_worker_host, us_solicitation_label"
         ),
         "declared but not in Key: extra_one",
     ]
@@ -1360,3 +1364,36 @@ def test_total_daily_ceiling_refuses_anything_outside_0_to_100(text: str, rule: 
     with pytest.raises(InvalidSettingValue) as raised:
         parse(setting(Key.TOTAL_DAILY_CEILING), text)
     assert raised.value.rule == rule
+# Places discovery (Story 8.3) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("item", ["Columbus, OH", "Columbus | us", "Columbus | XX"])
+def test_a_places_location_that_is_not_location_bar_code_is_refused(item: str) -> None:
+    found = settings_schema.setting(Key.PLACES_DISCOVERY_LOCATIONS)
+
+    with pytest.raises(InvalidSettingValue) as raised:
+        settings_schema.parse(found, f"Leeds | GB\n{item}")
+
+    assert raised.value.rule == "location"
+
+
+def test_a_places_location_list_is_accepted() -> None:
+    found = settings_schema.setting(Key.PLACES_DISCOVERY_LOCATIONS)
+
+    assert settings_schema.parse(found, "Columbus, OH | US\nLeeds | GB") == (
+        "Columbus, OH | US",
+        "Leeds | GB",
+    )
+    assert found.default == ()
+
+
+@pytest.mark.parametrize(("text", "rule"), [("0", "minimum"), ("4", "maximum")])
+def test_the_places_page_cap_is_1_to_3(text: str, rule: str) -> None:
+    found = settings_schema.setting(Key.PLACES_MAX_PAGES_PER_RUN)
+
+    with pytest.raises(InvalidSettingValue) as raised:
+        settings_schema.parse(found, text)
+
+    assert raised.value.rule == rule
+    assert [settings_schema.parse(found, value) for value in ("1", "3")] == [1, 3]
+    assert found.default == 3

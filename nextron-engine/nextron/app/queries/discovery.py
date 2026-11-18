@@ -33,6 +33,9 @@ current unit of work, read-only ones included.
   group's, read-only; ``None`` until scored), and ``sort=SORT_TIER`` (``"tier"``) orders by
   Tier, A to C, unscored last, then Lead Score descending, then newest; ``sort`` ``None`` is
   newest first, and any other value raises ``ValueError``.
+- ``recent_runs(limit=20)`` (Story 8.3): the newest ``limit`` discovery runs, as ``StoredRun``
+  rows, newest first (by ``started_at``, then ``id``). A ``limit`` that isn't an ``int`` from 1
+  to ``MAX_RECENT_RUNS`` (200) raises ``ValueError``.
 """
 
 from dataclasses import dataclass
@@ -40,27 +43,33 @@ from math import ceil
 from typing import Final
 
 from nextron.db.repos.discovery import leads as leads_repo
+from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.repos.discovery.leads import ListedLead, StoredLead
+from nextron.db.repos.discovery.runs import StoredRun
 from nextron.domain.ids import is_ulid
 from nextron.domain.pipeline_stage import PipelineStage
 
 __all__ = [
     "LEADS_PER_PAGE",
     "MAX_MERGE_HOPS",
+    "MAX_RECENT_RUNS",
     "SORT_TIER",
     "LeadListPage",
     "ListedLead",
     "StoredLead",
+    "StoredRun",
     "lead",
     "lead_by_web_domain",
     "lead_list",
     "merged_lead_ids",
+    "recent_runs",
     "survivor_of",
 ]
 
 LEADS_PER_PAGE: Final = 50
 MAX_MERGE_HOPS: Final = 32
 SORT_TIER: Final = leads_repo.TIER_SORT
+MAX_RECENT_RUNS: Final = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,3 +151,10 @@ def merged_lead_ids(lead_id: str) -> tuple[str, ...]:
     if not is_ulid(lead_id):
         return ()
     return leads_repo.merged_from(lead_id)
+
+
+def recent_runs(limit: int = 20) -> tuple[StoredRun, ...]:
+    """The newest ``limit`` discovery runs, newest first."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RECENT_RUNS:
+        raise ValueError(f"limit must be an int from 1 to {MAX_RECENT_RUNS}")
+    return runs_repo.recent(limit)

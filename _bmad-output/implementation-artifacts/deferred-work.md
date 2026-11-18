@@ -401,3 +401,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-3-12-monitor-unsubscribe-polling-and-re-poll-the-worker-after-a-restore.md`
   summary: Decide (Mac) what a restore of a backup older than the Worker's 30-day KV window should do. `repoll_unsubscribes` is marked done after one successful poll, but opt-outs recorded between the backup and 30 days ago are gone from KV, so they are lost silently. Options: a health issue or alert when `RecoveryContext.backup_at` is older than 30 days, or hold the step for a manual review.
   evidence: Story 3.12 review pass 1 (BH2, medium). `UnsubscribePolls.repolled` compares only `last_success_at` with `restored_at`.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-3-turn-places-candidates-into-deduplicated-contactable-leads.md`
+  summary: A `discover_places` job the quota keeps refusing re-runs every hour and writes a new zero-count `deferred` `discovery_runs` row each time, until the monthly quota resets, which can push real runs off the Discovery page's 20 recent rows.
+  evidence: Story 8.3 review pass 1 (blind #1). The runner's `DEFER_DELAY` is 1 h and `_start` inserts a run row before the first page's budget check. Story 8.1 (deferred handling, "Discovery stopped: quota reached" health issue) should hold such jobs or reuse the last deferred row.

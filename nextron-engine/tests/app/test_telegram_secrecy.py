@@ -206,6 +206,8 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             us_solicitation_label="",
             crawl_max_pages="",
             ats_hosts="",
+            places_discovery_locations="",
+            places_max_pages_per_run="",
             unsub_active_kid="",
             total_daily_ceiling="",
             lead_score_fit_weight="",

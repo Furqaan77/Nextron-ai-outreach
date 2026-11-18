@@ -370,6 +370,26 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "ramp_step": PiiClass.NONE,
         "ramp_target": PiiClass.NONE,
     },
+    # Story 8.3. A discovery run: the Operator's Campaign and location setting, ids, a hash of the
+    # Segment's queries, a status, times and counts. Nothing a Places search returned.
+    "discovery_runs": {
+        "id": PiiClass.NONE,
+        "source": PiiClass.NONE,
+        "campaign_id": PiiClass.NONE,
+        "segment_id": PiiClass.NONE,
+        "country_code": PiiClass.NONE,
+        "location": PiiClass.NONE,
+        "query_hash": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "finished_at": PiiClass.NONE,
+        "seen": PiiClass.NONE,
+        "created": PiiClass.NONE,
+        "merged": PiiClass.NONE,
+        "suppressed": PiiClass.NONE,
+        "no_website": PiiClass.NONE,
+        "market_blocked": PiiClass.NONE,
+    },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.
     "domain_checks": {

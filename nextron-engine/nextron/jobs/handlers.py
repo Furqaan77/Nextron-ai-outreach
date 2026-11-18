@@ -91,6 +91,11 @@ handler runs in.
   ``None``. The payload is a trigger's tick, ``{"v": 1}``. It is never budget-gated. A
   retryable ``AdapterError`` (the Worker unavailable) is retried by the runner; any other error
   fails the job, and nothing is applied either way.
+- ``discover_places(place_discovery)`` (Story 8.3): calls
+  ``place_discovery().run(campaign_id, location, country_code)`` once (the discovery service's
+  ``PlaceDiscovery``; ``location`` is the location's 16-hex hash and ``country_code`` two
+  lowercase letters, else ``InvalidJob``) and returns ``DEFERRED`` when it returns ``False``
+  (the budget refused a Places page).
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -107,6 +112,12 @@ from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, ST
 from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
+from nextron.domain.place_discovery import (
+    CAMPAIGN_ID_FIELD,
+    COUNTRY_CODE_FIELD,
+    HASH_LENGTH,
+    LOCATION_FIELD,
+)
 from nextron.domain.restore_test import RestoreTestKind
 
 ALERT_ID_FIELD: Final = "alert_id"
@@ -510,3 +521,39 @@ def poll_unsubscribes(polls: Callable[[], PollingUnsubscribes]) -> Handler:
         polls().poll()
 
     return handle_poll_unsubscribes
+class DiscoveringPlaces(Protocol):
+    """What ``discover_places`` needs of the ``discovery`` service's ``PlaceDiscovery``."""
+
+    def run(self, campaign_id: str, location_hash: str, country_code: str) -> bool: ...
+
+
+_LOWER_HEX: Final = frozenset("0123456789abcdef")
+
+
+def discover_places(place_discovery: Callable[[], DiscoveringPlaces]) -> Handler:
+    """The ``discover_places`` job's handler: run the payload's Campaign's Places discovery in
+    its location through ``place_discovery()``."""
+
+    def handle_discover_places(job: Job) -> HandlerResult | None:
+        campaign_id = _ulid_field(job, CAMPAIGN_ID_FIELD)
+        location = job.payload.get(LOCATION_FIELD)
+        if not (
+            isinstance(location, str)
+            and len(location) == HASH_LENGTH
+            and set(location) <= _LOWER_HEX
+        ):
+            raise InvalidJob(f"{job.type}: the {LOCATION_FIELD} field must be a location hash")
+        code = job.payload.get(COUNTRY_CODE_FIELD)
+        if not (
+            isinstance(code, str)
+            and len(code) == 2
+            and code.isascii()
+            and code.isalpha()
+            and code.islower()
+        ):
+            raise InvalidJob(f"{job.type}: the {COUNTRY_CODE_FIELD} field must be a country code")
+        if not place_discovery().run(campaign_id, location, code):
+            return DEFERRED
+        return None
+
+    return handle_discover_places

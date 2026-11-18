@@ -193,7 +193,7 @@ the registry cycle.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
 contact_markets, crawls, discovery, research, extractions, primary, test_runs,
-domain_checks=..., unsubscribes=...)`` is the job type registry: the only
+domain_checks=..., unsubscribes=..., place_discovery=...)`` is the job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -237,7 +237,10 @@ default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score
 ``handlers.recompute_tiers(scores)``, ``enrichment``) after them, and Story 3.11's
 ``poll_unsubscribes`` (the realtime lane only, priority 80, ``max_runtime`` 5 minutes, retry
 limit 3, ``handlers.poll_unsubscribes(unsubscribes)``, ``unsubscribe_poll``; never budget-gated)
-is registered last. ``domain_checks`` and ``unsubscribes`` are optional services: each defaults
+is registered after them, and Story 8.3's ``discover_places`` (bulk only, priority 30,
+``max_runtime`` 1 hour, retry limit 2, ``handlers.discover_places(place_discovery)``,
+``discovery``) last. ``domain_checks``, ``unsubscribes`` and ``place_discovery`` are optional
+services: each defaults
 to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
@@ -307,8 +310,14 @@ when the app is built: ``GooglePlaces(secrets, meter=meter)`` (``nextron.adapter
 read and discarded), else ``OfflinePlaces()``, which makes no request, and also when the keyring
 can't be read. ``build_app(..., places=None)`` uses it unless a ``places=`` is injected, builds
 ``PlaceSearches(clock, meter, places)`` (``nextron.app.discovery.places``) and keeps it on
-``app.state.place_searches`` for Story 8.3's discovery runs. The daily ``purge_place_coords``
-job nulls Places coordinates older than 30 days.
+``app.state.place_searches``. The daily ``purge_place_coords`` job nulls Places coordinates
+older than 30 days.
+
+**Places discovery (Story 8.3).** ``PlaceDiscovery(clock, place_searches, site_crawler,
+discovery, queue)`` (``nextron.app.discovery.place_ingest``) runs the ``discover_places`` jobs
+(reached through ``place_discovery=lambda: place_discovery``) on the crawl's own crawler, and
+the Discovery page's "Run Places discovery" (``create_app(..., place_discovery=...)``); it is
+also kept on ``app.state.place_discovery``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -783,6 +792,7 @@ from nextron.app.compliance.ledger import ErasureLedger, LedgerAppender, LedgerF
 from nextron.app.compliance.unsub_poll import UnsubscribePolls
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.legal_form import LegalFormChecks
+from nextron.app.discovery.place_ingest import PlaceDiscovery
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
@@ -902,6 +912,7 @@ from nextron.domain.notifications import (
 )
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
+from nextron.domain.place_discovery import DISCOVER_PLACES_JOB
 from nextron.domain.places import PURGE_PLACE_COORDS_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
 from nextron.domain.scoring import RECOMPUTE_TIERS_JOB, SCORE_LEAD_JOB
@@ -1204,7 +1215,8 @@ def build_app(
     meter=meter)`` unless injected), which builds its HTTP client on its first fetch, and applies
     it through a ``Compliance`` with the ``TokenCodec``. Google Places is
     searched through ``places`` (``build_places(config.env, secrets, meter)`` unless injected),
-    kept with its ``PlaceSearches`` on ``app.state.place_searches``."""
+    kept with its ``PlaceSearches`` on ``app.state.place_searches``; ``PlaceDiscovery`` runs the
+    Places discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1220,7 +1232,8 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding, lead_scores and unsubscribes are bound just below
+    # erasure_stores, email_finding, lead_scores, unsubscribes and place_discovery are bound just
+    # below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1240,6 +1253,7 @@ def build_app(
         finding=lambda: email_finding,
         scores=lambda: lead_scores,
         unsubscribes=lambda: unsubscribes,
+        place_discovery=lambda: place_discovery,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1294,6 +1308,7 @@ def build_app(
     place_searches = PlaceSearches(
         clock, meter, places if places is not None else build_places(config.env, secrets, meter)
     )
+    place_discovery = PlaceDiscovery(clock, place_searches, site_crawler, discovery, queue)
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1402,6 +1417,7 @@ def build_app(
         domain_checks=domain_checks,
         email_finding=email_finding,
         lead_scores=lead_scores,
+        place_discovery=place_discovery,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1411,7 +1427,8 @@ def build_app(
             startup=functools.partial(run_startup_steps, startup_steps),
         ),
     )
-    app.state.place_searches = place_searches  # Story 8.2: Story 8.3's discovery runs use it
+    app.state.place_searches = place_searches  # Story 8.2
+    app.state.place_discovery = place_discovery  # Story 8.3
     return app
 
 
@@ -1499,6 +1516,7 @@ def build_job_types(
     erasure_stores: Callable[[], handlers.StoreErasing] | None = None,
     finding: Callable[[], handlers.FindingEmail] | None = None,
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
+    place_discovery: Callable[[], handlers.DiscoveringPlaces] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1525,10 +1543,12 @@ def build_job_types(
     runs), and ``scores`` the ``scoring`` service's ``LeadScores`` that ``score_lead`` and
     ``recompute_tiers`` jobs call, and ``unsubscribes`` the ``compliance`` service's
     ``UnsubscribePolls`` that ``poll_unsubscribes`` jobs call (``None``: a provider that raises
-    ``RuntimeError``, as for ``domain_checks``)."""
+    ``RuntimeError``, as for ``domain_checks``), and ``place_discovery`` the ``discovery``
+    service's ``PlaceDiscovery`` that ``discover_places`` jobs call (``None``: the same)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
+    discovering = place_discovery if place_discovery is not None else no_place_discovery
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1808,8 +1828,27 @@ def build_job_types(
             group=JobGroup.UNSUBSCRIBE_POLL,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=DISCOVER_PLACES_JOB,
+            default_lane=Lane.BULK,  # AD-10: supply work runs on the bulk lane
+            lanes=frozenset({Lane.BULK}),
+            priority=30,
+            # up to 3 Places pages of 20 candidates, each a paced robots.txt and homepage fetch
+            max_runtime=timedelta(hours=1),
+            retry_limit=2,
+            handler=handlers.discover_places(discovering),
+            group=JobGroup.DISCOVERY,
+        )
+    )
     job_types.freeze()
     return job_types
+
+
+def no_place_discovery() -> handlers.DiscoveringPlaces:
+    """``build_job_types``'s default ``place_discovery``: a registry built without the service
+    fails a ``discover_places`` job instead of discovering nothing."""
+    raise RuntimeError("this job type registry was built without place_discovery")
 
 
 def no_domain_checks() -> handlers.DomainChecking:

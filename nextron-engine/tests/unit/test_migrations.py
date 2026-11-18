@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0046_3_12_unsub_poll_state"
+HEAD = "0047_8_3_discovery_runs"
 
 
 @pytest.fixture
@@ -1167,3 +1167,104 @@ def test_0045_keeps_every_draft_and_its_partial_index(tmp_path: Path) -> None:
     )
     with pytest.raises(sqlite3.IntegrityError, match=r"ck_drafts_step_slot$"):
         run_sql(path, "UPDATE drafts SET step_no = NULL WHERE id = '01JD3QZ8X5V9K2M7N4P6R8T0D6'")
+def test_0047_creates_an_empty_discovery_runs_table_with_its_checks(tmp_path: Path) -> None:
+    """0047 (Story 8.3) adds ``discovery_runs`` to a database at 0046 and touches no Lead; its
+    CHECKs refuse an unknown source or status, a running row with a finish time, and a
+    negative count."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0046_3_12_unsub_poll_state":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0046_3_12_unsub_poll_state",
+        )
+    at = "2026-11-18T09:00:00.000000Z"
+    segment = "01JD3QZ8X5V9K2M7N4P6R8T0D0"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0046_3_12_unsub_poll_state", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(discovery_runs)")]
+        count = reader.execute("SELECT COUNT(*) FROM discovery_runs").fetchone()[0]
+        indexes = [row[1] for row in reader.execute("PRAGMA index_list(discovery_runs)")]
+    finally:
+        reader.close()
+    assert columns == [
+        "id",
+        "source",
+        "campaign_id",
+        "segment_id",
+        "country_code",
+        "location",
+        "query_hash",
+        "status",
+        "started_at",
+        "finished_at",
+        "seen",
+        "created",
+        "merged",
+        "suppressed",
+        "no_website",
+        "market_blocked",
+    ]
+    assert count == 0
+    assert "ix_discovery_runs_started_at" in indexes
+    campaign = "01JD3QZ8X5V9K2M7N4P6R8T0D9"
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA foreign_keys = OFF")  # only the CHECKs are under test here
+        good = {
+            "id": "01JD3QZ8X5V9K2M7N4P6R8T0E0",
+            "source": "places",
+            "campaign_id": campaign,
+            "segment_id": segment,
+            "country_code": "US",
+            "location": "Columbus, OH",
+            "query_hash": "0" * 16,
+            "status": "finished",
+            "started_at": at,
+            "finished_at": at,
+            "seen": 0,
+            "created": 0,
+            "merged": 0,
+            "suppressed": 0,
+            "no_website": 0,
+            "market_blocked": 0,
+        }
+
+        def insert(**changes: object) -> None:
+            row = {**good, **changes}
+            names = ", ".join(row)
+            marks = ", ".join("?" for _ in row)
+            writer.execute(
+                f"INSERT INTO discovery_runs ({names}) VALUES ({marks})",  # noqa: S608
+                tuple(row.values()),
+            )
+
+        bad = [
+            {"source": "companies_house"},
+            {"status": "done"},
+            {"status": "running"},  # running with a finish time
+            {"finished_at": None},  # finished without one
+            {"country_code": "us"},
+            {"seen": -1},
+            {"market_blocked": -1},
+        ]
+        for number, changes in enumerate(bad):
+            with pytest.raises(sqlite3.IntegrityError):
+                insert(id=f"01JD3QZ8X5V9K2M7N4P6R8T1{number:02d}", **changes)
+        insert()  # the good row is accepted
+        insert(id="01JD3QZ8X5V9K2M7N4P6R8T0E1", status="running", finished_at=None)
+        writer.commit()
+    finally:
+        writer.close()

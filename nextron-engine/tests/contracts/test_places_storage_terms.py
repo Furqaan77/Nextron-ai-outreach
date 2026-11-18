@@ -9,13 +9,21 @@
   transient ``PlaceCandidate``), and the names ``PlaceCandidate`` and ``PlaceSearchPage``
   themselves (relative imports resolved), are imported only by the
   modules ``PLACES_IMPORTERS`` allows: the ports package, the Places adapter, the search seam
-  (``nextron/app/discovery/places.py``) and ``nextron/main.py``. No module of the AI and prompt
+  (``nextron/app/discovery/places.py``), Story 8.3's ingest
+  (``nextron/app/discovery/place_ingest.py``) and ``nextron/main.py``. No module of the AI and prompt
   packages (``AI_PACKAGES``) imports them, whatever the allowlist says.
 - **A planted run.** ``PlaceSearches.search_page`` runs on a database migrated to head through a
   ``GooglePlaces`` on a mock transport (metered by the real ``UsageMeter``, so ``api_usage`` rows
   are written) and through ``ScriptedPlaces``, both answering a candidate whose display name and
   website are planted strings. Afterwards no text cell of any table (``events`` and
   ``jobs.payload`` included) and no log record holds either string.
+- **A planted discovery run** (Story 8.3). A ``discover_places`` job, requested through
+  ``PlaceDiscovery.request_run`` and run through the registry's handler, ingests three
+  candidates, each with a planted display name, a planted website path and query, and planted
+  coordinates: one created, one merged (its place ID already held) and one blocked (its domain
+  suppressed). Afterwards no text cell of any table (``jobs.payload``, ``events`` and
+  ``discovery_runs`` included) and no log record holds a planted string or coordinate, and the
+  only coordinates stored are the created Lead's numeric ``place_lat``/``place_lng``.
 
 The AST check's proofs run it on a temporary copy of the tree with a probe module.
 """
@@ -56,6 +64,7 @@ PLACES_IMPORTERS: Final = (
     "nextron/ports/",
     "nextron/adapters/places/",
     "nextron/app/discovery/places.py",
+    "nextron/app/discovery/place_ingest.py",  # Story 8.3: the candidates, in memory only
     "nextron/main.py",
 )
 AI_PACKAGES: Final = (
@@ -315,3 +324,87 @@ def test_a_search_stores_and_logs_no_places_content(
         shown = record.getMessage() + repr(vars(record))
         assert not any(planted in shown for planted in PLANTED), record.getMessage()
 
+
+PLANTED_PATH: Final = "qz7plantedpath"
+PLANTED_QUERY: Final = "kx4plantedquery"
+PLANTED_LAT: Final = 39.961234567
+PLANTED_LNG: Final = -82.998765432
+PLANTED_RUN: Final = (
+    PLANTED_NAME,
+    "Qz7Planted",
+    PLANTED_PATH,
+    PLANTED_QUERY,
+    "39.961234",
+    "82.998765",
+)
+
+
+def test_a_discovery_run_stores_and_logs_no_places_content(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    from nextron.app.compliance.api import Compliance  # noqa: PLC0415
+    from nextron.domain.contactability import DomainSubject, SuppressionScope  # noqa: PLC0415
+    from nextron.domain.job import Job, Lane, decode_payload  # noqa: PLC0415
+    from nextron.domain.suppression_entry import SuppressionSource  # noqa: PLC0415
+    from tests.app.test_place_discovery import LAW, build_world  # noqa: PLC0415
+
+    caplog.set_level(logging.DEBUG)
+    world = build_world(db_engine)
+    world.lead(place_id="ChIJ-held", web_domain="held-firm.com")
+    world.transact(
+        lambda: Compliance(world.clock).suppress(
+            DomainSubject("blocked-firm.com"),
+            SuppressionScope.FIRM,
+            SuppressionSource.OPERATOR,
+            None,
+        )
+    )
+    for domain in ("acme-law.com", "blocked-firm.com"):
+        world.site(domain, f"<title>{domain.split('.')[0]}</title>")
+
+    def planted(place_id: str, domain: str) -> PlaceCandidate:
+        website = f"https://www.{domain}/{PLANTED_PATH}?ref={PLANTED_QUERY}"
+        return PlaceCandidate(place_id, website, PLANTED_NAME, PLANTED_LAT, PLANTED_LNG)
+
+    world.search(
+        PlaceSearchPage(
+            (
+                planted("ChIJ-new", "acme-law.com"),
+                planted("ChIJ-held", "held-firm.com"),
+                planted("ChIJ-blocked", "blocked-firm.com"),
+            ),
+            None,
+        ),
+        query=LAW,
+    )
+    world.request()
+    [(_, payload, _, _)] = world.jobs("discover_places")
+    job = Job("01JD0000000000000000000099", "discover_places", Lane.BULK, decode_payload(payload), 1)
+
+    with world.units.open():
+        assert world.handler()(job) is None
+
+    assert world.counts() == {
+        "seen": 3,
+        "created": 1,
+        "merged": 1,
+        "suppressed": 1,
+        "no_website": 0,
+        "market_blocked": 0,
+    }
+    database = db_engine.url.database
+    assert database is not None
+    cells = list(text_cells(Path(database)))
+    assert {table for table, _, _ in cells} >= {"jobs", "events", "discovery_runs", "leads"}
+    leaked = [
+        (table, column)
+        for table, column, text in cells
+        if any(planted in text for planted in PLANTED_RUN)
+    ]
+    assert leaked == []
+    assert world.sql(
+        "SELECT place_id, place_lat, place_lng FROM leads WHERE place_lat IS NOT NULL"
+    ) == [("ChIJ-new", PLANTED_LAT, PLANTED_LNG)]
+    for record in caplog.records:
+        shown = record.getMessage() + repr(vars(record))
+        assert not any(planted in shown for planted in PLANTED_RUN), record.getMessage()

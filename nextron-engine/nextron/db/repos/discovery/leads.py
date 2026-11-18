@@ -18,6 +18,8 @@ nothing; ``nextron.app.discovery`` does.
   domain its website now lives on);
 - ``mark_merged(loser_id, survivor_id, cleared_keys)``: sets ``merged_into`` and clears each
   key column named in ``cleared_keys``, in one statement;
+- ``set_place_coords(lead_id, lat, lng, at)`` (Story 8.3): sets ``place_lat``, ``place_lng``
+  and ``place_coords_at`` together;
 - ``purge_place_coords(cutoff) -> int`` (Story 8.2): nulls ``place_lat``, ``place_lng`` and
   ``place_coords_at`` on every row whose ``place_coords_at`` is strictly before ``cutoff``, and
   on every row holding a coordinate without a ``place_coords_at`` (its age is unknown), and
@@ -157,6 +159,15 @@ def mark_merged(loser_id: str, survivor_id: str, cleared_keys: tuple[str, ...]) 
         update_rows(LeadRecord)
         .where(LeadRecord.id == loser_id)
         .values(merged_into=survivor_id, **values)
+    )
+
+
+def set_place_coords(lead_id: str, lat: float, lng: float, at: datetime) -> None:
+    """Store the Places location of the Lead ``lead_id``, stored at ``at``."""
+    current().session.execute(
+        update_rows(LeadRecord)
+        .where(LeadRecord.id == lead_id)
+        .values(place_lat=lat, place_lng=lng, place_coords_at=at)
     )
 
 

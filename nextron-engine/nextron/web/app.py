@@ -129,6 +129,11 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   again, with the Segment choices read in a read-only one: a refusal by its field, the summary
   above a fresh form, or a stopped import's summary above the form with the origin and default
   kept, always 200.
+- ``GET /leads/discovery`` (``discovery_page``) and ``POST /leads/discovery/places``
+  (``discovery_places``), both ``@personal_data(False)`` and registered before
+  ``/leads/{lead_id}``: the Discovery page (Story 8.3), linked from the Leads list; see
+  ``nextron.web.discovery_page``. The POST runs ``place_discovery.request_run`` in its own unit
+  of work, then renders the panel again in a read-only one with its notice, always 200.
 - ``GET /inboxes`` (``inboxes_page``) and ``POST /inboxes`` (``inbox_register``), both
   ``@personal_data(True)``: the Sending Inboxes panel (Story 4.7, FR-32, UX-DR26), linked from
   the Settings page; see ``nextron.web.inboxes_page``. The GET lists
@@ -307,6 +312,11 @@ from starlette.routing import BaseRoute
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
+from nextron.app.discovery.place_ingest import (
+    PlaceDiscovery,
+    PlacesRunRefused,
+    configured_locations,
+)
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -378,6 +388,7 @@ from nextron.domain.unsub_token import UnsubKeyInUse, UnsubKeysHeldInRecovery
 from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
+from nextron.web import discovery_page as discovery_rows
 from nextron.web import erase_page as erase_rows
 from nextron.web import export_page as export_rows
 from nextron.web import facts_page as fact_rows
@@ -566,6 +577,7 @@ def create_app(
     erasures: Erasures,
     domain_checks: DomainChecks,
     lead_scores: LeadScores,
+    place_discovery: PlaceDiscovery,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -591,7 +603,7 @@ def create_app(
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
     subject access export; ``domain_checks`` reads the Sending Domain authentication section
-    and queues its Recheck.
+    and queues its Recheck; ``place_discovery`` queues the Discovery page's Places runs.
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1540,6 +1552,52 @@ def create_app(
         if export is None:  # never echoes the ticket
             return not_found_text(export_rows.EXPORT_EXPIRED)
         return export_rows.download_response(export)
+
+    def discovery_answer(
+        request: Request,
+        template: str,
+        *,
+        notice: discovery_rows.Notice | None = None,
+        chosen: discovery_rows.SubmittedRun | None = None,
+    ) -> HTMLResponse:
+        campaigns = setup_queries.campaigns()
+        active = [found for found in campaigns if setup_queries.campaign_active(found.id)]
+        names = {found.id: found.name for found in campaigns}
+        context = discovery_rows.panel_context(
+            campaigns=discovery_rows.campaign_options(active),
+            locations=discovery_rows.location_options(configured_locations()),
+            runs=discovery_rows.run_rows(discovery_queries.recent_runs(), names),
+            notice=notice,
+            chosen=chosen,
+        )
+        return page(request, template, **context)
+
+    # before /leads/{lead_id}, like every /leads/<word> path
+    @app.get("/leads/discovery", name="discovery_page")
+    @personal_data(False)  # Campaign names, Operator locations, statuses and counts
+    def discovery_page(request: Request) -> HTMLResponse:
+        return discovery_answer(request, discovery_rows.PAGE_TEMPLATE)
+
+    @app.post("/leads/discovery/places", name="discovery_places")
+    @personal_data(False)
+    def discovery_places(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        submitted = discovery_rows.submitted_run(fields)
+        try:
+            with units.open():
+                enqueued = place_discovery.request_run(submitted.campaign_id, submitted.location)
+        except PlacesRunRefused as refused:
+            notice = discovery_rows.Notice("alert", refused.message)
+        else:
+            notice = discovery_rows.Notice(
+                "status",
+                discovery_rows.QUEUED if enqueued.created else discovery_rows.ALREADY_QUEUED,
+            )
+        with units.open(read_only=True):
+            return discovery_answer(
+                request, discovery_rows.PANEL_TEMPLATE, notice=notice, chosen=submitted
+            )
 
     @app.get("/leads", name="pipeline_page")
     @personal_data(True)  # a Lead's name can be a sole trader's name

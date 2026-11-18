@@ -347,6 +347,26 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "ramp_target",
         ),
     },
+    "discovery_runs": {  # Story 8.3
+        "discovery": (
+            "id",
+            "source",
+            "campaign_id",
+            "segment_id",
+            "country_code",
+            "location",
+            "query_hash",
+            "status",
+            "started_at",
+            "finished_at",
+            "seen",
+            "created",
+            "merged",
+            "suppressed",
+            "no_website",
+            "market_blocked",
+        ),
+    },
     "domain_checks": {
         "sending": (
             "id",
