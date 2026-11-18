@@ -44,7 +44,9 @@ returns ``DEFERRED`` only before its use case has done any work: the budget chec
 ULID, ``inbox:<ULID>`` or ``global``; the discriminator is ``tick``, a real ``YYYY-MM-DD`` date,
 a revision from ``0`` to ``999999999`` without leading zeros, or the value of an AI Test Set
 (``nextron.domain.ai_test_gate.TestSet``: ``reply``, ``grounding``, ``drafting_smoke`` or
-``extraction``; Story 4.5's ``run_ai_test_sets:<tuple id>:<set>``), all as text.
+``extraction``; Story 4.5's ``run_ai_test_sets:<tuple id>:<set>``), or a hash of exactly 16
+lowercase hex characters (Story 8.3's ``discover_places:<campaign id>:<location hash>``), all
+as text.
 ``is_concurrency_key(value)`` accepts ``inbox:<ULID>`` and ``domain:<name>``, where the name is
 at most 253 characters of ``[a-z0-9-]`` labels joined by dots, with at least one dot.
 
@@ -126,6 +128,7 @@ MAX_DOMAIN_NAME: Final = 253
 # Each matched with fullmatch.
 JOB_TYPE_NAME_PATTERN: Final = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
 REVISION_PATTERN: Final = re.compile(r"0|[1-9][0-9]{0,8}")
+HASH_PATTERN: Final = re.compile(r"[0-9a-f]{16}")
 PAYLOAD_KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")
 TOKEN_PATTERN: Final = re.compile(r"[a-z0-9_:.-]{1,64}")
 DOMAIN_NAME_PATTERN: Final = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+")
@@ -370,6 +373,7 @@ def _is_discriminator(value: object) -> bool:
         value == TICK
         or is_iso_date(value)
         or REVISION_PATTERN.fullmatch(value) is not None
+        or HASH_PATTERN.fullmatch(value) is not None
         or set_of(value) is not None
     )
 
@@ -383,7 +387,7 @@ def idempotency_key(job_type: str, scope: str, discriminator: str) -> str:
     if not _is_discriminator(discriminator):
         raise InvalidJob(
             "the key's discriminator must be tick, a YYYY-MM-DD date, a revision from 0 to "
-            "999999999 or an AI Test Set"
+            "999999999, an AI Test Set or a 16-character hex hash"
         )
     return f"{job_type}:{scope}:{discriminator}"
 

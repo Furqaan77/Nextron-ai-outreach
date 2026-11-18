@@ -278,6 +278,7 @@ RESTORE_FORM = {
 }
 RESTORE_BUTTON = {"type": "submit", "class": "secondary", "id": "restore-test-now"}
 NEVER_RUN = [
+    [["Job type", "Last success"], ["discover_places", "never"]],  # Discovery, Story 8.3
     [
         ["Job type", "Last success"],
         ["enrich_lead", "never"],
@@ -353,6 +354,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Errors needing attention (0)",
         "No errors need attention.",
         "Last successful runs",
+        "Discovery",
         "Enrichment",
         "Re-check",
         "Sending",
@@ -408,6 +410,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Last error: ValueError: broken",
         "Dismiss",
         "Last successful runs",
+        "Discovery",
         "Enrichment",
         "Re-check",
         "Sending",
@@ -416,10 +419,11 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Readiness (nextron doctor)",
         "13 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables[:5] == [
+    assert panel.tables[:6] == [
         NEVER_RUN[0],
         NEVER_RUN[1],
         NEVER_RUN[2],
+        NEVER_RUN[3],
         [
             ["Job type", "Last success"],
             ["backup_db", "never"],

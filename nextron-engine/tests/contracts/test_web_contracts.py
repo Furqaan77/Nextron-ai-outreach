@@ -192,6 +192,8 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/suppression/reverse",
         "/contacts/{contact_id}/export",
         "/exports/{ticket}",
+        "/leads/discovery",  # Story 8.3
+        "/leads/discovery/places",
         "/leads",
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
@@ -647,6 +649,8 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "contact_export_form.html",
         "credential_row.html",
         "credentials.html",
+        "discovery.html",
+        "discovery_panel.html",
         "facts.html",
         "facts_panel.html",
         "google_client_row.html",

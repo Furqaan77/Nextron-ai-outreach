@@ -1,0 +1,51 @@
+{#- The Discovery panel (nextron.web.discovery_page): rendered inside discovery.html, and alone
+    as the answer to POST /leads/discovery/places, which HTMX swaps in for this block. Every
+    value is autoescaped; nothing here is marked safe. -#}
+<div class="discovery" id="discovery">
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
+{%- endif %}
+<h2>Run Places discovery</h2>
+{%- if not campaigns %}
+<p class="discovery-empty">No Campaign is active. Activate one on the Settings page to run discovery.</p>
+{%- elif not locations %}
+<p class="discovery-empty">No Places discovery location is set. Add one under Engine on the Settings page, such as Columbus, OH | US.</p>
+{%- else %}
+<form class="discovery-form" method="post" hx-post="/leads/discovery/places" hx-target="#discovery" hx-swap="outerHTML" hx-disabled-elt="find button">
+{{ csrf_field() }}
+<div class="field">
+<label for="discovery-campaign">Campaign</label>
+<select id="discovery-campaign" name="campaign_id">
+{%- for option in campaigns %}
+<option value="{{ option.value }}"{% if option.value == chosen_campaign %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+</div>
+<div class="field">
+<label for="discovery-location">Location</label>
+<select id="discovery-location" name="location" aria-describedby="hint-discovery-location">
+{%- for option in locations %}
+<option value="{{ option.value }}"{% if option.value == chosen_location %} selected{% endif %}>{{ option.label }}</option>
+{%- endfor %}
+</select>
+<p class="hint" id="hint-discovery-location">Choose a location in the Campaign's Market's country.</p>
+</div>
+<button type="submit">Run Places discovery</button>
+</form>
+{%- endif %}
+<h2>Recent runs</h2>
+{%- if runs %}
+<table class="discovery-table">
+<thead>
+<tr><th scope="col">Source</th><th scope="col">Campaign</th><th scope="col">Location</th><th scope="col">Status</th><th scope="col">Started</th><th scope="col">Seen</th><th scope="col">Created</th><th scope="col">Merged</th><th scope="col">Suppressed</th><th scope="col">No own website</th><th scope="col">Market blocked</th></tr>
+</thead>
+<tbody>
+{%- for run in runs %}
+<tr><td>{{ run.source }}</td><td>{{ run.campaign }}</td><td>{{ run.location }}</td><td>{{ run.status }}</td><td>{{ run.started_at }}</td><td class="number">{{ run.seen }}</td><td class="number">{{ run.created }}</td><td class="number">{{ run.merged }}</td><td class="number">{{ run.suppressed }}</td><td class="number">{{ run.no_website }}</td><td class="number">{{ run.market_blocked }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p class="discovery-empty">No discovery has run yet.</p>
+{%- endif %}
+</div>

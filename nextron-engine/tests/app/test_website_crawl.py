@@ -104,7 +104,10 @@ class World:
             return caller()
 
     def lead(
-        self, web_domain: str | None = SITE, source: LeadSource = LeadSource.PLACES, **keys: Any
+        self,
+        web_domain: str | None = SITE,
+        source: LeadSource = LeadSource.SIGNAL_INBOX,  # a source that queues no crawl
+        **keys: Any,
     ) -> str:
         identity = LeadIdentity(
             name="Smith Law LLP", segment_id=self.segment, web_domain=web_domain, **keys
@@ -962,13 +965,17 @@ def test_a_csv_lead_with_a_website_gets_its_enrich_lead_job(world: World) -> Non
     ]
 
 
-def test_only_a_created_csv_lead_with_a_website_is_queued(world: World) -> None:
-    world.lead(source=LeadSource.PLACES, web_domain="places-firm.com")
+def test_only_a_created_csv_or_places_lead_with_a_website_is_queued(world: World) -> None:
+    world.lead(source=LeadSource.SIGNAL_INBOX, web_domain="inbox-firm.com")
+    places = world.lead(source=LeadSource.PLACES, web_domain="places-firm.com")  # Story 8.3
     world.lead(source=LeadSource.CSV, web_domain=None, place_id="ChIJ2")
     first = world.lead(source=LeadSource.CSV, web_domain="csv-firm.com")
     world.lead(source=LeadSource.CSV, web_domain="csv-firm.com")  # matched, not created
 
-    assert [row[1] for row in world.jobs()] == [f"enrich_lead:{first}:2026-11-17"]
+    assert [row[1] for row in world.jobs()] == [
+        f"enrich_lead:{places}:2026-11-17",
+        f"enrich_lead:{first}:2026-11-17",
+    ]
 
 
 def test_the_job_is_enqueued_in_the_upserts_transaction(world: World) -> None:

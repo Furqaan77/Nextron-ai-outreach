@@ -334,3 +334,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-8-2-places-search-adapter-that-keeps-only-what-the-maps-terms-allow.md`
   summary: The per-call budget/quota check and the metered request are not atomic, so concurrent blockable calls (e.g. several `discover_places` or `check_legal_form` jobs on the bulk lane) can each pass the check at 999/1,000 and overshoot a quota by the number of threads.
   evidence: `PlaceSearches.search_page` and `LegalFormChecks.check_legal_form` read `meter.snapshot` in one transaction and record usage only when `Metered` exits after the request; nothing reserves a unit or serializes calls. Story 8.1 (per-call checks for every blockable job) or 8.3 (the concurrent caller) should serialize or reserve.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-3-turn-places-candidates-into-deduplicated-contactable-leads.md`
+  summary: A `discover_places` job the quota keeps refusing re-runs every hour and writes a new zero-count `deferred` `discovery_runs` row each time, until the monthly quota resets, which can push real runs off the Discovery page's 20 recent rows.
+  evidence: Story 8.3 review pass 1 (blind #1). The runner's `DEFER_DELAY` is 1 h and `_start` inserts a run row before the first page's budget check. Story 8.1 (deferred handling, "Discovery stopped: quota reached" health issue) should hold such jobs or reuse the last deferred row.

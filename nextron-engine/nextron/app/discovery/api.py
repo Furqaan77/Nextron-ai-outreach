@@ -24,8 +24,9 @@ normaliser).
      that is neither ``Allowed`` nor ``Blocked`` raises ``TypeError``. On ``Allowed`` a new
      Lead is inserted (``created_at`` = now, stage ``new``), and
      ``pipeline.record_created`` appends its creation ``events`` row (cause
-     ``created_from_<source>``); ``created=True``. A Lead created from a ``csv`` source with a
-     ``web_domain`` also gets its ``enrich_lead`` job (Story 2.5), enqueued in the same
+     ``created_from_<source>``); ``created=True``. A Lead created from a ``csv`` source (Story
+     2.5) or a ``places`` source (Story 8.3) with a ``web_domain`` also gets its
+     ``enrich_lead`` job, enqueued in the same
      transaction: key ``enrich_lead:<lead ULID>:<UTC date>``, payload ``{v: 1, lead_id}``,
      concurrency key ``domain:<web_domain>``, on its default lane. A matched Lead (steps 4 and
      5) is returned as before, at any stage and whatever its domain, without the gate: it is
@@ -85,6 +86,12 @@ normaliser).
   A ``ch_number`` that came from a CSV is never Evidence: only this command, called by the
   legal-form check, links a number to a Lead from its website.
 
+- ``@command record_place_coords(lead_id, lat, lng)`` (Story 8.3): stores a Places location on
+  the Lead ``lead_id`` (``place_lat``, ``place_lng`` and ``place_coords_at`` = now, together).
+  ``lat`` and ``lng`` are finite floats in range (``TypeError``/``ValueError`` otherwise); an
+  unknown Lead raises ``LookupError``. Only a Places discovery run calls it, for the Lead it
+  just created; the daily purge nulls the three after 30 days.
+
 - ``@use_case purge_place_coords() -> int`` (the daily ``purge_place_coords`` job, Story 8.2):
   in one transaction it nulls ``place_lat``, ``place_lng`` and ``place_coords_at`` on every
   Lead whose coordinates were stored strictly before ``now - 30 days``
@@ -93,7 +100,10 @@ normaliser).
   (``count``) and returns the count.
 
 **Google Places (Story 8.2).** ``PlaceSearches`` (``nextron.app.discovery.places``) runs one
-Places search page at a time, after the budget's per-call check.
+Places search page at a time, after the budget's per-call check. ``PlaceDiscovery``
+(``nextron.app.discovery.place_ingest``, Story 8.3) runs the ``discover_places`` jobs: it pages
+through a Campaign's Places queries in one location and turns each candidate into a Lead
+through ``upsert_lead`` (source ``places``) and ``record_place_coords``.
 
 **The legal form (Story 2.12, FR-12).** ``LegalFormChecks`` (``nextron.app.discovery
 .legal_form``) runs the ``check_legal_form`` jobs: it links a GB Lead to its Companies House
@@ -140,6 +150,7 @@ rows are ``nextron.domain.lead_import``'s.
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -196,6 +207,8 @@ from nextron.ports.email_syntax import EmailSyntaxPort
 log = logging.getLogger(__name__)
 
 MAX_MERGE_CHAIN: Final = 64
+# The sources whose new Leads get their enrich_lead job in the creating transaction
+CRAWLED_SOURCES: Final = frozenset({LeadSource.CSV, LeadSource.PLACES})
 PLACE_COORDS_PURGED: Final = "place_coords_purged"
 BATCH_ROWS: Final = 200
 LEAD_CANONICALIZED: Final = "lead_canonicalized"
@@ -289,7 +302,7 @@ class Discovery:
                 created_at=self._clock.now(),
             )
             self._pipeline.record_created(lead_id, source)
-            if source is LeadSource.CSV and identity.web_domain is not None:
+            if source in CRAWLED_SOURCES and identity.web_domain is not None:
                 self._enqueue_crawl(lead_id, identity.web_domain)
             return UpsertedLead(lead_id, True, ())
         keep, *others = sorted(survivors.values(), key=_age)
@@ -356,6 +369,18 @@ class Discovery:
         older, newer = sorted((survivor, other), key=_age)
         self.merge(older.id, newer.id)
         return older.id, MERGED
+
+    @command
+    def record_place_coords(self, lead_id: str, lat: float, lng: float) -> None:
+        """Store the Places location of the Lead ``lead_id``; see the module docstring."""
+        for value, limit in ((lat, 90.0), (lng, 180.0)):
+            if isinstance(value, bool) or not isinstance(value, float):
+                raise TypeError("record_place_coords takes the coordinates as float")
+            if not math.isfinite(value) or not -limit <= value <= limit:
+                raise ValueError("record_place_coords: a coordinate is out of range")
+        if not isinstance(lead_id, str) or not is_ulid(lead_id) or leads_repo.get(lead_id) is None:
+            raise LookupError("record_place_coords: the Lead is unknown")
+        leads_repo.set_place_coords(lead_id, lat, lng, self._clock.now())
 
     @use_case
     def purge_place_coords(self) -> int:

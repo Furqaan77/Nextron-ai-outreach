@@ -10,7 +10,9 @@
 - **Quotas are settings.** Every ``QUOTAS`` setting is a declared ``integer`` setting.
 - **No paid Places use.** The Places quota settings' maximums are Google's free monthly
   allowances (decision 6: Enterprise 1,000 and Pro 5,000 requests), so no value can start paid
-  use, and no other setting's key or label names Places.
+  use, and no other setting's key or label names Places except those ``PLACES_LIMITERS`` lists
+  (Story 8.3's discovery settings, which can only narrow Places use: a location list and a page
+  cap of at most 3 per run, never a quota).
 """
 
 import ast
@@ -55,6 +57,11 @@ TABLE_NAMERS: Final = frozenset(
 )
 METER_IMPORTERS: Final = frozenset({"nextron/main.py"})
 PLACES_ALLOWANCES: Final = {"quota_places_enterprise": 1_000, "quota_places_pro": 5_000}
+# Settings that name Places but can only narrow its use, never raise a quota (Story 8.3)
+PLACES_LIMITERS: Final = {
+    "places_discovery_locations": "where a run may search; no request without one",
+    "places_max_pages_per_run": "at most 3 pages per run, counted inside the quotas",
+}
 
 
 # One writer -------------------------------------------------------------------------------------
@@ -304,7 +311,12 @@ def test_the_places_quota_maximums_are_googles_free_allowances() -> None:
 
 
 def test_no_other_setting_names_places() -> None:
-    assert places_namers(settings_schema.SCHEMA) == sorted(PLACES_ALLOWANCES)
+    assert places_namers(settings_schema.SCHEMA) == sorted(
+        [*PLACES_ALLOWANCES, *PLACES_LIMITERS]
+    )
+    pages = settings_schema.setting("places_max_pages_per_run")
+    assert pages.type is SettingType.INTEGER and pages.default == 3
+    assert maximum_problems(settings_schema.SCHEMA, {"places_max_pages_per_run": 3}) == []
 
 
 def _setting(key: str, label: str, *rules: settings_schema.Rule) -> Setting:

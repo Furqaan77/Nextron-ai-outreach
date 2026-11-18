@@ -2478,6 +2478,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0035_2_11_job_postings` | `job_postings` (foreign keys to `leads`, `signals` and `evidence` with no cascade; `ix_job_postings_lead_id`, `ix_job_postings_signal_id`; unique on `lead_id`, `url` and `title`; `ck_job_postings_source`, `ck_job_postings_board_token`, `ck_job_postings_status` and `ck_job_postings_closed_at`); adds nine nullable counts to `crawl_runs` in place (`add_column`, no check): `careers_postings`, `careers_events`, `<source>_postings` and `<source>_events` for `greenhouse`, `lever` and `ashby`, and `board_errors` (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)) | `research` |
 | `0036_2_12_legal_form` | adds to `leads`, in place with no check, the nullable `legal_form` (64), `company_status` (32), `legal_form_status` (16: `confirmed`, `not_corporate` or `unconfirmed`; NULL until first checked) and the two Evidence ids `legal_form_site_evidence_id` and `legal_form_registry_evidence_id` (no foreign key) (see [Companies House legal form](#companies-house-legal-form)) | `research` |
 | `0037_8_2_place_coords` | adds to `leads`, in place with no check, the nullable `place_lat` and `place_lng` (floats) and `place_coords_at` (UTC text), purged after 30 days (see [Google Places search](#google-places-search)) | `discovery` |
+| `0038_8_3_discovery_runs` | `discovery_runs` (foreign keys to `campaigns` and `segments` with no cascade; `ix_discovery_runs_started_at`; `ck_discovery_runs_source`, `ck_discovery_runs_status`, `ck_discovery_runs_country_code`, `ck_discovery_runs_finished_at` and `ck_discovery_runs_counts`) (see [Places discovery](#places-discovery)) | `discovery` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2567,8 +2568,10 @@ limit 2, group `other`; see [Google Places search](#google-places-search)), `ext
 form](#companies-house-legal-form)), `select_primary_contact` (see [Decision-makers and the
 Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` (see [The AI
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
-authentication](#sending-domain-authentication)), and `check_job_boards` and `recheck_event`
-(see [Hiring Signals and job postings](#hiring-signals-and-job-postings)); the stories that add
+authentication](#sending-domain-authentication)), `check_job_boards` and `recheck_event`
+(see [Hiring Signals and job postings](#hiring-signals-and-job-postings)), and `discover_places`
+(bulk only, priority 30, 1 hour, retry limit 2, group `discovery`; see [Places
+discovery](#places-discovery)); the stories that add
 work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
@@ -4726,11 +4729,10 @@ and logs `places_search_refused` (the quota and the reason); a page logs `places
 with its candidate count only. The request runs outside any transaction. Outside `prod` the
 engine searches through `OfflinePlaces` (no request, an empty page) unless a `google_places`
 key is stored; `prod` always uses `GooglePlaces`. The search seam is on
-`app.state.place_searches`. Story 8.3's discovery runs will page through it and create the
-Leads.
+`app.state.place_searches`; [Places discovery](#places-discovery) pages through it.
 
 **Coordinates.** `leads.place_lat`, `place_lng` and `place_coords_at` hold a place's location
-(Story 8.3 fills them). The daily `purge_place_coords` job (every 24 hours and at start) nulls
+(a Places discovery run fills them for each Lead it creates). The daily `purge_place_coords` job (every 24 hours and at start) nulls
 all three on every Lead whose coordinates were stored more than 30 days ago (or that holds a
 coordinate with no storage time), logs `place_coords_purged` with the count, and keeps
 `place_id`.
@@ -4738,8 +4740,70 @@ coordinate with no storage time), logs `place_coords_purged` with the count, and
 field, that only the allowed modules import the Places port, and that a search with planted
 names stores and logs none of them.
 
-**Not yet:** paging through results, creating Leads from candidates and a location bias (Story
-8.3); the job budget class and deferred jobs (Story 8.1).
+**Not yet:** a location bias; the job budget class (Story 8.1). Paging and Lead creation are
+[Places discovery](#places-discovery)'s.
+
+## Places discovery
+
+A Places discovery run turns Google Places candidates into Leads (Story 8.3; FR-5, FR-9, FR-2,
+FR-49). Each new organization is named and keyed from **its own website**, never from what
+Places says about it, deduplicated, checked against the Suppression List, and handed straight to
+the research chain.
+
+**Settings.** "Places discovery locations" (`places_discovery_locations`, Settings, Engine,
+empty by default) lists where a run may search, one `<location> | <country code>` per line,
+such as `Columbus, OH | US` (1 to 100 characters, then a two-letter code in capitals). A
+Campaign can search the locations in its Market's country. "Places pages per discovery run"
+(`places_max_pages_per_run`, Budget and limits, 1 to 3, default 3) caps the Places pages one
+run fetches across all its queries.
+
+**Running one.** Open **Leads, Discovery** (`/leads/discovery`), choose an active Campaign and a
+location, and press **Run Places discovery**. That queues one `discover_places` job (bulk lane,
+priority 30, 1 hour, retry limit 2, group `discovery`), keyed `discover_places:<Campaign
+id>:<location hash>` (the hash: the first 16 hex characters of the SHA-256 of
+`<location>|<CC>`); pressing it again while that job is waiting or running returns the same job.
+The payload is `{v: 1, campaign_id, location: <hash>, country_code: <code in lowercase>}`: no
+location text, no Places data. Every such job has the concurrency key
+`domain:places.googleapis.com`, so two runs never search Places at once. An inactive Campaign,
+a location outside its Market's country, a Market that isn't enabled, or a Segment with no
+Places queries is refused with nothing queued. Nothing runs automatically yet.
+
+**The run.** It searches the Campaign's Segment's Places queries (`discovery_queries.places`,
+e.g. `law firm`, `solicitors`) in seed order, each paged to its end, until the page cap. A run
+that starts first ends any run row still `running` as `failed` (a crash left it). Before each
+page the run re-checks that the Campaign may still run in the same country, and otherwise
+ends `stopped`. The budget's per-call check comes before each page; a refusal ends the run `deferred` and the job
+is re-queued an hour later (the Leads already made stay; a re-run starts again at page 1 and
+merges what it already found). For each candidate, in memory only:
+
+1. the location's country must be an enabled Market, else **Market blocked**;
+2. a Lead already holding the place ID (normalised; at any stage, merged included) means
+   **merged**, with nothing fetched;
+3. a missing website, one the egress rules or the FR-49 denylist refuse, or a shared platform
+   (`wix.com`, `linktr.ee`...) means **no own website**, with nothing fetched. Otherwise the
+   site's robots.txt is read and its homepage fetched politely (at least 1 s per domain). A
+   disallowed homepage, a failed fetch, a non-2xx or non-HTML answer, or a homepage that lands
+   on a denylisted or shared-platform domain is also **no own website**;
+4. the Lead is `upsert_lead`d (source `places`) with the final URL's registrable domain, the
+   name from the homepage's first non-blank `og:site_name`, else its `<title>` (else the
+   domain), the place ID,
+   the Campaign's Segment and the location's country. The contactability gate runs first: a
+   suppressed domain is **suppressed**, with nothing written. A new Lead (**created**) gets its
+   coordinates (`place_coords_at` = now; purged after 30 days) and its `enrich_lead` crawl job
+   in the same transaction; a Lead matched by domain (**merged**) gets the place ID when it had
+   none.
+
+**Recent runs.** The `discovery_runs` table records each run: source (`places`), Campaign,
+Segment, country, location, a hash of the queries, status (`running`, `finished`, `deferred`,
+`failed` or `stopped`, when the Campaign could no longer run), start and finish times, and the
+counts seen, created, merged, suppressed, no own website and Market blocked. The Discovery
+page lists the newest 20 (`Cache-Control: no-store`). Logs hold ids, outcomes and counts only.
+`tests/contracts/test_places_storage_terms.py` runs a planted `discover_places` job and checks
+that no table, job payload, `events` row or log line holds a Places name, website path or
+coordinate text; `tests/contracts/test_ad16_callers.py` checks the gate precedes each insert.
+
+**Not yet:** the job budget class (Story 8.1), Companies House and aggregator discovery (8.4,
+8.6), the daily top-up (8.10), and the pool and quota figures on the Discovery page.
 
 ## Engine health
 

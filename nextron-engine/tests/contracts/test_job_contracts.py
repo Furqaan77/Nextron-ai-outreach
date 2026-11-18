@@ -530,7 +530,17 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "check_domains",
         "check_job_boards",
         "recheck_event",
+        "discover_places",
     )
+    discover = job_types.get("discover_places")  # Story 8.3
+    assert (
+        discover.default_lane,
+        discover.lanes,
+        discover.priority,
+        discover.max_runtime,
+        discover.retry_limit,
+        discover.group,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 30, timedelta(hours=1), 2, JobGroup.DISCOVERY)
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{#- The Discovery page (nextron.web.discovery_page): the Places discovery form and the recent
+    runs, in discovery_panel.html. -#}
+{% block title %}Nextron: Discovery{% endblock %}
+{% block content %}
+<h1>Discovery</h1>
+<p><a href="/leads">Back to Leads</a></p>
+<p>A Places discovery run searches Google Places for the Campaign's Segment in one location,
+fetches each place's own website, and adds each new organization as a Lead named from that
+website, after the Suppression List check. No email is sent. Each new Lead is queued for a
+polite crawl of its site.</p>
+{% include "discovery_panel.html" %}
+{% endblock %}

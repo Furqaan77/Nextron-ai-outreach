@@ -19,6 +19,10 @@ port it searches through.
    page_token)``. Its ``AdapterError`` propagates; the adapter has metered it.
 3. Logs ``places_page_fetched`` (``count``: the candidates, ``has_next``) and returns the page.
 
+``page(query, location, page_token=None)`` does the same two steps inside the caller's own use
+case (Story 8.3's discovery run, which pages through several queries in one unit of work); it
+must be called with no transaction open. ``search_page`` is ``page`` as a use case.
+
 The page's candidates are transient (the Maps terms): this module stores nothing, and no log
 line holds a name, a website, the query, the location or the page token. Paging and turning
 candidates into Leads are the caller's (Story 8.3).
@@ -72,6 +76,12 @@ class PlaceSearches:
     ) -> PlaceSearchPage | None:
         """One page of the places matching ``query`` in ``location``, or ``None`` when the
         budget refused the request; see the module docstring."""
+        return self.page(query, location, page_token)
+
+    def page(
+        self, query: str, location: str, page_token: str | None = None
+    ) -> PlaceSearchPage | None:
+        """``search_page`` inside the caller's use case, with no transaction open."""
         with current().transaction():
             usage = self._meter.snapshot(self._clock.now())
             limits = setup_queries.budget_limits()
