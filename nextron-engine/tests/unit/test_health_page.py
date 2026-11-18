@@ -438,11 +438,12 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Readiness (nextron doctor)",
         "15 ok, 0 warn, 0 fail",
     ]
-    assert panel.tables[:6] == [
+    assert panel.tables[:7] == [
         NEVER_RUN[0],
         NEVER_RUN[1],
         NEVER_RUN[2],
         NEVER_RUN[3],
+        NEVER_RUN[4],
         [
             ["Job type", "Last success"],
             ["backup_db", "never"],
