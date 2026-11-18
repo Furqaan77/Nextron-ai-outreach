@@ -50,6 +50,10 @@ handler runs in.
 - ``select_primary_contact(primary)`` (Story 2.10): calls
   ``primary().select_primary_contact(lead_id)`` once (the research service's
   ``PrimaryContacts``) and returns ``None``.
+- ``check_legal_form(legal_forms)`` (Story 2.12): calls
+  ``legal_forms().check_legal_form(lead_id)`` once (the discovery service's
+  ``LegalFormChecks``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused
+  the work). A retryable ``AdapterError`` it raises is retried by the runner.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -251,6 +255,25 @@ def select_primary_contact(primary: Callable[[], SelectingPrimary]) -> Handler:
         primary().select_primary_contact(lead_id)
 
     return handle_select_primary_contact
+
+
+class CheckingLegalForm(Protocol):
+    """What ``check_legal_form`` needs of the ``discovery`` service's ``LegalFormChecks``."""
+
+    def check_legal_form(self, lead_id: str) -> bool: ...
+
+
+def check_legal_form(legal_forms: Callable[[], CheckingLegalForm]) -> Handler:
+    """The ``check_legal_form`` job's handler: confirm the payload's Lead's legal form through
+    ``legal_forms()``."""
+
+    def handle_check_legal_form(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        if not legal_forms().check_legal_form(lead_id):
+            return DEFERRED
+        return None
+
+    return handle_check_legal_form
 
 
 def extract_lead(extractions: Callable[[], Extracting]) -> Handler:

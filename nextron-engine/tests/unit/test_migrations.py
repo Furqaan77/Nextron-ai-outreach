@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0029_2_9_tag_managers"
+HEAD = "0030_2_12_legal_form"
 
 
 @pytest.fixture
@@ -556,3 +556,67 @@ def test_0029_leaves_every_existing_page_unchecked(tmp_path: Path) -> None:
         reader.close()
     assert rows == [(page, "Smith Law LLP", None)]  # kept, and never checked
     assert columns[-1] == "tag_managers"
+
+
+LEGAL_FORM_COLUMNS = (
+    "legal_form",
+    "company_status",
+    "legal_form_status",
+    "legal_form_site_evidence_id",
+    "legal_form_registry_evidence_id",
+)
+
+
+def test_0030_adds_the_legal_form_columns_in_place_and_leaves_every_lead_unchecked(
+    tmp_path: Path,
+) -> None:
+    """A Lead stored before 0030 keeps its row and was never checked: every legal-form column is
+    NULL, and the five columns are nullable, with no CHECK, at the end of the table."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0029_2_9_tag_managers":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0029_2_9_tag_managers")
+    at = "2026-11-18T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, ch_number, segment_id, country_code, "
+        f"created_at) VALUES ('{lead}', 'Acme Accounting', 'acme.co.uk', '01234567', "
+        f"'{segment}', 'GB', '{at}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0029_2_9_tag_managers", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(
+            f"SELECT id, name, ch_number, {', '.join(LEGAL_FORM_COLUMNS)} FROM leads"
+        ).fetchall()
+        info = {row[1]: row for row in reader.execute("PRAGMA table_info(leads)")}
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(leads)")]
+        [(table_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'leads'"
+        ).fetchall()
+    finally:
+        reader.close()
+    assert rows == [(lead, "Acme Accounting", "01234567", None, None, None, None, None)]
+    assert tuple(columns[-5:]) == LEGAL_FORM_COLUMNS
+    assert {name: (info[name][2], info[name][3]) for name in LEGAL_FORM_COLUMNS} == {
+        "legal_form": ("VARCHAR(64)", 0),
+        "company_status": ("VARCHAR(32)", 0),
+        "legal_form_status": ("VARCHAR(16)", 0),
+        "legal_form_site_evidence_id": ("VARCHAR(26)", 0),
+        "legal_form_registry_evidence_id": ("VARCHAR(26)", 0),
+    }
+    assert "legal_form_status IN" not in table_sql  # no CHECK: added in place
+    run_sql(  # any text fits: the code, not a CHECK, keeps the values
+        path,
+        "UPDATE leads SET legal_form = 'ltd', legal_form_status = 'confirmed' "
+        f"WHERE id = '{lead}'",
+    )

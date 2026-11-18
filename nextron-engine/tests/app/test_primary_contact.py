@@ -660,8 +660,10 @@ def test_the_select_primary_contact_job_runs_the_selection(world: World) -> None
         research=no_jobs,
         extractions=no_jobs,
         primary=lambda: contacts,
+        legal_forms=no_jobs,
     ).get("select_primary_contact").handler
-    [(_, _, payload, _)] = world.jobs("select_primary_contact")
+    # the people step enqueues check_legal_form (Story 2.12), whose payload the selection's shares
+    [(_, _, payload, _)] = world.jobs("check_legal_form")
     job = Job(
         "01JD0000000000000000000099", "select_primary_contact", Lane.BULK, json.loads(payload), 1
     )

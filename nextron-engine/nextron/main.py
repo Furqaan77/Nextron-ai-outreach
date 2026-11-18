@@ -145,7 +145,9 @@ only, priority 20, 10 minutes, retry limit 2, ``handlers.purge_page_text(researc
 ``other``), Story 2.9's ``extract_lead`` (bulk by default, or interactive, priority 45, 15
 minutes, retry limit 3, ``handlers.extract_lead(extractions)``, ``enrichment``) and Story
 2.10's ``select_primary_contact`` (bulk by default, or interactive, priority 45, 5 minutes,
-retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``).
+retry limit 3, ``handlers.select_primary_contact(primary)``, ``enrichment``), registered after
+Story 2.12's ``check_legal_form`` (the same lanes, priority, runtime, retry limit and group,
+``handlers.check_legal_form(legal_forms)``).
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
 job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
@@ -175,6 +177,14 @@ research, queue)`` (``nextron.app.research.people``) is ``SignalExtractions``' p
 last argument), on the same gateway. ``PrimaryContacts(clock, research)`` runs the
 ``select_primary_contact`` jobs, reached through ``primary=lambda: primary_contacts``, and the
 Lead page's "Make primary" (``create_app(..., primary_contacts=...)``).
+
+**The legal form (Story 2.12).** ``build_app(..., registry=None)`` builds one
+``CompaniesHouseRegistry(secrets, meter=meter)`` (``nextron.adapters.companies_house``) unless a
+``registry=`` is injected; building it builds no HTTP client and reads no key.
+``LegalFormChecks(clock, meter, registry, discovery, research, queue)``
+(``nextron.app.discovery.legal_form``) runs the ``check_legal_form`` jobs that the people step
+enqueues, reached through ``legal_forms=lambda: legal_forms``; each enqueues
+``select_primary_contact``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -564,6 +574,7 @@ from fastapi import FastAPI
 from nextron import __version__
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.clock import SystemClock
+from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
@@ -573,6 +584,7 @@ from nextron.adapters.sink import AlertSink, MailSink, SinkRecorder
 from nextron.adapters.telegram import TelegramAlert
 from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -656,6 +668,7 @@ from nextron.domain.crawl import (
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
+from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import LeadsMerged, SubjectSuppressed
 from nextron.domain.offers import InvalidOffers, validate_offers
@@ -710,6 +723,7 @@ from nextron.ports.errors import AdapterError
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
+from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.usage_meter import UsageMeterPort
@@ -855,6 +869,7 @@ def build_app(
     crawler: CrawlerPort | None = None,
     llm: LlmPort | None = None,
     renderer: RendererPort | None = None,
+    registry: RegistryPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -884,7 +899,10 @@ def build_app(
     (``PlaywrightRenderer(meter=meter)`` on that same ``HttpCrawler`` unless injected), which
     starts a browser only for each render. The Signal extraction calls Claude through ``llm``
     (``ClaudeGateway(secrets, meter=meter)`` unless injected, imported here so that importing
-    this module loads no AI package), which builds its HTTP client on its first call."""
+    this module loads no AI package), which builds its HTTP client on its first call. The
+    legal-form check reads the Companies House register through ``registry``
+    (``CompaniesHouseRegistry(secrets, meter=meter)`` unless injected), which builds its HTTP
+    client on its first call."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -904,7 +922,7 @@ def build_app(
         recovery_steps if recovery_steps is not None else build_recovery_steps(),
     )
     # notify, backups, restore_tests, contact_markets, crawls, discovery, research,
-    # extractions and primary_contacts are bound just below
+    # extractions, primary_contacts and legal_forms are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -916,6 +934,7 @@ def build_app(
         research=lambda: research,
         extractions=lambda: extractions,
         primary=lambda: primary_contacts,
+        legal_forms=lambda: legal_forms,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl and for the renderer, so they share one pacing table
@@ -936,6 +955,14 @@ def build_app(
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research)
+    legal_forms = LegalFormChecks(
+        clock,
+        meter,
+        registry if registry is not None else CompaniesHouseRegistry(secrets, meter=meter),
+        discovery,
+        research,
+        queue,
+    )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1047,6 +1074,7 @@ def build_job_types(
     research: Callable[[], handlers.PurgingPageText],
     extractions: Callable[[], handlers.Extracting],
     primary: Callable[[], handlers.SelectingPrimary],
+    legal_forms: Callable[[], handlers.CheckingLegalForm],
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1058,8 +1086,9 @@ def build_job_types(
     ``WebsiteCrawls`` that ``enrich_lead`` and ``render_pages`` jobs call, ``discovery`` the
     ``discovery`` service that ``canonicalize_lead`` jobs call, ``research`` the ``research``
     service that ``purge_page_text`` jobs call, ``extractions`` its ``SignalExtractions`` that
-    ``extract_lead`` jobs call, and ``primary`` its ``PrimaryContacts`` that
-    ``select_primary_contact`` jobs call."""
+    ``extract_lead`` jobs call, ``primary`` its ``PrimaryContacts`` that
+    ``select_primary_contact`` jobs call, and ``legal_forms`` the ``discovery`` service's
+    ``LegalFormChecks`` that ``check_legal_form`` jobs call."""
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1185,6 +1214,18 @@ def build_job_types(
             max_runtime=timedelta(minutes=15),
             retry_limit=3,
             handler=handlers.extract_lead(extractions),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_LEGAL_FORM_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),
+            priority=45,
+            max_runtime=timedelta(minutes=5),  # at most five registry calls, 15 s per phase
+            retry_limit=3,
+            handler=handlers.check_legal_form(legal_forms),
             group=JobGroup.ENRICHMENT,
         )
     )

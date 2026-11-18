@@ -7,7 +7,9 @@ Contact's live Eligibility row (Story 3.6: eligible and ineligible Contacts, eve
 its ``data-reason``, recomputed on every render, nothing stored, inside ``hx-disable``),
 ``no-store``, the lock without a session, the route order, the nav link, the label tables and
 the queries-only import rule. Story 2.9 adds the headquarters zone and the Signals and Evidence
-sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped)."""
+sections (Tier 1 at 31 days live, Tier 2 at 91 days expired, "AI-extracted", escaped). Story
+2.12 adds a GB Lead's legal-form section ("Not checked yet", each status, the Companies House
+link, the two Evidence quotes escaped inside ``hx-disable``, none outside GB)."""
 
 import ast
 from collections.abc import Callable, Iterator
@@ -25,6 +27,7 @@ from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.queries.discovery import StoredLead
 from nextron.app.queries.setup import SeededSegment
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
@@ -306,6 +309,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        legal_forms=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -628,7 +632,12 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     website = header.find("a")
     assert website.attrs == {"href": "https://smith-law.co.uk/", "rel": "noopener noreferrer"}
     assert page.find("main").find("a", href="/leads").text == "All Leads"
-    assert [h2.text for h2 in page.find_all("h2")] == ["Signals", "Evidence", "Contacts"]
+    assert [h2.text for h2 in page.find_all("h2")] == [
+        "UK legal form",  # a GB Lead (Story 2.12)
+        "Signals",
+        "Evidence",
+        "Contacts",
+    ]
     table = page.find("table", class_="contact-table")
     assert table_rows(table)[0] == CONTACT_HEADER
     [contact] = table.find_all("tr", class_="contact-row")
@@ -1622,3 +1631,216 @@ def test_a_person_evidence_row_supports_its_contact(world: World) -> None:
     [row] = page.find_all("tr", class_="evidence-row")
     assert cells(row)[2] == f"Contact: {HOSTILE_NAME}"
     assert page.disabled("Contact: <script>") == [True]
+
+
+# The UK legal form (Story 2.12) -----------------------------------------------------------------
+
+CH_PAGE = "https://find-and-update.company-information.service.gov.uk/company/"
+SITE_QUOTE = '<script>alert(1)</script> registered in England, company number <b hx-get="/x">'
+REGISTRY_QUOTE = (
+    "Companies House record 01234567: company type ltd, company status active, registered office "
+    "postcode EC1A 1BB, registered name <i>SMITH LAW LIMITED</i>"
+)
+NOTE = "This Lead stays researchable; UK cold email waits for a confirmed corporate legal form."
+
+
+def legal_form_lead(
+    world: World,
+    legal_form: str | None,
+    company_status: str | None,
+    status: str | None,
+    *,
+    ch_number: str | None = "01234567",
+) -> tuple[str, str, str]:
+    """A GB Lead with its site and registry Evidence and the legal form pointing to them."""
+    lead = world.lead("Smith Law", "smith-law.co.uk", ch_number=ch_number)
+    site = evidence_row(world, lead, 1, quote=SITE_QUOTE, extracted_by="rule")
+    registry = evidence_row(
+        world,
+        lead,
+        2,
+        quote=REGISTRY_QUOTE,
+        source="registry",
+        source_url=CH_PAGE + "01234567",
+        pages_checked=(CH_PAGE + "01234567",),
+        extracted_by="rule",
+    )
+    stored = profile_repo.StoredLegalForm(legal_form, company_status, status, site, registry)
+    world.transact(lambda: profile_repo.set_legal_form(lead, stored))
+    return lead, site, registry
+
+
+def legal_form_section(page: Tree) -> Node:
+    return page.find("section", class_="lead-legal-form")
+
+
+def legal_form_facts(section: Node) -> list[str]:
+    return [node.text for node in section.find("dl").walk() if node.tag in ("dt", "dd")]
+
+
+def test_a_gb_lead_never_checked_says_not_checked_yet(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    page = world.page(f"/leads/{lead}")
+
+    section = legal_form_section(page)
+    assert "hx-disable" in section.attrs
+    assert section.find("p", class_="legal-form-status").text == "Not checked yet"
+    assert section.find("p", class_="legal-form-note").text == NOTE
+    assert legal_form_facts(section) == [
+        "Legal form",
+        "—",
+        "Company status",
+        "—",
+        "Company number",
+        "—",
+    ]
+    assert not section.find_all("ul") and not section.find_all("a")
+    order = [
+        node
+        for node in page.root.walk()
+        if node.tag == "header" and "lead-header" in (node.attrs.get("class") or "")
+        or node is section
+        or node.tag == "section" and "lead-signals" in (node.attrs.get("class") or "")
+    ]
+    assert [node.tag for node in order] == ["header", "section", "section"]
+    assert order[1] is section  # right after the header, before the Signals
+
+
+@pytest.mark.parametrize("country", ["US", None])
+def test_a_lead_outside_gb_has_no_legal_form_section(world: World, country: str | None) -> None:
+    lead = world.lead("Smith Law", "smith-law.com", country=country)
+
+    page = world.page(f"/leads/{lead}")
+
+    assert page.find_all("section", class_="lead-legal-form") == []
+    assert NOTE not in page.text
+
+
+def test_a_confirmed_lead_shows_its_legal_form_its_number_linked_and_its_evidence(
+    world: World,
+) -> None:
+    lead, _, _ = legal_form_lead(world, "ltd", "active", "confirmed")
+
+    reply = world.get(f"/leads/{lead}")
+
+    assert reply.status == 200
+    for raw in ("<script>alert", '<b hx-get="/x">', "<i>SMITH"):
+        assert raw not in reply.text
+    page = Tree(reply.text)
+    section = legal_form_section(page)
+    assert section.find("p", class_="legal-form-status").text == "Confirmed: corporate subscriber"
+    assert not section.find_all("p", class_="legal-form-note")
+    assert legal_form_facts(section) == [
+        "Legal form",
+        "private limited company (ltd)",
+        "Company status",
+        "active",
+        "Company number",
+        "01234567",
+    ]
+    number = section.find("dl").find("a")
+    assert (number.attrs["href"], number.text, number.attrs["rel"]) == (
+        CH_PAGE + "01234567",
+        "01234567",
+        "noopener noreferrer",
+    )
+    items = section.find("ul", class_="legal-form-evidence").find_all("li")
+    assert [item.find("span", class_="legal-form-source").text for item in items] == [
+        "Website",
+        "Companies House",
+    ]
+    assert [item.find("q").text for item in items] == [SITE_QUOTE, REGISTRY_QUOTE]
+    assert [item.find("a").attrs["href"] for item in items] == [
+        "https://smith-law.co.uk/team",
+        CH_PAGE + "01234567",
+    ]
+    assert page.disabled(SITE_QUOTE) == [True, True]  # the section and the Evidence table
+    assert page.disabled("SMITH LAW LIMITED") == [True, True]
+    for node in (section, *section.walk()):  # no HTMX action
+        assert not [key for key in node.attrs if key.startswith("hx-") and key != "hx-disable"]
+    assert not section.find_all("form") and not section.find_all("button")
+    rows = table_rows(page.find("table", class_="evidence-table"))
+    assert [(row[1], row[2]) for row in rows[1:]] == [
+        (SITE_QUOTE, "Legal form"),
+        (REGISTRY_QUOTE, "Legal form"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("legal_form", "company_status", "status", "text", "shown"),
+    [
+        (
+            "limited-partnership",
+            "active",
+            "not_corporate",
+            "Not a corporate subscriber",
+            "limited-partnership",
+        ),
+        ("ltd", "dissolved", "unconfirmed", "Unconfirmed", "private limited company (ltd)"),
+        (None, None, "unconfirmed", "Unconfirmed", "—"),
+        ("ltd", "active", "something-else", "Unconfirmed", "private limited company (ltd)"),
+    ],
+)
+def test_a_lead_that_isnt_confirmed_says_so_and_stays_researchable(
+    world: World,
+    legal_form: str | None,
+    company_status: str | None,
+    status: str,
+    text: str,
+    shown: str,
+) -> None:
+    lead, _, _ = legal_form_lead(world, legal_form, company_status, status)
+
+    page = world.page(f"/leads/{lead}")
+
+    section = legal_form_section(page)
+    assert section.find("p", class_="legal-form-status").text == text
+    assert section.find("p", class_="legal-form-note").text == NOTE
+    assert legal_form_facts(section)[1] == shown
+    assert legal_form_facts(section)[3] == (company_status or "—")
+    listed = world.page("/leads")
+    assert "Smith Law" in listed.text  # still on the Leads list
+
+
+def test_a_pointer_to_a_row_that_isnt_live_shows_no_quote(world: World) -> None:
+    lead, site, _ = legal_form_lead(world, "ltd", "active", "confirmed")
+    world.transact(lambda: signals_repo.retract_evidence(site, T))
+
+    page = world.page(f"/leads/{lead}")
+
+    items = legal_form_section(page).find("ul", class_="legal-form-evidence").find_all("li")
+    assert [item.find("q").text for item in items] == [REGISTRY_QUOTE]
+
+
+def test_a_lead_without_a_number_shows_a_dash(world: World) -> None:
+    lead, _, _ = legal_form_lead(world, None, None, "unconfirmed", ch_number=None)
+
+    section = legal_form_section(world.page(f"/leads/{lead}"))
+
+    assert legal_form_facts(section)[4:] == ["Company number", "—"]
+    assert not section.find("dl").find_all("a")
+
+
+def test_legal_form_view_is_none_outside_gb() -> None:
+    lead = StoredLead(
+        "01JD3QZ8X5V9K2M7N4P6R8T0AA",
+        "Smith Law",
+        "smith-law.co.uk",
+        "01234567",
+        None,
+        "01JD3QZ8X5V9K2M7N4P6R8T0AB",
+        "US",
+        None,
+        T,
+    )
+
+    assert leads_page.legal_form_view(lead, None, ()) is None
+    view = leads_page.legal_form_view(replace(lead, country_code="GB"), None, ())
+    assert view is not None
+    assert (view.status, view.note, view.legal_form, view.number_url) == (
+        "Not checked yet",
+        NOTE,
+        "—",
+        CH_PAGE + "01234567",
+    )

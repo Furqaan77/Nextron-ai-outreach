@@ -158,7 +158,8 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/<survivor id>``; otherwise it renders from ``queries.pipeline.stage``,
   ``queries.setup.segments``, ``queries.research.contacts``,
   ``queries.research.lead_provenance`` and ``lead_signals.view`` (Story 2.9: the Signals, the
-  Evidence and the headquarters zone), ``queries.research.no_decision_maker`` (Story 2.10), and
+  Evidence and the headquarters zone), ``queries.research.no_decision_maker`` (Story 2.10),
+  ``queries.research.legal_form`` (Story 2.12: a GB Lead's legal-form section), and
   each Contact's live Eligibility from ``compliance.evaluate_eligibility`` (Story 3.6), evaluated
   on every render and never stored.
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
@@ -1325,6 +1326,7 @@ def create_app(
             lead_signals.view(found.id),
             decisions,
             research_queries.no_decision_maker(found.id),
+            legal_form=research_queries.legal_form(found.id),
         )
         return page(request, lead_rows.LEAD_TEMPLATE, **context)
 

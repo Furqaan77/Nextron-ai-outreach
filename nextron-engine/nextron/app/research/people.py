@@ -78,10 +78,14 @@ work and opens its own transactions, in three phases:
    ``extraction_finished`` (``lead_id``, ``run_id``, ``outcome``, ``error_code``), as Story 2.9's
    do.
 
-Whenever it records a run (any outcome but the raise), the same transaction enqueues
-``select_primary_contact``: scope the Lead, discriminator ``tick`` (a live job absorbs a
-repeat), payload ``{v, lead_id}`` and, when the Lead has a ``web_domain``, the concurrency key
-``domain:<web_domain>``. A people run is an ``extraction_runs`` row with ``route``
+Whenever it records a run (any outcome but the raise), the same transaction enqueues the
+chain's next stage through ``_enqueue_next_stage``, the one insertion point for the stages
+between the people step and the Primary Contact's selection: today ``check_legal_form``
+(Story 2.12, ``nextron.app.discovery.legal_form``), which enqueues ``select_primary_contact``
+when it is done. Scope the Lead, discriminator ``tick`` (a live job absorbs a repeat), payload
+``{v, lead_id}`` and, when the Lead has a ``web_domain``, the concurrency key
+``domain:<web_domain>``. (When Story 2.11 merges, this enqueues ``check_job_boards``, whose
+finish enqueues ``check_legal_form``.) A people run is an ``extraction_runs`` row with ``route``
 ``extract_people``, recorded like Story 2.9's (``actor``, ``crawl_run_id``, ``pages_sent``,
 ``pages_truncated``, ``started_at`` phase 1's now, ``ended_at``).
 
@@ -131,6 +135,7 @@ from nextron.domain.extraction import (
 )
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import TICK, VERSION_FIELD
+from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.notifications import EvidenceChanged
 from nextron.domain.people import (
     BUDGET_CLASS,
@@ -138,7 +143,6 @@ from nextron.domain.people import (
     PEOPLE_PAGE_KINDS,
     PERSON_DISCARDED,
     ROUTE,
-    SELECT_PRIMARY_CONTACT_JOB,
     LivePersonEvidence,
     PeoplePlan,
     PeopleValidation,
@@ -339,12 +343,12 @@ class PeopleExtractions:
         actor: str | None,
         started_at: datetime,
     ) -> RecordedRun:
-        """Record a run that made no call, and enqueue the selection."""
+        """Record a run that made no call, and enqueue the next stage."""
         run_id = self._record(lead.id, crawl_run_id, outcome, actor=actor, started_at=started_at)
-        self._select(lead.id, lead.web_domain)
+        self._enqueue_next_stage(lead.id, lead.web_domain)
         return RecordedRun(lead.id, run_id, outcome, None)
 
-    # Runs and the selection ---------------------------------------------------------------------
+    # Runs and the next stage --------------------------------------------------------------------
 
     def _record(
         self,
@@ -383,7 +387,7 @@ class PeopleExtractions:
         *,
         select: bool = True,
     ) -> RecordedRun:
-        """Record a run that stored nothing after the call (and enqueue the selection, unless
+        """Record a run that stored nothing after the call (and enqueue the next stage, unless
         the run is followed by a raise)."""
         run_id = self._record(
             call.lead_id,
@@ -396,13 +400,16 @@ class PeopleExtractions:
             pages_truncated=call.pages_truncated,
         )
         if select:
-            self._select(call.lead_id, call.web_domain)
+            self._enqueue_next_stage(call.lead_id, call.web_domain)
         return RecordedRun(call.lead_id, run_id, outcome, code)
 
-    def _select(self, lead_id: str, web_domain: str | None) -> None:
-        """Enqueue the Lead's ``select_primary_contact`` job in the caller's transaction."""
+    def _enqueue_next_stage(self, lead_id: str, web_domain: str | None) -> None:
+        """Enqueue the chain's next stage for the Lead, in the caller's transaction: the one
+        insertion point between the people step and ``select_primary_contact`` (today
+        ``check_legal_form``, Story 2.12; Story 2.11's ``check_job_boards`` goes here when it
+        merges, and its finish enqueues ``check_legal_form``)."""
         self._queue.enqueue(
-            SELECT_PRIMARY_CONTACT_JOB,
+            CHECK_LEGAL_FORM_JOB,
             scope=lead_id,
             discriminator=TICK,
             payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id},
@@ -450,7 +457,7 @@ class PeopleExtractions:
             stored=applied.stored,
             discarded=applied.discarded,
         )
-        self._select(call.lead_id, call.web_domain)
+        self._enqueue_next_stage(call.lead_id, call.web_domain)
         return applied
 
     def _log_refusals(self, call: _PeopleCall, validation: PeopleValidation, now: datetime) -> None:

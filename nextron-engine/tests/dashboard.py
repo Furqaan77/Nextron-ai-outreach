@@ -166,11 +166,11 @@ def no_recovery() -> Any:
 
 
 def no_crawl_jobs() -> Any:
-    """``build_job_types``'s ``crawls``, ``discovery``, ``research``, ``extractions`` and
-    ``primary``: the dashboard runs no Story 2.5, 2.9 or 2.10 job."""
+    """``build_job_types``'s ``crawls``, ``discovery``, ``research``, ``extractions``,
+    ``primary`` and ``legal_forms``: the dashboard runs no Story 2.5, 2.9, 2.10 or 2.12 job."""
     raise AssertionError(
-        "the dashboard runs no enrich_lead, canonicalize_lead, purge_page_text, extract_lead or "
-        "select_primary_contact"
+        "the dashboard runs no enrich_lead, canonicalize_lead, purge_page_text, extract_lead, "
+        "check_legal_form or select_primary_contact"
     )
 
 
@@ -344,6 +344,7 @@ class Dashboard:
             research=no_crawl_jobs,
             extractions=no_crawl_jobs,
             primary=no_crawl_jobs,
+            legal_forms=no_crawl_jobs,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(

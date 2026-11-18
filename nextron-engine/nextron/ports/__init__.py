@@ -12,4 +12,10 @@ metered usage. Its values live in ``nextron.domain.ai``; ``nextron.adapters.ai``
 ``CrawlerPort`` (``crawler``) is the one way to fetch the web (Story 2.5): ``fetch_robots`` and
 ``fetch_page`` pass every hop through ``nextron.domain.fetch_policy`` and return parsed, visible
 text; ``nextron.adapters.crawler`` implements it.
+
+``RegistryPort`` (``registry``) is the one way to read the UK companies register (Story 2.12):
+``search_companies(name)`` and ``company(number)`` return ``RegistryCompany`` values (number,
+registered name, company type, company status, registered office postcode);
+``nextron.adapters.companies_house`` implements it over the Companies House API, metered and
+self rate-limited.
 """

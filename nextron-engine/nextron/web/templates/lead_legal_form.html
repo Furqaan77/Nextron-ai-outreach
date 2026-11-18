@@ -1,0 +1,26 @@
+{#- The Lead page's UK legal-form section (nextron.web.leads_page.legal_form_view, Story 2.12):
+    included by lead.html for a GB Lead only. The quotes come from the Lead's website and the
+    Companies House record: they render only through |plain or safe_link, inside an element
+    carrying hx-disable. The section holds no HTMX action. -#}
+<section class="lead-legal-form" aria-labelledby="legal-form-heading" hx-disable>
+<h2 id="legal-form-heading">UK legal form</h2>
+<p class="legal-form-status">{{ legal_form.status }}</p>
+{%- if legal_form.note %}
+<p class="legal-form-note">{{ legal_form.note }}</p>
+{%- endif %}
+<dl class="lead-facts">
+<dt>Legal form</dt>
+<dd>{{ legal_form.legal_form|plain }}</dd>
+<dt>Company status</dt>
+<dd>{{ legal_form.company_status|plain }}</dd>
+<dt>Company number</dt>
+<dd>{% if legal_form.number_url %}{{ safe_link(legal_form.number_url, legal_form.number) }}{% elif legal_form.number %}{{ legal_form.number|plain }}{% else %}—{% endif %}</dd>
+</dl>
+{%- if legal_form.evidence %}
+<ul class="legal-form-evidence">
+{%- for row in legal_form.evidence %}
+<li><span class="legal-form-source">{{ row.source|plain }}</span>: <q>{{ row.quote|plain }}</q>{% if row.source_url %} ({{ safe_link(row.source_url) }}){% endif %}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+</section>

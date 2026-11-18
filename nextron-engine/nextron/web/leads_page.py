@@ -85,6 +85,20 @@ Every untrusted text (the Primary line's name, each Contact and Provenance cell)
 element carrying ``hx-disable``; the forms sit outside them. A person Evidence row (its
 ``person_contact_id`` set) reads "Contact: <name>" under Supports.
 
+**The UK legal form (Story 2.12).** ``lead_context(..., legal_form=None)`` also takes the Lead's
+``queries.research.legal_form`` (a ``StoredLegalForm``, or ``None``). For a Lead whose country
+is ``GB`` only, ``legal_form_view`` gives the ``lead_legal_form.html`` section (``<section
+class="lead-legal-form" hx-disable>``, after the header, with no HTMX action): the status
+("Confirmed: corporate subscriber", "Not a corporate subscriber", "Unconfirmed", or "Not checked
+yet" before the first check; a stored status this module doesn't know reads "Unconfirmed"); for
+anything but ``confirmed``, the line "This Lead stays researchable; UK cold email waits for a
+confirmed corporate legal form."; the legal form as "<label> (<code>)" (``LEGAL_FORM_LABELS``;
+the code alone without a label) or "—"; the company status or "—"; the Lead's ``ch_number`` as a
+``safe_link`` to its Companies House page, or "—"; and the two Evidence quotes the finding rests
+on (the website's, then the registry's), each with its source link, when they are among the
+Lead's live Evidence. In the Evidence table, those two rows read "Legal form" under Supports. A
+Lead that isn't ``confirmed`` stays on the Leads list and is researched like any other.
+
 ``STAGE_LABELS`` and ``SOURCE_LABELS`` name every stage and Provenance source,
 ``CLASS_LABELS``, ``EVIDENCE_TYPE_LABELS`` and ``FACT_LABELS`` every Signal class, Evidence type
 and fact kind; a stored value none knows renders as its own text. Every Lead, Contact,
@@ -107,6 +121,7 @@ from nextron.app.queries.research import (
     LeadSignalsView,
     SignalStatus,
     StoredContact,
+    StoredLegalForm,
     StoredProvenance,
 )
 from nextron.app.queries.setup import SeededSegment
@@ -119,7 +134,14 @@ from nextron.domain.contacts import (
     ProvenanceSubject,
 )
 from nextron.domain.eligibility import Decision
-from nextron.domain.extraction import FactKind
+from nextron.domain.extraction import EvidenceSource, FactKind
+from nextron.domain.legal_form import (
+    COMPANY_NUMBER_PATTERN,
+    LEGAL_FORM_LABELS,
+    LegalFormStatus,
+    company_page_url,
+)
+from nextron.domain.markets import GB
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.segments import EvidenceType, SignalClass
 from nextron.web.credentials_page import Notice, Role
@@ -172,6 +194,22 @@ SUPPORTS_SEPARATOR: Final = "; "
 ELIGIBLE: Final = "Eligible: {basis}"
 NOT_ELIGIBLE: Final = "Not eligible"
 CONTACT_SUPPORT: Final = "Contact: "
+LEGAL_FORM_SUPPORT: Final = "Legal form"
+NOT_CHECKED: Final = "Not checked yet"
+UNCONFIRMED: Final = "Unconfirmed"
+LEGAL_FORM_NOTE: Final = (
+    "This Lead stays researchable; UK cold email waits for a confirmed corporate legal form."
+)
+LEGAL_FORM_STATUS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        LegalFormStatus.CONFIRMED: "Confirmed: corporate subscriber",
+        LegalFormStatus.NOT_CORPORATE: "Not a corporate subscriber",
+        LegalFormStatus.UNCONFIRMED: UNCONFIRMED,
+    }
+)
+LEGAL_FORM_SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {EvidenceSource.WEBSITE: "Website", EvidenceSource.REGISTRY: "Companies House"}
+)
 
 STAGE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -546,6 +584,31 @@ class EvidenceRow:
     extraction: str
 
 
+@dataclass(frozen=True, slots=True)
+class LegalFormEvidence:
+    """One Evidence quote the Lead's legal form rests on: where it comes from ("Website" or
+    "Companies House"), the quote and its source URL."""
+
+    source: str
+    quote: str
+    source_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LegalFormView:
+    """A GB Lead's legal-form section (Story 2.12): the status text, the line shown while the
+    Lead isn't confirmed (else ``None``), the legal form, the company status, the company
+    number (and its Companies House page, when it is a valid number) and the Evidence."""
+
+    status: str
+    note: str | None
+    legal_form: str
+    company_status: str
+    number: str | None
+    number_url: str | None
+    evidence: tuple[LegalFormEvidence, ...]
+
+
 def lead_header(
     lead: StoredLead,
     stage: PipelineStage | None,
@@ -594,10 +657,14 @@ def signal_row(status: SignalStatus) -> SignalRow:
     )
 
 
-def _supports(row: EvidenceSupport, contact_names: Mapping[str, str]) -> str:
+def _supports(
+    row: EvidenceSupport, contact_names: Mapping[str, str], legal_form_ids: frozenset[str]
+) -> str:
     if row.supports:
         return SUPPORTS_SEPARATOR.join(row.supports)
     evidence = row.evidence
+    if evidence.id in legal_form_ids:
+        return LEGAL_FORM_SUPPORT
     if evidence.person_contact_id is not None:
         return CONTACT_SUPPORT + contact_names.get(evidence.person_contact_id, NO_VALUE)
     if evidence.fact is None:
@@ -621,10 +688,13 @@ def _sought(row: EvidenceSupport) -> str | None:
 
 
 def evidence_row(
-    row: EvidenceSupport, contact_names: Mapping[str, str] = MappingProxyType({})
+    row: EvidenceSupport,
+    contact_names: Mapping[str, str] = MappingProxyType({}),
+    legal_form_ids: frozenset[str] = frozenset(),
 ) -> EvidenceRow:
     """One live Evidence row as the Lead page shows it; ``contact_names`` names the Contact a
-    person Evidence row is about (by Contact id)."""
+    person Evidence row is about (by Contact id), and ``legal_form_ids`` are the rows the
+    Lead's legal form rests on (Story 2.12)."""
     evidence = row.evidence
     is_quote = evidence.type == EvidenceType.QUOTE
     return EvidenceRow(
@@ -632,7 +702,7 @@ def evidence_row(
         quote=evidence.quote if is_quote else None,
         sought=_sought(row),
         pages_checked=() if is_quote else evidence.pages_checked,
-        supports=_supports(row, contact_names),
+        supports=_supports(row, contact_names, legal_form_ids),
         source_url=evidence.source_url,
         retrieved=moment(evidence.retrieved_at),
         extraction=AI_EXTRACTED if evidence.extracted_by.startswith(AI_ACTOR_PREFIX) else NO_VALUE,
@@ -742,6 +812,55 @@ def contacts_context(
     }
 
 
+def _legal_form_ids(legal_form: StoredLegalForm | None) -> frozenset[str]:
+    if legal_form is None:
+        return frozenset()
+    return frozenset(
+        evidence_id
+        for evidence_id in (legal_form.site_evidence_id, legal_form.registry_evidence_id)
+        if evidence_id is not None
+    )
+
+
+def _legal_form_text(code: str | None) -> str:
+    if code is None:
+        return NO_VALUE
+    label = LEGAL_FORM_LABELS.get(code)
+    return code if label is None else f"{label} ({code})"
+
+
+def legal_form_view(
+    lead: StoredLead, legal_form: StoredLegalForm | None, evidence: Iterable[EvidenceSupport]
+) -> LegalFormView | None:
+    """The Lead page's legal-form section for a GB Lead, or ``None`` for any other; see the
+    module docstring."""
+    if lead.country_code != GB:
+        return None
+    stored = legal_form if legal_form is not None else StoredLegalForm(None, None, None, None, None)
+    status = stored.legal_form_status
+    number = lead.ch_number
+    live = {row.evidence.id: row.evidence for row in evidence}
+    quotes = []
+    for evidence_id in (stored.site_evidence_id, stored.registry_evidence_id):
+        row = None if evidence_id is None else live.get(evidence_id)
+        if row is not None and row.quote is not None:
+            source = LEGAL_FORM_SOURCE_LABELS.get(row.source, row.source)
+            quotes.append(LegalFormEvidence(source, row.quote, row.source_url))
+    return LegalFormView(
+        status=NOT_CHECKED if status is None else LEGAL_FORM_STATUS_LABELS.get(status, UNCONFIRMED),
+        note=None if status == LegalFormStatus.CONFIRMED else LEGAL_FORM_NOTE,
+        legal_form=_legal_form_text(stored.legal_form),
+        company_status=stored.company_status or NO_VALUE,
+        number=number,
+        number_url=(
+            company_page_url(number)
+            if number is not None and COMPANY_NUMBER_PATTERN.fullmatch(number) is not None
+            else None
+        ),
+        evidence=tuple(quotes),
+    )
+
+
 def lead_context(
     lead: StoredLead,
     stage: PipelineStage | None,
@@ -751,15 +870,19 @@ def lead_context(
     signals: LeadSignalsView,
     decisions: Mapping[str, Decision],
     no_decision_maker: bool | None = None,
+    legal_form: StoredLegalForm | None = None,
 ) -> dict[str, object]:
-    """What ``lead.html`` renders: the header, the Signals and the live Evidence (in the order
-    given), and the Contacts panel (``contacts_context``), each Contact with its live
-    Eligibility from ``decisions`` (by Contact id)."""
+    """What ``lead.html`` renders: the header, the legal-form section for a GB Lead
+    (``legal_form_view``), the Signals and the live Evidence (in the order given), and the
+    Contacts panel (``contacts_context``), each Contact with its live Eligibility from
+    ``decisions`` (by Contact id)."""
     found = tuple(contacts)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
+    legal_form_ids = _legal_form_ids(legal_form)
     return {
         "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
+        "legal_form": legal_form_view(lead, legal_form, signals.evidence),
         "signals": tuple(signal_row(status) for status in signals.signals),
-        "evidence": tuple(evidence_row(row, names) for row in signals.evidence),
+        "evidence": tuple(evidence_row(row, names, legal_form_ids) for row in signals.evidence),
         **contacts_context(lead.id, found, provenance, decisions, no_decision_maker),
     }

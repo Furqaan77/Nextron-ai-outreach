@@ -100,12 +100,12 @@ from enum import StrEnum
 from typing import Any, Final
 
 from nextron.domain.errors import DomainError
+from nextron.domain.legal_form import CORPORATE_SUBSCRIBER_FORMS, LEGAL_FORM_PATTERN
 from nextron.domain.settings_schema import TIMEZONE_REASON, timezone_names
 
 CODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,15}")  # matched with fullmatch
 COUNTRY_PATTERN: Final = re.compile(r"[A-Z]{2}")  # matched with fullmatch
 CCTLD_PATTERN: Final = re.compile(r"[a-z]{2}")  # matched with fullmatch
-LEGAL_FORM_PATTERN: Final = re.compile(r"[a-z][a-z0-9-]{0,63}")  # matched with fullmatch
 SEND_WINDOW_PATTERN: Final = re.compile(r"([0-9]{2}):([0-9]{2})-([0-9]{2}):([0-9]{2})")
 _FIELD_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # an unknown field shown by name
 _PLACEHOLDER: Final = re.compile(r"\{([^{}]*)\}")
@@ -124,19 +124,9 @@ US: Final = "US"
 GB: Final = "GB"
 COLD_EMAIL_COUNTRIES: Final = frozenset({US, GB})  # NFR-5: cold email only to the US and UK
 # Decision 2: the Companies House company types a GB Market may list (PECR: corporate
-# subscribers). A seed may list fewer, never another.
-_GB_CORPORATE_FORMS: Final = frozenset(
-    {
-        "ltd",
-        "plc",
-        "private-limited-guarant-nsc",
-        "private-limited-guarant-nsc-limited-exemption",
-        "private-limited-shares-section-30-exemption",
-        "private-unlimited",
-        "private-unlimited-nsc",
-        "llp",
-    }
-)
+# subscribers). A seed may list fewer, never another. The one list is
+# nextron.domain.legal_form.CORPORATE_SUBSCRIBER_FORMS (Story 2.12); this is the same object.
+_GB_CORPORATE_FORMS: Final = CORPORATE_SUBSCRIBER_FORMS
 
 
 class EnglishVariant(StrEnum):

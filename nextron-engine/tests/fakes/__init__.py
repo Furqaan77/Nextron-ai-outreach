@@ -10,6 +10,8 @@ a script, after the real adapter's checks on the first URL, and records every ca
 ``FakeTokenCodec`` (``token_codec``) fakes ``TokenCodecPort``: it encodes under the kids it is
 given (kid 1 by default) and decodes only the tokens it encoded.
 ``ScriptedRenderer`` (``renderer``) fakes ``RendererPort`` the same way, by URL;
+``ScriptedRegistry`` (``registry``) fakes ``RegistryPort`` by company number and search name,
+recording every call;
 ``nextron.adapters.renderer`` itself is tested on the fake Playwright objects of ``browser``.
 
 ``PORT_FAKES`` maps every port Protocol in ``nextron/ports`` to its fake; each fake can be
@@ -30,6 +32,7 @@ from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
+from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
 from nextron.ports.token_codec import TokenCodecPort
@@ -42,6 +45,7 @@ from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.mail import InMemoryMail
+from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.token_codec import FakeTokenCodec
@@ -63,5 +67,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         CrawlerPort: ScriptedCrawler,
         TokenCodecPort: FakeTokenCodec,
         RendererPort: ScriptedRenderer,
+        RegistryPort: ScriptedRegistry,
     }
 )

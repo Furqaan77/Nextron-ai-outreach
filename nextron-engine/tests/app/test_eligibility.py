@@ -243,6 +243,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         research=no_jobs,
         extractions=no_jobs,
         primary=no_jobs,
+        legal_forms=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -348,6 +349,74 @@ def test_a_published_uk_contact_still_waits_for_its_legal_form(world: World) -> 
 
     assert decision.kinds == (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)
     assert UK_LIA not in repr(decision)
+
+
+# The UK legal form (Story 2.12) -------------------------------------------------------------------
+
+
+def set_legal_form(world: World, lead_id: str, legal_form: str | None, status: str | None) -> None:
+    """The Lead's stored legal form, as ``research.record_legal_form`` leaves it."""
+    world.sql(
+        "UPDATE leads SET legal_form = ?, legal_form_status = ? WHERE id = ?",
+        (legal_form, status, lead_id),
+    )
+
+
+@pytest.mark.parametrize(
+    ("legal_form", "status", "kinds"),
+    [
+        ("ltd", "confirmed", ()),
+        ("llp", "confirmed", ()),
+        ("limited-partnership", "not_corporate", (ReasonKind.UK_LEGAL_FORM_INELIGIBLE,)),
+        (None, "not_corporate", (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)),
+        ("ltd", "unconfirmed", (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)),  # dissolved, say
+        (None, "unconfirmed", (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)),
+        (None, None, (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)),  # never checked
+        ("ltd", "not_corporate", (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)),  # inconsistent
+        (
+            "limited-partnership",
+            "unconfirmed",
+            (ReasonKind.UK_LEGAL_FORM_INELIGIBLE, ReasonKind.UK_LEGAL_FORM_UNCONFIRMED),
+        ),
+    ],
+)
+def test_a_published_uk_contact_follows_its_leads_recorded_legal_form(
+    world: World, legal_form: str | None, status: str | None, kinds: tuple[ReasonKind, ...]
+) -> None:
+    lead_id = world.lead(UK_WEB, "GB")
+    contact_id = world.contact(lead_id, email=UK_EMAIL, name=NAME)
+    set_legal_form(world, lead_id, legal_form, status)
+
+    decision = world.evaluate(contact_id)
+
+    assert decision.kinds == kinds
+    assert decision.eligible is (kinds == ())
+    if not kinds:
+        assert decision.basis_rule is not None and decision.basis_rule.startswith(UK_LIA)
+        assert f"({legal_form})" not in decision.basis_rule  # the label, not the code
+    assert_no_personal_data(decision)
+
+
+def test_a_confirmed_legal_form_is_read_live(world: World) -> None:
+    lead_id = world.lead(UK_WEB, "GB")
+    contact_id = world.contact(lead_id, email=UK_EMAIL, name=NAME)
+
+    set_legal_form(world, lead_id, "ltd", "confirmed")
+    confirmed = world.evaluate(contact_id)
+    set_legal_form(world, lead_id, None, "unconfirmed")  # a re-check lost the link
+    lost = world.evaluate(contact_id)
+
+    assert confirmed.basis_rule == (
+        "UK: corporate subscriber (private limited company), legitimate interests"
+    )
+    assert lost.kinds == (ReasonKind.UK_LEGAL_FORM_UNCONFIRMED,)
+
+
+def test_a_us_lead_ignores_any_legal_form(world: World) -> None:
+    contact_id = world.us_contact()
+    set_legal_form(world, world.lead_of(contact_id), "limited-partnership", "not_corporate")
+
+    assert world.evaluate(contact_id) == Decision(True, US_BASIS, ())
 
 
 # The Market ---------------------------------------------------------------------------------------

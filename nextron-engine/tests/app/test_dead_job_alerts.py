@@ -153,6 +153,7 @@ def build_world(
         research=no_crawls,
         extractions=no_crawls,
         primary=no_crawls,
+        legal_forms=no_crawls,
     )
     job_types = JobTypes()
     job_types.register_job_type(registered.get("send_alert"))  # the real, registered one

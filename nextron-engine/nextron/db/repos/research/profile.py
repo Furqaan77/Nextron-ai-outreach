@@ -1,6 +1,8 @@
-"""The ``leads`` profile group's repository (FR-11, FR-13, AD-3, AD-11; Stories 2.6, 2.9 and
-2.10): the only code that reads or writes the ``research``-owned columns of ``leads``:
-``hq_tz``, ``hq_evidence_id``, ``contact_methods`` and ``no_decision_maker``.
+"""The ``leads`` profile group's repository (FR-11, FR-12, FR-13, AD-3, AD-11; Stories 2.6, 2.9,
+2.10 and 2.12): the only code that reads or writes the ``research``-owned columns of ``leads``:
+``hq_tz``, ``hq_evidence_id``, ``contact_methods``, ``no_decision_maker`` and the legal form's
+``legal_form``, ``company_status``, ``legal_form_status``, ``legal_form_site_evidence_id`` and
+``legal_form_registry_evidence_id``.
 
 Every function runs one explicit Core statement through the current unit of work's session
 (``nextron.db.uow.current()``): reads work in a read-only unit of work too, writes only inside
@@ -15,7 +17,11 @@ the running use case's transaction. It stores and returns what it is given and c
 - ``set_contact_methods(lead_id, value)``: stores it (Story 2.6);
 - ``no_decision_maker(lead_id)`` (Story 2.10): the row's ``no_decision_maker`` (``None`` until
   the Primary Contact's selection first runs, and for an unknown Lead);
-  ``set_no_decision_maker(lead_id, value)``: sets it.
+  ``set_no_decision_maker(lead_id, value)``: sets it;
+- ``StoredLegalForm(legal_form, company_status, legal_form_status, site_evidence_id,
+  registry_evidence_id)`` (Story 2.12): the legal-form columns of one row, each ``None`` until
+  the Lead is first checked; ``legal_form(lead_id)``: the row's, or ``None`` for an unknown
+  Lead; ``set_legal_form(lead_id, legal_form)``: sets all five from a ``StoredLegalForm``.
 """
 
 from dataclasses import dataclass
@@ -64,6 +70,46 @@ def set_contact_methods(lead_id: str, value: str) -> None:
     """Store ``value`` as the Lead's ``contact_methods``."""
     current().session.execute(
         update_rows(LeadRecord).where(LeadRecord.id == lead_id).values(contact_methods=value)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class StoredLegalForm:
+    """The Lead's legal form: the linked record's company type and status, the check's status
+    and the two Evidence rows it rests on (each ``None`` until the Lead is first checked)."""
+
+    legal_form: str | None
+    company_status: str | None
+    legal_form_status: str | None
+    site_evidence_id: str | None
+    registry_evidence_id: str | None
+
+
+def legal_form(lead_id: str) -> StoredLegalForm | None:
+    """The Lead's legal-form columns, or ``None`` when the Lead has no row."""
+    statement = select(
+        LeadRecord.legal_form,
+        LeadRecord.company_status,
+        LeadRecord.legal_form_status,
+        LeadRecord.legal_form_site_evidence_id,
+        LeadRecord.legal_form_registry_evidence_id,
+    ).where(LeadRecord.id == lead_id)
+    row = current().session.execute(statement).one_or_none()
+    return None if row is None else StoredLegalForm(*row)
+
+
+def set_legal_form(lead_id: str, value: StoredLegalForm) -> None:
+    """Set the Lead's five legal-form columns to ``value``'s."""
+    current().session.execute(
+        update_rows(LeadRecord)
+        .where(LeadRecord.id == lead_id)
+        .values(
+            legal_form=value.legal_form,
+            company_status=value.company_status,
+            legal_form_status=value.legal_form_status,
+            legal_form_site_evidence_id=value.site_evidence_id,
+            legal_form_registry_evidence_id=value.registry_evidence_id,
+        )
     )
 
 

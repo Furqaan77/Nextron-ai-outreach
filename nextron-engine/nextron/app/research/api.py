@@ -68,9 +68,10 @@ actor ``system:research``, at the clock's now) with IDs and codes only.
   Lead moves to the survivor too (Story 2.5), and so does each ``crawled_pages`` and
   ``ats_links`` row whose ``url`` the survivor doesn't already hold (the rest stay on the
   merged Lead). Every ``evidence`` and ``signals`` row of the merged Lead moves to the survivor
-  (Story 2.9); its ``extraction_runs``, its ``hq_tz`` and ``hq_evidence_id`` and its
-  ``no_decision_maker`` stay. Last, the survivor's Primary Contact is selected again (Story
-  2.10), as ``select_primary`` does.
+  (Story 2.9); its ``extraction_runs``, its ``hq_tz`` and ``hq_evidence_id``, its
+  ``no_decision_maker`` and its legal form (Story 2.12: the five legal-form columns) stay.
+  Last, the survivor's Primary Contact is selected again (Story 2.10), as ``select_primary``
+  does.
 
 - ``@command resolve_market(contact_id)`` resolves one Contact, for the later paths that change
   its email, office location or Lead outside ``add_contact`` (Stories 2.10, 2.13, 2.14, 2.16);
@@ -108,6 +109,30 @@ cause ``selection`` with actor ``system:research``, or cause and actor ``operato
 
 ``PeopleExtractions`` and ``PrimaryContacts`` (``nextron.app.research.people``) find the
 decision-makers and run the selection.
+
+**The legal form (Story 2.12, FR-12).** ``Research`` is the only writer of the Lead's
+``legal_form``, ``company_status``, ``legal_form_status``, ``legal_form_site_evidence_id`` and
+``legal_form_registry_evidence_id`` (through ``db.repos.research.profile``), and of their
+Evidence.
+
+- ``@command record_legal_form(lead_id, finding)``: what a ``check_legal_form`` run
+  (``nextron.app.discovery.legal_form``) found, a ``nextron.domain.legal_form
+  .LegalFormFinding``. A finding of another type raises ``TypeError``; an unknown Lead (a text
+  that isn't a ULID included) ``LookupError``, a merged one ``ValueError``. The site quote is
+  checked again, before any write, with ``quote_in`` against the stored text of the Lead's page
+  at its ``page_url`` (``crawl_repo.pages``): a page that isn't there, whose text was purged, or
+  that doesn't hold the quote raises ``ValueError``. Then each of the two Evidence slots is
+  reconciled with the live row its pointer names (a pointer to a row that isn't one of the
+  Lead's live rows counts as none): the site slot with the finding's site quote (``source``
+  ``website``, ``source_url`` the page, ``retrieved_at`` its ``fetched_at``), the registry slot
+  with its registry quote (``source`` ``registry``, ``source_url`` the record's
+  ``company_page_url``, ``retrieved_at`` the finding's). A quote equal to the pointed row's
+  (type ``quote``, quote, source and ``source_url``) confirms it (``last_confirmed_at`` the later
+  of the two times); any other inserts a new row (type ``quote``, ``pages_checked``
+  ``[source_url]``, ``extracted_by`` ``rule``, no ``fact``, no ``person_contact_id``) that
+  supersedes the pointed row; a slot the finding lacks retracts the pointed row (now) and its
+  pointer becomes NULL. The five columns are then set (``legal_form_status`` the finding's
+  status), and ``EvidenceChanged`` is published for each row superseded or retracted.
 
 - ``@use_case purge_page_text() -> int`` (the daily ``purge_page_text`` job, Story 2.5): in one
   transaction, nulls ``text`` on every page whose ``text_purge_after`` is now or earlier, keeping
@@ -291,6 +316,7 @@ from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import provenance as provenance_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.contacts import StoredContact
+from nextron.db.repos.research.profile import StoredLegalForm
 from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import command, current, use_case
 from nextron.domain.absence import CheckedPage
@@ -340,7 +366,7 @@ from nextron.domain.crawl import (
     needs_render,
     text_hash,
 )
-from nextron.domain.extraction import EXTRACT_LEAD_JOB
+from nextron.domain.extraction import EXTRACT_LEAD_JOB, EXTRACTED_BY_RULE, EvidenceSource
 from nextron.domain.fetch_policy import FetchTarget, check_url, url_refusal
 from nextron.domain.geo import Location
 from nextron.domain.identity import IdentityError, normalize_name, registrable_domain
@@ -348,9 +374,11 @@ from nextron.domain.ids import is_ulid
 from nextron.domain.job import VERSION_FIELD
 from nextron.domain.leads import is_shared_platform
 from nextron.domain.machines import Transition
-from nextron.domain.notifications import LeadsMerged
+from nextron.domain.legal_form import LegalFormFinding, company_page_url
+from nextron.domain.notifications import EvidenceChanged, LeadsMerged
 from nextron.domain.people import ROUTE as PEOPLE_ROUTE
-from nextron.domain.segments import SegmentDef, SignalClass
+from nextron.domain.quotes import quote_in
+from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass
 from nextron.domain.settings_schema import Key
 from nextron.domain.signals import EventSignal, preferred_roles, strongest_event
 from nextron.domain.widgets import Detection, detect, encode, summarize, tag_managers
@@ -426,6 +454,41 @@ class AddedContact:
     created: bool
     email_dropped: bool
     blocked: Blocked | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LegalFormQuote:
+    """One slot's Evidence as a legal-form finding gives it (Story 2.12)."""
+
+    source: EvidenceSource
+    quote: str = field(repr=False)
+    source_url: str
+    retrieved_at: datetime
+
+
+def _legal_form_quotes(
+    finding: LegalFormFinding,
+) -> tuple[_LegalFormQuote | None, _LegalFormQuote | None]:
+    """The finding's site and registry Evidence, each ``None`` when it has none."""
+    site = finding.site
+    site_quote = (
+        None
+        if site is None
+        else _LegalFormQuote(EvidenceSource.WEBSITE, site.quote, site.page_url, site.fetched_at)
+    )
+    registry = None
+    if (
+        finding.number is not None
+        and finding.registry_quote is not None
+        and finding.retrieved_at is not None
+    ):
+        registry = _LegalFormQuote(
+            EvidenceSource.REGISTRY,
+            finding.registry_quote,
+            company_page_url(finding.number),
+            finding.retrieved_at,
+        )
+    return site_quote, registry
 
 
 @dataclass(frozen=True, slots=True)
@@ -900,6 +963,105 @@ class Research:
             actor=actor,
             at=at,
         )
+
+    # The legal form (Story 2.12) ---------------------------------------------------------------
+
+    @command
+    def record_legal_form(self, lead_id: str, finding: LegalFormFinding) -> None:
+        """Store what the Lead's legal-form check found, with its Evidence; see the module
+        docstring."""
+        if not isinstance(finding, LegalFormFinding):
+            raise TypeError(
+                f"record_legal_form takes a LegalFormFinding, not {type(finding).__name__}"
+            )
+        lead = discovery_queries.lead(lead_id) if isinstance(lead_id, str) else None
+        if lead is None:
+            raise LookupError("record_legal_form: the Lead is unknown")
+        if lead.merged_into is not None:
+            raise ValueError("record_legal_form: the Lead was merged into another Lead")
+        site = finding.site
+        if site is not None:
+            text = next(
+                (page.text for page in crawl_repo.pages(lead.id) if page.url == site.page_url),
+                None,
+            )
+            if text is None or not quote_in(site.quote, text):
+                raise ValueError(
+                    "record_legal_form: the site quote isn't on the Lead's stored page"
+                )
+        held = profile_repo.legal_form(lead.id)
+        if held is None:  # the Lead was just read
+            raise LookupError("record_legal_form: the Lead is unknown")
+        now = self._clock.now()
+        live = {row.id: row for row in signals_repo.evidence(lead.id, live_only=True)}
+        site_quote, registry_quote = _legal_form_quotes(finding)
+        changed: list[str] = []
+        site_id = self._legal_form_slot(
+            lead.id, held.site_evidence_id, live, site_quote, now, changed
+        )
+        registry_id = self._legal_form_slot(
+            lead.id, held.registry_evidence_id, live, registry_quote, now, changed
+        )
+        profile_repo.set_legal_form(
+            lead.id,
+            StoredLegalForm(
+                legal_form=finding.legal_form,
+                company_status=finding.company_status,
+                legal_form_status=str(finding.status),
+                site_evidence_id=site_id,
+                registry_evidence_id=registry_id,
+            ),
+        )
+        for evidence_id in changed:
+            current().publish(EvidenceChanged(lead_id=lead.id, evidence_id=evidence_id))
+
+    @staticmethod
+    def _legal_form_slot(
+        lead_id: str,
+        pointer: str | None,
+        live: dict[str, StoredEvidence],
+        proposed: _LegalFormQuote | None,
+        now: datetime,
+        changed: list[str],
+    ) -> str | None:
+        """Reconcile one legal-form Evidence slot; the row it points to now. The pointed row
+        counts only when it is one of the Lead's live rows; each row superseded or retracted is
+        added to ``changed``."""
+        old = live.get(pointer) if pointer is not None else None
+        if proposed is None:
+            if old is not None:
+                signals_repo.retract_evidence(old.id, now)
+                changed.append(old.id)
+            return None
+        if (
+            old is not None
+            and old.type == EvidenceType.QUOTE
+            and old.quote == proposed.quote
+            and old.source == proposed.source
+            and old.source_url == proposed.source_url
+        ):
+            signals_repo.confirm_evidence(old.id, max(old.last_confirmed_at, proposed.retrieved_at))
+            return old.id
+        new_id = signals_repo.insert_evidence(
+            lead_id=lead_id,
+            evidence_type=str(EvidenceType.QUOTE),
+            quote=proposed.quote,
+            sought=None,
+            number=None,
+            fact=None,
+            value=None,
+            pages_checked=(proposed.source_url,),
+            source=str(proposed.source),
+            source_url=proposed.source_url,
+            retrieved_at=proposed.retrieved_at,
+            extracted_by=EXTRACTED_BY_RULE,
+            person_contact_id=None,
+            at=now,
+        )
+        if old is not None:
+            signals_repo.supersede_evidence(old.id, new_id)
+            changed.append(old.id)
+        return new_id
 
     @use_case
     def purge_page_text(self) -> int:

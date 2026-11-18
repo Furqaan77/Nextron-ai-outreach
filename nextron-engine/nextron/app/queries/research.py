@@ -54,6 +54,11 @@ Story 2.10 adds ``no_decision_maker(lead_id)``: ``True`` when the Lead's last Pr
 selection found no decision-maker, ``False`` when it found one, ``None`` before the first
 selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
 ``primary_set_by`` (``system`` or ``operator``) beside ``is_primary``.
+
+Story 2.12 adds ``legal_form(lead_id)``: the Lead's legal form as a ``StoredLegalForm``
+(``legal_form``, ``company_status``, ``legal_form_status``, ``site_evidence_id``,
+``registry_evidence_id``, each ``None`` until the Lead is first checked), or ``None`` for an
+unknown Lead (a text that isn't a ULID included).
 """
 
 from collections.abc import Mapping
@@ -72,6 +77,7 @@ from nextron.db.repos.research.crawl import (
     StoredCrawlRun,
     StoredPage,
 )
+from nextron.db.repos.research.profile import StoredLegalForm
 from nextron.db.repos.research.provenance import StoredProvenance
 from nextron.db.repos.research.signals import StoredEvidence, StoredExtractionRun, StoredSignal
 from nextron.domain.extraction import ROUTE as SIGNALS_ROUTE
@@ -90,6 +96,7 @@ __all__ = [
     "StoredCrawlRun",
     "StoredEvidence",
     "StoredExtractionRun",
+    "StoredLegalForm",
     "StoredPage",
     "StoredProvenance",
     "StoredSignal",
@@ -106,6 +113,7 @@ __all__ = [
     "last_ok_extraction",
     "latest_crawl_run",
     "lead_provenance",
+    "legal_form",
     "lead_signals",
     "no_decision_maker",
     "page_contact_methods",
@@ -239,6 +247,11 @@ def no_decision_maker(lead_id: str) -> bool | None:
     """Whether the Lead's last Primary Contact selection found no decision-maker; ``None``
     before the first selection."""
     return profile_repo.no_decision_maker(lead_id) if is_ulid(lead_id) else None
+
+
+def legal_form(lead_id: str) -> StoredLegalForm | None:
+    """The Lead's legal form, or ``None`` for an unknown Lead."""
+    return profile_repo.legal_form(lead_id) if is_ulid(lead_id) else None
 
 
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:

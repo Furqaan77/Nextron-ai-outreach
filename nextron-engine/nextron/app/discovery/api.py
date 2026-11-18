@@ -68,6 +68,27 @@ normaliser).
   It logs ``lead_canonicalized`` (``lead_id``, ``survivor_id``, ``run_id``, ``action``) and
   returns the action.
 
+- ``@command set_ch_number(lead_id, number) -> str | None`` (Story 2.12, FR-9): Evidence on the
+  Lead's website links it to the Companies House company ``number`` (normalised: ``[A-Z0-9]{8}``,
+  else ``ValueError``; an unknown Lead raises ``LookupError``). It works on the Lead's survivor,
+  as ``_canonicalize`` does, and returns the Lead the number now belongs to:
+
+  - the survivor holds ``number``: nothing; the survivor;
+  - the survivor holds another number: nothing (a number a Lead holds is never overwritten);
+    ``None``, a conflict;
+  - no Lead holds it: the survivor's ``ch_number`` becomes it; the survivor;
+  - a Lead merged into the survivor holds it: nothing; the survivor;
+  - another Lead holds it: the two survivors are ``merge``d, the older surviving, and the older
+    is returned when it then holds ``number``; when it holds another (the number stayed on a
+    Lead merged into it), the merge stands and the answer is ``None``.
+
+  A ``ch_number`` that came from a CSV is never Evidence: only this command, called by the
+  legal-form check, links a number to a Lead from its website.
+
+**The legal form (Story 2.12, FR-12).** ``LegalFormChecks`` (``nextron.app.discovery
+.legal_form``) runs the ``check_legal_form`` jobs: it links a GB Lead to its Companies House
+record through ``set_ch_number`` and records the finding through ``research.record_legal_form``.
+
 **The CSV import (FR-59, Story 2.3).** ``LeadImports(clock, discovery, research,
 email_syntax)`` turns an uploaded CSV into Leads and Contacts; the rules for the file and its
 rows are ``nextron.domain.lead_import``'s.
@@ -156,6 +177,7 @@ from nextron.domain.leads import (
     MergeRefused,
     is_shared_platform,
 )
+from nextron.domain.legal_form import COMPANY_NUMBER_PATTERN
 from nextron.domain.notifications import LeadsMerged
 from nextron.ports.clock import Clock
 from nextron.ports.email_syntax import EmailSyntaxPort
@@ -322,6 +344,36 @@ class Discovery:
         older, newer = sorted((survivor, other), key=_age)
         self.merge(older.id, newer.id)
         return older.id, MERGED
+
+    @command
+    def set_ch_number(self, lead_id: str, number: str) -> str | None:
+        """Give the Lead's survivor the Companies House ``number``, merging per FR-9; the Lead
+        it now belongs to, or ``None`` on a conflict. See the module docstring."""
+        if not isinstance(lead_id, str) or not isinstance(number, str):
+            raise TypeError("set_ch_number takes a Lead id and a company number as str")
+        if COMPANY_NUMBER_PATTERN.fullmatch(number) is None:
+            raise ValueError("set_ch_number takes a normalised Companies House number")
+        lead = leads_repo.get(lead_id) if is_ulid(lead_id) else None
+        if lead is None:
+            raise LookupError("set_ch_number: the Lead is unknown")
+        survivor = _survivor(lead)
+        if survivor.ch_number == number:
+            return survivor.id
+        if survivor.ch_number is not None:  # never overwritten
+            return None
+        holder = leads_repo.by_ch_number(number)
+        if holder is None:
+            leads_repo.set_keys(survivor.id, ch_number=number)
+            return survivor.id
+        other = _survivor(holder)
+        if other.id == survivor.id:  # held by a Lead merged into the survivor
+            return survivor.id
+        older, newer = sorted((survivor, other), key=_age)
+        self.merge(older.id, newer.id)
+        kept = leads_repo.get(older.id)
+        if kept is None:  # merging never deletes a row
+            raise RuntimeError(f"Lead {older.id} has no row")
+        return kept.id if kept.ch_number == number else None
 
     @command
     def merge(self, survivor_id: str, loser_id: str) -> None:

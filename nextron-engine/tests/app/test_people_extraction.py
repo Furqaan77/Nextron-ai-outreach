@@ -119,8 +119,10 @@ def counts(world: World, lead: str) -> list[dict[str, Any]]:
     return [row for row in world.evidence(lead) if row["type"] == "count"]
 
 
-def select_jobs(world: World) -> list[tuple[Any, ...]]:
-    return world.jobs("select_primary_contact")
+def next_stage_jobs(world: World) -> list[tuple[Any, ...]]:
+    """The jobs of the chain's next stage, which the people step enqueues: ``check_legal_form``
+    (Story 2.12), which enqueues ``select_primary_contact`` when it is done."""
+    return world.jobs("check_legal_form")
 
 
 def page_fetched(world: World, lead: str) -> str:
@@ -232,11 +234,11 @@ def test_a_law_leads_decision_maker_becomes_a_contact_with_evidence_and_a_lawyer
         "extracted_by": "rule",
         "person_contact_id": None,
     }
-    # the run and the selection job
+    # the run and the next stage's job
     assert people_runs(world, lead) == [("ok", None, PEOPLE_ACTOR, 2, 0, 2, 0)]
-    [(key, concurrency, payload, lane)] = select_jobs(world)
+    [(key, concurrency, payload, lane)] = next_stage_jobs(world)
     assert (key, concurrency, json.loads(payload), lane) == (
-        f"select_primary_contact:{lead}:tick",
+        f"check_legal_form:{lead}:tick",
         f"domain:{SITE}",
         {"v": 1, "lead_id": lead},
         "bulk",
@@ -362,7 +364,7 @@ def test_refused_people_store_nothing_and_each_writes_one_event(world: World) ->
         (lead, None, "person_discarded", "unknown_block", None, PEOPLE_ACTOR),
     ]
     assert people_runs(world, lead) == [("ok", None, PEOPLE_ACTOR, 2, 0, 0, 3)]
-    assert len(select_jobs(world)) == 1  # selection still runs: the Lead has no decision-maker
+    assert len(next_stage_jobs(world)) == 1  # selection still runs: the Lead has no decision-maker
 
 
 def test_people_in_other_roles_are_never_stored(world: World) -> None:
@@ -662,7 +664,7 @@ def test_the_people_steps_own_budget_check_defers_the_job(world: World) -> None:
 
     assert world.people_calls == [] and people_runs(world, lead) == []
     assert world.runs(lead)[0][0] == "ok"  # the Signals step stored its run
-    assert select_jobs(world) == []
+    assert next_stage_jobs(world) == []
 
 
 # No work, bad results, failures -----------------------------------------------------------------
@@ -672,7 +674,7 @@ def test_no_changed_people_page_records_a_no_pages_run_and_still_selects(world: 
     lead, run_id, pages = law_lead(world)
     world.extract(lead, run_id, ok(), people=[law_people(pages)])
     world.clock.advance(timedelta(hours=1))
-    world.sql("UPDATE jobs SET status = 'done' WHERE type = 'select_primary_contact'")
+    world.sql("UPDATE jobs SET status = 'done' WHERE type = 'check_legal_form'")
     # only the homepage changed: the Signals step sends it, the people step sends nothing
     world.sql(
         "UPDATE crawled_pages SET changed_at = ? WHERE url = ?",
@@ -683,7 +685,7 @@ def test_no_changed_people_page_records_a_no_pages_run_and_still_selects(world: 
 
     assert len(world.people_calls) == 1
     assert people_runs(world, lead)[1] == ("no_pages", None, PEOPLE_ACTOR, 0, 0, 0, 0)
-    assert len(select_jobs(world)) == 2
+    assert len(next_stage_jobs(world)) == 2
 
 
 def test_any_changed_people_page_sends_every_people_page(world: World) -> None:
@@ -710,7 +712,7 @@ def test_with_no_activation_a_no_activation_run_is_recorded(db_engine: Engine) -
     assert world.extract(lead, run_id, people=[]) is True
 
     assert people_runs(world, lead) == [("no_activation", None, None, 0, 0, 0, 0)]
-    assert len(select_jobs(world)) == 1
+    assert len(next_stage_jobs(world)) == 1
 
 
 @pytest.mark.parametrize(
@@ -732,7 +734,7 @@ def test_a_bad_result_records_its_outcome_and_still_selects(
     assert world.extract(lead, run_id, ok(), people=[result]) is True
 
     assert people_runs(world, lead) == [(outcome, code, PEOPLE_ACTOR, 2, 0, 0, 0)]
-    assert contacts(world, lead) == [] and len(select_jobs(world)) == 1
+    assert contacts(world, lead) == [] and len(next_stage_jobs(world)) == 1
 
 
 def test_a_retryable_failure_records_a_failed_run_and_raises_without_selecting(
@@ -744,7 +746,7 @@ def test_a_retryable_failure_records_a_failed_run_and_raises_without_selecting(
         world.extract(lead, run_id, ok(), people=[AdapterError(True, "llm_timeout", "slow")])
 
     assert people_runs(world, lead) == [("failed", "llm_timeout", PEOPLE_ACTOR, 2, 0, 0, 0)]
-    assert select_jobs(world) == []
+    assert next_stage_jobs(world) == []
 
 
 def test_a_signals_failure_that_raises_skips_the_people_step(world: World) -> None:
@@ -818,7 +820,7 @@ def test_an_unknown_or_merged_lead_is_skipped_by_both_steps(world: World, merged
     assert world.extract(target, run_id, people=[]) is True
 
     assert world.sql("SELECT COUNT(*) FROM extraction_runs") == [(0,)]
-    assert select_jobs(world) == []
+    assert next_stage_jobs(world) == []
 
 
 # The route split and the log line ---------------------------------------------------------------

@@ -120,8 +120,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "created_at",
         ),
         "pipeline": ("pipeline_stage",),
-        # the profile group (Stories 2.9, 2.6 and 2.10)
-        "research": ("hq_tz", "hq_evidence_id", "contact_methods", "no_decision_maker"),
+        # the profile group (Stories 2.9, 2.6, 2.10 and 2.12)
+        "research": (
+            "hq_tz",
+            "hq_evidence_id",
+            "contact_methods",
+            "no_decision_maker",
+            "legal_form",
+            "company_status",
+            "legal_form_status",
+            "legal_form_site_evidence_id",
+            "legal_form_registry_evidence_id",
+        ),
     },
     "prompt_snapshots": {
         "playbook": ("id", "route", "prompt_version", "sha256", "text", "created_at"),
