@@ -22,6 +22,7 @@ from tests.fakes.clock import FrozenClock
 from nextron.web.app import STATIC_DIR
 from nextron.web.guard import LOCKED_TEXT
 from tests.asgi import DEFAULT_HOST, Reply, request
+from tests.assist_setup import assist_ready
 from tests.dashboard import FORM, Dashboard, form
 
 HTMX_CONFIG = (
@@ -63,6 +64,7 @@ class Tags(HTMLParser):
 
 @pytest.fixture
 def dashboard(units: UnitOfWorkFactory) -> Dashboard:
+    assist_ready(units)  # Story 10.2: no linkedin_tasks_off issue in the error count
     return Dashboard(units=units)
 
 

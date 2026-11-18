@@ -686,10 +686,13 @@ from nextron.app.ops.api import (
     clear_work_folders,
     remove_work_folder,
 )
+from nextron.app.pipeline import api as pipeline_api
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.pipeline.assist_accounts import AssistAccounts
 from nextron.app.playbook.api import AiTestRuns, CompanyFacts, CompanyFactSync, Playbook
 from nextron.app.queries import jobqueue as jobqueue_queries
 from nextron.app.queries import ops as ops_queries
+from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
@@ -1147,6 +1150,7 @@ def build_app(
         entry=build_entry(config, secrets=secrets, clock=clock),
         setup=Setup(clock),
         campaigns=Campaigns(clock),
+        assist_accounts=AssistAccounts(clock),  # Story 10.2: the LinkedIn account
         facts=CompanyFacts(clock),
         playbook=Playbook(clock),
         ai_content=functools.partial(load_ai_content, config.playbook_path),
@@ -1477,8 +1481,8 @@ def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> Health
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
     Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
-    ``clock`` is ``None``). Each later owner registers its ``queries.<owner>.health_issues``
-    here, before ``freeze()``."""
+    ``clock`` is ``None``), then the LinkedIn Tasks setup (Story 10.2). Each later owner
+    registers its ``queries.<owner>.health_issues`` here, before ``freeze()``."""
     now = (clock if clock is not None else SystemClock()).now
     issues = HealthIssues()
     issues.register_source(IssueSource("jobqueue", jobqueue_queries.health_issues))
@@ -1486,6 +1490,7 @@ def build_health_issues(*, budget: Budget, clock: Clock | None = None) -> Health
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
     issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
+    issues.register_source(IssueSource("pipeline", pipeline_queries.health_issues))  # Story 10.2
     issues.freeze()
     return issues
 
@@ -1807,7 +1812,7 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)
     # Story 4.6: the Operator's override cases of the Contact (ai_test_cases.input)
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
-    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
+    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api, pipeline_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
     subscribers.freeze()
     return subscribers

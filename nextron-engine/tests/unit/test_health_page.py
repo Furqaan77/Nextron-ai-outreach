@@ -35,6 +35,7 @@ from nextron.domain.recovery import RecoveryStep
 from nextron.domain.restore_test import RestoreTestKind
 from nextron.web.guard import LOCKED_TEXT
 from tests.asgi import DEFAULT_HOST, Reply, request
+from tests.assist_setup import assist_ready
 from tests.dashboard import FORM, READINESS, Dashboard, form
 from tests.fakes.clock import FrozenClock
 
@@ -157,6 +158,7 @@ class Texts(HTMLParser):
 
 @pytest.fixture
 def dashboard(units: UnitOfWorkFactory) -> Dashboard:
+    assist_ready(units)  # Story 10.2: no linkedin_tasks_off issue in the counts read here
     return Dashboard(units=units, clock=FrozenClock(T))
 
 
@@ -496,6 +498,7 @@ def test_the_readiness_list_counts_warnings_and_failures(
         CheckResult("required_settings", Status.FAIL, "required settings not set: <x>"),
         CheckResult("database_revision", Status.WARN, "will migrate on next start"),
     )
+    assist_ready(units)
     dashboard = Dashboard(units=units, clock=FrozenClock(T), readiness=lambda: results)
     cookie = dashboard.open_session()
 

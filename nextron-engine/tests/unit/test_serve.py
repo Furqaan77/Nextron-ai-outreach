@@ -25,6 +25,7 @@ from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.notify import api as notify_api
 from nextron.app.ops import api as ops_api
+from nextron.app.pipeline import api as pipeline_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
@@ -800,6 +801,7 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
         jobqueue_api.erase_pii,
         ops_api.erase_pii,
         notify_api.erase_pii,
+        pipeline_api.erase_pii,  # Story 10.2
     ]
     registered = (LeadsMerged, SubjectSuppressed, ContactErased)
     others = [kind for kind in NOTIFICATIONS if kind not in registered]

@@ -423,6 +423,20 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "footer_snapshots": {
         "drafting": ("id", "market_id", "sha256", "text", "created_at"),
     },
+    "linkedin_accounts": {  # Story 10.2
+        "pipeline": (
+            "id",
+            "label",
+            "owner_name",
+            "owner_role",
+            "status",
+            "tasks_per_weekday",
+            "daily_invite_cap",
+            "weekly_invite_cap",
+            "created_at",
+            "updated_at",
+        ),
+    },
     "unsub_tokens": {
         "compliance": (
             "id",

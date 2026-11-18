@@ -43,6 +43,7 @@ from nextron.domain.job import Job, JobGroup, JobType, JobTypes, Lane
 from nextron.domain.readiness import CheckResult, Status
 from nextron.ports.errors import AdapterError
 from nextron.startup_checks import CheckFailed, check_database_revision
+from tests.assist_setup import assist_ready
 from tests.fakes.alert import InMemoryAlert
 from tests.fakes.clock import FrozenClock
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -229,6 +230,7 @@ def world(
     job_types = registered_job_types(lambda: built["notify"])
     found = World(units, db_engine, clock, tmp_path, job_types)
     built["notify"] = found.notify
+    assist_ready(units)  # Story 10.2: no linkedin_tasks_off issue among the ones read here
     return found
 
 

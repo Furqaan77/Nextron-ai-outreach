@@ -2,8 +2,8 @@
 type or code that names the platforms' hosts, and nothing can add one without failing here.
 
 - **Module names.** No module or package under ``nextron/`` has ``linkedin`` or ``instagram``
-  (any case) in any path segment, except those in ``PLATFORM_MODULE_ALLOWLIST`` (empty: a
-  future pure helper would go there, in ``nextron.domain`` only).
+  (any case) in any path segment, except those in ``PLATFORM_MODULE_ALLOWLIST`` (pure helpers
+  in ``nextron.domain`` only: Story 10.2's ``linkedin_caps``).
 - **Defined names.** A name holding either word, defined at module level (also under a
   module-level ``if``, ``try``, ``with``, ``for`` or ``while``), as a method or nested class of a
   class, or as an import's ``as`` alias, is one of ``PLATFORM_NAME_ALLOWLIST`` (each a
@@ -47,7 +47,11 @@ PLATFORM_HOST: Final = re.compile(
 VENDORED: Final = re.compile(r"^htmx-[0-9.]+\.min\.js$")
 
 # module -> reason; only nextron.domain.* (pure helpers that fetch nothing)
-PLATFORM_MODULE_ALLOWLIST: Final[dict[str, str]] = {}
+PLATFORM_MODULE_ALLOWLIST: Final[dict[str, str]] = {
+    "nextron.domain.linkedin_caps": (
+        "Story 10.2: the account's caps and their headroom, a pure helper that fetches nothing"
+    ),
+}
 # "<module>.<qualified name>" -> reason; only in nextron.domain.*
 PLATFORM_NAME_ALLOWLIST: Final[dict[str, str]] = {
     "nextron.domain.identity.normalize_linkedin_url": "the one profile URL normaliser (FR-49)",

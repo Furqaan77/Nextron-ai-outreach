@@ -134,8 +134,23 @@ class Shown:
         return self.attrs.get("value")
 
 
+ASSIST_PANEL = '<section id="assist-accounts-panel"'  # Story 10.2's panel, read elsewhere
+CAMPAIGNS_PANEL = '<section id="campaigns-panel"'
+
+
+def without_assist_panel(html: str) -> str:
+    """``html`` without the LinkedIn account panel (``tests/app/test_assist_accounts.py``
+    reads it), so only the settings form's fields are parsed here."""
+    start = html.find(ASSIST_PANEL)
+    if start < 0:
+        return html
+    end = html.find(CAMPAIGNS_PANEL, start)
+    return html[:start] + (html[end:] if end >= 0 else "")
+
+
 class SettingsHtml(HTMLParser):
-    """The forms, fieldsets (legend and fields), hidden inputs and notices of a page."""
+    """The forms, fieldsets (legend and fields), hidden inputs and notices of a page, without
+    the LinkedIn account panel."""
 
     def __init__(self, html: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -148,7 +163,7 @@ class SettingsHtml(HTMLParser):
         self._text: list[str] = []
         self._field: Shown | None = None
         self._role: str | None = None
-        self.feed(html)
+        self.feed(without_assist_panel(html))
         self.close()
 
     def _capture(self, what: str, tag: str) -> None:
@@ -521,6 +536,7 @@ def test_the_sender_section_shows_the_sender_timezone_as_required(
         "Footer and booking",
         "Sender",
         "Alerts and recipients",
+        "LinkedIn",
         "Sending",
         "Budget and limits",
         "Engine",
@@ -545,6 +561,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "sender_name",
         "sender_timezone",
         "alert_chat_id",
+        "linkedin_owner_chat",
         "unsub_active_kid",
         "quota_hunter_credits",
         "quota_prospeo_credits",

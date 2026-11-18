@@ -15,6 +15,7 @@ from nextron.db.models import (
     metering,
     notify,
     ops,
+    pipeline,
     playbook,
     research,
     sending,
@@ -46,6 +47,7 @@ from nextron.db.models.ops import (
     RecoveryStateRecord,
     RestoreTestRecord,
 )
+from nextron.db.models.pipeline import AssistAccountRecord
 from nextron.db.models.playbook import (
     AiRouteActivationRecord,
     AiRouteTupleRecord,
@@ -83,6 +85,7 @@ __all__ = [
     "AiUsageRecord",
     "AlertRecord",
     "ApiUsageRecord",
+    "AssistAccountRecord",
     "AtsLinkRecord",
     "BackupRecord",
     "Base",
@@ -134,6 +137,7 @@ __all__ = [
     "new_id",
     "notify",
     "ops",
+    "pipeline",
     "playbook",
     "research",
     "sending",
