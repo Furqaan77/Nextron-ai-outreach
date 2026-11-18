@@ -102,6 +102,7 @@ class World:
             test_runs=no_jobs,
             job_boards=no_jobs,
             legal_forms=no_jobs,
+            scores=no_jobs,
             domain_checks=lambda: self.checks,
         )
         self.queue = JobQueue(self.clock, job_types)

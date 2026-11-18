@@ -362,3 +362,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-13-find-the-primary-contact-s-email-address-in-the-cheapest-order.md`
   summary: Treat a Hunter or Prospeo quota of 0 (the provider switched off) as "provider off": skip that paid step and move on, instead of deferring the email search.
   evidence: Story 2.13 review pass 1 (entry R). `allow(..., quota=)` refuses at a limit of 0, so a switched-off provider defers `find_contact_email` hourly forever and the Lead page says "email not found yet: quota reached".
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-15-score-and-tier-every-enriched-lead.md`
+  summary: Let an interactive "Re-score" run promptly when a bulk `score_lead` for the same Lead is already queued. Today the shared `score_lead:<lead>:tick` key absorbs the interactive request into the bulk job, so it waits behind the bulk backlog.
+  evidence: Story 2.15 review pass 1 (entry I, BH3, medium). `JobQueue.enqueue` returns the live job on the same idempotency key without changing its lane. A fix needs new jobqueue surface, such as promoting a live job's lane, or a separate discriminator for operator requests.
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-15-score-and-tier-every-enriched-lead.md`
+  summary: Re-score the survivor after a merge (a `scoring.reparent_lead` subscriber that enqueues `score_lead`). Also decide what an operator reopen of a Disqualified Lead does to the score group: clear `disqualified_rule` and `disqualified_evidence`, and stop a later `score_lead` from closing it again on the same Evidence.
+  evidence: Story 2.15 review pass 1 (entry J, BH7 and EC2, medium). Nothing re-scores a merge survivor, so its Tier and Lead Score stay stale until the next chain run or Re-score. There is no reopen UI yet (Story 4.10). Once there is, the next `score_lead` (from the chain, a re-check or Re-score) re-applies the matching disqualifier and closes the Lead again.

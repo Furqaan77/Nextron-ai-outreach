@@ -5,7 +5,8 @@ Commands join the caller's unit of work and never begin, commit or roll back.
 
 ``Pipeline(clock)`` owns ``leads.pipeline_stage`` and applies the Lead Pipeline Stage machine
 (``nextron.domain.pipeline_stage``). Every stage change appends one ``events`` row in the same
-transaction: entity ``leads``, actor ``system:pipeline``, at the clock's now.
+transaction: entity ``leads``, actor ``system:pipeline`` (``close`` takes another), at the
+clock's now.
 
 - ``@command record_created(lead_id, source)``: ``discovery`` calls it right after inserting a
   Lead. The stored stage must be ``new`` (otherwise, an unknown Lead included,
@@ -17,11 +18,15 @@ transaction: entity ``leads``, actor ``system:pipeline``, at the clock's now.
   ``merged(survivor, loser)``: on a ``Transition`` it sets the survivor's stage and appends a
   row from the old stage to the new one, cause ``leads_merged``, ``cause_ref`` the merged
   Lead's id. The merged Lead keeps its stage. A Lead with no row raises ``LookupError``.
-- ``@command close(lead_id, stage, cause_ref) -> bool``: closes the Lead at ``stage``, which
-  must be ``lost`` or ``disqualified`` (anything else raises ``ValueError``, and so does a
-  ``cause_ref`` that is neither ``None`` nor a ULID). It applies ``close_lost`` or
-  ``close_disqualified``, sets the stage and appends a row from the old stage, cause
-  ``closed_lost`` or ``closed_disqualified``, with the ``cause_ref``; it returns ``True``. A
+- ``@command close(lead_id, stage, cause_ref, *, cause=None, actor=None) -> bool``: closes the
+  Lead at ``stage``, which must be ``lost`` or ``disqualified`` (anything else raises
+  ``ValueError``, and so does a ``cause_ref`` that is neither ``None`` nor a ULID, a ``cause``
+  that is neither ``None`` nor a ``StageCause``, and an ``actor`` that is neither ``None`` nor a
+  non-blank ``str``). It applies ``close_lost`` or ``close_disqualified``, sets the stage and
+  appends a row from the old stage, with the ``cause_ref``; the row's cause is ``cause``, else
+  the machine's (``closed_lost`` or ``closed_disqualified``), and its actor ``actor``, else
+  ``system:pipeline`` (Story 2.15: the ``scoring`` service passes ``segment_disqualifier`` and
+  ``system:scoring``); it returns ``True``. A
   Lead already closed (``lost`` or ``disqualified``) is left as it is and gives ``False``; an
   unknown Lead (a text that isn't a ULID included) raises ``LookupError``. Before the
   already-closed check it stops the Lead's live Enrollment (AD-4, Story 4.8):
@@ -64,6 +69,7 @@ from nextron.domain.pipeline_stage import (
     CREATION,
     MACHINE,
     PipelineStage,
+    StageCause,
     StageEvent,
     advance,
     merged,
@@ -131,7 +137,15 @@ class Pipeline:
         )
 
     @command
-    def close(self, lead_id: str, stage: PipelineStage, cause_ref: str | None) -> bool:
+    def close(
+        self,
+        lead_id: str,
+        stage: PipelineStage,
+        cause_ref: str | None,
+        *,
+        cause: StageCause | None = None,
+        actor: str | None = None,
+    ) -> bool:
         """Close the Lead ``lead_id`` at ``stage`` (``lost`` or ``disqualified``); ``False``
         when it is closed already. See the module docstring."""
         try:
@@ -142,6 +156,10 @@ class Pipeline:
             raise ValueError("close takes the stage lost or disqualified")
         if not (cause_ref is None or is_ulid(cause_ref)):
             raise ValueError("close: cause_ref must be None or a ULID")
+        if cause is not None and not isinstance(cause, StageCause):
+            raise ValueError("close: cause must be None or a StageCause")
+        if actor is not None and (not isinstance(actor, str) or not actor.strip()):
+            raise ValueError("close: actor must be None or a non-blank str")
         stored = stages_repo.stage(lead_id) if is_ulid(lead_id) else None
         if stored is None:
             raise LookupError("close: the Lead is unknown")
@@ -157,9 +175,9 @@ class Pipeline:
             entity_id=lead_id,
             from_status=stored,
             to_status=str(change.to),
-            cause=str(change.cause),
+            cause=str(change.cause if cause is None else cause),
             cause_ref=cause_ref,
-            actor=ACTOR,
+            actor=ACTOR if actor is None else actor,
             at=self._clock.now(),
         )
         return True

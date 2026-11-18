@@ -58,6 +58,10 @@ seen (then by ``id``); empty for an unknown Lead (a text that isn't a ULID inclu
 run's ``StoredCrawlRun`` carries its posting counts (``careers_postings``, ...,
 ``board_errors``; ``None`` until a check writes them).
 
+Story 2.15 adds ``signal_evidence_ids(lead_id) -> dict[str, tuple[str, ...]]``: each of the
+Lead's Signals (retracted ones included) that has live Evidence, mapped to the ids of that live
+Evidence, sorted; ``{}`` for an unknown Lead (a text that isn't a ULID included).
+
 Story 2.10 adds ``no_decision_maker(lead_id)``: ``True`` when the Lead's last Primary Contact
 selection found no decision-maker, ``False`` when it found one, ``None`` before the first
 selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
@@ -169,6 +173,7 @@ __all__ = [
     "no_decision_maker",
     "page_contact_methods",
     "provenance",
+    "signal_evidence_ids",
     "signals",
 ]
 
@@ -348,6 +353,19 @@ def job_postings(lead_id: str) -> tuple[StoredPosting, ...]:
 def legal_form(lead_id: str) -> StoredLegalForm | None:
     """The Lead's legal form, or ``None`` for an unknown Lead."""
     return profile_repo.legal_form(lead_id) if is_ulid(lead_id) else None
+
+
+def signal_evidence_ids(lead_id: str) -> dict[str, tuple[str, ...]]:
+    """The ids of each of the Lead's Signals' live Evidence, sorted; see the module
+    docstring."""
+    if not is_ulid(lead_id):
+        return {}
+    live = {row.id for row in evidence(lead_id)}
+    grouped: dict[str, list[str]] = {}
+    for link in signals_repo.links(lead_id):
+        if link.evidence_id in live:
+            grouped.setdefault(link.signal_id, []).append(link.evidence_id)
+    return {signal_id: tuple(sorted(ids)) for signal_id, ids in grouped.items()}
 
 
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:

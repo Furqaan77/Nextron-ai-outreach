@@ -193,8 +193,19 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   each Contact's Market (Story 3.7), and ``queries.compliance.completed_erasures``
   (``lead_erasures``, Story 3.13: an erased Contact's tombstone line names its request) and
   ``queries.compliance.receipts`` (``lead_receipts``, Story 3.14: an erased Contact's erasure
-  receipts follow its tombstone line),
-  with one "Export data (JSON)" form per Contact (``export_page.lead_forms``, Story 3.15).
+  receipts follow its tombstone line), and
+  ``queries.scoring.stored`` (Story 2.15: the Score panel), with one "Export data (JSON)" form
+  per Contact (``export_page.lead_forms``, Story 3.15). The list also passes its ``sort`` to
+  ``lead_list``.
+- ``POST /leads/{lead_id}/rescore`` (``lead_rescore``, Story 2.15, ``@personal_data(True)``):
+  the Score panel's "Re-score". The form holds nothing but the CSRF token
+  (``leads_page.submitted_rescore``). It runs ``lead_scores.request_rescore(lead_id)`` in its
+  own unit of work, which queues ``score_lead`` on the interactive lane, then answers 200 with
+  the Score panel (``lead_score.html``, read in a read-only unit of work) and the notice
+  "Re-score queued."; a merged or closed Lead queues nothing and the panel carries the refusal
+  notice (``leads_page.rescore_refused``). An unknown Lead (a text that isn't a ULID
+  included) answers 404 with the plain text "That Lead doesn't exist.", which never echoes the
+  id.
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
   ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
   ``contact_id`` (``leads_page.submitted_contact``). It runs
@@ -307,11 +318,13 @@ from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import scoring as scoring_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.finding import EmailFinding, SearchQueued
 from nextron.app.research.people import PrimaryContacts
+from nextron.app.scoring.lead_scores import LeadScores, RescoreRequest
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import (
@@ -542,6 +555,7 @@ def create_app(
     primary_contacts: PrimaryContacts,
     erasures: Erasures,
     domain_checks: DomainChecks,
+    lead_scores: LeadScores,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -562,7 +576,8 @@ def create_app(
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
-    answers 503); ``compliance`` runs the Suppression List panel's add, import and Reverse, and
+    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``compliance`` runs the
+    Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
     subject access export; ``domain_checks`` reads the Sending Domain authentication section
@@ -1524,6 +1539,7 @@ def create_app(
             segment_id=filters.segment_id,
             search=filters.search,
             page=filters.page,
+            sort=filters.sort,
         )
         context = lead_rows.list_context(filters, found, segments)
         return page(request, lead_rows.LIST_TEMPLATE, **context)
@@ -1678,6 +1694,7 @@ def create_app(
             postings=research_queries.job_postings(found.id),
             legal_form=research_queries.legal_form(found.id),
             receipts=lead_receipts(contacts),
+            score=scoring_queries.stored(found.id),
         )
         return page(
             request,
@@ -1685,6 +1702,33 @@ def create_app(
             **context,
             export_forms=export_rows.lead_forms(contacts),
         )
+
+    @app.post("/leads/{lead_id}/rescore", name="lead_rescore")
+    @personal_data(True)  # the Lead page's panel; a Lead's name can be a sole trader's name
+    def lead_rescore(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        lead_rows.submitted_rescore(fields)
+        with units.open():
+            requested = lead_scores.request_rescore(lead_id)
+        if requested is RescoreRequest.UNKNOWN:  # never echoes the id
+            text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
+            return PlainTextResponse(text, status_code=404, headers=NO_STORE)
+        if requested is RescoreRequest.QUEUED:
+            notice = lead_rows.rescore_queued()
+        else:  # nothing was queued
+            notice = lead_rows.rescore_refused(requested is RescoreRequest.MERGED)
+        with units.open(read_only=True):  # 200, so HTMX swaps the panel in
+            found = discovery_queries.lead(lead_id)
+            seeded = None if found is None else setup_queries.segment_by_id(found.segment_id)
+            context = lead_rows.score_context(
+                lead_id,
+                scoring_queries.stored(lead_id),
+                None if seeded is None else seeded.definition,
+                notice,
+                live=frozenset(row.id for row in research_queries.evidence(lead_id)),
+            )
+            return page(request, lead_rows.SCORE_TEMPLATE, **context)
 
     @app.post("/leads/{lead_id}/primary", name="lead_make_primary")
     @personal_data(True)  # the panel shows Contacts, who are people

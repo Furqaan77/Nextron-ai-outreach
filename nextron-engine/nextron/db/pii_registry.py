@@ -133,6 +133,16 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "legal_form_status": PiiClass.NONE,
         "legal_form_site_evidence_id": PiiClass.NONE,
         "legal_form_registry_evidence_id": PiiClass.NONE,
+        # Story 2.15: the firm's scores, its Tier and the ids and keys behind them
+        "fit_score": PiiClass.NONE,
+        "signal_score": PiiClass.NONE,
+        "lead_score": PiiClass.NONE,
+        "tier": PiiClass.NONE,
+        "tier_computed_at": PiiClass.NONE,
+        "score_segment_version": PiiClass.NONE,
+        "score_factors": PiiClass.NONE,
+        "disqualified_rule": PiiClass.NONE,
+        "disqualified_evidence": PiiClass.NONE,
     },
     # Story 2.8. A prompt is the engine's own text, never a person's; an activation holds codes,
     # a hash and times.

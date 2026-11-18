@@ -319,6 +319,7 @@ def world(db_engine: Engine) -> Iterator[World]:
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=no_jobs,
+        scores=no_jobs,
         erasure_stores=lambda: built["stores"],
     )
     queue = JobQueue(clock, job_types)

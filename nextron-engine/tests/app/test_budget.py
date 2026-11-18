@@ -87,6 +87,7 @@ class World:
             test_runs=no_crawls,
             job_boards=no_crawls,
             legal_forms=no_crawls,
+            scores=no_crawls,
         )
         self.notify = Notify(
             self.clock,

@@ -655,6 +655,65 @@ def test_saving_the_real_schema_stores_the_sender_timezone(
     assert get(units, Key.SENDER_TIMEZONE) == "America/Los_Angeles"
 
 
+# Row: the Lead Score weights (Story 2.15) --------------------------------------------------------
+
+FIT_WEIGHT = "lead_score_fit_weight"
+SIGNAL_WEIGHT = "lead_score_signal_weight"
+
+
+def test_the_weights_default_to_50_each(units: UnitOfWorkFactory) -> None:
+    assert (get(units, Key.LEAD_SCORE_FIT_WEIGHT), get(units, Key.LEAD_SCORE_SIGNAL_WEIGHT)) == (
+        50,
+        50,
+    )
+
+
+def test_weights_that_dont_sum_to_100_are_refused_on_both_keys(
+    units: UnitOfWorkFactory, setup: Setup
+) -> None:
+    with pytest.raises(InvalidSettings) as raised:
+        save(units, setup, {FIT_WEIGHT: "60", SIGNAL_WEIGHT: "30"})
+
+    assert {key: problem.rule for key, problem in raised.value.problems.items()} == {
+        FIT_WEIGHT: "weights_sum",
+        SIGNAL_WEIGHT: "weights_sum",
+    }
+    assert "add up to 100" in str(raised.value.problems[FIT_WEIGHT])
+    assert stored(units) == {}
+    with pytest.raises(InvalidSettings):  # one key alone breaks the sum with the other's default
+        save(units, setup, {FIT_WEIGHT: "60"})
+    with pytest.raises(InvalidSettings) as single:
+        set_value(units, setup, Key.LEAD_SCORE_FIT_WEIGHT, 60)
+    assert set(single.value.problems) == {FIT_WEIGHT, SIGNAL_WEIGHT}
+    assert stored(units) == {}
+
+
+def test_weights_that_sum_to_100_are_stored_and_a_blank_one_reverts_to_its_default(
+    units: UnitOfWorkFactory, setup: Setup
+) -> None:
+    assert save(units, setup, {FIT_WEIGHT: "60", SIGNAL_WEIGHT: "40"}) == {
+        FIT_WEIGHT: "60",
+        SIGNAL_WEIGHT: "40",
+    }
+    set_value(units, setup, Key.LEAD_SCORE_FIT_WEIGHT, 60)  # unchanged: still sums to 100
+
+    with pytest.raises(InvalidSettings):  # the fit weight would revert to 50: 50 + 40
+        save(units, setup, {FIT_WEIGHT: ""})
+    assert save(units, setup, {FIT_WEIGHT: "", SIGNAL_WEIGHT: ""}) == {}
+    with pytest.raises(InvalidSettings) as range_refused:  # the range rule comes first
+        save(units, setup, {FIT_WEIGHT: "101", SIGNAL_WEIGHT: "-1"})
+    assert {problem.rule for problem in range_refused.value.problems.values()} == {
+        "maximum",
+        "minimum",
+    }
+
+
+def test_a_save_without_a_weight_key_skips_the_sum(units: UnitOfWorkFactory, setup: Setup) -> None:
+    assert save(units, setup, {"sender_timezone": "Europe/London"}) == {
+        "sender_timezone": "Europe/London"
+    }
+
+
 def test_a_read_only_unit_of_work_refuses_the_use_cases(
     units: UnitOfWorkFactory, setup: Setup
 ) -> None:

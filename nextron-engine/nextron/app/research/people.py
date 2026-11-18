@@ -100,7 +100,12 @@ selection, on the interactive lane after "Make primary".
   ``select_primary_contact`` job): in one transaction, ``research.select_primary(lead_id)``. An
   unknown or merged Lead logs ``primary_selection_skipped`` (``lead_id``, ``reason``) and
   returns ``None``; otherwise it logs ``primary_contact_selected`` (``lead_id``,
-  ``contact_id``: ``None`` for no decision-maker, ``set_by``).
+  ``contact_id``: ``None`` for no decision-maker, ``set_by``). When a selection ran, the same
+  transaction enqueues ``score_lead`` (Story 2.15, ``nextron.domain.scoring.SCORE_LEAD_JOB``,
+  the end of the Lead's research chain): scope the Lead, discriminator ``tick``, payload ``{v,
+  lead_id}``. The Primary's ``find_contact_email`` (Story 2.13), enqueued in the same
+  transaction when it has no usable address, is a job on the Contact beside the chain, not a
+  stage of it: the score reads nothing it writes, and a quota can defer it for days.
 - ``@use_case make_primary(lead_id, contact_id)`` (the Lead page's "Make primary"): in one
   transaction, ``research.make_primary(lead_id, contact_id)``; a ``PrimaryRefused`` leaves the
   transaction with nothing written and reaches the caller. It logs ``primary_contact_made``
@@ -148,6 +153,7 @@ from nextron.domain.extraction import (
 )
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import TICK, VERSION_FIELD, Lane
+from nextron.domain.scoring import SCORE_LEAD_JOB
 from nextron.domain.notifications import EvidenceChanged
 from nextron.domain.people import (
     BUDGET_CLASS,
@@ -679,6 +685,12 @@ class PrimaryContacts:
             else:
                 choice = self._research.select_primary(lead.id)
                 self._search(lead, choice.contact_id, lane=None)
+                self._queue.enqueue(
+                    SCORE_LEAD_JOB,
+                    scope=lead.id,
+                    discriminator=TICK,
+                    payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead.id},
+                )
         if choice is None:
             log.info(PRIMARY_SELECTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return None

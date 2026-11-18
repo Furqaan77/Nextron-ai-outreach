@@ -2835,6 +2835,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0038_4_8_enrollments` | `enrollments` (foreign keys to `leads`, `contacts`, `campaigns`, `variants`, `sending_inboxes`, `sequences` and `offers` with no cascade; origin, status, cause, ended and version checks; the partial unique index `uq_enrollments_one_live_per_lead`; `ix_enrollments_contact_id`, `ix_enrollments_sending_inbox_id`; triggers `trg_enrollments_bound` (the bound Variant, inbox, Sequence and Offer never change) and `trg_enrollments_erased_insert`) and `variant_counters` (one per Campaign, `uq_variant_counters_campaign_id`) (see [Enrollments](#enrollments)) | `sequencing` |
 | `0039_6_4_inbox_warmup` | rebuilds `sending_inboxes` (from 0018's exact table, which 0019 to 0038 leave unchanged; every row, check, the foreign key to `sending_domains` and `uq_sending_inboxes_address` kept) with the nullable warm-up record `warmup_started_on` (date), `warmup_method` (40) and `warm_level`, and the ramp `warmup_tool_daily` (default 0), `ramp_step` (default 5) and `ramp_target` (default 30); `ck_sending_inboxes_warmup_record` (the record is all NULL or all set) and `ck_sending_inboxes_warmup_ranges` (see [Warm-up and Daily Caps](#warm-up-and-daily-caps)) | `sending` |
 | `0040_2_13_email_domains` | creates `email_domains` (one row per mail domain: its address `pattern`, `pattern_source`, the example Evidence ids and `pattern_learned_at`, and `domain_search_at`), adds `contacts.email_search_tried`, `email_search_outcome` and `email_search_at`, and `crawled_pages.mailto` (the page's visible `mailto:` addresses as a JSON list), all in place, and creates `trg_contacts_tombstone` again with the three `email_search_*` columns fixed on an erased Contact (see [Finding email addresses](#finding-email-addresses)) | `research` |
+| `0041_2_15_scoring` | adds to `leads`, in place with no check, the nullable score group: `fit_score`, `signal_score` and `lead_score`, `tier` (1), `tier_computed_at`, `score_segment_version`, `score_factors`, `disqualified_rule` (31) and `disqualified_evidence` (see [Scores and the Lead Tier](#scores-and-the-lead-tier)) | `scoring` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -2925,7 +2926,8 @@ Primary Contact](#decision-makers-and-the-primary-contact)), `run_ai_test_sets` 
 test gate](#the-ai-test-gate-story-45)), `check_domains` (see [Sending Domain
 authentication](#sending-domain-authentication)), `check_job_boards` and `recheck_event`
 (see [Hiring Signals and job postings](#hiring-signals-and-job-postings)), and
-`find_contact_email` (see [Finding email addresses](#finding-email-addresses)); the stories that add
+`find_contact_email` (see [Finding email addresses](#finding-email-addresses)), and `score_lead` and
+`recompute_tiers` (see [Scores and the Lead Tier](#scores-and-the-lead-tier)); the stories that add
 work add theirs, with a thin handler in `nextron/jobs/handlers.py`.
 
 **Declare a job type** in `nextron.main.build_job_types`, the only code that builds the registry
@@ -4890,8 +4892,9 @@ address is Invalid; picking the engine's choice pins it. The button posts to
 ("This Lead was merged into another Lead.", "That Contact isn't on this Lead.", "That Contact's
 address is Invalid."). A person's Evidence reads "Contact: <name>" under Supports.
 
-**Not yet:** scores (Story 2.15); folding duplicate Contacts after a merge is deferred. The
-Primary Contact's address is found next ([Finding email addresses](#finding-email-addresses)).
+**Not yet:** folding duplicate Contacts after a merge is deferred. The Primary Contact's address
+is found next ([Finding email addresses](#finding-email-addresses)), and the Lead is scored at
+the end of the chain ([Scores and the Lead Tier](#scores-and-the-lead-tier)).
 
 ## Hiring Signals and job postings
 
@@ -5109,6 +5112,63 @@ search, and a **Find email** button on each Contact without a usable address, wh
 
 **Not yet:** verifying an address and changing its class (Story 2.14); obfuscated addresses
 ("jane [at] firm") aren't read.
+
+## Scores and the Lead Tier
+
+Each enriched Lead gets a Fit Score, a Signal Score, a Lead Score and a Lead Tier, with the
+factors behind them, after its Segment's disqualifiers have run (FR-17, FR-62, FR-1, AD-3, AD-7;
+Story 2.15). The formulas are in `nextron/domain/scoring.py` (pure, with a `now`); the service is
+`nextron/app/scoring` (`Scoring` and `LeadScores`); the score group of `leads` (migration
+`0041_2_15_scoring`, owner `scoring`) is written only by `nextron/db/repos/scoring/scores.py`.
+
+**The scores.**
+
+- **Fit Score** = min(100, the size fit + the weight of each live Attribute type). The size fit
+  is 50 inside the Segment's size range, 25 when the size is unknown, 0 outside. Law reads its
+  firm-wide lawyer count (a size fact, else the people step's "lawyers listed" count); Ops
+  reads revenue, which no source gives yet, so an Ops Lead's size is always unknown (25).
+- **Signal Score** = min(100, the sum over live Events of the type's weight × its decay
+  factor). A Tier 1 Event keeps its full weight to day 30, falls to 0 at day 90; a Tier 2 or 3
+  Event counts through day 90. A job-posting Event counts only while its posting is open.
+- Each Signal type counts once (an Event type's strongest live Event; an Attribute type's
+  earliest). A type the Lead's Segment no longer lists counts for nothing.
+- **Lead Score** = (`lead_score_fit_weight` × Fit + `lead_score_signal_weight` × Signal) ÷
+  100, rounded half up. The weights are whole percents (Engine section, 50 each); a save
+  that leaves them not adding up to 100 is refused on both fields (rule `weights_sum`).
+- **Lead Tier**: A for any live Tier 1 Event, B for a live Tier 2 Event and no Tier 1, C
+  otherwise.
+
+**Disqualifiers.** The Segment's disqualifiers run first, in order (Law: fewer than 5 or more
+than 50 lawyers; Ops: fewer than 20 staff or a group of more than 1,000). A match closes the Lead
+as Disqualified through the pipeline (an `events` row with cause `segment_disqualifier`, the
+Evidence id as `cause_ref`, actor `system:scoring`) and stores the rule's key and its Evidence,
+with no score or Tier. An unknown size never disqualifies.
+
+**The jobs.**
+
+- `score_lead` (bulk lane by default, or interactive; priority 40; 5 minutes; retry limit 3;
+  group Enrichment; keyed `score_lead:<lead>:tick`; payload `{v, lead_id}`) ends the research
+  chain: the Primary Contact's selection queues it (in the same transaction as the Primary's
+  `find_contact_email`, which runs beside the chain: the score reads nothing it writes), and so
+  does a re-check that closed or reopened a posting. It skips (logging `score_skipped`) an unknown, merged, Lost or
+  Disqualified Lead, one with no `ok` signal extraction, and one whose Segment is missing. It
+  applies the Segment's current version and stores it.
+- `recompute_tiers` (bulk only; priority 20; 10 minutes; retry limit 2; daily and at every
+  start) re-tiers every scored Lead that isn't merged, Lost or Disqualified, one transaction
+  each, without a crawl: each stored Event is re-aged against its Signal's current row; one
+  that aged out, closed or was retracted is dropped, and then the Primary Contact's selection
+  runs again. The Fit Score and the Segment version stay as stored: a `nextron seed sync` that
+  changes a Segment changes no stored score until the Lead is re-scored. A re-score is a full
+  `score_lead` with the current Segment, whichever queued it: "Re-score", the research chain
+  (each Primary Contact selection) or a posting re-check that closed or reopened a posting.
+
+**The Lead page** shows a **Score** panel below the header: the Tier, the three scores, when
+they were computed and the Segment version, then each factor with its points and links to its
+Evidence rows (`#evidence-<id>`). A Disqualified Lead shows its rule and Evidence; a Lead never
+scored says "Not scored yet.". The panel's "Re-score" button queues `score_lead` on the
+interactive lane and answers "Re-score queued.". **The Leads list** shows Tier and Lead Score
+columns ("—" until scored); the Tier heading sorts by Tier (A to C, unscored last), then Lead
+Score, keeping the filters. "Re-score" on a merged or closed Lead queues nothing and says so.
 
 ## Engine health
 

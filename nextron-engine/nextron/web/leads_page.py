@@ -14,7 +14,8 @@ section) renders ``leads.html`` from ``queries.discovery.lead_list`` and
   once. A blank one (empty or whitespace only) is unset. In ``q``, whitespace characters (tabs,
   line breaks and the like) count as spaces: it is stripped and each run collapses to one
   space. It must be at most 200 characters with no other control character. ``page`` is 1 to 7
-  ASCII digits worth at least 1. Any other parameter, a repeated one, an unknown stage or
+  ASCII digits worth at least 1. ``sort`` (Story 2.15) is blank or ``tier``. Any other
+  parameter, a repeated one, an unknown stage or
   Segment key, or a bad ``q`` or ``page`` raises ``MalformedForm`` (400 "Request refused:
   malformed form"), so a hand-edited URL never shows an unfiltered list that looks filtered.
 - The filter form is ``method="get" action="/leads"``, with no ``hx-post`` and no
@@ -25,9 +26,14 @@ section) renders ``leads.html`` from ``queries.discovery.lead_list`` and
 - ``list_context`` gives the count line ("Showing <a>–<b> of <total> Leads", "No Leads yet."
   or "No Leads match these filters."), one ``LeadRow`` per Lead (its name linked to its page,
   the website domain or "—", the Segment's name or "Unknown Segment", the country or "—", the
-  stage's label and the created date, ``YYYY-MM-DD`` UTC) and, when there is more than one
-  page, a ``Pager`` ("Page <n> of <pages>" with Previous and Next links that keep the set
-  filters, from ``page_href``).
+  stage's label, the created date, ``YYYY-MM-DD`` UTC, and Story 2.15's Lead Tier and Lead
+  Score, each "—" when unset) and, when there is more than one page, a ``Pager`` ("Page <n> of
+  <pages>" with Previous and Next links that keep the set filters and the sort, from
+  ``page_href``).
+- **The sort (Story 2.15).** The Tier column heading links to ``sort=tier``
+  (Tier A to C, unscored last, then Lead Score descending, then newest) and, while the list is
+  sorted so, the Created heading back to the default, newest first; each link keeps the set
+  filters and starts at page 1 (``sort_href``).
 
 **The Lead page** (``GET /leads/{lead_id}``, route ``lead_page``) renders ``lead.html`` from
 ``lead_context``: a ``LeadHeader`` (the name, the website as a ``safe_link`` to
@@ -130,6 +136,32 @@ Every untrusted text (the Primary line's name, each Contact and Provenance cell)
 element carrying ``hx-disable``; the forms sit outside them. A person Evidence row (its
 ``person_contact_id`` set) reads "Contact: <name>" under Supports.
 
+**The Score panel (Story 2.15).** ``lead_score.html`` (``<section id="lead-score">``), below the
+header, inside ``lead.html`` and alone as the answer to ``POST /leads/{lead_id}/rescore``, which
+HTMX swaps in for the whole panel. ``score_context(lead_id, stored, segment, notice=None)``
+gives a ``ScorePanel`` from ``queries.scoring.stored`` and the Lead's Segment:
+
+- a scored Lead: "Tier <A|B|C>", the Fit, Signal and Lead Scores, the computed time
+  (``YYYY-MM-DD HH:MM UTC``) and the Segment version ("v<n>"), then one ``FactorRow`` per
+  factor (the Fit factors, then the Signal factors): its label (``SIZE_LABELS`` for the size;
+  the Signal type's name from the Segment, else its key, for the others), its points (2
+  decimals at most, trailing zeros dropped) and its Evidence, each linked as
+  ``#evidence-<id>`` when that row is live (on the page), else shown as "Evidence <n> (no
+  longer live)";
+- a Disqualified Lead: "Disqualified: <the rule's description>" (its key when the Segment no
+  longer has it) and its Evidence (linked the same way), the computed time and the Segment
+  version;
+- a Lead never scored: "Not scored yet.".
+
+The "Re-score" form (``method="post"``, ``hx-post`` to ``/leads/{lead_id}/rescore``,
+``hx-target="#lead-score"``, ``hx-swap="outerHTML"``, ``csrf_field()``) sits outside the
+panel's ``hx-disable`` element; ``submitted_rescore(fields)`` accepts nothing but the CSRF
+token (``MalformedForm`` otherwise), and the POST's notice is ``rescore_queued()``
+("Re-score queued.", role ``status``) or, for a merged or closed Lead, where nothing is queued,
+``rescore_refused(merged)`` (role ``alert``: "This Lead was merged into another Lead; it can't
+be re-scored." or "This Lead is closed; it can't be re-scored."). Each Evidence row carries
+``id="evidence-<id>"``.
+
 **Job postings (Story 2.11).** ``lead_context`` also takes the Lead's job postings
 (``queries.research.job_postings``: live first, then the newest first seen) and gives one
 ``PostingRow`` each: its title, its source's label (``POSTING_SOURCE_LABELS``: "Careers page",
@@ -161,7 +193,7 @@ Every Lead, Contact, Provenance, Signal and Evidence text renders through ``|pla
 
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -169,7 +201,13 @@ from typing import Final
 from urllib.parse import urlencode
 
 from nextron.app.queries.compliance import StoredReceipt, StoredRequest
-from nextron.app.queries.discovery import LEADS_PER_PAGE, LeadListPage, ListedLead, StoredLead
+from nextron.app.queries.discovery import (
+    LEADS_PER_PAGE,
+    SORT_TIER,
+    LeadListPage,
+    ListedLead,
+    StoredLead,
+)
 from nextron.app.queries.research import (
     EvidenceSupport,
     LeadSignalsView,
@@ -179,6 +217,7 @@ from nextron.app.queries.research import (
     StoredPosting,
     StoredProvenance,
 )
+from nextron.app.queries.scoring import StoredScore
 from nextron.app.queries.setup import SeededMarket, SeededSegment
 from nextron.domain.contact_market import MarketBasis, TzBasis
 from nextron.domain.contacts import (
@@ -202,7 +241,8 @@ from nextron.domain.legal_form import (
 from nextron.domain.markets import GB
 from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.postings import PostingSource, PostingStatus
-from nextron.domain.segments import EvidenceType, SignalClass
+from nextron.domain.scoring import Factor, FactorKind
+from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
 from nextron.web.erase_page import ERASE_LABEL, ReceiptView, erase_href, receipt_view
@@ -212,6 +252,14 @@ LIST_TEMPLATE: Final = "leads.html"
 LEAD_TEMPLATE: Final = "lead.html"
 MISSING_TEMPLATE: Final = "lead_missing.html"
 CONTACTS_TEMPLATE: Final = "lead_contacts.html"
+SCORE_TEMPLATE: Final = "lead_score.html"
+RESCORE_QUEUED: Final = "Re-score queued."
+RESCORE_CLOSED: Final = "This Lead is closed; it can't be re-scored."
+RESCORE_MERGED: Final = "This Lead was merged into another Lead; it can't be re-scored."
+NOT_SCORED: Final = "Not scored yet."
+SCORED: Final = "scored"
+DISQUALIFIED: Final = "disqualified"
+UNSCORED: Final = "unscored"
 CONTACT_FIELD: Final = "contact_id"
 PRIMARY_SET: Final = "Primary Contact set."
 PRIMARY_PREFIX: Final = "Primary Contact: "
@@ -253,7 +301,10 @@ STAGE_FIELD: Final = "stage"
 SEGMENT_FIELD: Final = "segment"
 SEARCH_FIELD: Final = "q"
 PAGE_FIELD: Final = "page"
-FILTER_FIELDS: Final = frozenset({STAGE_FIELD, SEGMENT_FIELD, SEARCH_FIELD, PAGE_FIELD})
+SORT_FIELD: Final = "sort"
+FILTER_FIELDS: Final = frozenset(
+    {STAGE_FIELD, SEGMENT_FIELD, SEARCH_FIELD, PAGE_FIELD, SORT_FIELD}
+)
 MAX_SEARCH_LENGTH: Final = 200
 PAGE_PATTERN: Final = re.compile(r"[0-9]{1,7}")  # ASCII digits only; matched with fullmatch
 
@@ -344,6 +395,13 @@ POSTING_SOURCE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
         PostingSource.ASHBY: "Ashby",
     }
 )
+SIZE_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        FactorKind.SIZE_IN_RANGE: "Size inside the Segment's range",
+        FactorKind.SIZE_UNKNOWN: "Size unknown",
+        FactorKind.SIZE_OUTSIDE: "Size outside the Segment's range",
+    }
+)
 POSTING_STATUS_LABELS: Final[Mapping[str, str]] = MappingProxyType(
     {PostingStatus.LIVE: "Live", PostingStatus.CLOSED: "Closed"}
 )
@@ -403,6 +461,7 @@ class ListFilters:
     segment_id: str | None = None
     search: str | None = None
     page: int = 1
+    sort: str | None = None
 
     @property
     def filtered(self) -> bool:
@@ -430,6 +489,8 @@ class LeadRow:
     country: str | None
     stage: str
     created: str
+    tier: str = NO_VALUE
+    lead_score: str = NO_VALUE
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,12 +543,20 @@ def _page(value: str) -> int:
     return int(value)
 
 
+def _sort(value: str) -> str | None:
+    if not value.strip():
+        return None
+    if value != SORT_TIER:
+        raise MalformedForm(WRONG_FIELDS)
+    return value
+
+
 def list_filters(
     query_items: Iterable[tuple[str, str]], segments: Iterable[SeededSegment]
 ) -> ListFilters:
     """The filters of the query ``query_items`` (name and value pairs, in order), the Segment
     key resolved against ``segments``; ``MalformedForm`` for any other or repeated parameter,
-    an unknown stage or Segment key, or a bad ``q`` or ``page``."""
+    an unknown stage or Segment key, or a bad ``q``, ``page`` or ``sort``."""
     values = _single_values(query_items)
     segment_key = values.get(SEGMENT_FIELD, "")
     segment_key = segment_key if segment_key.strip() else None
@@ -503,11 +572,11 @@ def list_filters(
         segment_id=segment_id,
         search=_search(values.get(SEARCH_FIELD, "")),
         page=_page(values.get(PAGE_FIELD, "")),
+        sort=_sort(values.get(SORT_FIELD, "")),
     )
 
 
-def page_href(filters: ListFilters, page: int) -> str:
-    """The list's URL for ``page`` with the set filters, URL-encoded."""
+def _filter_params(filters: ListFilters) -> list[tuple[str, str]]:
     params: list[tuple[str, str]] = []
     if filters.stage is not None:
         params.append((STAGE_FIELD, filters.stage.value))
@@ -515,8 +584,25 @@ def page_href(filters: ListFilters, page: int) -> str:
         params.append((SEGMENT_FIELD, filters.segment))
     if filters.search is not None:
         params.append((SEARCH_FIELD, filters.search))
+    return params
+
+
+def page_href(filters: ListFilters, page: int) -> str:
+    """The list's URL for ``page`` with the set filters and the sort, URL-encoded."""
+    params = _filter_params(filters)
+    if filters.sort is not None:
+        params.append((SORT_FIELD, filters.sort))
     params.append((PAGE_FIELD, str(page)))
     return f"{LIST_PATH}?{urlencode(params)}"
+
+
+def sort_href(filters: ListFilters, sort: str | None) -> str:
+    """The list's URL sorted by ``sort`` (``None``: newest first) with the set filters, at
+    page 1, URL-encoded."""
+    params = _filter_params(filters)
+    if sort is not None:
+        params.append((SORT_FIELD, sort))
+    return f"{LIST_PATH}?{urlencode(params)}" if params else LIST_PATH
 
 
 def stage_label(stage: str | None) -> str:
@@ -581,6 +667,8 @@ def lead_row(lead: ListedLead, names: Mapping[str, str]) -> LeadRow:
         country=lead.country_code,
         stage=stage_label(lead.pipeline_stage),
         created=day(lead.created_at),
+        tier=NO_VALUE if lead.tier is None else lead.tier,
+        lead_score=NO_VALUE if lead.lead_score is None else str(lead.lead_score),
     )
 
 
@@ -610,6 +698,9 @@ def list_context(
         "count_text": count_text(found, filters),
         "rows": tuple(lead_row(lead, names) for lead in found.leads),
         "pager": pager(found, filters),
+        "sorted_by_tier": filters.sort == SORT_TIER,
+        "tier_href": sort_href(filters, SORT_TIER),
+        "newest_href": sort_href(filters, None),
     }
 
 
@@ -736,6 +827,7 @@ class EvidenceRow:
     source_url: str | None
     retrieved: str
     extraction: str
+    evidence_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -884,6 +976,7 @@ def evidence_row(
         source_url=evidence.source_url,
         retrieved=moment(evidence.retrieved_at),
         extraction=AI_EXTRACTED if evidence.extracted_by.startswith(AI_ACTOR_PREFIX) else NO_VALUE,
+        evidence_id=evidence.id,
     )
 
 
@@ -1179,6 +1272,137 @@ def legal_form_view(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class EvidenceLink:
+    """One Evidence id a score cites, and whether it is live (shown on the page, so linked as
+    ``#evidence-<id>``)."""
+
+    evidence_id: str
+    live: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FactorRow:
+    """One score factor as the Score panel shows it: its label, its points and its Evidence."""
+
+    label: str
+    points: str
+    evidence: tuple[EvidenceLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScorePanel:
+    """The Lead page's Score panel: ``state`` is ``scored``, ``disqualified`` or
+    ``unscored``."""
+
+    state: str
+    tier: str = NO_VALUE
+    fit: str = NO_VALUE
+    signal: str = NO_VALUE
+    lead: str = NO_VALUE
+    computed: str = NO_VALUE
+    segment_version: str = NO_VALUE
+    factors: tuple[FactorRow, ...] = ()
+    rule: str = NO_VALUE
+    evidence: tuple[EvidenceLink, ...] = ()
+
+
+def points_text(points: float) -> str:
+    """``points`` with at most 2 decimals, trailing zeros dropped: ``30``, ``28.33``."""
+    return f"{points:.2f}".rstrip("0").rstrip(".")
+
+
+def factor_label(factor: Factor, segment: SegmentDef | None) -> str:
+    """The factor's label: the size's, or its Signal type's name (else its key)."""
+    if factor.kind in SIZE_LABELS:
+        return SIZE_LABELS[factor.kind]
+    names = {} if segment is None else {each.key: each.name for each in segment.signal_types}
+    return names.get(factor.key, factor.key)
+
+
+def _number(value: int | None) -> str:
+    return NO_VALUE if value is None else str(value)
+
+
+def _links(evidence_ids: Iterable[str], live: Collection[str]) -> tuple[EvidenceLink, ...]:
+    return tuple(EvidenceLink(each, each in live) for each in evidence_ids)
+
+
+def score_panel(
+    stored: StoredScore | None, segment: SegmentDef | None, live: Collection[str] = frozenset()
+) -> ScorePanel:
+    """The Score panel of the Lead's stored score, ``live`` the ids of the Evidence the page
+    shows; see the module docstring."""
+    if stored is None:
+        return ScorePanel(UNSCORED)
+    version = NO_VALUE if stored.segment_version is None else f"v{stored.segment_version}"
+    if stored.disqualified:
+        rules = {} if segment is None else {rule.key: rule for rule in segment.disqualifiers}
+        key = stored.disqualified_rule or NO_VALUE
+        found = rules.get(key)
+        return ScorePanel(
+            DISQUALIFIED,
+            computed=moment(stored.computed_at),
+            segment_version=version,
+            rule=key if found is None else found.description,
+            evidence=_links(stored.disqualified_evidence, live),
+        )
+    return ScorePanel(
+        SCORED,
+        tier=NO_VALUE if stored.tier is None else f"Tier {stored.tier}",
+        fit=_number(stored.fit),
+        signal=_number(stored.signal),
+        lead=_number(stored.lead),
+        computed=moment(stored.computed_at),
+        segment_version=version,
+        factors=tuple(
+            FactorRow(
+                factor_label(factor, segment),
+                points_text(factor.points),
+                _links(factor.evidence_ids, live),
+            )
+            for factor in (*stored.fit_factors, *stored.signal_factors)
+        ),
+    )
+
+
+def rescore_queued() -> Notice:
+    """The notice of a "Re-score" that was queued."""
+    return Notice(Role.STATUS, RESCORE_QUEUED)
+
+
+def rescore_refused(merged: bool) -> Notice:
+    """The notice of a "Re-score" refused because the Lead is merged or closed (nothing was
+    queued)."""
+    return Notice(Role.ALERT, RESCORE_MERGED if merged else RESCORE_CLOSED)
+
+
+def submitted_rescore(fields: FormFields) -> None:
+    """The "Re-score" form posts nothing but the CSRF token; ``MalformedForm`` otherwise."""
+    if set(fields) - {CSRF_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+
+
+def _segment_of(segment_id: str, segments: Iterable[SeededSegment]) -> SegmentDef | None:
+    return next((each.definition for each in segments if each.id == segment_id), None)
+
+
+def score_context(
+    lead_id: str,
+    stored: StoredScore | None,
+    segment: SegmentDef | None,
+    notice: Notice | None = None,
+    live: Collection[str] = frozenset(),
+) -> dict[str, object]:
+    """What ``lead_score.html`` renders: the Lead's id (for the form's path), the panel (its
+    Evidence linked only when in ``live``) and the POST's notice."""
+    return {
+        "lead_id": lead_id,
+        "score": score_panel(stored, segment, live),
+        "score_notice": notice,
+    }
+
+
 def lead_context(
     lead: StoredLead,
     stage: PipelineStage | None,
@@ -1193,6 +1417,7 @@ def lead_context(
     postings: Iterable[StoredPosting] = (),
     legal_form: StoredLegalForm | None = None,
     receipts: Mapping[str, Iterable[StoredReceipt]] = MappingProxyType({}),
+    score: StoredScore | None = None,
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the legal-form section for a GB Lead
     (``legal_form_view``, Story 2.12), the Signals and the live Evidence (in the order given),
@@ -1200,12 +1425,20 @@ def lead_context(
     (``contacts_context``), each Contact with its live Eligibility from ``decisions`` (by
     Contact id), its Market named from ``markets`` (the route passes ``()`` when the Markets
     can't be read) and its erase link, or, for an erased one, its tombstone line with its
-    request from ``erasures`` and its receipts from ``receipts`` (both by Contact id)."""
+    request from ``erasures`` and its receipts from ``receipts`` (both by Contact id), and the Score panel (``score_context``, Story 2.15) of
+    ``score``."""
     found = tuple(contacts)
+    stored_segments = tuple(segments)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     legal_form_ids = _legal_form_ids(legal_form)
     return {
-        "lead": lead_header(lead, stage, segment_names(segments), signals.hq_tz),
+        **score_context(
+            lead.id,
+            score,
+            _segment_of(lead.segment_id, stored_segments),
+            live=frozenset(row.evidence.id for row in signals.evidence),
+        ),
+        "lead": lead_header(lead, stage, segment_names(stored_segments), signals.hq_tz),
         "legal_form": legal_form_view(lead, legal_form, signals.evidence),
         "signals": tuple(signal_row(status) for status in signals.signals),
         "evidence": tuple(evidence_row(row, names, legal_form_ids) for row in signals.evidence),

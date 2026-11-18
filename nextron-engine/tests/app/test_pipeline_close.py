@@ -24,7 +24,13 @@ from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.notifications import SubjectSuppressed
-from nextron.domain.pipeline_stage import CLOSED_STAGES, OPEN_STAGES, PARKED_STAGES, PipelineStage
+from nextron.domain.pipeline_stage import (
+    CLOSED_STAGES,
+    OPEN_STAGES,
+    PARKED_STAGES,
+    PipelineStage,
+    StageCause,
+)
 from nextron.domain.segments import validate_segments
 from nextron.domain.suppression_entry import OPT_OUT_SOURCES, SuppressionSource
 from tests.fakes.clock import FrozenClock
@@ -100,6 +106,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=no_jobs,
+        scores=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -201,6 +208,48 @@ def test_close_refuses_a_cause_ref_that_is_not_a_ulid(world: World, cause_ref: A
     with pytest.raises(ValueError, match="cause_ref"):
         world.transact(
             lambda: world.pipeline.close(world.lead_id, PipelineStage.LOST, cause_ref)
+        )
+
+    assert world.dump() == before
+
+
+def test_close_records_the_callers_cause_and_actor(world: World) -> None:
+    """Story 2.15: the scoring service's close records its own cause and actor."""
+    closed = world.transact(
+        lambda: world.pipeline.close(
+            world.lead_id,
+            PipelineStage.DISQUALIFIED,
+            CAUSE_REF,
+            cause=StageCause.SEGMENT_DISQUALIFIER,
+            actor="system:scoring",
+        )
+    )
+
+    assert closed is True
+    [row] = world.sql(
+        "SELECT from_status, to_status, cause, cause_ref, actor FROM events "
+        "WHERE entity = 'leads' AND entity_id = ? AND to_status = 'disqualified'",
+        (world.lead_id,),
+    )
+    assert row == ("new", "disqualified", "segment_disqualifier", CAUSE_REF, "system:scoring")
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ({"cause": "segment_disqualifier"}, "cause must be"),
+        ({"actor": "  "}, "actor must be"),
+        ({"actor": 7}, "actor must be"),
+    ],
+)
+def test_close_refuses_a_cause_or_actor_of_the_wrong_kind(
+    world: World, extra: dict[str, Any], match: str
+) -> None:
+    before = world.dump()
+
+    with pytest.raises(ValueError, match=match):
+        world.transact(
+            lambda: world.pipeline.close(world.lead_id, PipelineStage.LOST, None, **extra)
         )
 
     assert world.dump() == before

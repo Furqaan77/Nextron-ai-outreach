@@ -197,6 +197,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}",
+        "/leads/{lead_id}/rescore",
         "/leads/{lead_id}/primary",
         "/leads/{lead_id}/find-email",
     ]
@@ -670,6 +671,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_import_form.html",
         "lead_legal_form.html",
         "lead_missing.html",
+        "lead_score.html",
         "leads.html",
         "locked.html",
         "macros.html",

@@ -150,6 +150,7 @@ def world(db_engine: Engine) -> World:
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=no_jobs,
+        scores=no_jobs,
     )
     found = World(
         dashboard,

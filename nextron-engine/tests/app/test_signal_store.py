@@ -124,6 +124,7 @@ def world(db_engine: Engine) -> World:
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=no_jobs,
+        scores=no_jobs,
     )
     discovery = Discovery(clock, Pipeline(clock), JobQueue(clock, job_types))
     found = World(units, db_engine, discovery, "")

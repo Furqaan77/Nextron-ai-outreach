@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0040_2_13_email_domains"
+HEAD = "0041_2_15_scoring"
 
 
 @pytest.fixture
@@ -936,7 +936,8 @@ def test_0036_adds_the_legal_form_columns_in_place_and_leaves_every_lead_uncheck
     finally:
         reader.close()
     assert rows == [(lead, "Acme Accounting", "01234567", None, None, None, None, None)]
-    assert tuple(columns[-5:]) == LEGAL_FORM_COLUMNS
+    start = columns.index(LEGAL_FORM_COLUMNS[0])  # 0041 (Story 2.15) adds columns after them
+    assert tuple(columns[start : start + 5]) == LEGAL_FORM_COLUMNS
     assert {name: (info[name][2], info[name][3]) for name in LEGAL_FORM_COLUMNS} == {
         "legal_form": ("VARCHAR(64)", 0),
         "company_status": ("VARCHAR(32)", 0),

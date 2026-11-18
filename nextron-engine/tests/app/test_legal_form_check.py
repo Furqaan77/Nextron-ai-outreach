@@ -152,6 +152,7 @@ def handler_on(world: World, registry: ScriptedRegistry) -> Callable[[Job], obje
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=lambda: checks(world, registry),
+        scores=no_jobs,
     ).get("check_legal_form").handler
 
 

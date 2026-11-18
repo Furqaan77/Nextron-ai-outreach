@@ -112,6 +112,8 @@ from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PrimaryContacts
+from nextron.app.scoring.api import Scoring
+from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
@@ -341,6 +343,7 @@ class Dashboard:
     test_runs: AiTestRuns = field(init=False)
     erasures: Erasures = field(init=False)
     email_finding: EmailFinding = field(init=False)
+    lead_scores: LeadScores = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -375,6 +378,7 @@ class Dashboard:
             domain_checks=lambda: self.domain_checks,
             job_boards=no_crawl_jobs,
             legal_forms=no_crawl_jobs,
+            scores=lambda: self.lead_scores,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -426,6 +430,9 @@ class Dashboard:
             hunter=ScriptedFinder(),
             prospeo=ScriptedFinder(),
         )
+        self.lead_scores = LeadScores(
+            self.clock, Scoring(self.clock, Pipeline(self.clock), self.research), self.queue
+        )
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.lead_imports = LeadImports(
             self.clock,
@@ -462,6 +469,7 @@ class Dashboard:
             erasures=self.erasures,
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
+            lead_scores=self.lead_scores,
             units=self.units,
             **extra,
         )

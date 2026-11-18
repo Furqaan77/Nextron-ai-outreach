@@ -26,7 +26,14 @@ Three owners write it, column by column (``nextron.db.owners``):
   record's company type), ``company_status``, ``legal_form_status`` (``confirmed``,
   ``not_corporate`` or ``unconfirmed``; NULL until first checked) and the two ``evidence`` rows
   the finding rests on, ``legal_form_site_evidence_id`` and ``legal_form_registry_evidence_id``
-  (no foreign key, like ``hq_evidence_id``), all nullable with no CHECK (added in place).
+  (no foreign key, like ``hq_evidence_id``), all nullable with no CHECK (added in place);
+- the score group, owner ``scoring`` (``nextron.db.repos.scoring.scores``; Story 2.15, migration
+  ``0041_2_15_scoring``), every column nullable and NULL until ``score_lead`` first runs:
+  ``fit_score``, ``signal_score`` and ``lead_score`` (0 to 100), ``tier`` (``A``, ``B`` or
+  ``C``), ``tier_computed_at``, ``score_segment_version`` (the Segment version applied),
+  ``score_factors`` (``nextron.domain.scoring.factors_text``), and for a Disqualified Lead
+  ``disqualified_rule`` (the disqualifier's key) and ``disqualified_evidence`` (a JSON array of
+  Evidence ids). No CHECK, because the columns were added in place.
 
 ``ck_leads_identity_key``: a Lead that isn't merged holds at least one key. No foreign key
 cascades. There is no ``updated_at``, because several owners write the row. Every column is
@@ -36,7 +43,7 @@ organization data, PII class ``none``: erasing a Contact never touches the firm'
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -52,6 +59,8 @@ HQ_TZ_LENGTH: Final = 64
 LEGAL_FORM_LENGTH: Final = 64  # nextron.domain.legal_form.LEGAL_FORM_PATTERN
 COMPANY_STATUS_LENGTH: Final = 32  # nextron.domain.legal_form.COMPANY_STATUS_PATTERN
 LEGAL_FORM_STATUS_LENGTH: Final = 16
+TIER_LENGTH: Final = 1
+RULE_KEY_LENGTH: Final = 31  # nextron.domain.segments.KEY_PATTERN
 
 STAGE_CHECK: Final = "pipeline_stage IN ({})".format(
     ",".join(f"'{stage}'" for stage in PipelineStage)
@@ -99,3 +108,12 @@ class LeadRecord(Base):
     legal_form_status: Mapped[str | None] = mapped_column(String(LEGAL_FORM_STATUS_LENGTH))
     legal_form_site_evidence_id: Mapped[str | None] = mapped_column(Ulid)
     legal_form_registry_evidence_id: Mapped[str | None] = mapped_column(Ulid)
+    fit_score: Mapped[int | None] = mapped_column(Integer)
+    signal_score: Mapped[int | None] = mapped_column(Integer)
+    lead_score: Mapped[int | None] = mapped_column(Integer)
+    tier: Mapped[str | None] = mapped_column(String(TIER_LENGTH))
+    tier_computed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    score_segment_version: Mapped[int | None] = mapped_column(Integer)
+    score_factors: Mapped[str | None] = mapped_column(Text)
+    disqualified_rule: Mapped[str | None] = mapped_column(String(RULE_KEY_LENGTH))
+    disqualified_evidence: Mapped[str | None] = mapped_column(Text)

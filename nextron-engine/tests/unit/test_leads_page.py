@@ -44,6 +44,7 @@ from nextron.domain.eligibility import Decision, Reason, ReasonKind
 from nextron.domain.leads import LeadIdentity, LeadSource
 from nextron.domain.markets import MarketDef, validate_markets
 from nextron.domain.pipeline_stage import PipelineStage
+from nextron.domain.scoring import Factor, FactorKind, factors_text
 from nextron.domain.segments import validate_segments
 from nextron.domain.suppression_entry import SuppressionSource
 from nextron.web import leads_page
@@ -68,7 +69,9 @@ SHIPPED_MARKETS = main.SEED_DIR / main.MARKETS_FILE_NAME
 ORIGIN = "Law Society directory, Manchester"
 UNKNOWN = "01KA0000000000000000000000"  # a ULID no Lead has
 VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta"})
-LIST_HEADER = ["Name", "Website", "Segment", "Country", "Stage", "Created"]
+LIST_HEADER = [
+    "Name", "Website", "Segment", "Country", "Stage", "Tier", "Lead Score", "Created"
+]
 CONTACT_HEADER = [
     "Name",
     "Role",
@@ -325,6 +328,7 @@ def queue_on(clock: FrozenClock) -> JobQueue:
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=no_jobs,
+        scores=no_jobs,
     )
     return JobQueue(clock, job_types)
 
@@ -366,8 +370,17 @@ def test_the_list_shows_each_lead_newest_first_without_merged_leads(world: World
     assert "hx-disable" in table.attrs
     assert table_rows(table) == [
         LIST_HEADER,
-        ["Jones Ops", "—", "Ops-Automation", "—", "New", "2026-11-18"],
-        ["Smith Law", "smith-law.co.uk", "Law-PrivateAI", "GB", "Call booked", "2026-11-17"],
+        ["Jones Ops", "—", "Ops-Automation", "—", "New", "—", "—", "2026-11-18"],
+        [
+            "Smith Law",
+            "smith-law.co.uk",
+            "Law-PrivateAI",
+            "GB",
+            "Call booked",
+            "—",
+            "—",
+            "2026-11-17",
+        ],
     ]
     links = [row.find("a").attrs["href"] for row in table.find_all("tr")[1:]]
     assert links == [f"/leads/{c}", f"/leads/{a}"]
@@ -491,7 +504,8 @@ def test_paging_keeps_the_filters(world: World) -> None:
 
     first_rows = table_rows(first.find("table", class_="lead-table"))
     assert [row[0] for row in first_rows[1:]] == [f"Firm {n:03}" for n in range(50, 0, -1)]
-    hrefs = [a.attrs["href"] for a in first.find("table", class_="lead-table").find_all("a")]
+    body = first.find("table", class_="lead-table").find("tbody")
+    hrefs = [a.attrs["href"] for a in body.find_all("a")]
     assert hrefs == [f"/leads/{lead_id}" for lead_id in ids[:0:-1]]
     assert first.find("p", class_="lead-count").text == "Showing 1–50 of 51 Leads"
     pager = first.find("nav", class_="pager")
@@ -572,6 +586,9 @@ def test_the_pager_links_encode_the_search_and_round_trip(world: World) -> None:
         "csrf_token=x",
         "q=" + "a" * 201,
         "q=a%00b",
+        "sort=score",  # Story 2.15: only the Tier sort
+        "sort=TIER",
+        "sort=tier&sort=tier",
     ],
 )
 def test_a_bad_query_parameter_is_refused(world: World, query: str) -> None:
@@ -621,7 +638,7 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
         "linkedin.com/in/Jane-Doe",
     )
     listed = world.page("/leads")
-    href = listed.find("table", class_="lead-table").find("a").attrs["href"] or ""
+    href = listed.find("table", class_="lead-table").find("tbody").find("a").attrs["href"] or ""
 
     page = world.page(href)
 
@@ -648,6 +665,7 @@ def test_a_csv_imported_lead_shows_its_contact_and_provenance(world: World) -> N
     assert website.attrs == {"href": "https://smith-law.co.uk/", "rel": "noopener noreferrer"}
     assert page.find("main").find("a", href="/leads").text == "All Leads"
     assert [h2.text for h2 in page.find_all("h2")] == [
+        "Score",  # Story 2.15
         "UK legal form",  # a GB Lead (Story 2.12)
         "Signals",
         "Evidence",
@@ -2145,3 +2163,288 @@ def test_a_hostile_name_beside_the_find_email_form_is_escaped(world: World) -> N
     reply = post_find_email(world, lead, jane)
 
     assert "<script>alert" not in reply.text and '<b hx-get="/x">' not in reply.text
+
+
+# The Score panel and the Tier sort (Story 2.15) -------------------------------------------------
+
+
+def store_score(
+    world: World,
+    lead: str,
+    *,
+    tier: str | None = "A",
+    lead_score: int | None = 63,
+    factors: str | None = None,
+    rule: str | None = None,
+    rule_evidence: str | None = None,
+) -> None:
+    world.sql(
+        "UPDATE leads SET fit_score = ?, signal_score = ?, lead_score = ?, tier = ?, "
+        "tier_computed_at = '2026-11-17T09:30:00.000000Z', score_segment_version = 1, "
+        "score_factors = ?, disqualified_rule = ?, disqualified_evidence = ? WHERE id = ?",
+        (
+            None if tier is None else 65,
+            None if tier is None else 60,
+            lead_score,
+            tier,
+            factors,
+            rule,
+            rule_evidence,
+            lead,
+        ),
+    )
+
+
+def score_section(page: Tree) -> Node:
+    return page.find("section", id="lead-score")
+
+
+def post_rescore(world: World, lead: str, *, token: bool = True, body: bytes = b"") -> Reply:
+    return world.dashboard.post(
+        f"/leads/{lead}/rescore",
+        cookie=world.cookie,
+        token=world.dashboard.csrf_token(world.cookie) if token else None,
+        headers=[(b"content-type", FORM)],
+        body=body,
+    )
+
+
+def test_an_unscored_lead_says_so_and_offers_re_score(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    section = score_section(world.page(f"/leads/{lead}"))
+
+    body = section.find("div", class_="score-body")
+    assert body.text == "Not scored yet."
+    assert "hx-disable" in body.attrs
+    form_node = section.find("form")
+    assert (form_node.attrs["method"], form_node.attrs["hx-post"]) == (
+        "post",
+        f"/leads/{lead}/rescore",
+    )
+    assert form_node.attrs["hx-target"] == "#lead-score"
+    assert form_node.find("input", name="csrf_token").attrs["type"] == "hidden"
+    assert "hx-disable" not in form_node.attrs
+
+
+def test_a_scored_lead_shows_its_tier_scores_and_factors_linked_to_evidence(
+    world: World,
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    hiring = evidence_row(world, lead, 1, quote="We are hiring a Legal Operations Manager.")
+    size = evidence_row(world, lead, 2, quote="20 lawyers.", fact="lawyers_firm_wide", number=20)
+    factors = factors_text(
+        (Factor(FactorKind.SIZE_IN_RANGE, "lawyers_firm_wide", 50.0, None, None, None, (size,)),),
+        (Factor(FactorKind.EVENT, "law_hiring_legal_ops", 28.33, 60, 1, hiring, (hiring,)),),
+    )
+    store_score(world, lead, factors=factors)
+
+    page = world.page(f"/leads/{lead}")
+
+    section = score_section(page)
+    facts = [node.text for node in section.find("dl").walk() if node.tag in ("dt", "dd")]
+    assert facts == [
+        "Lead Tier",
+        "Tier A",
+        "Fit Score",
+        "65",
+        "Signal Score",
+        "60",
+        "Lead Score",
+        "63",
+        "Computed",
+        "2026-11-17 09:30 UTC",
+        "Segment version",
+        "v1",
+    ]
+    table = section.find("table", class_="factor-table")
+    assert table_rows(table)[0] == ["Factor", "Points", "Evidence"]
+    rows = table.find_all("tr", class_="factor-row")
+    assert [row.find("a").attrs["href"] for row in rows] == [
+        f"#evidence-{size}",
+        f"#evidence-{hiring}",
+    ]
+    assert cells(rows[0]) == ["Size inside the Segment's range", "50", "Evidence 1"]
+    assert cells(rows[1])[1:] == ["28.33", "Evidence 1"]
+    assert cells(rows[1])[0] != "law_hiring_legal_ops"  # the type's name, from the Segment
+    targets = {row.attrs.get("id") for row in page.find_all("tr", class_="evidence-row")}
+    assert {f"evidence-{size}", f"evidence-{hiring}"} <= targets
+
+
+def test_a_disqualified_lead_shows_its_rule_and_evidence(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    count = evidence_row(
+        world, lead, 1, evidence_type="count", sought="lawyers listed", number=3, quote=None
+    )
+    store_score(
+        world,
+        lead,
+        tier=None,
+        lead_score=None,
+        rule="law_fewer_than_5_lawyers",
+        rule_evidence=f'["{count}"]',
+    )
+
+    section = score_section(world.page(f"/leads/{lead}"))
+
+    rule = section.find("p", class_="score-disqualified").text
+    assert rule.startswith("Disqualified: ") and rule != "Disqualified: law_fewer_than_5_lawyers"
+    link = section.find("p", class_="score-evidence").find("a")
+    assert link.attrs["href"] == f"#evidence-{count}"
+    assert not section.find_all("table")
+
+
+def test_re_score_queues_the_job_and_answers_the_panel(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    reply = post_rescore(world, lead)
+
+    assert reply.status == 200
+    assert reply.header(b"cache-control") == b"no-store"
+    panel = Tree(reply.text)
+    assert panel.find("section", id="lead-score")
+    assert panel.find("p", role="status").text == "Re-score queued."
+    assert not panel.find_all("nav")  # the panel alone, not the page
+    assert world.sql("SELECT idempotency_key, lane FROM jobs WHERE type = 'score_lead'") == [
+        (f"score_lead:{lead}:tick", "interactive")
+    ]
+
+
+@pytest.mark.parametrize("lead", [UNKNOWN, "not-a-ulid"])
+def test_re_score_on_an_unknown_lead_is_404_without_echoing_the_id(
+    world: World, lead: str
+) -> None:
+    reply = post_rescore(world, lead)
+
+    assert (reply.status, reply.text) == (404, "That Lead doesn't exist.")
+    assert world.sql("SELECT COUNT(*) FROM jobs WHERE type = 'score_lead'") == [(0,)]
+
+
+def test_re_score_needs_the_csrf_token_and_no_field(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    assert post_rescore(world, lead, token=False).status == 403
+    reply = post_rescore(world, lead, body=form(extra="x"))
+    assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert world.sql("SELECT COUNT(*) FROM jobs WHERE type = 'score_lead'") == [(0,)]
+
+
+def test_the_re_score_route_is_a_post_declaring_personal_data(world: World) -> None:
+    [route] = [
+        route
+        for route in world.dashboard.app.routes
+        if getattr(route, "name", None) == "lead_rescore"
+    ]
+
+    assert getattr(route, "path") == "/leads/{lead_id}/rescore"
+    assert getattr(route, "methods") == {"POST"}
+    assert getattr(getattr(route, "endpoint"), "__nextron_personal_data__") is True
+
+
+def test_the_list_shows_tier_and_lead_score_and_sorts_by_tier(world: World) -> None:
+    b = world.lead("Bee Law", "bee-law.co.uk", minutes=1)
+    a_low = world.lead("Low Law", "low-law.co.uk", minutes=2)
+    a_high = world.lead("High Law", "high-law.co.uk", minutes=3)
+    world.lead("None Law", "none-law.co.uk", minutes=4)
+    c = world.lead("Sea Law", "sea-law.co.uk", minutes=5)
+    store_score(world, b, tier="B", lead_score=90)
+    store_score(world, a_low, tier="A", lead_score=40)
+    store_score(world, a_high, tier="A", lead_score=70)
+    store_score(world, c, tier="C", lead_score=99)
+
+    newest = world.page("/leads", "segment=law_private_ai")
+    by_tier = world.page("/leads", "segment=law_private_ai&sort=tier")
+
+    def names_and_scores(page: Tree) -> list[tuple[str, str, str]]:
+        rows = table_rows(page.find("table", class_="lead-table"))[1:]
+        return [(row[0], row[5], row[6]) for row in rows]
+
+    assert names_and_scores(newest) == [
+        ("Sea Law", "C", "99"),
+        ("None Law", "—", "—"),
+        ("High Law", "A", "70"),
+        ("Low Law", "A", "40"),
+        ("Bee Law", "B", "90"),
+    ]
+    assert names_and_scores(by_tier) == [
+        ("High Law", "A", "70"),
+        ("Low Law", "A", "40"),
+        ("Bee Law", "B", "90"),
+        ("Sea Law", "C", "99"),
+        ("None Law", "—", "—"),
+    ]
+    head = newest.find("table", class_="lead-table").find("thead")
+    links = {a.text: a.attrs["href"] or "" for a in head.find_all("a")}
+    assert set(links) == {"Tier"}  # Lead Score is plain; newest first already: Created too
+    assert parse_qsl(urlsplit(links["Tier"]).query) == [
+        ("segment", "law_private_ai"),
+        ("sort", "tier"),
+    ]
+    head = by_tier.find("table", class_="lead-table").find("thead")
+    [created] = [a for a in head.find_all("a") if a.text == "Created"]
+    assert created.attrs["href"] == "/leads?segment=law_private_ai"
+
+
+def test_paging_keeps_the_tier_sort(world: World) -> None:
+    many(world, 51)
+
+    first = world.page("/leads", "sort=tier")
+
+    [next_link] = first.find("nav", class_="pager").find_all("a")
+    assert parse_qsl(urlsplit(next_link.attrs["href"] or "").query) == [
+        ("sort", "tier"),
+        ("page", "2"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("merged", "notice"),
+    [
+        (False, "This Lead is closed; it can't be re-scored."),
+        (True, "This Lead was merged into another Lead; it can't be re-scored."),
+    ],
+)
+def test_re_score_on_a_closed_or_merged_lead_queues_nothing_and_says_so(
+    world: World, merged: bool, notice: str
+) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk", minutes=1)
+    if merged:
+        survivor = world.lead("Smith Law LLP", "smithlaw.co.uk")
+        world.merge(survivor, lead)
+    else:
+        world.stage(lead, PipelineStage.DISQUALIFIED)
+
+    reply = post_rescore(world, lead)
+
+    assert reply.status == 200
+    alert = Tree(reply.text).find("p", role="alert")
+    assert alert.text == notice
+    assert world.sql("SELECT COUNT(*) FROM jobs WHERE type = 'score_lead'") == [(0,)]
+
+
+def test_evidence_no_longer_live_is_named_not_linked(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    live = evidence_row(world, lead, 1, quote="We are hiring a Legal Operations Manager.")
+    gone = evidence_row(world, lead, 2, quote="We were hiring.")
+    world.transact(lambda: signals_repo.retract_evidence(gone, T))
+    factors = factors_text(
+        (),
+        (Factor(FactorKind.EVENT, "law_hiring_legal_ops", 60.0, 60, 1, live, (live, gone)),),
+    )
+    store_score(world, lead, factors=factors)
+
+    section = score_section(world.page(f"/leads/{lead}"))
+
+    [row] = section.find_all("tr", class_="factor-row")
+    assert [a.attrs["href"] for a in row.find_all("a")] == [f"#evidence-{live}"]
+    assert row.find("span", class_="evidence-gone").text == "Evidence 2 (no longer live)"
+
+
+def test_a_lead_whose_stored_factors_dont_decode_still_renders(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    store_score(world, lead, factors='{"x":1}')
+
+    section = score_section(world.page(f"/leads/{lead}"))
+
+    assert section.find("dd", class_="lead-tier").text == "Tier A"
+    assert section.find_all("tr", class_="factor-row") == []

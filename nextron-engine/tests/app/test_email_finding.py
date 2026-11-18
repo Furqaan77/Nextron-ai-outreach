@@ -663,6 +663,7 @@ def test_hunters_quota_reached_makes_no_call_and_the_handler_defers(world: World
         test_runs=no_jobs,
         job_boards=no_jobs,
         legal_forms=no_jobs,
+        scores=no_jobs,
         finding=lambda: found.service,
     ).get("find_contact_email").handler
     job = Job(

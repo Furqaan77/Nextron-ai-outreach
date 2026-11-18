@@ -73,8 +73,10 @@ checks the one posting whose Event is ``signal_id``. It is not budget-checked (D
   nothing.
 - A Lead merged during the call stores nothing (``recheck_skipped``, ``merged_lead``).
 
-After an apply it logs ``event_rechecked`` (``signal_id``, ``lead_id``, ``listed``, ``closed``,
-``reopened``).
+When an apply closed or reopened a posting, its transaction also enqueues ``score_lead`` (Story
+2.15, ``nextron.domain.scoring.SCORE_LEAD_JOB``): scope the Lead, discriminator ``tick``, payload
+``{v, lead_id}``, so the Lead's scores and Tier follow its Events. After an apply it logs
+``event_rechecked`` (``signal_id``, ``lead_id``, ``listed``, ``closed``, ``reopened``).
 """
 
 import logging
@@ -110,6 +112,7 @@ from nextron.domain.identity import IdentityError, registrable_domain
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import TICK, VERSION_FIELD
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
+from nextron.domain.scoring import SCORE_LEAD_JOB
 from nextron.domain.postings import (
     ATS_SOURCES,
     Board,
@@ -400,6 +403,13 @@ class JobBoards:
                 apply(now, tally)
                 signals_repo.retract_unsupported(lead_id, now)
                 postings.publish_closed(lead_id, tally)
+                if tally.closed or tally.reopened:
+                    self._queue.enqueue(
+                        SCORE_LEAD_JOB,
+                        scope=lead_id,
+                        discriminator=TICK,
+                        payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id},
+                    )
         if merged:
             log.info(RECHECK_SKIPPED, extra={"signal_id": signal_id, "reason": MERGED_LEAD})
             return

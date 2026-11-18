@@ -220,7 +220,8 @@ def test_a_boards_postings_become_live_postings_and_a_hiring_event(world: World)
     add(world, lead, "Ann Fox", "COO")
     controller = add(world, lead, "Bo Day", "Controller", minutes=1)
     with world.units.open():
-        choice = PrimaryContacts(world.clock, world.research, world.queue).select_primary_contact(lead)
+        primary = PrimaryContacts(world.clock, world.research, world.queue)
+        choice = primary.select_primary_contact(lead)
     assert choice == PrimaryChoice(controller, PrimarySetBy.SYSTEM)
 
 
@@ -548,6 +549,7 @@ def test_extract_lead_queues_check_job_boards_which_the_handler_runs(world: Worl
         test_runs=no_jobs,
         job_boards=lambda: service,
         legal_forms=no_jobs,
+        scores=no_jobs,
     ).get("check_job_boards").handler
 
     with world.units.open():
@@ -596,6 +598,29 @@ def test_the_log_lines_hold_ids_and_counts_only(
 # Row: Recheck ------------------------------------------------------------------------------------
 
 
+def test_a_recheck_that_reopens_a_posting_queues_score_lead(world: World) -> None:
+    """Story 2.15: a re-check whose board lists a posting closed earlier reopens it and
+    re-scores the Lead."""
+    order_url = "https://boards.greenhouse.io/acme/jobs/3"
+
+    def both() -> BoardListing:
+        return listing(posting(AP_CLERK, AP_URL), posting("Order Entry Clerk", order_url))
+
+    lead, run_id = ats_lead(world)
+    check(world, boards({ACME: both()}), lead, run_id)
+    world.clock.set(T0 + timedelta(days=1))
+    check(world, boards({ACME: listing(posting("Order Entry Clerk", order_url))}), lead, run_id)
+    assert by_title(world, lead)[AP_CLERK]["status"] == "closed"
+    assert world.jobs("score_lead") == []  # a board check leaves it to the chain's selection
+    order = by_title(world, lead)["Order Entry Clerk"]
+    world.clock.set(T0 + timedelta(days=2))
+
+    recheck(world, boards({ACME: both()}), order["signal_id"])
+
+    assert by_title(world, lead)[AP_CLERK]["status"] == "live"
+    assert [key for key, *_ in world.jobs("score_lead")] == [f"score_lead:{lead}:tick"]
+
+
 def test_recheck_of_an_ats_posting_rechecks_its_board_with_the_same_rule(world: World) -> None:
     lead, run_id = ats_lead(world)
     check(world, boards({ACME: first_listing()}), lead, run_id)
@@ -610,6 +635,8 @@ def test_recheck_of_an_ats_posting_rechecks_its_board_with_the_same_rule(world: 
     assert world.recorder.closed == [EventClosed(signal_id=ap["signal_id"], lead_id=lead)]
     assert counts(world, run_id)["greenhouse_postings"] == 2  # a recheck writes no counts
     assert len(world.jobs("check_legal_form")) == 1  # nor queues the next stage
+    # Story 2.15: a closed posting re-scores its Lead
+    assert [key for key, *_ in world.jobs("score_lead")] == [f"score_lead:{lead}:tick"]
 
 
 def test_a_recheck_that_still_lists_the_posting_confirms_it(world: World) -> None:
@@ -623,6 +650,7 @@ def test_a_recheck_that_still_lists_the_posting_confirms_it(world: World) -> Non
 
     assert by_title(world, lead)[AP_CLERK]["last_checked_at"] == utc(t1)
     assert evidence_of(world, lead, ap["evidence_id"])["last_confirmed_at"] == utc(t1)
+    assert world.jobs("score_lead") == []  # nothing closed or reopened: no re-score
 
 
 def test_a_recheck_reraises_a_retryable_error_and_logs_any_other(
@@ -851,6 +879,7 @@ def test_the_recheck_event_handler_checks_the_signal_id(world: World) -> None:
         test_runs=no_jobs,
         job_boards=lambda: service,
         legal_forms=no_jobs,
+        scores=no_jobs,
     ).get("recheck_event").handler
     payload = {"v": 1, "signal_id": ap["signal_id"]}
 

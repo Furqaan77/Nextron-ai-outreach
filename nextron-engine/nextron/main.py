@@ -225,8 +225,11 @@ only, priority 60, 5 minutes, retry limit 5 (``handlers.ERASE_EXTERNAL_RETRIES``
 ``handlers.erase_external(erasure_stores)``, ``other``) is registered after them, and with
 ``erasure_stores`` unwired its handler raises a ``RuntimeError``, which isn't retried; Story
 2.13's ``find_contact_email`` (bulk by default, or interactive, priority 45, 5 minutes, retry
-limit 3, ``handlers.find_contact_email(finding)``, ``enrichment``) is registered last, and with
-``finding`` left out its handler raises a ``RuntimeError``.
+limit 3, ``handlers.find_contact_email(finding)``, ``enrichment``) after it, and with
+``finding`` left out its handler raises a ``RuntimeError``; Story 2.15's ``score_lead`` (bulk by
+default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score_lead(scores)``,
+``enrichment``) and ``recompute_tiers`` (bulk only, priority 20, 10 minutes, retry limit 2,
+``handlers.recompute_tiers(scores)``, ``enrichment``) are registered last.
 ``domain_checks`` is the one optional service: it defaults to a provider that raises ``RuntimeError`` when called, so a registry built
 without it (only tests do) fails a ``check_domains`` job; ``build_app`` always passes the real
 one. ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
@@ -258,6 +261,13 @@ research, queue)`` (``nextron.app.research.people``) is ``SignalExtractions``' p
 last argument), on the same gateway. ``PrimaryContacts(clock, research, queue)`` runs the
 ``select_primary_contact`` jobs, reached through ``primary=lambda: primary_contacts``, and the
 Lead page's "Make primary" (``create_app(..., primary_contacts=...)``).
+
+**Scores and the Lead Tier (Story 2.15).** ``Scoring(clock, Pipeline(clock), research)``
+(``nextron.app.scoring.api``) and ``LeadScores(clock, scoring, queue)``
+(``nextron.app.scoring.lead_scores``) run the ``score_lead`` jobs (the end of the research
+chain, queued by the Primary Contact's selection) and the daily ``recompute_tiers`` job, reached
+through ``scores=lambda: lead_scores``, and the Lead page's "Re-score"
+(``create_app(..., lead_scores=...)``).
 
 **Hiring Signals and job postings (Story 2.11).** ``JobBoards(clock, meter, boards, crawler,
 queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (after the
@@ -321,7 +331,8 @@ but the scheduler enqueues it only while ``recovery_active()`` returns ``True``,
 made once recovery is over, then ``purge_page_text`` (Story 2.5), ``Every(1 day,
 at_startup=True)``: the PC is not on at fixed times, so it also runs at every start, then
 ``check_domains`` (Story 6.5), a ``DailyAt(domain_check_schedule,
-fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``.
+fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``, then ``recompute_tiers`` (Story 2.15),
+``Every(1 day, at_startup=True)``, like ``purge_page_text``.
 ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
@@ -761,6 +772,8 @@ from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
+from nextron.app.scoring.api import Scoring
+from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.sequencing.api import Sequencing
@@ -833,6 +846,7 @@ from nextron.domain.notifications import ContactErased, Enrolled, LeadsMerged, S
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
+from nextron.domain.scoring import RECOMPUTE_TIERS_JOB, SCORE_LEAD_JOB
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
     InvalidPlaybook,
@@ -951,6 +965,7 @@ PROMPTS_CHECK: Final = "prompts"
 AI_SETS_CHECK: Final = "ai_sets"
 FALLBACK_TIMEZONE: Final = "UTC"
 PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
+RECOMPUTE_TIERS_PERIOD: Final = timedelta(days=1)
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
 EXIT_OK: Final = 0
@@ -1111,8 +1126,8 @@ def build_app(
         allowlist=functools.partial(read_sink_allowlist, units),
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
-    # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms
-    # and erasure_stores are bound just below
+    # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
+    # erasure_stores, email_finding and lead_scores are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1130,6 +1145,7 @@ def build_app(
         legal_forms=lambda: legal_forms,
         erasure_stores=lambda: erasure_stores,
         finding=lambda: email_finding,
+        scores=lambda: lead_scores,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1155,6 +1171,7 @@ def build_app(
     domain_checks = DomainChecks(
         clock, dns if dns is not None else DnspythonDns(meter=meter), queue
     )
+    lead_scores = LeadScores(clock, Scoring(clock, Pipeline(clock), research), queue)
     job_boards = JobBoards(
         clock,
         meter,
@@ -1274,6 +1291,7 @@ def build_app(
         erasures=erasures,  # Story 3.13: on the same Compliance, with the queue
         domain_checks=domain_checks,
         email_finding=email_finding,
+        lead_scores=lead_scores,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1364,6 +1382,7 @@ def build_job_types(
     test_runs: Callable[[], handlers.AiTestRunning],
     job_boards: Callable[[], handlers.CheckingJobBoards],
     legal_forms: Callable[[], handlers.CheckingLegalForm],
+    scores: Callable[[], handlers.ScoringLeads],
     domain_checks: Callable[[], handlers.DomainChecking] | None = None,
     erasure_stores: Callable[[], handlers.StoreErasing] | None = None,
     finding: Callable[[], handlers.FindingEmail] | None = None,
@@ -1390,7 +1409,8 @@ def build_job_types(
     unwired, so such a job fails with a ``RuntimeError``, which isn't retried), and ``finding``
     the ``research`` service's ``EmailFinding`` that ``find_contact_email`` jobs call (left
     out, as in tests that never run one, the handler raises ``RuntimeError`` when a job
-    runs)."""
+    runs), and ``scores`` the ``scoring`` service's ``LeadScores`` that ``score_lead`` and
+    ``recompute_tiers`` jobs call."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     job_types = JobTypes()
@@ -1623,6 +1643,30 @@ def build_job_types(
             group=JobGroup.ENRICHMENT,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=SCORE_LEAD_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK, Lane.INTERACTIVE}),  # interactive for "Re-score"
+            priority=40,
+            max_runtime=timedelta(minutes=5),
+            retry_limit=3,
+            handler=handlers.score_lead(scores),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RECOMPUTE_TIERS_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),
+            priority=20,
+            max_runtime=timedelta(minutes=10),
+            retry_limit=2,
+            handler=handlers.recompute_tiers(scores),
+            group=JobGroup.ENRICHMENT,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1703,6 +1747,10 @@ def build_triggers(
     triggers.register_trigger(
         Trigger.CHECK_DOMAINS,
         DailyAt(domain_check_schedule, fallback=DailyRun(DOMAIN_CHECK_TIME, FALLBACK_TIMEZONE)),
+    )
+    # Events age out by the day: re-tier daily, and at every start too
+    triggers.register_trigger(
+        Trigger.RECOMPUTE_TIERS, Every(RECOMPUTE_TIERS_PERIOD, at_startup=True)
     )
     triggers.freeze()
     return triggers

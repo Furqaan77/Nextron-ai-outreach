@@ -1,0 +1,57 @@
+{#- The Lead page's Score panel (nextron.web.leads_page, Story 2.15): rendered inside lead.html,
+    below the header, and alone as the answer to POST /leads/{lead_id}/rescore, which HTMX swaps
+    in for this whole panel. The Lead Tier, the Fit, Signal and Lead Scores and each factor with
+    its points and its Evidence links (#evidence-<id>, live Evidence only: the rest read
+    "Evidence <n> (no longer live)"); a Disqualified Lead's rule and its
+    Evidence; or "Not scored yet.". Every label renders through |plain, inside an element
+    carrying hx-disable; the "Re-score" form sits outside it. -#}
+{%- macro evidence_link(link, index) %}{% if link.live %}<a href="#evidence-{{ link.evidence_id }}">Evidence {{ index }}</a>{% else %}<span class="evidence-gone">Evidence {{ index }} (no longer live)</span>{% endif %}{% endmacro %}
+<section class="lead-score" id="lead-score" aria-labelledby="score-heading">
+<h2 id="score-heading">Score</h2>
+{%- if score_notice %}
+<p class="notice{% if score_notice.role == 'alert' %} notice-refused{% endif %}" role="{{ score_notice.role }}">{{ score_notice.text }}</p>
+{%- endif %}
+<div class="score-body" hx-disable>
+{%- if score.state == "scored" %}
+<dl class="lead-facts score-facts">
+<dt>Lead Tier</dt>
+<dd class="lead-tier">{{ score.tier }}</dd>
+<dt>Fit Score</dt>
+<dd>{{ score.fit }}</dd>
+<dt>Signal Score</dt>
+<dd>{{ score.signal }}</dd>
+<dt>Lead Score</dt>
+<dd>{{ score.lead }}</dd>
+<dt>Computed</dt>
+<dd>{{ score.computed }}</dd>
+<dt>Segment version</dt>
+<dd>{{ score.segment_version }}</dd>
+</dl>
+<table class="lead-table factor-table">
+<thead>
+<tr><th scope="col">Factor</th><th scope="col">Points</th><th scope="col">Evidence</th></tr>
+</thead>
+<tbody>
+{%- for factor in score.factors %}
+<tr class="factor-row"><td>{{ factor.label|plain }}</td><td>{{ factor.points }}</td><td>
+{%- if factor.evidence %}{% for link in factor.evidence %}{{ evidence_link(link, loop.index) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}—{% endif -%}
+</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- elif score.state == "disqualified" %}
+<p class="score-disqualified">Disqualified: {{ score.rule|plain }}</p>
+<p class="score-evidence">Evidence:
+{%- for link in score.evidence %} {{ evidence_link(link, loop.index) }}{% if not loop.last %},{% endif %}{% else %} —{% endfor %}</p>
+<dl class="lead-facts score-facts">
+<dt>Computed</dt>
+<dd>{{ score.computed }}</dd>
+<dt>Segment version</dt>
+<dd>{{ score.segment_version }}</dd>
+</dl>
+{%- else %}
+<p>Not scored yet.</p>
+{%- endif %}
+</div>
+<form method="post" action="/leads/{{ lead_id }}/rescore" hx-post="/leads/{{ lead_id }}/rescore" hx-target="#lead-score" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<button type="submit" class="secondary">Re-score</button></form>
+</section>

@@ -1,12 +1,13 @@
 {% extends "base.html" %}
-{#- The Lead page (nextron.web.leads_page): the header facts, a GB Lead's legal form
-    (lead_legal_form.html, Story 2.12), the Signals, the live Evidence, then the Contacts panel
-    (lead_contacts.html: the Primary Contact and each Contact with its live Eligibility,
-    evaluated on this render and never stored, and its recorded bases, then its Market and
-    timezone facts, its Provenance Records and its erase link (Story 3.13), or, for an erased
-    Contact, its tombstone line only), then the Job postings section (Story 2.11), then the Data
-    subject requests section (Story 3.15): one "Export data (JSON)" form per Contact, outside any
-    hx-disable so HTMX posts it.
+{#- The Lead page (nextron.web.leads_page): the header facts, the Score panel (lead_score.html,
+    Story 2.15: the Tier, the scores and their factors, and the "Re-score" form), a GB Lead's
+    legal form (lead_legal_form.html, Story 2.12), the Signals, the live Evidence, then the
+    Contacts panel (lead_contacts.html: the Primary Contact and each Contact with its live
+    Eligibility, evaluated on this render and never stored, and its recorded bases, then its
+    Market and timezone facts, its Provenance Records and its erase link (Story 3.13), or, for
+    an erased Contact, its tombstone line only), then the Job postings section (Story 2.11), then
+    the Data subject requests section (Story 3.15): one "Export data (JSON)" form per Contact,
+    outside any hx-disable so HTMX posts it.
     Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
     it renders only through |plain or safe_link, inside an element carrying hx-disable. The
     legal-form, Signals, Evidence and Job postings sections hold no HTMX action. -#}
@@ -30,6 +31,7 @@
 <dd>{{ lead.created }}</dd>
 </dl>
 </header>
+{% include "lead_score.html" %}
 {%- if legal_form %}
 {% include "lead_legal_form.html" %}
 {%- endif %}
@@ -62,7 +64,7 @@
 </thead>
 <tbody>
 {%- for row in evidence %}
-<tr class="evidence-row"><td>{{ row.type|plain }}</td><td>
+<tr class="evidence-row"{% if row.evidence_id %} id="evidence-{{ row.evidence_id }}"{% endif %}><td>{{ row.type|plain }}</td><td>
 {%- if row.quote %}<q>{{ row.quote|plain }}</q>{% endif %}
 {%- if row.sought %}{{ row.sought|plain }}{% endif %}
 {%- if row.pages_checked %}<ul class="pages-checked">{% for url in row.pages_checked %}<li>{{ safe_link(url) }}</li>{% endfor %}</ul>{% endif -%}

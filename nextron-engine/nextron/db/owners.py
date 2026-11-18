@@ -132,6 +132,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "legal_form_site_evidence_id",
             "legal_form_registry_evidence_id",
         ),
+        # the score group (Story 2.15)
+        "scoring": (
+            "fit_score",
+            "signal_score",
+            "lead_score",
+            "tier",
+            "tier_computed_at",
+            "score_segment_version",
+            "score_factors",
+            "disqualified_rule",
+            "disqualified_evidence",
+        ),
     },
     "prompt_snapshots": {
         "playbook": ("id", "route", "prompt_version", "sha256", "text", "created_at"),

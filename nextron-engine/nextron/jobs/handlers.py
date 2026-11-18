@@ -80,6 +80,10 @@ handler runs in.
   contact_id)`` once (the research service's ``EmailFinding``) and returns ``DEFERRED`` when it
   returns ``quota_reached`` (a Hunter or Prospeo quota refused the paid step). A retryable
   ``AdapterError`` it raises is retried by the runner; any other error fails the job.
+- ``score_lead(scores)`` (Story 2.15): calls ``scores().score_lead(lead_id)`` once (the
+  ``scoring`` service's ``LeadScores``) and returns ``None``.
+- ``recompute_tiers(scores)`` (Story 2.15): calls ``scores().recompute_tiers()`` once and returns
+  ``None``; the payload is a trigger's tick, ``{"v": 1}``.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -435,3 +439,31 @@ def erase_external(stores: Callable[[], StoreErasing]) -> Handler:
         stores().run(contact_id, store, last_attempt=job.attempts > ERASE_EXTERNAL_RETRIES)
 
     return handle_erase_external
+
+
+class ScoringLeads(Protocol):
+    """What ``score_lead`` and ``recompute_tiers`` need of the ``scoring`` service's
+    ``LeadScores``."""
+
+    def score_lead(self, lead_id: str) -> object: ...
+
+    def recompute_tiers(self) -> object: ...
+
+
+def score_lead(scores: Callable[[], ScoringLeads]) -> Handler:
+    """The ``score_lead`` job's handler: score the payload's Lead through ``scores()``."""
+
+    def handle_score_lead(job: Job) -> None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        scores().score_lead(lead_id)
+
+    return handle_score_lead
+
+
+def recompute_tiers(scores: Callable[[], ScoringLeads]) -> Handler:
+    """The ``recompute_tiers`` job's handler: re-tier every scored Lead through ``scores()``."""
+
+    def handle_recompute_tiers(job: Job) -> None:
+        scores().recompute_tiers()
+
+    return handle_recompute_tiers
