@@ -1,5 +1,5 @@
 """Public command API of the ``sequencing`` service (AD-3, AD-4, AD-16, AD-21, FR-3, FR-63;
-Story 4.8).
+Stories 4.8 and 4.9).
 
 Other services and the delivery layers change ``sequencing`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
@@ -35,19 +35,23 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
    counter (round-robin in name order, skipping inactive Variants). The inbox is
    ``pick_inbox`` over the bindable inboxes, each weighed by ``capacity_forecast(its cold Daily
    Cap, its follow-ups due)`` on today's date in the ``sender_timezone`` (UTC while that is unset
-   or unreadable), its live Enrollments and when it was registered. Until Epic 6 every cap is 0
-   (``queries.sending.cold_daily_caps``) and no follow-up is due until Story 4.9 fills
-   ``_follow_ups_due``, so the inbox with the fewest live Enrollments wins, then the earliest
-   registered.
+   or unreadable), its live Enrollments and when it was registered. An inbox's follow-ups due
+   that day (``_follow_ups_due``, Story 4.9) are its live Enrollments' unsent (``ready`` or
+   ``approved``) Step slots with ``step_no > 1`` due before the end of that date in the
+   ``sender_timezone``, overdue ones included (``queries.drafting.follow_ups_due_before``).
+   Until Epic 6 every cap is 0 (``queries.sending.cold_daily_caps``), so the inbox with the
+   fewest live Enrollments wins, then the earliest registered.
 4. **Writes**, in order: the Campaign's ``variant_counters`` row upserted; the Enrollment
    inserted ``active`` with its ``variant_id``, ``sending_inbox_id``, ``sequence_id``,
    ``sequence_version``, ``offer_id`` and ``origin`` bound for good, and one ``events`` row
    (``None`` to ``active``, cause ``enrolled``, ``cause_ref`` the Campaign);
    ``research.record_eligibility_basis(contact_id, decision, campaign_id, lia_ref, lia_date,
    now)`` with the Campaign's LIA only when ``needs_lia`` of its Market's country, else
-   ``None, None``; then ``Enrolled(enrollment_id, lead_id)`` is published (its subscriber,
-   ``Pipeline.on_enrolled``, moves a ``new`` Lead to ``queued``). No job is enqueued (drafting
-   joins in Story 4.9). It returns ``NewEnrollment``.
+   ``None, None``; ``Drafting(clock).request_steps(enrollment_id, steps, Urgency.SOON)`` (Story
+   4.9: one ``ready`` slot per Step, Step 1 due at once), whose ``Blocked`` raises
+   ``RuntimeError`` so the whole enroll rolls back (fail closed); then
+   ``Enrolled(enrollment_id, lead_id)`` is published (its subscriber, ``Pipeline.on_enrolled``,
+   moves a ``new`` Lead to ``queued``). No job is enqueued. It returns ``NewEnrollment``.
 
 Only ``enroll`` has "enroll" in a def name here (the AD-16 manifest matches ``*enroll*``), and
 the ``enrollments`` insert is called lexically inside it.
@@ -60,15 +64,46 @@ the three is given (otherwise ``ValueError``). ``cause`` is a ``StopCause`` valu
 live one moves to ``stopped`` with its ``stop_cause``, its ``pause_cause`` cleared and
 ``ended_at`` = ``max(now, last_step_sent_at)``, so the ``ended_at >= last_step_sent_at`` CHECK
 never rolls a stop back, with one ``events`` row. An ended Enrollment is left as it is, so a
-repeat is a no-op. It returns the ids it stopped, oldest first. Story 4.9 adds
-``approval.cancel_pending`` here.
+repeat is a no-op. Then ``Approval(clock).cancel_pending`` cancels the stopped Enrollments'
+``ready`` Drafts in the same transaction (Story 4.9). It returns the ids it stopped, oldest
+first.
+
+**Lifecycle** (Story 4.9). Each status change appends one ``events`` row; an unknown
+Enrollment raises ``LookupError``, a non-``str`` id ``TypeError``.
+
+- ``@command pause(enrollment_id, cause) -> bool``: an ``active`` Enrollment moves to
+  ``paused`` with ``cause`` (a ``PauseCause`` value; actor ``operator`` for ``operator``);
+  any other status is a no-op ``False``.
+- ``@command resume(enrollment_id) -> bool``: a ``paused`` Enrollment moves back to
+  ``active``, its ``pause_cause`` cleared (actor ``operator`` when the Operator paused it);
+  any other status is a no-op ``False``, so a stopped one never resumes.
+- ``@command delay_until(enrollment_id, until) -> datetime | None``: for a live Enrollment,
+  the lowest-numbered ``ready`` or ``approved`` Step slot that has a ``due_at`` gets it
+  recomputed as ``step_due_at(base, gap, the Contact's tz, not_before=until)`` through
+  ``Drafting.set_due``: ``base`` is the previous Step's send time (``last_step_sent_at``) and
+  ``gap`` the difference of the two slots' ``day_offset``, or, for the Enrollment's first
+  slot, its own creation time and 0. It returns the new due time, or ``None`` (an ended
+  Enrollment, no such slot, or a Contact with no ``tz``, logged). ``until`` must be a ``date``
+  (not a ``datetime``): ``TypeError``.
+- ``@command on_step_sent(n: MessageSent)`` (the ``MessageSent`` subscriber): the Draft
+  ``n.draft_id`` must be a ``step`` or ``recontact`` slot (anything else, or an unknown one,
+  is a logged no-op that never raises). The send time is the clock's now. For a live
+  Enrollment, the next Step is the lowest-numbered still-pending (``ready`` or ``approved``)
+  slot above the sent one (a rejected, superseded or cancelled slot is skipped). When it
+  already has a ``due_at`` the message is a repeat and nothing is written. Otherwise
+  ``last_step_sent_at`` becomes the later of its value and now, and the next Step gets
+  ``set_due(step_due_at(now, gap, the Contact's tz))`` (a Contact with no ``tz`` leaves it
+  unset, logged); with no next Step the Enrollment becomes ``completed`` (``ended_at`` = the
+  send time, one event, ``cause_ref`` the Draft). A ``completed`` Enrollment writes nothing;
+  a ``stopped`` one only records ``last_step_sent_at``, raising ``ended_at`` to keep the
+  CHECK.
 
 **Subscribers** (``nextron.main.build_subscribers``), each idempotent:
 
 - ``@command stop_suppressed(n: SubjectSuppressed)``: stops, cause ``suppressed`` and
   ``cause_ref`` the entry, the named Contact's live Enrollments, then every live Enrollment whose
   Contact the gate now blocks on ``email`` for ``cold`` (a domain or shared key suppression
-  reaches Contacts the notification doesn't name).
+  reaches Contacts the notification doesn't name), cancelling their ``ready`` Drafts too.
 - ``@command erase_pii(n: ContactErased)``: stops the Contact's live Enrollments, cause
   ``contact_erased``. ``sequencing``'s tables hold no personal data, so it declares no
   ``ERASURE``.
@@ -78,15 +113,19 @@ repeat is a no-op. It returns the ids it stopped, oldest first. Story 4.9 adds
   ``lead_closed``, ``cause_ref`` the merged Lead.
 """
 
+import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from types import MappingProxyType
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from nextron.app.approval.api import Approval
 from nextron.app.compliance import api as compliance_api
 from nextron.app.compliance.api import Compliance
+from nextron.app.drafting.api import Drafting
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import sending as sending_queries
@@ -98,27 +137,40 @@ from nextron.db.repos.sequencing import enrollments as enrollments_repo
 from nextron.db.repos.sequencing import variant_counters as counters_repo
 from nextron.db.repos.sequencing.enrollments import StoredEnrollment
 from nextron.db.uow import command, current
+from nextron.domain.ai import Urgency
 from nextron.domain.campaign import needs_lia
 from nextron.domain.contactability import Blocked, ContactSubject
+from nextron.domain.draft import PENDING, STEP_KINDS
 from nextron.domain.enrollment import (
     CREATION,
     LIVE_STATUSES,
+    PAUSE_EVENTS,
     STOP_EVENTS,
+    EnrollmentEvent,
     EnrollmentOrigin,
     EnrollmentStatus,
     EnrollRefusal,
     NewEnrollment,
+    PauseCause,
     RefusalCode,
     StopCause,
     next_variant,
     transition,
 )
 from nextron.domain.ids import is_ulid
-from nextron.domain.notifications import ContactErased, Enrolled, LeadsMerged, SubjectSuppressed
+from nextron.domain.notifications import (
+    ContactErased,
+    Enrolled,
+    LeadsMerged,
+    MessageSent,
+    SubjectSuppressed,
+)
 from nextron.domain.pipeline_stage import CLOSED_STAGES, PipelineStage
-from nextron.domain.sending_policy import InboxLoad, capacity_forecast, pick_inbox
+from nextron.domain.sending_policy import InboxLoad, capacity_forecast, pick_inbox, step_due_at
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
 from nextron.ports.clock import Clock
+
+log = logging.getLogger(__name__)
 
 ENTITY: Final = "enrollments"
 SYSTEM_ACTOR: Final = "system:sequencing"
@@ -171,20 +223,31 @@ def _actor_of_stop(cause: StopCause) -> str:
     return OPERATOR_ACTOR if cause in OPERATOR_STOPS else SYSTEM_ACTOR
 
 
+def _sender_zone() -> tzinfo:
+    """The ``sender_timezone``, or UTC while it is unset or unreadable."""
+    try:
+        return ZoneInfo(str(setup_queries.get(Key.SENDER_TIMEZONE)))
+    except (SettingNotSet, InvalidSettingValue, ZoneInfoNotFoundError, ValueError, OSError):
+        return UTC
+
+
 def _local_date(now: datetime) -> date:
     """The date of ``now`` in ``sender_timezone``, or in UTC while it is unset or unreadable."""
-    zone: tzinfo = UTC
-    try:
-        zone = ZoneInfo(str(setup_queries.get(Key.SENDER_TIMEZONE)))
-    except (SettingNotSet, InvalidSettingValue, ZoneInfoNotFoundError, ValueError, OSError):
-        pass
-    return now.astimezone(zone).date()
+    return now.astimezone(_sender_zone()).date()
 
 
 def _follow_ups_due(local_date: date) -> Mapping[str, int]:
-    """Each inbox's follow-ups due on ``local_date``: none until Story 4.9 reads them from
-    ``queries.drafting``."""
-    return MappingProxyType({})
+    """Each inbox's follow-ups due on ``local_date``, overdue ones included: its live
+    Enrollments' unsent Step slots after Step 1 due before the end of that date in the
+    ``sender_timezone``."""
+    end = datetime.combine(local_date + timedelta(days=1), time(), tzinfo=_sender_zone())
+    due = drafting_queries.follow_ups_due_before(end.astimezone(UTC))
+    found: dict[str, int] = {}
+    for row in enrollments_repo.live():
+        count = due.get(row.id, 0)
+        if count:
+            found[row.sending_inbox_id] = found.get(row.sending_inbox_id, 0) + count
+    return MappingProxyType(found)
 
 
 def _picked_inbox(inboxes: Sequence[sending_queries.SendingInboxView], now: datetime) -> str:
@@ -206,6 +269,40 @@ def _picked_inbox(inboxes: Sequence[sending_queries.SendingInboxView], now: date
     if picked is None:  # the caller refused an empty list already
         raise LookupError("no Sending Inbox to bind")
     return picked
+
+
+def _pause_cause_of(cause: object) -> PauseCause:
+    if not isinstance(cause, str):
+        raise TypeError(f"pause takes a PauseCause, not {type(cause).__name__}")
+    try:
+        return PauseCause(cause)
+    except ValueError:
+        raise ValueError("pause: the cause is unknown") from None
+
+
+def _stored_row(row_id: object, name: str) -> StoredEnrollment:
+    """The Enrollment ``row_id``; ``TypeError`` for a non-``str`` id, ``LookupError`` when it
+    is unknown."""
+    if not isinstance(row_id, str):
+        raise TypeError(f"{name} takes the Enrollment id as str")
+    found = sequencing_queries.enrollment(row_id)
+    if found is None:
+        raise LookupError(f"{name}: the Enrollment is unknown")
+    return found
+
+
+def _contact_tz(contact_id: str) -> str | None:
+    contact = research_queries.contact(contact_id)
+    return None if contact is None else contact.tz
+
+
+def _step_slots(row_id: str) -> list[drafting_queries.DraftView]:
+    """The Enrollment's ``step`` and ``recontact`` slots, by ``step_no``."""
+    return [
+        draft
+        for draft in drafting_queries.drafts_of(row_id)
+        if draft.kind in STEP_KINDS and draft.step_no is not None
+    ]
 
 
 def _country_of(market_id: str) -> str | None:
@@ -303,6 +400,9 @@ class Sequencing:
             None if lia is None else lia.date,
             now,
         )
+        slots = Drafting(self._clock).request_steps(enrollment_id, chosen_steps, Urgency.SOON)
+        if isinstance(slots, Blocked):  # the gate answered Allowed above: fail closed
+            raise RuntimeError("enroll: the gate blocked the Enrollment's Draft slots")
         current().publish(Enrolled(enrollment_id=enrollment_id, lead_id=lead.id))
         return NewEnrollment(
             enrollment_id=enrollment_id,
@@ -344,7 +444,9 @@ class Sequencing:
             assert contact_id is not None
             rows = enrollments_repo.live_for_contact(contact_id) if is_ulid(contact_id) else []
         now = self._clock.now()
-        return tuple(self._stop_row(row, chosen, cause_ref, now) for row in rows)
+        stopped = tuple(self._stop_row(row, chosen, cause_ref, now) for row in rows)
+        Approval(self._clock).cancel_pending(stopped)
+        return stopped
 
     def _stop_row(
         self, row: StoredEnrollment, cause: StopCause, cause_ref: str | None, now: datetime
@@ -384,12 +486,16 @@ class Sequencing:
                 cause_ref=n.suppression_entry_id,
             )
         now = self._clock.now()
+        stopped = []
         for row in enrollments_repo.live():
             answer = compliance_api.assert_contactable(
                 ContactSubject(row.contact_id), CHANNEL, PURPOSE
             )
             if isinstance(answer, Blocked):
-                self._stop_row(row, StopCause.SUPPRESSED, n.suppression_entry_id, now)
+                stopped.append(
+                    self._stop_row(row, StopCause.SUPPRESSED, n.suppression_entry_id, now)
+                )
+        Approval(self._clock).cancel_pending(tuple(stopped))
 
     @command
     def erase_pii(self, n: ContactErased) -> None:
@@ -408,3 +514,160 @@ class Sequencing:
                 cause_ref=n.merged_lead_id,
             )
 
+
+    # Lifecycle (Story 4.9) ----------------------------------------------------------------------
+
+    def _move(
+        self,
+        row: StoredEnrollment,
+        event: EnrollmentEvent,
+        *,
+        pause_cause: str | None,
+        ended_at: datetime | None,
+        cause_ref: str | None,
+        actor: str,
+        now: datetime,
+    ) -> None:
+        """Apply ``event`` to the live Enrollment ``row`` and append its ``events`` row."""
+        current_status = EnrollmentStatus(row.status)
+        change = transition(current_status, event)
+        enrollments_repo.set_status(
+            row.id,
+            status=str(change.to),
+            pause_cause=pause_cause,
+            stop_cause=None,
+            ended_at=ended_at,
+            at=now,
+        )
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=row.id,
+            from_status=str(current_status),
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=cause_ref,
+            actor=actor,
+            at=now,
+        )
+
+    @command
+    def pause(self, enrollment_id: str, cause: PauseCause) -> bool:
+        """Pause an ``active`` Enrollment; whether it was paused."""
+        chosen = _pause_cause_of(cause)
+        row = _stored_row(enrollment_id, "pause")
+        if EnrollmentStatus(row.status) is not EnrollmentStatus.ACTIVE:
+            return False
+        actor = OPERATOR_ACTOR if chosen is PauseCause.OPERATOR else SYSTEM_ACTOR
+        self._move(
+            row,
+            PAUSE_EVENTS[chosen],
+            pause_cause=str(chosen),
+            ended_at=None,
+            cause_ref=None,
+            actor=actor,
+            now=self._clock.now(),
+        )
+        return True
+
+    @command
+    def resume(self, enrollment_id: str) -> bool:
+        """Resume a ``paused`` Enrollment; whether it was resumed."""
+        row = _stored_row(enrollment_id, "resume")
+        if EnrollmentStatus(row.status) is not EnrollmentStatus.PAUSED:
+            return False
+        actor = OPERATOR_ACTOR if row.pause_cause == PauseCause.OPERATOR else SYSTEM_ACTOR
+        self._move(
+            row,
+            EnrollmentEvent.RESUME,
+            pause_cause=None,
+            ended_at=None,
+            cause_ref=None,
+            actor=actor,
+            now=self._clock.now(),
+        )
+        return True
+
+    @command
+    def delay_until(self, enrollment_id: str, until: date) -> datetime | None:
+        """Recompute the next due Step's time so it is never before ``until``; the new due
+        time, or ``None``. See the module docstring."""
+        if isinstance(until, datetime) or not isinstance(until, date):
+            raise TypeError("delay_until takes a date")
+        row = _stored_row(enrollment_id, "delay_until")
+        if EnrollmentStatus(row.status) not in LIVE_STATUSES:
+            return None
+        slots = _step_slots(row.id)
+        position = next(
+            (
+                index
+                for index, slot in enumerate(slots)
+                if slot.status in PENDING and slot.due_at is not None
+            ),
+            None,
+        )
+        if position is None:
+            return None
+        target = slots[position]
+        tz = _contact_tz(row.contact_id)
+        if tz is None:
+            log.warning("delay_without_timezone", extra={"enrollment_id": row.id})
+            return None
+        base, gap = target.created_at, 0
+        if position > 0:
+            previous = slots[position - 1]
+            base = row.last_step_sent_at or target.created_at
+            gap = (target.day_offset or 0) - (previous.day_offset or 0)
+        due = step_due_at(base, gap, tz, not_before=until)
+        if not Drafting(self._clock).set_due(target.id, due):
+            return None
+        return due
+
+    @command
+    def on_step_sent(self, n: MessageSent) -> None:
+        """Record a sent Step: the next Step's due time, or the Enrollment's completion. See
+        the module docstring."""
+        draft = drafting_queries.draft(n.draft_id) if isinstance(n.draft_id, str) else None
+        if draft is None or draft.kind not in STEP_KINDS or draft.enrollment_id is None:
+            log.info("message_sent_not_a_step", extra={"om_id": str(n.om_id)})
+            return
+        row = enrollments_repo.get(draft.enrollment_id)
+        if row is None:  # the drafts foreign key keeps it
+            log.info("message_sent_without_enrollment", extra={"draft_id": draft.id})
+            return
+        now = self._clock.now()
+        last = row.last_step_sent_at
+        sent_at = now if last is None else max(last, now)
+        status = EnrollmentStatus(row.status)
+        if status is EnrollmentStatus.COMPLETED:
+            return  # a repeat after the last Step: nothing to record
+        if status not in LIVE_STATUSES:
+            ended_at = sent_at if row.ended_at is None else max(row.ended_at, sent_at)
+            enrollments_repo.record_step_sent(row.id, sent_at=sent_at, ended_at=ended_at, at=now)
+            return
+        sent_no = draft.step_no or 0
+        following = [
+            slot
+            for slot in _step_slots(row.id)
+            if (slot.step_no or 0) > sent_no and slot.status in PENDING
+        ]
+        if following and following[0].due_at is not None:
+            return  # a repeat: the next Step is already due
+        enrollments_repo.record_step_sent(row.id, sent_at=sent_at, ended_at=None, at=now)
+        if not following:
+            self._move(
+                row,
+                EnrollmentEvent.COMPLETE,
+                pause_cause=None,
+                ended_at=sent_at,
+                cause_ref=draft.id,
+                actor=SYSTEM_ACTOR,
+                now=now,
+            )
+            return
+        upcoming = following[0]
+        tz = _contact_tz(row.contact_id)
+        if tz is None:
+            log.warning("follow_up_without_timezone", extra={"enrollment_id": row.id})
+            return
+        gap = (upcoming.day_offset or 0) - (draft.day_offset or 0)
+        Drafting(self._clock).set_due(upcoming.id, step_due_at(now, gap, tz))

@@ -321,6 +321,29 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "variant_counters": {
         "sequencing": ("id", "campaign_id", "last_variant_id", "updated_at"),
     },
+    # Story 4.9: drafting inserts the slots and owns their content; approval moves the status
+    "drafts": {
+        "drafting": (
+            "id",
+            "kind",
+            "enrollment_id",
+            "step_no",
+            "day_offset",
+            "current_rev",
+            "due_at",
+            "generic",
+            "stale",
+            "created_at",
+            "updated_at",
+        ),
+        "approval": (
+            "status",
+            "reapproval_required",
+            "event_expired",
+            "skipped_at",
+            "status_at",
+        ),
+    },
     "crawl_runs": {
         "research": (
             "id",

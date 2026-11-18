@@ -1939,7 +1939,9 @@ stored `active` with its Variant, inbox, Sequence and version, and Offer bound f
 trigger refuses any change to them); one `events` row (cause `enrolled`); one
 `eligibility_basis` Provenance Record (`research.record_eligibility_basis`, with the Campaign's
 LIA for a UK Campaign); and `Enrolled` moves a `new` Lead to `queued`
-(`Pipeline.advance_to_at_least`). No job is enqueued yet: drafting joins in Story 4.9.
+(`Pipeline.advance_to_at_least`). Before `Enrolled` is published, Story 4.9's
+`Drafting.request_steps` creates the Enrollment's Draft slots (see [Draft slots and due
+times](#draft-slots-and-due-times)); no job is enqueued.
 
 **History.** `queries.sequencing.ended_sequences(contact_id)` feeds Eligibility the Contact's
 ended Enrollments that sent a Step (`replied` when stopped by a Reply or a Manual Reply), so a
@@ -1961,6 +1963,59 @@ otherwise the loser's Enrollments move to the survivor.
 | `resume` | `paused` | `active` | `resumed` |
 | `stop_<cause>` (`reply`, `manual_reply`, `hard_bounce`, `suppressed`, `operator_stop`, `operator_rejected`, `lead_closed`, `inbox_removed`, `contact_erased`) | `active`, `paused` | `stopped` | the stop cause |
 | `complete` | `active`, `paused` | `completed` | `completed` |
+
+## Draft slots and due times
+
+Story 4.9 (AD-4, AD-16, AD-21) gives every Enrollment its Draft slots, spaces its follow-ups and
+cancels what a stop leaves behind. No text is drafted yet (Story 4.12), nothing is approved
+(Epic 5) and nothing is sent (Epic 6).
+
+**The `drafts` table** (migration `0034_4_9_drafts`, every column PII class `none`) has two
+owners. `drafting` owns the content group: `kind` (`step`, `recontact`, `reply`, `rebook`,
+`channel`), `enrollment_id`, `step_no`, `day_offset` (the Step's Sequence day, copied when the
+slot is created so a later Sequence version never changes a running Enrollment),
+`current_rev` (empty until a revision exists), `due_at`, `generic`, `stale`, `created_at`,
+`updated_at`. `approval` owns the status group: `status` (inserted `ready`), the
+`reapproval_required` and `event_expired` flags, `skipped_at` and `status_at`. "Stalled" is
+never stored.
+
+**The Draft machine** (`nextron/domain/draft.py`):
+
+| Event | From | To | Cause |
+|---|---|---|---|
+| `approve` | `ready` | `approved` | `approved` |
+| `return_edited`, `return_expired`, `return_event_expired` | `approved` | `ready` | `edited`, `expired`, `event_expired` |
+| `reject` | `ready`, `approved` | `rejected` | `rejected` |
+| `send` | `approved` | `sent` | `sent` |
+| `supersede` | `ready`, `approved` | `superseded` | `superseded` |
+| `cancel` | `ready`, `approved` | `cancelled` | `sequence_stopped` |
+| `log_touch` (channel Drafts only) | `ready` | `sent` | `touch_logged` |
+
+**Slots.** `Drafting(clock).request_steps(enrollment_id, steps, urgency)` checks its
+arguments, asks the contactability gate (`email`, `cold`; a block returns `Blocked` and
+writes nothing), then inserts one `ready` slot per Step not already there, in one statement,
+with one `events` row each. `enroll` calls it with every requested Step; if the gate blocks
+there, the whole enroll rolls back.
+
+**Due times** come only from `domain.sending_policy.step_due_at(prev_sent_at, delay_days,
+recipient_tz, not_before=None)`: the same local wall time in the recipient's timezone,
+`delay_days` later, never before `not_before`, and a Saturday or Sunday moved to Monday (a
+time skipped by a clock change moves forward; a repeated one takes its first occurrence).
+Step 1 is due when it is created. A later Step gets its due time when the Step before it is
+sent: `Sequencing.on_step_sent` (on `MessageSent`) uses the send time and the gap between the
+two Steps' Sequence days (default days 0, 3, 7, 14, so gaps 3, 4, 7). After the last Step the
+Enrollment is `completed`.
+
+**Lifecycle.** `Sequencing.pause(enrollment_id, cause)` and `resume(enrollment_id)` move an
+Enrollment between `active` and `paused` (each returns whether it did anything).
+`delay_until(enrollment_id, date)` moves the next due Step so it is never before that date (an
+Out-of-Office return). Every stop (Operator, suppression, Lead close, erasure, merge onto a
+closed Lead) calls `Approval.cancel_pending`, which cancels the stopped Enrollments' `ready`
+Drafts in the same transaction; an `approved` one waits for Epic 5's `sending.cancel`.
+
+**Capacity.** When `enroll` picks an inbox, each inbox's follow-ups due that day (its live
+Enrollments' unsent Steps after Step 1, due by the end of the day in `sender_timezone`,
+overdue ones included) are reserved before new Step 1s.
 
 ## Leads list and Lead page
 

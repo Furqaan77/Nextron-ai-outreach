@@ -345,6 +345,26 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "last_variant_id": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 4.9. A Draft slot holds IDs, codes, numbers, flags and times; its text lives in
+    # draft_revisions (Story 4.12).
+    "drafts": {
+        "id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "enrollment_id": PiiClass.NONE,
+        "step_no": PiiClass.NONE,
+        "day_offset": PiiClass.NONE,
+        "current_rev": PiiClass.NONE,
+        "due_at": PiiClass.NONE,
+        "generic": PiiClass.NONE,
+        "stale": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "reapproval_required": PiiClass.NONE,
+        "event_expired": PiiClass.NONE,
+        "skipped_at": PiiClass.NONE,
+        "status_at": PiiClass.NONE,
+    },
     # Story 2.5. A page's visible text may quote a person, so an erasure nulls it (Story 3.13);
     # the URLs are of an organization's public pages, and the rest are IDs, codes, counts,
     # hashes and times.

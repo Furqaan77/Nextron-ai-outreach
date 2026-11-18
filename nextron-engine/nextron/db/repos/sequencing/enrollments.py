@@ -22,6 +22,8 @@ There is no setter for a bound column (``contact_id``, ``campaign_id``, ``varian
 - ``insert(...) -> id``: a new row;
 - ``set_status(enrollment_id, status, pause_cause, stop_cause, ended_at, at)``: the status
   group and ``updated_at``;
+- ``record_step_sent(enrollment_id, sent_at, ended_at, at)`` (Story 4.9): ``last_step_sent_at``,
+  ``ended_at`` and ``updated_at``;
 - ``move_lead(from_lead_id, to_lead_id, at) -> int``: every row of one Lead moved to another (a
   merge); the number moved.
 """
@@ -207,6 +209,17 @@ def set_status(
             ended_at=ended_at,
             updated_at=at,
         )
+    )
+
+
+def record_step_sent(
+    enrollment_id: str, *, sent_at: datetime, ended_at: datetime | None, at: datetime
+) -> None:
+    """Set the Enrollment's ``last_step_sent_at``, ``ended_at`` and ``updated_at``."""
+    current().session.execute(
+        update_rows(EnrollmentRecord)
+        .where(EnrollmentRecord.id == enrollment_id)
+        .values(last_step_sent_at=sent_at, ended_at=ended_at, updated_at=at)
     )
 
 
