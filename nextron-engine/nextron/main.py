@@ -129,9 +129,12 @@ Contact's live Enrollments stop with ``contact_erased``), then the hooks of ``se
 ``drafting`` (Story 4.12: it tombstones the text of the Contact's ``draft_revisions``),
 ``jobqueue``, ``ops`` and ``notify`` (the others no-ops: their tables never hold a Contact's
 data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
-``queued``); ``FooterChanged`` -> ``Drafting(clock).recompose_ready`` (Story 4.12: the Market's
-``ready`` Drafts get a ``footer_change`` revision). Each uses ``SystemClock()`` when no clock is
-given.
+``queued``); ``FooterChanged`` -> ``Drafting(clock, queue).recompose_ready`` (Story 4.12: the
+Market's ``ready`` Drafts get a ``footer_change`` revision; Story 4.14: each new revision's
+``check_grounding`` job is enqueued in the same transaction, through a ``JobQueue`` on
+``enqueue_only_job_types()``, ``build_job_types`` with every service unwired, so the job type's
+lanes and priority are the runner's own; the runner's registry runs the job). Each uses
+``SystemClock()`` when no clock is given.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance,
 queue=queue)`` (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the
@@ -237,7 +240,10 @@ default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score
 ``handlers.recompute_tiers(scores)``, ``enrichment``) after them, and Story 3.11's
 ``poll_unsubscribes`` (the realtime lane only, priority 80, ``max_runtime`` 5 minutes, retry
 limit 3, ``handlers.poll_unsubscribes(unsubscribes)``, ``unsubscribe_poll``; never budget-gated)
-is registered last. ``domain_checks`` and ``unsubscribes`` are optional services: each defaults
+and Story 4.14's ``check_grounding`` (interactive by default, or bulk, priority 50,
+``max_runtime`` 25 minutes (up to four Claude requests of 300 s each), retry limit 3,
+``handlers.check_grounding(grounding)``, ``other``; never budget-gated) are registered last.
+``domain_checks``, ``unsubscribes`` and ``grounding`` are optional services: each defaults
 to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
@@ -738,7 +744,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType, MappingProxyType
-from typing import Final, Protocol, TextIO
+from typing import Final, Never, Protocol, TextIO
 
 import uvicorn
 from fastapi import FastAPI
@@ -772,6 +778,7 @@ from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
+from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify import api as notify_api
@@ -874,6 +881,7 @@ from nextron.domain.domain_auth import CHECK_DOMAINS_JOB, DOMAIN_CHECK_TIME
 from nextron.domain.email_finding import FIND_CONTACT_EMAIL_JOB
 from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
+from nextron.domain.grounding_check import CHECK_GROUNDING_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
@@ -1199,7 +1207,8 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding, lead_scores and unsubscribes are bound just below
+    # erasure_stores, email_finding, lead_scores, unsubscribes and grounding_checks are bound just
+    # below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1219,6 +1228,7 @@ def build_app(
         finding=lambda: email_finding,
         scores=lambda: lead_scores,
         unsubscribes=lambda: unsubscribes,
+        grounding=lambda: grounding_checks,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1239,6 +1249,7 @@ def build_app(
 
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
+    grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
     domain_checks = DomainChecks(
@@ -1474,6 +1485,7 @@ def build_job_types(
     erasure_stores: Callable[[], handlers.StoreErasing] | None = None,
     finding: Callable[[], handlers.FindingEmail] | None = None,
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
+    grounding: Callable[[], handlers.CheckingGrounding] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1500,10 +1512,12 @@ def build_job_types(
     runs), and ``scores`` the ``scoring`` service's ``LeadScores`` that ``score_lead`` and
     ``recompute_tiers`` jobs call, and ``unsubscribes`` the ``compliance`` service's
     ``UnsubscribePolls`` that ``poll_unsubscribes`` jobs call (``None``: a provider that raises
-    ``RuntimeError``, as for ``domain_checks``)."""
+    ``RuntimeError``, as for ``domain_checks``), and ``grounding`` the ``drafting`` service's
+    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
+    checks_grounding = grounding if grounding is not None else no_grounding
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1783,8 +1797,60 @@ def build_job_types(
             group=JobGroup.UNSUBSCRIBE_POLL,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_GROUNDING_JOB,
+            default_lane=Lane.INTERACTIVE,  # an edit recheck, a Step 1; bulk for a footer change
+            lanes=frozenset({Lane.INTERACTIVE, Lane.BULK}),
+            priority=50,
+            max_runtime=timedelta(minutes=25),  # up to four Claude requests of 300 s each
+            retry_limit=3,  # a timeout is a recorded fail, never retried; only a bug retries
+            handler=handlers.check_grounding(checks_grounding),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
+
+
+def _unwired() -> Never:
+    """A service provider of the enqueue-only registry (``enqueue_only_job_types``): it never
+    runs a job."""
+    raise RuntimeError("the enqueue-only job type registry never runs a job")
+
+
+def enqueue_only_job_types() -> JobTypes:
+    """``build_job_types`` with every service unwired (Story 4.14): the registry of the queue
+    that the ``FooterChanged`` subscriber's ``Drafting`` enqueues its revisions'
+    ``check_grounding`` jobs through. It only enqueues (each job type's lanes and priority are
+    the runner's own); the runner's registry runs the jobs."""
+    return build_job_types(
+        alerts=_unwired,
+        backups=_unwired,
+        restore_tests=_unwired,
+        recovery=_unwired,
+        contact_markets=_unwired,
+        crawls=_unwired,
+        discovery=_unwired,
+        research=_unwired,
+        extractions=_unwired,
+        primary=_unwired,
+        test_runs=_unwired,
+        job_boards=_unwired,
+        legal_forms=_unwired,
+        scores=_unwired,
+        domain_checks=_unwired,
+        erasure_stores=_unwired,
+        finding=_unwired,
+        unsubscribes=_unwired,
+        grounding=_unwired,
+    )
+
+
+def no_grounding() -> handlers.CheckingGrounding:
+    """``build_job_types``'s default ``grounding``: a registry built without the service fails a
+    ``check_grounding`` job instead of checking nothing."""
+    raise RuntimeError("this job type registry was built without grounding")
 
 
 def no_domain_checks() -> handlers.DomainChecking:
@@ -2185,7 +2251,9 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     # Story 4.9: the next Step's due time, or the Enrollment's completion
     subscribers.register_subscriber(MessageSent, Sequencing(chosen).on_step_sent)
     # Story 4.12: a footer change recomposes the Market's ready Drafts
-    subscribers.register_subscriber(FooterChanged, Drafting(chosen).recompose_ready)
+    # (Story 4.14: each new revision's check_grounding job, through an enqueue-only queue)
+    enqueue_only = JobQueue(chosen, enqueue_only_job_types())
+    subscribers.register_subscriber(FooterChanged, Drafting(chosen, enqueue_only).recompose_ready)
     subscribers.freeze()
     return subscribers
 

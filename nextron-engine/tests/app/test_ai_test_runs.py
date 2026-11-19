@@ -115,10 +115,12 @@ class World:
         extra: Sequence[PromptFile] = (),
     ) -> None:
         files, shipped = main.load_prompts()
+        chosen = shipped if defaults is None else defaults
+        # Story 4.14's grounding routes are synced only by grounding(), below
+        files = tuple(f for f in files if not f.route.startswith("grounding_check"))
+        chosen = tuple(s for s in chosen if not s.route.startswith("grounding_check"))
         with self.units.open():
-            self.playbook.sync_prompts(
-                (*files, *extra), shipped if defaults is None else defaults, PLAYBOOK
-            )
+            self.playbook.sync_prompts((*files, *extra), chosen, PLAYBOOK)
 
     def sync_cases(self, cases: Sequence[TestCase]) -> TestCaseSync:
         with self.units.open():
@@ -267,7 +269,8 @@ def test_every_shipped_route_has_a_set_and_its_set_a_scorer() -> None:
     for spec in routes.default_specs():
         assert spec.route in ROUTE_SETS, spec.route
         assert ROUTE_SETS[spec.route] in SCORERS, spec.route
-    assert set(SCORERS) == {TestSet.EXTRACTION}  # decision 7: the others ship with their routes
+    # decision 7: the others ship with their routes (Story 4.14: the Grounding set)
+    assert set(SCORERS) == {TestSet.EXTRACTION, TestSet.GROUNDING}
 
 
 # Row: First start --------------------------------------------------------------------------------
@@ -1170,3 +1173,101 @@ def test_cases_changed_during_a_passing_run_leave_it_stored_and_activate_nothing
     assert fingerprint(started, TestSet.EXTRACTION, PEOPLE) != measured
     started.sql("DELETE FROM jobs")
     assert started.queue_runs() == 3  # the people tuple runs again, on the live set
+
+
+# Story 4.14: the Grounding set's scorer, for grounding_check and its Opus fallback ---------------
+
+GROUNDING_ROUTES = ("grounding_check", "grounding_check_fallback")
+
+
+def grounding(world: World) -> dict[str, str]:
+    """Sync the grounding routes' prompts too (under PLAYBOOK); each grounding tuple's id."""
+    files, defaults = main.load_prompts()
+    with world.units.open():
+        world.playbook.sync_prompts(files, defaults, PLAYBOOK)
+    return {route: world.tuple_id(route) for route in GROUNDING_ROUTES}
+
+
+def flagging(case: TestCase) -> LlmResult:
+    """An answer that flags every planted case (an unsupported claim) and no clean control."""
+    if case.expected["kind"] == "clean_control":
+        return ok({"claims": [], "flags": []})
+    claim = {
+        "span": "x",
+        "evidence_id": None,
+        "fact_id": None,
+        "fact_version": None,
+        "supported": False,
+        "explanation": "No block says so.",
+    }
+    return ok({"claims": [claim], "flags": []})
+
+
+@pytest.mark.parametrize("route", GROUNDING_ROUTES)
+def test_each_grounding_tuple_runs_the_49_grounding_cases_and_activates(
+    started: World, route: str
+) -> None:
+    ids = grounding(started)
+    cases = started.of("grounding_check")  # the fallback is gated on the same cases
+    assert len(cases) == 49
+    for case in cases:
+        started.llm.script.append(flagging(case))
+
+    assert started.run(ids[route], "grounding") is True
+
+    [(tuple_id, test_set, outcome, error, count, passed, *_)] = started.stored_runs()
+    assert (tuple_id, test_set, outcome, error, count, passed) == (
+        ids[route],
+        "grounding",
+        "passed",
+        None,
+        49,
+        49,
+    )
+    assert [call[0].route for call in started.llm.calls] == [route] * 49
+    assert {call[2] for call in started.llm.calls} == {Urgency.BULK}
+    with started.units.open(read_only=True):
+        served = playbook_queries.active_tuple(route)
+        fingerprint = playbook_queries.case_set_fingerprint(TestSet.GROUNDING, route)
+        main_set = playbook_queries.case_set_fingerprint(TestSet.GROUNDING, "grounding_check")
+    assert served is not None and served.playbook == PLAYBOOK
+    assert fingerprint == main_set
+
+
+def test_a_grounding_answer_that_misses_a_planted_claim_fails_the_run(started: World) -> None:
+    ids = grounding(started)
+    for case in started.of("grounding_check"):
+        started.llm.script.append(ok({"claims": [], "flags": []}))  # flags nothing
+
+    started.run(ids["grounding_check"], "grounding")
+
+    [row] = started.stored_runs()
+    assert row[2] == "failed"
+    with started.units.open(read_only=True):
+        assert playbook_queries.active_tuple("grounding_check") is None
+
+
+def test_no_answer_on_a_grounding_case_counts_as_flagged(started: World) -> None:
+    ids = grounding(started)
+    for case in started.of("grounding_check"):
+        started.llm.script.append(
+            LlmInvalid(model=HAIKU, usage=LlmUsage(requests=1))
+            if case.expected["kind"] != "clean_control"
+            else ok({"claims": [], "flags": []})
+        )
+
+    started.run(ids["grounding_check"], "grounding")
+
+    [row] = started.stored_runs()
+    assert row[2] == "passed"  # fail closed: a refused or invalid answer counts as flagged
+
+
+def test_queue_runs_queues_both_grounding_tuples_on_the_grounding_set(started: World) -> None:
+    started.queue_runs()
+    ids = grounding(started)
+
+    assert started.queue_runs() == 2
+    keys = [row[0] for row in started.jobs()]
+    for route in GROUNDING_ROUTES:
+        assert f"run_ai_test_sets:{ids[route]}:grounding" in keys
+

@@ -111,7 +111,7 @@ development_status:
   4-11-fill-in-furqaan-s-signature-and-the-compliance-footer: review
   4-12-store-draft-text-as-immutable-revisions-bound-to-a-hash: review
   4-13-check-every-draft-against-deterministic-grounding-rules: review
-  4-14-run-the-ai-grounding-check-and-fail-closed: backlog
+  4-14-run-the-ai-grounding-check-and-fail-closed: review
   4-15-draft-step-1-with-opus-from-evidence-and-facts: backlog
   4-16-draft-signal-inbox-leads-within-15-minutes: backlog
   4-17-send-bulk-ai-work-through-message-batches: backlog

@@ -1,6 +1,6 @@
 """The AI routes as data (``nextron.adapters.ai.routes``, Story 2.7): the exact candidate table,
-the lookups, the token-limit rules refused at construction, a price for every model, and no
-``fallbacks`` anywhere."""
+the lookups, the token-limit rules refused at construction, a price for every model, and
+server-side ``fallbacks`` only on the Opus ``grounding_check_fallback`` (Story 4.14)."""
 
 import dataclasses
 from dataclasses import replace
@@ -13,9 +13,11 @@ from nextron.adapters.ai.routes import CANDIDATES, Candidate, candidates, defaul
 from nextron.adapters.ai.schemas import (
     EXTRACT_PEOPLE_V1,
     EXTRACT_SIGNALS_V1,
+    GROUNDING_CHECK_V1,
     SIGNAL_INBOX_PARSE_V1,
     ExtractPeopleV1,
     ExtractSignalsV1,
+    GroundingCheckV1,
     OutputSchema,
     SignalInboxParseV1,
 )
@@ -27,7 +29,7 @@ PROMPT: Final = "Extract."
 PLAYBOOK: Final = PlaybookSnapshot("0.2.0", "---\nversion: 0.2.0\n---\nRules.\n")
 
 # name, model, effort, prompt, schema model, schema version, batchable, max_tokens, cap, class,
-# uses_playbook (Story 4.4: no shipped route uses the Playbook)
+# uses_playbook (Story 4.4), server_fallbacks (Story 4.14: only the Opus grounding fallback)
 TABLE: Final = [
     (
         "extract_signals",
@@ -40,6 +42,7 @@ TABLE: Final = [
         8_000,
         16_000,
         BudgetClass.BLOCKABLE,
+        False,
         False,
     ),
     (
@@ -54,6 +57,7 @@ TABLE: Final = [
         16_000,
         BudgetClass.BLOCKABLE,
         False,
+        False,
     ),
     (
         "signal_inbox_parse",
@@ -67,6 +71,35 @@ TABLE: Final = [
         8_000,
         BudgetClass.BLOCKABLE,
         False,
+        False,
+    ),
+    (
+        "grounding_check",
+        "claude-haiku-5-5",
+        Effort.MEDIUM,
+        "v1",
+        GroundingCheckV1,
+        1,
+        False,
+        4_000,
+        8_000,
+        BudgetClass.ESSENTIAL,
+        True,
+        False,
+    ),
+    (
+        "grounding_check_fallback",
+        "claude-opus-5-5",
+        Effort.MEDIUM,
+        "v1",
+        GroundingCheckV1,
+        1,
+        False,
+        4_000,
+        8_000,
+        BudgetClass.ESSENTIAL,
+        True,
+        True,
     ),
 ]
 
@@ -84,6 +117,7 @@ def _row(candidate: Candidate) -> tuple[Any, ...]:
         candidate.max_tokens_cap,
         candidate.budget_class,
         candidate.uses_playbook,
+        candidate.server_fallbacks,
     )
 
 
@@ -100,10 +134,17 @@ def tuple_of(candidate: Candidate, **changes: Any) -> RouteTuple:
 
 
 def test_the_candidates_are_exactly_the_specified_table() -> None:
-    assert list(CANDIDATES) == ["extract_signals", "extract_people", "signal_inbox_parse"]
+    assert list(CANDIDATES) == [
+        "extract_signals",
+        "extract_people",
+        "signal_inbox_parse",
+        "grounding_check",
+        "grounding_check_fallback",
+    ]
     assert [_row(found) for route in CANDIDATES for found in CANDIDATES[route]] == TABLE
     assert [schema.version for schema in (EXTRACT_SIGNALS_V1, EXTRACT_PEOPLE_V1)] == [1, 1]
     assert SIGNAL_INBOX_PARSE_V1 == OutputSchema(1, SignalInboxParseV1)
+    assert GROUNDING_CHECK_V1 == OutputSchema(1, GroundingCheckV1)
 
 
 def test_each_candidate_is_filed_under_its_own_route() -> None:
@@ -123,7 +164,8 @@ def test_the_lookups_find_each_route_and_its_default() -> None:
     for route, found in CANDIDATES.items():
         assert candidates(route) == found
         assert default_candidate(route) is found[0]
-        assert find(tuple_of(found[0])) is found[0]
+        playbook = PLAYBOOK if found[0].uses_playbook else None
+        assert find(tuple_of(found[0], playbook=playbook)) is found[0]
     assert candidates("draft_email") == ()
     assert default_candidate("draft_email") is None
 
@@ -163,7 +205,7 @@ def test_the_default_specs_carry_uses_playbook() -> None:
     specs = routes.default_specs()
 
     assert [spec.route for spec in specs] == list(CANDIDATES)
-    assert [spec.uses_playbook for spec in specs] == [False, False, False]
+    assert [spec.uses_playbook for spec in specs] == [False, False, False, True, True]
     assert specs[0] == RouteSpec(
         "extract_signals", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1, uses_playbook=False
     )
@@ -210,6 +252,8 @@ def test_a_candidate_outside_the_token_limits_is_refused_at_construction(
         ({"output_schema": ExtractPeopleV1}, TypeError),
         ({"uses_playbook": 1}, TypeError),
         ({"uses_playbook": None}, TypeError),
+        ({"server_fallbacks": 1}, TypeError),
+        ({"server_fallbacks": True}, ValueError),  # a Haiku candidate: no server fallback
     ],
 )
 def test_a_candidate_with_a_bad_route_field_is_refused(
@@ -231,10 +275,22 @@ def test_every_candidate_model_has_a_price() -> None:
     assert models <= set(pricing.PRICES)
 
 
-def test_no_candidate_field_is_named_like_fallbacks() -> None:
+def test_only_an_opus_candidate_that_isnt_batchable_carries_server_fallbacks() -> None:
+    opus = CANDIDATES["grounding_check_fallback"][0]
+
+    assert [c.name for r in CANDIDATES.values() for c in r if c.server_fallbacks] == [
+        "grounding_check_fallback"
+    ]
+    with pytest.raises(ValueError, match="batchable"):
+        replace(opus, batchable=True)
+    with pytest.raises(ValueError, match="Opus"):
+        replace(opus, model="claude-haiku-5-5")
+
+
+def test_the_candidate_fields_are_exactly_these() -> None:
     names = [field.name.lower() for field in dataclasses.fields(Candidate)]
 
-    assert not [name for name in names if "fallback" in name or "beta" in name]
+    assert not [name for name in names if "beta" in name]
     assert names == [
         "name",
         "model",
@@ -246,4 +302,5 @@ def test_no_candidate_field_is_named_like_fallbacks() -> None:
         "max_tokens_cap",
         "budget_class",
         "uses_playbook",
+        "server_fallbacks",
     ]

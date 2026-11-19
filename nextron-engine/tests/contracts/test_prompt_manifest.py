@@ -261,13 +261,20 @@ SHIPPED_CANDIDATES: Final = (
     ("extract_signals", "claude-haiku-5-5", "medium", "v1", 1),
     ("extract_people", "claude-haiku-5-5", "medium", "v1", 1),
     ("signal_inbox_parse", "claude-haiku-5-5", "medium", "v1", 1),
+    ("grounding_check", "claude-haiku-5-5", "medium", "v1", 1),  # Story 4.14
+    ("grounding_check_fallback", "claude-opus-5-5", "medium", "v1", 1),  # Story 4.14
 )
+# The shipped routes whose candidates pin a Sales Playbook snapshot (uses_playbook): add-only too,
+# so a candidate never silently flips uses_playbook.
+PLAYBOOK_ROUTES: Final = frozenset({"grounding_check", "grounding_check_fallback"})
 
 
 @pytest.mark.parametrize("shipped", SHIPPED_CANDIDATES, ids=lambda s: f"{s[0]}-{s[3]}")
 def test_a_shipped_candidate_is_still_found(shipped: tuple[str, str, str, str, int]) -> None:
     route, model, effort, version, schema_version = shipped
     route_tuple = RouteTuple(route, model, Effort(effort), version, schema_version, "any text")
+    if route in PLAYBOOK_ROUTES:
+        route_tuple = replace(route_tuple, playbook=PlaybookSnapshot("1.0.0", "CONTENT"))
 
     assert routes.find(route_tuple) is not None, (
         f"the shipped candidate {shipped} is gone: a shipped candidate never changes or goes "

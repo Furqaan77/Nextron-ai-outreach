@@ -92,21 +92,31 @@ handler runs in.
   retryable ``AdapterError`` (the Worker unavailable) is retried by the runner; any other error
   fails the job, and nothing is applied either way.
 
+- ``check_grounding(checks)`` (Story 4.14): ``checks`` returns the ``drafting`` service's
+  ``GroundingChecks`` (``nextron.main`` passes ``lambda: grounding_checks``). The payload's
+  ``draft_id`` must be a ULID and its ``rev`` a positive ``int`` (not a ``bool``), else
+  ``InvalidJob``; it calls ``checks().check(draft_id, rev, urgency)`` once, with ``urgency``
+  ``bulk`` for a job on the bulk lane and ``interactive`` otherwise, and returns ``None``. It is
+  never budget-gated (the grounding routes are ``essential``), and a timeout or an unreachable
+  API is recorded as a grounding ``fail`` by the use case, not retried.
+
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
 
 from collections.abc import Callable
 from typing import Final, Protocol
 
+from nextron.domain.ai import Urgency
 from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import LEAD_ID_FIELD, RUN_ID_FIELD
 from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
 from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, STORE_FIELD
+from nextron.domain.grounding_check import DRAFT_ID_FIELD, REV_FIELD
 from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job
+from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job, Lane
 from nextron.domain.restore_test import RestoreTestKind
 
 ALERT_ID_FIELD: Final = "alert_id"
@@ -510,3 +520,24 @@ def poll_unsubscribes(polls: Callable[[], PollingUnsubscribes]) -> Handler:
         polls().poll()
 
     return handle_poll_unsubscribes
+
+
+class CheckingGrounding(Protocol):
+    """What ``check_grounding`` needs of the ``drafting`` service's ``GroundingChecks``."""
+
+    def check(self, draft_id: str, rev: int, urgency: Urgency) -> object: ...
+
+
+def check_grounding(checks: Callable[[], CheckingGrounding]) -> Handler:
+    """The ``check_grounding`` job's handler: run the AI grounding check of the payload's Draft
+    revision through ``checks()``."""
+
+    def handle_check_grounding(job: Job) -> None:
+        draft_id = _ulid_field(job, DRAFT_ID_FIELD)
+        rev = job.payload.get(REV_FIELD)
+        if not isinstance(rev, int) or isinstance(rev, bool) or rev < 1:
+            raise InvalidJob(f"{job.type}: the {REV_FIELD} field must be a positive int")
+        urgency = Urgency.BULK if job.lane == Lane.BULK else Urgency.INTERACTIVE
+        checks().check(draft_id, rev, urgency)
+
+    return handle_check_grounding

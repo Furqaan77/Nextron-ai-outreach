@@ -204,6 +204,14 @@ through ``|plain``), or "No text yet" without a revision; "Sending blocked: foot
 check fails; the current revision's Playbook version (or "—"); and the revision history, one
 ``RevisionRow`` per revision: rev, the origin's label, the time and the first 12 characters of
 its hash. "No Drafts yet." when there are none.
+
+**Grounding (Story 4.14).** Each ``DraftSource`` also carries ``grounding``, the current
+revision's ``GroundingResultView`` (``queries.drafting.grounding_result``; ``None`` without a
+revision or a result). Its ``DraftRow`` shows a ``pass``, ``fail`` or ``pending`` badge
+(``grounding``; no result is ``pending``), and for ``fail`` one ``GroundingFlagRow(code, span,
+explanation)`` per stored flag, in the stored order (rules flags, then the AI check's): the code,
+the span in a ``<mark>`` (autoescaped through ``|plain``; none for an empty span) and the
+explanation. A result stored for an older revision never shows.
 """
 
 import re
@@ -223,7 +231,7 @@ from nextron.app.queries.discovery import (
     ListedLead,
     StoredLead,
 )
-from nextron.app.queries.drafting import DraftView, RevisionView
+from nextron.app.queries.drafting import DraftView, GroundingResultView, RevisionView
 from nextron.app.queries.research import (
     EvidenceSupport,
     LeadSignalsView,
@@ -249,6 +257,7 @@ from nextron.domain.contacts import (
 from nextron.domain.eligibility import Decision
 from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.extraction import EvidenceSource, FactKind
+from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.legal_form import (
     COMPANY_NUMBER_PATTERN,
     LEGAL_FORM_LABELS,
@@ -1476,6 +1485,9 @@ def lead_context(
     }
 
 
+PENDING_GROUNDING: Final = GroundingStatus.PENDING.value
+FAIL_GROUNDING: Final = GroundingStatus.FAIL.value
+
 # Drafts (Story 4.12) ----------------------------------------------------------------------------
 
 DRAFTS_TEMPLATE: Final = "lead_drafts.html"
@@ -1522,6 +1534,16 @@ class DraftSource:
     footer: render.FooterText | None  # the current revision's footer snapshot
     to_address: str | None  # None for an erased Contact
     footer_check: render.FooterCheck | None  # None when the Market can't be read
+    grounding: GroundingResultView | None = None  # the current revision's (Story 4.14)
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingFlagRow:
+    """One flag of a failed grounding result."""
+
+    code: str
+    span: str
+    explanation: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1547,6 +1569,22 @@ class DraftRow:
     blocked: str | None
     playbook_version: str
     revisions: tuple[RevisionRow, ...]
+    grounding: str = PENDING_GROUNDING  # pass, fail or pending (Story 4.14)
+    grounding_flags: tuple[GroundingFlagRow, ...] = ()
+
+
+def grounding_of(
+    current: RevisionView | None, result: GroundingResultView | None
+) -> tuple[str, tuple[GroundingFlagRow, ...]]:
+    """The badge and flags of the current revision's result; ``pending`` without one."""
+    if current is None or result is None or result.rev != current.rev:
+        return PENDING_GROUNDING, ()
+    status = str(result.status)
+    if status != FAIL_GROUNDING:
+        return status, ()
+    return status, tuple(
+        GroundingFlagRow(flag.rule, flag.span, flag.explanation) for flag in result.flags
+    )
 
 
 def due_text(draft: DraftView) -> str:
@@ -1582,6 +1620,7 @@ def draft_row(source: DraftSource) -> DraftRow:
         if check is not None and not check.complete and draft.status in BLOCKING_STATUSES
         else None
     )
+    grounding, flags = grounding_of(current, source.grounding)
     return DraftRow(
         draft_id=draft.id,
         kind=DRAFT_KIND_LABELS.get(draft.kind, str(draft.kind)),
@@ -1596,4 +1635,6 @@ def draft_row(source: DraftSource) -> DraftRow:
             else NO_VALUE
         ),
         revisions=tuple(revision_row(revision) for revision in source.revisions),
+        grounding=grounding,
+        grounding_flags=flags,
     )

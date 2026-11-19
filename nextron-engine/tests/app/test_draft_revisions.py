@@ -39,6 +39,7 @@ from nextron.db.models.base import new_id
 from nextron.db.repos.drafting import revisions as revisions_repo
 from nextron.db.uow import current
 from nextron.domain import render
+from nextron.domain.ai import Urgency
 from nextron.domain.draft import RevisionOrigin
 from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import FooterChanged
@@ -102,12 +103,14 @@ def append(
     body: str = BODY,
 ) -> int:
     """A revision written through drafting's private writer."""
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
 
     def write() -> int:
         view = drafting_queries.draft(draft_id)
         assert view is not None
-        return drafting._append(view, subject, body, origin, trace, world.clock.now())
+        return drafting._append(
+            view, subject, body, origin, trace, world.clock.now(), urgency=Urgency.SOON
+        )
 
     return world.transact(write)
 
@@ -172,7 +175,7 @@ def expected_hash(world: World, draft_id: str, subject: str, body: str, snapshot
 
 
 def revise(world: World, draft_id: str, subject: object = SUBJECT, body: object = BODY) -> int:
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
     return world.transact(lambda: drafting.revise(draft_id, subject, body))  # type: ignore[arg-type]
 
 
@@ -698,7 +701,7 @@ def test_the_lead_page_shows_each_draft_and_its_history(world: World) -> None:
             "SELECT id FROM drafts WHERE enrollment_id = ? ORDER BY step_no", (enrollment_id,)
         )
     ]
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
     hostile = "<script>alert(1)</script> & <img src=x>"
 
     def first() -> int:
@@ -706,7 +709,13 @@ def test_the_lead_page_shows_each_draft_and_its_history(world: World) -> None:
         assert view is not None
         body = "Body line\n" + hostile
         return drafting._append(
-            view, hostile, body, RevisionOrigin.GENERATED, TRACE, world.clock.now()
+            view,
+            hostile,
+            body,
+            RevisionOrigin.GENERATED,
+            TRACE,
+            world.clock.now(),
+            urgency=Urgency.SOON,
         )
 
     world.transact(first)

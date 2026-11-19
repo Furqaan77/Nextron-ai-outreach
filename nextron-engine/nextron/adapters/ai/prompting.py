@@ -38,8 +38,15 @@ for ``messages.create``, and nothing else:
 - ``output_config``: the tuple's ``effort``, and ``format`` ``json_schema`` with the
   candidate's wire schema (``schemas.wire_schema``), never in the system text.
 
+- only for a candidate with ``server_fallbacks`` (Story 4.14, AD-8: the Opus
+  ``grounding_check_fallback``): ``extra_headers`` ``{"anthropic-beta":
+  "server-side-fallback-2026-07-01"}`` and ``extra_body`` ``{"fallbacks": "default"}``, so a
+  refusal is retried server-side on the provider's fallback model. Every other request carries
+  neither.
+
 It never sets ``thinking``, ``temperature``, ``top_p``, ``top_k``, ``tools``, ``tool_choice``,
-``stop_sequences``, ``fallbacks`` or ``betas``, and never adds an assistant prefill.
+``stop_sequences`` or ``betas``, never sets ``fallbacks`` except as above, and never adds an
+assistant prefill. A batch request (Story 4.17) never goes through the fallback keys.
 """
 
 import re
@@ -56,6 +63,9 @@ BRACKETS: Final = "<＜﹤‹〈⟨〈"
 WORD: Final = "untrusted"
 FULLWIDTH_SMALL_A: Final = 0xFF41
 FULLWIDTH_CAPITAL_A: Final = 0xFF21
+FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
+FALLBACK_HEADERS: Final = {"anthropic-beta": FALLBACK_BETA}
+FALLBACK_BODY: Final = {"fallbacks": "default"}
 
 
 def _letter(letter: str) -> str:
@@ -108,7 +118,7 @@ def build_request(
         texts.append(playbook_section(route_tuple.playbook))
     system: list[dict[str, Any]] = [{"type": "text", "text": text} for text in texts]
     system[-1]["cache_control"] = {"type": "ephemeral"}  # the cached prefix ends here
-    return {
+    request: dict[str, Any] = {
         "model": route_tuple.model,
         "max_tokens": max_tokens,
         "system": system,
@@ -118,3 +128,7 @@ def build_request(
             "format": {"type": "json_schema", "schema": wire_schema(candidate.output_schema)},
         },
     }
+    if candidate.server_fallbacks:  # AD-8: an Opus direct call carries the refusal fallbacks
+        request["extra_headers"] = dict(FALLBACK_HEADERS)
+        request["extra_body"] = dict(FALLBACK_BODY)
+    return request

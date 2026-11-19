@@ -215,3 +215,44 @@ def test_a_tuple_without_a_playbook_keeps_one_cached_system_block() -> None:
         {"type": "text", "text": PROMPT, "cache_control": {"type": "ephemeral"}}
     ]
     assert list(request["system"][0]) == ["type", "text", "cache_control"]
+
+
+# Server-side refusal fallbacks (Story 4.14, AD-8) -------------------------------------------------
+
+
+def grounding_tuple(route: str, model: str) -> RouteTuple:
+    snapshot = PlaybookSnapshot("0.2.0", PLAYBOOK_TEXT)
+    return RouteTuple(route, model, Effort.MEDIUM, "v1", 1, PROMPT, snapshot)
+
+
+def test_only_the_opus_fallback_candidate_asks_for_server_side_fallbacks() -> None:
+    blocks = [block()]
+    opus = CANDIDATES["grounding_check_fallback"][0]
+
+    request = build_request(
+        grounding_tuple("grounding_check_fallback", "claude-opus-5-5"), opus, blocks, 4_000
+    )
+
+    assert request["extra_headers"] == {"anthropic-beta": "server-side-fallback-2026-07-01"}
+    assert request["extra_body"] == {"fallbacks": "default"}
+    assert not set(FORBIDDEN_KEYS) & set(request)  # never a top-level fallbacks or betas key
+    haiku = build_request(
+        grounding_tuple("grounding_check", "claude-haiku-5-5"),
+        CANDIDATES["grounding_check"][0],
+        blocks,
+        4_000,
+    )
+    assert "extra_headers" not in haiku and "extra_body" not in haiku
+    for route in ("extract_signals", "extract_people", "signal_inbox_parse"):
+        plain = build_request(signals_tuple(), CANDIDATES[route][0], blocks, 4_000)
+        assert "extra_headers" not in plain and "extra_body" not in plain
+
+
+def test_each_fallback_request_gets_its_own_copy() -> None:
+    opus = CANDIDATES["grounding_check_fallback"][0]
+    route = grounding_tuple("grounding_check_fallback", "claude-opus-5-5")
+
+    first = build_request(route, opus, [block()], 4_000)
+    first["extra_body"]["fallbacks"] = "changed"
+
+    assert build_request(route, opus, [block()], 4_000)["extra_body"] == {"fallbacks": "default"}

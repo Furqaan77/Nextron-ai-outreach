@@ -28,6 +28,7 @@ from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.research import signals as signals_repo
 from nextron.domain.company_facts import validate_company_facts
+from nextron.domain.ai import Urgency
 from nextron.domain.draft import RevisionOrigin
 from nextron.domain.grounding_rules import RULES_VERSION, Claim, GroundingStatus
 from tests.app.test_draft_revisions import (
@@ -283,7 +284,7 @@ def generated(
         replace(claim, evidence_id=named.get(claim.evidence_id or "", claim.evidence_id))
         for claim in claims
     )
-    drafting = drafting_api.Drafting(world.clock)
+    drafting = drafting_api.Drafting(world.clock, queue_on(world.clock))
 
     def write() -> int:
         view = drafting_queries.draft(draft_id)
@@ -296,6 +297,7 @@ def generated(
             trace,
             world.clock.now(),
             claims=real,
+            urgency=Urgency.SOON,
         )
 
     assert world.transact(write) == 1
@@ -352,7 +354,7 @@ def test_a_follow_up_repeating_step_1s_fact_fails(world: World) -> None:
     [step_1, step_2] = ids_of(world, enrollment_id)
     trace = replace(TRACE, evidence_ids=(quote,), fact_versions=(("legal_ai", 1),))
     assert append(world, step_1, RevisionOrigin.GENERATED, trace) == 1
-    drafting = drafting_api.Drafting(world.clock)
+    drafting = drafting_api.Drafting(world.clock, queue_on(world.clock))
 
     def write() -> int:
         view = drafting_queries.draft(step_2)
@@ -365,6 +367,7 @@ def test_a_follow_up_repeating_step_1s_fact_fails(world: World) -> None:
             trace,
             world.clock.now(),
             claims=(Claim(PROOF, None, ("legal_ai", 1)),),
+            urgency=Urgency.SOON,
         )
 
     world.transact(write)
@@ -377,7 +380,7 @@ def test_a_follow_up_citing_step_1s_signal_fails(world: World) -> None:
     [step_1, step_2] = ids_of(world, enrollment_id)
     trace = replace(TRACE, evidence_ids=(quote,), fact_versions=(), cited_signal_id=event)
     assert append(world, step_1, RevisionOrigin.GENERATED, trace) == 1
-    drafting = drafting_api.Drafting(world.clock)
+    drafting = drafting_api.Drafting(world.clock, queue_on(world.clock))
 
     def write() -> int:
         view = drafting_queries.draft(step_2)
@@ -390,6 +393,7 @@ def test_a_follow_up_citing_step_1s_signal_fails(world: World) -> None:
             trace,
             world.clock.now(),
             claims=(Claim(HIRING, quote, None),),
+            urgency=Urgency.SOON,
         )
 
     world.transact(write)
@@ -459,6 +463,7 @@ def test_drafting_declares_the_results_tombstoned_and_exports_them(world: World)
         "route_tuple_id",
         "served_model",
         "checked_at",
+        "ai_checked_at",  # Story 4.14
     }
     assert world.read(lambda: drafting_queries.export_pii("nope")) == {
         "draft_revisions": (),

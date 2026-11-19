@@ -3,10 +3,11 @@
 Other services and the delivery layers change ``drafting`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-``Drafting(clock)`` owns the ``drafts`` content group (``nextron.db.repos.drafting.drafts``);
-``approval`` owns the status group. A Draft is inserted at ``ready`` (the column's server
-default) with one ``events`` row: entity ``drafts``, ``None`` to ``ready``, cause
-``requested``, ``cause_ref`` the Enrollment, actor ``system:drafting``, at the clock's now.
+``Drafting(clock, queue=None)`` owns the ``drafts`` content group
+(``nextron.db.repos.drafting.drafts``); ``approval`` owns the status group. A Draft is inserted
+at ``ready`` (the column's server default) with one ``events`` row: entity ``drafts``, ``None``
+to ``ready``, cause ``requested``, ``cause_ref`` the Enrollment, actor ``system:drafting``, at
+the clock's now.
 
 **``@command request_steps(enrollment_id, steps, urgency) -> tuple[str, ...] | Blocked``**
 creates an Enrollment's Draft slots, with no text yet (Story 4.12 drafts it) and no job
@@ -68,9 +69,17 @@ unit:
    Segment, or a Step without a brief, raises ``LookupError``.
 5. ``footer_snapshots.ensure`` (identical footer text reuses its row), one revision at
    ``current_rev + 1`` (1 when there is none) with the traceability given, its one
-   ``grounding_results`` row (``fail`` with the flags when any rule flags, else ``pending``;
-   the ``RULES_VERSION``; checked at ``at``), and ``drafts.current_rev`` moved to it
-   (``updated_at`` the clock's now).
+   ``grounding_results`` row (``fail`` with the flags, each ``source`` ``rules``, when any rule
+   flags, else ``pending``; the ``RULES_VERSION``; checked at ``at``), and
+   ``drafts.current_rev`` moved to it (``updated_at`` the clock's now).
+6. **The AI check** (Story 4.14): in the same unit of work, a ``check_grounding`` job
+   (``nextron.domain.grounding_check.CHECK_GROUNDING_JOB``; scope the Draft id, discriminator
+   the new ``rev``, payload ``{"v": 1, "draft_id": <id>, "rev": <rev>}``) on the lane of
+   ``_append``'s ``urgency``: ``bulk`` on the bulk lane, ``interactive`` and ``soon`` on the
+   interactive lane (the job type's default). ``revise`` passes ``interactive`` and
+   ``recompose_ready`` ``bulk``; a generated revision passes its caller's (Step 1: ``soon``).
+   ``_append`` refuses with ``RuntimeError`` before any write when the ``Drafting`` was built
+   without a ``queue``. ``GroundingChecks`` (``nextron.app.drafting.grounding``) runs the job.
 
 **``@command revise(draft_id, subject, body) -> int``** (the Operator's edit; Epic 5 calls it
 through ``approval``). ``draft_id``, ``subject`` and ``body`` must be ``str`` (``TypeError``).
@@ -79,7 +88,8 @@ looked up (``ValueError``; the body may be empty). An unknown Draft raises ``Loo
 isn't ``ready`` or has no revision yet ``ValueError``. It appends origin ``operator_edit`` with
 the previous revision's traceability (evidence, facts, cited Signal, route tuple, Playbook,
 prompt version) and no ``instruction``, and returns the new ``rev``. Its grounding result comes
-from the text rules (no claims); the AI check is Story 4.14.
+from the text rules (no claims) until its ``check_grounding`` job (interactive) records the AI
+check.
 
 **``@command recompose_ready(n: FooterChanged)``**, ``FooterChanged``'s subscriber
 (``main.build_subscribers``): for each ``ready`` Draft with a revision whose Contact's
@@ -88,14 +98,15 @@ subject, body and traceability, only when the new ``text_hash`` differs from the
 (so a repeat is a no-op). A Draft whose footer can't be composed (``ValueError``,
 ``LookupError`` or ``InvalidMarkets`` from the checks) is logged (``recompose_skipped``, with
 the Draft id and the error type) and skipped, before any write. ``approved``, ``sent`` and every
-other status are untouched.
+other status are untouched. Each new revision's ``check_grounding`` job runs on the bulk lane.
 
 - ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 3.13, AD-17): ``draft_revisions``
   is tombstoned: every revision of every Draft of each of the Contact's Enrollments gets
   ``subject``, ``body`` and a set ``instruction`` ``[erased]`` (rows, hashes and traceability
   kept; the triggers allow only that). ``grounding_results`` is tombstoned too (Story 4.13):
   each flag's non-empty ``span`` becomes ``[erased]`` (an empty span, a whole-revision flag,
-  stays empty), the rule, explanation, status and rows kept.
+  stays empty), and each AI flag's explanation (model text, Story 4.14) too; the rule, the
+  rules' explanations, status and rows kept.
   ``footer_snapshots`` holds the Sender's name and
   Nextron's postal address, never a Contact's data; ``drafts`` holds none at all.
 """
@@ -109,6 +120,7 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.app.compliance import api as compliance_api
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
@@ -132,6 +144,12 @@ from nextron.domain.contacts import ProvenanceSubject
 from nextron.domain.draft import CREATION, STEP_KINDS, DraftKind, DraftStatus, RevisionOrigin
 from nextron.domain.enrollment import LIVE_STATUSES, EnrollmentOrigin, EnrollmentStatus
 from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.grounding_check import (
+    CHECK_GROUNDING_JOB,
+    DRAFT_ID_FIELD,
+    REV_FIELD,
+    FlagSource,
+)
 from nextron.domain.grounding_rules import (
     Claim,
     EarlierStep,
@@ -141,6 +159,7 @@ from nextron.domain.grounding_rules import (
     RulesResult,
 )
 from nextron.domain.grounding_rules import check as check_grounding
+from nextron.domain.job import VERSION_FIELD, Lane
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.notifications import ContactErased, FooterChanged
 from nextron.domain.segments import SignalClass
@@ -159,6 +178,7 @@ MAX_SUBJECT: Final = 200
 MAX_BODY: Final = 10_000
 LINE_BREAKS: Final = frozenset("\r\n\x0b\x0c\x1c\x1d\x1e\x85  ")
 RECOMPOSE_SKIPPED: Final = "recompose_skipped"
+PAYLOAD_VERSION: Final = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,8 +415,9 @@ def _checked_steps(steps: object) -> tuple[int, ...]:
 class Drafting:
     """Draft slots and their due times; see the module docstring."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, queue: JobQueue | None = None) -> None:
         self._clock = clock
+        self._queue = queue
 
     @command
     def request_steps(
@@ -494,11 +515,17 @@ class Drafting:
         at: datetime,
         prepared: _Prepared | None = None,
         claims: tuple[Claim, ...] | None = None,
+        *,
+        urgency: Urgency,
     ) -> int:
-        """Append a revision of ``draft`` and its grounding result, and point the Draft at it;
-        its ``rev``. ``prepared`` is ``_prepare``'s result for this text when the caller already
-        has it; ``claims`` are the drafting output's claims (``None`` without a claims array).
-        See the module docstring."""
+        """Append a revision of ``draft`` and its grounding result, point the Draft at it and
+        enqueue its AI check at ``urgency``; its ``rev``. ``prepared`` is ``_prepare``'s result
+        for this text when the caller already has it; ``claims`` are the drafting output's
+        claims (``None`` without a claims array). See the module docstring."""
+        check_urgency(urgency)
+        queue = self._queue
+        if queue is None:
+            raise RuntimeError("this Drafting was built without a job queue")
         if prepared is None:
             prepared = _prepare(draft, subject, body, traceability, at, claims)
         snapshot_id = footer_snapshots_repo.ensure(prepared.market_id, prepared.footer_text, at)
@@ -530,13 +557,21 @@ class Drafting:
                 rev=rev,
                 status=str(grounding.status),
                 flags=tuple(
-                    StoredFlag(flag.rule, flag.span, flag.explanation) for flag in grounding.flags
+                    StoredFlag(flag.rule, flag.span, flag.explanation, FlagSource.RULES.value)
+                    for flag in grounding.flags
                 ),
                 rules_version=grounding.rules_version,
             ),
             at,
         )
         drafts_repo.set_current_rev(draft.id, rev, at)
+        queue.enqueue(
+            CHECK_GROUNDING_JOB,
+            scope=draft.id,
+            discriminator=str(rev),
+            payload={VERSION_FIELD: PAYLOAD_VERSION, DRAFT_ID_FIELD: draft.id, REV_FIELD: rev},
+            lane=Lane.BULK if urgency is Urgency.BULK else Lane.INTERACTIVE,
+        )
         return rev
 
     @command
@@ -561,6 +596,7 @@ class Drafting:
             RevisionOrigin.OPERATOR_EDIT,
             _copied(previous),
             self._clock.now(),
+            urgency=Urgency.INTERACTIVE,
         )
 
     @command
@@ -600,6 +636,7 @@ class Drafting:
                 _copied(previous),
                 now,
                 prepared,
+                urgency=Urgency.BULK,
             )
 
 
@@ -620,8 +657,9 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
         ),
         "grounding_results": TableErasure(
             Coverage.TOMBSTONED,
-            "each flag's span (a quote of Draft text) becomes [erased]; the rule, explanation, "
-            "status and rows stay (Story 4.13)",
+            "each flag's span (a quote of Draft text) and each AI flag's explanation become "
+            "[erased]; the rule, the rules' explanations, status and rows stay (Stories 4.13, "
+            "4.14)",
         ),
     }
 )

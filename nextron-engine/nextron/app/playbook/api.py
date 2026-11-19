@@ -157,11 +157,12 @@ Reply class override joins the Reply set as a pseudonymised case.
      nothing called or written (decision 3: a gate run is deferrable spend). An unknown tuple, or
      a ``test_set`` that isn't its route's set, logs ``ai_test_run_skipped`` (``tuple_id``,
      ``reason``) and returns ``True``. It builds the ``RouteTuple`` (``queries.playbook
-     .tuple_of``) and reads the set's live cases of the tuple's route (by ``case_key``; both
-     origins) and the stored Segments, and takes their fingerprint (``case_set_sha256`` of the
+     .tuple_of``) and reads the set's live cases of the tuple's route's case route
+     (``nextron.domain.ai_test_sets.case_route``, Story 4.14: ``grounding_check_fallback`` runs
+     the ``grounding_check`` cases; by ``case_key``; both origins) and the stored Segments, and takes their fingerprint (``case_set_sha256`` of the
      rows' stored SHA-256s, the source ``case_set_fingerprint`` reads). When there are at
      least ``MIN_CASES`` cases, the set's scorer (``SCORERS``) must exist (``LookupError``
-     otherwise: only ``extraction`` has one, decision 7), and a case naming a Segment that isn't
+     otherwise: ``extraction`` and, since Story 4.14, ``grounding`` have one, decision 7), and a case naming a Segment that isn't
      stored raises ``InvalidTestCases`` before any call.
   2. **The calls**, with no transaction open. Fewer cases than ``MIN_CASES`` make a ``failed``
      run with ``set_too_small`` and no call. Otherwise each case's ``llm.run(route_tuple,
@@ -299,7 +300,7 @@ from nextron.domain.ai_test_gate import (
     run_passed,
     set_of,
 )
-from nextron.domain.ai_test_sets import CLASSIFY_REPLY, REPLY_SOURCE, class_tag
+from nextron.domain.ai_test_sets import CLASSIFY_REPLY, REPLY_SOURCE, case_route, class_tag
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.company_facts import (
     ENTER_A_VALUE,
@@ -317,6 +318,11 @@ from nextron.domain.company_facts import (
 )
 from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
 from nextron.domain.errors import DomainError
+from nextron.domain.grounding_check import (
+    grounding_inputs,
+    grounding_set_metrics,
+    score_grounding,
+)
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import VERSION_FIELD
 from nextron.domain.notifications import ContactErased
@@ -1288,7 +1294,7 @@ class Scorer:
     metrics: Callable[[str, Sequence[Any]], tuple[Metric, ...]]
 
 
-# Each set's scorer (decision 7): only extraction has one until its routes ship theirs.
+# Each set's scorer (decision 7): each set has one once its routes ship (Grounding: Story 4.14).
 SCORERS: Final[Mapping[TestSet, Scorer]] = MappingProxyType(
     {
         TestSet.EXTRACTION: Scorer(
@@ -1296,6 +1302,12 @@ SCORERS: Final[Mapping[TestSet, Scorer]] = MappingProxyType(
             inputs=extraction_inputs,
             score=score_extraction,
             metrics=extraction_metrics,
+        ),
+        TestSet.GROUNDING: Scorer(
+            check=check_segments,
+            inputs=grounding_inputs,
+            score=score_grounding,
+            metrics=grounding_set_metrics,
         ),
     }
 )
@@ -1476,7 +1488,7 @@ def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
     route_tuple = playbook_queries.tuple_of(row.id)
     if route_tuple is None:  # pragma: no cover - the row was just read in this transaction
         return UNKNOWN_TUPLE
-    rows = cases_repo.live(chosen.value, row.route)
+    rows = cases_repo.live(chosen.value, case_route(row.route))  # Story 4.14
     cases = tuple(
         stored_case(
             stored.case_key,

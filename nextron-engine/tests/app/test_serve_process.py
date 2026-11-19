@@ -369,7 +369,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0046_4_13_grounding_results"
+    assert HEAD == "0047_4_14_ai_grounding"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]
@@ -385,19 +385,21 @@ def test_guarded_health_page_and_second_instance(
     # no adapter or HTTP client was built, so no external call was made or recorded
     assert usage_counts(data_dir / "nextron.db") == (0, 0)
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
-    # bootstrap activation, by seed and with no test run, per route
-    assert prompt_counts(data_dir / "nextron.db") == (3, 3, 3)
+    # bootstrap activation, by seed and with no test run, per extraction route (Story 4.14: the
+    # two grounding prompts are stored but serve only after their gate)
+    assert prompt_counts(data_dir / "nextron.db") == (5, 3, 3)
     # Story 4.4: one Sales Playbook snapshot, one candidate tuple per route (none with a
     # Playbook) and one startup check; no route is activated with a Playbook, and every
     # activation is a bootstrap one
-    assert playbook_counts(data_dir / "nextron.db") == (1, 3, 0, 1, 0)
+    # (Story 4.14: plus the two grounding tuples, pinned to that Playbook, never activated)
+    assert playbook_counts(data_dir / "nextron.db") == (1, 5, 2, 1, 0)
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
-    assert (synced["stored_count"], synced["activated_count"]) == (3, 3)
+    assert (synced["stored_count"], synced["activated_count"]) == (5, 3)
     assert lines.index(synced) < lines.index(started)
     # Story 4.5: the 11 extraction fixtures were stored before the engine started, and the
     # lifespan queued one run_ai_test_sets job per extraction tuple, keyed by tuple and set.
     # Story 4.6: the Reply, Grounding and drafting-smoke sets were stored too, every row a
-    # fixture, and still only the three extraction jobs were queued (no other route has a tuple)
+    # fixture; Story 4.14: the two grounding tuples were queued too (on the Grounding set)
     db = data_dir / "nextron.db"
     stored = dict(
         read_rows(
@@ -416,9 +418,14 @@ def test_guarded_health_page_and_second_instance(
         0,
     )
     assert lines.index(cases_synced) < lines.index(started)
-    tuple_ids = sorted(str(row[0]) for row in read_rows(db, "SELECT id FROM ai_route_tuples"))
-    runs = wait_for_dead_test_runs(db, 3)
-    assert [row[0] for row in runs] == [f"run_ai_test_sets:{t}:extraction" for t in tuple_ids]
+    tuple_sets = {
+        str(row[0]): "grounding" if str(row[1]).startswith("grounding_check") else "extraction"
+        for row in read_rows(db, "SELECT id, route FROM ai_route_tuples")
+    }
+    runs = wait_for_dead_test_runs(db, 5)  # Story 4.14: the two grounding tuples too
+    assert sorted(row[0] for row in runs) == sorted(
+        f"run_ai_test_sets:{t}:{test_set}" for t, test_set in tuple_sets.items()
+    )
     # no Segment is stored (seed sync never ran), so each run refused its cases before any
     # call: nothing was stored, no Claude call was made and no activation is tested
     assert all("invalid_test_cases" in str(row[2]) for row in runs), runs
@@ -426,7 +433,7 @@ def test_guarded_health_page_and_second_instance(
     assert playbook_counts(db)[4] == 0  # every activation is still a bootstrap one
     lines = log_lines(data_dir)
     [queued] = [line for line in lines if line["event"] == "ai_test_runs_queued"]
-    assert queued["count"] == 3
+    assert queued["count"] == 5
     # each dead run raised a job_dead alert, which failed for want of a Telegram chat id: no
     # adapter was built and nothing reached the sink
     alerting = [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]

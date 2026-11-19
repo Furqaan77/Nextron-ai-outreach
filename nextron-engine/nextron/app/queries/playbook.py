@@ -39,6 +39,10 @@ hex digits.
 
 The AI test gate (FR-73, AD-12, NFR-26, UX-DR30, Story 4.5):
 
+- ``active_tuple_id(route) -> str | None`` (Story 4.14): the id of the tuple row whose fields
+  are the route's active activation's (what a grounding result stores as ``route_tuple_id``), or
+  ``None`` when the route has no active activation or no such row (a bootstrap activation
+  recorded before its row); ``TypeError`` for a route that isn't a ``str``.
 - ``tuple_of(tuple_id) -> RouteTuple | None``: the ``RouteTuple`` of the stored tuple row
   ``tuple_id`` (``None`` for an unknown id, a text that isn't a ULID included), built from its
   prompt snapshot and Playbook snapshot and checked exactly as ``active_tuple`` checks an
@@ -116,6 +120,7 @@ from nextron.db.repos.playbook.route_tuples import StoredTuple
 from nextron.db.repos.playbook.test_runs import StoredRun
 from nextron.domain.ai import Effort, RouteTuple
 from nextron.domain.ai_test_cases import case_set_sha256
+from nextron.domain.ai_test_sets import case_route
 from nextron.domain.ai_test_gate import (
     ROUTE_SETS,
     CaseResult,
@@ -149,6 +154,7 @@ __all__ = [
     "RouteTuples",
     "RunSummary",
     "active_tuple",
+    "active_tuple_id",
     "allowed_facts",
     "case_set_fingerprint",
     "company_facts",
@@ -185,12 +191,25 @@ def active_tuple(route: str) -> RouteTuple | None:
     return _built(activation, "active tuple")
 
 
-def case_set_fingerprint(test_set: TestSet, route: str) -> str:
-    """The fingerprint of the live cases of ``test_set`` and ``route``; see the module
+def active_tuple_id(route: str) -> str | None:
+    """The id of the tuple row (``ai_route_tuples``) with ``route``'s active activation's
+    fields, or ``None`` when the route has no active activation or no such row; see the module
     docstring."""
+    if not isinstance(route, str):
+        raise TypeError("route must be a str")
+    activation = activations_repo.active(route)
+    if activation is None:
+        return None
+    found = _active_row(activation, _rows_by_route().get(route, []))
+    return None if found is None else found.id
+
+
+def case_set_fingerprint(test_set: TestSet, route: str) -> str:
+    """The fingerprint of the live cases of ``test_set`` and ``route``'s case route
+    (``case_route``); see the module docstring."""
     if not isinstance(test_set, TestSet):
         raise TypeError("test_set must be a TestSet")
-    return case_set_sha256(cases_repo.live_sha256s(test_set.value, route))
+    return case_set_sha256(cases_repo.live_sha256s(test_set.value, case_route(route)))
 
 
 def tuple_of(tuple_id: str) -> RouteTuple | None:

@@ -3,18 +3,25 @@
 Import rule: ``nextron.domain``, this package and the standard library.
 
 **``Candidate(name, model, effort, prompt_version, output_schema, batchable, max_tokens,
-max_tokens_cap, budget_class, uses_playbook=False)``** is one version of a route. It is frozen,
-and refused at construction (``TypeError`` or ``ValueError`` from ``nextron.domain.ai``) unless
-its route fields are valid, ``0 < max_tokens <= max_tokens_cap <= MAX_TOKENS_CEILING`` (16,000,
-which keeps every request under the SDK's non-streaming limit) and ``uses_playbook`` is a
-``bool``. ``budget_class`` is a ``nextron.domain.budget.BudgetClass``: the calling service
-passes it to ``domain.budget.allow`` before the call; the gateway never checks the budget.
+max_tokens_cap, budget_class, uses_playbook=False, server_fallbacks=False)``** is one version of
+a route. It is frozen, and refused at construction (``TypeError`` or ``ValueError`` from
+``nextron.domain.ai``) unless its route fields are valid, ``0 <
+max_tokens <= max_tokens_cap <= MAX_TOKENS_CEILING`` (16,000, which keeps every request under
+the SDK's non-streaming limit), ``uses_playbook`` is a ``bool``, and ``server_fallbacks`` is a
+``bool`` that is ``True`` only on an Opus model (``OPUS``) and never on a batchable candidate
+(AD-8: Haiku has no server-side fallback, and a batch request never carries one).
+``budget_class`` is a ``nextron.domain.budget.BudgetClass``: the calling service passes a
+``blockable`` one to ``domain.budget.allow`` before the call (an ``essential`` route is never
+budget-checked); the gateway never checks the budget.
 ``uses_playbook`` (Story 4.4) says the route runs under a pinned Sales Playbook snapshot: its
 tuples carry one (``RouteTuple.playbook``), the request frames it after the system prompt
 (``prompting.build_request``), and ``Playbook.sync_prompts`` never bootstrap-activates it.
 
-**``CANDIDATES``**, by route. The first candidate of each route is its default. No candidate,
-and no request, carries ``fallbacks``: Haiku has no server-side fallback.
+``server_fallbacks`` (Story 4.14) makes ``prompting.build_request`` ask for AD-8's server-side
+refusal fallbacks on every direct request of the candidate.
+
+**``CANDIDATES``**, by route. The first candidate of each route is its default. Only
+``grounding_check_fallback`` carries server-side ``fallbacks``: Haiku has none.
 
 - ``extract_signals``: ``claude-haiku-5-5``, effort ``medium``, prompt ``v1``,
   ``ExtractSignalsV1`` (schema 1), batchable, ``max_tokens`` 8,000 capped at 16,000;
@@ -23,8 +30,20 @@ and no request, carries ``fallbacks``: Haiku has no server-side fallback.
 - ``signal_inbox_parse``: ``claude-haiku-5-5``, effort ``medium``, prompt ``v1``,
   ``SignalInboxParseV1`` (schema 1), not batchable, ``max_tokens`` 2,000 capped at 8,000.
 
+- ``grounding_check`` (Story 4.14): ``claude-haiku-5-5``, effort ``medium``, prompt ``v1``,
+  ``GroundingCheckV1`` (schema 1), not batchable, ``max_tokens`` 4,000 capped at 8,000,
+  ``essential``, ``uses_playbook``;
+- ``grounding_check_fallback`` (Story 4.14): its only candidate is ``claude-opus-5-5``, effort
+  ``medium``, prompt ``v1`` (a file of its own, the same text as ``grounding_check``'s),
+  ``GroundingCheckV1`` (schema 1), not batchable, ``max_tokens`` 4,000 capped at 8,000,
+  ``essential``, ``uses_playbook``, ``server_fallbacks``. It is the tested Opus fallback the
+  drafting service re-runs a refused, invalid or truncated Haiku check on (AD-8): a route of
+  its own, so it has its own active tuple and test run.
+
 ``extract_signals`` and ``extract_people`` are enrichment, ``signal_inbox_parse`` discovery;
-all three are ``blockable``, and none uses the Playbook.
+all three are ``blockable``, and none uses the Playbook. Both grounding routes are
+``essential`` (never budget-checked) and run under the pinned Playbook, so neither is ever
+bootstrap-activated: each serves only after its test run passes (Story 4.5).
 
 **A shipped candidate never changes or goes away** (Story 2.8): a stored activation may name its
 route, model, effort, prompt version and schema version, and the gateway refuses a tuple that no
@@ -57,6 +76,7 @@ from typing import Final
 from nextron.adapters.ai.schemas import (
     EXTRACT_PEOPLE_V1,
     EXTRACT_SIGNALS_V1,
+    GROUNDING_CHECK_V1,
     SIGNAL_INBOX_PARSE_V1,
     OutputSchema,
 )
@@ -65,6 +85,7 @@ from nextron.domain.ai import (
     RouteSpec,
     RouteTuple,
     check_route_fields,
+    check_server_fallbacks,
     check_token_limits,
     check_uses_playbook,
 )
@@ -72,6 +93,7 @@ from nextron.domain.budget import BudgetClass
 
 MAX_TOKENS_CEILING: Final = 16_000  # above it, the SDK wants a streaming request
 HAIKU: Final = "claude-haiku-5-5"
+OPUS: Final = "claude-opus-5-5"
 PROMPTS_DIR: Final = Path(__file__).resolve().parent / "prompts"
 
 
@@ -89,12 +111,14 @@ class Candidate:
     max_tokens_cap: int
     budget_class: BudgetClass
     uses_playbook: bool = False
+    server_fallbacks: bool = False
 
     def __post_init__(self) -> None:
         version = getattr(self.output_schema, "version", None)
         check_route_fields(self.name, self.model, self.effort, self.prompt_version, version)
         check_token_limits(self.max_tokens, self.max_tokens_cap, MAX_TOKENS_CEILING)
         check_uses_playbook(self.uses_playbook)
+        check_server_fallbacks(self.server_fallbacks, self.model, self.batchable, OPUS)
 
 
 CANDIDATES: Final[Mapping[str, tuple[Candidate, ...]]] = MappingProxyType(
@@ -136,6 +160,35 @@ CANDIDATES: Final[Mapping[str, tuple[Candidate, ...]]] = MappingProxyType(
                 max_tokens=2_000,
                 max_tokens_cap=8_000,
                 budget_class=BudgetClass.BLOCKABLE,
+            ),
+        ),
+        "grounding_check": (
+            Candidate(
+                name="grounding_check",
+                model=HAIKU,
+                effort=Effort.MEDIUM,
+                prompt_version="v1",
+                output_schema=GROUNDING_CHECK_V1,
+                batchable=False,
+                max_tokens=4_000,
+                max_tokens_cap=8_000,
+                budget_class=BudgetClass.ESSENTIAL,
+                uses_playbook=True,
+            ),
+        ),
+        "grounding_check_fallback": (
+            Candidate(
+                name="grounding_check_fallback",
+                model=OPUS,
+                effort=Effort.MEDIUM,
+                prompt_version="v1",
+                output_schema=GROUNDING_CHECK_V1,
+                batchable=False,
+                max_tokens=4_000,
+                max_tokens_cap=8_000,
+                budget_class=BudgetClass.ESSENTIAL,
+                uses_playbook=True,
+                server_fallbacks=True,
             ),
         ),
     }

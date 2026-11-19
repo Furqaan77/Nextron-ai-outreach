@@ -272,7 +272,8 @@ def _coverage_problems(cases: Sequence[Case], segments: Sequence[SegmentDef]) ->
 def default_tuples(
     files: Iterable[PromptFile], specs: Iterable[RouteSpec]
 ) -> dict[str, RouteTuple]:
-    """Each route's default tuple, with the text of the prompt file its spec names."""
+    """Each route's default tuple, with the text of the prompt file its spec names; a route
+    that runs under the Playbook (the grounding routes, Story 4.14) has no extraction tuple."""
     texts = {(prompt.route, prompt.version): prompt.text for prompt in files}
     return {
         spec.route: RouteTuple(
@@ -284,6 +285,7 @@ def default_tuples(
             texts[(spec.route, spec.prompt_version)],
         )
         for spec in specs
+        if not spec.uses_playbook
     }
 
 

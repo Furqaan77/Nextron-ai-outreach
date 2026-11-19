@@ -311,6 +311,7 @@ NEVER_RUN = [
         ["purge_place_coords", "never"],  # Story 8.2, group Other
         ["run_ai_test_sets", "never"],  # Story 4.5, group Other
         ["erase_external", "never"],  # Story 3.14
+        ["check_grounding", "never"],  # Story 4.14, group Other
     ],
 ]
 
@@ -442,6 +443,7 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
             ["purge_place_coords", "never"],
             ["run_ai_test_sets", "never"],
             ["erase_external", "never"],
+            ["check_grounding", "never"],
         ],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms

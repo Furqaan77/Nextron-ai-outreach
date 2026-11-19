@@ -23,6 +23,12 @@ would need a ``max_length`` of 200 or fewer (``tests/unit/test_ai_schemas.py`` c
 - ``SIGNAL_INBOX_PARSE_V1`` (``SignalInboxParseV1``): ``segment``, ``signal_type``,
   ``website``, ``author_name``, ``author_role``, ``event_date`` (a date) and ``quote``, each
   of them ``null`` when the item doesn't say.
+- ``GROUNDING_CHECK_V1`` (``GroundingCheckV1``, Story 4.14): ``claims`` (``span``;
+  ``evidence_id``, ``fact_id`` and ``fact_version``, an integer, each ``null`` when the claim
+  doesn't cite one; ``supported``, a boolean; ``explanation``, at most 200 characters) and
+  ``flags`` (``code``: ``fake_familiarity``, ``false_urgency``, ``competitor_claim``,
+  ``two_calls_to_action``, ``deceptive_subject`` or ``repeats_earlier_step``; ``span``;
+  ``explanation``, at most 200 characters).
 
 **``wire_schema(schema)``** is ``anthropic.transform_schema(model)``, computed once per schema
 (each call returns a fresh copy): the JSON schema sent in ``output_config.format``. Every
@@ -49,7 +55,7 @@ from typing import Any, Final, Literal
 
 import anthropic
 import pydantic
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 MAX_DEPTH: Final = 64  # how deep normalisation walks; a document is never this deep
 DEFS: Final = "#/$defs/"  # how pydantic's JSON schema refers to a nested model
@@ -127,6 +133,38 @@ class SignalInboxParseV1(_Strict):
     quote: str | None
 
 
+# grounding_check and grounding_check_fallback --------------------------------------------------
+
+MAX_EXPLANATION: Final = 200
+
+
+class GroundingClaim(_Strict):
+    span: str
+    evidence_id: str | None
+    fact_id: str | None
+    fact_version: int | None
+    supported: bool
+    explanation: str = Field(max_length=MAX_EXPLANATION)
+
+
+class GroundingFlag(_Strict):
+    code: Literal[
+        "fake_familiarity",
+        "false_urgency",
+        "competitor_claim",
+        "two_calls_to_action",
+        "deceptive_subject",
+        "repeats_earlier_step",
+    ]
+    span: str
+    explanation: str = Field(max_length=MAX_EXPLANATION)
+
+
+class GroundingCheckV1(_Strict):
+    claims: list[GroundingClaim]
+    flags: list[GroundingFlag]
+
+
 # Schemas ----------------------------------------------------------------------------------------
 
 
@@ -141,7 +179,8 @@ class OutputSchema:
 EXTRACT_SIGNALS_V1: Final = OutputSchema(1, ExtractSignalsV1)
 EXTRACT_PEOPLE_V1: Final = OutputSchema(1, ExtractPeopleV1)
 SIGNAL_INBOX_PARSE_V1: Final = OutputSchema(1, SignalInboxParseV1)
-SCHEMAS: Final = (EXTRACT_SIGNALS_V1, EXTRACT_PEOPLE_V1, SIGNAL_INBOX_PARSE_V1)
+GROUNDING_CHECK_V1: Final = OutputSchema(1, GroundingCheckV1)
+SCHEMAS: Final = (EXTRACT_SIGNALS_V1, EXTRACT_PEOPLE_V1, SIGNAL_INBOX_PARSE_V1, GROUNDING_CHECK_V1)
 
 
 @functools.cache

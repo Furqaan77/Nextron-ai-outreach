@@ -60,6 +60,9 @@ raised here):
 - ``check_route_fields(route, model, effort, prompt_version, schema_version)`` checks the
   fields a ``RouteTuple`` and a route candidate share, and ``check_uses_playbook(value)`` that a
   candidate's ``uses_playbook`` is a ``bool`` (Story 4.4).
+- ``check_server_fallbacks(value, model, batchable, fallback_model)`` (Story 4.14) that a
+  candidate's ``server_fallbacks`` is a ``bool``, ``True`` only on ``fallback_model`` and never
+  on a batchable candidate.
 - ``check_token_limits(max_tokens, max_tokens_cap, ceiling)`` raises unless both are ints (not
   bools) and ``0 < max_tokens <= max_tokens_cap <= ceiling``.
 """
@@ -144,6 +147,20 @@ def check_uses_playbook(uses_playbook: object) -> None:
     """Raise ``TypeError`` unless a route candidate's ``uses_playbook`` is a ``bool``."""
     if not isinstance(uses_playbook, bool):
         raise TypeError("uses_playbook must be a bool")
+
+
+def check_server_fallbacks(
+    server_fallbacks: object, model: str, batchable: bool, fallback_model: str
+) -> None:
+    """Raise unless a route candidate's ``server_fallbacks`` (Story 4.14) is a ``bool`` that is
+    ``True`` only on ``fallback_model`` (the one model with server-side refusal fallbacks) and
+    never on a batchable candidate (a batch request never carries ``fallbacks``)."""
+    if not isinstance(server_fallbacks, bool):
+        raise TypeError("server_fallbacks must be a bool")
+    if server_fallbacks and model != fallback_model:
+        raise ValueError("only an Opus candidate carries server-side fallbacks")
+    if server_fallbacks and batchable:
+        raise ValueError("a batchable candidate never carries server-side fallbacks")
 
 
 def check_token_limits(max_tokens: object, max_tokens_cap: object, ceiling: int) -> None:
