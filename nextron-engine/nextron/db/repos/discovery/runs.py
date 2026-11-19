@@ -4,7 +4,8 @@ Every function runs one explicit Core statement through the current unit of work
 ``nextron.db.repos.discovery.leads`` does; it checks nothing (``nextron.app.discovery`` does).
 
 - ``StoredRun``: one row;
-- ``insert(...) -> id``: a new run, every count 0;
+- ``insert(...) -> id``: a new run, every count 0 (Story 8.10: with ``scheduled_for`` and
+  ``ready_pool``, both ``None`` by default);
 - ``count(run_id, outcome)``: adds 1 to ``seen`` and, unless ``outcome`` is ``None``, 1 to the
   outcome's count column (a ``nextron.domain.place_discovery.Outcome`` value), in one
   statement;
@@ -13,17 +14,27 @@ Every function runs one explicit Core statement through the current unit of work
 - ``fail_running(source, at) -> int``: ends every ``running`` row of ``source`` ``failed`` at
   ``at``; the count (Story 8.4: each source's runs recover only their own rows);
 - ``get(run_id)``: the row, or ``None``;
-- ``recent(limit)``: the newest ``limit`` runs (by ``started_at``, then ``id``, descending).
+- ``recent(limit)``: the newest ``limit`` runs (by ``started_at``, then ``id``, descending);
+- ``last_finished(source, segment_id)`` (Story 8.10): for each ``(location, query_hash)`` of the
+  Segment's ``finished`` runs of ``source``, the latest ``started_at``, as a dict;
+- ``created_since(at)`` (Story 8.10): the sum of ``created`` over every run started at or after
+  ``at`` (any source, any status);
+- ``pool_rows(scheduled_for)`` (Story 8.10): the ``pool_sufficient`` rows for that date, oldest
+  first;
+- ``has_pool_row(campaign_id, scheduled_for)`` (Story 8.10): whether that Campaign has one;
+- ``ran_scheduled(source, campaign_id, scheduled_for)`` (Story 8.10): whether a ``source`` run
+  of that Campaign for that date already ended ``finished``, ``paced`` or ``target_reached``.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from typing import Final
 
 from sqlalchemy import insert as insert_rows
-from sqlalchemy import select
+from sqlalchemy import func, select, type_coerce
 from sqlalchemy import update as update_rows
 
-from nextron.db.models.base import new_id
+from nextron.db.models.base import UtcDateTime, new_id
 from nextron.db.models.discovery import DiscoveryRunRecord
 from nextron.db.uow import current
 from nextron.domain.place_discovery import Outcome, RunStatus
@@ -50,6 +61,8 @@ class StoredRun:
     no_website: int
     market_blocked: int
     inactive: int
+    scheduled_for: date | None = None
+    ready_pool: int | None = None
 
 
 _COLUMNS = (
@@ -70,6 +83,8 @@ _COLUMNS = (
     DiscoveryRunRecord.no_website,
     DiscoveryRunRecord.market_blocked,
     DiscoveryRunRecord.inactive,
+    DiscoveryRunRecord.scheduled_for,
+    DiscoveryRunRecord.ready_pool,
 )
 
 
@@ -84,6 +99,8 @@ def insert(
     status: RunStatus,
     started_at: datetime,
     finished_at: datetime | None,
+    scheduled_for: date | None = None,
+    ready_pool: int | None = None,
 ) -> str:
     """Store a new run with every count 0; return its new ULID."""
     run_id = new_id()
@@ -106,6 +123,8 @@ def insert(
             no_website=0,
             market_blocked=0,
             inactive=0,
+            scheduled_for=scheduled_for,
+            ready_pool=ready_pool,
         )
     )
     return run_id
@@ -171,3 +190,78 @@ def recent(limit: int) -> tuple[StoredRun, ...]:
         .limit(limit)
     )
     return tuple(StoredRun(*row) for row in rows)
+
+
+def last_finished(source: str, segment_id: str) -> dict[tuple[str | None, str], datetime]:
+    """The latest ``started_at`` of the Segment's ``finished`` runs of ``source``, by
+    ``(location, query_hash)``."""
+    rows = current().session.execute(
+        select(
+            DiscoveryRunRecord.location,
+            DiscoveryRunRecord.query_hash,
+            type_coerce(func.max(DiscoveryRunRecord.started_at), UtcDateTime),
+        )
+        .where(
+            DiscoveryRunRecord.source == source,
+            DiscoveryRunRecord.segment_id == segment_id,
+            DiscoveryRunRecord.status == str(RunStatus.FINISHED),
+        )
+        .group_by(DiscoveryRunRecord.location, DiscoveryRunRecord.query_hash)
+    )
+    return {(location, hashed): latest for location, hashed, latest in rows}
+
+
+def created_since(at: datetime) -> int:
+    """The Leads every run started at or after ``at`` created."""
+    total = current().session.execute(
+        select(func.coalesce(func.sum(DiscoveryRunRecord.created), 0)).where(
+            DiscoveryRunRecord.started_at >= at
+        )
+    ).scalar_one()
+    return int(total)
+
+
+def pool_rows(scheduled_for: date) -> tuple[StoredRun, ...]:
+    """The ``pool_sufficient`` rows for ``scheduled_for``, oldest first."""
+    rows = current().session.execute(
+        select(*_COLUMNS)
+        .where(
+            DiscoveryRunRecord.status == str(RunStatus.POOL_SUFFICIENT),
+            DiscoveryRunRecord.scheduled_for == scheduled_for,
+        )
+        .order_by(DiscoveryRunRecord.started_at, DiscoveryRunRecord.id)
+    )
+    return tuple(StoredRun(*row) for row in rows)
+
+
+_RAN: Final = (RunStatus.FINISHED, RunStatus.PACED, RunStatus.TARGET_REACHED)
+
+
+def ran_scheduled(source: str, campaign_id: str, scheduled_for: date) -> bool:
+    """Whether a scheduled ``source`` run of the Campaign for ``scheduled_for`` already ended
+    ``finished``, ``paced`` or ``target_reached`` (Story 8.10)."""
+    found = current().session.execute(
+        select(DiscoveryRunRecord.id)
+        .where(
+            DiscoveryRunRecord.source == source,
+            DiscoveryRunRecord.campaign_id == campaign_id,
+            DiscoveryRunRecord.scheduled_for == scheduled_for,
+            DiscoveryRunRecord.status.in_([str(status) for status in _RAN]),
+        )
+        .limit(1)
+    ).first()
+    return found is not None
+
+
+def has_pool_row(campaign_id: str, scheduled_for: date) -> bool:
+    """Whether the Campaign has a ``pool_sufficient`` row for ``scheduled_for``."""
+    found = current().session.execute(
+        select(DiscoveryRunRecord.id)
+        .where(
+            DiscoveryRunRecord.status == str(RunStatus.POOL_SUFFICIENT),
+            DiscoveryRunRecord.campaign_id == campaign_id,
+            DiscoveryRunRecord.scheduled_for == scheduled_for,
+        )
+        .limit(1)
+    ).first()
+    return found is not None

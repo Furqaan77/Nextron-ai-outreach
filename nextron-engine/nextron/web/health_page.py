@@ -58,7 +58,10 @@ In order, the panel shows:
    ``|plain``); a ``job_dead`` issue has a Dismiss form. With none: "No errors need
    attention.";
 7. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
-   type that has not succeeded;
+   type that has not succeeded; when the app has a ``DiscoveryTopUp`` (Story 8.10), a
+   **Discovery today** list first: "Leads created today: <n> of <target>" and "Places requests
+   today: <n> of <allowance> allowed" (``discovery_page.today_lines``), above the groups (the
+   Discovery group lists ``discover_places`` and ``discover_registry``);
 8. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
    fail".
 """
@@ -67,6 +70,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
+from nextron.app.discovery.topup import DiscoveryToday
 from nextron.app.ops.api import HealthReport, Worker
 from nextron.app.queries.ops import BackupRow, RecoveryRow, RestoreTestRow
 from nextron.domain.alert import JOB_DEAD
@@ -76,6 +80,7 @@ from nextron.domain.readiness import tally
 from nextron.domain.recovery import RecoveryMode
 from nextron.domain.restore_test import CheckOutcome, RestoreCheck, RestoreResult, RestoreTestKind
 from nextron.web.csrf import CSRF_FIELD
+from nextron.web.discovery_page import today_lines
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
 PAGE_TEMPLATE: Final = "health.html"
@@ -221,10 +226,15 @@ def recovery_steps(recovery: RecoveryRow | None) -> list[StepRow]:
 
 
 def panel_context(
-    report: HealthReport, *, notice: str | None = None, restore_notice: str | None = None
+    report: HealthReport,
+    *,
+    notice: str | None = None,
+    restore_notice: str | None = None,
+    discovery_today: DiscoveryToday | None = None,
 ) -> dict[str, object]:
     """What ``health_panel.html`` renders for ``report``, with the "Back up now" ``notice``
-    and the "Run restore test now" ``restore_notice`` when there is one."""
+    and the "Run restore test now" ``restore_notice`` when there is one, and today's discovery
+    lines when ``discovery_today`` is given (Story 8.10)."""
     issues = [
         IssueItem(issue.text, issue.detail, issue.subject if issue.kind == JOB_DEAD else None)
         for issue in report.issues
@@ -265,6 +275,7 @@ def panel_context(
         "groups": groups,
         "readiness": readiness,
         "readiness_counts": f"{ok} ok, {warn} warn, {fail} fail",
+        "discovery_today": None if discovery_today is None else today_lines(discovery_today),
     }
 
 

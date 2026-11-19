@@ -278,6 +278,14 @@ legal-form check uses, so both share its rate window, and the Discovery page's "
 House discovery" (``create_app(..., registry_discovery=...)``); it is also kept on
 ``app.state.registry_discovery``.
 
+**The weekday discovery top-up (Story 8.10).** ``DiscoveryTopUp(clock, queue, place_searches)``
+(``nextron.app.discovery.topup``) is built with no ``ReadyPool`` (the scoring and sequencing
+services that will provide one, and Story 8.9's ``daily_selection`` that calls its ``chain``,
+are not on this branch), so no trigger enqueues scheduled discovery yet. It gives the Discovery
+page and the health panel today's figures (``create_app(..., discovery_topup=...)``) and is
+kept on ``app.state.discovery_topup``. A ``discover_places`` or ``discover_registry`` job with a
+``scheduled_for`` payload runs ``run_scheduled``.
+
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
 ``notifications`` tables and sends each Telegram alert as a ``send_alert`` job. Its Telegram
@@ -706,6 +714,7 @@ from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.place_ingest import PlaceDiscovery
 from nextron.app.discovery.registry_ingest import RegistryDiscovery
 from nextron.app.discovery.places import PlaceSearches
+from nextron.app.discovery.topup import DiscoveryTopUp
 from nextron.app.drafting import api as drafting_api
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
@@ -1089,7 +1098,8 @@ def build_app(
     discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``.
     ``RegistryDiscovery`` runs the Companies House discovery on that same ``registry``, those
     ``PlaceSearches`` and the crawl's ``crawler``, kept on ``app.state.registry_discovery``.
-    The job type registry is kept on ``app.state.job_types`` (Story 8.1)."""
+    The job type registry is kept on ``app.state.job_types`` (Story 8.1). ``DiscoveryTopUp``
+    (Story 8.10, no ``ReadyPool``) is kept on ``app.state.discovery_topup``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1172,6 +1182,7 @@ def build_app(
     registry_discovery = RegistryDiscovery(
         clock, meter, companies_house, place_searches, site_crawler, discovery, research, queue
     )
+    discovery_topup = DiscoveryTopUp(clock, queue, place_searches)  # Story 8.10: no ReadyPool
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
@@ -1250,6 +1261,7 @@ def build_app(
         registry_discovery=registry_discovery,
         discovery=discovery,
         units=units,
+        discovery_topup=discovery_topup,
         lifespan=engine_lifespan(
             runner,
             scheduler,
@@ -1262,6 +1274,7 @@ def build_app(
     app.state.place_searches = place_searches  # Story 8.2
     app.state.place_discovery = place_discovery  # Story 8.3
     app.state.registry_discovery = registry_discovery  # Story 8.4
+    app.state.discovery_topup = discovery_topup  # Story 8.10
     return app
 
 
@@ -2329,7 +2342,7 @@ def record_pre_migrate(units: UnitOfWorkFactory, local: LocalBackups, taken: Tak
 class DoctorMeter:
     """``doctor``'s ``UsageMeterPort``: it keeps each recorded call in memory (``calls``) and
     writes nothing, so doctor's own Google refresh never reaches ``api_usage`` or the Quotas
-    page. ``snapshot`` returns an empty ``Usage``."""
+    page. ``snapshot`` returns an empty ``Usage`` and ``units_since`` 0."""
 
     def __init__(self) -> None:
         self.calls: list[ApiCall | AiCall] = []
@@ -2339,6 +2352,10 @@ class DoctorMeter:
 
     def snapshot(self, now: datetime) -> Usage:
         return Usage(month=month_of(now), api=(), ai_calls=0, ai_cost_micros=0)
+
+    def units_since(self, provider: str, sku: str | None, since: datetime) -> int:
+        del provider, sku, since
+        return 0
 
 
 class ReadinessDatabase(Protocol):

@@ -137,7 +137,8 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``POST /leads/discovery/companies-house`` (``discovery_companies_house``,
   ``@personal_data(False)``, Story 8.4) does the same with ``registry_discovery.request_run``;
   the page's Companies House form lists the active Campaigns whose Market is an enabled ``GB``
-  one.
+  one. With a ``discovery_topup`` (Story 8.10) the panel and the health panel also show
+  today's figures (``DiscoveryTopUp.today()``, read in the same read-only unit).
 - ``POST /leads/{lead_id}/website`` (``lead_enter_website``, ``@personal_data(False)``, Story
   8.4): the Leads list's "Website needed" form. Its fields are exactly ``website``
   (``leads_page.submitted_website``); it runs ``discovery.enter_website(lead_id, website)`` in
@@ -298,6 +299,7 @@ from nextron.app.discovery.place_ingest import (
     configured_locations,
 )
 from nextron.app.discovery.registry_ingest import RegistryDiscovery, RegistryRunRefused
+from nextron.app.discovery.topup import DiscoveryTopUp
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -556,6 +558,7 @@ def create_app(
     units: Units,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
+    discovery_topup: DiscoveryTopUp | None = None,
 ) -> FastAPI:
     """Build the dashboard app for ``127.0.0.1:<port>``; its GET handlers read through
     ``units.open(read_only=True)`` and its POST handlers that write the database open
@@ -577,7 +580,9 @@ def create_app(
     subject access export; ``domain_checks`` reads the Sending Domain authentication section
     and queues its Recheck; ``place_discovery`` queues the Discovery page's Places runs and
     ``registry_discovery`` its Companies House runs (Story 8.4); ``discovery`` saves the website
-    the Operator enters on the Leads list's "Website needed" rows (Story 8.4).
+    the Operator enters on the Leads list's "Website needed" rows (Story 8.4);
+    ``discovery_topup`` (Story 8.10, optional) gives the Discovery page and the health panel
+    today's discovery figures.
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -1147,7 +1152,10 @@ def create_app(
         restore_notice: str | None = None,
     ) -> HTMLResponse:
         context = health_rows.panel_context(
-            engine_health.report(), notice=notice, restore_notice=restore_notice
+            engine_health.report(),
+            notice=notice,
+            restore_notice=restore_notice,
+            discovery_today=None if discovery_topup is None else discovery_topup.today(),
         )
         return page(request, template, **context)
 
@@ -1513,6 +1521,11 @@ def create_app(
                 found for found in active if found.market_id in uk_markets
             ),
             chosen_uk_campaign=chosen_uk_campaign,
+            today=(
+                None
+                if discovery_topup is None
+                else discovery_rows.today_lines(discovery_topup.today(), names)
+            ),
         )
         return page(request, template, **context)
 

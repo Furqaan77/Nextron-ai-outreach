@@ -815,8 +815,8 @@ def test_pausing_the_campaign_between_pages_stops_the_run(world: World) -> None:
 
     real_page = world.place_discovery._searches.page
 
-    def page_then_pause(query: str, location: str, token: str | None = None) -> Any:
-        answer = real_page(query, location, token)
+    def page_then_pause(query: str, location: str, token: str | None = None, **kw: Any) -> Any:
+        answer = real_page(query, location, token, **kw)
         if not paused:  # the Operator pauses the Campaign after page 1 arrives
             world.sql("UPDATE campaigns SET status = 'paused' WHERE id = ?", (world.us,))
             paused.append(True)

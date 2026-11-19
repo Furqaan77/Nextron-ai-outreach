@@ -97,6 +97,7 @@ from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.place_ingest import PlaceDiscovery
 from nextron.app.discovery.registry_ingest import RegistryDiscovery
 from nextron.app.discovery.places import PlaceSearches
+from nextron.app.discovery.topup import DiscoveryTopUp
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -321,6 +322,7 @@ class Dashboard:
     places: ScriptedPlaces = field(default_factory=ScriptedPlaces)
     crawler: ScriptedCrawler = field(default_factory=ScriptedCrawler)
     registry: ScriptedRegistry = field(default_factory=ScriptedRegistry)
+    with_topup: bool = False  # Story 8.10: give the app a DiscoveryTopUp (today's figures)
     app: FastAPI = field(init=False)
     entry: DashboardEntry = field(init=False)
     setup: Setup = field(init=False)
@@ -350,6 +352,7 @@ class Dashboard:
     discovery: Discovery = field(init=False)
     place_discovery: PlaceDiscovery = field(init=False)
     registry_discovery: RegistryDiscovery = field(init=False)
+    discovery_topup: DiscoveryTopUp = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -448,7 +451,10 @@ class Dashboard:
             self.queue,
         )
         self.erasures = Erasures(self.clock, Compliance(self.clock))
-        extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
+        self.discovery_topup = DiscoveryTopUp(self.clock, self.queue, place_searches)
+        extra: dict[str, Any] = {"monotonic": self.monotonic} if self.monotonic is not None else {}
+        if self.with_topup:
+            extra["discovery_topup"] = self.discovery_topup
         self.app = create_app(
             env=self.env,
             version=self.version,

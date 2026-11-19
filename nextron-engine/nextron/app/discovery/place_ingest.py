@@ -73,6 +73,33 @@ the budget refused the run or a page (the handler returns ``DEFERRED``).
    transaction of its own and is raised again (a retryable ``AdapterError`` from Places is
    retried by the runner).
 
+**Scheduled runs (Story 8.10).** ``@use_case run_scheduled(campaign_id, scheduled_for) -> bool``
+(a ``discover_places`` job the weekday top-up queued, ``nextron.app.discovery.topup``) searches
+one query in one location, takes no Operator choice, and is paced:
+
+1. **Start** (a transaction). The stale-row recovery as above. Then, each logging
+   ``places_run_skipped`` (``campaign_id``, ``reason``) and returning ``True`` with no row: an
+   unknown Campaign or Segment (``unknown``); ``scheduled_for`` that isn't the Operator's local
+   date now (``sender_timezone``; ``not_today``: a job left from an earlier day never runs a
+   second day's search); a Campaign that can't run now (``campaign_not_active``); a Places run
+   of the Campaign for ``scheduled_for`` that already ended ``finished``, ``paced`` or
+   ``target_reached`` (``already_ran``: a re-queued job never searches a second pair that day).
+   **Rotation:** the pairs are (one of the Segment's Places queries, one configured location
+   whose code is the Campaign's Market's country, that Market enabled), queries in seed order,
+   then locations in setting order; a pair's ``query_hash`` is ``query_hash((query,))``.
+   ``discovery_topup.next_pair`` picks one against ``runs.last_finished(places, segment)`` and
+   ``discovery_requery_days``; none due logs ``discovery_nothing_due`` (``source``,
+   ``campaign_id``) and returns ``True`` with no row. Then the budget pre-check as above. Then a
+   ``running`` row as above for that location and that pair's ``query_hash``, with
+   ``scheduled_for``.
+2. **Pages** as above, for the one query, with two more checks. Before each page and each
+   candidate, ``daily.target_reached`` (Leads created today at or over
+   ``discovery_daily_lead_target``) ends the run ``target_reached``. Each page is
+   ``PlaceSearches.page(..., pace=Pace(<local date>, <zone>))``: ``Paced`` (today's Places
+   allowance used) ends the run ``paced`` with no request.
+3. **End** as above; ``run_scheduled`` returns ``False`` only for ``deferred`` (``paced`` and
+   ``target_reached`` complete the job: an hourly retry can't help before tomorrow).
+
 Logs hold ids, codes, counts and outcomes only: never a Places name, website, coordinate, page
 token, query or location text.
 """
@@ -80,10 +107,12 @@ token, query or location text.
 import logging
 import urllib.parse
 from dataclasses import dataclass
+from datetime import date
 from typing import Final
 
 from nextron.app.discovery.api import Discovery, UpsertedLead, website_domain
-from nextron.app.discovery.places import PlaceSearches
+from nextron.app.discovery.daily import DISCOVERY_NOTHING_DUE, sender_timezone, target_reached
+from nextron.app.discovery.places import Pace, Paced, PlaceSearches
 from nextron.app.jobqueue.api import Enqueued, JobQueue
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import robots_rule
@@ -91,6 +120,7 @@ from nextron.db.repos.discovery import leads as leads_repo
 from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.uow import current, use_case
 from nextron.domain.crawl import HTML_MEDIA_TYPES, MIN_INTERVAL_S
+from nextron.domain.discovery_topup import local_date_of, next_pair
 from nextron.domain.errors import DomainError
 from nextron.domain.fetch_policy import check_url
 from nextron.domain.identity import IdentityError, normalize_place_id
@@ -131,6 +161,10 @@ PLACE_CANDIDATE_INGESTED: Final = "place_candidate_ingested"
 REFUSED_CAMPAIGN: Final = "campaign_not_active"
 REFUSED_LOCATION: Final = "location_not_in_market"
 REFUSED_NO_QUERIES: Final = "no_places_queries"
+# Why a scheduled run was skipped, as logged (Story 8.10; else REFUSED_CAMPAIGN)
+SKIPPED_UNKNOWN: Final = "unknown"
+SKIPPED_NOT_TODAY: Final = "not_today"
+SKIPPED_ALREADY_RAN: Final = "already_ran"
 REFUSAL_MESSAGES: Final = {
     REFUSED_CAMPAIGN: "That Campaign isn't active, so it can't run discovery. Nothing was queued.",
     REFUSED_LOCATION: (
@@ -158,7 +192,8 @@ class PlacesRunRefused(DomainError):
 
 @dataclass(frozen=True, slots=True)
 class _Run:
-    """A started run: its row, Segment, location, queries and page cap."""
+    """A started run: its row, Segment, location, queries and page cap; a scheduled run's
+    ``pace`` (Story 8.10), ``None`` for a manual one."""
 
     run_id: str
     campaign_id: str
@@ -166,6 +201,7 @@ class _Run:
     location: DiscoveryLocation
     queries: tuple[str, ...]
     max_pages: int
+    pace: Pace | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +223,23 @@ def configured_locations() -> tuple[DiscoveryLocation, ...]:
         except ValueError:
             continue
     return tuple(found)
+
+
+def _places_pairs(
+    market_id: str, queries: tuple[str, ...]
+) -> dict[tuple[str, str], tuple[str, DiscoveryLocation]]:
+    """A scheduled run's (query, location) pairs, keyed ``(location text, query_hash)``, in
+    seed × setting order; none unless the Campaign's Market is enabled. Read in the current
+    unit of work."""
+    country = _market_country(market_id)
+    if country is None or not _enabled_market(country):
+        return {}
+    locations = [found for found in configured_locations() if found.country_code == country]
+    pairs: dict[tuple[str, str], tuple[str, DiscoveryLocation]] = {}
+    for search in queries:
+        for location in locations:
+            pairs.setdefault((location.location, query_hash((search,))), (search, location))
+    return pairs
 
 
 def _location(location_hash: str, country_code: str) -> DiscoveryLocation | None:
@@ -322,6 +375,85 @@ class PlaceDiscovery:
         self._end(started.run_id, status)
         return status is not RunStatus.DEFERRED
 
+    @use_case
+    def run_scheduled(self, campaign_id: str, scheduled_for: date) -> bool:
+        """Run one scheduled Places discovery (Story 8.10); ``False`` when the budget refused
+        the run or a page. See the module docstring."""
+        started = self._start_scheduled(campaign_id, scheduled_for)
+        if started is RunStatus.DEFERRED:
+            return False
+        if not isinstance(started, _Run):
+            return True
+        try:
+            status = self._pages(started)
+        except Exception:
+            self._end(started.run_id, RunStatus.FAILED)
+            raise
+        self._end(started.run_id, status)
+        return status is not RunStatus.DEFERRED
+
+    def _start_scheduled(self, campaign_id: str, scheduled_for: date) -> _Run | RunStatus | None:
+        """Scheduled step 1: the started run, ``RunStatus.DEFERRED`` (no row) or ``None``."""
+        now = self._clock.now()
+        with current().transaction():
+            stale = runs_repo.fail_running(SOURCE_PLACES, now)
+            if stale:
+                log.warning(PLACES_RUNS_RECOVERED, extra={"count": stale})
+            campaign = setup_queries.campaign(campaign_id)
+            segment = (
+                None if campaign is None else setup_queries.segment_by_id(campaign.segment_id)
+            )
+            timezone = sender_timezone()
+            today = local_date_of(now, timezone)
+            if campaign is None or segment is None:
+                skipped: str | None = SKIPPED_UNKNOWN
+            elif scheduled_for != today:
+                skipped = SKIPPED_NOT_TODAY
+            elif not setup_queries.campaign_active(campaign.id):
+                skipped = REFUSED_CAMPAIGN
+            elif runs_repo.ran_scheduled(SOURCE_PLACES, campaign.id, scheduled_for):
+                skipped = SKIPPED_ALREADY_RAN
+            else:
+                skipped = None
+            if skipped is not None or campaign is None or segment is None:
+                log.info(PLACES_RUN_SKIPPED, extra={"campaign_id": campaign_id, "reason": skipped})
+                return None
+            pairs = _places_pairs(campaign.market_id, segment.definition.discovery_queries.places)
+            chosen = next_pair(
+                tuple(pairs),
+                runs_repo.last_finished(SOURCE_PLACES, segment.id),
+                now,
+                int(setup_queries.get(Key.DISCOVERY_REQUERY_DAYS)),
+            )
+            if chosen is None:
+                log.info(
+                    DISCOVERY_NOTHING_DUE,
+                    extra={"source": SOURCE_PLACES, "campaign_id": campaign.id},
+                )
+                return None
+            refusal = self._searches.refusal()
+            if refusal is not None:
+                log.info(
+                    PLACES_RUN_DEFERRED, extra={"campaign_id": campaign.id, "reason": refusal}
+                )
+                return RunStatus.DEFERRED
+            search, location = pairs[chosen]
+            run_id = runs_repo.insert(
+                source=SOURCE_PLACES,
+                campaign_id=campaign.id,
+                segment_id=segment.id,
+                country_code=location.country_code,
+                location=location.location,
+                query_hash=chosen[1],
+                status=RunStatus.RUNNING,
+                started_at=now,
+                finished_at=None,
+                scheduled_for=scheduled_for,
+            )
+            max_pages = int(setup_queries.get(Key.PLACES_MAX_PAGES_PER_RUN))
+        pace = Pace(today, timezone)
+        return _Run(run_id, campaign.id, segment.id, location, (search,), max_pages, pace)
+
     def _start(
         self, campaign_id: str, location_hash: str, country_code: str
     ) -> _Run | RunStatus | None:
@@ -370,18 +502,28 @@ class PlaceDiscovery:
 
     def _pages(self, run: _Run) -> RunStatus:
         """Every page of the run, each candidate ingested: ``finished``, ``deferred`` when the
-        budget refused a page, or ``stopped`` when the Campaign could no longer run."""
+        budget refused a page, or ``stopped`` when the Campaign could no longer run; a
+        scheduled run also ends ``target_reached`` or ``paced`` (Story 8.10)."""
         fetched = 0
         for search in run.queries:
             token: str | None = None
             while fetched < run.max_pages:
                 if not self._may_continue(run):
                     return RunStatus.STOPPED
-                page = self._searches.page(search, run.location.location, token)
+                if self._target_reached(run):
+                    return RunStatus.TARGET_REACHED
+                try:
+                    page = self._searches.page(
+                        search, run.location.location, token, pace=run.pace
+                    )
+                except Paced:
+                    return RunStatus.PACED
                 if page is None:
                     return RunStatus.DEFERRED
                 fetched += 1
                 for candidate in page.candidates:
+                    if self._target_reached(run):
+                        return RunStatus.TARGET_REACHED
                     self.ingest_candidate(run.run_id, candidate, run.segment_id, run.location)
                 token = page.next_page_token
                 if token is None:
@@ -399,6 +541,13 @@ class PlaceDiscovery:
                 and setup_queries.campaign_active(campaign.id)
                 and _market_country(campaign.market_id) == run.location.country_code
             )
+
+    def _target_reached(self, run: _Run) -> bool:
+        """Whether a scheduled run must stop for the day's Lead target (never a manual one)."""
+        if run.pace is None:
+            return False
+        with current().transaction():
+            return target_reached(self._clock.now())
 
     def _end(self, run_id: str, status: RunStatus) -> None:
         with current().transaction():

@@ -167,4 +167,7 @@ def test_the_counts_are_seen_then_each_outcome() -> None:
         "deferred",
         "failed",
         "stopped",
+        "target_reached",  # Story 8.10
+        "paced",  # Story 8.10
+        "pool_sufficient",  # Story 8.10
     ]

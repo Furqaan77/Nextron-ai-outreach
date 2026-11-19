@@ -44,6 +44,7 @@ import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -655,6 +656,8 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
         assert [row[1] for row in readiness] == DOCTOR_IDS
         statuses = {row[1]: (row[0], row[2]) for row in readiness}
         assert f"Job dead: send_alert {job_id}, attempts: 1" in page.texts
+        # build_app passes its DiscoveryTopUp to create_app (Story 8.10)
+        assert "Leads created today: 0 of 60" in unescape(reply.text)
         assert raw_query(units, "SELECT COUNT(*) FROM api_usage") == [(0,)]
         if wiring == "real":
             assert database_dump(units) == before  # the GET wrote nothing

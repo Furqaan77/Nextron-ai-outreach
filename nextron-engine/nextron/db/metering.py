@@ -30,6 +30,10 @@ error ``code``, never another field value. The meter writes no ``events`` row.
 unit of work's session, a read-only one included, in two ``SELECT``s: ``api_usage`` grouped by
 provider, operation and SKU (the row count, the failed count and the sum of units), and
 ``ai_usage`` (the row count and the sum of ``cost_micros``).
+
+**units_since(provider, sku, since)** (Story 8.10) is the sum of ``units`` of the ``api_usage``
+rows of ``provider`` and ``sku`` (``None``: rows without one) whose ``at`` is at or after
+``since``, read the same way; 0 when there are none.
 """
 
 import contextvars
@@ -189,3 +193,14 @@ class UsageMeter:
             ai_calls=int(calls),
             ai_cost_micros=int(cost),
         )
+
+    def units_since(self, provider: str, sku: str | None, since: datetime) -> int:
+        """The units of ``provider``'s ``sku`` calls recorded at or after ``since``."""
+        api = ApiUsageRecord
+        same_sku = api.sku.is_(None) if sku is None else api.sku == sku
+        total = current().session.execute(
+            select(func.coalesce(func.sum(api.units), 0)).where(
+                api.provider == provider, same_sku, api.at >= since
+            )
+        ).scalar_one()
+        return int(total)

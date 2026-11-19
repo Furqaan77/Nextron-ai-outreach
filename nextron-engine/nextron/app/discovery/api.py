@@ -137,6 +137,14 @@ through a UK Campaign's Companies House searches and turns each active company i
 through ``upsert_lead`` (source ``companies_house``), then looks its website up once through
 Places (``attach_web_domain``, ``record_website_lookup``) and stores its kept officers.
 
+**The weekday discovery top-up (Story 8.10).** ``DiscoveryTopUp``
+(``nextron.app.discovery.topup``) is the stage ``daily_selection`` chains in its transaction:
+it queues each active Campaign's dated ``discover_places`` and (UK) ``discover_registry`` job
+unless its ready pool is sufficient, and reads today's figures for the pages. The jobs run
+``PlaceDiscovery.run_scheduled`` and ``RegistryDiscovery.run_scheduled``: one rotated query
+(and location), paced by today's Places allowance and stopped at the day's Lead target, using
+``nextron.app.discovery.daily`` for the Operator's local day.
+
 **The legal form (Story 2.12, FR-12).** ``LegalFormChecks`` (``nextron.app.discovery
 .legal_form``) runs the ``check_legal_form`` jobs: it links a GB Lead to its Companies House
 record through ``set_ch_number`` and records the finding through ``research.record_legal_form``.

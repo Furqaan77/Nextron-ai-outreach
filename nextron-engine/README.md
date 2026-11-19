@@ -4882,6 +4882,51 @@ and the job is re-queued an hour later; Story 8.1) and before each search page, 
 House rate limit (HTTP 429) also ends the run `deferred`: the job is re-queued an hour later and
 the Leads already created stay.
 
+## Weekday discovery top-up (Story 8.10)
+
+**What it does.** After each weekday's automatic selection (Story 8.9's `daily_selection`, not
+built yet), the engine queues one scheduled Places discovery for each active Campaign (when its
+Segment has Places queries and a Places discovery location is set in its Market's country) and,
+for an active UK Campaign, one scheduled Companies House discovery. The jobs are keyed by date,
+so a Campaign's discovery is queued once while that day's job is waiting or running, and a
+scheduled run that finds a run of the same kind for the same Campaign and day already ended
+(`finished`, `paced` or `target_reached`) skips, so a Campaign gets at most one scheduled search
+of each kind a day. Weekends, away days that
+skip selection and days with no capacity queue nothing. Until Story 8.9 is merged nothing
+triggers the top-up, so scheduled discovery does not run yet; the "Run … discovery" forms work
+as before.
+
+**Pool.** When the engine knows a Campaign's ready Leads and its daily capacity share (wired at
+the merge with Stories 2.15, 4.8, 4.10 and 8.9), a Campaign that would get discovery but whose
+ready Leads already cover
+**Ready pool days before discovery pauses** (Budget and limits, default 5) days of its share
+gets no discovery that day. The Discovery page then shows "<Campaign>: Pool sufficient: n Leads
+ready" and the runs table a `pool_sufficient` row.
+
+**Rotation.** A scheduled run searches one pair: one of the Segment's Places queries in one
+location (or one Companies House keyword with all the SIC codes). It takes a pair it has never
+searched first, then the one searched longest ago, and skips any pair searched successfully in
+the last **Days before a discovery search repeats** (default 30). A run cut short (deferred,
+paced, target reached) doesn't count, so its pair comes back first next time. With every pair
+recent, nothing is searched that day.
+
+**Pacing.** Scheduled runs spread the free Places quota over the month: today's allowance is
+what is left of the month's Places Enterprise quota (before today) divided by the weekdays left
+in the month, today included (the month and day follow the Sender time zone). Every Places
+request today counts against it, manual runs and Companies House website lookups included.
+Once it is used, a scheduled Places run ends `paced`, and a scheduled Companies House run
+leaves the new Lead's website lookup undecided (the Lead shows under **Website needed**). The
+quota and AI-budget checks still apply.
+
+**Target.** Scheduled runs stop with `target_reached` once **New Leads per day from scheduled
+discovery** (default 60; 0 stops scheduled creation) Leads were created today by any discovery
+run. "Today" and weekdays follow the Sender time zone.
+
+**Where to look.** The Discovery page shows "Leads created today: n of target", "Places
+requests today: n of allowance allowed" and the Pool sufficient lines; the health panel shows
+the first two under Last successful runs, next to the Discovery group's `discover_places` and
+`discover_registry`. Manual runs keep their old behaviour: no rotation, allowance or target.
+
 ## Engine health
 
 The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page

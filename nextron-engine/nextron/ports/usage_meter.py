@@ -12,6 +12,8 @@ structurally and is the only writer of ``api_usage`` and ``ai_usage``. Tests use
   called outside any transaction (AD-3); inside one it writes nothing.
 - ``snapshot(now)`` is the usage of ``now``'s UTC calendar month, read through the caller's
   current unit of work: inside a transaction, or in a read-only unit.
+- ``units_since(provider, sku, since)`` (Story 8.10) is the sum of the units of ``provider``'s
+  calls with ``sku`` recorded at or after ``since``, read the same way: today's Places requests.
 
 ``Metered(meter, provider, operation)`` is how an HTTP adapter records a request: a context
 manager around the one request that records exactly one ``ApiCall`` when it ends, ``ok`` or
@@ -39,6 +41,11 @@ class UsageMeterPort(Protocol):
 
     def snapshot(self, now: datetime) -> Usage:
         """The usage of ``now``'s UTC calendar month, read in the current unit of work."""
+        ...
+
+    def units_since(self, provider: str, sku: str | None, since: datetime) -> int:
+        """The units of ``provider``'s calls with ``sku`` recorded at or after ``since``, read
+        in the current unit of work (Story 8.10)."""
         ...
 
 

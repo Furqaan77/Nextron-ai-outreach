@@ -36,7 +36,10 @@ an input.
 
 **Runs.** ``RunStatus``: ``running``, ``finished``, ``deferred`` (the budget refused a page),
 ``failed`` (an error ended it) or ``stopped`` (the Campaign could no longer run when the job
-ran: nothing fetched). ``Outcome``: what one candidate came to (``created``, ``merged``,
+ran: nothing fetched) and, Story 8.10, for a scheduled run, ``target_reached`` (the day's Lead
+target was reached), ``paced`` (today's Places allowance was used) or ``pool_sufficient`` (no
+run at all: the Campaign's ready pool was enough; ``nextron.domain.discovery_topup``).
+``Outcome``: what one candidate came to (``created``, ``merged``,
 ``suppressed``, ``no_website``, ``market_blocked`` and, Story 8.4, ``inactive``), each a count on
 the run besides ``seen``. ``SOURCES`` are the run sources: ``places`` and (Story 8.4)
 ``companies_house``.
@@ -80,6 +83,9 @@ class RunStatus(StrEnum):
     DEFERRED = "deferred"
     FAILED = "failed"
     STOPPED = "stopped"
+    TARGET_REACHED = "target_reached"  # Story 8.10: the day's Lead target was reached
+    PACED = "paced"  # Story 8.10: today's Places allowance was used
+    POOL_SUFFICIENT = "pool_sufficient"  # Story 8.10: no run; the ready pool was enough
 
 
 class Outcome(StrEnum):

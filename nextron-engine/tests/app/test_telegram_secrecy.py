@@ -209,6 +209,9 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             places_discovery_locations="",
             places_max_pages_per_run="",
             registry_max_pages_per_run="",
+            discovery_pool_days="",
+            discovery_requery_days="",
+            discovery_daily_lead_target="",
             unsub_active_kid="",
         ),
     )
