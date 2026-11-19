@@ -24,6 +24,9 @@ that reads the clock once and opens one ``uow.transaction()``.
 
   Any problem raises ``InvalidSettings`` (every refused key with its rule) before anything is
   written. It returns every stored text after the save, as ``{key: text}``.
+- ``away_until() -> date | None`` (Story 5.11) writes nothing and isn't a ``@use_case``: it is
+  ``queries.setup.away_until`` at the clock's now, read in the current unit of work (a
+  read-only one included), for the Dashboard's away banner.
 
 **The Lead Score weights** (Story 2.15, Decision 1). ``set`` and ``save`` refuse a change that
 leaves the effective ``lead_score_fit_weight`` and ``lead_score_signal_weight`` (the value
@@ -764,6 +767,11 @@ class Setup:
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
+
+    def away_until(self) -> date | None:
+        """The last away day of the run holding today (``sender_timezone``), or ``None`` when
+        today isn't away; read in the current unit of work, a read-only one included."""
+        return setup_queries.away_until(self._clock.now())
 
     @use_case
     def set(self, key: str, value: object) -> None:

@@ -565,6 +565,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "unsub_active_kid",
         "total_daily_ceiling",
         "unsub_worker_host",
+        "away_periods",
         "quota_hunter_credits",
         "quota_prospeo_credits",
         "quota_places_enterprise",
@@ -700,6 +701,27 @@ def test_the_sink_allowlist_saves_addresses_and_chat_ids_and_refuses_anything_el
         assert field.error == "each line must be an email address or a numeric Telegram chat id"
         assert field.value == refused_text
         assert stored(units) == {"sink_allowlist": "a@b.co\n123"}
+
+
+def test_away_dates_save_a_period_and_refuse_a_reversed_or_malformed_one(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    token = session[1]
+
+    saved = save(dashboard, session, real_body(token, away_periods="2026-12-21 to 2027-01-04"))
+
+    assert SettingsHtml(saved.text).notices == [("status", "Settings saved.")]
+    assert stored(units) == {"away_periods": "2026-12-21 to 2027-01-04"}
+    for refused_text, reason_start in (
+        ("2027-01-04 to 2026-12-21", "End date must be on or after start date"),
+        ("next week", "each line must be a start and an end date"),
+    ):
+        refused = save(dashboard, session, real_body(token, away_periods=refused_text))
+        field = SettingsHtml(refused.text).fields["away_periods"]
+        assert field.attrs["aria-invalid"] == "true" and field.error is not None
+        assert field.error.startswith(reason_start)
+        assert field.value == refused_text
+        assert stored(units) == {"away_periods": "2026-12-21 to 2027-01-04"}
 
 
 def test_saving_mars_base_stores_nothing_and_america_los_angeles_is_saved(

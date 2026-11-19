@@ -1,0 +1,8 @@
+{#- The away banner (Story 5.11, FR-31, UX-DR6): while today, in the sender timezone, is inside
+    a period of the away_periods setting, `away_until` is the last day of that away run
+    (overlapping and back-to-back periods merged), shown as YYYY-MM-DD. It only informs:
+    nothing is reordered. Included by the Dashboard; Stories 4.10 and 5.1 include it on
+    /leads/ready and above the Approval Queue's groups. -#}
+{% if away_until %}
+<p class="away-banner" role="status">Away until {{ away_until.isoformat() }}: no new Sequences are selected</p>
+{% endif %}

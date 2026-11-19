@@ -374,6 +374,7 @@ FILES = [
     "nextron/web/templates/health.html",
     "nextron/web/templates/health_panel.html",
     "nextron/web/templates/home.html",
+    "nextron/web/templates/away_banner.html",
     "nextron/web/templates/lead_import.html",
     "nextron/web/templates/discovery.html",
     "nextron/web/templates/discovery_panel.html",

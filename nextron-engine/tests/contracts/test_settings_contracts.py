@@ -140,7 +140,8 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
         "footer_postal_address: the label is empty",
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
-            "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
+            "ats_hosts, away_periods, backup_offpc_dir, backup_rotation_days, backup_time, "
+            "bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "

@@ -216,6 +216,7 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             linkedin_owner_chat="",
             min_lead_score="",
             call_outcome_prompt_delay="",
+            away_periods="",
         ),
     )
     assert saved.status == 200 and "Saved." in saved.text

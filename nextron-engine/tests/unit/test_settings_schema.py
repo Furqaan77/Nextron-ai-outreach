@@ -536,6 +536,7 @@ def test_the_declared_keys_in_order() -> None:
         "linkedin_owner_chat",
         "min_lead_score",
         "call_outcome_prompt_delay",  # Story 9.4
+        "away_periods",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -571,6 +572,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.LINKEDIN_OWNER_CHAT),
         setting(Key.MIN_LEAD_SCORE),
         setting(Key.CALL_OUTCOME_PROMPT_DELAY),
+        setting(Key.AWAY_PERIODS),
     )
 
 
@@ -1345,7 +1347,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     assert schema_problems(schema) == [
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
-            "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
+            "ats_hosts, away_periods, backup_offpc_dir, backup_rotation_days, backup_time, "
+            "bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
@@ -1449,3 +1452,67 @@ def test_the_places_page_cap_is_1_to_3(text: str, rule: str) -> None:
     assert raised.value.rule == rule
     assert [settings_schema.parse(found, value) for value in ("1", "3")] == [1, 3]
     assert found.default == 3
+
+
+# Story 5.11: away dates ------------------------------------------------------------------------
+
+
+def away_refusal(text: str) -> InvalidSettingValue:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.AWAY_PERIODS), text)
+    return raised.value
+
+
+def test_away_periods_is_a_blank_list_in_sending() -> None:
+    found = setting(Key.AWAY_PERIODS)
+
+    assert (found.key, found.type, found.section, found.default) == (
+        "away_periods",
+        T.LIST,
+        Section.SENDING,
+        (),
+    )
+    assert [rule.name for rule in found.rules] == ["away_period", "away_order"]
+    assert default_text(found) == ""
+
+
+def test_away_periods_reads_one_period_per_line_and_allows_overlaps() -> None:
+    text = "2026-12-21 to 2027-01-04\n\n 2026-12-25 to 2026-12-25 \n2026-12-30 to 2027-01-10"
+
+    assert parse(setting(Key.AWAY_PERIODS), text) == (
+        "2026-12-21 to 2027-01-04",
+        "2026-12-25 to 2026-12-25",
+        "2026-12-30 to 2027-01-10",
+    )
+
+
+def test_an_end_before_the_start_is_refused_with_the_order_message() -> None:
+    refused = away_refusal("2026-12-21 to 2027-01-04\n2027-01-04 to 2026-12-21")
+
+    assert refused.rule == "away_order"
+    assert refused.reason == "End date must be on or after start date"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "next week",
+        "2026-02-30 to 2026-03-01",
+        "2026-12-21",
+        "2027-01-04 to 2026-12-21\nnext week",  # the shape is checked before the order
+    ],
+)
+def test_a_bad_away_line_is_refused_by_the_shape_rule(text: str) -> None:
+    refused = away_refusal(text)
+
+    assert refused.rule == "away_period"
+    assert "next week" not in str(refused) and "2026-02-30" not in str(refused)
+
+
+def test_encode_checks_the_away_rules_too() -> None:
+    found = setting(Key.AWAY_PERIODS)
+
+    assert encode(found, ("2026-12-21 to 2027-01-04",)) == "2026-12-21 to 2027-01-04"
+    with pytest.raises(InvalidSettingValue) as raised:
+        encode(found, ("2027-01-04 to 2026-12-21",))
+    assert raised.value.rule == "away_order"

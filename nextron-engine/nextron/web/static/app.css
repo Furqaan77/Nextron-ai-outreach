@@ -986,3 +986,13 @@ button.secondary {
 .signal-shortfall {
   margin: 0.25rem 0;
 }
+
+/* The away banner (Story 5.11): on the Dashboard while today is an away day. */
+.away-banner {
+  max-width: 48rem;
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.75rem;
+  font-weight: 600;
+  background: var(--band);
+  border-left: 4px solid var(--accent);
+}

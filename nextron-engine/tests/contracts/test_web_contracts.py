@@ -671,6 +671,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "ai_content.html",
         "ai_content_panel.html",
         "assist_accounts_panel.html",
+        "away_banner.html",
         "base.html",
         "campaigns_panel.html",
         "channel_permissions.html",  # Story 10.7
