@@ -69,6 +69,11 @@ repeat is a no-op. Then ``Approval(clock).cancel_pending`` cancels the stopped E
 ``ready`` Drafts in the same transaction (Story 4.9). It returns the ids it stopped, oldest
 first.
 
+**``@use_case stop_sequence(lead_id) -> tuple[str, ...]``** (Story 6.9, the Lead page's Stop
+Sequence): one transaction running ``stop(cause=operator_stop, lead_id=lead_id)``; the ids it
+stopped, ``()`` when the Lead has no live Enrollment (a text that isn't a ULID included). Stories
+5.2 and 6.10 add the cancelling of the stopped Enrollment's ``queued`` OMs.
+
 **Lifecycle** (Story 4.9). Each status change appends one ``events`` row; an unknown
 Enrollment raises ``LookupError``, a non-``str`` id ``TypeError``.
 
@@ -137,7 +142,7 @@ from nextron.db import eventlog
 from nextron.db.repos.sequencing import enrollments as enrollments_repo
 from nextron.db.repos.sequencing import variant_counters as counters_repo
 from nextron.db.repos.sequencing.enrollments import StoredEnrollment
-from nextron.db.uow import command, current
+from nextron.db.uow import command, current, use_case
 from nextron.domain.ai import Urgency
 from nextron.domain.campaign import needs_lia
 from nextron.domain.contactability import Blocked, ContactSubject
@@ -448,6 +453,14 @@ class Sequencing:
         stopped = tuple(self._stop_row(row, chosen, cause_ref, now) for row in rows)
         Approval(self._clock).cancel_pending(stopped)
         return stopped
+
+    @use_case
+    def stop_sequence(self, lead_id: str) -> tuple[str, ...]:
+        """Stop the Lead's live Enrollment for the Operator; see the module docstring."""
+        if not isinstance(lead_id, str):
+            raise TypeError("stop_sequence takes the Lead id as str")
+        with current().transaction():
+            return self.stop(cause=StopCause.OPERATOR_STOP, lead_id=lead_id)
 
     def _stop_row(
         self, row: StoredEnrollment, cause: StopCause, cause_ref: str | None, now: datetime

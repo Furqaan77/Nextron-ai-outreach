@@ -1,0 +1,19 @@
+{#- The Lead page's Stop Sequence panel (nextron.web.leads_page, Story 6.9): rendered inside
+    lead.html, after the Score panel, while the Lead has a live Enrollment, and alone as the
+    answer to POST /leads/{lead_id}/stop-sequence, which HTMX swaps in for this whole panel. The
+    first click only asks for the confirmation; "Yes, stop the Sequence" posts confirm=yes. -#}
+{%- if sequence_live or sequence_notice %}
+<section class="lead-sequence" id="lead-sequence" aria-labelledby="sequence-heading">
+<h2 id="sequence-heading">Sequence</h2>
+{%- if sequence_notice %}
+<p class="notice{% if sequence_notice.role == 'alert' %} notice-refused{% endif %}" role="{{ sequence_notice.role }}">{{ sequence_notice.text }}</p>
+{%- endif %}
+{%- if sequence_confirming %}
+<p class="notice notice-refused" role="alert">{{ stop_question }}</p>
+<form method="post" action="/leads/{{ lead_id }}/stop-sequence" hx-post="/leads/{{ lead_id }}/stop-sequence" hx-target="#lead-sequence" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<input type="hidden" name="confirm" value="yes"><button type="submit">Yes, stop the Sequence</button> <a href="/leads/{{ lead_id }}">Cancel</a></form>
+{%- elif sequence_live %}
+<p>This Lead has a live Sequence.</p>
+<form method="post" action="/leads/{{ lead_id }}/stop-sequence" hx-post="/leads/{{ lead_id }}/stop-sequence" hx-target="#lead-sequence" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<button type="submit" class="secondary">Stop Sequence</button></form>
+{%- endif %}
+</section>
+{%- endif %}

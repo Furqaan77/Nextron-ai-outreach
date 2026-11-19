@@ -204,6 +204,20 @@ through ``|plain``), or "No text yet" without a revision; "Sending blocked: foot
 check fails; the current revision's Playbook version (or "—"); and the revision history, one
 ``RevisionRow`` per revision: rev, the origin's label, the time and the first 12 characters of
 its hash. "No Drafts yet." when there are none.
+
+**Stop Sequence (Story 6.9).** ``lead_sequence.html`` (``<section id="lead-sequence">``, in
+``lead.html`` after the Score panel) shows only while the Lead has a live (``active`` or
+``paused``) Enrollment, or carries a notice. ``sequence_context(live, notice=None,
+confirming=False)`` gives it (with the page's ``lead_id``). Its "Stop Sequence" form
+(``method="post"``, ``hx-post`` to ``/leads/{lead_id}/stop-sequence``, ``hx-target="#lead-sequence"``, ``hx-swap="outerHTML"``,
+``csrf_field()``) posts nothing else and only asks for the confirmation: the panel comes back
+with "Stop this Lead's Sequence? Its ready Drafts are cancelled; an approved Draft stays
+approved but is blocked from sending while the Sequence is stopped." (role ``alert``), a "Yes,
+stop the Sequence" form holding the hidden ``confirm=yes`` and a Cancel link to the Lead page. ``submitted_stop(fields)`` is ``True`` for ``confirm=yes``,
+``False`` for no field but the CSRF token, and ``MalformedForm`` otherwise. After the stop the
+notice is ``sequence_stopped()`` ("Sequence stopped. Its ready Drafts were cancelled; approved
+Drafts are blocked from sending.", role ``status``), or ``no_live_sequence()`` ("This Lead has
+no live Sequence.", role ``alert``) when nothing was live, after the first click too.
 """
 
 import re
@@ -273,6 +287,17 @@ SCORE_TEMPLATE: Final = "lead_score.html"
 RESCORE_QUEUED: Final = "Re-score queued."
 RESCORE_CLOSED: Final = "This Lead is closed; it can't be re-scored."
 RESCORE_MERGED: Final = "This Lead was merged into another Lead; it can't be re-scored."
+SEQUENCE_TEMPLATE: Final = "lead_sequence.html"  # Story 6.9
+CONFIRM_FIELD: Final = "confirm"
+CONFIRM_YES: Final = "yes"
+SEQUENCE_STOPPED: Final = (
+    "Sequence stopped. Its ready Drafts were cancelled; approved Drafts are blocked from sending."
+)
+NO_LIVE_SEQUENCE: Final = "This Lead has no live Sequence."
+STOP_QUESTION: Final = (
+    "Stop this Lead's Sequence? Its ready Drafts are cancelled; an approved Draft stays approved "
+    "but is blocked from sending while the Sequence is stopped."
+)
 NOT_SCORED: Final = "Not scored yet."
 SCORED: Final = "scored"
 DISQUALIFIED: Final = "disqualified"
@@ -1597,3 +1622,45 @@ def draft_row(source: DraftSource) -> DraftRow:
         ),
         revisions=tuple(revision_row(revision) for revision in source.revisions),
     )
+
+
+# Stop Sequence (Story 6.9) ----------------------------------------------------------------------
+
+
+def sequence_stopped() -> Notice:
+    """The notice of a stopped Sequence."""
+    return Notice(Role.STATUS, SEQUENCE_STOPPED)
+
+
+def no_live_sequence() -> Notice:
+    """The notice of a Stop Sequence that found nothing live (nothing was written)."""
+    return Notice(Role.ALERT, NO_LIVE_SEQUENCE)
+
+
+def submitted_stop(fields: FormFields) -> bool:
+    """Whether the Stop Sequence form confirmed (``confirm=yes``); ``False`` for the first
+    click (no field but the CSRF token); ``MalformedForm`` otherwise."""
+    names = set(fields) - {CSRF_FIELD}
+    if not names:
+        return False
+    if names != {CONFIRM_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+    values = fields[CONFIRM_FIELD]
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    if values[0] != CONFIRM_YES:
+        raise MalformedForm(WRONG_FIELDS)
+    return True
+
+
+def sequence_context(
+    live: bool, notice: Notice | None = None, confirming: bool = False
+) -> dict[str, object]:
+    """The Stop Sequence panel's template context (the page or the POST adds ``lead_id``); see
+    the module docstring."""
+    return {
+        "sequence_live": live,
+        "sequence_notice": notice,
+        "sequence_confirming": confirming and live,
+        "stop_question": STOP_QUESTION,
+    }

@@ -114,6 +114,7 @@ from nextron.app.research.finding import EmailFinding
 from nextron.app.research.people import PrimaryContacts
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
+from nextron.app.sequencing.api import Sequencing
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
@@ -471,6 +472,7 @@ class Dashboard:
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
+            sequencing=Sequencing(self.clock),
             units=self.units,
             **extra,
         )

@@ -45,6 +45,17 @@ reported.
 - ``health_issues(now)``: one ``HealthIssue("domain_auth_failing", <id>, "<domain>: <verdict
   text>", detail=RECHECK_HINT)`` per listed Sending Domain whose verdict is blocked, by domain.
 
+**Sent counts (Story 6.9's fail-closed seams).** Both answer ``None`` (unknown) until Story 6.10
+stores sent messages (and Story 6.8 syncs ``other_sent``), so the send gate's
+``under_daily_cap`` and ``under_total_ceiling`` fail for every cold message:
+
+- ``cold_sent_on(inbox_id, local_date) -> int | None``: the cold messages (``step`` and
+  ``recontact``) the inbox sent on ``local_date`` (in ``sender_timezone``);
+- ``sent_total_on(inbox_id, local_date) -> int | None``: every message the inbox sent on
+  ``local_date``, any kind, without the warm-up tool sends (the gate adds
+  ``sending_policy.tool_send_figure`` for those). The ceiling is per inbox (the
+  ``total_daily_ceiling`` setting, "Total daily ceiling per inbox", Story 6.4).
+
 Every read goes through the current unit of work, read-only ones included.
 """
 
@@ -284,3 +295,17 @@ def health_issues(now: datetime) -> tuple[HealthIssue, ...]:
         if view.verdict.blocked
     )
 
+
+
+# Sent counts (Story 6.9 seams) ----------------------------------------------------------------
+
+
+def cold_sent_on(inbox_id: str, local_date: date) -> int | None:
+    """The inbox's cold sends on ``local_date``; ``None`` (unknown) always until Story 6.10."""
+    return None
+
+
+def sent_total_on(inbox_id: str, local_date: date) -> int | None:
+    """Every send of the inbox on ``local_date``, warm-up tool sends aside; ``None`` (unknown)
+    always until Story 6.10."""
+    return None

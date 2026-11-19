@@ -121,6 +121,8 @@ FILES = [
     "nextron/domain/erasure_receipt.py",
     "nextron/domain/enrollment.py",
     "nextron/domain/sending_policy.py",
+    "nextron/domain/send_gate.py",  # Story 6.9
+    "nextron/app/compliance/send_gate.py",  # Story 6.9
     "nextron/domain/erasure_ledger.py",
     "nextron/domain/email_finding.py",
     "nextron/domain/scoring.py",
@@ -346,6 +348,7 @@ FILES = [
     "nextron/web/templates/erasure_receipt.html",
     "nextron/web/templates/lead_missing.html",
     "nextron/web/templates/lead_score.html",
+    "nextron/web/templates/lead_sequence.html",  # Story 6.9
     "nextron/web/templates/leads.html",
     "nextron/web/templates/pipeline.html",
     "nextron/web/templates/locked.html",

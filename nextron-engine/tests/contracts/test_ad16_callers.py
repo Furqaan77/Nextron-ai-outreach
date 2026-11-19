@@ -11,9 +11,12 @@ violation.
   the AST finds such a def; the patterns are loose (``*find*email*``, ``*verify*email*``,
   ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever.
   ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method. Not built yet:
-  ``verify_contact_email``, the Signal Inbox chain, replies, ``approval.approve``, the pipeline
-  Tasks and call sheets and ``compliance.assert_sendable``: their stories add a scenario here
-  when they build them. ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with
+  ``verify_contact_email``, the Signal Inbox chain, replies, ``approval.approve`` and the
+  pipeline Tasks and call sheets: their stories add a scenario here when they build them.
+  ``compliance.assert_sendable`` (Story 6.9) is a read-only entry: it inserts nothing, so its
+  scenario (``read_only``) runs it in a read-only unit of work for the Step 1 OM of an enrolled
+  US Contact and requires no write at all, allowed or blocked: its gate call (purpose
+  ``cold``) and ``live_eligibility``'s. ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with
   Law-PrivateAI x US active and one Sending Inbox: an eligible US Contact's first two gate calls
   (``enroll``'s own and ``evaluate_eligibility``'s) come before its first write, the third
   (``drafting.request_steps``, Story 4.9) before its ``drafts`` insert, and ``Blocked`` writes
@@ -90,6 +93,7 @@ from nextron.app.sending.api import Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
 from nextron.db.engine import create_engine
+from nextron.db.models.base import new_id
 from nextron.db.migrations import ensure_current
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
@@ -112,6 +116,7 @@ from nextron.domain.enrollment import EnrollmentOrigin, NewEnrollment
 from nextron.domain.markets import validate_markets
 from nextron.domain.offers import validate_offers
 from nextron.domain.segments import validate_segments
+from nextron.domain.send_gate import OmKind, SendCandidate
 from nextron.domain.sequences import validate_sequences
 from nextron.ports.llm import LlmOk, LlmUsage
 from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
@@ -212,12 +217,8 @@ MANIFEST: Final = (
         ANY + r"(?!cancel_)\w*(?:task|call_sheet)\w*",
         inserts=frozenset({"linkedin_tasks"}),
     ),
-    Caller(
-        "compliance.assert_sendable",
-        ("app/compliance/",),
-        ANY + "assert_sendable",
-        inserts=frozenset({"outbound_messages"}),
-    ),
+    # Story 6.9: read-only, it inserts nothing (6.10's claim unit calls it before its UPDATE)
+    Caller("compliance.assert_sendable", ("app/compliance/",), ANY + "assert_sendable"),
 )
 NAMES: Final = tuple(caller.name for caller in MANIFEST)
 
@@ -988,7 +989,9 @@ class Scenario:
     row by row). ``gates_before_first_write``: with ``gates_first`` off, how many gate calls must
     still come before the first write. With ``Blocked``: the rows a run may still add (``blocked_rows``), the writes
     it may still make, as (verb, table) (``blocked_writes``), and a check of them
-    (``after_blocked``)."""
+    (``after_blocked``). ``read_only``: the caller writes nothing even with ``Allowed`` (Story
+    6.9's ``assert_sendable``), so the allowed run must make no write instead of at least
+    one."""
 
     cases: tuple[Prepare, ...]
     gates_first: bool = True
@@ -996,6 +999,7 @@ class Scenario:
     blocked_rows: Mapping[str, int] = field(default_factory=dict)
     blocked_writes: frozenset[tuple[str, str]] = frozenset()
     after_blocked: Callable[[World], None] | None = None
+    read_only: bool = False
 
 
 def _gate(subject: object) -> GateCall:
@@ -1321,8 +1325,46 @@ def _email_search_blocked(world: World) -> None:
     assert addresses == 1  # the allowed case's only
 
 
+def _sendable(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 6.9: ``assert_sendable`` for the Step 1 OM of an enrolled US Contact, in a read-only
+    unit of work: its contactability gate call (purpose ``cold``), then the one
+    ``live_eligibility`` makes; it writes nothing, allowed or blocked."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
+    enrolled = world.transact(
+        lambda: Sequencing(FrozenClock(T0)).enroll(
+            contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
+        )
+    )
+    assert isinstance(enrolled, NewEnrollment)
+    with world.engine.connect() as connection:
+        draft_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM drafts WHERE enrollment_id = ? AND step_no = 1",
+                (enrolled.enrollment_id,),
+            ).scalar_one()
+        )
+    candidate = SendCandidate(
+        om_id=new_id(),
+        kind=OmKind.STEP,
+        draft_id=draft_id,
+        approval_id=new_id(),
+        sending_inbox_id=enrolled.sending_inbox_id,
+        contact_id=contact_id,
+        enrollment_id=enrolled.enrollment_id,
+    )
+
+    def action() -> object:
+        with world.units.open(read_only=True):
+            return compliance_api.assert_sendable(candidate, T0)
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate)
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
+        # Story 6.9: a read; Blocked fails contactable and still writes nothing
+        "compliance.assert_sendable": Scenario((_sendable,), read_only=True),
         "find_contact_email": Scenario(
             (_find,),
             # what a blocked search still writes: its event and the Contact's search outcome
@@ -1418,7 +1460,11 @@ def test_each_ad16_caller_calls_the_gate_before_writing(
                 world, scenario, prepare, monkeypatch, Allowed(), f"{number}-allowed"
             )
             assert problems == []
-            assert any(isinstance(entry, Write) for entry in allowed.log)  # not vacuous
+            writes = [entry for entry in allowed.log if isinstance(entry, Write)]
+            if scenario.read_only:
+                assert writes == []  # a read: the gate calls are the whole record
+            else:
+                assert writes  # not vacuous
             _, problems = run_case(
                 world, scenario, prepare, monkeypatch, BLOCKED, f"{number}-blocked"
             )
@@ -1438,7 +1484,9 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "sequencing.enroll",  # Story 4.8
         "find_contact_email",
         "drafting.request_*",  # Story 4.9
+        "compliance.assert_sendable",  # Story 6.9
     }
+    assert {d.qualname for d in found["compliance.assert_sendable"]} == {"assert_sendable"}
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
     assert all(name.startswith("EmailFinding.") for name in finding)
