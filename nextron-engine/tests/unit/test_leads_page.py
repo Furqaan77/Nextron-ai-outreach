@@ -33,6 +33,7 @@ from nextron.app.queries.discovery import StoredLead
 from nextron.app.queries.setup import SeededSegment
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
+from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -2328,7 +2329,7 @@ def test_an_unscored_lead_says_so_and_offers_re_score(world: World) -> None:
     body = section.find("div", class_="score-body")
     assert body.text == "Not scored yet."
     assert "hx-disable" in body.attrs
-    form_node = section.find("form")
+    form_node = section.find_all("form")[0]  # Story 11.5 adds a second form after it
     assert (form_node.attrs["method"], form_node.attrs["hx-post"]) == (
         "post",
         f"/leads/{lead}/rescore",
@@ -2366,7 +2367,7 @@ def test_a_scored_lead_shows_its_tier_scores_and_factors_linked_to_evidence(
         "Computed",
         "2026-11-17 09:30 UTC",
         "Segment version",
-        "v1",
+        "v1 (current v1)",  # Story 11.5
     ]
     table = section.find("table", class_="factor-table")
     assert table_rows(table)[0] == ["Factor", "Points", "Evidence"]
@@ -2405,6 +2406,30 @@ def test_a_disqualified_lead_shows_its_rule_and_evidence(world: World) -> None:
     assert not section.find_all("table")
 
 
+def test_a_score_from_an_older_version_is_labelled_from_that_version(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    hiring = evidence_row(world, lead, 1, quote="We are hiring a Legal Operations Manager.")
+    factors = factors_text(
+        (),
+        (Factor(FactorKind.EVENT, "law_hiring_legal_ops", 28.33, 60, 1, hiring, (hiring,)),),
+    )
+    store_score(world, lead, factors=factors)  # scored with v1
+    [(text,)] = world.sql("SELECT definition FROM segments WHERE id = ?", (world.law,))
+    form = json.loads(text)
+    [hiring_type] = [each for each in form["signal_types"] if each["key"] == "law_hiring_legal_ops"]
+    old_name = hiring_type["name"]
+    hiring_type["name"] = "Renamed hiring"
+    with world.units.open():
+        assert SegmentEditor(world.clock).edit(world.law, 1, form).version == 2
+
+    for html in (world.get(f"/leads/{lead}").text, post_rescore(world, lead).text):
+        section = Tree(html).find("section", id="lead-score")
+        facts = [node.text for node in section.find("dl").walk() if node.tag in ("dt", "dd")]
+        assert facts[-2:] == ["Segment version", "v1 (current v2)"]
+        [row] = section.find("table", class_="factor-table").find_all("tr", class_="factor-row")
+        assert cells(row)[0] == old_name  # v1's name, not the current "Renamed hiring"
+
+
 def test_re_score_queues_the_job_and_answers_the_panel(world: World) -> None:
     lead = world.lead("Smith Law", "smith-law.co.uk")
 
@@ -2437,6 +2462,49 @@ def test_re_score_needs_the_csrf_token_and_no_field(world: World) -> None:
     assert post_rescore(world, lead, token=False).status == 403
     reply = post_rescore(world, lead, body=form(extra="x"))
     assert (reply.status, reply.text) == (400, MALFORMED_FORM)
+    assert world.sql("SELECT COUNT(*) FROM jobs WHERE type = 'score_lead'") == [(0,)]
+
+
+def test_re_score_with_the_current_definition_queues_its_own_job(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    forms = score_section(world.page(f"/leads/{lead}")).find_all("form")
+    assert [node.attrs["hx-post"] for node in forms] == [
+        f"/leads/{lead}/rescore",
+        f"/leads/{lead}/rescore-current",
+    ]
+
+    post_rescore(world, lead)
+    reply = world.dashboard.post(
+        f"/leads/{lead}/rescore-current",
+        cookie=world.cookie,
+        token=world.dashboard.csrf_token(world.cookie),
+        headers=[(b"content-type", FORM)],
+        body=b"",
+    )
+
+    assert reply.status == 200
+    panel = Tree(reply.text)
+    assert panel.find("p", role="status").text == "Re-score with the current definition queued."
+    assert world.sql(
+        "SELECT idempotency_key, lane FROM jobs WHERE type = 'score_lead' ORDER BY rowid"
+    ) == [
+        (f"score_lead:{lead}:tick", "interactive"),
+        (f"score_lead:{lead}:current", "interactive"),
+    ]
+
+
+def test_re_score_with_the_current_definition_needs_the_csrf_token(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+
+    reply = world.dashboard.post(
+        f"/leads/{lead}/rescore-current",
+        cookie=world.cookie,
+        token=None,
+        headers=[(b"content-type", FORM)],
+        body=b"",
+    )
+
+    assert reply.status == 403
     assert world.sql("SELECT COUNT(*) FROM jobs WHERE type = 'score_lead'") == [(0,)]
 
 

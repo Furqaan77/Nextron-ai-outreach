@@ -4,7 +4,8 @@
     its points and its Evidence links (#evidence-<id>, live Evidence only: the rest read
     "Evidence <n> (no longer live)"); a Disqualified Lead's rule and its
     Evidence; or "Not scored yet.". Every label renders through |plain, inside an element
-    carrying hx-disable; the "Re-score" form sits outside it. -#}
+    carrying hx-disable; the "Re-score" form (which keeps the Lead's stored Segment version)
+    and the "Re-score with the current definition" form (Story 11.5) sit outside it. -#}
 {%- macro evidence_link(link, index) %}{% if link.live %}<a href="#evidence-{{ link.evidence_id }}">Evidence {{ index }}</a>{% else %}<span class="evidence-gone">Evidence {{ index }} (no longer live)</span>{% endif %}{% endmacro %}
 <section class="lead-score" id="lead-score" aria-labelledby="score-heading">
 <h2 id="score-heading">Score</h2>
@@ -54,4 +55,5 @@
 {%- endif %}
 </div>
 <form method="post" action="/leads/{{ lead_id }}/rescore" hx-post="/leads/{{ lead_id }}/rescore" hx-target="#lead-score" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<button type="submit" class="secondary">Re-score</button></form>
+<form method="post" action="/leads/{{ lead_id }}/rescore-current" hx-post="/leads/{{ lead_id }}/rescore-current" hx-target="#lead-score" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}<button type="submit" class="secondary">Re-score with the current definition</button></form>
 </section>

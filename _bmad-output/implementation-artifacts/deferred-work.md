@@ -431,3 +431,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-16-turn-pasted-signals-into-researched-leads-through-the-signal-inbox.md`
   summary: Decide how erasure treats a pasted post URL copied into Evidence `source_url` (and `pages_checked`) and into a Contact Provenance `detail`. A social post URL such as `linkedin.com/posts/<person-slug>-…` carries the person's name, but both columns are classed `none`.
   evidence: Story 2.16 review pass 1 (entry E, BH5 and EC11, medium). 2.16 classes `signal_inbox_items.url` as `redact`. The Evidence and Provenance columns are pre-existing classes that the Website and CSV paths share; changing them affects the erasure contracts for every source.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-11-5-edit-segments-in-the-dashboard.md`
+  summary: A stored Segment or segment_versions row that no longer decodes (after a future validator change) makes /segments/{id}, its versions page and score_lead raise instead of degrading.
+  evidence: maybe-false, medium if true; only reachable when a later story tightens nextron.domain.segments' validator. Settle by adding such a rule and checking the pages and score_lead; fix with an "unreadable version" row and a skip reason.

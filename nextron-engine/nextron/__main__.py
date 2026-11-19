@@ -20,11 +20,14 @@ Commands:
   ``seed/sequences.yaml``, ``seed/company_facts.yaml``, ``seed/offers.yaml`` and
   ``seed/campaigns.yaml`` into the database in one transaction: create each new Segment, Market,
   Sequence, Approved Company Fact, Offer and Campaign, give each changed one a new version, and
-  leave a stored one the file no longer lists as it is (a fact the Operator edited or retracted
+  leave a stored one the file no longer lists as it is (Segments load only into a database
+  that holds none: once one exists they are edited on the dashboard's Segments page, and the
+  sync writes none and lists how the file differs; a fact the Operator edited or retracted
   on the facts page keeps the Operator's version: a changed seed entry is reported as a
   conflict; a Campaign is created as a draft, and the seed never sets its status or its
   legitimate-interests assessment); print ``segments: <n> changed, <m> unchanged`` and a line
-  per Segment created, changed or not in the file, then the same for ``markets``,
+  per Segment created (or ``segments: Segments are managed in the dashboard;
+  seed/segments.yaml ignored`` and a line per difference), then the same for ``markets``,
   ``sequences``, ``company_facts`` (with ``, <c> conflict(s)`` and a line per conflict),
   ``offers`` and ``campaigns``. ``--env`` syncs that
   environment instead of ``NEXTRON_ENV``. The database must exist and be migrated: start the
@@ -85,7 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
         "create or update the Segments, Markets, Sequences, Approved Company Facts, Offers and "
         "Campaigns from seed/segments.yaml, seed/markets.yaml, seed/sequences.yaml, "
         "seed/company_facts.yaml, seed/offers.yaml and seed/campaigns.yaml (never re-scores a "
-        "Lead; a fact the Operator edited or retracted keeps the Operator's version; a Campaign "
+        "Lead; Segments load only into a database that holds none, after that they are edited "
+        "in the dashboard and the sync lists how the file differs; a fact the Operator edited "
+        "or retracted keeps the Operator's version; a Campaign "
         "starts as a draft, and only the Operator activates it and records its LIA)"
     )
     sync = seed_commands.add_parser("sync", help=sync_help, description=sync_help)

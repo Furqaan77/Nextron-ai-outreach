@@ -12,6 +12,9 @@ Story 2.15 adds the score group of ``leads``:
   Evidence ids). ``StoredScore.disqualified`` says whether it holds a Disqualified rule.
 - ``retier_candidates()``: the ids of the Leads the daily ``recompute_tiers`` re-tiers (a stored
   ``tier``, not merged, not ``lost`` or ``disqualified``), by id.
+- ``segment_leads(segment_id)`` (Story 11.5): the ids of the Segment's Leads that aren't merged
+  and aren't ``lost`` or ``disqualified``, by id; ``()`` for a text that isn't a ULID.
+  ``StoredScore.segment_version`` is the Segment version the Lead was scored with.
 
 Story 4.10 adds ``ready_candidates()``: ``(lead_id, tier, lead_score)`` of every Lead with a
 stored Tier and Lead Score that isn't merged and whose stage is ``new``, ``queued`` or
@@ -25,7 +28,7 @@ from nextron.db.repos.scoring import scores as scores_repo
 from nextron.domain.ids import is_ulid
 from nextron.domain.scoring import Factor, Tier, evidence_from_text, factors_from_text
 
-__all__ = ["StoredScore", "ready_candidates", "retier_candidates", "stored"]
+__all__ = ["StoredScore", "ready_candidates", "retier_candidates", "segment_leads", "stored"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,3 +103,8 @@ def retier_candidates() -> tuple[str, ...]:
 def ready_candidates() -> tuple[tuple[str, str, int], ...]:
     """The Leads the "Ready to draft" list may show, by id; see the module docstring."""
     return scores_repo.ready_candidates()
+
+
+def segment_leads(segment_id: str) -> tuple[str, ...]:
+    """The Segment's open, unmerged Leads, by id."""
+    return scores_repo.segment_leads(segment_id) if is_ulid(segment_id) else ()

@@ -55,30 +55,33 @@ A seed sync that changes a stored Market's decoded ``footer_template`` or
 ``_record_market``, in the same transaction); a new Market, or a change to any other field,
 publishes nothing.
 
-``Setup.sync_segments(segments)`` (FR-1, AD-12, Story 2.1; ``nextron seed sync``) upserts the
-Segments of ``seed/segments.yaml``, as ``nextron.domain.segments.SegmentDef``s, by key into
-the ``segments`` table. Before any transaction it refuses an item that isn't a ``SegmentDef``
+``Setup.sync_segments(segments)`` (FR-1, AD-12, Story 2.1; ``nextron seed sync``) loads the
+Segments of ``seed/segments.yaml``, as ``nextron.domain.segments.SegmentDef``s, into the
+``segments`` table **only while it holds none** (Story 11.5: once a Segment exists the dashboard
+owns them, AD-12). Before any transaction it refuses an item that isn't a ``SegmentDef``
 (``TypeError``) or a repeated key (``ValueError``), and validates the definitions again as the
 file form (``validate_segments``, when there is at least one), so a hand-built ``SegmentDef``
 that breaks a rule raises ``InvalidSegments`` and nothing is stored. It reads the clock once,
-then works in one transaction. Before any write it decodes each stored Segment the input leaves
-out (``segment_from_text``) and raises ``InvalidSegments`` for the first input signal-type or
-disqualifier key, in file order, that such a Segment still uses (say, after a Segment's key
-was renamed in the file), naming the input field (``segments[<key>].signal_types[<key>].key``:
-"is also a key of the stored Segment <key>, which is no longer in the file: rename one of
-them"), so keys stay unique across every stored Segment; nothing is written. Then, in input
-order: a key with no row is inserted at version 1 with one ``events`` row
-(entity ``segments``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``); a row whose
-``definition`` differs from ``definition_text(segment)`` is updated to version n+1 with one
-``events`` row ``v<n>`` to ``v<n+1>``; anything else writes nothing. A stored key missing from
-the input is never changed or deleted (Leads may point to it). A sync enqueues no job,
-publishes no notification and touches no other table, so it never re-scores a Lead. It returns
-``SegmentSync(created, changed, unchanged, not_in_file)``: ``(key, version)``,
-``(key, from_version, to_version)`` and keys in input order, and ``(key, version)`` of each
-stored Segment not in the input, by key. After the commit it logs ``segments_synced`` (INFO)
-with the four counts: ``created_count``, ``changed_count``, ``unchanged_count`` and
-``not_in_file_count`` (``created`` alone is a ``LogRecord`` attribute, which ``extra`` may not
-overwrite).
+then works in one transaction:
+
+- **Bootstrap** (no stored Segment): each Segment, in input order, is inserted at version 1
+  (with its ``segment_versions`` row, actor ``seed``) and one ``events`` row (entity
+  ``segments``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``).
+- **Managed** (any stored Segment): nothing is written. The result lists the differences
+  between the file and the database as ``SegmentDifference(key, only_in, paths)``: each file
+  key with no row (``only_in`` = ``file``) and each file key whose stored definition (decoded
+  with ``segment_from_text``, which raises ``InvalidSegments`` for a row that no longer
+  validates) differs, with the changed field paths (``segment_form_diff`` from the stored
+  definition to the file's), in input order; then each stored key the file leaves out
+  (``only_in`` = ``dashboard``), by key.
+
+A sync enqueues no job, publishes no notification and touches no other table, so it never
+re-scores a Lead. It returns ``SegmentSync(created, changed, unchanged, not_in_file, managed,
+differences)``: in bootstrap mode ``created`` holds ``(key, 1)`` in input order and the rest is
+empty; in managed mode only ``managed`` (true) and ``differences`` are set. After the commit it
+logs ``segments_synced`` (INFO) with the four counts: ``created_count``, ``changed_count``,
+``unchanged_count`` and ``not_in_file_count`` (``created`` alone is a ``LogRecord`` attribute,
+which ``extra`` may not overwrite), plus ``managed`` and ``differences_count``.
 
 ``Setup.sync_markets(markets)`` (FR-2, AD-12, Story 3.1) does the same for the Markets of
 ``seed/markets.yaml``, as ``nextron.domain.markets.MarketDef`` values, keyed by ``code`` into the
@@ -167,19 +170,21 @@ changed, unchanged, not_in_file)``, shaped like ``SequenceSync``.
 load in the same transaction; ``nextron.app.ops.api.Seeds.sync_seed`` is the use case
 ``nextron seed sync`` calls, and a unit of work runs one use case):
 
-- ``check_seed(segments, markets, sequences, offers, campaigns) -> CheckedSeed`` runs every
-  pre-transaction check of the five syncs (Segments, Markets, Sequences, whose angles are
-  checked against this call's Segments and Markets, Offers, then Campaigns, whose references are
-  checked against this call's Segments, Markets, Offers and Sequences), raising as described
-  above. ``CheckedSeed`` holds what they return, with ``segment_keys`` (this sync's Segment
-  keys) and ``market_countries`` (``{code: country_code}`` of this sync's Markets) for the
-  facts' checks.
+- ``check_seed(segments, markets, sequences, offers, campaigns, stored_segment_keys=None) ->
+  CheckedSeed`` runs every check of the five syncs that needs no database (Segments, Markets,
+  Sequences, whose angles are checked against the Segments and this call's Markets, Offers,
+  then Campaigns, whose references are checked against the Segments and this call's Markets,
+  Offers and Sequences), raising as described above. "The Segments" are this call's, or, when
+  ``stored_segment_keys`` is given (Story 11.5: the database holds Segments, so the file's are
+  ignored), those stored keys. ``CheckedSeed`` holds what they return, with ``segment_keys``
+  (the keys the references were checked against) and ``market_countries`` (``{code:
+  country_code}`` of this sync's Markets) for the facts' checks.
 - ``@command Setup.seed_sync(checked, now) -> SetupSeedSync(segments, markets, sequences,
   offers, campaigns)`` runs the five syncs in the caller's transaction, in that order, all at
   ``now``, so a failure anywhere changes nothing.
 - ``log_seed_sync(result)``, after the commit, logs ``segments_synced``, ``markets_synced``,
   ``sequences_synced``, ``offers_synced`` and then ``campaigns_synced``, each with the four
-  ``*_count`` fields.
+  ``*_count`` fields (``segments_synced`` also with ``managed`` and ``differences_count``).
 
 **The Operator's Campaign commands** (FR-3, AD-4, AD-5, NFR-3, NFR-7, Story 4.2).
 ``Campaigns(clock)``: each method is a ``@use_case`` that reads the clock once and runs one
@@ -472,9 +477,9 @@ from nextron.domain.offers import OfferDef, offer_form, validate_offers
 from nextron.domain.render import FOOTER_SETTING_KEYS, PLACEHOLDER_OF
 from nextron.domain.scoring import WEIGHTS_SUM_REASON, WEIGHTS_SUM_RULE, weights_sum_ok
 from nextron.domain.segments import (
-    InvalidSegments,
     SegmentDef,
     definition_text,
+    segment_form_diff,
     segment_from_text,
     validate_segments,
 )
@@ -544,6 +549,8 @@ UNSUB_KEY_STORE_FAILED: Final = "unsub_key_store_failed"
 UNSUB_KEY_READ_FAILED: Final = "unsub_key_read_failed"
 SEGMENTS_SYNCED: Final = "segments_synced"
 SEGMENTS_ENTITY: Final = "segments"
+SEGMENT_ONLY_IN_FILE: Final = "file"  # SegmentDifference.only_in
+SEGMENT_ONLY_IN_DASHBOARD: Final = "dashboard"
 MARKETS_SYNCED: Final = "markets_synced"
 MARKETS_ENTITY: Final = "markets"
 SEQUENCES_SYNCED: Final = "sequences_synced"
@@ -580,15 +587,31 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class SegmentDifference:
+    """How the seed file and the database differ on one Segment key (Story 11.5): ``only_in``
+    is ``file`` or ``dashboard`` for a key only one side has, else ``None``, and then ``paths``
+    are the changed fields of a key both have."""
+
+    key: str
+    only_in: str | None
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SegmentSync:
     """What ``sync_segments`` did: ``created`` as ``(key, version)``, ``changed`` as ``(key,
     from_version, to_version)`` and ``unchanged`` keys, each in input order, and
-    ``not_in_file`` as ``(key, version)`` of each stored Segment the input left out, by key."""
+    ``not_in_file`` as ``(key, version)`` of each stored Segment the input left out, by key.
+    Since Story 11.5 only a bootstrap writes (``created``); ``managed`` says the database
+    already held Segments, so nothing was written and ``differences`` lists how the file
+    differs."""
 
     created: tuple[tuple[str, int], ...]
     changed: tuple[tuple[str, int, int], ...]
     unchanged: tuple[str, ...]
     not_in_file: tuple[tuple[str, int], ...]
+    managed: bool = False
+    differences: tuple[SegmentDifference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,10 +686,14 @@ class CheckedSeed:
     sequences: tuple[SequenceDef, ...]
     offers: tuple[OfferDef, ...]
     campaigns: tuple[CampaignDef, ...]
+    stored_segment_keys: frozenset[str] | None = None
 
     @property
     def segment_keys(self) -> frozenset[str]:
-        """This sync's Segment keys."""
+        """The Segment keys the references were checked against: the stored ones when the
+        database holds Segments (Story 11.5), else this sync's."""
+        if self.stored_segment_keys is not None:
+            return self.stored_segment_keys
         return frozenset(segment.key for segment in self.segments)
 
     @property
@@ -681,12 +708,18 @@ def check_seed(
     sequences: Sequence[SequenceDef],
     offers: Sequence[OfferDef],
     campaigns: Sequence[CampaignDef],
+    stored_segment_keys: Collection[str] | None = None,
 ) -> CheckedSeed:
-    """Every check of the seed's five syncs before any transaction; see the module
+    """Every check of the seed's five syncs that needs no database; see the module
     docstring."""
     chosen_segments, texts = _segment_inputs(segments)
     chosen_markets = _market_inputs(markets)
-    segment_keys = frozenset(segment.key for segment in chosen_segments)
+    stored_keys = None if stored_segment_keys is None else frozenset(stored_segment_keys)
+    segment_keys = (
+        frozenset(segment.key for segment in chosen_segments)
+        if stored_keys is None
+        else stored_keys
+    )
     market_countries = {market.code: market.country_code for market in chosen_markets}
     chosen_sequences = _sequence_inputs(sequences, segment_keys, market_countries)
     chosen_offers = _offer_inputs(offers)
@@ -698,14 +731,21 @@ def check_seed(
         {sequence.key: len(sequence.steps) for sequence in chosen_sequences},
     )
     return CheckedSeed(
-        chosen_segments, texts, chosen_markets, chosen_sequences, chosen_offers, chosen_campaigns
+        chosen_segments,
+        texts,
+        chosen_markets,
+        chosen_sequences,
+        chosen_offers,
+        chosen_campaigns,
+        stored_keys,
     )
 
 
 def log_seed_sync(result: SetupSeedSync) -> None:
     """Log ``segments_synced``, ``markets_synced``, ``sequences_synced``, ``offers_synced`` and
-    ``campaigns_synced`` with their counts."""
-    _log_sync(SEGMENTS_SYNCED, result.segments)
+    ``campaigns_synced`` with their counts; ``segments_synced`` also carries ``managed`` and
+    ``differences_count`` (Story 11.5), so a managed sync is told apart from a no-op."""
+    _log_segment_sync(result.segments)
     _log_sync(MARKETS_SYNCED, result.markets)
     _log_sync(SEQUENCES_SYNCED, result.sequences)
     _log_sync(OFFERS_SYNCED, result.offers)
@@ -855,12 +895,13 @@ class Setup:
 
     @use_case
     def sync_segments(self, segments: Sequence[SegmentDef]) -> SegmentSync:
-        """Upsert ``segments`` by key; see the module docstring."""
+        """Load ``segments`` into a database that holds none, else report the differences;
+        see the module docstring."""
         chosen, texts = _segment_inputs(segments)
         now = self._clock.now()
         with current().transaction():
             result = _sync_segments(chosen, texts, now)
-        _log_sync(SEGMENTS_SYNCED, result)
+        _log_segment_sync(result)
         return result
 
     @use_case
@@ -892,6 +933,7 @@ class Setup:
 def _log_sync(
     event: str,
     result: SegmentSync | MarketSync | SequenceSync | OfferSync | CampaignSync,
+    **more: object,
 ) -> None:
     log.info(  # "created" itself is a LogRecord attribute, so each count is suffixed
         event,
@@ -900,7 +942,17 @@ def _log_sync(
             "changed_count": len(result.changed),
             "unchanged_count": len(result.unchanged),
             "not_in_file_count": len(result.not_in_file),
+            **more,
         },
+    )
+
+
+def _log_segment_sync(result: SegmentSync) -> None:
+    _log_sync(
+        SEGMENTS_SYNCED,
+        result,
+        managed=result.managed,
+        differences_count=len(result.differences),
     )
 
 
@@ -929,54 +981,42 @@ def _segment_inputs(
 def _sync_segments(
     chosen: tuple[SegmentDef, ...], texts: tuple[str, ...], now: datetime
 ) -> SegmentSync:
-    """The Segments' upsert, inside the running use case's transaction."""
+    """The Segments' bootstrap, or the managed mode's differences, inside the running use
+    case's transaction."""
+    stored = segments_repo.all_segments()
+    if stored:
+        return SegmentSync((), (), (), (), True, _segment_differences(chosen, stored))
     created: list[tuple[str, int]] = []
-    changed: list[tuple[str, int, int]] = []
-    unchanged: list[str] = []
-    keys = {segment.key for segment in chosen}
-    left_out = [row for row in segments_repo.all_segments() if row.key not in keys]
-    _refuse_shared_keys(chosen, left_out)  # before any write
     for segment, text in zip(chosen, texts, strict=True):
-        stored = segments_repo.by_key(segment.key)
-        if stored is None:
-            segment_id = segments_repo.insert(segment.key, text, now)
-            _record_segment(segment_id, None, segments_repo.FIRST_VERSION, now)
-            created.append((segment.key, segments_repo.FIRST_VERSION))
-        elif stored.definition != text:
-            version = stored.version + 1
-            segments_repo.update(stored.id, text, version, now)
-            _record_segment(stored.id, stored.version, version, now)
-            changed.append((segment.key, stored.version, version))
-        else:
-            unchanged.append(segment.key)
-    not_in_file = tuple((row.key, row.version) for row in left_out)
-    return SegmentSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+        segment_id = segments_repo.insert(segment.key, text, now, SEED_ACTOR)
+        _record_segment(segment_id, None, segments_repo.FIRST_VERSION, now)
+        created.append((segment.key, segments_repo.FIRST_VERSION))
+    return SegmentSync(tuple(created), (), (), ())
 
 
-def _refuse_shared_keys(
-    segments: Sequence[SegmentDef], left_out: Sequence[segments_repo.StoredSegment]
-) -> None:
-    """Signal-type and disqualifier keys stay unique across every stored Segment: raise
-    ``InvalidSegments`` for the first input key, in file order, that a stored Segment the input
-    leaves out still uses (a Segment renamed in the file, say)."""
-    owners: dict[tuple[str, str], str] = {}
-    for row in left_out:
-        definition = segment_from_text(row.definition)
-        for disqualifier in definition.disqualifiers:
-            owners.setdefault(("disqualifiers", disqualifier.key), row.key)
-        for signal_type in definition.signal_types:
-            owners.setdefault(("signal_types", signal_type.key), row.key)
-    for segment in segments:
-        used = [("disqualifiers", d.key) for d in segment.disqualifiers]
-        used += [("signal_types", t.key) for t in segment.signal_types]
-        for field_name, key in used:
-            owner = owners.get((field_name, key))
-            if owner is not None:
-                raise InvalidSegments(
-                    f"segments[{segment.key}].{field_name}[{key}].key",
-                    f"is also a key of the stored Segment {owner}, which is no longer in the "
-                    "file: rename one of them",
-                )
+def _segment_differences(
+    chosen: Sequence[SegmentDef], stored: Sequence[segments_repo.StoredSegment]
+) -> tuple[SegmentDifference, ...]:
+    """How the file's Segments differ from the stored ones: the file's keys in input order,
+    then the stored keys the file leaves out, by key."""
+    by_key = {row.key: row for row in stored}
+    found: list[SegmentDifference] = []
+    for segment in chosen:
+        row = by_key.get(segment.key)
+        if row is None:
+            found.append(SegmentDifference(segment.key, SEGMENT_ONLY_IN_FILE))
+            continue
+        changes = segment_form_diff(segment_from_text(row.definition), segment)
+        if changes:
+            paths = tuple(change.path for change in changes)
+            found.append(SegmentDifference(segment.key, None, paths))
+    keys = {segment.key for segment in chosen}
+    found += [
+        SegmentDifference(row.key, SEGMENT_ONLY_IN_DASHBOARD)
+        for row in stored
+        if row.key not in keys
+    ]
+    return tuple(found)
 
 
 def _version_status(version: int) -> str:

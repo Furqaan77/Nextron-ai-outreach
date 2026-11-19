@@ -76,7 +76,7 @@ SEGMENTS_FIRST = (
     "  law_private_ai: created (version 1)\n"
     "  ops_automation: created (version 1)\n"
 )
-SEGMENTS_UNCHANGED = "segments: 0 changed, 2 unchanged\n"
+SEGMENTS_UNCHANGED = "segments: Segments are managed in the dashboard; seed/segments.yaml ignored\n"
 MARKETS_FIRST = (
     "markets: 2 changed, 0 unchanged\n  us: created (version 1)\n  uk: created (version 1)\n"
 )
@@ -949,7 +949,7 @@ def test_sync_markets_refuses_bad_input_before_any_transaction(
     assert sha256(database) == before
 
 
-def test_sync_seed_refuses_bad_markets_before_any_transaction(
+def test_sync_seed_refuses_bad_markets_before_any_write(
     database: Path, units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     segments = validate_segments(seed_yaml.parse(SEGMENTS_TEXT))
@@ -959,7 +959,6 @@ def test_sync_seed_refuses_bad_markets_before_any_transaction(
         raise AssertionError("a transaction was opened")
 
     with units.open() as uow:
-        monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(ValueError, match="sync_markets got a code more than once: us"):
             Seeds(FrozenClock()).sync_seed(
                 segments,

@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0054_2_16_signal_inbox"
+HEAD = "0055_11_5_segment_editing"
 
 
 @pytest.fixture
@@ -1393,3 +1393,62 @@ def test_0053_adds_the_outcome_columns_in_place_and_keeps_every_booking_pending(
     run_sql(  # any value fits: the code, not a CHECK, keeps the rules
         path, f"UPDATE call_outcomes SET outcome = 'maybe', audit_price = -1 WHERE id = '{booking}'"
     )
+
+
+def test_0055_stores_each_existing_segments_current_version_and_keeps_it_immutable(
+    tmp_path: Path,
+) -> None:
+    """Every Segment stored before 0055 (Story 11.5) gets one segment_versions row at its
+    current version, with its definition, its updated_at and actor seed; the rows can't be
+    updated, deleted or replaced afterwards."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0054_2_16_signal_inbox":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0054_2_16_signal_inbox",
+        )
+    created, updated = "2026-11-14T09:00:00.000000Z", "2026-11-18T09:00:00.000000Z"
+    law, ops = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{law}', 'law_ai', '{{\"v\":3}}', 3, '{created}', '{updated}')",
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{ops}', 'ops_ai', '{{\"v\":1}}', 1, '{created}', '{created}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0054_2_16_signal_inbox", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(
+            "SELECT segment_id, version, definition, created_at, actor, length(id) "
+            "FROM segment_versions ORDER BY segment_id"
+        ).fetchall()
+    finally:
+        reader.close()
+    assert rows == [
+        (law, 3, '{"v":3}', updated, "seed", 26),
+        (ops, 1, '{"v":1}', created, "seed", 26),
+    ]
+    for statement in (
+        "UPDATE segment_versions SET definition = '{}'",
+        "DELETE FROM segment_versions",
+        "INSERT OR REPLACE INTO segment_versions (id, segment_id, version, definition, "
+        f"created_at, actor) VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0D9', '{law}', 3, '{{}}', "
+        f"'{updated}', 'operator')",
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match="segment_versions rows are immutable"):
+            run_sql(path, statement)
+    with pytest.raises(sqlite3.IntegrityError, match="ck_segment_versions_actor"):
+        run_sql(
+            path,
+            "INSERT INTO segment_versions (id, segment_id, version, definition, created_at, "
+            f"actor) VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0D8', '{law}', 4, '{{}}', '{updated}', "
+            "'system')",
+        )

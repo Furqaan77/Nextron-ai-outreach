@@ -18,7 +18,8 @@ from nextron import main
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import setup as setup_queries
 from nextron.app.setup import api as setup_api
-from nextron.app.setup.api import SegmentSync, Setup
+from nextron.app.setup.api import SegmentDifference, SegmentSync, Setup
+from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
 from nextron.db.uow import UnitOfWorkFactory
@@ -28,6 +29,7 @@ from nextron.domain.segments import (
     InvalidSegments,
     SegmentDef,
     definition_text,
+    file_form,
     validate_segments,
 )
 from tests.fakes.clock import DEFAULT_NOW, FrozenClock
@@ -183,6 +185,11 @@ OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 chang
 SUMMARY_FIRST = (
     SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST
 )
+# Story 11.5: once the database holds a Segment, the dashboard owns them
+SEGMENTS_MANAGED = "segments: Segments are managed in the dashboard; seed/segments.yaml ignored\n"
+OTHERS_UNCHANGED = (
+    MARKETS_UNCHANGED + SEQUENCES_UNCHANGED + FACTS_UNCHANGED + OFFERS_CAMPAIGNS_UNCHANGED
+)
 
 
 # The I/O matrix -----------------------------------------------------------------------------------
@@ -210,30 +217,36 @@ def test_the_stored_definitions_are_the_shipped_files_canonical_text(database: P
     assert stored == {s.key: definition_text(s) for s in shipped}
 
 
-def test_a_second_sync_reports_0_changed_and_writes_nothing(database: Path) -> None:
+def test_the_first_sync_stores_each_segments_first_version_row(database: Path) -> None:
+    sync()
+
+    rows = query(
+        database,
+        "SELECT s.key, v.version, v.actor, v.definition = s.definition, v.created_at "
+        "FROM segment_versions v JOIN segments s ON s.id = v.segment_id ORDER BY s.key",
+    )
+    stamp = "2026-11-16T09:00:00.000000Z"
+    assert rows == [(key, 1, "seed", 1, stamp) for key in KEYS]
+
+
+def test_a_second_sync_says_the_dashboard_owns_segments_and_writes_nothing(
+    database: Path,
+) -> None:
     sync()
     before = table_dump(database)
 
     run = sync(clock=FrozenClock(LATER))
 
-    assert (run.code, run.out, run.err) == (
-        0,
-        "segments: 0 changed, 2 unchanged\n"
-        + MARKETS_UNCHANGED
-        + SEQUENCES_UNCHANGED
-        + FACTS_UNCHANGED
-        + OFFERS_CAMPAIGNS_UNCHANGED,
-        "",
-    )
+    assert (run.code, run.out, run.err) == (0, SEGMENTS_MANAGED + OTHERS_UNCHANGED, "")
     assert table_dump(database) == before
 
 
-def test_a_changed_definition_gets_a_new_version_and_one_event(
+def test_a_changed_file_after_the_first_sync_writes_no_segment_and_lists_the_difference(
     database: Path, tmp_path: Path
 ) -> None:
+    """Story 11.5: ``nextron seed sync`` never updates a stored Segment."""
     sync()
-    law_before, ops_before = segment_rows(database)
-    events_before = event_rows(database)
+    before = table_dump(database)
     changed = edited(
         "        sources: [job_ads, website]\n        score_only: false\n        weight: 30",
         "        sources: [job_ads, website]\n        score_only: false\n        weight: 25",
@@ -243,46 +256,11 @@ def test_a_changed_definition_gets_a_new_version_and_one_event(
 
     assert (run.code, run.err) == (0, "")
     assert run.out == (
-        "segments: 1 changed, 1 unchanged\n  ops_automation: changed (version 1 -> 2)\n"
-        + MARKETS_UNCHANGED
-        + SEQUENCES_UNCHANGED
-        + FACTS_UNCHANGED
-        + OFFERS_CAMPAIGNS_UNCHANGED
+        SEGMENTS_MANAGED
+        + "  ops_automation: differs in signal_types[ops_dynamics_gp].weight\n"
+        + OTHERS_UNCHANGED
     )
-    law_after, ops_after = segment_rows(database)
-    assert law_after == law_before
-    assert ops_after[0] == ops_before[0]  # the same row
-    assert (ops_after[3], ops_after[4]) == (2, ops_before[4])  # created_at kept
-    assert ops_after[5] == "2026-11-19T09:00:00.000000Z"
-    assert '"weight":25' in ops_after[2]
-    assert event_rows(database) == [
-        *events_before,
-        ("segments", ops_before[0], "v1", "v2", "seed_sync", None, "seed", ops_after[5]),
-    ]
-    # and the next sync of the same file changes nothing
-    assert (
-        sync(seed_dir(tmp_path, changed, "again")).out
-        == "segments: 0 changed, 2 unchanged\n"
-        + MARKETS_UNCHANGED
-        + SEQUENCES_UNCHANGED
-        + FACTS_UNCHANGED
-        + OFFERS_CAMPAIGNS_UNCHANGED
-    )
-
-
-def test_each_change_adds_a_version(database: Path, tmp_path: Path) -> None:
-    sync()
-    for version, weight in ((2, 25), (3, 20), (4, 30)):
-        text = edited(
-            "        sources: [job_ads, website]\n        score_only: false\n        weight: 30",
-            f"        sources: [job_ads, website]\n        score_only: false\n        weight: {weight}",
-        )
-        run = sync(seed_dir(tmp_path, text, f"v{version}"))
-        assert f"ops_automation: changed (version {version - 1} -> {version})" in run.out
-
-    assert [row[3] for row in segment_rows(database)] == [1, 4]
-    statuses = [(f, t) for entity, _, f, t, *_ in event_rows(database) if entity == "segments"]
-    assert statuses == [(None, "v1"), (None, "v1"), ("v1", "v2"), ("v2", "v3"), ("v3", "v4")]
+    assert table_dump(database) == before
 
 
 def renamed(segment: SegmentDef, key: str, prefix: str) -> SegmentDef:
@@ -306,74 +284,60 @@ def store(units: UnitOfWorkFactory, *segments: SegmentDef) -> None:
         Setup(FrozenClock()).sync_segments(segments)
 
 
-def test_a_stored_segment_not_in_the_file_is_left_as_it_is(
+def test_the_other_files_are_checked_against_the_stored_segments(
     database: Path, units: UnitOfWorkFactory
 ) -> None:
+    """Managed mode: the file's Segments are ignored, so a Sequence angle naming a Segment the
+    database doesn't hold is refused, and nothing is written."""
     law = shipped_defs()[0]
     store(units, renamed(law, "old_segment", "old_"))
-    [old_row] = segment_rows(database)
-    events_before = event_rows(database)
-
-    run = sync(clock=FrozenClock(LATER))
-
-    assert run.code == 0
-    assert run.out == (
-        SEGMENTS_FIRST
-        + "  old_segment: not in seed/segments.yaml, left as it is (version 1)\n"
-        + MARKETS_FIRST
-        + SEQUENCES_FIRST
-        + FACTS_FIRST
-        + OFFERS_CAMPAIGNS_FIRST
-    )
-    assert segment_rows(database)[1] == old_row  # law, old, ops by key
-    # 2 Segments, 2 Markets, 1 Sequence, 8 Approved Company Facts, 1 Offer, 4 Campaigns
-    assert len(event_rows(database)) == len(events_before) + 18
-
-
-@pytest.mark.parametrize(
-    ("shared", "field"),
-    [
-        ("signal_types", "segments[law_private_ai].signal_types[law_hiring_legal_ops].key"),
-        ("disqualifiers", "segments[law_private_ai].disqualifiers[law_fewer_than_5_lawyers].key"),
-    ],
-)
-def test_a_key_still_used_by_a_stored_segment_not_in_the_file_is_refused(
-    database: Path, units: UnitOfWorkFactory, shared: str, field: str
-) -> None:
-    """A Segment renamed in the file: the old row keeps its keys, so the file can't reuse
-    them."""
-    law = shipped_defs()[0]
-    old = dataclasses.replace(
-        renamed(law, "old_segment", "old_"), **{shared: getattr(law, shared)}
-    )
-    store(units, old)
     before = table_dump(database)
 
     run = sync(clock=FrozenClock(LATER))
 
     assert (run.code, run.out) == (1, "")
-    assert run.err == (
-        f"seed/segments.yaml: {field}: is also a key of the stored Segment old_segment, which "
-        "is no longer in the file: rename one of them\n"
-    )
+    assert run.err.startswith("seed/sequences.yaml: ")
     assert table_dump(database) == before
 
 
-def test_the_use_case_refuses_a_shared_key_before_any_write(
-    database: Path, units: UnitOfWorkFactory
-) -> None:
+def test_the_managed_mode_lists_every_kind_of_difference(units: UnitOfWorkFactory) -> None:
     law, ops = shipped_defs()
-    store(units, law)
-    before = table_dump(database)
+    store(units, law, renamed(ops, "aa_ops", "aa_"))
+    changed_law = dataclasses.replace(law, name="Law firms")
 
-    with units.open(), pytest.raises(InvalidSegments) as caught:
-        Setup(FrozenClock()).sync_segments([ops, renamed(law, "law_renamed", "")])
+    with units.open():
+        result = Setup(FrozenClock()).sync_segments([changed_law, ops])
 
-    assert caught.value.field == (
-        "segments[law_renamed].disqualifiers[law_fewer_than_5_lawyers].key"
+    assert result == SegmentSync(
+        (),
+        (),
+        (),
+        (),
+        True,
+        (
+            SegmentDifference("law_private_ai", None, ("name",)),
+            SegmentDifference("ops_automation", "file"),
+            SegmentDifference("aa_ops", "dashboard"),
+        ),
     )
-    assert "stored Segment law_private_ai" in caught.value.reason
-    assert table_dump(database) == before
+
+
+def test_the_cli_prints_each_difference(
+    database: Path, units: UnitOfWorkFactory, tmp_path: Path
+) -> None:
+    sync()
+    law = shipped_defs()[0]
+    with units.open():  # a Segment only the dashboard has
+        SegmentEditor(FrozenClock()).create(
+            file_form(renamed(law, "accountants", "acc_"))
+        )
+
+    run = sync(clock=FrozenClock(LATER))
+
+    assert run.code == 0
+    assert run.out == (
+        SEGMENTS_MANAGED + "  accountants: only in the dashboard\n" + OTHERS_UNCHANGED
+    )
 
 
 INVALID_RULES = [
@@ -656,13 +620,7 @@ def test_a_seed_file_with_a_bom_and_crlf_line_ends_is_read(database: Path, tmp_p
     run = sync(seed_dir(tmp_path, text))
 
     assert (run.code, run.out) == (0, SUMMARY_FIRST)
-    assert sync().out == (  # the same
-        "segments: 0 changed, 2 unchanged\n"
-        + MARKETS_UNCHANGED
-        + SEQUENCES_UNCHANGED
-        + FACTS_UNCHANGED
-        + OFFERS_CAMPAIGNS_UNCHANGED
-    )
+    assert sync().out == SEGMENTS_MANAGED + OTHERS_UNCHANGED  # the same, with no difference
 
 
 def test_an_unset_environment_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -730,12 +688,9 @@ def test_a_sync_never_re_scores_or_touches_another_table(
 
     run = sync(seed_dir(tmp_path, changed), clock=FrozenClock(LATER))
 
-    assert "law_private_ai: changed (version 1 -> 2)" in run.out
+    assert "law_private_ai: differs in signal_types[law_expansion].weight" in run.out
     assert table_dump(database, skip=others) == before
-    new_events = event_rows(database)[len(events_before) :]
-    assert [(e[0], e[3], e[4], e[6]) for e in new_events] == [
-        ("segments", "v2", "seed_sync", "seed")
-    ]
+    assert event_rows(database) == events_before  # Story 11.5: no Segment is written
     assert query(database, "SELECT status FROM jobs") == [("queued",)]
 
 
@@ -790,10 +745,14 @@ def test_the_sync_logs_its_counts(
     counts = ("created_count", "changed_count", "unchanged_count", "not_in_file_count")
     assert [[getattr(r, name) for name in counts] for r in records] == [
         [2, 0, 0, 0],  # the first sync
-        [0, 0, 2, 0],  # the same file again
-        [2, 0, 0, 2],  # aa_old and zz_old stored; law and ops left out
-        [0, 1, 1, 2],  # law changed, ops unchanged, aa_old and zz_old not in the file
+        [0, 0, 0, 0],  # the same file again: managed, nothing written
+        [0, 0, 0, 0],  # managed: aa_old and zz_old are not stored either
+        [0, 0, 0, 0],  # managed
     ]
+    managed = [(getattr(r, "managed"), getattr(r, "differences_count")) for r in records]
+    assert managed[:2] == [(False, 0), (True, 0)]  # a managed no-op told apart from a bootstrap
+    assert [flag for flag, _ in managed[2:]] == [True, True]
+    assert managed[3][1] >= 1  # the edited weight is a difference
 
 
 # The use case ------------------------------------------------------------------------------------
@@ -817,12 +776,19 @@ def test_sync_segments_returns_what_it_did(units: UnitOfWorkFactory) -> None:
         unchanged=(),
         not_in_file=(),
     )
-    assert second == SegmentSync(
-        created=(),
-        changed=(("ops_automation", 1, 2),),
-        unchanged=(),
-        not_in_file=(("law_private_ai", 1),),
+    assert second == SegmentSync(  # Story 11.5: the stored Segment isn't touched
+        (),
+        (),
+        (),
+        (),
+        managed=True,
+        differences=(
+            SegmentDifference("ops_automation", None, ("name",)),
+            SegmentDifference("law_private_ai", "dashboard"),
+        ),
     )
+    with units.open(read_only=True):
+        assert setup_queries.segment("ops_automation").version == 1  # type: ignore[union-attr]
 
 
 def test_stored_segments_come_back_in_key_order(units: UnitOfWorkFactory) -> None:
@@ -839,7 +805,7 @@ def test_stored_segments_come_back_in_key_order(units: UnitOfWorkFactory) -> Non
     with units.open(read_only=True):
         seeded = setup_queries.segments()
 
-    assert result.not_in_file == (("aa_law", 1), ("mm_law", 1), ("zz_ops", 1))
+    assert [each.key for each in result.differences] == ["aa_law", "mm_law", "zz_ops"]
     assert [s.key for s in seeded] == ["aa_law", "mm_law", "zz_ops"]
 
 
@@ -872,7 +838,17 @@ def test_sync_segments_with_nothing_lists_what_is_stored(units: UnitOfWorkFactor
     with units.open():
         result = Setup(FrozenClock()).sync_segments(())
 
-    assert result == SegmentSync((), (), (), (("law_private_ai", 1), ("ops_automation", 1)))
+    assert result == SegmentSync(
+        (),
+        (),
+        (),
+        (),
+        True,
+        (
+            SegmentDifference("law_private_ai", "dashboard"),
+            SegmentDifference("ops_automation", "dashboard"),
+        ),
+    )
 
 
 @pytest.mark.parametrize(

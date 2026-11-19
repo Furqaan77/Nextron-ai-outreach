@@ -108,15 +108,19 @@ owner's command in one transaction (decision 1).
 
 - ``@use_case sync_seed(segments, markets, sequences, company_facts, offers, campaigns) ->
   SeedSync(segments, markets, sequences, company_facts, offers, campaigns)`` (each story's
-  arguments and results after the earlier ones): (1) reads the clock once; (2) runs
-  ``setup.api.check_seed`` (the Segments, Markets, Sequences, Offers and Campaigns), then
-  ``playbook.api.check_seed_facts`` against that sync's Segment keys and Market countries, with
-  ``latest`` the UTC date of now plus one day; (3) in **one** transaction runs
+  arguments and results after the earlier ones): (1) reads the clock once; (2) in **one**
+  transaction reads the stored Segment keys (``queries.setup.segment_keys``), runs
+  ``setup.api.check_seed`` (the Segments, Markets, Sequences, Offers and Campaigns; when the
+  database holds Segments, Story 11.5's managed mode, the references are checked against the
+  **stored** Segment keys, since the file's Segments are ignored), then
+  ``playbook.api.check_seed_facts`` against those Segment keys and this sync's Market
+  countries, with ``latest`` the UTC date of now plus one day, then runs
   ``Setup(clock).seed_sync(...)``, then ``CompanyFacts(clock).seed_facts(...)``, so a failure
-  anywhere changes nothing in any seeded table; (4) after the commit runs ``log_seed_sync``,
-  then ``log_fact_sync``, and returns ``SeedSync``. A check that fails raises before any
-  transaction (``TypeError``, ``ValueError``, ``InvalidSegments``, ``InvalidMarkets``,
-  ``InvalidSequences``, ``InvalidOffers``, ``InvalidCampaigns`` or ``InvalidCompanyFacts``).
+  anywhere changes nothing in any seeded table; (3) after the commit runs ``log_seed_sync``,
+  then ``log_fact_sync``, and returns ``SeedSync``. A check that fails raises before any write
+  (``TypeError``, ``ValueError``, ``InvalidSegments``, ``InvalidMarkets``,
+  ``InvalidSequences``, ``InvalidOffers``, ``InvalidCampaigns`` or ``InvalidCompanyFacts``) and
+  the transaction rolls back.
 
 **Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5, OP-6, NFR-16).** Every copy is made with
 SQLite's backup API (``nextron.db.repos.ops.snapshot``), verified and recorded in ``backups``,
@@ -669,11 +673,19 @@ class Seeds:
         """Load the Segments, Markets, Sequences, Approved Company Facts, Offers and Campaigns
         in one transaction."""
         now = self._clock.now()
-        checked = check_seed(segments, markets, sequences, offers, campaigns)
-        checked_facts = check_seed_facts(
-            company_facts, checked.segment_keys, checked.market_countries, latest_allowed(now)
-        )
         with current().transaction():
+            stored_keys = setup_queries.segment_keys()  # Story 11.5: managed once any exists
+            checked = check_seed(
+                segments,
+                markets,
+                sequences,
+                offers,
+                campaigns,
+                stored_segment_keys=stored_keys if stored_keys else None,
+            )
+            checked_facts = check_seed_facts(
+                company_facts, checked.segment_keys, checked.market_countries, latest_allowed(now)
+            )
             setup_result = Setup(self._clock).seed_sync(checked, now)
             fact_result = CompanyFacts(self._clock).seed_facts(checked_facts, now)
         log_seed_sync(setup_result)

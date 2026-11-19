@@ -25,7 +25,14 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   Segments only through these two and ``segment_by_id(segment_id)`` (Story 2.9: the Segment
   with that row id, or ``None``, a text that isn't a ULID included; a Lead names its Segment by
   id). ``segment_ids()``: every stored Segment's id, a ``frozenset`` (``Discovery.upsert_lead``
-  checks a candidate's Segment against it).
+  checks a candidate's Segment against it). ``segment_keys()`` (Story 11.5): every stored
+  Segment's key, a ``frozenset``, without decoding (the seed sync's managed mode).
+- ``segment_version(segment_id, version)`` (Story 11.5): that stored version of the Segment as
+  a ``SegmentVersion(segment_id, version, definition, created_at, actor)``, or ``None`` (a
+  Segment id that isn't a ULID, or a version not stored, included); ``segment_versions
+  (segment_id)``: every stored version, oldest first. Each ``definition`` is decoded with
+  ``segment_from_text`` (``InvalidSegments`` for a text that no longer validates). Scoring
+  re-scores an existing Lead with its stored version through ``segment_version``.
 - ``markets()``: every stored Market as a ``SeededMarket(id, code, version, definition)``, by
   code; ``market(code)``: one, or ``None``; ``market_by_id(market_id)`` (Story 4.12): one by
   its row id, or ``None`` (a text that isn't a ULID included). ``definition`` is the
@@ -82,7 +89,7 @@ from nextron.db.repos.setup import settings as settings_repo
 from nextron.db.repos.setup.campaigns import StoredCampaign
 from nextron.db.repos.setup.markets import StoredMarket
 from nextron.db.repos.setup.offers import StoredOffer
-from nextron.db.repos.setup.segments import StoredSegment
+from nextron.db.repos.setup.segments import StoredSegment, StoredSegmentVersion
 from nextron.db.repos.setup.sequences import StoredSequence
 from nextron.domain.budget import QUOTAS, Limits
 from nextron.domain.campaign import CampaignStatus, Lia, StepAngleNote, VariantStatus, may_run
@@ -225,6 +232,11 @@ def segment_ids() -> frozenset[str]:
     return segments_repo.segment_ids()
 
 
+def segment_keys() -> frozenset[str]:
+    """Every stored Segment's key, without decoding a definition (Story 11.5)."""
+    return frozenset(stored.key for stored in segments_repo.all_segments())
+
+
 def segment(key: str) -> SeededSegment | None:
     """The stored Segment ``key``, or ``None``."""
     stored = segments_repo.by_key(key)
@@ -237,6 +249,43 @@ def segment_by_id(segment_id: str) -> SeededSegment | None:
         return None
     stored = segments_repo.get(segment_id)
     return None if stored is None else _seeded(stored)
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentVersion:
+    """One stored version of a Segment: its Segment's id, the version, its decoded definition,
+    when it was stored and by whom (``seed`` or ``operator``)."""
+
+    segment_id: str
+    version: int
+    definition: SegmentDef
+    created_at: datetime
+    actor: str
+
+
+def _version(stored: StoredSegmentVersion) -> SegmentVersion:
+    return SegmentVersion(
+        segment_id=stored.segment_id,
+        version=stored.version,
+        definition=segment_from_text(stored.definition),
+        created_at=stored.created_at,
+        actor=stored.actor,
+    )
+
+
+def segment_version(segment_id: str, version: int) -> SegmentVersion | None:
+    """Version ``version`` of the Segment ``segment_id``, or ``None``."""
+    if not is_ulid(segment_id) or isinstance(version, bool) or not isinstance(version, int):
+        return None
+    stored = segments_repo.version(segment_id, version)
+    return None if stored is None else _version(stored)
+
+
+def segment_versions(segment_id: str) -> tuple[SegmentVersion, ...]:
+    """Every stored version of the Segment ``segment_id``, oldest first."""
+    if not is_ulid(segment_id):
+        return ()
+    return tuple(_version(stored) for stored in segments_repo.versions(segment_id))
 
 
 @dataclass(frozen=True, slots=True)

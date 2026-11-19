@@ -59,6 +59,15 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 11.5. Each version of a Segment's definition, as immutable rows: never a person.
+    "segment_versions": {
+        "id": PiiClass.NONE,
+        "segment_id": PiiClass.NONE,
+        "version": PiiClass.NONE,
+        "definition": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "actor": PiiClass.NONE,
+    },
     # Story 3.1. A Market's rules and footer template hold codes, flags and placeholders, never
     # a person.
     "markets": {

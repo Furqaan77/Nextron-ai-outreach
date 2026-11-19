@@ -514,10 +514,11 @@ class RecordingScores:
 
     def __init__(self) -> None:
         self.scored: list[str] = []
+        self.current: list[str] = []  # Story 11.5: use_current jobs
         self.recomputes = 0
 
-    def score_lead(self, lead_id: str) -> None:
-        self.scored.append(lead_id)
+    def score_lead(self, lead_id: str, *, use_current: bool = False) -> None:
+        (self.current if use_current else self.scored).append(lead_id)
 
     def recompute_tiers(self) -> int:
         self.recomputes += 1
@@ -1837,6 +1838,26 @@ def test_score_lead_and_recompute_tiers_call_their_service_once() -> None:
 
     assert (scored, recomputed) == (None, None)
     assert (scores.scored, scores.recomputes) == ([LEAD], 1)
+
+
+def test_a_use_current_score_lead_job_applies_the_current_definition() -> None:
+    scores = RecordingScores()
+    handler = registry(scores=lambda: scores).get("score_lead").handler
+
+    handler(Job(RUN, "score_lead", Lane.BULK, {"v": 1, "lead_id": LEAD, "use_current": True}, 1))
+    handler(Job(RUN, "score_lead", Lane.BULK, {"v": 1, "lead_id": LEAD, "use_current": False}, 1))
+
+    assert (scores.current, scores.scored) == ([LEAD], [LEAD])
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_a_use_current_that_isnt_a_bool_is_invalid(value: object) -> None:
+    scores = RecordingScores()
+    handler = registry(scores=lambda: scores).get("score_lead").handler
+
+    with pytest.raises(InvalidJob, match="use_current"):
+        handler(Job(RUN, "score_lead", Lane.BULK, {"v": 1, "lead_id": LEAD, "use_current": value}, 1))
+    assert (scores.current, scores.scored) == ([], [])
 
 
 @pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "lead_id": "not-a-ulid"}])

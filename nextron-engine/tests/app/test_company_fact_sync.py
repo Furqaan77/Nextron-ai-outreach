@@ -28,6 +28,7 @@ from nextron.app.playbook.api import (
 )
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.bootstrap import BootstrapConfig, load_bootstrap
 from nextron.db.migrations import head_revision
 from nextron.db.uow import UnitOfWorkFactory
@@ -46,7 +47,7 @@ from nextron.domain.company_facts import (
 )
 from nextron.domain.markets import validate_markets
 from nextron.domain.offers import OfferDef, validate_offers
-from nextron.domain.segments import validate_segments
+from nextron.domain.segments import file_form, validate_segments
 from nextron.domain.sequences import validate_sequences
 from tests.fakes.clock import DEFAULT_NOW, FrozenClock
 from tests.migration_chains import run_sql, sha256
@@ -82,7 +83,7 @@ OTHERS_FIRST = (
     "  default: created (version 1)\n"
 )
 OTHERS_UNCHANGED = (
-    "segments: 0 changed, 2 unchanged\n"
+    "segments: Segments are managed in the dashboard; seed/segments.yaml ignored\n"
     "markets: 0 changed, 2 unchanged\n"
     "sequences: 0 changed, 1 unchanged\n"
 )
@@ -755,7 +756,7 @@ def hand_built(fact: SeedFact, **changes: Any) -> SeedFact:
     ],
     ids=["dict", "repeat", "rule-1", "value", "floor", "future"],
 )
-def test_seeds_refuses_bad_facts_before_any_transaction(
+def test_seeds_refuses_bad_facts_before_any_write(
     database: Path,
     units: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -767,7 +768,6 @@ def test_seeds_refuses_bad_facts_before_any_transaction(
     before = sha256(database)
 
     with units.open() as uow:
-        monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(error, match=match):
             Seeds(FrozenClock()).sync_seed(
                 segments, markets, sequences, make(facts), *shipped_offers_and_campaigns()
@@ -796,7 +796,6 @@ def test_seeds_checks_the_facts_against_its_own_segments_and_markets(
     ]
 
     with units.open() as uow:
-        monkeypatch.setattr(uow, "transaction", no_transaction)
         with pytest.raises(InvalidCompanyFacts) as caught:
             Seeds(FrozenClock()).sync_seed(  # US only, so no Campaign (they name uk too)
                 segments, us, no_uk_angle, facts, shipped_offers_and_campaigns()[0], ()
@@ -804,6 +803,46 @@ def test_seeds_checks_the_facts_against_its_own_segments_and_markets(
 
     assert caught.value.field == "company_facts[nextron_team].markets[0]"
     assert caught.value.reason == "names uk, which isn't a Market of this sync"
+
+
+def test_in_managed_mode_the_facts_are_checked_against_the_stored_segments(
+    units: UnitOfWorkFactory,
+) -> None:
+    segments, markets, sequences, facts = shipped_inputs()
+    with units.open():  # the bootstrap stores the file's Segments
+        Seeds(FrozenClock()).sync_seed(
+            segments, markets, sequences, facts, *shipped_offers_and_campaigns()
+        )
+    with units.open(read_only=True):
+        law = setup_queries.segment("law_private_ai")
+    assert law is not None
+    form: dict[str, Any] = json.loads(json.dumps(file_form(law.definition)))
+    form["key"], form["name"] = "accountants", "Accountants"
+    for index, each in enumerate(form["signal_types"]):
+        each["key"] = f"accountants_signal_{index}"
+    for index, each in enumerate(form["disqualifiers"]):
+        each["key"] = f"accountants_rule_{index}"
+    with units.open():  # a dashboard-only Segment
+        SegmentEditor(FrozenClock()).create(form)
+
+    dashboard_only = [hand_built(facts[0], segments=("accountants",)), *facts[1:]]
+    with units.open():  # managed: the stored keys count, so the fact is accepted
+        result = Seeds(FrozenClock(LATER)).sync_seed(
+            segments, markets, sequences, dashboard_only, *shipped_offers_and_campaigns()
+        )
+    assert result.segments.managed
+    assert result.company_facts.changed == (("nextron_team", 1, 2),)
+
+    form["key"] = "file_only"  # fresh Signal type and rule keys too, so the file validates
+    for each in (*form["signal_types"], *form["disqualifiers"]):
+        each["key"] = each["key"].replace("accountants", "file_only")
+    file_only = [*segments, *validate_segments({"segments": [form]})]
+    named = [hand_built(facts[0], segments=("file_only",)), *facts[1:]]
+    with units.open(), pytest.raises(InvalidCompanyFacts) as caught:
+        Seeds(FrozenClock(LATER)).sync_seed(  # a key only in the file is not stored
+            file_only, markets, sequences, named, *shipped_offers_and_campaigns()
+        )
+    assert caught.value.field == "company_facts[nextron_team].segments[0]"
 
 
 def test_an_empty_facts_input_syncs_nothing_but_reports_the_stored_ones(

@@ -15,6 +15,14 @@ at each change; ``ck_segments_version``: at least 1), ``created_at`` and ``updat
 definition holds role titles, keywords and rules, never a person, so no column is personal
 data.
 
+``segment_versions`` (Story 11.5, migration ``0055_11_5_segment_editing``) holds one immutable
+row per version of a Segment, written only by the same repository whenever it inserts or
+updates a Segment: its ``segment_id`` (a foreign key to ``segments``, no cascade), the
+``version`` (unique per Segment, ``uq_segment_versions_segment_id_version``;
+``ck_segment_versions_version``: at least 1), that version's ``definition``, ``created_at`` and
+the ``actor`` (``ck_segment_versions_actor``: ``seed`` or ``operator``). Triggers refuse every
+``UPDATE`` and ``DELETE`` and a reused id or (Segment, version). No column is personal data.
+
 ``markets`` holds one row per Market (FR-2, Story 3.1), written only by
 ``nextron.db.repos.setup.markets`` (migration ``0010_3_1_markets``): the
 ``nextron.domain.markets.MarketDef`` fields as typed columns, keyed by ``code`` (unique,
@@ -118,6 +126,8 @@ CAMPAIGN_LIA_CHECK: Final = (
     "(lia_ref IS NULL AND lia_date IS NULL) OR (lia_ref IS NOT NULL AND lia_date IS NOT NULL)"
 )
 VARIANT_STATUS_CHECK: Final = "status IN ('active', 'inactive')"
+SEGMENT_VERSION_ACTOR_LENGTH: Final = 8  # seed, operator
+SEGMENT_VERSION_ACTOR_CHECK: Final = "actor IN ('seed', 'operator')"
 
 
 class SettingRecord(Base):
@@ -143,6 +153,24 @@ class SegmentRecord(Base):
     version: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class SegmentVersionRecord(Base):
+    """One immutable version of a Segment's definition (Story 11.5)."""
+
+    __tablename__ = "segment_versions"
+    __table_args__ = (
+        UniqueConstraint("segment_id", "version"),
+        CheckConstraint("version >= 1", name="version"),
+        CheckConstraint(SEGMENT_VERSION_ACTOR_CHECK, name="actor"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    segment_id: Mapped[str] = mapped_column(Ulid, ForeignKey("segments.id"))
+    version: Mapped[int] = mapped_column(Integer)
+    definition: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    actor: Mapped[str] = mapped_column(String(SEGMENT_VERSION_ACTOR_LENGTH))
 
 
 class MarketRecord(Base):

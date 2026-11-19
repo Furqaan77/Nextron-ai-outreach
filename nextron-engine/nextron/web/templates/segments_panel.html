@@ -1,0 +1,37 @@
+{#- The Segments list and create form (nextron.web.segments_page, Story 11.5): rendered inside
+    segments.html, and alone as the answer to POST /segments/create, swapped in for this whole
+    panel. Stored text is escaped with |plain. -#}
+{%- from "segment_form.html" import segment_fields %}
+<div id="segments-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<h2>Segments ({{ segments|length }})</h2>
+{%- if unavailable %}
+<p class="notice notice-refused" role="alert">{{ unavailable|plain }}</p>
+{%- elif not segments %}
+<p>No Segments yet. Run <code>nextron seed sync</code> or create one below.</p>
+{%- else %}
+<table class="segment-table">
+<thead>
+<tr><th scope="col">Key</th><th scope="col">Name</th><th scope="col">Version</th><th scope="col">Campaigns</th><th scope="col">History</th></tr>
+</thead>
+<tbody>
+{%- for segment in segments %}
+<tr class="segment-row-item"><td><a href="/segments/{{ segment.id }}">{{ segment.key|plain }}</a></td><td>{{ segment.name|plain }}</td><td>{{ segment.version }}</td><td>{% if segment.campaigns %}{{ segment.campaigns }}{% else %}0 (inert){% endif %}</td><td><a href="/segments/{{ segment.id }}/versions">Versions</a></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+<details class="segment-create"{% if create.open %} open{% endif %}>
+<summary>Create a Segment</summary>
+<form method="post" action="/segments/create" hx-post="/segments/create" hx-target="#segments-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+{{- segment_fields(create, true) }}
+<button type="submit">Create the Segment</button>
+</form>
+</details>
+</div>

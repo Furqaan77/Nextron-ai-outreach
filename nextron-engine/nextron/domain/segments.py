@@ -8,7 +8,8 @@ ship; the ``segments`` table (owner ``setup``) stores each one as ``definition_t
 **Types** (frozen, slotted; every list is a tuple): ``SizeRange(minimum, maximum, unit)``,
 ``Disqualifier(key, kind, size_clue, threshold, description)``, ``PreferredRoles(when_terms,
 roles)``, ``SignalType(key, name, signal_class, tier, evidence, sources, score_only, weight,
-match_terms, preferred_roles)``, ``DiscoveryQueries(places)`` and ``SegmentDef(key, name,
+match_terms, preferred_roles)``, ``DiscoveryQueries(places, registry_keywords,
+registry_sic_codes, job_titles)`` and ``SegmentDef(key, name,
 industry_keywords, size_range, decision_maker_roles, disqualifiers, signal_types,
 discovery_queries)``. ``decision_maker_roles`` is a tuple of ranks, best first; each rank is a
 tuple of equal titles. ``SegmentDef.titles()`` is every decision-maker title: the ranked titles
@@ -18,7 +19,9 @@ in rank order, then each preferred role not already listed, in file order.
 is ``class``. The top level is exactly ``segments: [<segment>, ...]``. A segment has exactly
 ``key``, ``name``, ``industry_keywords``, ``size_range`` (``minimum``, ``maximum``, ``unit``),
 ``decision_maker_roles``, ``disqualifiers``, ``signal_types`` and ``discovery_queries``
-(``places``); a disqualifier exactly ``key``, ``kind``, ``size_clue``, ``threshold`` and
+(``places``, plus the optional ``registry`` (optional ``keywords`` and ``sic_codes``) and
+``job_titles``, Story 11.5: lists that may be empty; a SIC code is a text of 4 or 5 digits); a
+disqualifier exactly ``key``, ``kind``, ``size_clue``, ``threshold`` and
 ``description``; a signal type ``key``, ``name``, ``class``, ``tier``, ``evidence``,
 ``sources``, ``score_only`` and ``weight``, plus optional ``match_terms`` and
 ``preferred_roles`` (each exactly ``when_terms`` and ``roles``). Missing and unknown fields are
@@ -55,10 +58,22 @@ repeats a value longer than 40 characters.
   (case-insensitive).
 
 **Stored form.** ``definition_text(segment)`` is the canonical JSON of the segment's file form
-(``sort_keys``, ``ensure_ascii=False``, no spaces), with enums as their values and every
-optional field present. ``segment_from_text(text)`` is its inverse: ``json.loads`` plus the
-same validation of one segment (keys unique within it); a text that no longer validates, or
-isn't JSON, raises ``InvalidSegments``.
+(``sort_keys``, ``ensure_ascii=False``, no spaces) of ``file_form(segment)``, with enums as
+their values and every optional field present, except the discovery queries' ``registry``
+(and each of its two lists) and ``job_titles``, which appear only when non-empty, so every
+text stored before Story 11.5 stays byte-identical (AI test-set fingerprints hash them).
+``segment_from_text(text)`` is its inverse: ``json.loads`` plus the same validation of one
+segment (keys unique within it); a text that no longer validates, or isn't JSON, raises
+``InvalidSegments``.
+
+**Dashboard editing (Story 11.5).** ``segment_editing_rule(segment)`` holds the rules the
+editor adds: ``InvalidSegments`` (``EDITING_RULE``: "A Segment needs a decision-maker role and
+at least one Tier 1 or 2 Event") on ``.decision_maker_roles`` or ``.signal_types``, or
+(``FORM_SEPARATOR``: "can't contain | or =>", the Segments form's separators) on
+``.decision_maker_roles`` or a Signal type's ``.preferred_roles``, or ``None``.
+``segment_form_diff(old, new)`` lists each changed field as a ``FieldChange(path, old, new)``
+(values as compact JSON, ``None`` where absent), Signal types and disqualifiers matched by
+key, for the version history view.
 
 **The regulation detectors.** ``mentions_aba_512(text)`` and ``mentions_sra_notice(text)`` tell
 whether a text names ABA Formal Opinion 512 or the SRA notice; ``represents_market_fact(text)``
@@ -77,7 +92,7 @@ left out, because the model can't quote it. No Segments give an empty text; anyt
 import json
 import re
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
@@ -93,6 +108,7 @@ TIERS: Final = (1, 2, 3)
 MIN_WEIGHT: Final = 1
 MAX_WEIGHT: Final = 100  # Signal and Fit Scores cap at 100
 REFUSED_TEXT_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
+SIC_CODE_PATTERN: Final = re.compile(r"[0-9]{4,5}")  # matched with fullmatch
 
 
 class SignalClass(StrEnum):
@@ -193,7 +209,14 @@ class SignalType:
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryQueries:
+    """The Segment's discovery queries: Places query texts (required), and the optional
+    Companies House keywords and SIC codes and aggregator job titles (Story 11.5), each of
+    which may be empty."""
+
     places: tuple[str, ...]
+    registry_keywords: tuple[str, ...] = ()
+    registry_sic_codes: tuple[str, ...] = ()
+    job_titles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,9 +454,45 @@ def _preferred_roles(value: object, path: str) -> tuple[PreferredRoles, ...]:
     return tuple(result)
 
 
+def _sic_codes(value: object, path: str) -> tuple[str, ...]:
+    """SIC codes: unique texts of 4 or 5 ASCII digits; the list may be empty."""
+    codes = _texts(value, path, may_be_empty=True)
+    for index, code in enumerate(codes):
+        if SIC_CODE_PATTERN.fullmatch(code) is None:
+            raise InvalidSegments(f"{path}[{index}]", "must be a SIC code of 4 or 5 digits")
+    return codes
+
+
+def _registry(value: object, path: str) -> dict[str, tuple[str, ...]]:
+    return _fields(
+        value,
+        path,
+        {
+            "keywords": lambda v, p: _texts(v, p, may_be_empty=True),
+            "sic_codes": _sic_codes,
+        },
+        required=(),
+    )
+
+
 def _queries(value: object, path: str) -> DiscoveryQueries:
-    checked = _fields(value, path, {"places": lambda v, p: _texts(v, p)})
-    return DiscoveryQueries(places=checked["places"])
+    checked = _fields(
+        value,
+        path,
+        {
+            "places": lambda v, p: _texts(v, p),
+            "registry": _registry,
+            "job_titles": lambda v, p: _texts(v, p, may_be_empty=True),
+        },
+        required=("places",),
+    )
+    registry = checked.get("registry", {})
+    return DiscoveryQueries(
+        places=checked["places"],
+        registry_keywords=registry.get("keywords", ()),
+        registry_sic_codes=registry.get("sic_codes", ()),
+        job_titles=checked.get("job_titles", ()),
+    )
 
 
 def _folded(texts: Iterable[str]) -> frozenset[str]:
@@ -642,8 +701,26 @@ def validate_segments(data: object) -> tuple[SegmentDef, ...]:
 # The stored form --------------------------------------------------------------------------------
 
 
-def _file_form(segment: SegmentDef) -> dict[str, object]:
-    """The segment as the file's mapping, enums as their values, every optional field present."""
+def _queries_form(queries: DiscoveryQueries) -> dict[str, object]:
+    """The discovery queries' file form: ``places``, then ``registry`` (holding only its
+    non-empty ``keywords`` and ``sic_codes``) and ``job_titles`` only when non-empty, so a
+    Segment without them keeps the canonical text it had before Story 11.5."""
+    form: dict[str, object] = {"places": list(queries.places)}
+    registry: dict[str, object] = {}
+    if queries.registry_keywords:
+        registry["keywords"] = list(queries.registry_keywords)
+    if queries.registry_sic_codes:
+        registry["sic_codes"] = list(queries.registry_sic_codes)
+    if registry:
+        form["registry"] = registry
+    if queries.job_titles:
+        form["job_titles"] = list(queries.job_titles)
+    return form
+
+
+def file_form(segment: SegmentDef) -> dict[str, object]:
+    """The segment as the file's mapping, enums as their values, every optional field present
+    except the discovery queries' optional ones, which appear only when non-empty."""
     return {
         "key": segment.key,
         "name": segment.name,
@@ -682,14 +759,14 @@ def _file_form(segment: SegmentDef) -> dict[str, object]:
             }
             for signal_type in segment.signal_types
         ],
-        "discovery_queries": {"places": list(segment.discovery_queries.places)},
+        "discovery_queries": _queries_form(segment.discovery_queries),
     }
 
 
 def definition_text(segment: SegmentDef) -> str:
     """The canonical JSON of ``segment``'s file form: what the ``segments`` table stores."""
     return json.dumps(
-        _file_form(segment), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        file_form(segment), sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
 
 
@@ -710,6 +787,156 @@ def segment_from_text(text: str) -> SegmentDef:
     except (TypeError, ValueError, RecursionError):  # JSONDecodeError is a ValueError
         raise InvalidSegments("definition", "is not valid JSON") from None
     return _Validator().segment(data, 0)
+
+
+# Dashboard editing (Story 11.5) ------------------------------------------------------------------
+
+EDITING_RULE: Final = "A Segment needs a decision-maker role and at least one Tier 1 or 2 Event"
+EDITING_TIERS: Final = frozenset({1, 2})
+FORM_SEPARATOR: Final = "can't contain | or =>"
+FORM_SEPARATORS: Final = ("|", "=>")
+KEYED_LISTS: Final = frozenset({"disqualifiers", "signal_types"})
+FORM_FIELD: Final = "form"  # a refusal that belongs to no one field
+
+
+class SegmentRefused(DomainError):
+    """A dashboard Segment save refused, nothing written: ``problems`` maps each refused form
+    field (or ``form``) to its reason. The message names the fields, never a value."""
+
+    code = "segment_refused"
+
+    def __init__(self, problems: Mapping[str, str]) -> None:
+        self.problems: dict[str, str] = dict(problems)
+        super().__init__(f"segment refused: {', '.join(self.problems) or 'no field'}")
+
+
+def segment_editing_rule(segment: SegmentDef) -> InvalidSegments | None:
+    """The rules the dashboard adds to ``validate_segments``: a Segment needs a
+    decision-maker role and at least one Tier 1 or 2 Event (``EDITING_RULE``, on
+    ``segments[<key>].decision_maker_roles`` or ``segments[<key>].signal_types``), and no
+    decision-maker title, preferred role or when-term may contain ``|`` or ``=>``, which the
+    Segments page's form uses as separators (``FORM_SEPARATOR``, on
+    ``segments[<key>].decision_maker_roles`` or
+    ``segments[<key>].signal_types[<type key>].preferred_roles``). ``None`` when ``segment``
+    keeps them, else the first refusal."""
+    path = f"segments[{segment.key}]"
+    if not any(rank for rank in segment.decision_maker_roles):
+        return InvalidSegments(f"{path}.decision_maker_roles", EDITING_RULE)
+    if not any(
+        each.signal_class is SignalClass.EVENT and each.tier in EDITING_TIERS
+        for each in segment.signal_types
+    ):
+        return InvalidSegments(f"{path}.signal_types", EDITING_RULE)
+    if any(_has_separator(title) for rank in segment.decision_maker_roles for title in rank):
+        return InvalidSegments(f"{path}.decision_maker_roles", FORM_SEPARATOR)
+    for each in segment.signal_types:
+        if any(
+            _has_separator(text)
+            for preferred in each.preferred_roles
+            for text in (*preferred.when_terms, *preferred.roles)
+        ):
+            return InvalidSegments(
+                f"{path}.signal_types[{each.key}].preferred_roles", FORM_SEPARATOR
+            )
+    return None
+
+
+def _has_separator(text: str) -> bool:
+    return any(separator in text for separator in FORM_SEPARATORS)
+
+
+_PATH_TOKEN: Final = re.compile(r"\.([a-z_]+)|\[([^\]]*)\]")
+_EDITED_SEGMENT: Final = re.compile(r"segments\[[^\]]*\]")
+
+
+def edited_field(path: str, form: Mapping[str, object]) -> str:
+    """The editor's form field for the validator ``path`` of the edited Segment, whose file
+    form is ``form``: the path inside the Segment with each Signal type and disqualifier named
+    by its 0-based position in ``form`` (``signal_types[2].weight``), cut at the first other
+    list index (``industry_keywords``, ``decision_maker_roles``,
+    ``signal_types[0].match_terms``, ``discovery_queries.registry.sic_codes``); ``form`` for
+    the Segment as a whole or a path it can't place."""
+    prefix = _EDITED_SEGMENT.match(path)
+    if prefix is None:
+        return FORM_FIELD
+    rest = path[prefix.end() :]
+    parts: list[str] = []
+    position = 0
+    for token in _PATH_TOKEN.finditer(rest):
+        if token.start() != position:
+            return FORM_FIELD
+        position = token.end()
+        name, index = token.group(1), token.group(2)
+        if name is not None:
+            parts.append(f".{name}" if parts else name)
+            continue
+        if len(parts) != 1 or parts[0] not in KEYED_LISTS:
+            break
+        items = form.get(parts[0])
+        found = _position(index, items if isinstance(items, list) else [])
+        if found is None:
+            return FORM_FIELD
+        parts.append(f"[{found}]")
+    else:
+        if position != len(rest):
+            return FORM_FIELD
+    return "".join(parts) or FORM_FIELD
+
+
+def _position(index: str, items: list[object]) -> int | None:
+    """The 0-based position the validator's ``[<index>]`` names: a number as it is, a key as
+    the first item with that key."""
+    if index.isascii() and index.isdigit():
+        return int(index)
+    for found, item in enumerate(items):
+        if isinstance(item, dict) and item.get("key") == index:
+            return found
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class FieldChange:
+    """One changed field between two versions: its path in the file form (``name``,
+    ``size_range.maximum``, ``signal_types[<key>].weight``, ``signal_types[<key>]`` for a type
+    added or removed) and its old and new values as compact JSON, ``None`` where absent."""
+
+    path: str
+    old: str | None
+    new: str | None
+
+
+def _shown(value: object) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(", ", ": "))
+
+
+def _diff(old: object, new: object, path: str, out: list[FieldChange]) -> None:
+    if isinstance(old, dict) and isinstance(new, dict):
+        names = [*new, *(name for name in old if name not in new)]
+        for name in names:
+            child = f"{path}.{name}" if path else name
+            before, after = old.get(name), new.get(name)
+            if name in KEYED_LISTS and isinstance(before, list) and isinstance(after, list):
+                olds = {item["key"]: item for item in before if isinstance(item, dict)}
+                news = {item["key"]: item for item in after if isinstance(item, dict)}
+                for key in [*news, *(key for key in olds if key not in news)]:
+                    _diff(olds.get(key), news.get(key), f"{child}[{key}]", out)
+            else:
+                _diff(before, after, child, out)
+        return
+    shown_old, shown_new = _shown(old), _shown(new)
+    if shown_old != shown_new:
+        out.append(FieldChange(path, shown_old, shown_new))
+
+
+def segment_form_diff(old: SegmentDef, new: SegmentDef) -> tuple[FieldChange, ...]:
+    """The fields that differ between ``old`` and ``new``, in the new file form's order, then
+    the ones only ``old`` has. Signal types and disqualifiers are matched by key: a changed one
+    lists its changed fields, an added or removed one is a single change of the whole item."""
+    out: list[FieldChange] = []
+    _diff(file_form(old), file_form(new), "", out)
+    return tuple(out)
 
 
 # The signal_types block (Story 2.8) --------------------------------------------------------------

@@ -143,11 +143,14 @@ element carrying ``hx-disable``; the forms sit outside them. A person Evidence r
 
 **The Score panel (Story 2.15).** ``lead_score.html`` (``<section id="lead-score">``), below the
 header, inside ``lead.html`` and alone as the answer to ``POST /leads/{lead_id}/rescore``, which
-HTMX swaps in for the whole panel. ``score_context(lead_id, stored, segment, notice=None)``
-gives a ``ScorePanel`` from ``queries.scoring.stored`` and the Lead's Segment:
+HTMX swaps in for the whole panel. ``score_context(lead_id, stored, segment, notice=None,
+live=..., current_version=None)`` gives a ``ScorePanel`` from ``queries.scoring.stored`` and the
+Lead's Segment (Story 11.5: the definition of the version the score used when the route found
+it stored, else the current one; ``current_version``: its current version):
 
 - a scored Lead: "Tier <A|B|C>", the Fit, Signal and Lead Scores, the computed time
-  (``YYYY-MM-DD HH:MM UTC``) and the Segment version ("v<n>"), then one ``FactorRow`` per
+  (``YYYY-MM-DD HH:MM UTC``) and the Segment version it was scored with ("v<n> (current
+  v<m>)", or "v<n>" when the Segment's current version is unknown), then one ``FactorRow`` per
   factor (the Fit factors, then the Signal factors): its label (``SIZE_LABELS`` for the size;
   the Signal type's name from the Segment, else its key, for the others), its points (2
   decimals at most, trailing zeros dropped) and its Evidence, each linked as
@@ -165,7 +168,10 @@ token (``MalformedForm`` otherwise), and the POST's notice is ``rescore_queued()
 ("Re-score queued.", role ``status``) or, for a merged or closed Lead, where nothing is queued,
 ``rescore_refused(merged)`` (role ``alert``: "This Lead was merged into another Lead; it can't
 be re-scored." or "This Lead is closed; it can't be re-scored."). Each Evidence row carries
-``id="evidence-<id>"``.
+``id="evidence-<id>"``. "Re-score" keeps the Lead's stored Segment version (Story 11.5); a
+second form beside it, "Re-score with the current definition" (``hx-post`` to
+``/leads/{lead_id}/rescore-current``, the same shape), moves it to the current version, and
+its notice is ``rescore_current_queued()`` ("Re-score with the current definition queued.").
 
 **Job postings (Story 2.11).** ``lead_context`` also takes the Lead's job postings
 (``queries.research.job_postings``: live first, then the newest first seen) and gives one
@@ -282,6 +288,7 @@ MISSING_TEMPLATE: Final = "lead_missing.html"
 CONTACTS_TEMPLATE: Final = "lead_contacts.html"
 SCORE_TEMPLATE: Final = "lead_score.html"
 RESCORE_QUEUED: Final = "Re-score queued."
+RESCORE_CURRENT_QUEUED: Final = "Re-score with the current definition queued."
 RESCORE_CLOSED: Final = "This Lead is closed; it can't be re-scored."
 RESCORE_MERGED: Final = "This Lead was merged into another Lead; it can't be re-scored."
 NOT_SCORED: Final = "Not scored yet."
@@ -1411,13 +1418,18 @@ def _links(evidence_ids: Iterable[str], live: Collection[str]) -> tuple[Evidence
 
 
 def score_panel(
-    stored: StoredScore | None, segment: SegmentDef | None, live: Collection[str] = frozenset()
+    stored: StoredScore | None,
+    segment: SegmentDef | None,
+    live: Collection[str] = frozenset(),
+    current_version: int | None = None,
 ) -> ScorePanel:
     """The Score panel of the Lead's stored score, ``live`` the ids of the Evidence the page
-    shows; see the module docstring."""
+    shows and ``current_version`` the Segment's current version; see the module docstring."""
     if stored is None:
         return ScorePanel(UNSCORED)
     version = NO_VALUE if stored.segment_version is None else f"v{stored.segment_version}"
+    if stored.segment_version is not None and current_version is not None:
+        version = f"{version} (current v{current_version})"
     if stored.disqualified:
         rules = {} if segment is None else {rule.key: rule for rule in segment.disqualifiers}
         key = stored.disqualified_rule or NO_VALUE
@@ -1453,6 +1465,11 @@ def rescore_queued() -> Notice:
     return Notice(Role.STATUS, RESCORE_QUEUED)
 
 
+def rescore_current_queued() -> Notice:
+    """The notice of a "Re-score with the current definition" that was queued."""
+    return Notice(Role.STATUS, RESCORE_CURRENT_QUEUED)
+
+
 def rescore_refused(merged: bool) -> Notice:
     """The notice of a "Re-score" refused because the Lead is merged or closed (nothing was
     queued)."""
@@ -1465,8 +1482,8 @@ def submitted_rescore(fields: FormFields) -> None:
         raise MalformedForm(WRONG_FIELDS)
 
 
-def _segment_of(segment_id: str, segments: Iterable[SeededSegment]) -> SegmentDef | None:
-    return next((each.definition for each in segments if each.id == segment_id), None)
+def _segment_of(segment_id: str, segments: Iterable[SeededSegment]) -> SeededSegment | None:
+    return next((each for each in segments if each.id == segment_id), None)
 
 
 def score_context(
@@ -1475,12 +1492,14 @@ def score_context(
     segment: SegmentDef | None,
     notice: Notice | None = None,
     live: Collection[str] = frozenset(),
+    current_version: int | None = None,
 ) -> dict[str, object]:
-    """What ``lead_score.html`` renders: the Lead's id (for the form's path), the panel (its
-    Evidence linked only when in ``live``) and the POST's notice."""
+    """What ``lead_score.html`` renders: the Lead's id (for the forms' paths), the panel (its
+    Evidence linked only when in ``live``, its version beside the Segment's
+    ``current_version``) and the POST's notice."""
     return {
         "lead_id": lead_id,
-        "score": score_panel(stored, segment, live),
+        "score": score_panel(stored, segment, live, current_version),
         "score_notice": notice,
     }
 
@@ -1501,6 +1520,7 @@ def lead_context(
     receipts: Mapping[str, Iterable[StoredReceipt]] = MappingProxyType({}),
     score: StoredScore | None = None,
     drafts: Iterable[DraftSource] = (),
+    score_segment: SegmentDef | None = None,
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the legal-form section for a GB Lead
     (``legal_form_view``, Story 2.12), the Signals and the live Evidence (in the order given),
@@ -1509,18 +1529,22 @@ def lead_context(
     Contact id), its Market named from ``markets`` (the route passes ``()`` when the Markets
     can't be read) and its erase link, or, for an erased one, its tombstone line with its
     request from ``erasures`` and its receipts from ``receipts`` (both by Contact id), the Score
-    panel (``score_context``, Story 2.15) of ``score``, and the Drafts (Story 4.12), one
-    ``DraftRow`` per ``DraftSource``, in the order given."""
+    panel (``score_context``, Story 2.15) of ``score``, labelled from ``score_segment`` (the
+    Segment version the score used, Story 11.5) or, when that is ``None``, from the Segment's
+    current definition, and the Drafts (Story 4.12), one ``DraftRow`` per ``DraftSource``, in
+    the order given."""
     found = tuple(contacts)
     stored_segments = tuple(segments)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     legal_form_ids = _legal_form_ids(legal_form)
+    seeded = _segment_of(lead.segment_id, stored_segments)
     return {
         **score_context(
             lead.id,
             score,
-            _segment_of(lead.segment_id, stored_segments),
+            score_segment or (None if seeded is None else seeded.definition),
             live=frozenset(row.evidence.id for row in signals.evidence),
+            current_version=None if seeded is None else seeded.version,
         ),
         "lead": lead_header(lead, stage, segment_names(stored_segments), signals.hq_tz),
         "legal_form": legal_form_view(lead, legal_form, signals.evidence),

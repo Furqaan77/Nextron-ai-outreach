@@ -24,6 +24,9 @@ the running use case's transaction. It stores and returns what it is given and c
   stored ``tier`` and ``lead_score`` that isn't merged and whose stage is ``new``, ``queued`` or
   ``contacted``, by id. It reads ``merged_into`` and ``pipeline_stage`` read-only, like
   ``retier_candidates``.
+- ``segment_leads(segment_id)`` (Story 11.5): the ids of the Segment's Leads that aren't merged
+  and aren't ``lost`` or ``disqualified``, by id (read-only, like ``retier_candidates``): the
+  Leads "Re-score with the current definition" covers for a whole Segment.
 """
 
 from dataclasses import dataclass
@@ -145,6 +148,20 @@ def write_tier(
         tier_computed_at=computed_at,
         score_factors=factors,
     )
+
+
+def segment_leads(segment_id: str) -> tuple[str, ...]:
+    """The Segment's open, unmerged Leads, by id."""
+    statement = (
+        select(LeadRecord.id)
+        .where(
+            LeadRecord.segment_id == segment_id,  # discovery's column, read only
+            LeadRecord.merged_into.is_(None),  # discovery's column, read only
+            LeadRecord.pipeline_stage.not_in(CLOSED),  # pipeline's column, read only
+        )
+        .order_by(LeadRecord.id)
+    )
+    return tuple(current().session.execute(statement).scalars())
 
 
 def retier_candidates() -> tuple[str, ...]:

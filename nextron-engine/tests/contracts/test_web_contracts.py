@@ -161,6 +161,12 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/facts/add",
         "/facts/edit",
         "/facts/retract",
+        "/segments",  # Story 11.5
+        "/segments/create",
+        "/segments/{segment_id}",
+        "/segments/{segment_id}/versions",
+        "/segments/{segment_id}/edit",
+        "/segments/{segment_id}/rescore-current",
         "/ai",
         "/ai/check",
         "/ai/rollback",
@@ -217,6 +223,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/{lead_id}/call",
         "/leads/{lead_id}/deal",
         "/leads/{lead_id}/outcome",  # Story 9.4
+        "/leads/{lead_id}/rescore-current",  # Story 11.5
         "/leads/{lead_id}/primary",
         "/leads/{lead_id}/find-email",
     ]
@@ -712,6 +719,12 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "notifications.html",
         "pipeline.html",
         "quotas.html",
+        "segment.html",
+        "segment_form.html",
+        "segment_panel.html",
+        "segment_versions.html",
+        "segments.html",
+        "segments_panel.html",
         "settings.html",
         "settings_form.html",
         "signal_inbox.html",  # Story 2.16

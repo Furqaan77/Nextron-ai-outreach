@@ -516,8 +516,9 @@ def test_everything_sits_inside_hx_disable_with_no_htmx_action(seeded: World) ->
     assert sorted(form.attrs["hx-post"] for form in exports) == sorted(
         f"/contacts/{contact_id}/export" for contact_id in contacts
     )
-    rescore = [form for form in forms if form.attrs.get("action") == f"/leads/{lead}/rescore"]
-    assert len(rescore) == 1  # Story 2.15: the Score panel's one form
+    rescore_paths = {f"/leads/{lead}/rescore", f"/leads/{lead}/rescore-current"}
+    rescore = [form for form in forms if form.attrs.get("action") in rescore_paths]
+    assert len(rescore) == 2  # Story 2.15's "Re-score" and Story 11.5's current-definition one
     find_email = [
         form for form in forms if form.attrs.get("action") == f"/leads/{lead}/find-email"
     ]

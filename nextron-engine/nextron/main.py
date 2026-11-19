@@ -726,8 +726,8 @@ the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``
    ``Seeds(clock).sync_seed`` (``nextron.app.ops.api``): the Segments, the Markets, the
    Sequences, the Offers, the Campaigns, then the Approved Company Facts, in one transaction.
    Its ``InvalidSegments`` (a
-   signal-type or disqualifier key of the file that a stored Segment no longer in the file
-   still uses) prints ``seed/segments.yaml: <message>``; its ``InvalidMarkets`` (a country code
+   stored Segment that no longer validates, found while listing the differences) prints
+   ``seed/segments.yaml: <message>``; its ``InvalidMarkets`` (a country code
    or ccTLD of the file that a stored Market no longer in the file still uses, or a stored
    Market that no longer validates) prints ``seed/markets.yaml: <message>``; its
    ``InvalidSequences`` (an angle naming a Segment or Market that isn't in this sync's files, a
@@ -743,9 +743,13 @@ the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``
    prints ``seed/campaigns.yaml: <message>``; each exits 1. Any other exception prints ``seed
    sync failed (<type>); nothing was changed`` and exits 1. Either way the transaction rolled
    back, so no table changed.
-5. The summary on ``out`` (``format_seed_sync``) and exit 0: ``segments: <n> changed, <m>
-   unchanged`` (n counts created plus changed), then a line per created, changed and
-   not-in-file Segment; then the same block for the Markets (``markets: <n> changed, <m>
+5. The summary on ``out`` (``format_seed_sync``) and exit 0: while the database held no
+   Segment, ``segments: <n> changed, <m> unchanged`` (n counts created plus changed), then a
+   line per created Segment; once it holds any (Story 11.5: the dashboard owns them and nothing
+   is written), ``segments: Segments are managed in the dashboard; seed/segments.yaml
+   ignored``, then ``  <key>: only in the file``, ``  <key>: differs in <path>, <path>`` (the
+   changed fields, the database's version against the file's) and ``  <key>: only in the
+   dashboard`` per difference; then the same block for the Markets (``markets: <n> changed, <m>
    unchanged`` and a line per Market code) and for the Sequences (``sequences: <n> changed,
    <m> unchanged`` and a line per Sequence key); then the facts' block: ``company_facts: <n>
    changed, <m> unchanged`` (plus ``, <c> conflict`` or ``conflicts`` when there are any), a
@@ -873,6 +877,8 @@ from nextron.app.sending.checks import DomainChecks
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup import api as setup_api
 from nextron.app.setup.api import (
+    SEGMENT_ONLY_IN_DASHBOARD,
+    SEGMENT_ONLY_IN_FILE,
     Campaigns,
     CampaignSync,
     Credentials,
@@ -883,6 +889,7 @@ from nextron.app.setup.api import (
     SequenceSync,
     Setup,
 )
+from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.bootstrap import ENGINE_ROOT, BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine, create_read_only_engine
 from nextron.db.metering import UsageMeter
@@ -1479,6 +1486,7 @@ def build_app(
         place_discovery=place_discovery,
         selection=selection,
         signal_inbox=signal_inbox,
+        segment_editor=SegmentEditor(clock),  # Story 11.5: the Segments page
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -3203,6 +3211,25 @@ def _sync_block(
     return lines
 
 
+SEGMENTS_MANAGED: Final = "Segments are managed in the dashboard; seed/segments.yaml ignored"
+
+
+def _segments_block(result: SegmentSync) -> list[str]:
+    """The Segments' summary lines: ``_sync_block``'s while the database held none (the
+    bootstrap), else (Story 11.5) the managed notice and a line per difference."""
+    if not result.managed:
+        return _sync_block("segments", SEGMENTS_FILE_LABEL, result)
+    lines = [f"segments: {SEGMENTS_MANAGED}"]
+    for difference in result.differences:
+        if difference.only_in == SEGMENT_ONLY_IN_FILE:
+            lines.append(f"  {difference.key}: only in the file")
+        elif difference.only_in == SEGMENT_ONLY_IN_DASHBOARD:
+            lines.append(f"  {difference.key}: only in the dashboard")
+        else:
+            lines.append(f"  {difference.key}: differs in {', '.join(difference.paths)}")
+    return lines
+
+
 def _facts_block(result: CompanyFactSync) -> list[str]:
     """The Approved Company Facts' summary lines: the counts (with the conflicts, when there
     are any), then a line per created, changed, conflicting and not-in-file fact."""
@@ -3232,7 +3259,7 @@ def _facts_block(result: CompanyFactSync) -> list[str]:
 def format_seed_sync(result: SeedSync) -> str:
     """``seed sync``'s summary: the Segments' block, then the Markets', the Sequences', the
     Approved Company Facts', the Offers' and the Campaigns'."""
-    lines = _sync_block("segments", SEGMENTS_FILE_LABEL, result.segments)
+    lines = _segments_block(result.segments)
     lines += _sync_block("markets", MARKETS_FILE_LABEL, result.markets)
     lines += _sync_block("sequences", SEQUENCES_FILE_LABEL, result.sequences)
     lines += _facts_block(result.company_facts)

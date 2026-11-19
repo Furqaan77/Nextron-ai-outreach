@@ -91,6 +91,17 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``facts`` (``CompanyFacts``, the ``playbook`` service) in its own unit of work, then renders
   the panel again in a read-only one; a refused one (``InvalidFact``) answers 200 with the
   refused form re-rendered.
+- ``GET /segments`` (``segments_page``), ``GET /segments/{segment_id}`` (``segment_page``),
+  ``GET /segments/{segment_id}/versions`` (``segment_versions_page``), ``POST /segments/create``
+  (``segment_create``), ``POST /segments/{segment_id}/edit`` (``segment_edit``) and ``POST
+  /segments/{segment_id}/rescore-current`` (``segment_rescore_current``), all
+  ``@personal_data(False)``: the Segments section of Settings (FR-1, Story 11.5), linked from
+  the Settings page; see ``nextron.web.segments_page``. The create and edit POSTs run
+  ``segment_editor`` (``SegmentEditor``, the ``setup`` service) and the re-score POST
+  ``lead_scores.request_segment_rescore`` in their own unit of work, then render the panel again
+  in a read-only one; a refused save (``SegmentRefused``) answers 200 with the form re-rendered
+  as submitted. An unknown Segment (a text that isn't a ULID included) answers 404 with the
+  plain text "That Segment doesn't exist.", which never echoes the id.
 - ``GET /ai`` (``ai_content_page``) and ``POST /ai/check`` (``ai_content_check``), both
   ``@personal_data(False)``: the AI content view (Story 4.4), linked from the Settings page; see
   ``nextron.web.ai_content_page``. The GET reads ``queries.playbook.route_tuples()`` and
@@ -228,7 +239,8 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   (``lead_erasures``, Story 3.13: an erased Contact's tombstone line names its request) and
   ``queries.compliance.receipts`` (``lead_receipts``, Story 3.14: an erased Contact's erasure
   receipts follow its tombstone line), and
-  ``queries.scoring.stored`` (Story 2.15: the Score panel), with one "Export data (JSON)" form
+  ``queries.scoring.stored`` (Story 2.15: the Score panel, labelled from the Segment version
+  the score used, ``scored_segment``, Story 11.5), with one "Export data (JSON)" form
   per Contact (``export_page.lead_forms``, Story 3.15), and the Pipeline panel (Story 9.1,
   ``lead_pipeline.panel_context``) from ``queries.pipeline.lead_pipeline`` and, for its opt-out
   line, the suppression entry its latest close names (``queries.compliance.entries``). The list
@@ -250,7 +262,7 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   "Re-score queued."; a merged or closed Lead queues nothing and the panel carries the refusal
   notice (``leads_page.rescore_refused``). An unknown Lead (a text that isn't a ULID
   included) answers 404 with the plain text "That Lead doesn't exist.", which never echoes the
-  id.
+  id. "Re-score" keeps the Lead's stored Segment version (Story 11.5).
 - ``POST /leads/{lead_id}/stage`` (``lead_stage``), ``POST /leads/{lead_id}/call``
   (``lead_call``) and ``POST /leads/{lead_id}/deal`` (``lead_deal``), Story 9.1, all
   ``@personal_data(True)``: the Pipeline panel's forms; see ``nextron.web.lead_pipeline``. Each
@@ -275,6 +287,11 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   with what was typed, the posted ``booking`` id and the error next to its field. It answers 200
   with the panel; a saved outcome also sends ``HX-Trigger: call-outcome-saved``, on which the
   layout's notification area loads again, so the due line clears.
+- ``POST /leads/{lead_id}/rescore-current`` (``lead_rescore_current``, Story 11.5,
+  ``@personal_data(True)``): the Score panel's "Re-score with the current definition", shaped
+  like ``lead_rescore`` but running ``lead_scores.request_rescore_current(lead_id)``, whose job
+  applies the Segment's current version; its notice is "Re-score with the current definition
+  queued.".
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
   ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
   ``contact_id`` (``leads_page.submitted_contact``). It runs
@@ -412,6 +429,7 @@ from nextron.app.queries import scoring as scoring_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.app.queries.scoring import StoredScore
 from nextron.app.research.extraction import LeadSignals
 from nextron.app.research.finding import EmailFinding, SearchQueued
 from nextron.app.research.people import PrimaryContacts
@@ -427,6 +445,7 @@ from nextron.app.setup.api import (
     GrantStatus,
     Setup,
 )
+from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.channel_permission import PermissionRefused
 from nextron.domain.company_facts import InvalidFact
@@ -446,7 +465,7 @@ from nextron.domain.playbook import SyncTrigger
 from nextron.domain.prompts import InvalidPrompts
 from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.render import footer_complete
-from nextron.domain.segments import InvalidSegments
+from nextron.domain.segments import InvalidSegments, SegmentDef, SegmentRefused
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.signal_inbox_item import ItemsRefused, check_items
@@ -482,6 +501,7 @@ from nextron.web import leads_page as lead_rows
 from nextron.web import pipeline_page as board_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import ready_page as ready_rows
+from nextron.web import segments_page as segment_rows
 from nextron.web import signal_inbox_page as inbox_page_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
@@ -567,6 +587,19 @@ class NotificationItem:
     id: str
     text: str
     time: str
+
+
+def scored_segment(segment_id: str, score: StoredScore | None) -> SegmentDef | None:
+    """The definition of the Segment version ``score`` used, when that version is stored and
+    is not the current one (Story 11.5); else ``None``, so the Score panel uses the current
+    definition. Runs inside the caller's read unit."""
+    if score is None or score.segment_version is None:
+        return None
+    current = setup_queries.segment_by_id(segment_id)
+    if current is not None and current.version == score.segment_version:
+        return None
+    stored = setup_queries.segment_version(segment_id, score.segment_version)
+    return None if stored is None else stored.definition
 
 
 def health_count_text(errors: int) -> str | None:
@@ -683,6 +716,7 @@ def create_app(
     place_discovery: PlaceDiscovery,
     selection: Selection,
     signal_inbox: SignalInbox,
+    segment_editor: SegmentEditor,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -704,7 +738,9 @@ def create_app(
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
-    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``pipeline`` runs its Pipeline
+    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15) and both "Re-score with the
+    current definition" controls (Story 11.5); ``segment_editor`` creates and edits Segments
+    (Story 11.5); ``pipeline`` runs its Pipeline
     panel's moves, bookings and deal saves (Story 9.1); ``selection`` gives the "Ready to draft"
     page its list, capacity and picks and the notification area its signal shortfall (Story
     4.10); ``signal_inbox`` stores the Signal Inbox's pasted items and reprocesses a flagged one
@@ -1055,6 +1091,129 @@ def create_app(
         notice = fact_rows.retracted_notice(retracted)
         with units.open(read_only=True):
             return facts_answer(request, fact_rows.PANEL_TEMPLATE, notice=notice)
+
+    def segments_answer(
+        request: Request,
+        template: str,
+        *,
+        notice: str | None = None,
+        refused: tuple[segment_rows.SubmittedSegment, Mapping[str, str]] | None = None,
+    ) -> HTMLResponse:
+        """The Segments list (page or panel), in the caller's read-only unit of work."""
+        try:
+            rows = segment_rows.segment_rows(setup_queries.segments(), setup_queries.campaigns())
+        except STORED_ROW_REFUSED as unreadable:  # the create form stays reachable
+            context = segment_rows.list_context(
+                (), notice=notice, refused=refused, unavailable=unreadable.message
+            )
+        else:
+            context = segment_rows.list_context(rows, notice=notice, refused=refused)
+        return page(request, template, **context)
+
+    def segment_answer(
+        request: Request,
+        segment_id: str,
+        template: str,
+        *,
+        notice: str | None = None,
+        refused: tuple[segment_rows.SubmittedSegment, int, Mapping[str, str]] | None = None,
+    ) -> Response:
+        """One Segment's page or panel, in the caller's read-only unit of work; 404 for an
+        unknown id (never echoed)."""
+        seeded = setup_queries.segment_by_id(segment_id)
+        if seeded is None:
+            return not_found_text(segment_rows.NOT_FOUND)
+        campaigns = sum(1 for each in setup_queries.campaigns() if each.segment_id == seeded.id)
+        context = segment_rows.edit_context(
+            seeded,
+            campaigns,
+            len(scoring_queries.segment_leads(seeded.id)),
+            notice=notice,
+            refused=refused,
+        )
+        return page(request, template, **context)
+
+    @app.get("/segments", name="segments_page")
+    @personal_data(False)  # role titles, keywords and rules, never a person
+    def segments_page(request: Request) -> HTMLResponse:
+        return segments_answer(request, segment_rows.PAGE_TEMPLATE)
+
+    @app.post("/segments/create", name="segment_create")
+    @personal_data(False)
+    def segment_create(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        submitted = segment_rows.submitted_segment(fields, with_key=True)
+        proposed = segment_rows.proposed_form(submitted)
+        try:
+            with units.open():
+                saved = segment_editor.create(proposed.form)
+        except SegmentRefused as refusal:  # 200, so HTMX swaps the panel in; nothing was saved
+            problems = segment_rows.form_problems(refusal.problems, proposed)
+            with units.open(read_only=True):
+                return segments_answer(
+                    request, segment_rows.PANEL_TEMPLATE, refused=(submitted, problems)
+                )
+        notice = segment_rows.created_notice(saved.key)
+        with units.open(read_only=True):
+            return segments_answer(request, segment_rows.PANEL_TEMPLATE, notice=notice)
+
+    @app.get("/segments/{segment_id}", name="segment_page")
+    @personal_data(False)
+    def segment_page(request: Request, segment_id: str) -> Response:
+        return segment_answer(request, segment_id, segment_rows.SEGMENT_TEMPLATE)
+
+    @app.get("/segments/{segment_id}/versions", name="segment_versions_page")
+    @personal_data(False)
+    def segment_versions_page(request: Request, segment_id: str) -> Response:
+        seeded = setup_queries.segment_by_id(segment_id)
+        if seeded is None:
+            return not_found_text(segment_rows.NOT_FOUND)
+        context = segment_rows.versions_context(
+            seeded, setup_queries.segment_versions(seeded.id)
+        )
+        return page(request, segment_rows.VERSIONS_TEMPLATE, **context)
+
+    @app.post("/segments/{segment_id}/edit", name="segment_edit")
+    @personal_data(False)
+    def segment_edit(
+        request: Request, segment_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        submitted = segment_rows.submitted_segment(fields, with_key=False)
+        based_on = segment_rows.submitted_based_on(fields)
+        proposed = segment_rows.proposed_form(submitted, key=None)
+        proposed.form.pop(segment_rows.KEY, None)  # the editor keeps the stored key
+        try:
+            with units.open():
+                saved = segment_editor.edit(segment_id, based_on, proposed.form)
+        except SegmentRefused as refusal:  # 200, so HTMX swaps the panel in; nothing was saved
+            problems = segment_rows.form_problems(refusal.problems, proposed)
+            with units.open(read_only=True):
+                return segment_answer(
+                    request,
+                    segment_id,
+                    segment_rows.SEGMENT_PANEL_TEMPLATE,
+                    refused=(submitted, based_on, problems),
+                )
+        notice = segment_rows.saved_notice(saved.key, saved.version, saved.changed)
+        with units.open(read_only=True):
+            return segment_answer(
+                request, segment_id, segment_rows.SEGMENT_PANEL_TEMPLATE, notice=notice
+            )
+
+    @app.post("/segments/{segment_id}/rescore-current", name="segment_rescore_current")
+    @personal_data(False)
+    def segment_rescore_current(
+        request: Request, segment_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        segment_rows.submitted_rescore(fields)
+        with units.open():  # an unknown Segment covers no Lead, then answers 404 below
+            leads = lead_scores.request_segment_rescore(segment_id)
+        notice = segment_rows.rescore_notice(leads)
+        with units.open(read_only=True):
+            return segment_answer(
+                request, segment_id, segment_rows.SEGMENT_PANEL_TEMPLATE, notice=notice
+            )
 
     def ai_content_answer(
         request: Request, template: str, *, notice: str | None = None, alert: str | None = None
@@ -2233,6 +2392,7 @@ def create_app(
         contacts = research_queries.contacts(found.id)
         # live on every render, never stored (FR-18, AD-16)
         decisions = {each.id: compliance.evaluate_eligibility(each.id) for each in contacts}
+        score = scoring_queries.stored(found.id)
         context = lead_rows.lead_context(
             found,
             pipeline_queries.stage(found.id),
@@ -2247,7 +2407,8 @@ def create_app(
             postings=research_queries.job_postings(found.id),
             legal_form=research_queries.legal_form(found.id),
             receipts=lead_receipts(contacts),
-            score=scoring_queries.stored(found.id),
+            score=score,
+            score_segment=scored_segment(found.segment_id, score),
             drafts=lead_drafts(found.id),
         )
         return page(
@@ -2266,24 +2427,35 @@ def create_app(
         lead_rows.submitted_rescore(fields)
         with units.open():
             requested = lead_scores.request_rescore(lead_id)
+        return rescore_answer(request, lead_id, requested, lead_rows.rescore_queued())
+
+    def rescore_answer(
+        request: Request, lead_id: str, requested: RescoreRequest, queued: lead_rows.Notice
+    ) -> Response:
+        """The Score panel after a "Re-score" (either kind): 404 for an unknown Lead, else 200
+        with ``queued`` or the refusal notice."""
         if requested is RescoreRequest.UNKNOWN:  # never echoes the id
             text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
             return PlainTextResponse(text, status_code=404, headers=NO_STORE)
         if requested is RescoreRequest.QUEUED:
-            notice = lead_rows.rescore_queued()
+            notice = queued
         else:  # nothing was queued
             notice = lead_rows.rescore_refused(requested is RescoreRequest.MERGED)
         with units.open(read_only=True):  # 200, so HTMX swaps the panel in
             found = discovery_queries.lead(lead_id)
             seeded = None if found is None else setup_queries.segment_by_id(found.segment_id)
+            score = scoring_queries.stored(lead_id)
+            scored = None if found is None else scored_segment(found.segment_id, score)
             context = lead_rows.score_context(
                 lead_id,
-                scoring_queries.stored(lead_id),
-                None if seeded is None else seeded.definition,
+                score,
+                scored or (None if seeded is None else seeded.definition),
                 notice,
                 live=frozenset(row.id for row in research_queries.evidence(lead_id)),
+                current_version=None if seeded is None else seeded.version,
             )
             return page(request, lead_rows.SCORE_TEMPLATE, **context)
+
     def pipeline_context(
         lead_id: str,
         contacts: Iterable[research_queries.StoredContact],
@@ -2447,6 +2619,16 @@ def create_app(
         answer = pipeline_answer(request, lead_id, pipeline_rows.outcome_saved(saved))
         answer.headers["HX-Trigger"] = pipeline_rows.OUTCOME_SAVED_EVENT  # refresh the due lines
         return answer
+
+    @app.post("/leads/{lead_id}/rescore-current", name="lead_rescore_current")
+    @personal_data(True)  # the Lead page's panel; a Lead's name can be a sole trader's name
+    def lead_rescore_current(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        lead_rows.submitted_rescore(fields)
+        with units.open():
+            requested = lead_scores.request_rescore_current(lead_id)
+        return rescore_answer(request, lead_id, requested, lead_rows.rescore_current_queued())
 
     @app.post("/leads/{lead_id}/primary", name="lead_make_primary")
     @personal_data(True)  # the panel shows Contacts, who are people
