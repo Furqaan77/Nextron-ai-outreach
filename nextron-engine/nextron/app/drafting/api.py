@@ -38,6 +38,11 @@ argument checks, before any read or write.
    ``bulk`` on the bulk lane, else the interactive lane (``enroll`` passes ``soon``). The job
    drafts at ``bulk`` on the bulk lane and at ``soon`` on the interactive lane.
    ``StepDrafts`` (``nextron.app.drafting.generation``) runs it.
+5. **The follow-ups' batch item** (Story 4.18): when it created any of Steps 2 to 4's slots, in
+   the same unit of work, one ``pending`` drafting item (``nextron.db.ai_batches.queue_item``,
+   owner ``drafting``, route ``draft_sequence``, target the Enrollment, ``rev`` the next for
+   that target, no context). The daily ``submit_bulk_ai`` sends it
+   (``nextron.app.drafting.batches.DraftingBatches``).
 
 **``@command set_due(draft_id, due_at) -> bool``** sets the due time (an aware ``datetime``,
 always from ``nextron.domain.sending_policy.step_due_at``) of a ``ready`` or ``approved``
@@ -136,7 +141,7 @@ from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.drafting import DraftView, RevisionView
 from nextron.app.queries.sequencing import StoredEnrollment
-from nextron.db import eventlog
+from nextron.db import ai_batches, eventlog
 from nextron.db.repos.drafting import drafts as drafts_repo
 from nextron.db.repos.drafting import footer_snapshots as footer_snapshots_repo
 from nextron.db.repos.drafting import grounding_results as grounding_results_repo
@@ -147,6 +152,7 @@ from nextron.db.repos.drafting.revisions import NewRevision
 from nextron.db.uow import command
 from nextron.domain import render
 from nextron.domain.ai import Urgency, check_urgency
+from nextron.domain.ai_batch import BatchOwner
 from nextron.domain.contactability import Blocked, ContactSubject
 from nextron.domain.contacts import ProvenanceSubject
 from nextron.domain.draft import CREATION, STEP_KINDS, DraftKind, DraftStatus, RevisionOrigin
@@ -173,7 +179,13 @@ from nextron.domain.notifications import ContactErased, FooterChanged
 from nextron.domain.segments import SignalClass
 from nextron.domain.sending_policy import step_due_at
 from nextron.domain.signals import EventSignal, strongest_event
-from nextron.domain.step_drafting import DRAFT_STEP_JOB, ENROLLMENT_ID_FIELD, STEP_FIELD
+from nextron.domain.step_drafting import (
+    DRAFT_SEQUENCE_ROUTE,
+    DRAFT_STEP_JOB,
+    ENROLLMENT_ID_FIELD,
+    FOLLOW_UP_STEPS,
+    STEP_FIELD,
+)
 from nextron.ports.clock import Clock
 
 log = logging.getLogger(__name__)
@@ -515,6 +527,15 @@ class Drafting:
                     STEP_FIELD: FIRST_STEP,
                 },
                 lane=Lane.BULK if urgency is Urgency.BULK else Lane.INTERACTIVE,
+            )
+        if any(step in FOLLOW_UP_STEPS for step in wanted):  # Story 4.18: the afternoon batch
+            ai_batches.queue_item(
+                BatchOwner.DRAFTING,
+                route=DRAFT_SEQUENCE_ROUTE,
+                target_id=enrollment.id,
+                rev=ai_batches.next_rev(BatchOwner.DRAFTING, DRAFT_SEQUENCE_ROUTE, enrollment.id),
+                context_id=None,
+                at=now,
             )
         return ids
 

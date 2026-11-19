@@ -212,6 +212,7 @@ def test_the_bot_token_appears_in_no_log_error_last_error_database_file_or_respo
             lead_score_signal_weight="",
             unsub_worker_host="",
             bulk_ai_submit_at="",  # Story 4.17
+            draft_deadline="",  # Story 4.18
         ),
     )
     assert saved.status == 200 and "Saved." in saved.text

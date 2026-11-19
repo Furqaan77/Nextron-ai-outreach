@@ -269,6 +269,7 @@ FILES = [
     "nextron/app/discovery/legal_form.py",
     "nextron/app/research/finding.py",
     "nextron/app/research/batches.py",
+    "nextron/app/drafting/batches.py",  # Story 4.18
     "nextron/app/scoring/lead_scores.py",
     "nextron/app/discovery/places.py",
     "nextron/adapters/__init__.py",
@@ -284,6 +285,7 @@ FILES = [
     "nextron/adapters/ai/prompts/grounding_check/v1.md",
     "nextron/adapters/ai/prompts/grounding_check_fallback/v1.md",
     "nextron/adapters/ai/prompts/draft_sequence/v1.md",
+    "nextron/adapters/ai/prompts/draft_sequence/v2.md",  # Story 4.18
     "nextron/adapters/backup_target/__init__.py",
     "nextron/adapters/clock/__init__.py",
     "nextron/adapters/companies_house/__init__.py",

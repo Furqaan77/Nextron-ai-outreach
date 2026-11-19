@@ -1342,6 +1342,17 @@ def drafting(world: World, *, grounding_active: bool = True) -> str:
 CLEAN_CHECK = {"claims": [], "flags": []}
 
 
+def v2(answer: dict[str, Any]) -> dict[str, Any]:
+    """A v1 Step 1 answer in ``DraftSequenceV2``'s shape (Story 4.18: v2 is the default
+    ``draft_sequence`` candidate, so the smoke run reads the answer by schema 2)."""
+    step = {key: answer[key] for key in ("subject", "body", "claims")}
+    return {
+        "steps": [{"step": 1, **step, "angle_fact_id": None, "angle_fact_version": None}],
+        "cited_signal_id": answer["cited_signal_id"],
+        "explanation": answer["explanation"],
+    }
+
+
 def test_a_clean_draft_per_smoke_case_passes_and_activates_draft_sequence(
     started: World,
 ) -> None:
@@ -1351,7 +1362,7 @@ def test_a_clean_draft_per_smoke_case_passes_and_activates_draft_sequence(
     cases = started.of("draft_sequence")
     assert len(cases) >= 10
     for case in cases:
-        started.llm.script.extend([ok(clean_answer(case)), ok(CLEAN_CHECK)])
+        started.llm.script.extend([ok(v2(clean_answer(case))), ok(CLEAN_CHECK)])
 
     assert started.run(tuple_id, "drafting_smoke") is True
 
@@ -1389,7 +1400,7 @@ def test_one_grounding_flag_fails_the_drafting_smoke_run(started: World) -> None
     flagged = {"code": "false_urgency", "span": "x", "explanation": "Pressure."}
     for number, case in enumerate(cases):
         check = {"claims": [], "flags": [flagged]} if number == 0 else CLEAN_CHECK
-        started.llm.script.extend([ok(clean_answer(case)), ok(check)])
+        started.llm.script.extend([ok(v2(clean_answer(case))), ok(check)])
 
     started.run(tuple_id, "drafting_smoke")
 
@@ -1405,7 +1416,7 @@ def test_no_active_grounding_tuple_fails_every_smoke_case_closed(started: World)
     tuple_id = drafting(started, grounding_active=False)
     cases = started.of("draft_sequence")
     for case in cases:
-        started.llm.script.append(ok(clean_answer(case)))
+        started.llm.script.append(ok(v2(clean_answer(case))))
 
     started.run(tuple_id, "drafting_smoke")
 
@@ -1441,9 +1452,9 @@ def test_an_invalid_or_refused_draft_is_flagged_without_a_grounding_call(
     tuple_id = drafting(started)
     cases = started.of("draft_sequence")
     started.llm.script.append(LlmInvalid(model=HAIKU, usage=LlmUsage(requests=1)))
-    started.llm.script.append(ok({**clean_answer(cases[1]), "cited_signal_id": "nope"}))
+    started.llm.script.append(ok(v2({**clean_answer(cases[1]), "cited_signal_id": "nope"})))
     for case in cases[2:]:
-        started.llm.script.extend([ok(clean_answer(case)), ok(CLEAN_CHECK)])
+        started.llm.script.extend([ok(v2(clean_answer(case))), ok(CLEAN_CHECK)])
 
     started.run(tuple_id, "drafting_smoke")
 

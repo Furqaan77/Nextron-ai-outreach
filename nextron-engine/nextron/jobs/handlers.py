@@ -105,14 +105,18 @@ handler runs in.
   ``enrollment_id`` must be a ULID and its ``step`` a positive ``int`` (not a ``bool``), else
   ``InvalidJob``; it calls ``step_drafts().draft(enrollment_id, step, urgency)`` once, with
   ``urgency`` ``Urgency.BULK`` on the bulk lane and ``Urgency.SOON`` on the interactive lane
-  (Step 1 is due at once), and returns ``None``. It is never budget-gated
+  (Step 1 is due at once; Story 4.18's direct follow-up job ``draft_step:<enrollment>:2``,
+  payload ``step`` 2, runs on the interactive lane and drafts Steps 2 to 4 together), and
+  returns ``None``. It is never budget-gated
   (``draft_sequence`` is ``essential``); a retryable ``AdapterError`` (the API unavailable)
   propagates, so the runner retries it with nothing stored.
 - ``submit_bulk_ai(owners)`` and ``poll_ai_batches(owners)`` (Story 4.17): ``owners`` returns
-  each registered batch owner (``nextron.main`` passes ``lambda: (research_batches,)``, the
-  ``research`` service's ``ResearchBatches``). The payload is a trigger's tick. The handler
-  calls each owner's ``submit_bulk()`` (or ``poll()``) once, in order, and returns ``None``; a
-  budget refusal leaves the work queued for the next day, so neither is ever ``DEFERRED``.
+  each registered batch owner (Story 4.18: ``nextron.main`` passes one ``BatchJobs`` over the
+  ``research`` service's ``ResearchBatches`` and the ``drafting`` service's
+  ``DraftingBatches``, so each job calls one use case). The payload is a trigger's tick. The
+  handler calls each owner's ``submit_bulk()`` (or ``poll()``) once, in order, and returns
+  ``None``; a budget refusal leaves the work queued for the next day, so neither is ever
+  ``DEFERRED``.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -581,7 +585,8 @@ def draft_step(step_drafts: Callable[[], DraftingSteps]) -> Handler:
 
 class BatchingAi(Protocol):
     """What ``submit_bulk_ai`` and ``poll_ai_batches`` need of a batch owner (Story 4.17: the
-    ``research`` service's ``ResearchBatches``)."""
+    ``research`` service's ``ResearchBatches``; Story 4.18: the ``drafting`` service's
+    ``DraftingBatches``)."""
 
     def submit_bulk(self) -> int: ...
 

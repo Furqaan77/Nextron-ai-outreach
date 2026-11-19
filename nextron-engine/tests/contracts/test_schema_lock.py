@@ -31,6 +31,8 @@ SCHEMA_SHA256: Final[dict[tuple[str, int], str]] = {
     ),
     # Story 4.15: DraftSequenceV1
     ("draft_sequence", 1): "f03e18c5bfe54412235253f523493dc8d2736852befc21332c15d7adea7ea38b",
+    # Story 4.18: DraftSequenceV2 (Step 1 alone, or the follow-ups 2 to 4)
+    ("draft_sequence", 2): "f42ddd3ffb492043982efeca23a18584c891d26349cd0ff8a6b0799e908e3c23",
 }
 
 

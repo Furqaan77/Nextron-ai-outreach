@@ -187,6 +187,21 @@ class DraftSequenceV1(_Strict):
     explanation: str = Field(max_length=MAX_EXPLANATION)
 
 
+class DraftStep(_Strict):  # Story 4.18
+    step: int
+    subject: str
+    body: str
+    claims: list[DraftClaim]
+    angle_fact_id: str | None
+    angle_fact_version: int | None
+
+
+class DraftSequenceV2(_Strict):  # Story 4.18: Step 1 alone, or the follow-ups 2 to 4
+    steps: list[DraftStep]
+    cited_signal_id: str | None
+    explanation: str = Field(max_length=MAX_EXPLANATION)
+
+
 # Schemas ----------------------------------------------------------------------------------------
 
 
@@ -203,12 +218,14 @@ EXTRACT_PEOPLE_V1: Final = OutputSchema(1, ExtractPeopleV1)
 SIGNAL_INBOX_PARSE_V1: Final = OutputSchema(1, SignalInboxParseV1)
 GROUNDING_CHECK_V1: Final = OutputSchema(1, GroundingCheckV1)
 DRAFT_SEQUENCE_V1: Final = OutputSchema(1, DraftSequenceV1)
+DRAFT_SEQUENCE_V2: Final = OutputSchema(2, DraftSequenceV2)  # Story 4.18
 SCHEMAS: Final = (
     EXTRACT_SIGNALS_V1,
     EXTRACT_PEOPLE_V1,
     SIGNAL_INBOX_PARSE_V1,
     GROUNDING_CHECK_V1,
     DRAFT_SEQUENCE_V1,
+    DRAFT_SEQUENCE_V2,
 )
 
 

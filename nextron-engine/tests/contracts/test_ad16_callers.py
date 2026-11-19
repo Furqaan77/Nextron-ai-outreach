@@ -31,7 +31,10 @@ violation.
   ``PeopleExtractions.apply_extract_people_result``, a Message Batch result's apply) applies an
   ended batch's Signals result on Story 2.9's research world: its one gate call
   (``NewLeadSubject(web_domain)``, email, cold) comes before its first write, and ``Blocked``
-  writes nothing at all (the item is ``stale``).
+  writes nothing at all (the item is ``stale``). ``drafting.batch_apply`` (Story 4.18:
+  ``DraftingBatches.apply_draft_sequence_result``, a follow-up batch result's apply) applies an
+  Enrollment's item before Step 1 has a revision: its one gate call (the Contact, email, cold)
+  comes before its one write (the next ``pending`` item), and ``Blocked`` writes nothing.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -93,6 +96,7 @@ from nextron import main
 from nextron.app.compliance import api as compliance_api
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
 from nextron.app.drafting.api import Drafting, Traceability
+from nextron.app.drafting.batches import DraftingBatches
 from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue.api import JobQueue
@@ -236,6 +240,12 @@ MANIFEST: Final = (
     Caller("drafting.grounding_check", ("app/drafting/",), r"GroundingChecks\.check"),
     # Story 4.15: no Step 1 drafting call for a subject that may not be reached
     Caller("drafting.draft_step", ("app/drafting/",), r"StepDrafts\.draft"),
+    # Story 4.18: a follow-up batch result applies only while the Contact may still be reached
+    Caller(
+        "drafting.batch_apply",
+        ("app/drafting/",),
+        r"DraftingBatches\.apply_draft_sequence_result",
+    ),
     # Story 4.17: a Message Batch result applies only while the Lead may still be reached
     Caller(
         "research.batch_apply",
@@ -1386,6 +1396,55 @@ def _draft_step(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
 
 
+def _follow_up_apply(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.18: an Enrollment's follow-up item applied (``DraftingBatches.
+    apply_draft_sequence_result``) before Step 1 has a revision: its one gate call, the Contact,
+    comes before its one write (the next ``pending`` item); ``Blocked`` writes nothing."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
+    clock = FrozenClock(T0)
+    queue = queue_on(clock)
+    enrolled = world.transact(
+        lambda: Sequencing(clock, queue).enroll(
+            contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1, 2, 3, 4)
+        )
+    )
+    assert isinstance(enrolled, NewEnrollment)
+    llm = ScriptedLlm()  # never called
+    batches = DraftingBatches(clock, llm, queue, StepDrafts(clock, llm, queue))
+    with world.engine.connect() as connection:
+        item_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM ai_batch_items WHERE target_id = ? AND route = 'draft_sequence'",
+                (enrolled.enrollment_id,),
+            ).scalar_one()
+        )
+
+    @use_case
+    def apply() -> object:  # as poll_ai_batches runs it: in a transaction of its own
+        with current().transaction():
+            item = ai_batches.item(BatchOwner.DRAFTING, item_id)
+            assert item is not None
+            return batches.apply_draft_sequence_result(item, {"steps": []})
+
+    def action() -> object:
+        with world.units.open():
+            return apply()
+
+    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+def _follow_up_requeued(world: World) -> None:
+    """The allowed apply queued the next item; the blocked one wrote nothing and no Draft has a
+    revision (the scenario isn't vacuous)."""
+    with world.engine.connect() as connection:
+        revs = connection.exec_driver_sql(
+            "SELECT rev FROM ai_batch_items WHERE route = 'draft_sequence' ORDER BY rev"
+        ).all()
+        revisions = connection.exec_driver_sql("SELECT COUNT(*) FROM draft_revisions").scalar_one()
+    assert 2 in {row[0] for row in revs}
+    assert revisions == 0
+
+
 def _draft_step_recorded(world: World) -> None:
     """The allowed draft recorded ``no_route``, the blocked one its ``drafting_blocked`` event,
     and neither stored a revision (the scenario isn't vacuous)."""
@@ -1537,6 +1596,8 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             after_blocked=_draft_step_recorded,
         ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
+        # Story 4.18: Blocked writes nothing at all: the item goes stale in the caller's write
+        "drafting.batch_apply": Scenario((_follow_up_apply,), after_blocked=_follow_up_requeued),
         # Story 4.17: Blocked writes nothing at all: the item goes stale in the caller's write
         "research.batch_apply": Scenario((_batch_apply,), after_blocked=_batch_applied),
         "research.people_extraction": Scenario(
@@ -1641,6 +1702,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.grounding_check",  # Story 4.14
         "drafting.draft_step",  # Story 4.15
         "research.batch_apply",  # Story 4.17
+        "drafting.batch_apply",  # Story 4.18
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

@@ -74,7 +74,13 @@ from nextron.db.ai_batches import StoredBatch, StoredItem
 from nextron.db.uow import current, use_case
 from nextron.domain import extraction as extraction_rules
 from nextron.domain import people as people_rules
-from nextron.domain.ai_batch import TERMINAL, BatchOwner, BatchStatus, ItemStatus
+from nextron.domain.ai_batch import (
+    TERMINAL,
+    BatchOwner,
+    BatchStatus,
+    BulkAiSchedule,
+    ItemStatus,
+)
 from nextron.domain.backup import latest_slot
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.settings_schema import Key, SettingNotSet
@@ -141,15 +147,6 @@ class _Route:
     budget_class: BudgetClass
 
 
-@dataclass(frozen=True, slots=True)
-class BulkAiSchedule:
-    """When ``submit_bulk_ai`` runs, and whether a queued item missed the latest run."""
-
-    at: time
-    timezone: str
-    missed: bool
-
-
 class ResearchBatches:
     """The ``research`` service's Message Batches; see the module docstring."""
 
@@ -184,6 +181,11 @@ class ResearchBatches:
     @use_case
     def submit_bulk(self) -> int:
         """Send each route's queued items as Message Batches; how many batches were sent."""
+        return self.submit_queued()
+
+    def submit_queued(self) -> int:
+        """``submit_bulk``'s work inside the caller's use case (Story 4.18: the
+        ``submit_bulk_ai`` job runs every batch owner's in its one use case)."""
         return sum(self._submit(route) for route in self._routes.values())
 
     def _submit(self, route: _Route) -> int:
@@ -250,6 +252,11 @@ class ResearchBatches:
     def poll(self) -> int:
         """Settle the items of every ended batch and delete each settled batch; how many items
         were settled."""
+        return self.poll_open()
+
+    def poll_open(self) -> int:
+        """``poll``'s work inside the caller's use case (Story 4.18: the ``poll_ai_batches`` job
+        runs every batch owner's in its one use case)."""
         with current().transaction():
             batches = ai_batches.open_batches(OWNER)
         settled = 0

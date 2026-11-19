@@ -124,13 +124,14 @@ def test_each_service_reaches_only_its_own_batch_rows() -> None:
     assert owner_problems() == []
 
 
-def test_research_is_the_one_batch_owner_built_so_far() -> None:
+def test_research_and_drafting_are_the_batch_owners_built_so_far() -> None:
     users = {
         relative
         for relative, tree in _files(PACKAGE)
         if _uses_module(tree) or _constants(tree)
     }
-    assert users and all(user.startswith("app/research/") for user in users)
+    assert users and all(user.startswith(("app/research/", "app/drafting/")) for user in users)
+    assert any(user.startswith("app/drafting/") for user in users)  # Story 4.18
 
 
 def _probe(tmp_path: Path, relative: str, source: str) -> list[str]:

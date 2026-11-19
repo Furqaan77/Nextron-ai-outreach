@@ -105,7 +105,7 @@ from nextron.domain.backup import (
     OFFPC_ROTATION_DAYS,
     is_offpc_folder,
 )
-from nextron.domain.ai_batch import DEFAULT_BULK_AI_SUBMIT_AT
+from nextron.domain.ai_batch import DEFAULT_BULK_AI_SUBMIT_AT, DEFAULT_DRAFT_DEADLINE
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.company_facts import is_link
 from nextron.domain.errors import DomainError
@@ -194,6 +194,7 @@ class Key(StrEnum):
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
     BULK_AI_SUBMIT_AT = "bulk_ai_submit_at"
+    DRAFT_DEADLINE = "draft_deadline"
 
 
 class _Required(Enum):
@@ -1376,6 +1377,21 @@ SCHEMA: Mapping[str, Setting] = _declare(
             "the engine restarts."
         ),
         default=DEFAULT_BULK_AI_SUBMIT_AT,
+        timezone_key=Key.SENDER_TIMEZONE,
+    ),
+    # (Story 4.18, AD-8): the time by which the afternoon batch's follow-up drafts must be in;
+    # the 15-minute poll re-runs any not yet applied as direct calls at its first run after it.
+    Setting(
+        key=Key.DRAFT_DEADLINE,
+        type=SettingType.TIME,
+        section=Section.ENGINE,
+        label="Follow-up drafting deadline",
+        unit=(
+            "HH:MM in the sender's timezone (UTC until that is set). Follow-up drafts the "
+            "afternoon batch hasn't returned by then are drafted directly instead, at the next "
+            "15-minute poll."
+        ),
+        default=DEFAULT_DRAFT_DEADLINE,
         timezone_key=Key.SENDER_TIMEZONE,
     ),
 )

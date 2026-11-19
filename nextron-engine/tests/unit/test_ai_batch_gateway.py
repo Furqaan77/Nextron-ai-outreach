@@ -23,7 +23,7 @@ from nextron.adapters.ai import (
 )
 from nextron.adapters.ai.prompting import FALLBACK_BETA
 from nextron.adapters.ai.routes import CANDIDATES
-from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import Effort, Framing, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.ai_batch import custom_id
 from nextron.domain.budget import AiCall
 from nextron.domain.playbook import PlaybookSnapshot
@@ -262,6 +262,36 @@ def test_a_batch_of_the_opus_draft_route_never_carries_the_fallbacks_a_direct_ca
     params = api.body(0)["requests"][0]["params"]
     assert params["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert set(params) == {"model", "max_tokens", "system", "messages", "output_config"}
+    assert direct.headers["anthropic-beta"] == FALLBACK_BETA
+    assert api.body(1)["fallbacks"] == "default"
+
+
+def test_a_follow_up_drafting_item_is_sent_framed_on_v2_without_fallbacks() -> None:
+    """Story 4.18: a drafting item (custom_id ``draft_sequence_<enrollment>_<rev>``) on the v2
+    tuple, Step 1 as an ``earlier_step`` block, and the framing: the batch body carries neither
+    ``fallbacks`` nor the beta header; the same call made directly carries both."""
+    api = Api()
+    gateway, _ = gateway_on(api)
+    tuple_ = route("draft_sequence")
+    assert (tuple_.prompt_version, tuple_.schema_version) == ("v2", 2)
+    blocks = (
+        UntrustedBlock(f"lead:{LEAD_A}", "earlier_step", "step_1", "subject: Hi\n\nStep 1."),
+        block(),
+    )
+    framing = Framing("# Steps to write\n\nWrite Steps 2, 3 and 4.", "# Approved facts", "note")
+    request = BatchRequest(custom_id("draft_sequence", LEAD_B, 2), blocks, framing)
+
+    gateway.submit_batch(tuple_, [request])
+    gateway.run(tuple_, blocks, Urgency.SOON, framing=framing)
+
+    batch_request, direct = api.requests
+    assert "anthropic-beta" not in batch_request.headers
+    assert "fallbacks" not in batch_request.content.decode("utf-8")
+    [entry] = api.body(0)["requests"]
+    assert entry["custom_id"] == f"draft_sequence_{LEAD_B}_2"
+    assert set(entry["params"]) == {"model", "max_tokens", "system", "messages", "output_config"}
+    sent = json.dumps(entry["params"])
+    assert "Write Steps 2, 3 and 4." in sent and "earlier_step" in sent
     assert direct.headers["anthropic-beta"] == FALLBACK_BETA
     assert api.body(1)["fallbacks"] == "default"
 

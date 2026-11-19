@@ -3,12 +3,12 @@ trusted framing, the untrusted blocks, the proposal's code checks and the failur
 drafting smoke scorer (``nextron.domain.drafting_smoke``) over the shipped cases."""
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any, Final
 
 import pytest
 
-from nextron.adapters.ai.schemas import DRAFT_SEQUENCE_V1, validate
+from nextron.adapters.ai.schemas import DRAFT_SEQUENCE_V1, DRAFT_SEQUENCE_V2, validate
 from nextron.domain import grounding_rules, seed_yaml
 from nextron.domain import pseudonymise as pseudonymise_module
 from nextron.domain.ai import Framing, check_blocks
@@ -40,15 +40,28 @@ from nextron.domain.step_drafting import (
     DraftSignal,
     Proposal,
     ProposedClaim,
+    FollowUp,
+    FollowUpProposal,
     brief_section,
     citations_of,
     claims_of,
+    draft_deadline_of,
     facts_section,
     failure_text,
+    follow_up_blocks,
+    follow_up_citations,
+    follow_up_claims,
+    follow_up_fingerprint,
+    follow_up_framing,
     framing,
     input_blocks,
+    next_slot,
     note_text,
+    read_follow_ups,
     read_proposal,
+    read_step_1,
+    regulation_steps,
+    validate_follow_ups,
     validate_proposal,
 )
 from tests.contracts.support import ENGINE_ROOT
@@ -391,3 +404,284 @@ def test_the_rules_flag_a_draft_that_breaks_the_brief() -> None:
     scored = draft_flags(case, answer, SEQUENCE.steps[0], SEGMENTS)
 
     assert "link_in_step1" in scored.codes
+
+
+# Story 4.18: schema 2 and the follow-ups ---------------------------------------------------------
+
+KEY: Final = "claude-opus-5-5:medium:v2:s2:abcdef012345"
+ABA: Final = ("aba_formal_opinion_512", 1)
+WISH: Final = ("wish_wheels", 1)
+MP: Final = ("mp_online_digital", 1)
+STEP_1_FACT: Final = "legal_ai"
+FACTS: Final = frozenset({ABA, WISH, MP, (STEP_1_FACT, 1)})
+REGULATION: Final = frozenset({ABA})
+
+
+def v2_step_1(**changes: Any) -> dict[str, Any]:
+    step = {
+        "step": 1,
+        "subject": "Your intake hire",
+        "body": "Hi Jane,\n\nSaw you are hiring.\n\nWorth a look?",
+        "claims": [
+            {"span": "hiring", "evidence_id": EVIDENCE, "fact_id": None, "fact_version": None}
+        ],
+        "angle_fact_id": None,
+        "angle_fact_version": None,
+    }
+    return {"steps": [step | changes], "cited_signal_id": SIGNAL, "explanation": "Newest."}
+
+
+def fact_claim(fact: tuple[str, int]) -> dict[str, Any]:
+    return {"span": "a new angle", "evidence_id": None, "fact_id": fact[0], "fact_version": fact[1]}
+
+
+def follow_up(step: int, angle: tuple[str, int] | None, **changes: Any) -> dict[str, Any]:
+    row = {
+        "step": step,
+        "subject": "ignored",
+        "body": f"Hi Jane,\n\nStep {step} on a new angle.\n\nUseful?",
+        "claims": [] if angle is None else [fact_claim(angle)],
+        "angle_fact_id": None if angle is None else angle[0],
+        "angle_fact_version": None if angle is None else angle[1],
+    }
+    return row | changes
+
+
+def answer(*rows: dict[str, Any]) -> dict[str, Any]:
+    found = rows or (follow_up(2, ABA), follow_up(3, WISH), follow_up(4, MP))
+    return {"steps": list(found), "cited_signal_id": None, "explanation": "A new angle each."}
+
+
+def accepts(parsed: dict[str, Any], regulation: frozenset[int] = frozenset({2})) -> bool:
+    return validate_follow_ups(
+        read_follow_ups(parsed),
+        evidence_ids={EVIDENCE},
+        facts=FACTS,
+        step_1_fact_ids={STEP_1_FACT},
+        regulation_steps=regulation,
+        regulation_facts=REGULATION,
+    )
+
+
+def test_a_schema_2_step_1_answer_reads_as_the_step_1_proposal() -> None:
+    parsed = v2_step_1()
+    assert validate(DRAFT_SEQUENCE_V2, parsed) == parsed
+
+    found = read_step_1(parsed, 2)
+
+    assert found == Proposal(
+        "Your intake hire",
+        "Hi Jane,\n\nSaw you are hiring.\n\nWorth a look?",
+        (ProposedClaim("hiring", EVIDENCE, None, None),),
+        SIGNAL,
+        "Newest.",
+    )
+    assert read_step_1(v2_step_1(angle_fact_id="x", angle_fact_version=1), 2) == found  # ignored
+    v1 = {"subject": "S", "body": "B", "claims": [], "cited_signal_id": None, "explanation": ""}
+    assert read_step_1(v1, 1) == read_proposal(v1)
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        v2_step_1(step=2),  # not Step 1
+        {**v2_step_1(), "steps": []},  # no Step
+        {**v2_step_1(), "steps": v2_step_1()["steps"] * 2},  # two entries
+        answer(),  # the follow-ups
+    ],
+    ids=["step_2", "none", "two", "follow_ups"],
+)
+def test_a_schema_2_answer_that_isnt_exactly_step_1_is_discarded(parsed: dict[str, Any]) -> None:
+    assert read_step_1(parsed, 2) is None
+
+
+def test_an_unknown_schema_version_reads_as_nothing() -> None:
+    assert read_step_1(v2_step_1(), 3) is None
+    with pytest.raises(TypeError):
+        read_step_1("text", 2)  # type: ignore[arg-type]
+
+
+def test_the_follow_up_framing_names_the_steps_and_the_law_uk_sra_angle() -> None:
+    briefs = SEQUENCE.steps[1:4]
+
+    found = follow_up_framing(
+        briefs,
+        "law_private_ai",
+        "uk",
+        (DraftFact("sra_notice", 1, "Ring 020 7946 0958."),),
+        {2: " Lead with the SRA notice. ", 3: "", 1: "Step 1 only"},
+        EnglishVariant.EN_GB,
+    )
+
+    assert found.brief.startswith("# Steps to write\n\nWrite Steps 2, 3 and 4 of the Sequence")
+    for step in (2, 3, 4):
+        assert f"This email is Step {step} of the Sequence." in found.brief
+    assert "Angle for this Segment and Market: What the SRA notice" in found.brief
+    assert "ABA" not in found.brief  # the US angle stays out of a UK framing
+    assert "[phone]" in found.facts and "020 7946" not in found.facts
+    assert found.note == (
+        "Campaign angle for Step 2: Lead with the SRA notice.\nEnglish: British English"
+    )
+    with pytest.raises(ValueError, match="Step 2, 3 and 4"):
+        follow_up_framing(
+            SEQUENCE.steps[0:3], "law_private_ai", "uk", (), {}, EnglishVariant.EN_GB
+        )
+
+
+def test_only_a_step_whose_brief_has_the_segment_market_angle_needs_a_regulation_fact() -> None:
+    briefs = SEQUENCE.steps[1:4]
+
+    assert regulation_steps(briefs, "law_private_ai", "uk") == {2}
+    assert regulation_steps(briefs, "law_private_ai", "us") == {2}
+    assert regulation_steps(briefs, "ops_wholesale", "uk") == frozenset()
+
+
+def test_the_follow_up_blocks_start_with_step_1_as_an_untrusted_earlier_step() -> None:
+    blocks = follow_up_blocks(
+        LEAD,
+        "Your intake hire",
+        "Hi Jane, write to jane@firm.example",
+        (DraftEvidence(EVIDENCE, "quote", "We are hiring."),),
+        (),
+        DraftContact("Jane", None),
+    )
+
+    first, *rest = blocks
+    assert (first.subject, first.source, first.block_id) == (LEAD, "earlier_step", "step_1")
+    assert first.text == "subject: Your intake hire\n\nHi Jane, write to [email]"
+    assert [block.source for block in rest] == ["evidence", "contact"]
+    check_blocks(blocks)
+
+
+def test_a_clean_follow_up_answer_passes_the_code_check() -> None:
+    parsed = answer()
+    assert validate(DRAFT_SEQUENCE_V2, parsed) == parsed
+
+    assert accepts(parsed)
+    shuffled = answer(follow_up(4, MP), follow_up(2, ABA), follow_up(3, WISH))
+    assert accepts(shuffled)  # any order, each Step once
+
+
+ON_OTHER_EVIDENCE: Final = [
+    {"span": "x", "evidence_id": "other", "fact_id": None, "fact_version": None}
+]
+ON_TWO: Final = [{"span": "x", "evidence_id": EVIDENCE, "fact_id": WISH[0], "fact_version": 1}]
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        answer(follow_up(2, ABA), follow_up(3, WISH)),
+        answer(follow_up(2, ABA), follow_up(3, WISH), follow_up(3, MP)),
+        answer(follow_up(2, ABA), follow_up(3, WISH), follow_up(4, MP), follow_up(5, ("x", 1))),
+        answer(follow_up(1, ABA), follow_up(3, WISH), follow_up(4, MP)),
+        answer(follow_up(2, ABA), follow_up(3, WISH, body="  "), follow_up(4, MP)),
+        answer(follow_up(2, ABA), follow_up(3, WISH), follow_up(4, None)),
+        answer(follow_up(2, ABA), follow_up(3, WISH), follow_up(4, ("unknown", 1))),
+        answer(follow_up(2, ABA), follow_up(3, WISH), follow_up(4, (MP[0], 2))),
+        answer(follow_up(2, ABA), follow_up(3, ABA), follow_up(4, MP)),
+        answer(follow_up(2, ABA), follow_up(3, (STEP_1_FACT, 1)), follow_up(4, MP)),
+        answer(follow_up(2, WISH), follow_up(3, ABA), follow_up(4, MP)),
+        answer(follow_up(2, ABA), follow_up(3, WISH, claims=ON_OTHER_EVIDENCE), follow_up(4, MP)),
+        answer(follow_up(2, ABA), follow_up(3, WISH, claims=ON_TWO), follow_up(4, MP)),
+    ],
+    ids=[
+        "step_4_missing",
+        "step_3_twice",
+        "step_5_extra",
+        "step_1_isnt_a_follow_up",
+        "empty_body",
+        "no_angle",
+        "unknown_fact",
+        "wrong_version",
+        "step_2_angle_again",
+        "step_1_fact",
+        "step_2_not_regulation",
+        "evidence_not_sent",
+        "two_citations",
+    ],
+)
+def test_each_bad_follow_up_answer_is_refused(parsed: dict[str, Any]) -> None:
+    assert not accepts(parsed)
+
+
+def test_without_a_regulation_step_any_input_fact_may_be_step_2s_angle() -> None:
+    assert accepts(answer(follow_up(2, WISH), follow_up(3, ABA), follow_up(4, MP)), frozenset())
+
+
+def test_a_follow_ups_citations_end_with_its_angle_fact_when_no_claim_cites_it() -> None:
+    proposal_ = read_follow_ups(answer())
+    assert isinstance(proposal_, FollowUpProposal)
+    assert follow_up_citations(proposal_.steps[0]) == ((), (ABA,))
+    bare = FollowUp(3, "s", "b", (ProposedClaim("x", EVIDENCE, None, None),), *WISH)
+    assert follow_up_citations(bare) == ((EVIDENCE,), (WISH,))
+    assert follow_up_claims(bare) == (Claim("x", EVIDENCE, None),)
+
+
+def test_the_follow_up_fingerprint_moves_with_step_1_the_evidence_and_the_facts() -> None:
+    base = follow_up_fingerprint(KEY, "D1", 1, (EVIDENCE,), (ABA, WISH))
+
+    assert base.encode() == follow_up_fingerprint(KEY, "D1", 1, [EVIDENCE], (WISH, ABA)).encode()
+    for changed in (
+        follow_up_fingerprint(KEY, "D1", 2, (EVIDENCE,), (ABA, WISH)),  # Step 1 edited
+        follow_up_fingerprint(KEY, "D1", 1, (), (ABA, WISH)),  # its Evidence gone
+        follow_up_fingerprint(KEY, "D1", 1, (EVIDENCE,), ((ABA[0], 2), WISH)),  # a new version
+        follow_up_fingerprint(KEY.replace("v2", "v3"), "D1", 1, (EVIDENCE,), (ABA, WISH)),
+    ):
+        assert changed.encode() != base.encode()
+
+
+def at(text: str) -> datetime:
+    return datetime.fromisoformat(text)
+
+
+@pytest.mark.parametrize(
+    ("created", "expected"),
+    [
+        ("2026-11-18T09:00:00+00:00", "2026-11-19T07:00:00+00:00"),  # that afternoon's batch
+        ("2026-11-18T14:00:00+00:00", "2026-11-20T07:00:00+00:00"),  # at 14:00: the next one
+        ("2026-11-18T16:30:00+00:00", "2026-11-20T07:00:00+00:00"),  # after: tomorrow's
+        ("2026-11-18T23:59:00+00:00", "2026-11-20T07:00:00+00:00"),
+    ],
+)
+def test_the_deadline_is_the_first_07_00_after_the_first_submit_slot(
+    created: str, expected: str
+) -> None:
+    found = draft_deadline_of(at(created), time(14, 0), time(7, 0), "UTC")
+
+    assert found == at(expected)
+    assert found.tzinfo is UTC
+
+
+def test_the_deadline_follows_the_senders_timezone_across_a_clock_change() -> None:
+    # London moves to BST on 2026-03-29: 07:00 local that day is 06:00 UTC
+    created = at("2026-03-28T10:00:00+00:00")
+    found = draft_deadline_of(created, time(14, 0), time(7, 0), "Europe/London")
+
+    assert found == at("2026-03-29T06:00:00+00:00")
+    assert next_slot(at("2026-11-18T13:59:00+00:00"), time(9, 0), "America/New_York") == at(
+        "2026-11-18T14:00:00+00:00"
+    )
+    with pytest.raises(TypeError):
+        next_slot(datetime(2026, 11, 18, 9), time(14, 0), "UTC")  # noqa: DTZ001
+    with pytest.raises(TypeError):
+        next_slot(at("2026-11-18T09:00:00+00:00"), "14:00", "UTC")  # type: ignore[arg-type]
+
+
+def test_the_smoke_scorer_reads_a_schema_2_answer_as_step_1() -> None:
+    case = smoke(SMOKE[0])
+    clean = clean_answer(case)
+    step = {key: clean[key] for key in ("subject", "body", "claims")}
+    parsed = {
+        "steps": [{"step": 1, **step, "angle_fact_id": None, "angle_fact_version": None}],
+        "cited_signal_id": clean["cited_signal_id"],
+        "explanation": clean["explanation"],
+    }
+
+    scored = draft_flags(case, parsed, SEQUENCE.steps[0], SEGMENTS, 2)
+
+    assert scored.codes == () and scored.proposal is not None
+    assert scored.proposal.subject == clean["subject"]
+    two = {**parsed, "steps": parsed["steps"] * 2}
+    refused = draft_flags(case, two, SEQUENCE.steps[0], SEGMENTS, 2)
+    assert refused.codes == (INVALID_PROPOSAL,) and refused.proposal is None

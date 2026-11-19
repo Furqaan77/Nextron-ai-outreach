@@ -28,7 +28,8 @@ canonical JSON (sorted keys, no spaces) and ``Fingerprint.decode(text)`` reads i
 (``RouteTuple.key`` is ``<model>:<effort>:<prompt_version>:...``). No fingerprint holds text:
 only ids, hashes and versions.
 
-``DEFAULT_BULK_AI_SUBMIT_AT`` (14:00) is the ``bulk_ai_submit_at`` setting's default;
+``DEFAULT_BULK_AI_SUBMIT_AT`` (14:00) is the ``bulk_ai_submit_at`` setting's default and
+``DEFAULT_DRAFT_DEADLINE`` (07:00) the ``draft_deadline`` setting's (Story 4.18);
 ``SUBMIT_BULK_AI_JOB`` and ``POLL_AI_BATCHES_JOB`` name the two job types, which share the
 concurrency key ``CONCURRENCY_KEY``.
 """
@@ -49,9 +50,21 @@ MAX_INPUT_ID: Final = 64
 MAX_INPUT_VERSION: Final = 128
 KEY_PARTS: Final = 3  # model, effort, prompt version lead every RouteTuple.key
 DEFAULT_BULK_AI_SUBMIT_AT: Final = time(14, 0)  # the bulk_ai_submit_at setting's default
+DEFAULT_DRAFT_DEADLINE: Final = time(7, 0)  # the draft_deadline setting's default (Story 4.18)
 SUBMIT_BULK_AI_JOB: Final = "submit_bulk_ai"
 POLL_AI_BATCHES_JOB: Final = "poll_ai_batches"
 CONCURRENCY_KEY: Final = "ai_batches"  # both jobs: one batch job at a time
+
+
+@dataclass(frozen=True, slots=True)
+class BulkAiSchedule:
+    """When ``submit_bulk_ai`` runs (``at`` in ``timezone``), and whether a queued item of the
+    owner missed the latest run (each batch owner's ``schedule()``; Story 4.18 moved it here
+    from ``nextron.app.research.batches`` so both owners share it)."""
+
+    at: time
+    timezone: str
+    missed: bool
 
 
 class BatchOwner(StrEnum):

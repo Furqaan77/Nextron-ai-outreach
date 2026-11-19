@@ -1170,7 +1170,7 @@ def test_a_first_start_stores_the_prompts_and_activates_each_route(dev: Path) ->
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
     assert (synced["logger"], synced["stored_count"], synced["activated_count"]) == (
         "nextron.app.playbook.api",
-        6,  # Story 4.15: draft_sequence's prompt too
+        7,  # Story 4.15: draft_sequence's prompt too; Story 4.18: and its v2
         3,
     )
 
@@ -1184,7 +1184,7 @@ def test_a_restart_changes_no_prompt_row(dev: Path) -> None:
 
     assert prompt_rows(dev / "nextron.db") == before
     synced = [line for line in log_lines(dev) if line["event"] == "prompts_synced"]
-    assert [(line["unchanged_count"], line["kept_count"]) for line in synced] == [(0, 0), (6, 3)]
+    assert [(line["unchanged_count"], line["kept_count"]) for line in synced] == [(0, 0), (7, 3)]
 
 
 def test_the_loader_runs_outside_any_unit_of_work(dev: Path) -> None:
@@ -1340,7 +1340,7 @@ def test_a_first_start_stores_the_playbook_and_records_the_tuples_and_the_check(
     snapshots, tuples, checks = playbook_rows(dev / "nextron.db")
     assert snapshots == [(read.version, read.sha256)]
     assert tuples == [
-        ("draft_sequence", "v1", read.sha256),  # Story 4.15: pinned to the Playbook read
+        ("draft_sequence", "v2", read.sha256),  # Story 4.15, v2 since 4.18: pinned to it
         ("extract_people", "v1", None),
         ("extract_signals", "v1", None),
         ("grounding_check", "v1", read.sha256),  # Story 4.14: pinned to the Playbook read
