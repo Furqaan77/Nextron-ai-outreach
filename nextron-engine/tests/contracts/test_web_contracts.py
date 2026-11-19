@@ -213,6 +213,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/{lead_id}/stage",  # Story 9.1
         "/leads/{lead_id}/call",
         "/leads/{lead_id}/deal",
+        "/leads/{lead_id}/outcome",  # Story 9.4
         "/leads/{lead_id}/primary",
         "/leads/{lead_id}/find-email",
     ]
@@ -690,6 +691,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "inboxes.html",
         "inboxes_panel.html",
         "lead.html",
+        "lead_call_outcome.html",
         "lead_contacts.html",
         "lead_drafts.html",  # Story 4.12
         "lead_import.html",

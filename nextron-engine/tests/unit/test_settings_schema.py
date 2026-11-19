@@ -535,6 +535,7 @@ def test_the_declared_keys_in_order() -> None:
         "unsub_worker_host",
         "linkedin_owner_chat",
         "min_lead_score",
+        "call_outcome_prompt_delay",  # Story 9.4
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -569,7 +570,33 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.UNSUB_WORKER_HOST),
         setting(Key.LINKEDIN_OWNER_CHAT),
         setting(Key.MIN_LEAD_SCORE),
+        setting(Key.CALL_OUTCOME_PROMPT_DELAY),
     )
+
+
+def test_call_outcome_prompt_delay_is_an_engine_duration_defaulting_to_60_minutes() -> None:
+    """Story 9.4, decision 1: the delay after a call's time before its outcome is asked for."""
+    found = setting(Key.CALL_OUTCOME_PROMPT_DELAY)
+
+    assert (found.key, found.type, found.section) == (
+        "call_outcome_prompt_delay",
+        SettingType.DURATION,
+        Section.ENGINE,
+    )
+    assert found.default == timedelta(minutes=60)
+    assert found.label == "Call Outcome prompt delay"
+    assert parse(found, "PT60M") == timedelta(hours=1)
+    assert encode(found, timedelta(minutes=90)) == "PT1H30M"
+
+
+def test_call_outcome_prompt_delay_is_at_most_7_days() -> None:
+    """A huge delay would overflow ``now - delay`` and break every page's notification area."""
+    found = setting(Key.CALL_OUTCOME_PROMPT_DELAY)
+
+    assert parse(found, "P7D") == timedelta(days=7)
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(found, "P8D")
+    assert (raised.value.rule, raised.value.reason) == ("maximum", "must be at most 7 days")
 
 
 # Row: Setting (alert_chat_id) -------------------------------------------------------------------
@@ -1319,6 +1346,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
+            "call_outcome_prompt_delay, "
             "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "

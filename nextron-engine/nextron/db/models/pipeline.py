@@ -1,5 +1,5 @@
-"""The ``pipeline`` service's own tables (AD-3, AD-7).
-
+"""The ``pipeline`` service's own tables (AD-3, AD-7; migrations ``0048_10_2_assist_accounts``,
+``0049_9_1_manual_stages``, ``0051_10_7_channel_permissions`` and ``0053_9_4_call_outcomes``).
 
 ``linkedin_accounts`` (FR-49, PRD OQ-5, Story 10.2; migration ``0048_10_2_assist_accounts``),
 written only by ``nextron.db.repos.pipeline.assist_accounts``: one row per account a person sends
@@ -19,9 +19,17 @@ every other column holds no personal data. No Contact's data is ever stored here
 (``fk_call_outcomes_lead_id_leads``, indexed: ``ix_call_outcomes_lead_id``), ``contact_id``
 (``fk_call_outcomes_contact_id_contacts``), ``scheduled_at`` (UTC), ``prospect_tz`` (the IANA
 zone the time was given in), ``booked_at``, ``booked_by`` (the actor, ``operator``) and
-``superseded_at`` (nullable: set when a rebooking replaces the row). A row with no
-``superseded_at`` is the Lead's pending booking. Story 9.4 adds the outcome's columns. Every
-column is an ID, a code or a time: PII class ``none``. No foreign key cascades.
+``superseded_at`` (nullable: set when a rebooking replaces the row). A row with neither
+``superseded_at`` nor ``recorded_at`` is a pending booking.
+
+The outcome (Story 9.4, all nullable, no CHECK: ``nextron.domain.call_outcomes`` keeps the
+rules): ``outcome`` (``held``/``no_show``), ``qualified``, ``reason``, ``next_step``,
+``next_step_on`` (a date), ``audit_proposed``, ``audit_price`` (micro-dollars), ``objections``
+(comma-joined sorted codes, ``""`` for none), ``price_reaction``, ``recorded_at`` and
+``recorded_by``. ``reason`` and ``next_step`` are free text that may name a person (PII class
+``redact``); every other column is an ID, a code, an amount or a time (``none``). No foreign
+key cascades.
+
 ``channel_permissions`` (FR-24, FR-47, Story 10.7; migration ``0051_10_7_channel_permissions``),
 written only by ``nextron.db.repos.pipeline.channel_permissions``: one row per opening a
 prospect gave on WhatsApp or Instagram, recorded by the Operator. A ULID ``id``; ``contact_id``
@@ -40,10 +48,21 @@ Instagram, never before ``occurred_at``); ``status`` (``active`` or ``revoked``)
 """
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
@@ -74,6 +93,8 @@ DAILY_CAP_CHECK: Final = "daily_invite_cap <= weekly_invite_cap"
 ONE_ACTIVE_WHERE: Final = f"status = '{AccountStatus.ACTIVE}'"
 TZ_LENGTH: Final = 64  # nextron.domain.manual_stages.MAX_TIMEZONE_LENGTH
 ACTOR_LENGTH: Final = 64
+CODE_LENGTH: Final = 16
+OBJECTIONS_LENGTH: Final = 200
 
 
 class AssistAccountRecord(Base):
@@ -113,7 +134,7 @@ class AssistAccountRecord(Base):
 
 
 class CallOutcomeRecord(Base):
-    """One booked discovery call of a Lead (its outcome arrives in Story 9.4)."""
+    """One booked discovery call of a Lead and, once recorded, its outcome."""
 
     __tablename__ = "call_outcomes"
     __table_args__ = (Index("ix_call_outcomes_lead_id", "lead_id"),)
@@ -126,6 +147,20 @@ class CallOutcomeRecord(Base):
     booked_at: Mapped[datetime] = mapped_column(UtcDateTime)
     booked_by: Mapped[str] = mapped_column(String(ACTOR_LENGTH))
     superseded_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    # Story 9.4: the outcome
+    outcome: Mapped[str | None] = mapped_column(String(CODE_LENGTH))
+    qualified: Mapped[bool | None] = mapped_column(Boolean)
+    reason: Mapped[str | None] = mapped_column(Text)
+    next_step: Mapped[str | None] = mapped_column(Text)
+    next_step_on: Mapped[date | None] = mapped_column(Date)
+    audit_proposed: Mapped[bool | None] = mapped_column(Boolean)
+    audit_price: Mapped[int | None] = mapped_column(BigInteger)
+    objections: Mapped[str | None] = mapped_column(String(OBJECTIONS_LENGTH))
+    price_reaction: Mapped[str | None] = mapped_column(String(CODE_LENGTH))
+    recorded_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    recorded_by: Mapped[str | None] = mapped_column(String(ACTOR_LENGTH))
+
+
 PERMISSION_CHANNEL_LENGTH: Final = 16
 PROSPECT_ACTION_LENGTH: Final = 32
 PERMISSION_STATUS_LENGTH: Final = 8

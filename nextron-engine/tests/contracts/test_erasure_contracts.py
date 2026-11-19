@@ -82,6 +82,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "linkedin_accounts": ("pipeline", Coverage.NOT_HELD),  # Story 10.2: staff, never a Contact
     "leads": ("pipeline", Coverage.TOMBSTONED),  # Story 9.1: the notes
     "channel_permissions": ("pipeline", Coverage.TOMBSTONED),  # Story 10.7
+    "call_outcomes": ("pipeline", Coverage.TOMBSTONED),  # Story 9.4: reason, next step
 }
 
 type Declarations = Mapping[str, object]  # owner -> its ERASURE (or None)

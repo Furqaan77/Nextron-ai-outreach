@@ -21,7 +21,7 @@
 {%- endif %}
 </nav>
 </header>
-<section id="notifications" aria-live="polite"><p id="request-error" class="request-error" role="alert"></p><div id="notification-list" hx-get="/notifications" hx-trigger="load"></div></section>
+<section id="notifications" aria-live="polite"><p id="request-error" class="request-error" role="alert"></p><div id="notification-list" hx-get="/notifications" hx-trigger="load, call-outcome-saved from:body"></div></section>
 <main>
 {% block content %}{% endblock %}
 </main>

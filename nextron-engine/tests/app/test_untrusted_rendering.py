@@ -202,7 +202,7 @@ def test_hostile_markup_renders_as_escaped_text(rendered: dict[str, Any]) -> Non
     # only the page's own form posts through HTMX; the layout's notification list loads once
     assert hx_tags == ["div", "form"]
     assert [attrs for tag, attrs in page.tags if "hx-trigger" in attrs] == [
-        {"id": "notification-list", "hx-get": "/notifications", "hx-trigger": "load"}
+        {"id": "notification-list", "hx-get": "/notifications", "hx-trigger": "load, call-outcome-saved from:body"}
     ]
     assert [attrs for tag, attrs in page.tags if tag == "button"] == [{"type": "submit"}]
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html

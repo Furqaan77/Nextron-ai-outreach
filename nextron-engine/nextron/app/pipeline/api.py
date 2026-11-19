@@ -101,8 +101,41 @@ leaves it rolled back and reaches the caller:
   ``book_call``; ``True`` when it was a rebooking (the Lead was at ``call_booked``).
 - ``@use_case operator_save_deal(lead_id, deal_value, notes) -> None``: runs ``save_deal``.
 
-**Erasure (Stories 9.1, 10.2 and 10.7, AD-17).** ``ERASURE`` declares ``leads`` and
-``channel_permissions`` ``tombstoned`` and ``linkedin_accounts`` ``not_held`` (a Nextron staff
+**Call Outcomes (Story 9.4, FR-69, FR-45).** A booking's outcome is a
+``nextron.domain.call_outcomes.Outcome`` (any other type raises ``TypeError``); ``actor`` is
+checked as above. Events never hold a field's value.
+
+- ``@command record_call_outcome(booking_id, outcome, *, actor) -> None``: the booking must be
+  pending (not superseded, not yet recorded; else ``ValueError``; an unknown one
+  ``LookupError``). It stores the outcome with ``recorded_at`` (the clock's now) and
+  ``recorded_by`` ``actor``, appends a ``call_outcomes`` row ``booked`` to ``held`` or
+  ``no_show``, cause ``call_outcome``, and moves the Lead through the AD-4 machine: ``held`` at
+  ``call_booked`` applies ``hold_call`` (to ``call_held``), ``no_show`` at ``call_held`` applies
+  ``no_show`` (back to ``call_booked``), each with a ``leads`` row, cause ``call_outcome``,
+  ``cause_ref`` the booking's id; at any other stage (a ``no_show`` at ``call_booked``, a Lead
+  already past the call, a closed Lead) the stage is unchanged.
+- ``@command correct_call_outcome(booking_id, outcome, *, actor) -> tuple[str, ...]``: the
+  booking must be recorded and not superseded (else ``ValueError``; unknown ``LookupError``).
+  It stores the new outcome (``recorded_at``/``recorded_by`` keep the first recording) and
+  appends one ``call_outcomes`` row per changed field (``call_outcomes.changed_fields``, in
+  ``CORRECTABLE_FIELDS`` order), from the stored outcome before to the one after, cause
+  ``corrected_<field>``, no ``cause_ref``; it returns those fields. Nothing changed: nothing is
+  written and it returns ``()``. The stage is never recomputed.
+- ``@use_case operator_record_call_outcome(lead_id, booking_id, form) -> OutcomeSaved``:
+  the dashboard's form (an ``OutcomeForm``), actor ``operator``. A booking that is unknown,
+  isn't ``lead_id``'s, or is superseded raises ``NotThisLeadsBooking`` (nothing written),
+  checked before the fields; then ``call_outcomes.check_outcome(form)`` may raise
+  ``OutcomeRefused`` (nothing written). An unrecorded booking is
+  recorded (``recorded``), a recorded one corrected (``corrected``, or ``unchanged`` when
+  nothing differed).
+- ``call_outcomes_due()``: a read in the caller's unit of work (no write, no job, no stored
+  flag): ``queries.pipeline.call_outcomes_due(now - call_outcome_prompt_delay)``, the clock's
+  now and the setting (``queries.setup.get``).
+- ``lead_panel(lead_id)``: ``queries.pipeline.lead_pipeline(lead_id, now=<the clock's now>)``,
+  for the Lead page's Pipeline panel and its Call Outcome form.
+
+**Erasure (Stories 9.1, 9.4, 10.2 and 10.7, AD-17).** ``ERASURE`` declares ``leads``,
+``call_outcomes`` and ``channel_permissions`` ``tombstoned`` and ``linkedin_accounts`` ``not_held`` (a Nextron staff
 member's label and name, never a Contact's data). ``@command Pipeline.erase_pii(n:
 ContactErased)`` is pipeline's one ``ContactErased`` subscriber, registered last
 (``nextron.main.build_subscribers``); a ``cause`` that isn't an ``ErasureCause`` raises
@@ -110,29 +143,39 @@ ContactErased)`` is pipeline's one ``ContactErased`` subscriber, registered last
 
 - sets the ``notes`` (PII class ``redact``) of the erased Contact's Lead, and of every Lead
   merged into it (``queries.discovery.merged_lead_ids``), to ``[erased]`` when they hold any
-  (Story 9.1; an unknown Contact's Leads are left alone);
+  (Story 9.1; an unknown Contact's Leads are left alone), and the ``reason`` and ``next_step``
+  (``redact``) of every ``call_outcomes`` row of those Leads too (Story 9.4);
 - turns each of the Contact's ``active`` Channel Permissions ``revoked`` (``revoked_at`` now)
   through the Channel Permission machine (event ``erase``), each with one ``events`` row (entity
   ``channel_permissions``, cause ``contact_erased``, actor ``system:pipeline``), then sets every
   row's ``whatsapp_number`` and ``instagram_handle`` (PII class ``null``) to NULL (Story 10.7).
   Research's hook tombstones the linked operator Evidence.
-
-``call_outcomes`` holds no personal data (the Contact is kept as its id).
 """
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
 from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import setup as setup_queries
 from nextron.app.sequencing.api import Sequencing
 from nextron.db import eventlog
 from nextron.db.repos.pipeline import bookings as bookings_repo
 from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.call_outcomes import (
+    CallResult,
+    Outcome,
+    OutcomeForm,
+    changed_fields,
+    check_outcome,
+    correction_cause,
+)
 from nextron.domain.channel_permission import PermissionEvent, PermissionStatus
 from nextron.domain.channel_permission import transition as permission_transition
 from nextron.domain.enrollment import StopCause
@@ -158,6 +201,7 @@ from nextron.domain.pipeline_stage import (
     reopen,
     transition,
 )
+from nextron.domain.settings_schema import Key
 from nextron.domain.suppression_entry import OPT_OUT_SOURCES
 from nextron.ports.clock import Clock
 
@@ -192,13 +236,37 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
             "the Contact's WhatsApp number and Instagram handle become NULL and each active "
             "permission is revoked; research tombstones the linked operator Evidence",
         ),
+        "call_outcomes": TableErasure(  # Story 9.4
+            Coverage.TOMBSTONED,
+            "the free texts of every Call Outcome of the Contact's Lead and of the Leads merged "
+            "into it (why it isn't qualified, the next step) become [erased], whichever Contact "
+            "the call was with; the codes, amounts and times are kept",
+        ),
     }
 )
+
+
+class OutcomeSaved(StrEnum):
+    """What ``operator_record_call_outcome`` did."""
+
+    RECORDED = "recorded"
+    CORRECTED = "corrected"
+    UNCHANGED = "unchanged"
+
+
+class NotThisLeadsBooking(Exception):
+    """A Call Outcome posted for a booking that is unknown, another Lead's or superseded;
+    nothing was written."""
 
 
 def _check_actor(actor: object) -> None:
     if not isinstance(actor, str) or not actor.strip():
         raise ValueError("actor must be a non-blank str")
+
+
+def _check_outcome(outcome: object) -> None:
+    if not isinstance(outcome, Outcome):
+        raise TypeError(f"a Call Outcome must be an Outcome, not {type(outcome).__name__}")
 
 
 class Pipeline:
@@ -487,7 +555,7 @@ class Pipeline:
 
     @command
     def erase_pii(self, n: ContactErased) -> None:
-        """Pipeline's erasure hook (Stories 9.1 and 10.7), the last ``ContactErased``
+        """Pipeline's erasure hook (Stories 9.1, 9.4 and 10.7), the last ``ContactErased``
         subscriber: redact the erased Contact's Lead's notes, then revoke and clear its Channel
         Permissions; see the module docstring."""
         ErasureCause(n.cause)  # a data subject request or a retention erasure
@@ -495,8 +563,10 @@ class Pipeline:
             return
         contact = research_queries.contact(n.contact_id)
         if contact is not None:
-            for lead_id in (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id)):
+            lead_ids = (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id))
+            for lead_id in lead_ids:
                 stages_repo.redact_notes(lead_id, REDACTED)
+            bookings_repo.redact_text(lead_ids, REDACTED)  # Story 9.4
         now = self._clock.now()
         for permission in permissions_repo.for_contact(n.contact_id):
             if permission.status != PermissionStatus.ACTIVE.value:
@@ -514,6 +584,82 @@ class Pipeline:
                 at=now,
             )
         permissions_repo.clear_identifiers(n.contact_id, now)
+
+    # Story 9.4: Call Outcomes ---------------------------------------------------------------------
+
+    def _booking(self, booking_id: str) -> bookings_repo.StoredBooking:
+        booking = bookings_repo.get(booking_id) if is_ulid(booking_id) else None
+        if booking is None:
+            raise LookupError("the booking is unknown")
+        return booking
+
+    @command
+    def record_call_outcome(self, booking_id: str, outcome: Outcome, *, actor: str) -> None:
+        """Record a pending booking's outcome and move the stage; see the module docstring."""
+        _check_outcome(outcome)
+        _check_actor(actor)
+        booking = self._booking(booking_id)
+        if booking.superseded_at is not None or booking.recorded_at is not None:
+            raise ValueError("record_call_outcome: the booking isn't pending")
+        stored = self._stored(booking.lead_id)
+        change = None
+        if outcome.outcome is CallResult.HELD and stored is PipelineStage.CALL_BOOKED:
+            change = transition(stored, StageEvent.HOLD_CALL)
+        elif outcome.outcome is CallResult.NO_SHOW and stored is PipelineStage.CALL_HELD:
+            change = transition(stored, StageEvent.NO_SHOW)
+        now = self._clock.now()
+        bookings_repo.record(booking_id, outcome, now, actor)
+        eventlog.append(
+            entity=BOOKINGS_ENTITY,
+            entity_id=booking_id,
+            from_status=BOOKED,
+            to_status=str(outcome.outcome),
+            cause=str(StageCause.CALL_OUTCOME),
+            cause_ref=None,
+            actor=actor,
+            at=now,
+        )
+        if change is not None:
+            stages_repo.set_stage(booking.lead_id, str(change.to))
+            self._stage_row(booking.lead_id, (stored, change.to), change.cause, actor, booking_id)
+
+    @command
+    def correct_call_outcome(
+        self, booking_id: str, outcome: Outcome, *, actor: str
+    ) -> tuple[str, ...]:
+        """Correct a recorded booking's outcome; see the module docstring."""
+        _check_outcome(outcome)
+        _check_actor(actor)
+        booking = self._booking(booking_id)
+        before = booking.result
+        if booking.superseded_at is not None or before is None:
+            raise ValueError("correct_call_outcome: the booking has no current outcome")
+        changed = changed_fields(before, outcome)
+        if not changed:
+            return ()
+        now = self._clock.now()
+        bookings_repo.update_outcome(booking_id, outcome)
+        for field in changed:
+            eventlog.append(
+                entity=BOOKINGS_ENTITY,
+                entity_id=booking_id,
+                from_status=str(before.outcome),
+                to_status=str(outcome.outcome),
+                cause=correction_cause(field),
+                cause_ref=None,
+                actor=actor,
+                at=now,
+            )
+        return changed
+
+    def call_outcomes_due(self) -> tuple[pipeline_queries.DueBooking, ...]:
+        """The bookings whose Call Outcome is due now; see the module docstring."""
+        delay = setup_queries.get(Key.CALL_OUTCOME_PROMPT_DELAY)
+        return pipeline_queries.call_outcomes_due(self._clock.now() - delay)
+
+    def lead_panel(self, lead_id: str) -> pipeline_queries.LeadPipeline | None:
+        """The Lead's Pipeline panel facts at the clock's now; see the module docstring."""
+        return pipeline_queries.lead_pipeline(lead_id, now=self._clock.now())
 
     # Story 9.1: the dashboard's use cases -------------------------------------------------------
 
@@ -542,3 +688,23 @@ class Pipeline:
         """The Pipeline panel's deal form."""
         with current().transaction():
             self.save_deal(lead_id, deal_value, notes, actor=OPERATOR)
+
+    @use_case
+    def operator_record_call_outcome(
+        self, lead_id: str, booking_id: str, form: OutcomeForm
+    ) -> OutcomeSaved:
+        """The Pipeline panel's Call Outcome form: records or corrects the booking's outcome.
+        The booking is checked before the form's fields, so a foreign booking is never a field
+        refusal."""
+        if not isinstance(form, OutcomeForm):
+            raise TypeError(f"the form must be an OutcomeForm, not {type(form).__name__}")
+        with current().transaction():
+            booking = bookings_repo.get(booking_id) if is_ulid(booking_id) else None
+            if booking is None or booking.lead_id != lead_id or booking.superseded_at is not None:
+                raise NotThisLeadsBooking
+            outcome = check_outcome(form)  # OutcomeRefused before any write
+            if booking.recorded_at is None:
+                self.record_call_outcome(booking_id, outcome, actor=OPERATOR)
+                return OutcomeSaved.RECORDED
+            changed = self.correct_call_outcome(booking_id, outcome, actor=OPERATOR)
+            return OutcomeSaved.CORRECTED if changed else OutcomeSaved.UNCHANGED

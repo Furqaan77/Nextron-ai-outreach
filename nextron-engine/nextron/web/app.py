@@ -63,17 +63,20 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   the flow's own listener, never by a dashboard route.
 - ``GET /notifications`` (``notifications_area``) and ``POST /notifications/dismiss``
   (``notification_dismiss``), both ``@personal_data(True)``: the notification area (UX-DR5),
-  which the base layout loads once per page view (``hx-trigger="load"``; it isn't polled), and
-  its Dismiss button. While recovery mode is on (``queries.ops.recovery_mode()``, Story 1.19),
+  which the base layout loads once per page view (``hx-trigger="load, call-outcome-saved
+  from:body"``: it isn't polled, and it loads again when a Call Outcome is saved), and its
+  Dismiss button. While recovery mode is on (``queries.ops.recovery_mode()``, Story 1.19),
   the area (``notifications.html``) starts with the banner ``<p class="recovery-banner"
   role="alert">``, ``RECOVERY_BANNER`` linked to the health panel; every page shows it, because
   every page loads the area. Then it shows "Engine health: <n> error
   needs attention" (or "<n> errors need attention"), linked to the health panel, when
-  ``health.issue_count()`` is above 0. It is empty when nothing is undismissed and no error
-  needs attention. Then (Story 4.10) "signal shortfall: <n>" while today's remaining new-Sequence
-  capacity (``selection.today().remaining``) is above 0. It is empty when none of these shows
-  and nothing is undismissed; otherwise it shows "Notifications (<count>)", the newest
-  ``AREA_LIMIT`` (5), each with its text (``|plain``), its time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and
+  ``health.issue_count()`` is above 0. Then (Story 4.10) "signal shortfall: <n>" while today's
+  remaining new-Sequence capacity (``selection.today().remaining``) is above 0. Then (Story 9.4)
+  one "Call Outcome due: <Lead name>" line per due booking (``pipeline.call_outcomes_due()``,
+  worked out at each render: no job or stored flag), linked to ``/leads/<id>#call-outcome``. It
+  is empty when none of these shows and nothing is undismissed; otherwise it shows
+  "Notifications (<count>)", the newest ``AREA_LIMIT`` (5), each with its text (``|plain``), its
+  time as ``YYYY-MM-DD HH:MM UTC`` and a Dismiss form, and
   "and <n> more" when there are more. The POST's fields, apart from ``csrf_token``, must be
   exactly one ``notification`` holding a ULID (anything else is ``MalformedForm``, 400); it
   dismisses through ``notify`` (``Notify.dismiss``) in its own unit of work, then renders the
@@ -252,6 +255,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   written) becomes the panel's alert, and a refused call or deal form renders back what was
   typed. Then it answers 200 with the panel
   (``lead_pipeline.html``, read in a read-only unit of work), so HTMX swaps it in.
+- ``POST /leads/{lead_id}/outcome`` (``lead_outcome``, Story 9.4, ``@personal_data(True)``):
+  the panel's Call Outcome form (``lead_pipeline.submitted_outcome``: malformed is 400; then the
+  same 404 for a Lead that isn't a live survivor). It runs
+  ``pipeline.operator_record_call_outcome`` with the form in its own unit of work, which checks
+  the booking first: one that isn't this Lead's, is unknown or is superseded
+  (``NotThisLeadsBooking``) is ``MalformedForm`` (400) whatever the fields hold. Then
+  ``call_outcomes.check_outcome``'s ``OutcomeRefused`` (nothing written) renders the form again
+  with what was typed, the posted ``booking`` id and the error next to its field. It answers 200
+  with the panel; a saved outcome also sends ``HX-Trigger: call-outcome-saved``, on which the
+  layout's notification area loads again, so the due line clears.
 - ``POST /leads/{lead_id}/primary`` (``lead_make_primary``, Story 2.10,
   ``@personal_data(True)``): the Contacts panel's "Make primary". The form is exactly
   ``contact_id`` (``leads_page.submitted_contact``). It runs
@@ -366,7 +379,7 @@ from nextron.app.discovery.place_ingest import (
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
-from nextron.app.pipeline.api import Pipeline
+from nextron.app.pipeline.api import NotThisLeadsBooking, Pipeline
 from nextron.app.pipeline.assist_accounts import AssistAccounts
 from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.playbook.api import (
@@ -413,6 +426,7 @@ from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
 from nextron.domain.linkedin_caps import LABEL, OWNER_NAME, OWNER_ROLE, STATUS, AccountRefused
+from nextron.domain.call_outcomes import OutcomeForm, OutcomeRefused
 from nextron.domain.manual_stages import StageRefused, clean_notes, parse_deal_value
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.offers import InvalidOffers
@@ -564,10 +578,11 @@ def area_context(
     errors: int = 0,
     recovery: bool = False,
     shortfall: int = 0,
+    due: Iterable[pipeline_rows.DueItem] = (),
 ) -> dict[str, object]:
     """What ``notifications.html`` renders: the recovery banner while ``recovery`` mode is on,
-    the engine health line, the signal shortfall line (today's remaining capacity), the count,
-    the listed items and how many more."""
+    the engine health line, the signal shortfall line (today's remaining capacity), the Call
+    Outcome due lines (Story 9.4), the count, the listed items and how many more."""
     items = [
         NotificationItem(row.id, row.text, f"{row.created_at:{TIME_FORMAT}}")
         for row in found.newest
@@ -577,6 +592,7 @@ def area_context(
         "RECOVERY_BANNER": RECOVERY_BANNER,
         "health_text": health_count_text(errors),
         "shortfall_text": shortfall_text(shortfall),
+        "due_items": list(due),
         "count": found.count,
         "items": items,
         "more": max(found.count - len(items), 0),
@@ -1280,11 +1296,13 @@ def create_app(
 
     def notification_list(request: Request) -> HTMLResponse:
         found = notify_queries.open_notifications(AREA_LIMIT)
+        due = pipeline.call_outcomes_due()  # Story 9.4: worked out now, never stored
         context = area_context(
             found,
             errors=engine_health.issue_count(),
             recovery=ops_queries.recovery_mode(),
             shortfall=selection.today().remaining,
+            due=pipeline_rows.due_items((each.lead_id, each.lead_name) for each in due),
         )
         return page(request, NOTIFICATIONS_TEMPLATE, **context)
 
@@ -2205,9 +2223,12 @@ def create_app(
         *,
         typed_call: pipeline_rows.CallForm | None = None,
         typed_deal: pipeline_rows.DealForm | None = None,
+        typed_outcome: OutcomeForm | None = None,
+        outcome_refusal: OutcomeRefused | None = None,
+        typed_booking_id: str | None = None,
     ) -> dict[str, object]:
         """The Pipeline panel's context (Story 9.1), read in the open unit of work."""
-        found = pipeline_queries.lead_pipeline(lead_id)
+        found = pipeline.lead_panel(lead_id)  # Story 9.4: with the Call Outcome form's booking
         if found is None:  # the Lead was checked first
             raise LookupError("the Lead is unknown")
         close_entries = (
@@ -2221,6 +2242,9 @@ def create_app(
             notice,
             typed_call=typed_call,
             typed_deal=typed_deal,
+            typed_outcome=typed_outcome,
+            outcome_refusal=outcome_refusal,
+            typed_booking_id=typed_booking_id,
         )
 
     def live_lead(lead_id: str) -> bool:
@@ -2236,6 +2260,9 @@ def create_app(
         *,
         typed_call: pipeline_rows.CallForm | None = None,
         typed_deal: pipeline_rows.DealForm | None = None,
+        typed_outcome: OutcomeForm | None = None,
+        outcome_refusal: OutcomeRefused | None = None,
+        typed_booking_id: str | None = None,
     ) -> HTMLResponse:
         """The Pipeline panel alone, with ``notice``: 200, so HTMX swaps it in. A refused form
         passes what was typed, so it renders back into the form."""
@@ -2246,6 +2273,9 @@ def create_app(
                 notice,
                 typed_call=typed_call,
                 typed_deal=typed_deal,
+                typed_outcome=typed_outcome,
+                outcome_refusal=outcome_refusal,
+                typed_booking_id=typed_booking_id,
             )
             return page(request, pipeline_rows.PANEL_TEMPLATE, **context)
 
@@ -2323,6 +2353,32 @@ def create_app(
             return lead_gone()
         notice = pipeline_rows.deal_saved()
         return pipeline_answer(request, lead_id, notice)
+
+    @app.post(pipeline_rows.OUTCOME_ROUTE, name="lead_outcome")
+    @personal_data(True)  # the panel names the Lead's Contacts and shows typed text
+    def lead_outcome(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        booking_id, form = pipeline_rows.submitted_outcome(fields)
+        if not live_lead(lead_id):
+            return lead_gone()
+        try:
+            with units.open():
+                saved = pipeline.operator_record_call_outcome(lead_id, booking_id, form)
+        except NotThisLeadsBooking:  # checked before the fields; nothing was written
+            raise MalformedForm(WRONG_FIELDS) from None
+        except OutcomeRefused as refused:  # nothing was written; the form keeps what was typed
+            return pipeline_answer(
+                request,
+                lead_id,
+                pipeline_rows.outcome_refused(),
+                typed_outcome=form,
+                outcome_refusal=refused,
+                typed_booking_id=booking_id,
+            )
+        answer = pipeline_answer(request, lead_id, pipeline_rows.outcome_saved(saved))
+        answer.headers["HX-Trigger"] = pipeline_rows.OUTCOME_SAVED_EVENT  # refresh the due lines
+        return answer
 
     @app.post("/leads/{lead_id}/primary", name="lead_make_primary")
     @personal_data(True)  # the panel shows Contacts, who are people

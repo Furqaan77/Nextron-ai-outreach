@@ -4,7 +4,8 @@
     automatic stage), the call form while a booking is possible, and the deal value and notes
     form. The notes and Contact names are typed or imported text: they render only through
     |plain, inside an element carrying hx-disable; every form sits outside those elements (the
-    notes' textarea sits in an hx-disable wrapper inside its form, and HTMX still posts it). -#}
+    notes' textarea sits in an hx-disable wrapper inside its form, and HTMX still posts it).
+    Story 9.4 includes the Call Outcome form (lead_call_outcome.html) when there is one. -#}
 <section class="lead-pipeline" id="lead-pipeline" aria-labelledby="pipeline-heading">
 <h2 id="pipeline-heading">Pipeline</h2>
 {%- if pipeline_notice %}
@@ -49,6 +50,9 @@
 </div>
 <button type="submit">{{ booking_label }}</button>
 </form>
+{%- endif %}
+{%- if outcome_form %}
+{% include "lead_call_outcome.html" %}
 {%- endif %}
 <p class="deal-line">{{ deal_line }}</p>
 <div class="lead-notes" hx-disable>

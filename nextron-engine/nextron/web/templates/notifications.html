@@ -4,9 +4,12 @@
     recovery banner, linked to the health panel; every page loads the area, so every page shows
     it. Then comes the engine health error count, linked to the health panel, when there are
     errors, then (Story 4.10) "signal shortfall: <n>" while today's remaining new-Sequence
-    capacity is above 0, linked to the "Ready to draft" page. It renders nothing at all when
-    recovery mode is off, no notification is undismissed, no error needs attention and there is
-    no shortfall, so the list stays empty and takes no space. -#}
+    capacity is above 0, linked to the "Ready to draft" page. Then (Story 9.4) one "Call Outcome
+    due: <Lead name>" line per due booking, worked out at render time and linked to the Lead's
+    Call Outcome form; the Lead's name is imported text, so it renders through |plain inside
+    hx-disable. It renders nothing at all when recovery mode is off, no notification is
+    undismissed, no error needs attention, there is no shortfall and no Call Outcome is due, so
+    the list stays empty and takes no space. -#}
 {%- if recovery -%}
 <p class="recovery-banner" role="alert"><a href="/health/panel">{{ RECOVERY_BANNER }}</a></p>
 {%- endif -%}
@@ -15,6 +18,13 @@
 {%- endif -%}
 {%- if shortfall_text -%}
 <p class="signal-shortfall"><a href="/leads/ready">{{ shortfall_text }}</a></p>
+{%- endif -%}
+{%- if due_items -%}
+<ul class="outcome-due" hx-disable>
+{%- for due in due_items %}
+<li><a href="{{ due.href }}">{{ due.text|plain }}</a></li>
+{%- endfor %}
+</ul>
 {%- endif -%}
 {%- if count -%}
 <h2 class="notifications-heading">Notifications ({{ count }})</h2>

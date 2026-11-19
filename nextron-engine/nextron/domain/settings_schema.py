@@ -214,6 +214,7 @@ class Key(StrEnum):
     LINKEDIN_OWNER_CHAT = "linkedin_owner_chat"  # Story 10.2
     # The "Ready to draft" list's badge threshold (Story 4.10).
     MIN_LEAD_SCORE = "min_lead_score"
+    CALL_OUTCOME_PROMPT_DELAY = "call_outcome_prompt_delay"
 
 
 class _Required(Enum):
@@ -1450,6 +1451,19 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=DEFAULT_MIN_LEAD_SCORE,
         rules=(minimum(0, "0"), maximum(MAX_SCORE, str(MAX_SCORE))),
+    ),
+    # The Call Outcome prompt (Story 9.4, FR-69), read at each render of the notification area.
+    Setting(
+        key=Key.CALL_OUTCOME_PROMPT_DELAY,
+        type=SettingType.DURATION,
+        section=Section.ENGINE,
+        label="Call Outcome prompt delay",
+        unit=(
+            "An ISO 8601 duration, such as PT60M, at most 7 days (P7D). The notification area "
+            "asks how a booked call went once its scheduled time plus this delay has passed."
+        ),
+        default=timedelta(minutes=60),
+        rules=(maximum(timedelta(days=7), "7 days"),),
     ),
 )
 

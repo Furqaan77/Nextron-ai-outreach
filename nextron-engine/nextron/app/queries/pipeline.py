@@ -23,12 +23,21 @@ current unit of work, read-only ones included.
   isn't a ``str``, a date that isn't a ``date`` (a ``datetime`` included), or a ``pages`` that
   isn't a mapping of ``PipelineStage`` to ``int`` (a ``bool`` included) raises ``TypeError``; a
   page below 1, or ``entered_from`` after ``entered_to``, raises ``ValueError``.
-- ``lead_pipeline(lead_id)`` (Story 9.1): the Lead page's Pipeline panel as a ``LeadPipeline``:
-  its ``stage``, ``deal_value`` (micro-dollars) and ``notes`` (each ``None`` when unset), its
-  ``booking`` (the newest pending ``call_outcomes`` row, a ``StoredBooking``, or ``None``), its
-  ``moves`` (``operator_moves(stage)``) and ``close_ref``, the ``cause_ref`` of its latest close
+- ``lead_pipeline(lead_id, *, now=None)`` (Story 9.1): the Lead page's Pipeline panel as a
+  ``LeadPipeline``: its ``stage``, ``deal_value`` (micro-dollars) and ``notes`` (each ``None``
+  when unset), its ``booking`` (the newest pending ``call_outcomes`` row, a ``StoredBooking``,
+  or ``None``; a booking with a recorded outcome is no longer pending), its ``moves``
+  (``operator_moves(stage)``) and ``close_ref``, the ``cause_ref`` of its latest close
   ``events`` row (``stages.last_close``), whether it is still closed or reopened since, or
-  ``None``. ``None`` for an unknown Lead (a text that isn't a ULID included).
+  ``None``. Story 9.4: ``outcome_booking`` is the booking the Call Outcome form is for: given
+  ``now`` (an aware ``datetime``), the Lead's oldest pending booking scheduled at or before it
+  (``bookings.oldest_open_due``), on any stage; otherwise its newest recorded booking
+  (``bookings.latest_recorded``), to correct; otherwise ``None`` (always ``None`` without
+  ``now``). ``None`` for an unknown Lead (a text that isn't a ULID included).
+- ``call_outcomes_due(cutoff)`` (Story 9.4): every pending booking scheduled at or before
+  ``cutoff`` whose Lead is at ``call_booked`` and not merged (``bookings.due``), oldest first,
+  each a ``DueBooking`` (``booking_id``, ``lead_id``, ``lead_name``). ``cutoff`` must be an
+  aware ``datetime`` (``TypeError``/``ValueError``).
 - ``export_pii(contact_id, lead_ids, terms) -> {section: tuple[dict, ...]}`` (Stories 9.1 and
   10.7, the
   subject access export): ``call_bookings``, every ``call_outcomes`` row of the Contact (all
@@ -69,7 +78,7 @@ from nextron.db.repos.pipeline import stages as stages_repo
 from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline.assist_accounts import StoredAccount
 from nextron.db.repos.pipeline.board import BoardLead
-from nextron.db.repos.pipeline.bookings import StoredBooking
+from nextron.db.repos.pipeline.bookings import DueBooking, StoredBooking
 from nextron.domain.contact_export import MentionTerm, excerpts
 from nextron.db.repos.pipeline.channel_permissions import StoredPermission
 from nextron.domain.health import HealthIssue
@@ -94,6 +103,7 @@ __all__ = [
     "AssistAccount",
     "AssistSetup",
     "BoardLead",
+    "DueBooking",
     "LeadPipeline",
     "PipelineBoard",
     "StageGroup",
@@ -102,6 +112,7 @@ __all__ = [
     "accounts",
     "assist_setup",
     "board",
+    "call_outcomes_due",
     "export_pii",
     "health_issues",
     "lead_pipeline",
@@ -136,6 +147,7 @@ class LeadPipeline:
     booking: StoredBooking | None
     moves: tuple[str, ...]
     close_ref: str | None
+    outcome_booking: StoredBooking | None = None  # Story 9.4
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,14 +165,28 @@ def stage(lead_id: str) -> PipelineStage | None:
     return None if stored is None else PipelineStage(stored)
 
 
-def lead_pipeline(lead_id: str) -> LeadPipeline | None:
+def _check_aware(name: str, value: object) -> None:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime, not {type(value).__name__}")
+    if value.utcoffset() is None:
+        raise ValueError(f"{name} must be aware")
+
+
+def lead_pipeline(lead_id: str, *, now: datetime | None = None) -> LeadPipeline | None:
     """The Lead's Pipeline panel facts, or ``None``; see the module docstring."""
+    if now is not None:
+        _check_aware("now", now)
     current = stage(lead_id)
     deal = stages_repo.deal(lead_id) if current is not None else None
     if current is None or deal is None:
         return None
     pending = bookings_repo.pending(lead_id)
     closing = stages_repo.last_close(lead_id)
+    outcome_booking = None
+    if now is not None:
+        outcome_booking = bookings_repo.oldest_open_due(
+            lead_id, now
+        ) or bookings_repo.latest_recorded(lead_id)
     return LeadPipeline(
         stage=current,
         deal_value=deal.deal_value,
@@ -168,7 +194,14 @@ def lead_pipeline(lead_id: str) -> LeadPipeline | None:
         booking=pending[-1] if pending else None,
         moves=operator_moves(current),
         close_ref=None if closing is None else closing.cause_ref,
+        outcome_booking=outcome_booking,
     )
+
+
+def call_outcomes_due(cutoff: datetime) -> tuple[DueBooking, ...]:
+    """The bookings whose Call Outcome is due by ``cutoff``; see the module docstring."""
+    _check_aware("cutoff", cutoff)
+    return bookings_repo.due(cutoff)
 
 
 def export_pii(

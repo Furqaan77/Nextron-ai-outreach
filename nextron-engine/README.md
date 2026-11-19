@@ -2810,6 +2810,26 @@ that name the Contact and the Contact's booked calls. Migration `0049_9_1_manual
 yet: closing a Lead doesn't stop them here (see `deferred-work.md`), and the contactability gate
 already blocks a closed Lead.
 
+**Call Outcomes (Story 9.4, FR-69).** Once a booked call's time plus the **Call Outcome prompt
+delay** setting (Engine section, default `PT60M`, at most 7 days) has passed, every page's notification area
+shows "Call Outcome due: <Lead name>", linked to the Lead's Call Outcome form
+(`/leads/<id>#call-outcome`). It is worked out from `call_outcomes` at each render (no job, no
+stored flag) and only for a pending booking of a Lead still at `call_booked` and not merged, so a
+closed Lead doesn't nag. The form sits in the Pipeline panel for the oldest pending booking whose
+time has passed (on any stage), or, once recorded, as a prefilled "Correct Call Outcome" form. It
+records held or no-show; for a held call, qualified (with a reason when not), whether the audit
+was proposed (with its price in whole US dollars), the price reaction and any Sales Playbook §5
+objections; and, for either, an optional next step and its date. A missing or bad field shows its
+error next to it and stores nothing. Recording appends a `call_outcomes` row `booked` to `held`
+or `no_show` (cause `call_outcome`, actor `operator`) and moves the stage through the AD-4
+machine: held at `call_booked` gives `call_held`, a no-show at `call_held` gives `call_booked`;
+any other stage is left alone. A correction appends one row per changed field (cause
+`corrected_<field>`) and never recomputes the stage. A recorded booking is no longer pending, so
+a later rebooking never supersedes it. The reason and next step are personal data (`redact`):
+erasing a Contact sets them to `[erased]` on every booking of its Lead and of the Leads merged
+into it, whichever Contact the call was with. Migration
+`0053_9_4_call_outcomes` adds the outcome columns to `call_outcomes`.
+
 **The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
 to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created
 date, with a link back to **All Leads**. **Contacts** lists every Contact, oldest first, with its
@@ -3173,6 +3193,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0050_2_14_email_checks` | adds to `contacts`, in place with no check, the nullable `email_check_result`, `email_checked_at`, `email_invalid_reason` and `email_verifier_at` (codes and times only), and creates `trg_contacts_tombstone` again with the four columns fixed on an erased Contact (22 fixed columns; see [Validating addresses](#validating-addresses)) | `research` |
 | `0051_10_7_channel_permissions` | `channel_permissions` (one row per opening a prospect gave on WhatsApp or Instagram: foreign keys to `contacts` and `evidence` with no cascade, `ix_channel_permissions_contact_id`; channel, action, identifier, last-inbound, status, revoked-at and recorded-by checks; the partial unique index `uq_channel_permissions_active` allows one `active` permission per Contact and channel; `whatsapp_number` and `instagram_handle` are PII class `null`) | `pipeline` |
 | `0052_4_10_daily_capacity` | `daily_capacity` (one row per day: `local_date` unique, the day's total cold capacity, follow-ups reserved, new-Sequence capacity, `picked` and the `signal_shortfall` set when a later day finalises it; non-negative checks), owned by `scoring` (see [Today's capacity and Ready to draft](#todays-capacity-and-ready-to-draft)) | `scoring` |
+| `0053_9_4_call_outcomes` | adds to `call_outcomes`, in place with no check, eleven nullable outcome columns: `outcome`, `qualified`, `reason` and `next_step` (Text, PII class `redact`), `next_step_on`, `audit_proposed`, `audit_price` (micro-dollars), `objections`, `price_reaction`, `recorded_at` and `recorded_by`; every stored booking stays pending | `pipeline` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

@@ -47,6 +47,25 @@ disqualified" and "Won" ask for confirmation first (``hx-confirm``, ``CONFIRMS``
 
 ``dollars(micros)`` is "$12,000" (whole dollars, thousands separated) or "—" for ``None``;
 ``deal_line(micros)`` is "Deal value: <that>", used by this panel and the Pipeline board.
+
+**The Call Outcome form (Story 9.4, FR-69).** ``lead_call_outcome.html`` (included by the panel,
+``<div id="call-outcome">``) renders ``panel_context``'s ``outcome_form`` (an ``OutcomeView``)
+for ``LeadPipeline.outcome_booking``: "Call Outcome" for a pending booking, or a prefilled
+"Correct Call Outcome" for a recorded one, with the call's time ("Call on <local> <zone>
+(<utc> UTC)"). It posts the hidden ``booking`` id, ``outcome`` (Held, No-show), ``qualified``
+and ``audit_proposed`` (Yes, No), ``reason``, ``audit_price`` (whole US dollars),
+``price_reaction`` (Accepted, Pushed back, Not discussed), ``objections`` (one checkbox per
+``ObjectionType``, ``OBJECTION_LABELS``), ``next_step`` and ``next_step_on`` (a date) to
+``/leads/{lead_id}/outcome``. Typed texts render through ``|plain`` inside ``hx-disable``.
+``submitted_outcome(fields)`` reads it: exactly one ``booking`` (a ULID) and at most one of
+each other field but ``objections`` (each a distinct ``ObjectionType`` code); a missing field
+is blank; an unknown or repeated field, a ``booking`` that isn't a ULID, or a value that isn't
+one of the field's codes (blank aside) is ``MalformedForm``. A refusal
+(``call_outcomes.OutcomeRefused``) renders the form again with what was typed, the posted
+``booking`` id and the error next to its field (``outcome_error``: ``OUTCOME_ERRORS``), and the
+panel alert "The Call Outcome wasn't saved."; the saved notices are "Call Outcome recorded.",
+"Call Outcome corrected. The stage wasn't changed; move it by hand if needed." and "Nothing
+changed.".
 """
 
 from collections.abc import Iterable, Mapping
@@ -56,8 +75,29 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.app.queries.compliance import ListedEntry
-from nextron.app.queries.pipeline import LeadPipeline
+from nextron.app.queries.pipeline import LeadPipeline, StoredBooking
 from nextron.app.queries.research import StoredContact
+from nextron.domain.call_outcomes import (
+    ANSWERS,
+    AUDIT_PRICE,
+    AUDIT_PROPOSED,
+    NEXT_STEP,
+    NEXT_STEP_ON,
+    OBJECTIONS,
+    OUTCOME,
+    PRICE_REACTION,
+    QUALIFIED,
+    REASON,
+    NO,
+    YES,
+    CallResult,
+    Outcome,
+    OutcomeForm,
+    OutcomeRefusal,
+    OutcomeRefused,
+    PriceReaction,
+)
+from nextron.domain.ids import is_ulid
 from nextron.domain.manual_stages import (
     MICROS_PER_DOLLAR,
     StageRefusal,
@@ -66,6 +106,7 @@ from nextron.domain.manual_stages import (
     check_timezone,
 )
 from nextron.domain.pipeline_stage import REOPEN, PipelineStage
+from nextron.domain.reply_classes import ObjectionType
 from nextron.domain.suppression_entry import OPT_OUT_SOURCES
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
@@ -135,6 +176,77 @@ REBOOKED: Final = "Call rebooked."
 REOPENED: Final = "Lead reopened at {label}."
 DEAL_SAVED: Final = "Deal details saved."
 
+# Story 9.4: the Call Outcome form
+OUTCOME_ROUTE: Final = "/leads/{lead_id}/outcome"
+OUTCOME_ANCHOR: Final = "call-outcome"
+# The HX-Trigger event a saved outcome answers with; the layout's notification area re-fetches
+# on it, so the due line clears at once.
+OUTCOME_SAVED_EVENT: Final = "call-outcome-saved"
+BOOKING_FIELD: Final = "booking"
+OUTCOME_TEXT_FIELDS: Final = frozenset(
+    {OUTCOME, QUALIFIED, REASON, AUDIT_PROPOSED, AUDIT_PRICE, PRICE_REACTION, NEXT_STEP, NEXT_STEP_ON}
+)
+OUTCOME_FIELDS: Final = OUTCOME_TEXT_FIELDS | {BOOKING_FIELD, OBJECTIONS}
+CODES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        OUTCOME: frozenset(CallResult),
+        QUALIFIED: frozenset(ANSWERS),
+        AUDIT_PROPOSED: frozenset(ANSWERS),
+        PRICE_REACTION: frozenset(PriceReaction),
+    }
+)
+RESULT_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {CallResult.HELD: "Held", CallResult.NO_SHOW: "No-show"}
+)
+ANSWER_LABELS: Final[Mapping[str, str]] = MappingProxyType({YES: "Yes", NO: "No"})
+REACTION_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        PriceReaction.ACCEPTED: "Accepted",
+        PriceReaction.PUSHED_BACK: "Pushed back",
+        PriceReaction.NOT_DISCUSSED: "Not discussed",
+    }
+)
+OBJECTION_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        ObjectionType.SEND_INFORMATION: "Send me some information",
+        ObjectionType.NO_BUDGET: "No budget",
+        ObjectionType.USES_OTHER_TOOL: "We already use another tool",
+    }
+)
+MISSING_ERRORS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        OUTCOME: "Choose whether the call was held or a no-show",
+        QUALIFIED: "Choose whether the Lead is qualified",
+        REASON: "Enter why the Lead isn't qualified",
+        AUDIT_PROPOSED: "Choose whether the audit was proposed",
+        AUDIT_PRICE: "Enter the audit price in whole US dollars",
+        PRICE_REACTION: "Choose the price reaction",
+    }
+)
+OUTCOME_ERRORS: Final[Mapping[OutcomeRefusal, str]] = MappingProxyType(
+    {
+        OutcomeRefusal.BAD_PRICE: "Enter the audit price in whole US dollars",
+        OutcomeRefusal.BAD_DATE: "Enter the next step's date as YYYY-MM-DD",
+        OutcomeRefusal.TOO_LONG: "At most 500 characters",
+    }
+)
+OUTCOME_HEADING: Final = "Call Outcome"
+CORRECT_HEADING: Final = "Correct Call Outcome"
+OUTCOME_SUBMIT: Final = "Save Call Outcome"
+CORRECT_SUBMIT: Final = "Save correction"
+CALL_LINE: Final = "Call on {local} {zone} ({utc} UTC)"
+OUTCOME_REFUSED: Final = "The Call Outcome wasn't saved."
+OUTCOME_SAVED: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "recorded": "Call Outcome recorded.",
+        "corrected": (
+            "Call Outcome corrected. The stage wasn't changed; move it by hand if needed."
+        ),
+        "unchanged": "Nothing changed.",
+    }
+)
+DUE_LINE: Final = "Call Outcome due: {name}"
+
 
 @dataclass(frozen=True, slots=True)
 class CallForm:
@@ -166,6 +278,40 @@ class ContactOption:
     value: str
     label: str
     selected: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Choice:
+    """One option of a select (or one checkbox)."""
+
+    value: str
+    label: str
+    selected: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeView:
+    """What ``lead_call_outcome.html`` renders."""
+
+    booking_id: str
+    heading: str
+    submit: str
+    call_line: str
+    form: OutcomeForm
+    errors: Mapping[str, str]
+    results: tuple[Choice, ...]
+    qualified: tuple[Choice, ...]
+    audit_proposed: tuple[Choice, ...]
+    reactions: tuple[Choice, ...]
+    objections: tuple[Choice, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DueItem:
+    """One "Call Outcome due: <Lead name>" line of the notification area."""
+
+    text: str
+    href: str
 
 
 def _fields(fields: FormFields, names: frozenset[str]) -> dict[str, str]:
@@ -218,6 +364,119 @@ def call_details(form: CallForm, contact: StoredContact | None) -> tuple[datetim
     return call_time(form.date, form.time, zone), zone_name
 
 
+def submitted_outcome(fields: FormFields) -> tuple[str, OutcomeForm]:
+    """The Call Outcome form's booking id and fields; see the module docstring."""
+    names = set(fields) - {CSRF_FIELD}
+    if BOOKING_FIELD not in names or not names <= OUTCOME_FIELDS:
+        raise MalformedForm(WRONG_FIELDS)
+    found: dict[str, str] = {}
+    for name in names - {OBJECTIONS}:
+        values = fields[name]
+        if len(values) != 1:
+            raise MalformedForm(REPEATED_FIELD)
+        found[name] = values[0]
+    booking_id = found.pop(BOOKING_FIELD)
+    if not is_ulid(booking_id):
+        raise MalformedForm(WRONG_FIELDS)
+    for name, codes in CODES.items():
+        if found.get(name, "") not in codes | {""}:
+            raise MalformedForm(WRONG_FIELDS)
+    objections = tuple(fields.get(OBJECTIONS, ()))
+    if not set(objections) <= set(ObjectionType):
+        raise MalformedForm(WRONG_FIELDS)
+    if len(set(objections)) != len(objections):
+        raise MalformedForm(REPEATED_FIELD)
+    return booking_id, OutcomeForm(**found, objections=objections)
+
+
+def outcome_error(refused: OutcomeRefused) -> str:
+    """The message shown next to the refused field."""
+    if refused.reason is OutcomeRefusal.MISSING:
+        return MISSING_ERRORS[refused.field]
+    return OUTCOME_ERRORS[refused.reason]
+
+
+def outcome_refused() -> Notice:
+    return Notice(Role.ALERT, OUTCOME_REFUSED)
+
+
+def outcome_saved(saved: str) -> Notice:
+    return Notice(Role.STATUS, OUTCOME_SAVED[saved])
+
+
+def typed_from(outcome: Outcome) -> OutcomeForm:
+    """The form prefilled with a stored outcome (to correct it)."""
+
+    def answer(value: bool | None) -> str:
+        return "" if value is None else YES if value else NO
+
+    return OutcomeForm(
+        outcome=str(outcome.outcome),
+        qualified=answer(outcome.qualified),
+        reason=outcome.reason or "",
+        audit_proposed=answer(outcome.audit_proposed),
+        audit_price=(
+            "" if outcome.audit_price is None else str(outcome.audit_price // MICROS_PER_DOLLAR)
+        ),
+        price_reaction="" if outcome.price_reaction is None else str(outcome.price_reaction),
+        objections=tuple(str(each) for each in outcome.objections or ()),
+        next_step=outcome.next_step or "",
+        next_step_on="" if outcome.next_step_on is None else outcome.next_step_on.isoformat(),
+    )
+
+
+def _local_line(template: str, booking: StoredBooking) -> str:
+    utc = booking.scheduled_at.astimezone(UTC)
+    try:
+        local = utc.astimezone(check_timezone(booking.prospect_tz))
+    except StageRefused:  # a stored zone this PC no longer knows: show UTC only
+        local = utc
+    return template.format(
+        local=f"{local:{TIME_FORMAT}}", zone=booking.prospect_tz, utc=f"{utc:{TIME_FORMAT}}"
+    )
+
+
+def _choices(labels: Mapping[str, str], chosen: Iterable[str]) -> tuple[Choice, ...]:
+    picked = set(chosen)
+    return tuple(Choice(str(value), label, str(value) in picked) for value, label in labels.items())
+
+
+def outcome_view(
+    booking: StoredBooking | None,
+    typed: OutcomeForm | None = None,
+    error: OutcomeRefused | None = None,
+    typed_booking_id: str | None = None,
+) -> OutcomeView | None:
+    """The Call Outcome form for ``booking`` (``None`` without one); see the module docstring.
+    A refused form keeps the booking id it posted (``typed_booking_id``), which a stale form
+    can hold even when the panel's booking has changed since."""
+    if booking is None:
+        return None
+    recorded = booking.result
+    form = typed if typed is not None else typed_from(recorded) if recorded else OutcomeForm()
+    return OutcomeView(
+        booking_id=typed_booking_id or booking.id,
+        heading=OUTCOME_HEADING if recorded is None else CORRECT_HEADING,
+        submit=OUTCOME_SUBMIT if recorded is None else CORRECT_SUBMIT,
+        call_line=_local_line(CALL_LINE, booking),
+        form=form,
+        errors={} if error is None else {error.field: outcome_error(error)},
+        results=_choices(RESULT_LABELS, (form.outcome,)),
+        qualified=_choices(ANSWER_LABELS, (form.qualified,)),
+        audit_proposed=_choices(ANSWER_LABELS, (form.audit_proposed,)),
+        reactions=_choices(REACTION_LABELS, (form.price_reaction,)),
+        objections=_choices(OBJECTION_LABELS, form.objections),
+    )
+
+
+def due_items(due: Iterable[tuple[str, str]]) -> list[DueItem]:
+    """The notification area's due lines, one per ``(lead_id, lead_name)``."""
+    return [
+        DueItem(DUE_LINE.format(name=name), f"/leads/{lead_id}#{OUTCOME_ANCHOR}")
+        for lead_id, name in due
+    ]
+
+
 def dollars(micros: int | None) -> str:
     """``micros`` as whole US dollars, "$12,000", or "—" for ``None``."""
     if micros is None:
@@ -259,14 +518,7 @@ def _booking_line(found: LeadPipeline) -> str | None:
     booking = found.booking
     if booking is None or found.stage is not PipelineStage.CALL_BOOKED:
         return None
-    utc = booking.scheduled_at.astimezone(UTC)
-    try:
-        local = utc.astimezone(check_timezone(booking.prospect_tz))
-    except StageRefused:  # a stored zone this PC no longer knows: show UTC only
-        local = utc
-    return BOOKING_LINE.format(
-        local=f"{local:{TIME_FORMAT}}", zone=booking.prospect_tz, utc=f"{utc:{TIME_FORMAT}}"
-    )
+    return _local_line(BOOKING_LINE, booking)
 
 
 def panel_context(
@@ -278,6 +530,9 @@ def panel_context(
     *,
     typed_call: CallForm | None = None,
     typed_deal: DealForm | None = None,
+    typed_outcome: OutcomeForm | None = None,
+    outcome_refusal: OutcomeRefused | None = None,
+    typed_booking_id: str | None = None,
 ) -> dict[str, object]:
     """What ``lead_pipeline.html`` renders; see the module docstring."""
     can_book = PipelineStage.CALL_BOOKED in found.moves
@@ -322,4 +577,7 @@ def panel_context(
         "no_notes": NO_NOTES,
         "opted_out": OPTED_OUT if opted_out(close_entries) else None,
         "pipeline_notice": notice,
+        "outcome_form": outcome_view(
+            found.outcome_booking, typed_outcome, outcome_refusal, typed_booking_id
+        ),
     }

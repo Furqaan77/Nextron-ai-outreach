@@ -160,6 +160,18 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "booked_at",
             "booked_by",
             "superseded_at",
+            # Story 9.4: the outcome
+            "outcome",
+            "qualified",
+            "reason",
+            "next_step",
+            "next_step_on",
+            "audit_proposed",
+            "audit_price",
+            "objections",
+            "price_reaction",
+            "recorded_at",
+            "recorded_by",
         ),
     },
     "prompt_snapshots": {

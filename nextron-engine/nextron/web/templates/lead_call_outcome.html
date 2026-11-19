@@ -1,0 +1,68 @@
+{#- The Pipeline panel's Call Outcome form (nextron.web.lead_pipeline, Story 9.4): included by
+    lead_pipeline.html for the Lead's oldest pending booking whose time has passed, or, to
+    correct it, its newest recorded one. It posts to /leads/{lead_id}/outcome, which answers
+    the whole panel. Typed text (the reason, the next step) renders only through |plain, inside
+    an element carrying hx-disable; each error shows next to its field. -#}
+{%- set view = outcome_form -%}
+{%- macro described(name) -%}
+id="outcome-{{ name }}" name="{{ name }}"
+{%- if view.errors.get(name) %} aria-describedby="outcome-{{ name }}-error" aria-invalid="true"{% endif %}
+{%- endmacro %}
+{%- macro field_error(name) -%}
+{%- if view.errors.get(name) %}
+<p class="field-error" id="outcome-{{ name }}-error">{{ view.errors.get(name)|plain }}</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro select(name, label, choices) %}
+<div class="field">
+<label for="outcome-{{ name }}">{{ label }}</label>
+<select {{ described(name) }}>
+<option value=""{% if not choices|selectattr("selected")|list %} selected{% endif %}>Choose</option>
+{%- for choice in choices %}
+<option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
+{%- endfor %}
+</select>
+{{- field_error(name) }}
+</div>
+{%- endmacro %}
+<div class="call-outcome" id="call-outcome">
+<h3>{{ view.heading }}</h3>
+<p class="call-line">{{ view.call_line }}</p>
+<form class="outcome-form" method="post" action="/leads/{{ pipeline_lead_id }}/outcome" hx-post="/leads/{{ pipeline_lead_id }}/outcome" hx-target="#lead-pipeline" hx-swap="outerHTML" hx-sync="this:drop">{{ csrf_field() }}
+<input type="hidden" name="booking" value="{{ view.booking_id }}">
+{{- select("outcome", "Outcome", view.results) }}
+<p class="hint">For a held call, also fill in the fields below.</p>
+{{- select("qualified", "Qualified", view.qualified) }}
+<div class="field" hx-disable>
+<label for="outcome-reason">Reason (when not qualified)</label>
+<textarea {{ described("reason") }} rows="3" maxlength="500">
+{{ view.form.reason|plain }}</textarea>
+{{- field_error("reason") }}
+</div>
+{{- select("audit_proposed", "Audit proposed", view.audit_proposed) }}
+<div class="field">
+<label for="outcome-audit_price">Audit price (whole US dollars)</label>
+<input type="text" {{ described("audit_price") }} inputmode="numeric" maxlength="13" value="{{ view.form.audit_price|plain }}">
+{{- field_error("audit_price") }}
+</div>
+{{- select("price_reaction", "Price reaction", view.reactions) }}
+<fieldset class="field">
+<legend>Objections raised</legend>
+{%- for choice in view.objections %}
+<label><input type="checkbox" name="objections" value="{{ choice.value }}"{% if choice.selected %} checked{% endif %}> {{ choice.label }}</label>
+{%- endfor %}
+</fieldset>
+<div class="field" hx-disable>
+<label for="outcome-next_step">Next step</label>
+<textarea {{ described("next_step") }} rows="2" maxlength="500">
+{{ view.form.next_step|plain }}</textarea>
+{{- field_error("next_step") }}
+</div>
+<div class="field">
+<label for="outcome-next_step_on">Next step date</label>
+<input type="date" {{ described("next_step_on") }} value="{{ view.form.next_step_on|plain }}">
+{{- field_error("next_step_on") }}
+</div>
+<button type="submit">{{ view.submit }}</button>
+</form>
+</div>
