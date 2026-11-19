@@ -14,6 +14,8 @@ and ``cancelled``. ``PENDING`` (not yet sent or ended) is ``ready`` and ``approv
 **Kinds** (``DraftKind``): ``step`` (a Sequence Step), ``recontact`` (a re-contact's Step),
 ``reply``, ``rebook`` and ``channel`` (a LinkedIn or other channel message). ``STEP_KINDS`` are
 ``step`` and ``recontact``: the kinds that belong to an Enrollment and carry a Step number.
+``RESPONSIVE_KINDS`` (Story 5.1) are ``reply``, ``rebook`` and ``channel``: the kinds the
+Approval Queue shows whatever their due time, in its Replies group.
 
 **Transitions.** ``transition(current, event, *, kind=None)`` follows ``TRANSITIONS``
 (read-only) or raises ``IllegalTransition``:
@@ -109,6 +111,7 @@ TERMINAL: Final = (
     DraftStatus.CANCELLED,
 )
 STEP_KINDS: Final = (DraftKind.STEP, DraftKind.RECONTACT)
+RESPONSIVE_KINDS: Final = (DraftKind.REPLY, DraftKind.REBOOK, DraftKind.CHANNEL)
 
 _S = DraftStatus
 _E = DraftEvent

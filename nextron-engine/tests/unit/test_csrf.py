@@ -4,6 +4,7 @@ record each time their handler runs."""
 
 import logging
 import threading
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -14,9 +15,10 @@ from fastapi.routing import APIRoute
 from nextron.app.ops.api import OPEN_CODE_SECRET
 from nextron.web.csrf import SECURITY_CHECK_FAILED
 from nextron.web.routing import dashboard_route_class, personal_data, route_rule_problems
-from nextron.web.sessions import SessionStore
+from nextron.web.sessions import SessionStore, session_cookie_values
 from tests.asgi import DEFAULT_HOST, Reply, request
 from tests.dashboard import FORM, ORIGIN, Dashboard
+from tests.fakes.clock import FrozenClock
 from tests.fakes.units import FakeUnits
 
 KEY = ("nextron-engine/test", OPEN_CODE_SECRET)
@@ -121,6 +123,50 @@ def test_the_store_maps_a_session_to_its_token() -> None:
     assert store.csrf_token(session) == token
     assert store.csrf_token("") is None
     assert store.csrf_token("x" * 43) is None
+
+
+def test_a_store_without_a_clock_records_no_start() -> None:
+    store = SessionStore()
+    session = store.create()
+
+    assert store.csrf_token(session) is not None
+    assert store.started_at(session) is None
+
+
+def test_the_start_is_none_for_an_unknown_or_empty_token() -> None:
+    store = SessionStore(FrozenClock().now)
+    store.create()
+
+    assert store.started_at("") is None
+    assert store.started_at("x" * 43) is None
+
+
+def test_the_start_is_the_clocks_time_at_create_and_does_not_move() -> None:
+    clock = FrozenClock()
+    store = SessionStore(clock.now)
+    created_at = clock.now()
+    session = store.create()
+    clock.advance(timedelta(hours=2))
+
+    assert store.started_at(session) == created_at
+    assert store.started_at(session) == created_at
+    later = store.create()
+    assert store.started_at(later) == created_at + timedelta(hours=2)
+    assert store.started_at(session) == created_at
+
+
+@pytest.mark.parametrize(
+    ("header", "values"),
+    [
+        ("", []),
+        ("nextron_session=abc", ["abc"]),
+        (" a=1; nextron_session = abc ;nextron_session=def", ["abc", "def"]),
+        ("nextron_session; other=nextron_session", []),
+        ("nextron_session_x=abc; nextron_session=", [""]),
+    ],
+)
+def test_session_cookie_values(header: str, values: list[str]) -> None:
+    assert list(session_cookie_values(header)) == values
 
 
 def _header(token: str) -> dict[str, Any]:

@@ -408,3 +408,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-14-run-the-ai-grounding-check-and-fail-closed.md`
   summary: Add a migration data test for 0047 (a `grounding_results` row seeded at 0046 keeps its data and gains `"source": "rules"` on each flag).
   evidence: Review pass 1 of Story 4.14 (VG6, low). No test seeds a row at 0046; `_decoded` already treats a missing `source` as `rules`, so the impact is small.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
+  summary: Give the queue's focused card a stable target (for example `?draft=<id>` falling back to `?card=k`) before the approve/edit/reject/skip stories post decisions from it, so a queue that changed between loads never applies a decision to a different Draft than the one shown.
+  evidence: Review pass 1 of Story 5.1 (BH3, low). `/queue?card=k` picks the k-th card of the current build; a Draft becoming due or held back between loads shifts positions. Harmless while the page has no actions.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
+  summary: Decide whether responsive Drafts (reply, rebook, channel) in the queue are checked with cold-email Eligibility (Not Now, FR-63 re-contact, Market cold rules) or only with `assert_contactable` for a reply purpose; today `due_queue` applies `Compliance.evaluate_eligibility` (cold) to every Draft, so a Reply to a Lead marked Not Now would be held back.
+  evidence: Review pass 1 of Story 5.1 (VG other, unverified medium). No reply Draft exists before Epic 7; the Epic 7 story that writes reply Drafts should settle it.

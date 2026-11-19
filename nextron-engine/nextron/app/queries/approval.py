@@ -1,5 +1,358 @@
-"""Read API of the ``approval`` service (AD-3).
+"""Read API of the ``approval`` service (AD-3, AD-16; Story 5.1).
 
-Import rule: ``nextron.domain`` and ``nextron.db.repos.approval`` only. Empty until a story adds
-a query.
+Import rule: ``nextron.domain``, ``nextron.db.repos.approval`` and the other read APIs
+(``nextron.app.queries.*``) only; never ``nextron.app.compliance`` (c6), so live Eligibility is
+passed in as a callable.
+
+**The due queue (FR-26).** ``due_queue(now, eligibility) -> DueQueue`` reads, and never writes,
+the Drafts due for review:
+
+- **Candidates.** ``ready`` Drafts with a current revision (``reviewable``). A cold Draft (kind
+  ``step`` or ``recontact``) also needs ``due_at`` set, ``due_at <= now + 24 h`` (inclusive) and
+  an ``active`` Enrollment. A responsive Draft (``reply``, ``rebook``, ``channel``) needs
+  neither; it is resolved to its Contact and Lead through its ``enrollment_id``, and one that
+  can't be is held back with ``no_contact_link``.
+- **Live Eligibility (AD-16).** ``eligibility(contact_id) -> Decision`` is called once per
+  Contact per build (the dashboard passes ``Compliance.evaluate_eligibility``, which itself asks
+  ``assert_contactable``). A Draft whose Decision isn't eligible is held back with the
+  Decision's reasons; one whose call raises ``LookupError`` with ``contact_unknown``, and one
+  whose call raises ``ValueError`` (a Contact whose Lead was merged) with ``not_checkable``,
+  fail closed. Scoring's stored Eligibility is never read.
+- **Groups, in order** (``GROUP_ORDER``): ``replies`` (responsive kinds, oldest ``created_at``
+  first); ``tier_a_step_1`` (kind ``step``, ``step_no`` 1, Lead Tier A: by the age in days of
+  the Lead's newest live Event, ``domain.signals.age_days`` over its current Event-class Signals
+  that ``is_live``, ascending, a Lead without one after every Lead with one, then by Lead Score
+  descending); ``other_step_1`` (every other ``step_no`` 1 Draft: a non-A ``step`` or a
+  ``recontact``, by Lead Score descending); ``follow_ups`` (``step_no`` above 1, by Lead Score
+  descending). A missing score sorts last; the final tie-breaks are ``due_at`` (none last) and
+  then the Draft id.
+- **Result.** ``DueQueue(groups, held_back, total, next_due_at)``: every group (empty ones
+  included) with its ordered ``QueueCard``s (``cards`` flattens them in queue order); the
+  ``HeldBack`` cards with their ``HeldReason(code, text)``s, by Draft id; ``total`` N, the cards
+  in the groups (held-back ones not counted); ``next_due_at``, the earliest ``due_at`` of any
+  ``ready`` Draft that has one (any Enrollment status), else ``None``.
+- **A card** (``QueueCard``) holds the Lead's name, Segment name, the Contact's Market code, the
+  Lead's Tier and Score; the Contact's name, role and Address Class; ``message``, the exact
+  ``domain.render.compose`` output of the current revision with its footer snapshot (``None``
+  without one); and ``blocked``, ``render.incomplete_notice`` when the Market's footer check
+  fails. A Segment or Market that no longer decodes reads as missing.
 """
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Final
+
+from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import drafting as drafting_queries
+from nextron.app.queries import research as research_queries
+from nextron.app.queries import scoring as scoring_queries
+from nextron.app.queries import setup as setup_queries
+from nextron.db.repos.approval import drafts as drafts_repo
+from nextron.domain import render
+from nextron.domain.draft import RESPONSIVE_KINDS, DraftKind
+from nextron.domain.eligibility import Decision
+from nextron.domain.markets import InvalidMarkets
+from nextron.domain.scoring import Tier
+from nextron.domain.segments import InvalidSegments, SignalClass
+from nextron.domain.signals import age_days, is_live
+
+HORIZON: Final = timedelta(hours=24)
+FIRST_STEP: Final = 1
+
+GROUP_REPLIES: Final = "replies"
+GROUP_TIER_A: Final = "tier_a_step_1"
+GROUP_OTHER_STEP_1: Final = "other_step_1"
+GROUP_FOLLOW_UPS: Final = "follow_ups"
+GROUP_ORDER: Final = (GROUP_REPLIES, GROUP_TIER_A, GROUP_OTHER_STEP_1, GROUP_FOLLOW_UPS)
+GROUP_LABELS: Final = {
+    GROUP_REPLIES: "Replies",
+    GROUP_TIER_A: "Tier A Step 1",
+    GROUP_OTHER_STEP_1: "Other Step 1 and recontact",
+    GROUP_FOLLOW_UPS: "Follow-ups",
+}
+
+NO_CONTACT_LINK: Final = "no_contact_link"
+CONTACT_UNKNOWN: Final = "contact_unknown"
+NOT_ELIGIBLE: Final = "not_eligible"
+NOT_CHECKABLE: Final = "not_checkable"
+REASON_TEXTS: Final = {
+    NO_CONTACT_LINK: "No Contact is linked to this Draft",
+    CONTACT_UNKNOWN: "The Contact is unknown",
+    NOT_ELIGIBLE: "Not eligible",
+    NOT_CHECKABLE: "Eligibility couldn't be checked",
+}
+
+_NO_TIME: Final = datetime.min.replace(tzinfo=UTC)
+
+type Eligibility = Callable[[str], Decision]
+
+
+@dataclass(frozen=True, slots=True)
+class QueueCard:
+    """One Draft as the queue shows it; see the module docstring."""
+
+    draft_id: str
+    kind: DraftKind
+    step_no: int | None
+    rev: int | None
+    due_at: datetime | None
+    created_at: datetime
+    lead_id: str | None = None
+    lead_name: str | None = None
+    segment_name: str | None = None
+    market_code: str | None = None
+    tier: Tier | None = None
+    lead_score: int | None = None
+    contact_id: str | None = None
+    contact_name: str | None = None
+    contact_role: str | None = None
+    address_class: str | None = None
+    message: render.Composed | None = None
+    blocked: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HeldReason:
+    """Why a Draft is held back: a code and its Operator-facing text."""
+
+    code: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class HeldBack:
+    """A due Draft that failed live Eligibility, with its reasons."""
+
+    card: QueueCard
+    reasons: tuple[HeldReason, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class QueueGroup:
+    """One queue group: its key, its label and its cards in queue order."""
+
+    key: str
+    label: str
+    cards: tuple[QueueCard, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DueQueue:
+    """The due queue; see the module docstring."""
+
+    groups: tuple[QueueGroup, ...]
+    held_back: tuple[HeldBack, ...]
+    total: int
+    next_due_at: datetime | None
+
+    @property
+    def cards(self) -> tuple[QueueCard, ...]:
+        """Every card of the groups, flattened in queue order."""
+        return tuple(card for group in self.groups for card in group.cards)
+
+
+def _reason(code: str) -> HeldReason:
+    return HeldReason(code, REASON_TEXTS[code])
+
+
+@dataclass(slots=True)
+class _Reader:
+    """One build's lookups, each read at most once."""
+
+    now: datetime
+    eligibility: Eligibility
+    settings: render.FooterSettings
+    decisions: dict[str, Decision | str] = field(default_factory=dict)
+    contacts: dict[str, research_queries.StoredContact | None] = field(default_factory=dict)
+    leads: dict[str, discovery_queries.StoredLead | None] = field(default_factory=dict)
+    scores: dict[str, scoring_queries.StoredScore | None] = field(default_factory=dict)
+    segments: dict[str, str | None] = field(default_factory=dict)
+    markets: dict[str, setup_queries.SeededMarket | None] = field(default_factory=dict)
+    event_ages: dict[str, int | None] = field(default_factory=dict)
+
+    def decision(self, contact_id: str) -> Decision | str:
+        """The Contact's live Decision, or the held-back reason code when the call raised:
+        ``contact_unknown`` for ``LookupError``, ``not_checkable`` for ``ValueError``."""
+        if contact_id not in self.decisions:
+            try:
+                self.decisions[contact_id] = self.eligibility(contact_id)
+            except LookupError:
+                self.decisions[contact_id] = CONTACT_UNKNOWN
+            except ValueError:  # e.g. the Contact's Lead was merged: fail closed
+                self.decisions[contact_id] = NOT_CHECKABLE
+        return self.decisions[contact_id]
+
+    def contact(self, contact_id: str) -> research_queries.StoredContact | None:
+        if contact_id not in self.contacts:
+            self.contacts[contact_id] = research_queries.contact(contact_id)
+        return self.contacts[contact_id]
+
+    def lead(self, lead_id: str) -> discovery_queries.StoredLead | None:
+        if lead_id not in self.leads:
+            self.leads[lead_id] = discovery_queries.lead(lead_id)
+        return self.leads[lead_id]
+
+    def score(self, lead_id: str) -> scoring_queries.StoredScore | None:
+        if lead_id not in self.scores:
+            self.scores[lead_id] = scoring_queries.stored(lead_id)
+        return self.scores[lead_id]
+
+    def segment_name(self, segment_id: str) -> str | None:
+        if segment_id not in self.segments:
+            try:
+                seeded = setup_queries.segment_by_id(segment_id)
+            except InvalidSegments:  # unreadable: shown as missing
+                seeded = None
+            self.segments[segment_id] = None if seeded is None else seeded.definition.name
+        return self.segments[segment_id]
+
+    def market(self, market_id: str) -> setup_queries.SeededMarket | None:
+        if market_id not in self.markets:
+            try:
+                self.markets[market_id] = setup_queries.market_by_id(market_id)
+            except InvalidMarkets:  # unreadable: no Market code and no footer check
+                self.markets[market_id] = None
+        return self.markets[market_id]
+
+    def newest_live_event_age(self, lead_id: str) -> int | None:
+        """The age in days of the Lead's newest live Event, or ``None`` without one."""
+        if lead_id not in self.event_ages:
+            ages = []
+            for signal in research_queries.signals(lead_id):
+                if signal.signal_class != SignalClass.EVENT:
+                    continue
+                age = age_days(signal.event_date, signal.first_seen_at, self.now)
+                try:
+                    live = is_live(SignalClass.EVENT, signal.tier, age)
+                except (TypeError, ValueError):  # a tier outside 1..3 never counts
+                    live = False
+                if live:
+                    ages.append(age)
+            self.event_ages[lead_id] = min(ages) if ages else None
+        return self.event_ages[lead_id]
+
+
+def _card(
+    reader: _Reader, candidate: drafts_repo.QueueCandidate, draft: drafting_queries.DraftView
+) -> QueueCard:
+    bare = QueueCard(
+        draft_id=draft.id,
+        kind=draft.kind,
+        step_no=draft.step_no,
+        rev=draft.current_rev,
+        due_at=draft.due_at,
+        created_at=draft.created_at,
+    )
+    lead_id, contact_id = candidate.lead_id, candidate.contact_id
+    if lead_id is None or contact_id is None:
+        return bare
+    lead = reader.lead(lead_id)
+    score = reader.score(lead_id)
+    contact = reader.contact(contact_id)
+    market = (
+        None if contact is None or contact.market_id is None else reader.market(contact.market_id)
+    )
+    message = None
+    current = drafting_queries.current_revision(draft)
+    if current is not None:
+        footer = drafting_queries.footer_snapshot(current.footer_snapshot_id)
+        if footer is not None:
+            recipient = "" if contact is None or contact.email is None else contact.email
+            message = render.compose(current, footer, recipient)
+    blocked = None
+    if market is not None:
+        check = render.footer_complete(reader.settings, market.definition)
+        if not check.complete:
+            blocked = render.incomplete_notice(check)
+    return QueueCard(
+        draft_id=draft.id,
+        kind=draft.kind,
+        step_no=draft.step_no,
+        rev=draft.current_rev,
+        due_at=draft.due_at,
+        created_at=draft.created_at,
+        lead_id=lead_id,
+        lead_name=None if lead is None else lead.name,
+        segment_name=None if lead is None else reader.segment_name(lead.segment_id),
+        market_code=None if market is None else market.code,
+        tier=None if score is None else score.tier,
+        lead_score=None if score is None else score.lead,
+        contact_id=contact_id,
+        contact_name=None if contact is None else contact.name,
+        contact_role=None if contact is None else contact.role,
+        address_class=None if contact is None else contact.address_class,
+        message=message,
+        blocked=blocked,
+    )
+
+
+def _group(card: QueueCard) -> str:
+    if card.kind in RESPONSIVE_KINDS:
+        return GROUP_REPLIES
+    if card.step_no == FIRST_STEP:
+        if card.kind == DraftKind.STEP and card.tier == Tier.A:
+            return GROUP_TIER_A
+        return GROUP_OTHER_STEP_1
+    return GROUP_FOLLOW_UPS
+
+
+def _tail(card: QueueCard) -> tuple[bool, datetime, str]:
+    return (card.due_at is None, card.due_at or _NO_TIME, card.draft_id)
+
+
+def _by_score(card: QueueCard) -> tuple[bool, int]:
+    return (card.lead_score is None, -(card.lead_score or 0))
+
+
+def _ordered(key: str, cards: list[QueueCard], reader: _Reader) -> tuple[QueueCard, ...]:
+    if key == GROUP_REPLIES:
+        return tuple(sorted(cards, key=lambda card: (card.created_at, *_tail(card))))
+    if key == GROUP_TIER_A:
+
+        def tier_a(card: QueueCard) -> tuple[object, ...]:
+            age = None if card.lead_id is None else reader.newest_live_event_age(card.lead_id)
+            return (age is None, age or 0, *_by_score(card), *_tail(card))
+
+        return tuple(sorted(cards, key=tier_a))  # type: ignore[arg-type]
+    return tuple(sorted(cards, key=lambda card: (*_by_score(card), *_tail(card))))
+
+
+def _held_reasons(reader: _Reader, card: QueueCard) -> tuple[HeldReason, ...]:
+    """Why ``card`` is held back; ``()`` when its Contact is eligible now."""
+    if card.contact_id is None:
+        return (_reason(NO_CONTACT_LINK),)
+    decision = reader.decision(card.contact_id)
+    if isinstance(decision, str):
+        return (_reason(decision),)
+    if decision.eligible:
+        return ()
+    found = tuple(HeldReason(str(reason.kind), reason.text) for reason in decision.reasons)
+    return found or (_reason(NOT_ELIGIBLE),)
+
+
+def due_queue(now: datetime, eligibility: Eligibility) -> DueQueue:
+    """The Drafts due for review at ``now``, grouped and ordered; see the module docstring."""
+    reader = _Reader(now, eligibility, setup_queries.footer_settings())
+    grouped: dict[str, list[QueueCard]] = {key: [] for key in GROUP_ORDER}
+    held: list[HeldBack] = []
+    for candidate in drafts_repo.queue_candidates(now + HORIZON):
+        draft = drafting_queries.draft(candidate.id)
+        if draft is None or not draft.reviewable:
+            continue
+        card = _card(reader, candidate, draft)
+        reasons = _held_reasons(reader, card)
+        if reasons:
+            held.append(HeldBack(card, reasons))
+        else:
+            grouped[_group(card)].append(card)
+    groups = tuple(
+        QueueGroup(key, GROUP_LABELS[key], _ordered(key, grouped[key], reader))
+        for key in GROUP_ORDER
+    )
+    return DueQueue(
+        groups=groups,
+        held_back=tuple(held),
+        total=sum(len(group.cards) for group in groups),
+        next_due_at=drafts_repo.earliest_ready_due(),
+    )

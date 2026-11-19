@@ -1389,6 +1389,7 @@ def build_app(
         email_finding=email_finding,
         lead_scores=lead_scores,
         units=units,
+        now=clock.now,  # Story 5.1: the Approval Queue and each session's start
         lifespan=engine_lifespan(
             runner,
             scheduler,

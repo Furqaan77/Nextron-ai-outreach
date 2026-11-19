@@ -472,6 +472,7 @@ class Dashboard:
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
             units=self.units,
+            now=self.clock.now,
             **extra,
         )
 

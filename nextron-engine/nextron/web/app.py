@@ -13,6 +13,11 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``Cache-Control: no-store``, and both are logged (``dashboard_session_opened``, or
   ``dashboard_entry_refused`` with ``reason``), never with the code or the token.
 - ``GET /`` (``home``): the base layout.
+- ``GET /queue`` (``queue_page``, the navigation's Queue section, ``@personal_data(True)``;
+  Story 5.1): the Approval Queue, ``app.queries.approval.due_queue(now(), ...)`` with the live
+  Eligibility of ``compliance.evaluate_eligibility``, rendered by ``nextron.web.queue_page``:
+  the group headers with counts, one focused card (``?card=k``, clamped), the Held back list,
+  the empty state and the session's elapsed time (``SessionStore.started_at``). Read-only.
 - ``GET /health`` (``health``): the environment, the engine version and the process uptime in
   whole seconds, and nothing else.
 - ``GET /static/{name}`` (``static``): the vendored HTMX build and ``app.css``, read once when
@@ -296,6 +301,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -317,6 +323,7 @@ from nextron.app.playbook.api import (
     CompanyFacts,
     Playbook,
 )
+from nextron.app.queries import approval as approval_queries
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import drafting as drafting_queries
@@ -348,6 +355,7 @@ from nextron.domain.company_facts import InvalidFact
 from nextron.domain.contacts import PrimaryRefusal, PrimaryRefused
 from nextron.domain.data_subject_request import check_request_ref
 from nextron.domain.credentials import InvalidCredentialValue
+from nextron.domain.errors import DomainError
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
@@ -361,7 +369,7 @@ from nextron.domain.render import footer_complete
 from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
-from nextron.domain.settings_schema import InvalidSettings
+from nextron.domain.settings_schema import InvalidSettings, Key
 from nextron.domain.suppression_list import (
     ADDED,
     FILE_TOO_LARGE,
@@ -387,6 +395,7 @@ from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import leads_page as lead_rows
 from nextron.web import pipeline_page as board_rows
+from nextron.web import queue_page as queue_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
@@ -409,7 +418,7 @@ from nextron.web.routing import (
     require_declared,
     require_route_rules,
 )
-from nextron.web.sessions import SESSION_COOKIE, SessionStore
+from nextron.web.sessions import SESSION_COOKIE, SessionStore, session_cookie_values
 from nextron.web.settings_page import (
     FORM_TEMPLATE,
     PAGE_TEMPLATE,
@@ -567,6 +576,7 @@ def create_app(
     domain_checks: DomainChecks,
     lead_scores: LeadScores,
     units: Units,
+    now: Callable[[], datetime],
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     lifespan: Lifespan | None = None,
@@ -592,6 +602,8 @@ def create_app(
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
     subject access export; ``domain_checks`` reads the Sending Domain authentication section
     and queues its Recheck.
+    ``now`` is the app clock's ``now`` (Story 5.1): the Approval Queue's time and each session's
+    start.
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -600,7 +612,7 @@ def create_app(
     started = monotonic()
     engine_health = health  # the name health is the GET /health handler's below
     templates = template_environment()
-    sessions = SessionStore()
+    sessions = SessionStore(now)
     tickets = export_rows.ExportTickets(monotonic)  # built export files, in memory only
     assets = {name: (STATIC_DIR / name).read_bytes() for name in STATIC_TYPES}
     locked_page = templates.get_template("locked.html").render().encode("utf-8")
@@ -655,6 +667,34 @@ def create_app(
     @personal_data(False)
     def home(request: Request) -> HTMLResponse:
         return page(request, "home.html")
+
+    def session_started(request: Request) -> datetime | None:
+        """When the request's session started: the first ``nextron_session`` cookie value that
+        names a live session, as the guard reads it."""
+        for header in request.headers.getlist("cookie"):
+            for value in session_cookie_values(header):
+                found = sessions.started_at(value)
+                if found is not None:
+                    return found
+        return None
+
+    @app.get("/queue", name="queue_page")
+    @personal_data(True)  # a card shows a Contact's name, address and message
+    def queue_page(request: Request) -> HTMLResponse:
+        at = now()
+        queue = approval_queries.due_queue(at, compliance.evaluate_eligibility)
+        try:
+            zone_name: str | None = str(setup_queries.get(Key.SENDER_TIMEZONE))
+        except DomainError:  # unset or unreadable: the next due time shows in UTC
+            zone_name = None
+        context = queue_rows.queue_context(
+            queue,
+            request.query_params.get(queue_rows.CARD_PARAM),
+            at,
+            session_started(request),
+            zone_name,
+        )
+        return page(request, queue_rows.TEMPLATE, **context)
 
     @app.get("/health", name="health")
     @personal_data(False)

@@ -2699,6 +2699,42 @@ older revision stays on that revision. Erasure also turns the AI flags' explanat
 `fail` or `pending`) and, for `fail`, each flag's code, the flagged words highlighted and the
 explanation.
 
+## The Approval Queue
+
+Story 5.1 (FR-26, AD-13, AD-16) adds **Queue** to the dashboard's navigation (`/queue`): the
+Drafts due for your review, one focused card at a time. The page only reads; deciding a card
+(approve, reject, edit, skip, regenerate) and the keyboard keys come in later stories.
+
+**What is due.** A `ready` Draft that has text. A Sequence Step or re-contact also needs a due
+time no later than 24 hours from now and an `active` Enrollment (a paused, stopped or completed
+one keeps its Drafts out). A Reply, Rebook or channel Draft is due whatever its due time.
+
+**The groups, in order**, each header with its count:
+
+1. **Replies**: oldest first.
+2. **Tier A Step 1**: the Lead with the newest live Event first (a Lead without one after
+   those with one), then by Lead Score.
+3. **Other Step 1 and recontact**: every other Step 1 (a Tier B or C Lead, an unscored one,
+   or a re-contact, Tier A included), by Lead Score.
+4. **Follow-ups** (Steps 2 to 4), by Lead Score.
+
+A Lead without a score sorts last; ties go to the earlier due time, then the Draft id.
+
+**Held back.** Each Contact's Eligibility is checked live as the page loads (the same check as
+the Lead page, including the Suppression List). A Draft whose Contact fails is listed under
+**Held back** with the reasons and isn't counted. So is a Reply Draft with no Contact linked.
+
+**The card** shows the Lead's name, Segment, Market, Tier and Lead Score; the Contact's name,
+role and Address Class; and the message exactly as it would be sent (To, Subject, then the body
+with the signature, footer and, for a UK Contact, the privacy line). "Sending blocked: footer
+incomplete (...)" shows when the Market's footer settings are missing. "k of N" sits above it
+with **Previous** and **Next** links (`/queue?card=k`; a number past the end shows the last
+card, anything that isn't a number the first). The page also shows how long this dashboard
+session has been open ("Session time: 0h 12m", since `nextron open`).
+
+**Empty.** "Queue clear", then the next due time in the Sender's timezone, or "Nothing
+scheduled" when no `ready` Draft has one.
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
