@@ -247,8 +247,14 @@ then Story 4.15's ``draft_step`` (interactive by default, or bulk, priority 40, 
 minutes (a Claude request of 300 s and its one doubled retry), retry limit 3,
 ``handlers.draft_step(step_drafts)``, ``other``; never budget-gated: ``draft_sequence`` is
 ``essential``; ``build_app`` passes ``lambda: step_drafts``, the ``drafting`` service's
-``StepDrafts(clock, llm, queue)``).
-``domain_checks``, ``unsubscribes``, ``grounding`` and ``step_drafts`` are optional services:
+``StepDrafts(clock, llm, queue)``), then Story 4.17's ``submit_bulk_ai`` and
+``poll_ai_batches`` (bulk only, priority 30, ``max_runtime`` 30 minutes and 2 hours (each re-run
+item is a direct Claude call), retry limit 3, concurrency key ``ai_batches`` (one at a time),
+``handlers.submit_bulk_ai(ai_batches)`` and ``handlers.poll_ai_batches(ai_batches)``,
+``other``; ``build_app`` passes ``lambda: (research_batches,)``, the ``research`` service's
+``ResearchBatches(clock, meter, llm, extractions, people)``).
+``domain_checks``, ``unsubscribes``, ``grounding``, ``step_drafts`` and ``ai_batches`` are
+optional services:
 each defaults to a provider that raises ``RuntimeError`` when called, so a registry built
 without it (only tests do) fails its job; ``build_app`` always passes the real one.
 ``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
@@ -347,7 +353,8 @@ dashboard notice once a month. The meter needs the hook, the hook needs ``budget
 Building the app builds no adapter or HTTP client and records nothing.
 
 **Triggers (AD-10).** ``build_triggers(job_types, *, backup_schedule, restore_test_schedule,
-recovery_active, domain_check_schedule, unsub_poll_period=POLL_PERIOD_OTHER)`` is the trigger
+recovery_active, domain_check_schedule, unsub_poll_period=POLL_PERIOD_OTHER,
+bulk_ai_schedule=None)`` is the trigger
 registry: the only code that constructs ``Triggers`` or calls ``register_trigger``. Register
 each AD-10 ``Trigger`` there, after its job type (a firing enqueues the job type with the
 trigger's own name), then it is frozen. So far: ``backup_db``
@@ -363,7 +370,13 @@ at_startup=True)``: the PC is not on at fixed times, so it also runs at every st
 fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``, then ``recompute_tiers`` (Story 2.15),
 ``Every(1 day, at_startup=True)``, like ``purge_page_text``, then ``poll_unsubscribes`` (Story
 3.11), an ``Every(unsub_poll_period, at_startup=True)``: ``build_app`` passes
-``poll_period(config.env)``, 5 minutes in ``prod`` and 30 elsewhere.
+``poll_period(config.env)``, 5 minutes in ``prod`` and 30 elsewhere, then
+``poll_ai_batches`` (Story 4.17), ``Every(15 minutes, at_startup=True)``, then
+``submit_bulk_ai`` (Story 4.17), a ``DailyAt(bulk_ai_schedule,
+fallback=DailyRun(DEFAULT_BULK_AI_SUBMIT_AT, "UTC"))`` (``build_app`` passes
+``read_bulk_ai_schedule(units, owners)``: the ``bulk_ai_submit_at`` setting in
+``sender_timezone``, caught up at start when a queued item missed the latest time; ``None``
+uses the fallback).
 ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
@@ -816,6 +829,7 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
+from nextron.app.research.batches import BulkAiSchedule, ResearchBatches
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.job_boards import JobBoards
@@ -889,6 +903,12 @@ from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.grounding_check import CHECK_GROUNDING_JOB
 from nextron.domain.step_drafting import DRAFT_STEP_JOB
+from nextron.domain.ai_batch import CONCURRENCY_KEY as AI_BATCHES_KEY
+from nextron.domain.ai_batch import (
+    DEFAULT_BULK_AI_SUBMIT_AT,
+    POLL_AI_BATCHES_JOB,
+    SUBMIT_BULK_AI_JOB,
+)
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
@@ -1029,6 +1049,7 @@ FALLBACK_TIMEZONE: Final = "UTC"
 PURGE_PAGE_TEXT_PERIOD: Final = timedelta(days=1)
 RECOMPUTE_TIERS_PERIOD: Final = timedelta(days=1)
 PURGE_PLACE_COORDS_PERIOD: Final = timedelta(days=1)
+POLL_AI_BATCHES_PERIOD: Final = timedelta(minutes=15)  # Story 4.17, AD-10
 PLACES_PORT_CHOSEN: Final = "places_port_chosen"
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 
@@ -1237,6 +1258,7 @@ def build_app(
         unsubscribes=lambda: unsubscribes,
         grounding=lambda: grounding_checks,
         step_drafts=lambda: step_drafts,
+        ai_batches=lambda: batch_owners,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1260,6 +1282,8 @@ def build_app(
     grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
     step_drafts = StepDrafts(clock, llm, queue)  # Story 4.15: the draft_step jobs
     extractions = SignalExtractions(clock, meter, llm, research, people)
+    # Story 4.17: the bulk extraction work as Message Batches (submit_bulk_ai, poll_ai_batches)
+    batch_owners = (ResearchBatches(clock, meter, llm, extractions, people),)
     primary_contacts = PrimaryContacts(clock, research, queue)
     domain_checks = DomainChecks(
         clock, dns if dns is not None else DnspythonDns(meter=meter), queue
@@ -1350,6 +1374,7 @@ def build_app(
         recovery_active=functools.partial(read_recovery_mode, units),
         domain_check_schedule=functools.partial(read_domain_check_schedule, units, domain_checks),
         unsub_poll_period=poll_period(config.env),
+        bulk_ai_schedule=functools.partial(read_bulk_ai_schedule, units, batch_owners),
     )
     scheduler = Scheduler(units, queue, triggers)
     heartbeat = Heartbeat(clock, config.data_dir / HEARTBEAT_FILE_NAME)
@@ -1496,6 +1521,7 @@ def build_job_types(
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
     grounding: Callable[[], handlers.CheckingGrounding] | None = None,
     step_drafts: Callable[[], handlers.DraftingSteps] | None = None,
+    ai_batches: Callable[[], Sequence[handlers.BatchingAi]] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1525,12 +1551,14 @@ def build_job_types(
     ``RuntimeError``, as for ``domain_checks``), and ``grounding`` the ``drafting`` service's
     ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise), and
     ``step_drafts`` its ``StepDrafts`` that ``draft_step`` jobs call (Story 4.15; ``None``:
-    likewise)."""
+    likewise), and ``ai_batches`` every batch owner that ``submit_bulk_ai`` and
+    ``poll_ai_batches`` jobs call (Story 4.17; ``None``: likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     checks_grounding = grounding if grounding is not None else no_grounding
     drafts_steps = step_drafts if step_drafts is not None else no_step_drafts
+    batch_owners = ai_batches if ai_batches is not None else no_ai_batches
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1834,6 +1862,32 @@ def build_job_types(
             group=JobGroup.OTHER,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=SUBMIT_BULK_AI_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),  # Story 4.17: the daily batch submit
+            priority=30,
+            max_runtime=timedelta(minutes=30),  # rebuilding the requests, one create per route
+            retry_limit=3,  # an unavailable API is retried; the items stay pending meanwhile
+            handler=handlers.submit_bulk_ai(batch_owners),
+            group=JobGroup.OTHER,
+            concurrency_key=AI_BATCHES_KEY,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=POLL_AI_BATCHES_JOB,
+            default_lane=Lane.BULK,
+            lanes=frozenset({Lane.BULK}),  # Story 4.17: every 15 minutes
+            priority=30,
+            max_runtime=timedelta(hours=2),  # each lost item is re-run as a direct call
+            retry_limit=3,  # a settled item is never touched again, so a retry is safe
+            handler=handlers.poll_ai_batches(batch_owners),
+            group=JobGroup.OTHER,
+            concurrency_key=AI_BATCHES_KEY,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1870,6 +1924,7 @@ def enqueue_only_job_types() -> JobTypes:
         unsubscribes=_unwired,
         grounding=_unwired,
         step_drafts=_unwired,
+        ai_batches=_unwired,
     )
 
 
@@ -1877,6 +1932,13 @@ def no_grounding() -> handlers.CheckingGrounding:
     """``build_job_types``'s default ``grounding``: a registry built without the service fails a
     ``check_grounding`` job instead of checking nothing."""
     raise RuntimeError("this job type registry was built without grounding")
+
+
+def no_ai_batches() -> Sequence[handlers.BatchingAi]:
+    """``build_job_types``'s default ``ai_batches`` (Story 4.17): a registry built without the
+    batch owners fails a ``submit_bulk_ai`` or ``poll_ai_batches`` job instead of doing
+    nothing."""
+    raise RuntimeError("this job type registry was built without ai_batches")
 
 
 def no_step_drafts() -> handlers.DraftingSteps:
@@ -1938,6 +2000,7 @@ def build_triggers(
     recovery_active: Callable[[], bool],
     domain_check_schedule: Callable[[], DailyRun],
     unsub_poll_period: timedelta = POLL_PERIOD_OTHER,
+    bulk_ai_schedule: Callable[[], DailyRun] | None = None,
 ) -> Triggers:
     """The trigger registry (AD-10), frozen: register each trigger with
     ``register_trigger(Trigger.X, Every(...))`` or ``DailyAt(...)``, after its job type, before
@@ -1947,7 +2010,8 @@ def build_triggers(
     each ``check_recovery`` firing. ``domain_check_schedule`` returns the daily domain checks'
     ``DailyRun``, read when the scheduler starts. ``unsub_poll_period`` is how often
     ``poll_unsubscribes`` fires (``build_app`` passes ``poll_period(config.env)``: 5 minutes in
-    ``prod``, 30 elsewhere)."""
+    ``prod``, 30 elsewhere). ``bulk_ai_schedule`` returns the daily ``submit_bulk_ai``'s
+    ``DailyRun`` (Story 4.17; ``None``: the 14:00 UTC fallback)."""
     triggers = Triggers(job_types)
     triggers.register_trigger(
         Trigger.BACKUP_DB,
@@ -1981,6 +2045,18 @@ def build_triggers(
     # the PC is not on at fixed times: poll at every start too, so requests made while it was
     # off land at once
     triggers.register_trigger(Trigger.POLL_UNSUBSCRIBES, Every(unsub_poll_period, at_startup=True))
+    # Story 4.17: an ended batch is settled within 15 minutes, and at every start
+    triggers.register_trigger(
+        Trigger.POLL_AI_BATCHES, Every(POLL_AI_BATCHES_PERIOD, at_startup=True)
+    )
+    bulk_fallback = DailyRun(DEFAULT_BULK_AI_SUBMIT_AT, FALLBACK_TIMEZONE)
+    triggers.register_trigger(
+        Trigger.SUBMIT_BULK_AI,
+        DailyAt(
+            bulk_ai_schedule if bulk_ai_schedule is not None else lambda: bulk_fallback,
+            fallback=bulk_fallback,
+        ),
+    )
     triggers.freeze()
     return triggers
 
@@ -2083,6 +2159,31 @@ def read_backup_schedule(units: Units, backups: Backups) -> DailyRun:
         with units.open(read_only=True):
             found = backups.schedule()
         return DailyRun(found.at, found.timezone, catch_up=found.missed)
+
+    return contextvars.Context().run(read)
+
+
+class ScheduledBatching(Protocol):
+    """What ``read_bulk_ai_schedule`` needs of a batch owner (Story 4.17)."""
+
+    def schedule(self) -> BulkAiSchedule: ...
+
+
+def read_bulk_ai_schedule(units: Units, owners: Sequence[ScheduledBatching]) -> DailyRun:
+    """The daily ``submit_bulk_ai``'s ``DailyRun`` (Story 4.17): each batch owner's
+    ``schedule()`` read in its own read-only unit of work inside a fresh
+    ``contextvars.Context()``; the time and timezone are the first owner's (they are the
+    settings'), and ``catch_up`` is whether any owner holds an item queued before the latest
+    daily time."""
+
+    def read() -> DailyRun:
+        with units.open(read_only=True):
+            found = [owner.schedule() for owner in owners]
+        if not found:
+            raise RuntimeError("no batch owner is registered")
+        return DailyRun(
+            found[0].at, found[0].timezone, catch_up=any(each.missed for each in found)
+        )
 
     return contextvars.Context().run(read)
 

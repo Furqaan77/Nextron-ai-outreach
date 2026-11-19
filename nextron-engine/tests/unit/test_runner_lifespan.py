@@ -244,6 +244,8 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "poll_unsubscribes",
         "check_grounding",  # Story 4.14
         "draft_step",  # Story 4.15
+        "submit_bulk_ai",  # Story 4.17
+        "poll_ai_batches",  # Story 4.17
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -980,6 +982,7 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
         "daily_trigger_scheduled",  # backup_db
         "daily_trigger_scheduled",  # restore_test
         "daily_trigger_scheduled",  # check_domains (Story 6.5)
+        "daily_trigger_scheduled",  # submit_bulk_ai (Story 4.17)
         "scheduler_started",
         "scheduler_stopped",
         "job_runner_stopped",
@@ -988,8 +991,9 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
     # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords,
-    # check_domains, recompute_tiers and poll_unsubscribes
-    assert scheduled.triggers == 8  # type: ignore[attr-defined]
+    # check_domains, recompute_tiers and poll_unsubscribes; Story 4.17: poll_ai_batches and
+    # submit_bulk_ai
+    assert scheduled.triggers == 10  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1353,11 +1357,13 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         "backup_db",
         "check_domains",
         "check_recovery",
+        "poll_ai_batches",  # Story 4.17
         "poll_unsubscribes",
         "purge_page_text",
         "purge_place_coords",
         "recompute_tiers",
         "restore_test",
+        "submit_bulk_ai",  # Story 4.17
     ]
     [check] = [job for job in jobs if job.id == "check_recovery"]
     assert isinstance(check.trigger, IntervalTrigger)
@@ -1378,11 +1384,13 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
                 "purge_place_coords",
                 "recompute_tiers",
                 "poll_unsubscribes",
+                "poll_ai_batches",  # Story 4.17: every 15 minutes
             }
         ),
         key=lambda job: job.id,
     )
-    for job, hour in zip(dailies, ("10", "7", "11"), strict=True):  # check_domains at 07:00
+    # check_domains at 07:00; Story 4.17: submit_bulk_ai at 14:00
+    for job, hour in zip(dailies, ("10", "7", "11", "14"), strict=True):
         assert isinstance(job.trigger, CronTrigger)
         fields = {field.name: str(field) for field in job.trigger.fields}
         assert (fields["hour"], fields["minute"]) == (hour, "0")
@@ -1393,10 +1401,11 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         "backup_db",
         "restore_test",
         "check_domains",
+        "submit_bulk_ai",  # Story 4.17
     ]
-    # a new database never catches up: no daily backup, no monthly restore test and no Sending
-    # Domain yet
-    assert [getattr(record, "catch_up") for record in scheduled] == [False, False, False]
+    # a new database never catches up: no daily backup, no monthly restore test, no Sending
+    # Domain and no queued batch item yet
+    assert [getattr(record, "catch_up") for record in scheduled] == [False] * 4
     assert engine.backups() == []
     # the backup dir holds only the empty erasure ledger the startup sync made (Story 3.16)
     assert [path.name for path in engine.config.backup_dir.iterdir()] == ["erasure-ledger.jsonl"]

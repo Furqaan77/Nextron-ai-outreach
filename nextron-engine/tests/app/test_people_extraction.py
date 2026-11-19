@@ -31,6 +31,7 @@ from nextron.app.research import people as people_module
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.db.repos.research import signals as signals_repo
 from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.job import Lane
 from nextron.domain.budget import AiCall
 from nextron.domain.contactability import ContactSubject, SuppressionScope
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource, provenance_recorded
@@ -148,12 +149,13 @@ def test_a_law_leads_decision_maker_becomes_a_contact_with_evidence_and_a_lawyer
 
     assert world.extract(lead, run_id, ok(), people=[law_people(pages)]) is True
 
-    # the call: the active extract_people tuple, bulk, the team then the about page
+    # the call: the active extract_people tuple, soon (the interactive lane; Story 4.17), the
+    # team then the about page
     [(route_tuple, blocks, urgency)] = world.people_calls
     assert (route_tuple.route, route_tuple.actor, urgency) == (
         "extract_people",
         PEOPLE_ACTOR,
-        Urgency.BULK,
+        Urgency.SOON,
     )
     assert [(b.subject, b.source, b.block_id) for b in blocks] == [
         (f"lead:{lead}", "website", pages[TEAM]),
@@ -867,7 +869,7 @@ def test_a_lead_merged_during_the_people_call_records_lead_merged(world: World) 
     )
 
     with world.units.open():
-        assert extractions.extract_lead(lead, run_id) is True
+        assert extractions.extract_lead(lead, run_id, lane=Lane.INTERACTIVE) is True
 
     assert people_runs(world, lead) == [("lead_merged", None, PEOPLE_ACTOR, 2, 0, 0, 0)]
     assert world.sql("SELECT COUNT(*) FROM contacts") == [(0,)]

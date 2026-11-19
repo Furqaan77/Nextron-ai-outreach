@@ -4,7 +4,10 @@ Services, Story 2.8's queries and the AI gateway (``nextron.adapters.ai``) share
 construction check raises ``TypeError`` or ``ValueError`` that names the field, never its value.
 
 **Enums.** ``Urgency`` is ``interactive``, ``soon`` or ``bulk``: how soon the caller needs the
-answer (in Epic 2 every call is one direct Messages request, whatever the urgency).
+answer. Only a ``bulk`` call on a batchable route goes through a Message Batch (Story 4.17); the
+service decides that, and every ``run`` is one direct Messages request. ``chain_urgency(lane)``
+(Story 2.16, Story 4.17) is the urgency of a research chain's AI call made by a job on ``lane``:
+``soon`` on the interactive lane, ``bulk`` on any other lane or none.
 ``Effort`` is ``low``, ``medium``, ``high``, ``xhigh`` or ``max``, the API's
 ``output_config.effort``.
 
@@ -84,6 +87,7 @@ from enum import StrEnum
 from typing import Final
 
 from nextron.domain.budget import CODE_PATTERN
+from nextron.domain.job import Lane
 from nextron.domain.playbook import SHORT_SHA_LENGTH, PlaybookSnapshot
 
 MODEL_NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
@@ -102,6 +106,12 @@ class Urgency(StrEnum):
     INTERACTIVE = "interactive"
     SOON = "soon"
     BULK = "bulk"
+
+
+def chain_urgency(lane: str | None) -> Urgency:
+    """The urgency of a research chain's AI call made by a job on ``lane`` (Story 2.16): ``soon``
+    on the interactive lane (a Signal Inbox chain), ``bulk`` on any other lane or none."""
+    return Urgency.SOON if lane == Lane.INTERACTIVE else Urgency.BULK
 
 
 class Effort(StrEnum):

@@ -336,18 +336,21 @@ def test_guarded_health_page_and_second_instance(
     dailies = {
         line["trigger"]: line for line in lines if line["event"] == "daily_trigger_scheduled"
     }
-    assert sorted(dailies) == ["backup_db", "check_domains", "restore_test"]
+    assert sorted(dailies) == ["backup_db", "check_domains", "restore_test", "submit_bulk_ai"]
     daily = dailies["backup_db"]
     assert (daily["at"], daily["timezone"], daily["catch_up"]) == ("10:00", "UTC", False)
     restore = dailies["restore_test"]
     assert (restore["at"], restore["timezone"], restore["catch_up"]) == ("11:00", "UTC", False)
     domains = dailies["check_domains"]  # Story 6.5: no Sending Domain yet, so no catch-up
     assert (domains["at"], domains["timezone"], domains["catch_up"]) == ("07:00", "UTC", False)
+    bulk = dailies["submit_bulk_ai"]  # Story 4.17: nothing queued yet, so no catch-up
+    assert (bulk["at"], bulk["timezone"], bulk["catch_up"]) == ("14:00", "UTC", False)
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        8,  # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords,
-        # check_domains, recompute_tiers and poll_unsubscribes (Story 3.11)
+        10,  # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords,
+        # check_domains, recompute_tiers, poll_unsubscribes (Story 3.11), poll_ai_batches and
+        # submit_bulk_ai (Story 4.17)
     )
     # poll_unsubscribes fires at start too; with no Worker host set it makes no request
     skipped = wait_for_log_line(data_dir, "nextron.app.compliance.unsub_poll", "unsub_poll_skipped")
@@ -370,7 +373,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0048_4_15_draft_failed"
+    assert HEAD == "0049_4_17_ai_batches"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]

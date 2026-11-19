@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-19-2026 14:00
+last_updated: 11-19-2026 20:00
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -114,7 +114,7 @@ development_status:
   4-14-run-the-ai-grounding-check-and-fail-closed: review
   4-15-draft-step-1-with-opus-from-evidence-and-facts: review
   4-16-draft-signal-inbox-leads-within-15-minutes: backlog
-  4-17-send-bulk-ai-work-through-message-batches: backlog
+  4-17-send-bulk-ai-work-through-message-batches: review
   4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-de: backlog
   4-19-use-segment-fallback-copy-for-hand-picked-tier-c-leads: backlog
   4-20-regenerate-a-draft-and-flag-stale-ones: backlog

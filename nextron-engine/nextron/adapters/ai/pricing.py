@@ -13,8 +13,10 @@ tokens and of Opus 5.5. Check them against Anthropic's pricing page.
 - ``claude-opus-5-5``: 4,000,000 / 20,000,000 / 200,000 / 5,000,000 / 8,000,000.
 
 **``cost_micros(model, *, input_tokens, output_tokens, cache_read_tokens,
-cache_write_5m_tokens, cache_write_1h_tokens)``** is ``ceil(Σ tokens × rate / 10^6)``, so any
-billed token costs at least 1 micro-dollar. The prompt is the input, cache-read and cache-write
+cache_write_5m_tokens, cache_write_1h_tokens, batch=False)``** is ``ceil(Σ tokens × rate /
+10^6)``, so any billed token costs at least 1 micro-dollar. With ``batch=True`` (a Message Batch
+result, Story 4.17) every rate is halved and the total rounded up: ``ceil(Σ tokens × rate /
+(2 × 10^6))``. The prompt is the input, cache-read and cache-write
 tokens together. A model that isn't listed is priced at the dearest card, field by field
 (``FALLBACK``), so the budget errs toward stopping early. The counts are the caller's
 non-negative ints; this module checks nothing.
@@ -27,6 +29,7 @@ from typing import Final
 
 PER_MILLION: Final = 1_000_000
 HAIKU_LONG_PROMPT: Final = 100_000  # Haiku 5.5's long-prompt card starts above this
+BATCH_DIVISOR: Final = 2  # Story 4.17: a Message Batch result costs half of every rate
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,8 +100,9 @@ def cost_micros(
     cache_read_tokens: int,
     cache_write_5m_tokens: int,
     cache_write_1h_tokens: int,
+    batch: bool = False,
 ) -> int:
-    """What the request cost, in micro-dollars, rounded up."""
+    """What the request cost, in micro-dollars, rounded up; at half every rate for a batch."""
     prompt = input_tokens + cache_read_tokens + cache_write_5m_tokens + cache_write_1h_tokens
     card = rate_card(model, prompt)
     total = (
@@ -108,4 +112,5 @@ def cost_micros(
         + cache_write_5m_tokens * card.cache_write_5m
         + cache_write_1h_tokens * card.cache_write_1h
     )
-    return -(-total // PER_MILLION)
+    divisor = BATCH_DIVISOR * PER_MILLION if batch else PER_MILLION
+    return -(-total // divisor)

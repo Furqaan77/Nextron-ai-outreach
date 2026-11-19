@@ -26,7 +26,12 @@ violation.
   ``grounding_results``). ``drafting.draft_step`` (Story 4.15: ``StepDrafts.draft``, the
   ``draft_step`` job's use case) drafts Step 1 with no active ``draft_sequence`` tuple: its gate
   call comes before its one write (``draft_failed_at``), and ``Blocked`` makes no AI call and
-  writes only its ``drafting_blocked`` ``events`` row.
+  writes only its ``drafting_blocked`` ``events`` row. ``research.batch_apply`` (Story 4.17:
+  ``SignalExtractions.apply_extract_signals_result`` and
+  ``PeopleExtractions.apply_extract_people_result``, a Message Batch result's apply) applies an
+  ended batch's Signals result on Story 2.9's research world: its one gate call
+  (``NewLeadSubject(web_domain)``, email, cold) comes before its first write, and ``Blocked``
+  writes nothing at all (the item is ``stale``).
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -95,17 +100,22 @@ from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import drafting as drafting_queries
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.finding import EmailFinding
+from nextron.app.research.batches import ResearchBatches
+from nextron.app.research.extraction import SignalExtractions
 from nextron.app.research.people import PeopleExtractions
 from nextron.app.sending.api import Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
+from nextron.db import ai_batches
 from nextron.db.engine import create_engine
 from nextron.db.migrations import ensure_current
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.address_class import ASSIGNMENT
+from nextron.domain.ai_batch import BatchOwner
 from nextron.domain.ai import Urgency
+from nextron.domain.job import Lane
 from nextron.domain.contactability import (
     Allowed,
     Blocked,
@@ -226,6 +236,12 @@ MANIFEST: Final = (
     Caller("drafting.grounding_check", ("app/drafting/",), r"GroundingChecks\.check"),
     # Story 4.15: no Step 1 drafting call for a subject that may not be reached
     Caller("drafting.draft_step", ("app/drafting/",), r"StepDrafts\.draft"),
+    # Story 4.17: a Message Batch result applies only while the Lead may still be reached
+    Caller(
+        "research.batch_apply",
+        ("app/research/",),
+        r"(?:SignalExtractions|PeopleExtractions)\.apply_extract_\w+_result",
+    ),
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
     Caller(
         "pipeline.tasks_and_call_sheets",
@@ -1127,13 +1143,69 @@ def _people(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
 
     @use_case
     def extract_people() -> bool:  # as extract_lead runs it: inside a use case
-        return step.extract(lead_id, run_id)
+        return step.extract(lead_id, run_id, lane=Lane.INTERACTIVE)  # direct (Story 4.17)
 
     def action() -> object:
         with site.units.open():
             return extract_people()
 
     return action, lambda: (_gate(NewContactSubject(lead_id, name=NAME)),)
+
+
+def _batch_apply(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.17: a Lead's ``extract_signals`` item queued on the bulk lane, submitted, and its
+    ended result applied (``apply_extract_signals_result``): one gate call, the Lead's domain,
+    before the first write."""
+    site = research_world(world.engine)
+    origin = f"https://batch-{tag}.com"
+    site.crawler.robots[f"{origin}/robots.txt"] = robots_txt(
+        f"{origin}/robots.txt", "User-agent: *\nDisallow:\n"
+    )
+    site.crawler.pages[f"{origin}/"] = html_page(f"{origin}/", RESEARCH_HOME_HTML)
+    for missing in ("team", "about", "news"):
+        site.crawler.pages[f"{origin}/{missing}"] = html_page(f"{origin}/{missing}", status=404)
+    lead_id = site.lead(web_domain=f"batch-{tag}.com")
+    run_id = site.crawl(lead_id)
+    llm = ScriptedLlm(batch_prefix=f"msgbatch_{re.sub(r'[^A-Za-z0-9]', '', tag)}_")
+    people = PeopleExtractions(site.clock, site.meter, llm, site.research, site.queue)
+    extractions = SignalExtractions(site.clock, site.meter, llm, site.research, people)
+    batches = ResearchBatches(site.clock, site.meter, llm, extractions, people)
+    with site.units.open():
+        assert extractions.extract_lead(lead_id, run_id, lane=Lane.BULK) is True
+    with site.units.open():
+        batches.submit_bulk()
+    with world.engine.connect() as connection:
+        item_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM ai_batch_items WHERE target_id = ? AND route = 'extract_signals'",
+                (lead_id,),
+            ).scalar_one()
+        )
+    parsed = {"signals": [], "profile_facts": [], "size_clues": [], "job_postings": []}
+
+    @use_case
+    def apply() -> object:  # as poll_ai_batches runs it: in a transaction of its own
+        with current().transaction():
+            item = ai_batches.item(BatchOwner.RESEARCH, item_id)
+            assert item is not None
+            return extractions.apply_extract_signals_result(item, parsed, site.clock.now())
+
+    def action() -> object:
+        with site.units.open():
+            return apply()
+
+    return action, lambda: (GateCall(NewLeadSubject(f"batch-{tag}.com"), EMAIL, "cold"),)
+
+
+def _batch_applied(world: World) -> None:
+    """The allowed apply recorded its ``ok`` run; the blocked one wrote nothing (the scenario
+    isn't vacuous)."""
+    with world.engine.connect() as connection:
+        runs = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM extraction_runs WHERE route = 'extract_signals' "
+            "AND outcome = 'ok'"
+        ).scalar_one()
+    assert runs >= 1
 
 
 def _no_person_evidence_without_a_contact(world: World) -> None:
@@ -1465,6 +1537,8 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             after_blocked=_draft_step_recorded,
         ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
+        # Story 4.17: Blocked writes nothing at all: the item goes stale in the caller's write
+        "research.batch_apply": Scenario((_batch_apply,), after_blocked=_batch_applied),
         "research.people_extraction": Scenario(
             (_people,),
             gates_first=False,  # one gate call per decision-maker, each before its own writes
@@ -1566,6 +1640,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.request_*",  # Story 4.9
         "drafting.grounding_check",  # Story 4.14
         "drafting.draft_step",  # Story 4.15
+        "research.batch_apply",  # Story 4.17
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

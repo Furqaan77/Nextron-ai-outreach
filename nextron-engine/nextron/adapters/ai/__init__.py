@@ -73,6 +73,35 @@ doesn't account for is priced at the 5-minute rate), else pricing every write at
 rate; and ``refused`` and the error code from the table. A request with no response (a failed
 status or no connection) records zero tokens and cost 0.
 
+**Message Batches (Story 4.17, AD-8).** ``submit_batch(route_tuple, items)``,
+``fetch_batch(batch_id, route_tuple)`` and ``delete_batch(batch_id)`` each make one request (an
+ended batch's ``fetch_batch`` also streams its results) and never wait. The caller checks are
+``run``'s: an unknown tuple is ``llm_unknown_route``; the route must be ``batchable``
+(``ValueError``); ``items`` must pass ``nextron.ports.llm.check_batch_items`` and a batch id
+``check_batch_id``. Each request builds its client as ``run`` does (the key read on every call).
+
+- ``submit_batch`` sends ``client.messages.batches.create(requests=[{"custom_id": ...,
+  "params": prompting.build_batch_params(...)}])`` (no ``fallbacks``, no beta header, a 1-hour
+  cached prefix) and returns the batch's ``id``. It records nothing.
+- ``fetch_batch`` sends ``batches.retrieve``; HTTP 404 there (the batch or its results are
+  gone) returns ``BatchEnded({})``, so the owner re-runs every item. A ``processing_status``
+  other than ``ended`` is ``BatchInProgress()``. An ended batch's results
+  (``batches.results``) become ``BatchEnded({custom_id: ...})``: a ``succeeded`` message is
+  read by ``run``'s outcome rules
+  (``refusal``, ``max_tokens`` with no retry, ``end_turn`` with a valid answer, else invalid)
+  into ``BatchSucceeded(...)`` and metered once as an ``AiCall`` with ``batch=True`` and the cost
+  at the batch rate (``pricing.cost_micros(..., batch=True)``); ``errored``, ``canceled`` and
+  ``expired`` are ``BatchLost(kind)``, and an errored one records an ``AiCall`` with zero tokens
+  and ``error_code`` ``llm_batch_errored``. An entry whose ``custom_id`` isn't valid, or whose
+  type is unknown, is left out (the owner re-runs a missing item). ``route_tuple`` is the
+  batch's tuple: what its results are validated against and metered as. With
+  ``metered=False`` (the owner re-fetching a batch it already saw ended) nothing is recorded.
+- ``delete_batch`` sends ``batches.delete``; HTTP 404 returns as if deleted. It records nothing.
+
+HTTP 429, a 5xx or no connection raises ``AdapterError(True, "llm_unavailable")``; any other
+4xx ``AdapterError(False, "llm_rejected")``; anything else the SDK raised (a malformed answer
+included) ``AdapterError(False, "llm_unexpected")``. None of them carries SDK or answer text.
+
 **Errors and text.** Every ``AdapterError`` message is this module's own text, raised ``from
 None``. No API key, system prompt, block text, response text or SDK message appears in an
 ``AdapterError``, an ``AiCall``, a result's ``repr`` or a log record. The SDK logs whole request
@@ -82,6 +111,7 @@ bodies at DEBUG, so every ``run`` keeps the ``anthropic`` logger at WARNING or a
 
 import json
 import logging
+import re
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -91,6 +121,7 @@ import anthropic
 import httpx2
 
 from nextron.adapters.ai import pricing, prompting, routes, schemas
+from nextron.domain.ai_batch import CUSTOM_ID_PATTERN
 from nextron.domain.ai import (
     Framing,
     RouteTuple,
@@ -103,6 +134,16 @@ from nextron.domain.budget import CODE_PATTERN, MAX_AI_NUMBER, MODEL_PATTERN, Ai
 from nextron.domain.credentials import CredentialKey
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import (
+    BatchAnswer,
+    BatchEnded,
+    BatchInProgress,
+    BatchItemResult,
+    BatchLost,
+    BatchLostKind,
+    BatchRequest,
+    BatchState,
+    BatchSucceeded,
+    BATCH_ID_PATTERN,
     LlmFailed,
     LlmInvalid,
     LlmOk,
@@ -110,6 +151,9 @@ from nextron.ports.llm import (
     LlmResult,
     LlmTruncated,
     LlmUsage,
+    check_batch_id,
+    check_batch_items,
+    check_batchable,
 )
 from nextron.ports.secrets import SecretsPort, read_credential
 from nextron.ports.usage_meter import UsageMeterPort
@@ -126,6 +170,11 @@ LLM_REJECTED: Final = "llm_rejected"
 LLM_UNEXPECTED: Final = "llm_unexpected"
 LLM_INVALID: Final = "llm_invalid"
 LLM_TRUNCATED: Final = "llm_truncated"
+LLM_BATCH_ERRORED: Final = "llm_batch_errored"
+BATCH_ENDED: Final = "ended"
+BATCH_SUCCEEDED: Final = "succeeded"
+LOST_KINDS: Final = {kind.value: kind for kind in BatchLostKind}
+NOT_FOUND: Final = 404
 
 END_TURN: Final = "end_turn"
 REFUSAL: Final = "refusal"
@@ -234,15 +283,25 @@ def _status_failure(status: object) -> _Failure:
 class _Tally:
     """The ``AiCall`` of each request one ``run`` made, and their sum."""
 
-    def __init__(self, route_tuple: RouteTuple, meter: UsageMeterPort) -> None:
+    def __init__(
+        self,
+        route_tuple: RouteTuple,
+        meter: UsageMeterPort,
+        *,
+        batch: bool = False,
+        metered: bool = True,
+    ) -> None:
         self._route_tuple = route_tuple
         self._meter = meter
+        self._batch = batch  # Story 4.17: a Message Batch result, priced at the batch rate
+        self._metered = metered  # Story 4.17: False for a re-fetch of an ended batch
         self.model = route_tuple.model  # the last response's served model
         self._calls: list[AiCall] = []
 
     def _record(self, call: AiCall) -> None:
         self._calls.append(call)
-        self._meter.record(call)
+        if self._metered:
+            self._meter.record(call)
 
     def failed(self, code: str) -> None:
         """A request with no response: zero tokens, zero iterations, cost 0."""
@@ -255,6 +314,7 @@ class _Tally:
                 input_tokens=0,
                 output_tokens=0,
                 iterations=0,
+                batch=self._batch,
                 cost_micros=0,
                 error_code=code,
             )
@@ -287,6 +347,7 @@ class _Tally:
             cache_read_tokens=cache_read,
             cache_write_5m_tokens=five_minute,
             cache_write_1h_tokens=one_hour,
+            batch=self._batch,
         )
         self._record(
             AiCall(
@@ -298,6 +359,7 @@ class _Tally:
                 cache_read_tokens=cache_read,
                 cache_write_tokens=cache_write,
                 iterations=_iterations(usage),
+                batch=self._batch,
                 cost_micros=min(cost, MAX_AI_NUMBER),
                 refused=refused,
                 error_code=error_code,
@@ -342,6 +404,18 @@ class ClaudeGateway:
                 self._http = default_http_client()  # looked up now, so tests can refuse it
             return self._http
 
+    def _anthropic(self) -> anthropic.Anthropic:
+        """A client for one call: the key read now and never kept, the SDK never retrying."""
+        key = read_credential(self._secrets, CredentialKey.CLAUDE)
+        _quiet_sdk_logger()
+        return anthropic.Anthropic(
+            api_key=key,
+            base_url=API_BASE,
+            http_client=self._client(),
+            max_retries=0,
+            timeout=_timeout(),
+        )
+
     def run(
         self,
         route_tuple: RouteTuple,
@@ -358,15 +432,7 @@ class ClaudeGateway:
         check_urgency(urgency)
         check_framing(framing)
         prompting.user_turn(inputs)  # a caller's bad inputs raise here, before any request
-        key = read_credential(self._secrets, CredentialKey.CLAUDE)
-        _quiet_sdk_logger()
-        client = anthropic.Anthropic(
-            api_key=key,
-            base_url=API_BASE,
-            http_client=self._client(),
-            max_retries=0,
-            timeout=_timeout(),
-        )
+        client = self._anthropic()
         tally = _Tally(route_tuple, self._meter)
         max_tokens, retried = candidate.max_tokens, False
         while True:
@@ -416,3 +482,150 @@ class ClaudeGateway:
                 message = f"the Claude API answered HTTP {failure.status}"
             raise AdapterError(True, LLM_UNAVAILABLE, message) from None
         return failure
+
+    # Message Batches (Story 4.17) -----------------------------------------------------------------
+
+    def submit_batch(self, route_tuple: RouteTuple, items: Sequence[BatchRequest]) -> str:
+        """Submit one Message Batch; the provider's batch id. See the module docstring."""
+        candidate = _batch_candidate(route_tuple)
+        found = check_batch_items(items)
+        requests = [
+            {
+                "custom_id": item.custom_id,
+                "params": prompting.build_batch_params(
+                    route_tuple, candidate, item.inputs, framing=item.framing
+                ),
+            }
+            for item in found
+        ]
+        client = self._anthropic()
+        with _BatchErrors():
+            batch = client.messages.batches.create(requests=requests)  # type: ignore[arg-type]
+        batch_id = getattr(batch, "id", None)
+        if not isinstance(batch_id, str) or BATCH_ID_PATTERN.fullmatch(batch_id) is None:
+            raise AdapterError(
+                False, LLM_UNEXPECTED, "the Claude API returned no batch id"
+            ) from None
+        return batch_id
+
+    def fetch_batch(
+        self, batch_id: str, route_tuple: RouteTuple, *, metered: bool = True
+    ) -> BatchState:
+        """The batch's state and, once it ended, each item's result (metered per fetch unless
+        ``metered=False``). See the module docstring."""
+        check_batch_id(batch_id)
+        candidate = _batch_candidate(route_tuple)
+        client = self._anthropic()
+        retrieve = _BatchErrors(missing_ok=True)
+        batch: object = None
+        with retrieve:
+            batch = client.messages.batches.retrieve(batch_id)
+        if retrieve.missing:  # gone (its results expired): every item reads as "no result"
+            return BatchEnded({})
+        if getattr(batch, "processing_status", None) != BATCH_ENDED:
+            return BatchInProgress()
+        results: dict[str, BatchItemResult] = {}
+        with _BatchErrors():
+            for entry in client.messages.batches.results(batch_id):
+                custom_id = getattr(entry, "custom_id", None)
+                if not isinstance(custom_id, str) or not CUSTOM_ID_PATTERN.fullmatch(custom_id):
+                    continue
+                found = self._read_entry(
+                    getattr(entry, "result", None), route_tuple, candidate, metered=metered
+                )
+                if found is not None:
+                    results[custom_id] = found
+        return BatchEnded(results)
+
+    def delete_batch(self, batch_id: str) -> None:
+        """Delete the batch; HTTP 404 counts as deleted. See the module docstring."""
+        check_batch_id(batch_id)
+        client = self._anthropic()
+        with _BatchErrors(missing_ok=True):
+            client.messages.batches.delete(batch_id)
+
+    def _read_entry(
+        self,
+        result: object,
+        route_tuple: RouteTuple,
+        candidate: routes.Candidate,
+        *,
+        metered: bool,
+    ) -> BatchItemResult | None:
+        """One results entry as a ``BatchItemResult``, metered (unless ``metered`` is False);
+        ``None`` for an unknown type."""
+        kind = getattr(result, "type", None)
+        if kind == BATCH_SUCCEEDED:
+            tally = _Tally(route_tuple, self._meter, batch=True, metered=metered)
+            return BatchSucceeded(_batch_answer(getattr(result, "message", None), candidate, tally))
+        if not isinstance(kind, str) or kind not in LOST_KINDS:
+            return None
+        if LOST_KINDS[kind] is BatchLostKind.ERRORED:
+            _Tally(route_tuple, self._meter, batch=True, metered=metered).failed(
+                LLM_BATCH_ERRORED
+            )
+        return BatchLost(LOST_KINDS[kind])
+
+
+def _batch_candidate(route_tuple: RouteTuple) -> routes.Candidate:
+    """The tuple's candidate, which must be batchable."""
+    candidate = routes.find(route_tuple)
+    if candidate is None:
+        raise AdapterError(
+            False, LLM_UNKNOWN_ROUTE, "the route tuple matches no route candidate"
+        ) from None
+    check_batchable(candidate.batchable)
+    return candidate
+
+
+def _batch_answer(message: object, candidate: routes.Candidate, tally: _Tally) -> BatchAnswer:
+    """A succeeded batch message by ``run``'s outcome rules, with no retry; metered once."""
+    stop = getattr(message, "stop_reason", None)
+    if stop == REFUSAL:
+        served = tally.answered(message, refused=True)
+        return LlmRefused(_category(message), model=served, usage=tally.usage())
+    if stop == MAX_TOKENS:
+        served = tally.answered(message, error_code=LLM_TRUNCATED)
+        return LlmTruncated(model=served, usage=tally.usage())
+    parsed = _parsed(message, candidate.output_schema) if stop == END_TURN else None
+    if parsed is None:
+        served = tally.answered(message, error_code=LLM_INVALID)
+        return LlmInvalid(model=served, usage=tally.usage())
+    served = tally.answered(message)
+    return LlmOk(parsed, model=served, usage=tally.usage())
+
+
+class _BatchErrors:
+    """A context manager that turns an SDK failure into this module's ``AdapterError``, raised
+    ``from None``; with ``missing_ok``, HTTP 404 is swallowed (the batch is already gone)."""
+
+    def __init__(self, *, missing_ok: bool = False) -> None:
+        self._missing_ok = missing_ok
+        self.missing = False  # set when a 404 was swallowed
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, kind: object, error: BaseException | None, trace: object) -> bool:
+        if error is None or isinstance(error, AdapterError) or not isinstance(error, Exception):
+            return False  # nothing to turn: KeyboardInterrupt and the like pass through
+        if isinstance(error, anthropic.APIStatusError):
+            if self._missing_ok and error.status_code == NOT_FOUND:
+                self.missing = True
+                return True  # already gone
+            failure = _status_failure(error.status_code)
+        elif isinstance(error, anthropic.APIConnectionError):  # timeouts included
+            failure = _Failure(LLM_UNAVAILABLE, None)
+        else:
+            failure = _Failure(LLM_UNEXPECTED, None)
+        if failure.code == LLM_UNAVAILABLE:
+            raise AdapterError(
+                True, LLM_UNAVAILABLE, "the Claude Batches API was unavailable"
+            ) from None
+        if failure.code == LLM_REJECTED:
+            raise AdapterError(
+                False, LLM_REJECTED, f"the Claude Batches API answered HTTP {failure.status}"
+            ) from None
+        raise AdapterError(
+            False, LLM_UNEXPECTED, "the Claude Batches API failed unexpectedly"
+        ) from None

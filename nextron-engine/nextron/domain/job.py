@@ -46,7 +46,9 @@ a revision from ``0`` to ``999999999`` without leading zeros, or the value of an
 (``nextron.domain.ai_test_gate.TestSet``: ``reply``, ``grounding``, ``drafting_smoke`` or
 ``extraction``; Story 4.5's ``run_ai_test_sets:<tuple id>:<set>``), all as text.
 ``is_concurrency_key(value)`` accepts ``inbox:<ULID>`` and ``domain:<name>``, where the name is
-at most 253 characters of ``[a-z0-9-]`` labels joined by dots, with at least one dot.
+at most 253 characters of ``[a-z0-9-]`` labels joined by dots, with at least one dot, and the
+global keys in ``GLOBAL_CONCURRENCY_KEYS`` (Story 4.17: ``ai_batches``, which a job type names
+as its ``concurrency_key`` so its jobs never run at once).
 
 **Payloads** hold IDs and scalars, never personal data, secrets or free text.
 ``encode_payload(payload)`` returns compact JSON with sorted keys; ``decode_payload(text)``
@@ -59,7 +61,7 @@ UTC time ``YYYY-MM-DDTHH:MM:SS[.ffffff]Z``, or a token fullmatching ``[a-z0-9_:.
 refusal's reason names the field, never its value.
 
 **Job types.** ``JobType(name, default_lane, lanes, priority, max_runtime, retry_limit,
-handler, group=JobGroup.OTHER)`` is checked when it is built (``TypeError`` or
+handler, group=JobGroup.OTHER, concurrency_key=None)`` is checked when it is built (``TypeError`` or
 ``ValueError``): ``name`` a ``verb_noun`` name of at most 48 characters; ``lanes`` a non-empty
 ``frozenset`` of ``Lane`` holding ``default_lane``; ``priority`` an int from 0 to 100 (higher
 runs first); ``max_runtime`` a ``timedelta`` of whole seconds from 1 s to 24 h;
@@ -67,7 +69,9 @@ runs first); ``max_runtime`` a ``timedelta`` of whole seconds from 1 s to 24 h;
 health panel's group for the type (``discovery`` "Discovery", ``enrichment`` "Enrichment",
 ``recheck`` "Re-check", ``sending`` "Sending", ``reply_check`` "Reply check",
 ``unsubscribe_poll`` "Unsubscribe Endpoint poll", ``backup`` "Backup" or ``other`` "Other";
-``JobGroup.label`` is the heading). Every registration names its group
+``JobGroup.label`` is the heading); ``concurrency_key`` ``None`` or a concurrency key every job
+of the type is enqueued with unless the caller names another (Story 4.17). Every registration
+names its group
 (``tests/contracts/test_health_contracts.py``). A ``bool`` is refused wherever an int is
 expected. ``JobTypes``
 is the registry: ``register_job_type`` until ``freeze()``, then ``get(name)`` (raising
@@ -121,6 +125,7 @@ GLOBAL_SCOPE: Final = "global"
 TICK: Final = "tick"
 INBOX_PREFIX: Final = "inbox:"
 DOMAIN_PREFIX: Final = "domain:"
+GLOBAL_CONCURRENCY_KEYS: Final = frozenset({"ai_batches"})  # Story 4.17: a job type's own key
 MAX_DOMAIN_NAME: Final = 253
 
 # Each matched with fullmatch.
@@ -392,6 +397,8 @@ def is_concurrency_key(value: object) -> bool:
     """Whether ``value`` is ``inbox:<ULID>`` or ``domain:<name>``."""
     if not isinstance(value, str):
         return False
+    if value in GLOBAL_CONCURRENCY_KEYS:
+        return True
     if value.startswith(INBOX_PREFIX):
         return is_ulid(value.removeprefix(INBOX_PREFIX))
     if value.startswith(DOMAIN_PREFIX):
@@ -539,6 +546,7 @@ class JobType:
     retry_limit: int
     handler: Handler
     group: JobGroup = JobGroup.OTHER
+    concurrency_key: str | None = None  # Story 4.17: every job of the type holds this key
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
@@ -572,6 +580,8 @@ class JobType:
             raise TypeError(f"job type {self.name}: handler must be callable")
         if not isinstance(self.group, JobGroup):
             raise TypeError(f"job type {self.name}: group must be a JobGroup")
+        if self.concurrency_key is not None and not is_concurrency_key(self.concurrency_key):
+            raise ValueError(f"job type {self.name}: concurrency_key must be a concurrency key")
 
 
 class JobTypes:

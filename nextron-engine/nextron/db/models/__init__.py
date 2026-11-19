@@ -6,6 +6,7 @@ it. ``tests/contracts/test_persistence_contracts.py`` fails on a module left out
 """
 
 from nextron.db.models import (
+    ai_batches,
     compliance,
     crawl,
     drafting,
@@ -22,6 +23,7 @@ from nextron.db.models import (
     setup,
     signals,
 )
+from nextron.db.models.ai_batches import AiBatchItemRecord, AiBatchRecord
 from nextron.db.models.base import Base, Ulid, UtcDateTime, new_id, ulid_pk
 from nextron.db.models.compliance import (
     DataSubjectRequestRecord,
@@ -81,6 +83,8 @@ from nextron.db.models.signals import (
 )
 
 __all__ = [
+    "AiBatchItemRecord",
+    "AiBatchRecord",
     "AiRouteActivationRecord",
     "AiRouteTupleRecord",
     "AiTestCaseRecord",
@@ -136,6 +140,7 @@ __all__ = [
     "UtcDateTime",
     "VariantCounterRecord",
     "VariantRecord",
+    "ai_batches",
     "compliance",
     "crawl",
     "drafting",

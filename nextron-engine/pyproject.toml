@@ -107,9 +107,10 @@ forbidden_modules = [
     "nextron.startup_checks",
 ]
 
-# Also group 1: the app reaches the database only through nextron.db.uow, nextron.db.eventlog and
-# its own nextron.db.repos.<owner> (AD-2, AD-3). Indirect imports are allowed, because uow and
-# eventlog themselves use the engine and the models.
+# Also group 1: the app reaches the database only through nextron.db.uow, nextron.db.eventlog,
+# nextron.db.ai_batches (Story 4.17: the shared Message Batch writer, each row for its owner) and
+# its own nextron.db.repos.<owner> (AD-2, AD-3). Indirect imports are allowed, because uow,
+# eventlog and ai_batches themselves use the engine and the models.
 [[tool.importlinter.contracts]]
 id = "c1-app-db-surface"
 name = "1 forbidden: the app reaches the database only through uow, eventlog and its repositories"

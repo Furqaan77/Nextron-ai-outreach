@@ -368,6 +368,8 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("erase_external", None),
                 LastRun("check_grounding", None),  # Story 4.14
                 LastRun("draft_step", None),  # Story 4.15
+                LastRun("submit_bulk_ai", None),  # Story 4.17
+                LastRun("poll_ai_batches", None),  # Story 4.17
             ),
         ),
     )

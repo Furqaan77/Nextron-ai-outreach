@@ -417,3 +417,13 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-15-draft-step-1-with-opus-from-evidence-and-facts.md`
   summary: Mask (or refuse) email addresses and phone numbers in the route system prompt and the pinned Playbook snapshot text as well, so a future Playbook edit can't put one into a drafting prompt.
   evidence: Story 4.15 review pass 1 (EC9, low). Only framing and untrusted blocks pass through `mask_contact_details`; today's `docs/playbook/sales-playbook.md` holds none.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
+  summary: Make the bulk AI submit count the cost of in-flight batches (or cap items by the remaining budget) so one daily batch can't overshoot the monthly AI budget.
+  evidence: Review pass 1 of Story 4.17 (BH6, EC6). `submit_bulk` checks `domain.budget.allow` once per route, and batch spend reaches `ai_usage` only when results arrive.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
+  summary: Surface stuck AI batches (submitted over 24 h, items pending for days, a missing tuple) on the health panel, and add retention for deleted `ai_batches` rows and settled `ai_batch_items`.
+  evidence: Review pass 1 of Story 4.17 (BH8, BH9). Today these produce log lines only, and both tables grow without bound.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
+  summary: When an `extract_people` batch item goes `stale` with no newer item or run for the Lead, re-run it directly or enqueue the chain's next stage, so the Lead's research chain doesn't wait for its next crawl.
+  evidence: Review pass 1 of Story 4.17 (BH10; decision 8). A stale item writes and enqueues nothing.

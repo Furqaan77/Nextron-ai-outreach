@@ -9,9 +9,24 @@ writes, and makes the one Claude call. No log line, ``events`` row, error or job
 name, a role, a quote, a URL or a place: IDs, codes and counts only.
 
 **``PeopleExtractions(clock, meter, llm, research, queue)``** is the people step of the
-``extract_lead`` job: ``SignalExtractions.extract_lead`` calls ``extract(lead_id, run_id) ->
-bool`` after its Signals phases. It isn't a use case: it runs inside ``extract_lead``'s unit of
-work and opens its own transactions, in three phases:
+``extract_lead`` job: ``SignalExtractions.extract_lead`` calls ``extract(lead_id, run_id, *,
+lane=None) -> bool`` after its Signals phases. It isn't a use case: it runs inside
+``extract_lead``'s unit of work and opens its own transactions, in three phases. Its urgency is
+``chain_urgency(lane)`` (Story 4.17): ``soon`` on the interactive lane, else ``bulk``.
+
+**At ``bulk`` (Story 4.17, AD-8)** phase 1, after its budget check and its unknown or merged
+Lead skip, queues one ``pending`` batch item instead (owner ``research``, route
+``extract_people``, target the Lead, ``rev`` the crawl run's ordinal among the Lead's runs,
+``context_id`` the crawl run; ``extraction_queued`` is logged) and enqueues nothing: the
+chain's next stage follows the run the item later records. ``batch_request``,
+``apply_extract_people_result``, ``record_invalid`` and ``rerun`` are Story 4.17's batch steps
+(``nextron.app.research.extraction``) for this route:
+the request rebuilt at submit with its fingerprint (every people page sent and its
+``content_hash``); the result applied through phase 3 (its run started at the batch's
+``submitted_at``, the next stage enqueued) only after the same re-checks, the Lead's domain gate
+included (each decision-maker still goes through ``add_contact``'s own gate), else ``stale``
+with nothing written; an invalid result's run recorded (``failed``); a direct re-run at
+``soon``.
 
 1. **Prepare** (a transaction). When ``nextron.domain.budget.allow(BUDGET_CLASS,
    meter.snapshot(now), queries.setup.budget_limits())`` refuses, it returns ``False`` (the
@@ -25,7 +40,7 @@ work and opens its own transactions, in three phases:
    ``no_pages`` run. They go in ``PageKind`` order, then by URL, each cut by
    ``allot(texts, PAGE_TEXT_BUDGET)``, as one ``website`` block each (block id: the page's id,
    subject ``lead:<id>``). The full stored text of each page sent is kept for phase 3.
-2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, Urgency.BULK)``. An
+2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, urgency)``. An
    ``AdapterError`` records a ``failed`` run with its code (in a transaction of its own) and is
    raised again (the runner retries only a retryable one). ``LlmRefused`` (``error_code``: its
    category), ``LlmTruncated``, ``LlmInvalid`` and ``LlmFailed`` (its code) record that outcome
@@ -124,15 +139,29 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.discovery import StoredLead
 from nextron.app.research.api import Research
-from nextron.app.research.extraction import RecordedRun, outcome_of, page_order
+from nextron.app.research.extraction import (
+    BatchPlan,
+    RecordedRun,
+    Settled,
+    fingerprint_of,
+    log_queued,
+    outcome_of,
+    page_order,
+    queue_item,
+    restore_pages,
+    still_contactable,
+)
 from nextron.app.research.finding import enqueue_search, has_usable_address
 from nextron.db import eventlog
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import signals as signals_repo
+from nextron.db.ai_batches import StoredItem
+from nextron.db.repos.research.crawl import StoredPage
 from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import current, use_case
-from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency, chain_urgency
+from nextron.domain.ai_batch import Fingerprint, ItemStatus
 from nextron.domain.budget import allow
 from nextron.domain.contacts import ContactCandidate, PrimaryChoice, ProvenanceSource
 from nextron.domain.crawl import (
@@ -175,7 +204,7 @@ from nextron.domain.postings import CHECK_JOB_BOARDS_JOB
 from nextron.domain.segments import EvidenceType, SegmentDef, SizeUnit
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
-from nextron.ports.llm import LlmOk, LlmPort
+from nextron.ports.llm import BatchRequest, LlmOk, LlmPort
 from nextron.ports.usage_meter import UsageMeterPort
 
 log = logging.getLogger(__name__)
@@ -207,6 +236,7 @@ class _PeopleCall:
     team_sent: bool
     blocks: tuple[UntrustedBlock, ...] = field(repr=False)
     pages_truncated: int
+    stored: tuple[StoredPage, ...] = field(default=(), repr=False)  # Story 4.17: fingerprint
 
 
 @dataclass(slots=True)
@@ -244,13 +274,19 @@ class PeopleExtractions:
         self._research = research
         self._queue = queue
 
-    def extract(self, lead_id: str, run_id: str) -> bool:
+    def extract(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
         """Extract the Lead's named decision-makers from its people pages; see the module
         docstring. ``False`` when the budget refused the call."""
+        return self.people_step(lead_id, run_id, chain_urgency(lane))
+
+    def people_step(self, lead_id: str, run_id: str, urgency: Urgency) -> bool:
+        """The people phases at ``urgency``: at ``bulk`` a queued batch item, else the direct
+        call; ``False`` when the budget refused it."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
         call: _PeopleCall | RecordedRun | None = None
+        queued: tuple[str | None] | None = None
         with uow.transaction():
             limits = setup_queries.budget_limits()
             if not allow(BUDGET_CLASS, self._meter.snapshot(started_at), limits):
@@ -260,16 +296,22 @@ class PeopleExtractions:
                 skipped = UNKNOWN_LEAD
             elif lead.merged_into is not None:
                 skipped = MERGED_LEAD
+            elif urgency is Urgency.BULK:  # Story 4.17: the daily batch makes the call
+                queued = (queue_item(ROUTE, lead.id, run_id, started_at),)
             else:
                 call = self._prepare(lead, run_id, started_at)
-        if call is None:  # an unknown or merged Lead
+        if skipped is not None:  # an unknown or merged Lead
             log.info(EXTRACTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return True
+        if queued is not None:
+            log_queued(lead_id, ROUTE, queued[0])
+            return True
+        assert call is not None
         if isinstance(call, RecordedRun):  # phase 1 recorded its run
             call.log()
             return True
         try:
-            result = self._llm.run(call.route_tuple, call.blocks, Urgency.BULK)
+            result = self._llm.run(call.route_tuple, call.blocks, urgency)
         except AdapterError as error:
             with uow.transaction():
                 recorded = self._finished(call, ExtractionOutcome.FAILED, error.code, select=False)
@@ -286,6 +328,10 @@ class PeopleExtractions:
         if applied.merged is not None:
             applied.merged.log()
             return True
+        self._log_extracted(call, applied)
+        return True
+
+    def _log_extracted(self, call: "_PeopleCall", applied: "_Applied") -> None:
         log.info(
             PEOPLE_EXTRACTED,
             extra={
@@ -305,7 +351,94 @@ class PeopleExtractions:
                 "lawyers": applied.lawyers,
             },
         )
-        return True
+
+    # The batch steps (Story 4.17) -----------------------------------------------------------------
+
+    def batch_request(
+        self, item: StoredItem, started_at: datetime
+    ) -> BatchPlan | RecordedRun | None:
+        """The item's request rebuilt now, in the caller's transaction; ``None`` for an unknown
+        or merged Lead."""
+        lead = discovery_queries.lead(item.target_id)
+        if lead is None or lead.merged_into is not None:
+            return None
+        call = self._prepare(lead, item.context_id or "", started_at)
+        if isinstance(call, RecordedRun):
+            return call
+        return BatchPlan(
+            call.route_tuple,
+            BatchRequest(item.custom_id, call.blocks),
+            fingerprint_of(call.route_tuple, call.stored),
+        )
+
+    def apply_extract_people_result(
+        self, item: StoredItem, parsed: Mapping[str, Any], submitted_at: datetime
+    ) -> Settled:
+        """Apply a batch result after the re-checks, in the caller's transaction; ``stale``
+        with nothing written when one fails."""
+        lead = discovery_queries.lead(item.target_id)
+        if lead is None or lead.merged_into is not None or item.fingerprint is None:
+            return Settled(ItemStatus.STALE)
+        last = signals_repo.last_ok_run(lead.id, ROUTE)
+        if last is not None and last.started_at > submitted_at:
+            return Settled(ItemStatus.STALE)  # a newer run already holds the Lead's people
+        call = self._restore(lead, item, submitted_at, strict=True)
+        if call is None or not still_contactable(lead):
+            return Settled(ItemStatus.STALE)
+        applied = self._apply(call, parsed)
+        return Settled(ItemStatus.APPLIED, lambda: self._log_extracted(call, applied))
+
+    def record_invalid(self, item: StoredItem, submitted_at: datetime) -> Settled:
+        """Record an invalid batch result's run and enqueue the next stage, in the caller's
+        transaction (``failed``)."""
+        lead = discovery_queries.lead(item.target_id)
+        if lead is None or item.fingerprint is None:
+            return Settled(ItemStatus.FAILED)
+        call = self._restore(lead, item, submitted_at, strict=False)
+        outcome = ExtractionOutcome.INVALID
+        if call is not None:
+            recorded = self._finished(call, outcome, None)
+        else:  # the pages or the tuple changed: the run still counts what was sent
+            fingerprint = Fingerprint.decode(item.fingerprint)
+            version = fingerprint.prompt_version
+            run = self._record(
+                lead.id,
+                self._crawl_run(item.context_id),
+                outcome,
+                actor=None if version is None else f"{ACTOR_PREFIX}{version}",
+                started_at=submitted_at,
+                pages_sent=len(fingerprint.inputs),
+            )
+            if lead.merged_into is None:
+                self._enqueue_next_stage(lead.id, item.context_id or "", lead.web_domain)
+            recorded = RecordedRun(lead.id, run, outcome, None)
+        return Settled(ItemStatus.FAILED, recorded.log)
+
+    def rerun(self, item: StoredItem) -> bool:
+        """Run the step directly at ``soon``; ``False`` when the budget refused it."""
+        return self.people_step(item.target_id, item.context_id or "", Urgency.SOON)
+
+    def _restore(
+        self, lead: StoredLead, item: StoredItem, started_at: datetime, *, strict: bool
+    ) -> "_PeopleCall | None":
+        """The call the item's fingerprint names, as stored now; ``None`` when it can't be
+        (``strict``: the tuple or a page changed)."""
+        fingerprint = Fingerprint.decode(item.fingerprint or "")
+        route_tuple = playbook_queries.active_tuple(ROUTE)
+        if route_tuple is None or route_tuple.key != fingerprint.route_tuple_key:
+            return None
+        pages = restore_pages(lead.id, fingerprint, strict=strict)
+        seeded = setup_queries.segment_by_id(lead.segment_id)
+        if not pages or seeded is None:
+            return None
+        run_id = item.context_id or ""
+        return self._call(
+            lead, run_id, self._crawl_run(item.context_id), started_at, route_tuple, seeded, pages
+        )
+
+    @staticmethod
+    def _crawl_run(run_id: str | None) -> str | None:
+        return run_id if is_ulid(run_id) and crawl_repo.run(str(run_id)) is not None else None
 
     # Phase 1 ------------------------------------------------------------------------------------
 
@@ -336,6 +469,19 @@ class PeopleExtractions:
                 route_tuple.actor,
                 started_at,
             )
+        return self._call(lead, run_id, crawl_run_id, started_at, route_tuple, seeded, pages)
+
+    @staticmethod
+    def _call(
+        lead: StoredLead,
+        run_id: str,
+        crawl_run_id: str | None,
+        started_at: datetime,
+        route_tuple: RouteTuple,
+        seeded: Any,
+        pages: Sequence[StoredPage],
+    ) -> "_PeopleCall":
+        """The call on ``pages`` (in ``page_order``), each cut by the page budget."""
         full = [page.text or "" for page in pages]
         cut = allot(full, PAGE_TEXT_BUDGET)
         subject = f"lead:{lead.id}"
@@ -359,6 +505,7 @@ class PeopleExtractions:
             pages_truncated=sum(
                 len(short) < len(text) for short, text in zip(cut, full, strict=True)
             ),
+            stored=tuple(pages),
         )
 
     def _recorded(

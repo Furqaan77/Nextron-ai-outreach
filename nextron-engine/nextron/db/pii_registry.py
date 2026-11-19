@@ -817,6 +817,32 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "error_code": PiiClass.NONE,
         "at": PiiClass.NONE,
     },
+    # Story 4.17: the Message Batch tables hold ids, codes, hashes and times only
+    "ai_batches": {
+        "id": PiiClass.NONE,
+        "owner": PiiClass.NONE,
+        "provider_batch_id": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "route_tuple_key": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "submitted_at": PiiClass.NONE,
+        "ended_at": PiiClass.NONE,
+        "deleted_at": PiiClass.NONE,
+    },
+    "ai_batch_items": {
+        "id": PiiClass.NONE,
+        "owner": PiiClass.NONE,
+        "batch_row_id": PiiClass.NONE,
+        "route": PiiClass.NONE,
+        "custom_id": PiiClass.NONE,
+        "target_id": PiiClass.NONE,
+        "rev": PiiClass.NONE,
+        "context_id": PiiClass.NONE,
+        "fingerprint": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
 }
 
 # Story 3.13: the suppression key kind each keep_hash column's value is hashed as, or None when

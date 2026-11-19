@@ -105,6 +105,7 @@ from nextron.domain.backup import (
     OFFPC_ROTATION_DAYS,
     is_offpc_folder,
 )
+from nextron.domain.ai_batch import DEFAULT_BULK_AI_SUBMIT_AT
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.company_facts import is_link
 from nextron.domain.errors import DomainError
@@ -192,6 +193,7 @@ class Key(StrEnum):
     LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
+    BULK_AI_SUBMIT_AT = "bulk_ai_submit_at"
 
 
 class _Required(Enum):
@@ -1359,6 +1361,22 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(max_length(MAX_HOST_LENGTH), WORKER_HOST_RULE),
+    ),
+    # When the daily submit_bulk_ai job sends the queued bulk AI work as Message Batches
+    # (Story 4.17, AD-8, AD-10): the afternoon PC-on session, read once when the engine starts.
+    Setting(
+        key=Key.BULK_AI_SUBMIT_AT,
+        type=SettingType.TIME,
+        section=Section.ENGINE,
+        label="Bulk AI submit time",
+        unit=(
+            "HH:MM in the sender's timezone (UTC until that is set). Queued enrichment AI work "
+            "goes out as half-price Message Batches then; work queued before a time missed "
+            "while the engine was off goes out when it next starts. A change takes effect when "
+            "the engine restarts."
+        ),
+        default=DEFAULT_BULK_AI_SUBMIT_AT,
+        timezone_key=Key.SENDER_TIMEZONE,
     ),
 )
 
