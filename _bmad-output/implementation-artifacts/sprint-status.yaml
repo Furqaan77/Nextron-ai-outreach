@@ -144,7 +144,7 @@ development_status:
   6-6-pause-inboxes-on-blocklistings-and-postmaster-spam-rates: backlog
   6-7-assemble-plain-text-messages-in-one-thread-per-contact: backlog
   6-8-sync-each-sending-inbox-every-2-minutes-and-confirm-engine-s: backlog
-  6-9-evaluate-the-closed-send-gate-including-stop-rules-before-ev: backlog
+  6-9-evaluate-the-closed-send-gate-including-stop-rules-before-ev: review
   6-10-send-each-approved-message-exactly-once: backlog
   6-11-pace-cold-sends-inside-send-windows-and-catch-up-without-bur: backlog
   6-12-reconcile-uncertain-sends-and-let-the-operator-resolve-unkno: backlog

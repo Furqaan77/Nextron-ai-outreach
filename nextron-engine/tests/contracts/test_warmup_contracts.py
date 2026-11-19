@@ -37,6 +37,7 @@ ALLOWED_WARM_FUNCTIONS: Final = frozenset(
         "update_warmup",  # nextron.db.repos.sending.inboxes
         "check_warmup",  # nextron.domain.sending_inbox
         "warmup_days",  # nextron.domain.sending_policy
+        "_warmup_ok",  # nextron.domain.send_gate: the warmup_ok predicate's check
         "stored_warmup",  # nextron.web.inboxes_page
         "submitted_warmup",
         "warmup_facts",

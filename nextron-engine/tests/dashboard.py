@@ -568,6 +568,7 @@ class Dashboard:
             sequence_editor=self.sequence_editor,
             registry_discovery=self.registry_discovery,
             discovery=self.discovery,
+            sequencing=Sequencing(self.clock),
             units=self.units,
             **extra,
         )

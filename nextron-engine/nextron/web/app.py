@@ -393,6 +393,20 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   else "This Lead was merged into another Lead.", "That Contact isn't on this Lead." or "That
   Contact already has an address." (nothing written). An unknown Lead answers 404 with "That
   Lead doesn't exist.".
+- ``POST /leads/{lead_id}/stop-sequence`` (``lead_stop_sequence``, Story 6.9,
+  ``@personal_data(True)``): the Lead page's Stop Sequence panel (``lead_sequence.html``). The
+  form is empty (the first click) or exactly ``confirm=yes`` (``leads_page.submitted_stop``;
+  anything else is ``MalformedForm``, 400). An unknown Lead (a text that isn't a ULID
+  included) answers 404 with "That Lead doesn't exist.", which never echoes the id. The first
+  click writes nothing and answers 200 with the panel asking for the confirmation (or, when the
+  Lead no longer has a live Enrollment, the "This Lead has no live Sequence." notice). With
+  ``confirm=yes`` it runs ``sequencing.stop_sequence(lead_id)`` in its own unit of work
+  (``Sequencing.stop(cause=operator_stop, lead_id=...)``, which cancels the stopped
+  Enrollment's ``ready`` Drafts; Stories 5.2 and 6.10 add ``sending.cancel`` for its
+  ``queued`` OMs), then answers 200 with the panel, read in a read-only unit of work, and the
+  notice "Sequence stopped. Its ready Drafts were cancelled; approved Drafts are blocked from
+  sending." or, when nothing was live, "This Lead has no live Sequence.". The Lead page shows
+  the panel only while the Lead has a live Enrollment (``queries.sequencing.live_enrollment``).
 
 ``Guard`` (``nextron.web.guard``) checks ``Host``, the session, and ``Origin`` and
 ``Sec-Fetch-Site`` on unsafe methods in front of every route, and stamps the security headers on
@@ -488,6 +502,7 @@ from nextron.app.research.people import PrimaryContacts
 from nextron.app.scoring.lead_scores import LeadScores, RescoreRequest
 from nextron.app.scoring.selection import Selection
 from nextron.app.sending.api import Sending
+from nextron.app.sequencing.api import Sequencing
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.setup.api import (
     Campaigns,
@@ -779,6 +794,7 @@ def create_app(
     sequence_editor: SequenceEditor,
     registry_discovery: RegistryDiscovery,
     discovery: Discovery,
+    sequencing: Sequencing,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -817,7 +833,7 @@ def create_app(
     ``registry_discovery`` its Companies House runs (Story 8.4); ``discovery`` saves the website
     the Operator enters on the Leads list's "Website needed" rows (Story 8.4);
     ``discovery_topup`` (Story 8.10, optional) gives the Discovery page and the health panel
-    today's discovery figures.
+    today's discovery figures; ``sequencing`` runs the Lead page's Stop Sequence (Story 6.9).
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -2925,6 +2941,9 @@ def create_app(
             lead_rows.LEAD_TEMPLATE,
             **context,
             **pipeline_context(found.id, contacts),
+            **lead_rows.sequence_context(
+                sequencing_queries.live_enrollment(found.id) is not None
+            ),
             export_forms=export_rows.lead_forms(contacts),
             tabs=history_rows.lead_tabs(found.id, history_rows.OVERVIEW),
         )
@@ -3220,6 +3239,29 @@ def create_app(
                 receipts=lead_receipts(contacts),
             )
             return page(request, lead_rows.CONTACTS_TEMPLATE, **context)
+
+    @app.post("/leads/{lead_id}/stop-sequence", name="lead_stop_sequence")
+    @personal_data(True)  # the Lead page's panel; a Lead's name can be a sole trader's name
+    def lead_stop_sequence(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        confirmed = lead_rows.submitted_stop(fields)
+        with units.open(read_only=True):
+            known = discovery_queries.lead(lead_id) is not None
+        if not known:  # never echoes the id
+            text = lead_rows.REFUSALS[PrimaryRefusal.UNKNOWN_LEAD]
+            return PlainTextResponse(text, status_code=404, headers=NO_STORE)
+        notice = None
+        if confirmed:
+            with units.open():
+                stopped = sequencing.stop_sequence(lead_id)
+            notice = lead_rows.sequence_stopped() if stopped else lead_rows.no_live_sequence()
+        with units.open(read_only=True):  # 200, so HTMX swaps the panel in
+            live = sequencing_queries.live_enrollment(lead_id) is not None
+            if not confirmed and not live:  # ended before the first click: say so, never blank
+                notice = lead_rows.no_live_sequence()
+            context = lead_rows.sequence_context(live, notice, confirming=not confirmed)
+            return page(request, lead_rows.SEQUENCE_TEMPLATE, lead_id=lead_id, **context)
 
     require_declared(app)
     require_route_rules(app)

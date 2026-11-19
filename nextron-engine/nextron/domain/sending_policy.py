@@ -1,8 +1,9 @@
 """Time, caps and pacing, computed in one place (AD-11, AD-21, FR-19, FR-31, FR-33, FR-34,
-NFR-22). Standard library only, no clock (callers pass the local date). Story 4.8 adds the two
-rules Enrollment needs and Story 4.9 the Step due time; Story 6.4 the cold-send volume policy
-(warm-up, the ramped Daily Cap and the total daily ceiling); later stories add the Send Window,
-the gap draw and ``approval_expired`` here.
+NFR-22). Standard library only, no clock (callers pass the local
+date or ``now``). Story 4.8 adds the two rules Enrollment needs and Story 4.9 the Step due
+time; Story 6.4 the cold-send volume policy (warm-up, the ramped Daily Cap and the total daily
+ceiling); Story 6.9 the Send Window and the approval lifetime; later stories add the gap draw
+here.
 
 **Stories 4.8 and 4.9.**
 
@@ -85,13 +86,30 @@ this module only records and reads its facts.
 - ``away_until(local_date, periods) -> date | None``: ``None`` when ``local_date`` isn't away;
   otherwise the last day of the contiguous away run holding it: overlapping periods and
   back-to-back ones (the next starts the day after one ends) merge.
+
+**Story 6.9: the Send Window and the approval lifetime** (FR-19, FR-31, AD-11).
+
+- ``SEND_WINDOW``: ``Window(08:00, 17:00)``, weekdays only, in the recipient's local time;
+  ``start`` is inside the window and ``end`` outside it.
+- ``in_send_window(contact_tz, market, now) -> bool``: whether ``now`` (an aware ``datetime``;
+  a naive one, or another type, raises ``ValueError``) falls in the recipient's Send Window.
+  ``market`` is a ``markets.MarketDef`` (read through its ``unknown_timezone`` and
+  ``unknown_send_window``; this module can't import ``markets``, which imports the settings
+  schema, which imports this module).
+  ``contact_tz`` is the Contact's IANA zone, or ``None`` when it is unknown: then the zone is
+  ``market.unknown_timezone`` and the window ``market.unknown_send_window`` (the US: 11:00 to
+  17:00 ``America/New_York``), or ``SEND_WINDOW`` when the Market doesn't narrow it. A Saturday
+  or Sunday in that zone is outside; a zone that ``zoneinfo`` doesn't know is outside too
+  (fail closed).
+- ``APPROVAL_TTL`` is 72 hours; ``approval_expired(approved_at, now)`` is true once ``now -
+  approved_at`` reaches it (both aware; otherwise ``ValueError``).
 """
 
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
-from typing import Final
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Final, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SATURDAY: Final = 5  # date.weekday()
@@ -107,6 +125,18 @@ DEFAULT_RAMP_STEP: Final = 5
 DEFAULT_RAMP_TARGET: Final = 30
 DEFAULT_TOOL_DAILY: Final = 0
 DEFAULT_CEILING: Final = 50
+APPROVAL_TTL: Final = timedelta(hours=72)
+
+
+@dataclass(frozen=True, slots=True)
+class Window:
+    """Send hours in the recipient's local time: from ``start`` (inside) to ``end`` (outside)."""
+
+    start: time
+    end: time
+
+
+SEND_WINDOW: Final = Window(time(8, 0), time(17, 0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +195,6 @@ def inbox_capacity_forecast(
 ) -> int:
     """The cold cap left after the follow-ups due on ``local_date``; never negative."""
     return capacity_forecast(cold_cap(plan, local_date, ceiling), follow_ups_due)
-
 
 
 def _count(value: object, name: str) -> int:
@@ -336,3 +365,56 @@ def away_until(local_date: date, periods: Iterable[AwayPeriod]) -> date | None:
         if period.start <= end + timedelta(days=1):
             end = max(end, period.end)
     return end
+
+
+# The Send Window and the approval lifetime (Story 6.9) ------------------------------------------
+
+
+def _aware(value: object, name: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be an aware datetime")
+    return value
+
+
+class _Hours(Protocol):
+    @property
+    def start(self) -> time: ...
+
+    @property
+    def end(self) -> time: ...
+
+
+class WindowMarket(Protocol):
+    """What ``in_send_window`` reads of a ``markets.MarketDef``."""
+
+    @property
+    def unknown_timezone(self) -> str: ...
+
+    @property
+    def unknown_send_window(self) -> _Hours | None: ...
+
+
+def in_send_window(contact_tz: str | None, market: WindowMarket, now: datetime) -> bool:
+    """Whether ``now`` is inside the recipient's Send Window; see the module docstring."""
+    moment = _aware(now, "now")
+    window: _Hours
+    if contact_tz is None:
+        zone_name = market.unknown_timezone
+        narrowed = market.unknown_send_window
+        window = SEND_WINDOW if narrowed is None else narrowed
+    else:
+        zone_name = contact_tz
+        window = SEND_WINDOW
+    try:
+        zone = _zone(zone_name)
+    except (TypeError, ValueError):
+        return False  # an unreadable zone is outside every window: fail closed
+    local = moment.astimezone(zone)
+    if local.weekday() >= SATURDAY:
+        return False
+    return window.start <= local.time().replace(tzinfo=None) < window.end
+
+
+def approval_expired(approved_at: datetime, now: datetime) -> bool:
+    """Whether an approval given at ``approved_at`` has lapsed at ``now`` (72 hours on)."""
+    return _aware(now, "now") - _aware(approved_at, "approved_at") >= APPROVAL_TTL

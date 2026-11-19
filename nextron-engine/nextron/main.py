@@ -346,6 +346,11 @@ meter=meter)`` (``nextron.adapters.hunter``) serves Domain Search and Email Find
 ``ProspeoFinder(secrets, meter=meter)`` (``nextron.adapters.prospeo``) the fallback, unless
 injected.
 
+**Stop Sequence (Story 6.9).** The dashboard gets one ``Sequencing(clock)``
+(``create_app(..., sequencing=...)``) for the Lead page's Stop Sequence. The send gate
+(``nextron.app.compliance.send_gate.SendGate``) isn't wired yet: Story 6.10's send path builds
+and calls it.
+
 **Google Places (Story 8.2).** ``build_places(env, secrets, meter)`` chooses the Places port once,
 when the app is built: ``GooglePlaces(secrets, meter=meter)`` (``nextron.adapters.places``) in
 ``prod``; in ``dev`` and ``test`` only when the ``google_places`` keyring entry exists (its value
@@ -1564,6 +1569,7 @@ def build_app(
         sequence_editor=SequenceEditor(clock),  # Story 11.7: the Sequences page
         registry_discovery=registry_discovery,
         discovery=discovery,
+        sequencing=Sequencing(clock),  # Story 6.9: the Lead page's Stop Sequence
         units=units,
         discovery_topup=discovery_topup,
         lifespan=engine_lifespan(

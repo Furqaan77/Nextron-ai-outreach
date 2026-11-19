@@ -457,8 +457,8 @@ section of the page, in the order the footer prints them. All are one-line strin
 - **Required.** Until the four required ones are set, `nextron doctor`'s `required_settings`
   check (and the health panel's readiness list) fails naming them, after `sender_timezone` and
   `alert_chat_id`. Once set, none can be cleared; a blank opt-out line means its default. No
-  email is sent while a footer value it needs is blank (the send gate comes with Story 6.9);
-  drafting goes on with the incomplete footer.
+  email is sent while a footer value it needs is blank (the send gate's `footer_complete`,
+  Story 6.9); drafting goes on with the incomplete footer.
 - **No off switch** (NFR-7): no setting or dashboard control hides, shortens or reorders a footer
   line; `tests/contracts/test_footer_contracts.py` fails otherwise.
 - **`FooterChanged`.** A save (or `Setup.set`) that changes a footer setting's effective text
@@ -2670,6 +2670,58 @@ Sender's timezone), SPF, DKIM, DMARC and Alignment (each `Pass`,
 **Recheck** button. Recheck (`POST /inboxes/auth/recheck`, the one field `sending_domain_id`)
 queues the check and says "Recheck queued for <domain>; the result appears here when it
 lands."; a domain with no listed inbox gets "That Sending Domain has no inboxes to check.".
+
+## Send gate (Story 6.9)
+
+Every approved OutboundMessage (OM) passes one closed gate immediately before it leaves (FR-31,
+AD-11, AD-16). `nextron/domain/send_gate.py` holds the closed list, `PREDICATES`, exactly 13
+predicates in this order. No setting or control disables or weakens one (NFR-7), and nothing
+adds a fourteenth:
+
+| Predicate | Kinds | Fails when |
+|---|---|---|
+| `contactable` | all | `assert_contactable` answers `Blocked` (a suppression after approval, a closed Lead, an erased Contact) |
+| `approval_live` | all | the Draft isn't `approved`, the OM's approval isn't its current one, or 72 hours have passed since `approved_at` |
+| `hash_matches` | all | the approved hash differs from the current revision's `text_hash`, or from a fresh recompute (the revision, its stored footer snapshot, the Contact's current email and the OM's inbox) |
+| `inbox_ready` | all | the inbox is missing or not `active` (`paused`, `auth_failed`, `connecting`), its domain has no passing check within 26 hours, recovery mode is on, or the address is on `nextronai.com` or a subdomain |
+| `footer_complete` | all | the legal name, postal address or (UK) privacy URL is blank, or the revision's footer snapshot isn't the footer the Contact's current Market and the current settings give |
+| `market_eligible` | all | the Contact's Market is missing or disabled; for cold kinds, live Eligibility fails |
+| `enrollment_active` | cold | the Enrollment is `paused`, `stopped`, `completed` or missing |
+| `thread_quiet` | cold | the Thread has activity after `approved_at`, or that is unknown |
+| `campaign_active` | cold | the Campaign may not run (`queries.setup.campaign_active`) |
+| `in_send_window` | cold | outside weekdays 08:00 to 17:00 in the recipient's zone; a US recipient with an unknown zone gets 11:00 to 17:00 New York |
+| `under_daily_cap` | cold | today's cold sends from the inbox reach its cold Daily Cap, or the count is unknown |
+| `warmup_ok` | cold | fewer than 14 days of recorded warm-up |
+| `under_total_ceiling` | cold | today's sends from the inbox plus its warm-up tool figure reach the per-inbox ceiling, or the count is unknown |
+
+The cold kinds are `step` and `recontact`; the responsive kinds `reply` and `rebook` skip every
+cold predicate. Any other kind is refused when the `SendCandidate` is built. **Fail closed:** a
+missing row, an unset setting or an unknown count fails the predicate it feeds. Days are
+calendar days in `sender_timezone`. The result lists every failing predicate, in order;
+`send_gate.LABELS` names each for the "Approved, not yet sent" list (Epic 5).
+
+`compliance.assert_sendable(om, now)` (`nextron/app/compliance/send_gate.py`, re-exported from
+`compliance/api.py`) gathers the facts through the owners' `app.queries` and
+`assert_contactable` only, and writes nothing. `SendGate(clock, notify).check(om)`, which Story
+6.10's claim unit calls, also raises the deduplicated ops alert `send_hash_mismatch` (subject the
+OM id, text IDs only) when `hash_matches` fails while the OM's approval is its Draft's current
+approval; with no current approval (every OM until Story 5.4) there is nothing to mismatch, so
+no alert. A fact read that raises a lookup, value or domain error (the inbox list, warm-up days
+and the tool send figure included) fails its predicate. An approval dated after `now` fails
+`approval_live`. The gate never cancels an OM and never writes another owner's rows.
+
+**Nothing can be sent yet.** Four inputs belong to later stories and answer `None` until then:
+`queries.approval.current_approval` (Story 5.4), `queries.replies.thread_quiet` (Story 6.8) and
+`queries.sending.cold_sent_on` / `sent_total_on` (Story 6.10). So `approval_live`,
+`hash_matches`, `thread_quiet`, `under_daily_cap` and `under_total_ceiling` fail for every OM
+today.
+
+**Stop Sequence.** While a Lead has a live Enrollment, the Lead page shows a Sequence panel with
+**Stop Sequence**. The first click asks for confirmation; **Yes, stop the Sequence** stops the
+Enrollment (cause `operator_stop`) and cancels its `ready` Drafts. An approved Draft stays
+approved, and the gate's `enrollment_active` blocks it; the panel's texts say so. A first
+click that arrives after the Enrollment already ended answers "This Lead has no live
+Sequence." instead of an empty panel. Stories 5.2 and 6.10 add cancelling the queued OMs.
 
 ## Enrollments
 

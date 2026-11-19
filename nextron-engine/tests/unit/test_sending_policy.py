@@ -17,25 +17,38 @@ give 10, all caps 0 give 0) and its argument checks.
 
 Story 5.11 (FR-31): ``is_away`` on a period's first and last days and the days around it, a
 one-day period; ``parse_away_period`` and ``away_period_dates`` on good, malformed, unreal and
-reversed lines; ``away_until`` merging overlapping and back-to-back periods."""
+reversed lines; ``away_until`` merging overlapping and back-to-back periods.
 
-from datetime import UTC, date, datetime, timedelta
+Story 6.9 (FR-19, FR-31): the Send Window on weekdays 08:00 to 17:00 in the recipient's zone
+(UK and US hours, weekends, the end outside), the US unknown-location window 11:00 to 17:00
+Eastern, the 2027 DST gap between 14 and 28 March (London 08:00 is New York 04:00), an unknown
+zone and a naive ``now``; ``approval_expired`` at exactly 72 hours."""
+
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from nextron import main
+from nextron.domain import seed_yaml
+from nextron.domain.markets import MarketDef, validate_markets
 from nextron.domain.sending_policy import (
     DEFAULT_CEILING,
     DEFAULT_RAMP_STEP,
+    APPROVAL_TTL,
     DEFAULT_RAMP_TARGET,
+    SEND_WINDOW,
     AwayPeriod,
     InboxLoad,
     WarmupPlan,
+    approval_expired,
     away_period_dates,
     away_until,
     capacity_forecast,
     cold_cap,
     daily_cap,
+    in_send_window,
     inbox_capacity_forecast,
     is_away,
     local_date,
@@ -452,3 +465,113 @@ def test_a_period_to_the_last_date_ends_the_run_without_overflow() -> None:
     ]
 
     assert away_until(date(2026, 12, 25), periods) == date.max
+
+
+# The Send Window and the approval lifetime (Story 6.9) ------------------------------------------
+
+LONDON, NEW_YORK = ZoneInfo("Europe/London"), ZoneInfo("America/New_York")
+
+
+def shipped_market(code: str) -> MarketDef:
+    text = (main.SEED_DIR / main.MARKETS_FILE_NAME).read_text(encoding="utf-8")
+    [found] = [market for market in validate_markets(seed_yaml.parse(text)) if market.code == code]
+    return found
+
+
+UK, US = shipped_market("uk"), shipped_market("us")
+
+
+def at(zone: ZoneInfo, *parts: int) -> datetime:
+    return datetime(*parts, tzinfo=zone)  # type: ignore[misc]
+
+
+def test_the_send_window_is_8_to_17_on_weekdays() -> None:
+    assert SEND_WINDOW.start == time(8, 0) and SEND_WINDOW.end == time(17, 0)
+
+
+@pytest.mark.parametrize(
+    ("moment", "inside"),
+    [
+        (at(LONDON, 2026, 11, 16, 7, 59), False),  # Monday 07:59
+        (at(LONDON, 2026, 11, 16, 8, 0), True),
+        (at(LONDON, 2026, 11, 16, 16, 59), True),
+        (at(LONDON, 2026, 11, 16, 17, 0), False),  # the end is outside
+        (at(LONDON, 2026, 11, 20, 12, 0), True),  # Friday
+        (at(LONDON, 2026, 11, 21, 12, 0), False),  # Saturday
+        (at(LONDON, 2026, 11, 22, 12, 0), False),  # Sunday
+    ],
+)
+def test_uk_hours_in_london(moment: datetime, inside: bool) -> None:
+    assert in_send_window("Europe/London", UK, moment) is inside
+    assert in_send_window("Europe/London", UK, moment.astimezone(UTC)) is inside
+
+
+@pytest.mark.parametrize(
+    ("moment", "inside"),
+    [
+        (at(ZoneInfo("America/Chicago"), 2026, 11, 18, 8, 0), True),
+        (at(ZoneInfo("America/Chicago"), 2026, 11, 18, 7, 59), False),
+        (at(ZoneInfo("America/Chicago"), 2026, 11, 18, 17, 0), False),
+        (at(ZoneInfo("America/Chicago"), 2026, 11, 21, 10, 0), False),  # Saturday
+    ],
+)
+def test_us_hours_in_the_contacts_own_zone(moment: datetime, inside: bool) -> None:
+    assert in_send_window("America/Chicago", US, moment) is inside
+
+
+@pytest.mark.parametrize(
+    ("moment", "inside"),
+    [
+        (at(NEW_YORK, 2026, 11, 18, 10, 59), False),
+        (at(NEW_YORK, 2026, 11, 18, 11, 0), True),
+        (at(NEW_YORK, 2026, 11, 18, 16, 59), True),
+        (at(NEW_YORK, 2026, 11, 18, 17, 0), False),
+        (at(NEW_YORK, 2026, 11, 21, 12, 0), False),  # Saturday
+    ],
+)
+def test_a_us_contact_with_an_unknown_zone_gets_11_to_17_eastern(
+    moment: datetime, inside: bool
+) -> None:
+    assert US.unknown_send_window is not None
+    assert in_send_window(None, US, moment) is inside
+
+
+def test_a_uk_contact_with_an_unknown_zone_gets_the_default_window_in_london() -> None:
+    assert UK.unknown_send_window is None
+    assert in_send_window(None, UK, at(LONDON, 2026, 11, 16, 8, 0)) is True
+    assert in_send_window(None, UK, at(LONDON, 2026, 11, 16, 7, 59)) is False
+
+
+def test_the_2027_dst_gap_between_the_us_and_uk_changes() -> None:
+    # the US moves on 14 March 2027, the UK on 28 March: in between London 08:00 is New York 04:00
+    london_8 = at(LONDON, 2027, 3, 17, 8, 0)  # a Wednesday in the gap
+    assert london_8.astimezone(NEW_YORK).hour == 4
+    assert in_send_window("Europe/London", UK, london_8) is True
+    assert in_send_window("America/New_York", US, london_8) is False
+    assert in_send_window(None, US, london_8) is False
+    # New York 11:00 is London 15:00 in the gap (16:00 outside it)
+    ny_11 = at(NEW_YORK, 2027, 3, 17, 11, 0)
+    assert ny_11.astimezone(LONDON).hour == 15
+    assert in_send_window(None, US, ny_11) is True
+    assert at(NEW_YORK, 2027, 3, 10, 11, 0).astimezone(LONDON).hour == 16  # before the gap
+
+
+def test_an_unknown_zone_is_outside_every_window() -> None:
+    assert in_send_window("Mars/Olympus", US, at(NEW_YORK, 2026, 11, 18, 12, 0)) is False
+
+
+def test_a_naive_now_raises() -> None:
+    with pytest.raises(ValueError):
+        in_send_window("Europe/London", UK, datetime(2026, 11, 16, 9, 0))
+    with pytest.raises(ValueError):
+        approval_expired(T0, datetime(2026, 11, 16, 9, 0))
+    with pytest.raises(ValueError):
+        approval_expired(datetime(2026, 11, 16, 9, 0), T0)
+
+
+def test_an_approval_expires_at_72_hours() -> None:
+    assert APPROVAL_TTL == timedelta(hours=72)
+    assert approval_expired(T0, T0) is False
+    assert approval_expired(T0, T0 + timedelta(hours=71, minutes=59, seconds=59)) is False
+    assert approval_expired(T0, T0 + timedelta(hours=72)) is True
+    assert approval_expired(T0, T0 + timedelta(days=4)) is True

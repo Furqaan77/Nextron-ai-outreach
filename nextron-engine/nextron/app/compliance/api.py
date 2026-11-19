@@ -253,7 +253,12 @@ the send gate, 6.9) calls it, and it is the only caller of
    ``not_now_undated``).
 
 Nothing is written, cached or logged: each call reads the current facts again, so an edit to a
-Market, a suppression or a stage change shows in the very next Decision.
+Market, a suppression or a stage change shows in the very next Decision. Its body is the
+module function ``live_eligibility(contact_id, now)``, which the send gate (Story 6.9) calls
+with its own ``now``.
+
+**The send gate (Story 6.9).** ``assert_sendable(om, now) -> GateResult`` and ``SendGate(clock,
+notify)`` live in ``nextron.app.compliance.send_gate`` and are re-exported here.
 
 **Erasure (Story 3.13).** ``nextron.app.compliance.erasure`` holds ``Erasures`` (``open_dsr``,
 ``complete_dsr``, ``erase_contact``, compliance's ``erase_pii`` hook, the ``erase_on_request``
@@ -900,45 +905,51 @@ class Compliance:
 
     def evaluate_eligibility(self, contact_id: str) -> Decision:
         """The stored Contact's live cold-email Eligibility; see the module docstring."""
-        contact = research_queries.contact(contact_id)
-        if contact is None:
-            raise LookupError("evaluate_eligibility: the Contact is unknown")
-        lead = discovery_queries.lead(contact.lead_id)
-        if lead is None:
-            raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
-        stage = pipeline_queries.stage(lead.id)
-        if stage is None:  # the Lead was just read, so its stage is there
-            raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
-        # a global looked up at call time: a fake of compliance_api.assert_contactable sees it
-        contactable = assert_contactable(ContactSubject(contact.id), "email", "cold")
-        stored = research_queries.legal_form(lead.id)
-        legal_form, confirmed = eligibility_facts(
-            None if stored is None else stored.legal_form,
-            None if stored is None else stored.legal_form_status,
-        )
-        return evaluate(
-            EligibilityContact(
-                email=contact.email,
-                address_class=contact.address_class,
-                market_id=contact.market_id,
-                market_basis=contact.market_basis,
-                office_country=contact.office_country,
-                office_region=contact.office_region,
-                contactable=contactable,
-                provenance_recorded=provenance_recorded(
-                    contact.email, research_queries.provenance(contact.id)
-                ),
-                history=sequencing_queries.ended_sequences(contact.id),
+        return live_eligibility(contact_id, self._clock.now())
+
+
+def live_eligibility(contact_id: str, now: datetime) -> Decision:
+    """The stored Contact's live cold-email Eligibility at ``now``; ``evaluate_eligibility``'s
+    body, which the send gate (Story 6.9) calls with its own ``now``."""
+    contact = research_queries.contact(contact_id)
+    if contact is None:
+        raise LookupError("evaluate_eligibility: the Contact is unknown")
+    lead = discovery_queries.lead(contact.lead_id)
+    if lead is None:
+        raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
+    stage = pipeline_queries.stage(lead.id)
+    if stage is None:  # the Lead was just read, so its stage is there
+        raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
+    # a global looked up at call time: a fake of compliance_api.assert_contactable sees it
+    contactable = assert_contactable(ContactSubject(contact.id), "email", "cold")
+    stored = research_queries.legal_form(lead.id)
+    legal_form, confirmed = eligibility_facts(
+        None if stored is None else stored.legal_form,
+        None if stored is None else stored.legal_form_status,
+    )
+    return evaluate(
+        EligibilityContact(
+            email=contact.email,
+            address_class=contact.address_class,
+            market_id=contact.market_id,
+            market_basis=contact.market_basis,
+            office_country=contact.office_country,
+            office_region=contact.office_region,
+            contactable=contactable,
+            provenance_recorded=provenance_recorded(
+                contact.email, research_queries.provenance(contact.id)
             ),
-            EligibilityLead(
-                country_code=lead.country_code,
-                stage=stage,
-                legal_form=legal_form,
-                legal_form_confirmed=confirmed,
-            ),
-            _market_rules(),
-            self._clock.now(),
-        )
+            history=sequencing_queries.ended_sequences(contact.id),
+        ),
+        EligibilityLead(
+            country_code=lead.country_code,
+            stage=stage,
+            legal_form=legal_form,
+            legal_form_confirmed=confirmed,
+        ),
+        _market_rules(),
+        now,
+    )
 
 
 # The contactability gate ------------------------------------------------------------------------
@@ -998,3 +1009,8 @@ def assert_contactable(
     facts = _facts(subject)
     active = compliance_queries.active_keys(lookup_keys(facts))
     return check(facts, found_channel, found_purpose, active)
+
+
+# The send gate (Story 6.9), re-exported. It imports this module, so it comes last.
+from nextron.app.compliance.send_gate import SendGate as SendGate  # noqa: E402
+from nextron.app.compliance.send_gate import assert_sendable as assert_sendable  # noqa: E402
