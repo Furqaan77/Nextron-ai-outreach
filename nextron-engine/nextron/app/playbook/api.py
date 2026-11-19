@@ -163,14 +163,21 @@ Reply class override joins the Reply set as a pseudonymised case.
      rows' stored SHA-256s, the source ``case_set_fingerprint`` reads). When there are at
      least ``MIN_CASES`` cases, the set's scorer (``SCORERS``) must exist (``LookupError``
      otherwise: ``extraction`` and, since Story 4.14, ``grounding`` have one, decision 7), and a case naming a Segment that isn't
-     stored raises ``InvalidTestCases`` before any call.
+     stored raises ``InvalidTestCases`` before any call. A scorer with a ``context`` (Story 4.15:
+     ``drafting_smoke``) reads it here too: the Step 1 brief of the stored ``default``
+     Sequence, each stored Market's English variant and the active ``grounding_check`` tuple
+     (``nextron.domain.drafting_smoke.SmokeContext``).
   2. **The calls**, with no transaction open. Fewer cases than ``MIN_CASES`` make a ``failed``
      run with ``set_too_small`` and no call. Otherwise each case's ``llm.run(route_tuple,
      blocks, urgency)`` runs in case order (the scorer builds the inputs). A retryable
      ``AdapterError`` propagates and nothing is stored (the job retries); ``llm_unknown_route``
      ends the run ``failed`` with ``unknown_route``; any other ``AdapterError`` propagates and
      nothing is stored (decision 8). Each answer is scored (an ``LlmOk``'s ``parsed``, or the
-     result's type name).
+     result's type name). A scorer with ``run_case`` (Story 4.15: ``drafting_smoke``) runs each
+     case itself instead: the draft call with the case's framing (``llm.run(route_tuple,
+     blocks, bulk, framing=...)``), its validation and ``grounding_rules``, then, for a checked
+     output, the active ``grounding_check`` tuple's call over it; its flags are counted
+     (``nextron.domain.drafting_smoke``), and both calls' cost is summed.
   3. **Last transaction.** The run is inserted (``ai_test_runs``: its outcome, ``passed`` when
      every metric passed; the error; the case and passed counts; the metrics and every case's
      result; the summed ``cost_micros``; ``started_at`` and ``finished_at``; and
@@ -270,7 +277,7 @@ from nextron.db.repos.playbook.test_cases import StoredCase
 from nextron.db.repos.playbook.route_tuples import StoredTuple
 from nextron.db.uow import command, current, use_case
 from nextron.domain import company_facts as facts_domain
-from nextron.domain.ai import RouteSpec, RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import Framing, RouteSpec, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.ai_test_cases import (
     OVERRIDE_PREFIX,
     CaseOrigin,
@@ -293,7 +300,9 @@ from nextron.domain.ai_test_gate import (
     Metric,
     RunError,
     RunOutcome,
+    DraftingOutcome,
     TestSet,
+    drafting_metrics,
     extraction_metrics,
     metrics_json,
     results_json,
@@ -318,8 +327,20 @@ from nextron.domain.company_facts import (
 )
 from nextron.domain.erasure import Coverage, ErasureCause, TableErasure
 from nextron.domain.errors import DomainError
+from nextron.domain.drafting_smoke import (
+    SmokeContext,
+    case_blocks,
+    case_framing,
+    draft_flags,
+    grounding_codes,
+    grounding_input_of,
+    no_brief_codes,
+    score_drafting,
+)
 from nextron.domain.grounding_check import (
+    GROUNDING_CHECK_ROUTE,
     grounding_inputs,
+    input_blocks as grounding_blocks,
     grounding_set_metrics,
     score_grounding,
 )
@@ -381,6 +402,7 @@ OVERRIDE_BLOCK_ID: Final = "r1"
 MAX_OVERRIDE_TEXT: Final = 8_000
 # nextron.adapters.ai.LLM_UNKNOWN_ROUTE: the app never imports the gateway (tests pin the two)
 UNKNOWN_ROUTE_CODE: Final = "llm_unknown_route"
+DEFAULT_SEQUENCE: Final = "default"  # Story 4.15: the drafting smoke set's Step 1 brief
 
 # Story 3.13 (AD-17): what playbook's erasure hook does to each of its personal-data tables.
 ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
@@ -1284,14 +1306,83 @@ def _saved(result: FactSaved) -> FactSaved:
 
 
 @dataclass(frozen=True, slots=True)
+class CaseRun:
+    """What one case's own run gave (a ``run_case`` scorer, Story 4.15)."""
+
+    outcome: Any
+    result: CaseResult
+    cost_micros: int
+
+
+@dataclass(frozen=True, slots=True)
 class Scorer:
     """How a set's cases are run and scored: the check before any call, each case's inputs,
-    each answer's score and the run's metrics."""
+    each answer's score and the run's metrics. Story 4.15: a scorer may instead read a
+    ``context`` in the first transaction and run each case itself (``run_case``: its calls,
+    their score and their cost), as the drafting smoke set does."""
 
     check: Callable[[Sequence[TestCase], Sequence[SegmentDef]], None]
-    inputs: Callable[[TestCase, int, Sequence[SegmentDef]], tuple[list[UntrustedBlock], Urgency]]
-    score: Callable[[TestCase, Mapping[str, Any] | str], tuple[Any, CaseResult]]
     metrics: Callable[[str, Sequence[Any]], tuple[Metric, ...]]
+    inputs: (
+        Callable[[TestCase, int, Sequence[SegmentDef]], tuple[list[UntrustedBlock], Urgency]]
+        | None
+    ) = None
+    score: Callable[[TestCase, Mapping[str, Any] | str], tuple[Any, CaseResult]] | None = None
+    context: Callable[[], Any] | None = None
+    run_case: (
+        Callable[[LlmPort, RouteTuple, TestCase, int, Sequence[SegmentDef], Any], CaseRun] | None
+    ) = None
+
+
+def _smoke_context() -> SmokeContext:
+    """The drafting smoke run's context, read in its first transaction (Story 4.15)."""
+    sequence = setup_queries.sequence(DEFAULT_SEQUENCE)
+    steps = () if sequence is None else sequence.definition.steps
+    return SmokeContext(
+        brief=steps[0] if steps else None,
+        english_variants=MappingProxyType(
+            {market.code: market.definition.english_variant for market in setup_queries.markets()}
+        ),
+        grounding=playbook_queries.active_tuple(GROUNDING_CHECK_ROUTE),
+    )
+
+
+def _run_drafting_case(
+    llm: LlmPort,
+    route_tuple: RouteTuple,
+    case: TestCase,
+    number: int,
+    segments: Sequence[SegmentDef],
+    context: SmokeContext,
+) -> CaseRun:
+    """One drafting smoke case: the draft call, its checks and the grounding check's call over
+    the output (Story 4.15; ``nextron.domain.drafting_smoke``). ``AdapterError`` propagates."""
+    variant = context.english_variants.get(str(case.input["market"]))
+    if context.brief is None or variant is None:  # fail closed, with no call
+        outcome, result = score_drafting(case, no_brief_codes())
+        return CaseRun(outcome, result, 0)
+    blocks, urgency = case_blocks(case, number, segments)
+    framing: Framing = case_framing(case, context.brief, variant)
+    drafted = llm.run(route_tuple, blocks, urgency, framing=framing)
+    cost = drafted.usage.cost_micros
+    scored = draft_flags(case, _answer(drafted), context.brief, segments)
+    codes = scored.codes
+    if scored.proposal is not None:
+        checked: Mapping[str, Any] | str | None = None
+        if context.grounding is not None:
+            given = grounding_input_of(case, scored.proposal)
+            answer = llm.run(
+                context.grounding, grounding_blocks(f"lead:case{number}", given), urgency
+            )
+            cost += answer.usage.cost_micros
+            checked = _answer(answer)
+        codes = (*codes, *grounding_codes(scored.proposal, checked))
+    outcome, result = score_drafting(case, codes)
+    return CaseRun(outcome, result, cost)
+
+
+def _drafting_metrics(route: str, outcomes: Sequence[DraftingOutcome]) -> tuple[Metric, ...]:
+    return drafting_metrics(outcomes)
 
 
 # Each set's scorer (decision 7): each set has one once its routes ship (Grounding: Story 4.14).
@@ -1308,6 +1399,12 @@ SCORERS: Final[Mapping[TestSet, Scorer]] = MappingProxyType(
             inputs=grounding_inputs,
             score=score_grounding,
             metrics=grounding_set_metrics,
+        ),
+        TestSet.DRAFTING_SMOKE: Scorer(  # Story 4.15
+            check=check_segments,
+            metrics=_drafting_metrics,
+            context=_smoke_context,
+            run_case=_run_drafting_case,
         ),
     }
 )
@@ -1329,6 +1426,7 @@ class _Prepared:
     segments: tuple[SegmentDef, ...]
     scorer: Scorer | None  # None when the set is too small
     cases_sha256: str  # the fingerprint of the cases read
+    context: Any = None  # the scorer's context (Story 4.15), read in this transaction
 
 
 @dataclass(slots=True)
@@ -1461,19 +1559,30 @@ class AiTestRuns:
             return _Scored(error=RunError.SET_TOO_SMALL)
         scored = _Scored()
         for number, case in enumerate(prepared.cases, start=1):
-            blocks, urgency = scorer.inputs(case, number, prepared.segments)
             try:
-                result = self._llm.run(prepared.route_tuple, blocks, urgency)
+                run = self._case(prepared, scorer, case, number)
             except AdapterError as failure:
                 if not failure.retryable and failure.code == UNKNOWN_ROUTE_CODE:
                     scored.error = RunError.UNKNOWN_ROUTE
                     return scored
                 raise  # decision 8: retried, or the job dies and is queued at the next start
-            scored.cost_micros += result.usage.cost_micros
-            outcome, case_result = scorer.score(case, _answer(result))
-            scored.outcomes.append(outcome)
-            scored.results.append(case_result)
+            scored.cost_micros += run.cost_micros
+            scored.outcomes.append(run.outcome)
+            scored.results.append(run.result)
         return scored
+
+    def _case(self, prepared: _Prepared, scorer: Scorer, case: TestCase, number: int) -> CaseRun:
+        """One case's call(s) and score."""
+        if scorer.run_case is not None:  # Story 4.15
+            return scorer.run_case(
+                self._llm, prepared.route_tuple, case, number, prepared.segments, prepared.context
+            )
+        if scorer.inputs is None or scorer.score is None:  # pragma: no cover - a wiring bug
+            raise LookupError("the set's scorer has no inputs or score")
+        blocks, urgency = scorer.inputs(case, number, prepared.segments)
+        result = self._llm.run(prepared.route_tuple, blocks, urgency)
+        outcome, case_result = scorer.score(case, _answer(result))
+        return CaseRun(outcome, case_result, result.usage.cost_micros)
 
 
 def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
@@ -1502,14 +1611,16 @@ def _prepare(tuple_id: str, test_set: str) -> _Prepared | str:
     )
     segments = tuple(seeded.definition for seeded in setup_queries.segments())
     scorer: Scorer | None = None
+    context: Any = None
     if len(cases) >= MIN_CASES[chosen]:
         scorer = SCORERS.get(chosen)
         if scorer is None:
             raise LookupError(f"the {chosen.value} set has no scorer yet")
         scorer.check(cases, segments)
+        context = None if scorer.context is None else scorer.context()
     # the stored SHA-256s, as queries.playbook.case_set_fingerprint reads them
     fingerprint = case_set_sha256(stored.sha256 for stored in rows)
-    return _Prepared(row, chosen, route_tuple, cases, segments, scorer, fingerprint)
+    return _Prepared(row, chosen, route_tuple, cases, segments, scorer, fingerprint, context)
 
 
 def _may_activate(row: StoredTuple) -> bool:

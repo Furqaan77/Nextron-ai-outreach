@@ -5,8 +5,10 @@ metered usage.
 The values it takes (``RouteTuple``, ``UntrustedBlock``, ``Urgency``) live in
 ``nextron.domain.ai``.
 
-**``run(route_tuple, inputs, urgency)``** makes the call that ``route_tuple`` names on the
-untrusted ``inputs`` of one subject, and returns exactly one ``LlmResult``. It never checks the
+**``run(route_tuple, inputs, urgency, *, framing=None)``** makes the call that ``route_tuple``
+names on the untrusted ``inputs`` of one subject, and returns exactly one ``LlmResult``.
+``framing`` (Story 4.15, ``nextron.domain.ai.Framing``) adds a drafting call's trusted brief,
+facts and Campaign note; without it the request is unchanged. It never checks the
 budget: the calling service asks ``nextron.domain.budget.allow`` first. A failure the job runner
 may retry (the API unavailable) raises ``AdapterError(True, ...)``; a caller's bad inputs raise
 ``TypeError`` or ``ValueError`` before any request.
@@ -36,7 +38,7 @@ from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field, fields
 from typing import Any, Final, Protocol, runtime_checkable
 
-from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import Framing, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import CODE_PATTERN, MODEL_PATTERN
 
 MIN_STATUS: Final = 100
@@ -168,7 +170,12 @@ class LlmPort(Protocol):
     """One Claude call through the route a tuple names."""
 
     def run(
-        self, route_tuple: RouteTuple, inputs: Sequence[UntrustedBlock], urgency: Urgency
+        self,
+        route_tuple: RouteTuple,
+        inputs: Sequence[UntrustedBlock],
+        urgency: Urgency,
+        *,
+        framing: Framing | None = None,
     ) -> LlmResult:
         """Make the call and return its one result; see the module docstring."""
         ...

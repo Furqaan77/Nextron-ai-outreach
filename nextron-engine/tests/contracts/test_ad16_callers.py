@@ -23,7 +23,10 @@ violation.
   ``GroundingChecks.check``, the ``check_grounding`` job's use case) checks Step 1's revision 1
   with no active tuple: its gate call comes before its one write (the fail-closed result), and
   ``Blocked`` makes no AI call and only records that ``fail`` (an ``UPDATE`` of
-  ``grounding_results``).
+  ``grounding_results``). ``drafting.draft_step`` (Story 4.15: ``StepDrafts.draft``, the
+  ``draft_step`` job's use case) drafts Step 1 with no active ``draft_sequence`` tuple: its gate
+  call comes before its one write (``draft_failed_at``), and ``Blocked`` makes no AI call and
+  writes only its ``drafting_blocked`` ``events`` row.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -85,6 +88,7 @@ from nextron import main
 from nextron.app.compliance import api as compliance_api
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
 from nextron.app.drafting.api import Drafting, Traceability
+from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
@@ -220,6 +224,8 @@ MANIFEST: Final = (
     ),
     # Story 4.14: no AI grounding call for a subject that may no longer be reached
     Caller("drafting.grounding_check", ("app/drafting/",), r"GroundingChecks\.check"),
+    # Story 4.15: no Step 1 drafting call for a subject that may not be reached
+    Caller("drafting.draft_step", ("app/drafting/",), r"StepDrafts\.draft"),
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
     Caller(
         "pipeline.tasks_and_call_sheets",
@@ -1210,7 +1216,8 @@ def _enroll(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     the one ``evaluate_eligibility`` makes, both before the first write; then (Story 4.9)
     ``request_steps``' before its ``drafts`` insert."""
     contact_id, campaign_id = _enrollable_contact(world, tag)
-    sequencing = Sequencing(FrozenClock(T0))
+    clock = FrozenClock(T0)
+    sequencing = Sequencing(clock, queue_on(clock))  # Story 4.15: Step 1's draft_step job
 
     def action() -> object:
         return world.transact(
@@ -1227,12 +1234,12 @@ def _request_steps(world: World, tag: str) -> tuple[Callable[[], object], Expect
     contact_id, campaign_id = _enrollable_contact(world, tag)
     clock = FrozenClock(T0)
     enrolled = world.transact(
-        lambda: Sequencing(clock).enroll(
+        lambda: Sequencing(clock, queue_on(clock)).enroll(
             contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
         )
     )
     assert isinstance(enrolled, NewEnrollment)
-    drafting = Drafting(clock)
+    drafting = Drafting(clock, queue_on(clock))
 
     def action() -> object:
         return world.transact(
@@ -1248,7 +1255,7 @@ def _grounding_check(world: World, tag: str) -> tuple[Callable[[], object], Expe
     contact_id, campaign_id = _enrollable_contact(world, tag)
     clock = FrozenClock(T0)
     enrolled = world.transact(
-        lambda: Sequencing(clock).enroll(
+        lambda: Sequencing(clock, queue_on(clock)).enroll(
             contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
         )
     )
@@ -1284,6 +1291,43 @@ def _grounding_check(world: World, tag: str) -> tuple[Callable[[], object], Expe
             return checks.check(draft_id, 1, Urgency.INTERACTIVE)
 
     return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+def _draft_step(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.15: Step 1 drafted with no active ``draft_sequence`` tuple: one gate call before
+    the one write that records ``no_route``."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
+    clock = FrozenClock(T0)
+    queue = queue_on(clock)
+    enrolled = world.transact(
+        lambda: Sequencing(clock, queue).enroll(
+            contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
+        )
+    )
+    assert isinstance(enrolled, NewEnrollment)
+    drafts = StepDrafts(clock, ScriptedLlm(), queue)  # no tuple is active: never called
+
+    def action() -> object:
+        with world.units.open():
+            return drafts.draft(enrolled.enrollment_id, 1, Urgency.SOON)
+
+    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+def _draft_step_recorded(world: World) -> None:
+    """The allowed draft recorded ``no_route``, the blocked one its ``drafting_blocked`` event,
+    and neither stored a revision (the scenario isn't vacuous)."""
+    with world.engine.connect() as connection:
+        reasons = connection.exec_driver_sql(
+            "SELECT draft_failed_reason FROM drafts WHERE draft_failed_at IS NOT NULL"
+        ).all()
+        blocked = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM events WHERE to_status = 'drafting_blocked'"
+        ).scalar_one()
+        revisions = connection.exec_driver_sql("SELECT COUNT(*) FROM draft_revisions").scalar_one()
+    assert reasons and {row[0] for row in reasons} == {"no_route"}
+    assert blocked >= 1
+    assert revisions == 0
 
 
 def _grounding_failed(world: World) -> None:
@@ -1413,6 +1457,13 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             blocked_writes=frozenset({("UPDATE", "grounding_results")}),
             after_blocked=_grounding_failed,
         ),
+        # Story 4.15: Blocked makes no AI call; it writes only its drafting_blocked event
+        "drafting.draft_step": Scenario(
+            (_draft_step,),
+            blocked_rows={"events": 1},
+            blocked_writes=frozenset({("INSERT", "events")}),
+            after_blocked=_draft_step_recorded,
+        ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1514,6 +1565,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "find_contact_email",
         "drafting.request_*",  # Story 4.9
         "drafting.grounding_check",  # Story 4.14
+        "drafting.draft_step",  # Story 4.15
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

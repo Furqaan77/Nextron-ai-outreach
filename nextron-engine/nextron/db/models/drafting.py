@@ -61,6 +61,12 @@ data. Story 4.14 (migration ``0047_4_14_ai_grounding``) adds the nullable ``ai_c
 (when the AI check's result was recorded; PII class ``none``), gives each flag a ``source``
 (``rules`` or ``ai``), and ``ck_grounding_results_pass``: a ``pass`` row has a
 ``route_tuple_id``, a ``served_model`` and an ``ai_checked_at``.
+
+Story 4.15 (migration ``0048_4_15_draft_failed``) adds two nullable columns to the ``drafts``
+content group: ``draft_failed_at`` (when the last drafting attempt stored no revision) and
+``draft_failed_reason`` (its ``nextron.domain.step_drafting.DraftFailure`` code, at most 32
+characters); ``ck_drafts_draft_failed``: both NULL or both set, and the reason one of the codes.
+Neither holds personal data.
 """
 
 from collections.abc import Iterable
@@ -84,6 +90,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.draft import DraftKind, DraftStatus, RevisionOrigin
 from nextron.domain.grounding_rules import GroundingStatus
+from nextron.domain.step_drafting import MAX_REASON, DraftFailure
 
 SHA256_LENGTH: Final = 64  # lowercase hex SHA-256
 SHA256_CHECK: Final = "length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'"
@@ -106,6 +113,10 @@ STEP_SLOT_CHECK: Final = (
 STEP_NO_CHECK: Final = "step_no IS NULL OR step_no >= 1"
 DAY_OFFSET_CHECK: Final = "day_offset IS NULL OR day_offset >= 0"
 CURRENT_REV_CHECK: Final = "current_rev IS NULL OR current_rev >= 1"
+DRAFT_FAILED_CHECK: Final = (
+    "(draft_failed_at IS NULL) = (draft_failed_reason IS NULL) AND "
+    f"(draft_failed_reason IS NULL OR {_one_of('draft_failed_reason', DraftFailure)})"
+)
 ORIGIN_LENGTH: Final = 16
 PLAYBOOK_VERSION_LENGTH: Final = 32  # nextron.domain.playbook.VERSION_PATTERN
 PROMPT_VERSION_LENGTH: Final = 5  # v1 to v9999
@@ -174,6 +185,7 @@ class DraftRecord(Base):
         CheckConstraint(STEP_NO_CHECK, name="step_no"),
         CheckConstraint(DAY_OFFSET_CHECK, name="day_offset"),
         CheckConstraint(CURRENT_REV_CHECK, name="current_rev"),
+        CheckConstraint(DRAFT_FAILED_CHECK, name="draft_failed"),
         # Story 4.12: current_rev names an existing revision of this Draft
         ForeignKeyConstraint(
             ["id", "current_rev"],
@@ -194,6 +206,8 @@ class DraftRecord(Base):
     stale: Mapped[bool] = _flag()
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    draft_failed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)  # Story 4.15
+    draft_failed_reason: Mapped[str | None] = mapped_column(String(MAX_REASON))
     # the status group (approval)
     status: Mapped[str] = mapped_column(
         String(STATUS_LENGTH), server_default=text(f"'{DraftStatus.READY}'")

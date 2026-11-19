@@ -11,8 +11,8 @@
   Story 4.5, ``check_domains``, Story 6.5, ``check_job_boards`` and ``recheck_event``, Story
   2.11, ``check_legal_form``, Story 2.12, ``purge_place_coords``, Story 8.2, ``erase_external``,
   Story 3.14, ``find_contact_email``, Story 2.13, ``score_lead`` and ``recompute_tiers``, Story
-  2.15, ``poll_unsubscribes``, Story 3.11, and ``check_grounding``, Story 4.14, with their
-  settings); the triggers are exactly
+  2.15, ``poll_unsubscribes``, Story 3.11, ``check_grounding``, Story 4.14, and ``draft_step``,
+  Story 4.15, with their settings); the triggers are exactly
   ``backup_db``'s and ``restore_test``'s daily schedules, ``check_recovery``'s ``Every`` with
   ``active``, ``purge_page_text``'s and ``purge_place_coords``'s daily ``Every`` at startup,
   ``check_domains``'s daily schedule, ``recompute_tiers``' daily ``Every`` at startup and
@@ -506,6 +506,16 @@ class RecordingGrounding:
         self.checks.append((draft_id, rev, urgency))
 
 
+class RecordingStepDrafts:
+    """Stands in for the ``drafting`` service's ``StepDrafts`` (Story 4.15)."""
+
+    def __init__(self) -> None:
+        self.drafts: list[tuple[str, int, Urgency]] = []
+
+    def draft(self, enrollment_id: str, step: int, urgency: Urgency) -> None:
+        self.drafts.append((enrollment_id, step, urgency))
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -527,6 +537,7 @@ def registry(**overrides: object) -> JobTypes:
         "scores": RecordingScores,
         "unsubscribes": RecordingUnsubscribes,
         "grounding": RecordingGrounding,
+        "step_drafts": RecordingStepDrafts,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -616,6 +627,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "recompute_tiers",
         "poll_unsubscribes",
         "check_grounding",
+        "draft_step",  # Story 4.15
     )
     send_alert = job_types.get("send_alert")
     assert (
@@ -1837,3 +1849,79 @@ def test_a_score_lead_job_without_its_lead_is_invalid(payload: dict[str, object]
     with pytest.raises(InvalidJob, match="must be a ULID"):
         handler(Job(RUN, "score_lead", Lane.BULK, payload, 1))
     assert scores.scored == []
+
+
+# Story 4.15: draft_step ---------------------------------------------------------------------------
+
+
+def test_build_job_types_registers_draft_step_as_specified() -> None:
+    """Interactive by default, or bulk, priority 40, 15 minutes, retry limit 3, group Other."""
+    found = registry().get("draft_step")
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (
+        Lane.INTERACTIVE,
+        frozenset({Lane.INTERACTIVE, Lane.BULK}),
+        40,
+        timedelta(minutes=15),
+        3,
+        JobGroup.OTHER,
+    )
+
+
+def test_draft_step_drafts_the_payloads_step_once_at_soon() -> None:
+    drafts = RecordingStepDrafts()
+    handler = registry(step_drafts=lambda: drafts).get("draft_step").handler
+
+    result = handler(
+        Job(RUN, "draft_step", Lane.INTERACTIVE, {"v": 1, "enrollment_id": LEAD, "step": 1}, 1)
+    )
+
+    assert (result, drafts.drafts) == (None, [(LEAD, 1, Urgency.SOON)])
+
+
+def test_draft_step_drafts_at_bulk_on_the_bulk_lane() -> None:
+    drafts = RecordingStepDrafts()
+    handler = registry(step_drafts=lambda: drafts).get("draft_step").handler
+
+    handler(Job(RUN, "draft_step", Lane.BULK, {"v": 1, "enrollment_id": LEAD, "step": 1}, 1))
+
+    assert drafts.drafts == [(LEAD, 1, Urgency.BULK)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "step": 1},
+        {"v": 1, "enrollment_id": "not-a-ulid", "step": 1},
+        {"v": 1, "enrollment_id": LEAD},
+        {"v": 1, "enrollment_id": LEAD, "step": 0},
+        {"v": 1, "enrollment_id": LEAD, "step": True},
+        {"v": 1, "enrollment_id": LEAD, "step": "1"},
+    ],
+)
+def test_draft_step_refuses_a_bad_payload(payload: dict[str, object]) -> None:
+    drafts = RecordingStepDrafts()
+    handler = registry(step_drafts=lambda: drafts).get("draft_step").handler
+
+    with pytest.raises(InvalidJob):
+        handler(Job(RUN, "draft_step", Lane.INTERACTIVE, payload, 1))
+    assert drafts.drafts == []
+
+
+def test_a_registry_built_without_step_drafts_fails_a_draft_step_job() -> None:
+    services = _services()
+    services.pop("step_drafts", None)
+    job_types = main.build_job_types(**services)  # type: ignore[arg-type]
+    handler = job_types.get("draft_step").handler
+
+    with pytest.raises(RuntimeError, match="without step_drafts"):
+        handler(
+            Job(RUN, "draft_step", Lane.INTERACTIVE, {"v": 1, "enrollment_id": LEAD, "step": 1}, 1)
+        )

@@ -243,6 +243,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "recompute_tiers",
         "poll_unsubscribes",
         "check_grounding",  # Story 4.14
+        "draft_step",  # Story 4.15
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -933,7 +934,8 @@ def test_the_built_startup_queues_contact_markets_then_the_test_runs(
     assert jobs == [
         ("bulk", f"run_ai_test_sets:{row[0]}:{ROUTE_SETS[row[1]].value}") for row in tuples
     ]
-    assert len(jobs) == 5  # the three extraction tuples and, Story 4.14, the two grounding ones
+    # the three extraction tuples, Story 4.14's two grounding ones and Story 4.15's draft_sequence
+    assert len(jobs) == 6
 
 
 def test_a_failed_startup_step_is_logged_with_its_name_and_the_next_still_runs(

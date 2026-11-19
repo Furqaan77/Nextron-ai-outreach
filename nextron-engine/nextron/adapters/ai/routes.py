@@ -8,8 +8,9 @@ a route. It is frozen, and refused at construction (``TypeError`` or ``ValueErro
 ``nextron.domain.ai``) unless its route fields are valid, ``0 <
 max_tokens <= max_tokens_cap <= MAX_TOKENS_CEILING`` (16,000, which keeps every request under
 the SDK's non-streaming limit), ``uses_playbook`` is a ``bool``, and ``server_fallbacks`` is a
-``bool`` that is ``True`` only on an Opus model (``OPUS``) and never on a batchable candidate
-(AD-8: Haiku has no server-side fallback, and a batch request never carries one).
+``bool`` that is ``True`` only on an Opus model (``OPUS``) (AD-8: Haiku has no server-side
+fallback). A batchable Opus candidate may carry it (Story 4.15): only the direct request adds
+the fallbacks, and a batch request (Story 4.17) never does.
 ``budget_class`` is a ``nextron.domain.budget.BudgetClass``: the calling service passes a
 ``blockable`` one to ``domain.budget.allow`` before the call (an ``essential`` route is never
 budget-checked); the gateway never checks the budget.
@@ -20,8 +21,14 @@ tuples carry one (``RouteTuple.playbook``), the request frames it after the syst
 ``server_fallbacks`` (Story 4.14) makes ``prompting.build_request`` ask for AD-8's server-side
 refusal fallbacks on every direct request of the candidate.
 
-**``CANDIDATES``**, by route. The first candidate of each route is its default. Only
-``grounding_check_fallback`` carries server-side ``fallbacks``: Haiku has none.
+- ``draft_sequence`` (Story 4.15): ``claude-opus-5-5``, effort ``medium`` (explicit), prompt
+  ``v1``, ``DraftSequenceV1`` (schema 1), batchable, ``max_tokens`` 8,000 capped at 16,000,
+  ``essential``, ``uses_playbook``, ``server_fallbacks``. It writes a Step 1 Draft; like the
+  grounding routes it is never bootstrap-activated (Story 4.5's gate only).
+
+**``CANDIDATES``**, by route. The first candidate of each route is its default. Only the Opus
+routes (``grounding_check_fallback``, ``draft_sequence``) carry server-side ``fallbacks``: Haiku
+has none.
 
 - ``extract_signals``: ``claude-haiku-5-5``, effort ``medium``, prompt ``v1``,
   ``ExtractSignalsV1`` (schema 1), batchable, ``max_tokens`` 8,000 capped at 16,000;
@@ -74,6 +81,7 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.adapters.ai.schemas import (
+    DRAFT_SEQUENCE_V1,
     EXTRACT_PEOPLE_V1,
     EXTRACT_SIGNALS_V1,
     GROUNDING_CHECK_V1,
@@ -186,6 +194,21 @@ CANDIDATES: Final[Mapping[str, tuple[Candidate, ...]]] = MappingProxyType(
                 batchable=False,
                 max_tokens=4_000,
                 max_tokens_cap=8_000,
+                budget_class=BudgetClass.ESSENTIAL,
+                uses_playbook=True,
+                server_fallbacks=True,
+            ),
+        ),
+        "draft_sequence": (
+            Candidate(
+                name="draft_sequence",
+                model=OPUS,
+                effort=Effort.MEDIUM,
+                prompt_version="v1",
+                output_schema=DRAFT_SEQUENCE_V1,
+                batchable=True,
+                max_tokens=8_000,
+                max_tokens_cap=16_000,
                 budget_class=BudgetClass.ESSENTIAL,
                 uses_playbook=True,
                 server_fallbacks=True,

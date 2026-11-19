@@ -14,7 +14,9 @@ connect and 300 s for each other phase, that never follows redirects) on its fir
 looked up when it is called (so a test can refuse it) and under a lock. Constructing a gateway
 builds no client.
 
-**``run(route_tuple, inputs, urgency)``:**
+**``run(route_tuple, inputs, urgency, *, framing=None)``** (``framing``, a
+``nextron.domain.ai.Framing``, is Story 4.15's trusted brief, facts and Campaign note: it goes to
+``prompting.build_request`` as it is, and anything else raises ``TypeError`` before a request):
 
 1. A tuple that ``routes.find`` doesn't know raises ``AdapterError(False,
    "llm_unknown_route")``: a deployment mismatch.
@@ -89,7 +91,14 @@ import anthropic
 import httpx2
 
 from nextron.adapters.ai import pricing, prompting, routes, schemas
-from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency, check_urgency
+from nextron.domain.ai import (
+    Framing,
+    RouteTuple,
+    UntrustedBlock,
+    Urgency,
+    check_framing,
+    check_urgency,
+)
 from nextron.domain.budget import CODE_PATTERN, MAX_AI_NUMBER, MODEL_PATTERN, AiCall
 from nextron.domain.credentials import CredentialKey
 from nextron.ports.errors import AdapterError
@@ -334,7 +343,12 @@ class ClaudeGateway:
             return self._http
 
     def run(
-        self, route_tuple: RouteTuple, inputs: Sequence[UntrustedBlock], urgency: Urgency
+        self,
+        route_tuple: RouteTuple,
+        inputs: Sequence[UntrustedBlock],
+        urgency: Urgency,
+        *,
+        framing: Framing | None = None,
     ) -> LlmResult:
         candidate = routes.find(route_tuple)
         if candidate is None:
@@ -342,6 +356,7 @@ class ClaudeGateway:
                 False, LLM_UNKNOWN_ROUTE, "the route tuple matches no route candidate"
             ) from None
         check_urgency(urgency)
+        check_framing(framing)
         prompting.user_turn(inputs)  # a caller's bad inputs raise here, before any request
         key = read_credential(self._secrets, CredentialKey.CLAUDE)
         _quiet_sdk_logger()
@@ -355,7 +370,9 @@ class ClaudeGateway:
         tally = _Tally(route_tuple, self._meter)
         max_tokens, retried = candidate.max_tokens, False
         while True:
-            request = prompting.build_request(route_tuple, candidate, inputs, max_tokens)
+            request = prompting.build_request(
+                route_tuple, candidate, inputs, max_tokens, framing=framing
+            )
             response = self._send(client, request, tally)
             if isinstance(response, _Failure):
                 return LlmFailed(

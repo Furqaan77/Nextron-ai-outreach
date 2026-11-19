@@ -408,3 +408,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-14-run-the-ai-grounding-check-and-fail-closed.md`
   summary: Add a migration data test for 0047 (a `grounding_results` row seeded at 0046 keeps its data and gains `"source": "rules"` on each flag).
   evidence: Review pass 1 of Story 4.14 (VG6, low). No test seeds a row at 0046; `_decoded` already treats a missing `source` as `rules`, so the impact is small.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-15-draft-step-1-with-opus-from-evidence-and-facts.md`
+  summary: Give a Step 1 slot whose drafting failed (`no_route`, `refused`, `truncated`, `invalid`, `failed`) or whose `draft_step` job died after AdapterError retries a way to be drafted again, e.g. re-enqueue `draft_step` for open failed slots when a `draft_sequence` tuple is activated, plus 4.20's Regenerate; a dead job also leaves no `draft_failed_at`.
+  evidence: Story 4.15 review pass 1 (BH1, EC1, EC8, medium). On a fresh install every enrolled Step 1 fails `no_route` until the 4.5 gate activates a tuple, and nothing retries it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-15-draft-step-1-with-opus-from-evidence-and-facts.md`
+  summary: Skip the Opus call (no paid request) for a Lead with no live Event Signal and route it to Story 4.19's fallback copy or a distinct failure reason; today the call is made and the proposal is always discarded as `invalid_proposal`.
+  evidence: Story 4.15 review pass 1 (BH3, medium). `validate_proposal` requires `cited_signal_id` in the live Events; `_prepare` doesn't check the set is non-empty.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-15-draft-step-1-with-opus-from-evidence-and-facts.md`
+  summary: Mask (or refuse) email addresses and phone numbers in the route system prompt and the pinned Playbook snapshot text as well, so a future Playbook edit can't put one into a drafting prompt.
+  evidence: Story 4.15 review pass 1 (EC9, low). Only framing and untrusted blocks pass through `mask_contact_details`; today's `docs/playbook/sales-playbook.md` holds none.

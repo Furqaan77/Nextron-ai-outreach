@@ -399,6 +399,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "stale",
             "created_at",
             "updated_at",
+            "draft_failed_at",  # Story 4.15
+            "draft_failed_reason",
         ),
         "approval": (
             "status",

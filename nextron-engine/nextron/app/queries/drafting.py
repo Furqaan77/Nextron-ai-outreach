@@ -4,7 +4,9 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.drafting`` only. All read
 current unit of work, read-only ones included.
 
 - ``DraftView``: one Draft, both column groups; ``reviewable`` is true once it has a revision
-  (``current_rev is not None``; Story 4.12 writes the first);
+  (``current_rev is not None``; Story 4.12 writes the first); Story 4.15 adds
+  ``draft_failed_at`` and ``draft_failed_reason`` (the last drafting attempt stored no
+  revision, and why);
 - ``draft(draft_id)``: the Draft, or ``None`` (a text that isn't a ULID included);
 - ``drafts_of(enrollment_id)``: the Enrollment's Drafts, by ``step_no`` (``()`` for a text
   that isn't a ULID);
@@ -73,6 +75,8 @@ class DraftView:
     event_expired: bool
     skipped_at: datetime | None
     status_at: datetime | None
+    draft_failed_at: datetime | None = None  # Story 4.15: the last drafting attempt failed
+    draft_failed_reason: str | None = None  # its nextron.domain.step_drafting.DraftFailure
 
     @property
     def reviewable(self) -> bool:
@@ -98,6 +102,8 @@ def _view(stored: StoredDraft) -> DraftView:
         event_expired=bool(stored.event_expired),
         skipped_at=stored.skipped_at,
         status_at=stored.status_at,
+        draft_failed_at=stored.draft_failed_at,
+        draft_failed_reason=stored.draft_failed_reason,
     )
 
 

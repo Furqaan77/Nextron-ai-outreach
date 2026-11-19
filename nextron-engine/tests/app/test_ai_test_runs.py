@@ -37,6 +37,7 @@ from nextron.app.playbook.api import (
     TestCaseSync,
 )
 from nextron.app.queries import playbook as playbook_queries
+from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Setup
 from nextron.db.repos.playbook import test_runs as runs_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
@@ -62,6 +63,7 @@ SEGMENTS_FILE = main.SEED_DIR / main.SEGMENTS_FILE_NAME
 PLAYBOOK = PlaybookSnapshot("1.0.0", "---\nversion: 1.0.0\n---\n\nA test Sales Playbook.\n")
 SIGNALS, PEOPLE, INBOX = "extract_signals", "extract_people", "signal_inbox_parse"
 ROUTES = (SIGNALS, PEOPLE, INBOX)
+PLAYBOOK_ROUTES = ("grounding_check", "draft_sequence")  # synced by their own helpers
 CASE_TEXT = "client confidentiality is not something we will gamble with"  # a fixture's quote
 INVENTED = "We are opening three new offices next year."  # in no block
 
@@ -117,8 +119,9 @@ class World:
         files, shipped = main.load_prompts()
         chosen = shipped if defaults is None else defaults
         # Story 4.14's grounding routes are synced only by grounding(), below
-        files = tuple(f for f in files if not f.route.startswith("grounding_check"))
-        chosen = tuple(s for s in chosen if not s.route.startswith("grounding_check"))
+        # (Story 4.15: so is draft_sequence, by drafting(), below)
+        files = tuple(f for f in files if not f.route.startswith(PLAYBOOK_ROUTES))
+        chosen = tuple(s for s in chosen if not s.route.startswith(PLAYBOOK_ROUTES))
         with self.units.open():
             self.playbook.sync_prompts((*files, *extra), chosen, PLAYBOOK)
 
@@ -270,7 +273,7 @@ def test_every_shipped_route_has_a_set_and_its_set_a_scorer() -> None:
         assert spec.route in ROUTE_SETS, spec.route
         assert ROUTE_SETS[spec.route] in SCORERS, spec.route
     # decision 7: the others ship with their routes (Story 4.14: the Grounding set)
-    assert set(SCORERS) == {TestSet.EXTRACTION, TestSet.GROUNDING}
+    assert set(SCORERS) == {TestSet.EXTRACTION, TestSet.GROUNDING, TestSet.DRAFTING_SMOKE}
 
 
 # Row: First start --------------------------------------------------------------------------------
@@ -1266,8 +1269,184 @@ def test_queue_runs_queues_both_grounding_tuples_on_the_grounding_set(started: W
     started.queue_runs()
     ids = grounding(started)
 
-    assert started.queue_runs() == 2
+    assert started.queue_runs() == 3  # Story 4.15: and draft_sequence, synced with them
     keys = [row[0] for row in started.jobs()]
     for route in GROUNDING_ROUTES:
         assert f"run_ai_test_sets:{ids[route]}:grounding" in keys
 
+
+# Story 4.15: the drafting smoke set ---------------------------------------------------------------
+
+
+def drafting(world: World, *, grounding_active: bool = True) -> str:
+    """Seed the shipped Setup (the default Sequence and the Markets), sync every Playbook route
+    (under PLAYBOOK) and, with ``grounding_active``, activate ``grounding_check`` through a
+    stored passing run; the ``draft_sequence`` tuple's id."""
+    from nextron.app.setup.api import check_seed  # noqa: PLC0415
+    from nextron.domain.campaign import validate_campaigns  # noqa: PLC0415
+    from nextron.domain.markets import validate_markets  # noqa: PLC0415
+    from nextron.domain.offers import validate_offers  # noqa: PLC0415
+    from nextron.domain.sequences import validate_sequences  # noqa: PLC0415
+
+    def parsed(name: str, validate: Callable[[object], Any]) -> Any:
+        return validate(seed_yaml.parse((main.SEED_DIR / name).read_text(encoding="utf-8")))
+
+    checked = check_seed(
+        parsed(main.SEGMENTS_FILE_NAME, validate_segments),
+        parsed(main.MARKETS_FILE_NAME, validate_markets),
+        parsed(main.SEQUENCES_FILE_NAME, validate_sequences),
+        parsed(main.OFFERS_FILE_NAME, validate_offers),
+        parsed(main.CAMPAIGNS_FILE_NAME, validate_campaigns),
+    )
+
+    @use_case
+    def seed() -> None:
+        with current().transaction():
+            Setup(world.clock).seed_sync(checked, world.clock.now())
+
+    with world.units.open():
+        seed()
+    files, defaults = main.load_prompts()
+    with world.units.open():
+        world.playbook.sync_prompts(files, defaults, PLAYBOOK)
+    if grounding_active:
+        tuple_id = world.tuple_id("grounding_check")
+        now = world.clock.now()
+
+        @use_case
+        def store() -> None:
+            with current().transaction():
+                runs_repo.insert(
+                    tuple_id=tuple_id,
+                    test_set=TestSet.GROUNDING.value,
+                    outcome="passed",
+                    error=None,
+                    case_count=49,
+                    passed_count=49,
+                    metrics="[]",
+                    results="[]",
+                    cost_micros=0,
+                    started_at=now,
+                    finished_at=now,
+                    cases_sha256=playbook_queries.case_set_fingerprint(
+                        TestSet.GROUNDING, "grounding_check"
+                    ),
+                )
+
+        with world.units.open():
+            store()
+        world.activate(tuple_id, ActivationTrigger.TEST_PASSED)
+    return world.tuple_id("draft_sequence")
+
+
+CLEAN_CHECK = {"claims": [], "flags": []}
+
+
+def test_a_clean_draft_per_smoke_case_passes_and_activates_draft_sequence(
+    started: World,
+) -> None:
+    from tests.unit.test_step_drafting import clean_answer  # noqa: PLC0415
+
+    tuple_id = drafting(started)
+    cases = started.of("draft_sequence")
+    assert len(cases) >= 10
+    for case in cases:
+        started.llm.script.extend([ok(clean_answer(case)), ok(CLEAN_CHECK)])
+
+    assert started.run(tuple_id, "drafting_smoke") is True
+
+    [(stored, test_set, outcome, error, count, passed, *_)] = started.stored_runs()[-1:]
+    assert (stored, test_set, outcome, error, count, passed) == (
+        tuple_id,
+        "drafting_smoke",
+        "passed",
+        None,
+        len(cases),
+        len(cases),
+    )
+    routes_called = [call[0].route for call in started.llm.calls]
+    assert routes_called == ["draft_sequence", "grounding_check"] * len(cases)
+    framings = started.llm.framings
+    assert all(framing is not None for framing in framings[::2])  # each draft call is framed
+    assert all(framing is None for framing in framings[1::2])  # the grounding check isn't
+    first = framings[0]
+    assert first is not None and first.brief.startswith("# Step brief")
+    noted = [(case, framings[2 * n]) for n, case in enumerate(cases) if case.input["angle_note"]]
+    assert noted  # some shipped cases carry a Variant angle note
+    for case, framing in noted:
+        assert framing is not None and str(case.input["angle_note"]).strip() in framing.note
+    assert started.stored_runs()[-1][6] == 2 * 1_000 * len(cases)  # each draft and its check
+    with started.units.open(read_only=True):
+        served = playbook_queries.active_tuple("draft_sequence")
+    assert served is not None and served.playbook == PLAYBOOK
+
+
+def test_one_grounding_flag_fails_the_drafting_smoke_run(started: World) -> None:
+    from tests.unit.test_step_drafting import clean_answer  # noqa: PLC0415
+
+    tuple_id = drafting(started)
+    cases = started.of("draft_sequence")
+    flagged = {"code": "false_urgency", "span": "x", "explanation": "Pressure."}
+    for number, case in enumerate(cases):
+        check = {"claims": [], "flags": [flagged]} if number == 0 else CLEAN_CHECK
+        started.llm.script.extend([ok(clean_answer(case)), ok(check)])
+
+    started.run(tuple_id, "drafting_smoke")
+
+    [row] = started.stored_runs()[-1:]
+    assert (row[2], row[5]) == ("failed", len(cases) - 1)
+    with started.units.open(read_only=True):
+        assert playbook_queries.active_tuple("draft_sequence") is None
+
+
+def test_no_active_grounding_tuple_fails_every_smoke_case_closed(started: World) -> None:
+    from tests.unit.test_step_drafting import clean_answer  # noqa: PLC0415
+
+    tuple_id = drafting(started, grounding_active=False)
+    cases = started.of("draft_sequence")
+    for case in cases:
+        started.llm.script.append(ok(clean_answer(case)))
+
+    started.run(tuple_id, "drafting_smoke")
+
+    [row] = started.stored_runs()[-1:]
+    assert (row[2], row[5]) == ("failed", 0)
+    assert [call[0].route for call in started.llm.calls] == ["draft_sequence"] * len(cases)
+    assert row[6] == 1_000 * len(cases)  # the draft calls only
+
+
+def test_no_stored_default_sequence_flags_every_smoke_case_with_no_call(
+    started: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tuple_id = drafting(started)
+    cases = started.of("draft_sequence")
+    monkeypatch.setattr(setup_queries, "sequence", lambda _key: None)
+
+    started.run(tuple_id, "drafting_smoke")
+
+    [row] = started.stored_runs()[-1:]
+    assert (row[2], row[5], row[6]) == ("failed", 0, 0)
+    assert started.llm.calls == []
+    [(results,)] = started.sql("SELECT results FROM ai_test_runs WHERE tuple_id = ?", (tuple_id,))
+    found = json.loads(results)
+    assert len(found) == len(cases)
+    assert all("no_brief" in json.dumps(result) for result in found)
+
+
+def test_an_invalid_or_refused_draft_is_flagged_without_a_grounding_call(
+    started: World,
+) -> None:
+    from tests.unit.test_step_drafting import clean_answer  # noqa: PLC0415
+
+    tuple_id = drafting(started)
+    cases = started.of("draft_sequence")
+    started.llm.script.append(LlmInvalid(model=HAIKU, usage=LlmUsage(requests=1)))
+    started.llm.script.append(ok({**clean_answer(cases[1]), "cited_signal_id": "nope"}))
+    for case in cases[2:]:
+        started.llm.script.extend([ok(clean_answer(case)), ok(CLEAN_CHECK)])
+
+    started.run(tuple_id, "drafting_smoke")
+
+    [row] = started.stored_runs()[-1:]
+    assert (row[2], row[5]) == ("failed", len(cases) - 2)
+    assert [call[0].route for call in started.llm.calls[:3]] == ["draft_sequence"] * 3

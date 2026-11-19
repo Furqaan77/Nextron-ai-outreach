@@ -299,11 +299,11 @@ def test_a_check_syncs_and_renders_the_panel_with_its_notice(units: UnitOfWorkFa
     assert reply.text.startswith('<div id="ai-content-panel">')
     assert "<html" not in reply.text
     assert (
-        '<p class="notice" role="status">Checked for changes: 5 new candidate tuples. Stored '
-        f"Sales Playbook version 9.9.9-test ({pinned.sha256[:12]}). Queued 5 test runs.</p>"
-    ) in reply.text  # Story 4.5: each new tuple's paid test run is announced (4.14: grounding)
+        '<p class="notice" role="status">Checked for changes: 6 new candidate tuples. Stored '
+        f"Sales Playbook version 9.9.9-test ({pinned.sha256[:12]}). Queued 6 test runs.</p>"
+    ) in reply.text  # Story 4.5: each new tuple's paid test run (4.14: grounding; 4.15: drafting)
     assert 'role="alert"' not in reply.text
-    assert counts(units) == (1, 5, 1, 3)  # the grounding tuples are never bootstrap-activated
+    assert counts(units) == (1, 6, 1, 3)  # the Playbook tuples are never bootstrap-activated
     assert "with Check for changes: read without a problem." in texts(reply.text)
 
 
@@ -315,7 +315,7 @@ def test_a_second_check_with_nothing_changed_says_so(units: UnitOfWorkFactory) -
 
     assert "Checked for changes: 0 new candidate tuples.</p>" in reply.text
     assert "Stored Sales Playbook" not in reply.text
-    assert counts(units) == (1, 5, 2, 3)
+    assert counts(units) == (1, 6, 2, 3)
 
 
 def test_a_check_of_an_edited_playbook_stores_it(units: UnitOfWorkFactory) -> None:
@@ -760,13 +760,15 @@ def test_check_for_changes_queues_a_run_of_each_tuple_without_one(
             f"run_ai_test_sets:{tuple_id_of(units, route)}:grounding"
             for route in ("grounding_check", "grounding_check_fallback")
         ]
+        # Story 4.15: the draft_sequence tuple runs the drafting smoke set
+        + [f"run_ai_test_sets:{tuple_id_of(units, 'draft_sequence')}:drafting_smoke"]
     )
     check(dashboard)  # the live jobs absorb a second check
     with units.open(read_only=True) as unit:
         again = unit.session.execute(
             sql("SELECT COUNT(*) FROM jobs WHERE type = 'run_ai_test_sets'")
         ).scalar_one()
-    assert again == 5
+    assert again == 6
 
 
 def test_the_health_panel_shows_a_failed_active_tuple(units: UnitOfWorkFactory) -> None:

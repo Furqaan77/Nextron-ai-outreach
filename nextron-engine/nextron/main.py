@@ -242,12 +242,17 @@ default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score
 limit 3, ``handlers.poll_unsubscribes(unsubscribes)``, ``unsubscribe_poll``; never budget-gated)
 and Story 4.14's ``check_grounding`` (interactive by default, or bulk, priority 50,
 ``max_runtime`` 25 minutes (up to four Claude requests of 300 s each), retry limit 3,
-``handlers.check_grounding(grounding)``, ``other``; never budget-gated) are registered last.
-``domain_checks``, ``unsubscribes`` and ``grounding`` are optional services: each defaults
-to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
-tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
-``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
-dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
+``handlers.check_grounding(grounding)``, ``other``; never budget-gated) are registered last,
+then Story 4.15's ``draft_step`` (interactive by default, or bulk, priority 40, ``max_runtime`` 15
+minutes (a Claude request of 300 s and its one doubled retry), retry limit 3,
+``handlers.draft_step(step_drafts)``, ``other``; never budget-gated: ``draft_sequence`` is
+``essential``; ``build_app`` passes ``lambda: step_drafts``, the ``drafting`` service's
+``StepDrafts(clock, llm, queue)``).
+``domain_checks``, ``unsubscribes``, ``grounding`` and ``step_drafts`` are optional services:
+each defaults to a provider that raises ``RuntimeError`` when called, so a registry built
+without it (only tests do) fails its job; ``build_app`` always passes the real one.
+``build_app`` builds one ``JobQueue(clock, job_types)`` and one ``Runner(units, queue,
+job_types, dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 
 **The website crawl (Story 2.5, AD-9, AD-18).** ``build_app`` builds one
 ``HttpCrawler(meter=meter)`` (``nextron.adapters.crawler``) unless a ``crawler=`` is injected;
@@ -778,6 +783,7 @@ from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
+from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
@@ -882,6 +888,7 @@ from nextron.domain.email_finding import FIND_CONTACT_EMAIL_JOB
 from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.grounding_check import CHECK_GROUNDING_JOB
+from nextron.domain.step_drafting import DRAFT_STEP_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
@@ -1207,8 +1214,8 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding, lead_scores, unsubscribes and grounding_checks are bound just
-    # below
+    # erasure_stores, email_finding, lead_scores, unsubscribes, grounding_checks and step_drafts
+    # are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1229,6 +1236,7 @@ def build_app(
         scores=lambda: lead_scores,
         unsubscribes=lambda: unsubscribes,
         grounding=lambda: grounding_checks,
+        step_drafts=lambda: step_drafts,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1250,6 +1258,7 @@ def build_app(
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
     grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
+    step_drafts = StepDrafts(clock, llm, queue)  # Story 4.15: the draft_step jobs
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
     domain_checks = DomainChecks(
@@ -1486,6 +1495,7 @@ def build_job_types(
     finding: Callable[[], handlers.FindingEmail] | None = None,
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
     grounding: Callable[[], handlers.CheckingGrounding] | None = None,
+    step_drafts: Callable[[], handlers.DraftingSteps] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1513,11 +1523,14 @@ def build_job_types(
     ``recompute_tiers`` jobs call, and ``unsubscribes`` the ``compliance`` service's
     ``UnsubscribePolls`` that ``poll_unsubscribes`` jobs call (``None``: a provider that raises
     ``RuntimeError``, as for ``domain_checks``), and ``grounding`` the ``drafting`` service's
-    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise)."""
+    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise), and
+    ``step_drafts`` its ``StepDrafts`` that ``draft_step`` jobs call (Story 4.15; ``None``:
+    likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     checks_grounding = grounding if grounding is not None else no_grounding
+    drafts_steps = step_drafts if step_drafts is not None else no_step_drafts
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1809,6 +1822,18 @@ def build_job_types(
             group=JobGroup.OTHER,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=DRAFT_STEP_JOB,
+            default_lane=Lane.INTERACTIVE,  # Story 4.15: Step 1 is due at once; bulk on request
+            lanes=frozenset({Lane.INTERACTIVE, Lane.BULK}),
+            priority=40,
+            max_runtime=timedelta(minutes=15),  # a Claude request of 300 s and its doubled retry
+            retry_limit=3,  # an unavailable API is retried; nothing is stored before the answer
+            handler=handlers.draft_step(drafts_steps),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1844,6 +1869,7 @@ def enqueue_only_job_types() -> JobTypes:
         finding=_unwired,
         unsubscribes=_unwired,
         grounding=_unwired,
+        step_drafts=_unwired,
     )
 
 
@@ -1851,6 +1877,12 @@ def no_grounding() -> handlers.CheckingGrounding:
     """``build_job_types``'s default ``grounding``: a registry built without the service fails a
     ``check_grounding`` job instead of checking nothing."""
     raise RuntimeError("this job type registry was built without grounding")
+
+
+def no_step_drafts() -> handlers.DraftingSteps:
+    """``build_job_types``'s default ``step_drafts`` (Story 4.15): a registry built without the
+    service fails a ``draft_step`` job instead of drafting nothing."""
+    raise RuntimeError("this job type registry was built without step_drafts")
 
 
 def no_domain_checks() -> handlers.DomainChecking:

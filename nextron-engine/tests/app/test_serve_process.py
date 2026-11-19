@@ -32,6 +32,7 @@ import pytest
 from nextron import __version__
 from nextron.bootstrap import DEFAULT_PLAYBOOK_PATH, ENGINE_ROOT
 from nextron.db.migrations import head_revision
+from nextron.domain.ai_test_gate import ROUTE_SETS
 from nextron.domain.backup import ERASURE_LEDGER_FILE
 from tests.live_guard import child_env
 from tests.migration_chains import stored_revisions
@@ -369,7 +370,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0047_4_14_ai_grounding"
+    assert HEAD == "0048_4_15_draft_failed"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]
@@ -387,14 +388,15 @@ def test_guarded_health_page_and_second_instance(
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
     # bootstrap activation, by seed and with no test run, per extraction route (Story 4.14: the
     # two grounding prompts are stored but serve only after their gate)
-    assert prompt_counts(data_dir / "nextron.db") == (5, 3, 3)
+    assert prompt_counts(data_dir / "nextron.db") == (6, 3, 3)  # Story 4.15: draft_sequence
     # Story 4.4: one Sales Playbook snapshot, one candidate tuple per route (none with a
     # Playbook) and one startup check; no route is activated with a Playbook, and every
     # activation is a bootstrap one
     # (Story 4.14: plus the two grounding tuples, pinned to that Playbook, never activated)
-    assert playbook_counts(data_dir / "nextron.db") == (1, 5, 2, 1, 0)
+    # (Story 4.15: and the draft_sequence tuple, likewise)
+    assert playbook_counts(data_dir / "nextron.db") == (1, 6, 3, 1, 0)
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
-    assert (synced["stored_count"], synced["activated_count"]) == (5, 3)
+    assert (synced["stored_count"], synced["activated_count"]) == (6, 3)
     assert lines.index(synced) < lines.index(started)
     # Story 4.5: the 11 extraction fixtures were stored before the engine started, and the
     # lifespan queued one run_ai_test_sets job per extraction tuple, keyed by tuple and set.
@@ -419,10 +421,10 @@ def test_guarded_health_page_and_second_instance(
     )
     assert lines.index(cases_synced) < lines.index(started)
     tuple_sets = {
-        str(row[0]): "grounding" if str(row[1]).startswith("grounding_check") else "extraction"
+        str(row[0]): ROUTE_SETS[str(row[1])].value
         for row in read_rows(db, "SELECT id, route FROM ai_route_tuples")
     }
-    runs = wait_for_dead_test_runs(db, 5)  # Story 4.14: the two grounding tuples too
+    runs = wait_for_dead_test_runs(db, 6)  # Story 4.14: the grounding tuples; 4.15: drafting
     assert sorted(row[0] for row in runs) == sorted(
         f"run_ai_test_sets:{t}:{test_set}" for t, test_set in tuple_sets.items()
     )
@@ -433,7 +435,7 @@ def test_guarded_health_page_and_second_instance(
     assert playbook_counts(db)[4] == 0  # every activation is still a bootstrap one
     lines = log_lines(data_dir)
     [queued] = [line for line in lines if line["event"] == "ai_test_runs_queued"]
-    assert queued["count"] == 5
+    assert queued["count"] == 6  # Story 4.15: and draft_sequence
     # each dead run raised a job_dead alert, which failed for want of a Telegram chat id: no
     # adapter was built and nothing reached the sink
     alerting = [line for line in lines if str(line["event"]).startswith(("alert_", "sink_"))]

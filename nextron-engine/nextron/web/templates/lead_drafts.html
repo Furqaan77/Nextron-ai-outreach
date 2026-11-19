@@ -4,7 +4,8 @@
     |plain), "Sending blocked: footer incomplete (...)" when its Market's footer check fails, the
     Playbook version, the current revision's grounding badge (pass, fail or pending; Story 4.14)
     with each flag of a fail (its code, its span in <mark>, autoescaped, and its explanation) and
-    the revision history. A Draft's text is AI-written from crawled data:
+    the revision history, and "Drafting failed: <reason>. Regenerate to retry." for a Draft whose
+    drafting stored no revision (Story 4.15). A Draft's text is AI-written from crawled data:
     the whole section carries hx-disable and holds no HTMX action. -#}
 <section class="lead-drafts" id="lead-drafts" aria-labelledby="drafts-heading" hx-disable>
 <h2 id="drafts-heading">Drafts</h2>
@@ -33,6 +34,9 @@
 {%- endif %}
 {%- if draft.blocked %}
 <p class="draft-blocked" role="alert">{{ draft.blocked|plain }}</p>
+{%- endif %}
+{%- if draft.draft_failed %}
+<p class="draft-failed" role="alert">{{ draft.draft_failed|plain }}</p>
 {%- endif %}
 {%- if draft.message %}
 <div class="draft-message">

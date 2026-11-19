@@ -10,13 +10,14 @@ to ``ready``, cause ``requested``, ``cause_ref`` the Enrollment, actor ``system:
 the clock's now.
 
 **``@command request_steps(enrollment_id, steps, urgency) -> tuple[str, ...] | Blocked``**
-creates an Enrollment's Draft slots, with no text yet (Story 4.12 drafts it) and no job
-(Stories 4.15 and 4.18).
+creates an Enrollment's Draft slots, with no text yet, and (Story 4.15) the job that drafts Step
+1. A ``Drafting`` built without a ``queue`` refuses with ``RuntimeError`` right after the
+argument checks, before any read or write.
 
 1. **Arguments**, checked before anything else: ``enrollment_id`` a ``str``, ``steps`` a
    non-empty ``tuple`` or ``list`` of ``int`` Step numbers (``bool`` refused) in strictly
-   ascending order, and ``urgency`` an ``Urgency`` (``check_urgency``; validated, not stored).
-   A bad type raises ``TypeError``, a bad value ``ValueError``. An unknown Enrollment, or one
+   ascending order, and ``urgency`` an ``Urgency`` (``check_urgency``; not stored: it picks
+   the Step 1 job's lane). A bad type raises ``TypeError``, a bad value ``ValueError``. An unknown Enrollment, or one
    whose Sequence is missing or no longer at the version it was enrolled at, raises
    ``LookupError``; an ended one ``ValueError``; a Step outside its Sequence ``ValueError``.
    Nothing is written.
@@ -30,6 +31,13 @@ creates an Enrollment's Draft slots, with no text yet (Story 4.12 drafts it) and
    step_due_at(now, 0, the Contact's tz)`` (a Contact with no ``tz`` leaves it unset, logged).
    Every later Step waits for ``Sequencing.on_step_sent``. One ``events`` row per slot. It
    returns the new slots' ids, by Step (``()`` when every Step was already present).
+4. **The Step 1 job** (Story 4.15): when it created a Step 1 slot (kind ``step`` or
+   ``recontact``), in the same unit of work, one ``draft_step`` job
+   (``nextron.domain.step_drafting.DRAFT_STEP_JOB``; scope the Enrollment id, discriminator
+   ``1``, payload ``{"v": 1, "enrollment_id": <id>, "step": 1}``) on the lane of ``urgency``:
+   ``bulk`` on the bulk lane, else the interactive lane (``enroll`` passes ``soon``). The job
+   drafts at ``bulk`` on the bulk lane and at ``soon`` on the interactive lane.
+   ``StepDrafts`` (``nextron.app.drafting.generation``) runs it.
 
 **``@command set_due(draft_id, due_at) -> bool``** sets the due time (an aware ``datetime``,
 always from ``nextron.domain.sending_policy.step_due_at``) of a ``ready`` or ``approved``
@@ -165,6 +173,7 @@ from nextron.domain.notifications import ContactErased, FooterChanged
 from nextron.domain.segments import SignalClass
 from nextron.domain.sending_policy import step_due_at
 from nextron.domain.signals import EventSignal, strongest_event
+from nextron.domain.step_drafting import DRAFT_STEP_JOB, ENROLLMENT_ID_FIELD, STEP_FIELD
 from nextron.ports.clock import Clock
 
 log = logging.getLogger(__name__)
@@ -429,6 +438,9 @@ class Drafting:
             raise TypeError("request_steps takes the Enrollment id as str")
         chosen = _checked_steps(steps)
         check_urgency(urgency)
+        queue = self._queue
+        if queue is None:  # Story 4.15: the Step 1 job needs it; refuse before any write
+            raise RuntimeError("this Drafting was built without a job queue")
         enrollment = sequencing_queries.enrollment(enrollment_id)
         if enrollment is None:
             raise LookupError("request_steps: the Enrollment is unknown")
@@ -491,6 +503,18 @@ class Drafting:
                 cause_ref=enrollment.id,
                 actor=ACTOR,
                 at=now,
+            )
+        if FIRST_STEP in wanted:  # Story 4.15: draft Step 1 now
+            queue.enqueue(
+                DRAFT_STEP_JOB,
+                scope=enrollment.id,
+                discriminator=str(FIRST_STEP),
+                payload={
+                    VERSION_FIELD: PAYLOAD_VERSION,
+                    ENROLLMENT_ID_FIELD: enrollment.id,
+                    STEP_FIELD: FIRST_STEP,
+                },
+                lane=Lane.BULK if urgency is Urgency.BULK else Lane.INTERACTIVE,
             )
         return ids
 

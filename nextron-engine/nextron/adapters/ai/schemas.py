@@ -29,6 +29,10 @@ would need a ``max_length`` of 200 or fewer (``tests/unit/test_ai_schemas.py`` c
   ``flags`` (``code``: ``fake_familiarity``, ``false_urgency``, ``competitor_claim``,
   ``two_calls_to_action``, ``deceptive_subject`` or ``repeats_earlier_step``; ``span``;
   ``explanation``, at most 200 characters).
+- ``DRAFT_SEQUENCE_V1`` (``DraftSequenceV1``, Story 4.15): ``subject``, ``body``, ``claims``
+  (``span``; ``evidence_id``, ``fact_id`` and ``fact_version``, an integer, each ``null`` when
+  the claim doesn't cite one), ``cited_signal_id`` (``null`` when none) and ``explanation`` (at
+  most 200 characters).
 
 **``wire_schema(schema)``** is ``anthropic.transform_schema(model)``, computed once per schema
 (each call returns a fresh copy): the JSON schema sent in ``output_config.format``. Every
@@ -165,6 +169,24 @@ class GroundingCheckV1(_Strict):
     flags: list[GroundingFlag]
 
 
+# draft_sequence ---------------------------------------------------------------------------------
+
+
+class DraftClaim(_Strict):
+    span: str
+    evidence_id: str | None
+    fact_id: str | None
+    fact_version: int | None
+
+
+class DraftSequenceV1(_Strict):
+    subject: str
+    body: str
+    claims: list[DraftClaim]
+    cited_signal_id: str | None
+    explanation: str = Field(max_length=MAX_EXPLANATION)
+
+
 # Schemas ----------------------------------------------------------------------------------------
 
 
@@ -180,7 +202,14 @@ EXTRACT_SIGNALS_V1: Final = OutputSchema(1, ExtractSignalsV1)
 EXTRACT_PEOPLE_V1: Final = OutputSchema(1, ExtractPeopleV1)
 SIGNAL_INBOX_PARSE_V1: Final = OutputSchema(1, SignalInboxParseV1)
 GROUNDING_CHECK_V1: Final = OutputSchema(1, GroundingCheckV1)
-SCHEMAS: Final = (EXTRACT_SIGNALS_V1, EXTRACT_PEOPLE_V1, SIGNAL_INBOX_PARSE_V1, GROUNDING_CHECK_V1)
+DRAFT_SEQUENCE_V1: Final = OutputSchema(1, DraftSequenceV1)
+SCHEMAS: Final = (
+    EXTRACT_SIGNALS_V1,
+    EXTRACT_PEOPLE_V1,
+    SIGNAL_INBOX_PARSE_V1,
+    GROUNDING_CHECK_V1,
+    DRAFT_SEQUENCE_V1,
+)
 
 
 @functools.cache

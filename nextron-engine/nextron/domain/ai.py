@@ -49,6 +49,13 @@ shows in its ``repr``.
 - ``block_id`` fullmatches ``[A-Za-z0-9][A-Za-z0-9_.-]{0,63}``;
 - ``text`` is a ``str`` that encodes as UTF-8.
 
+**``Framing(brief, facts, note)``** (Story 4.15, AD-18) is the trusted text a drafting call
+adds around the route's prompt: ``brief`` (the Step brief section) and ``facts`` (the allowed
+Approved Company Facts section) join the cached system prompt, and ``note`` (the Campaign note:
+the Variant's angle and the Market's English variant) opens the user turn. It is frozen; each
+field is a ``str`` that encodes as UTF-8 and never shows in its ``repr``. A call without one is
+built exactly as before.
+
 **Checks the gateway shares** (an adapter raises only ``AdapterError``, so a caller's bug is
 raised here):
 
@@ -56,13 +63,15 @@ raised here):
   unless ``blocks`` is a sequence of ``UntrustedBlock``, and ``ValueError`` when there is no
   block, when the blocks name more than one subject, or when a ``block_id`` repeats.
 - ``check_urgency(urgency)`` returns ``urgency``, or raises ``TypeError`` unless it is an
-  ``Urgency``.
+  ``Urgency``; ``check_framing(framing)`` (Story 4.15) returns ``framing``, or raises
+  ``TypeError`` unless it is a ``Framing`` or ``None``.
 - ``check_route_fields(route, model, effort, prompt_version, schema_version)`` checks the
   fields a ``RouteTuple`` and a route candidate share, and ``check_uses_playbook(value)`` that a
   candidate's ``uses_playbook`` is a ``bool`` (Story 4.4).
 - ``check_server_fallbacks(value, model, batchable, fallback_model)`` (Story 4.14) that a
-  candidate's ``server_fallbacks`` is a ``bool``, ``True`` only on ``fallback_model`` and never
-  on a batchable candidate.
+  candidate's ``server_fallbacks`` is a ``bool`` and ``True`` only on ``fallback_model``. Since
+  Story 4.15 a batchable Opus candidate may carry them too (``draft_sequence``): only the direct
+  request (``prompting.build_request``) adds them, and a batch request (Story 4.17) never does.
 - ``check_token_limits(max_tokens, max_tokens_cap, ceiling)`` raises unless both are ints (not
   bools) and ``0 < max_tokens <= max_tokens_cap <= ceiling``.
 """
@@ -153,14 +162,15 @@ def check_server_fallbacks(
     server_fallbacks: object, model: str, batchable: bool, fallback_model: str
 ) -> None:
     """Raise unless a route candidate's ``server_fallbacks`` (Story 4.14) is a ``bool`` that is
-    ``True`` only on ``fallback_model`` (the one model with server-side refusal fallbacks) and
-    never on a batchable candidate (a batch request never carries ``fallbacks``)."""
+    ``True`` only on ``fallback_model`` (the one model with server-side refusal fallbacks). A
+    batchable candidate may carry them (Story 4.15): only its direct request adds them."""
     if not isinstance(server_fallbacks, bool):
         raise TypeError("server_fallbacks must be a bool")
     if server_fallbacks and model != fallback_model:
         raise ValueError("only an Opus candidate carries server-side fallbacks")
-    if server_fallbacks and batchable:
-        raise ValueError("a batchable candidate never carries server-side fallbacks")
+    if not isinstance(batchable, bool):
+        raise TypeError("batchable must be a bool")
+    # Story 4.15: a batchable Opus candidate may carry them; only its direct request does.
 
 
 def check_token_limits(max_tokens: object, max_tokens_cap: object, ceiling: int) -> None:
@@ -185,6 +195,13 @@ def check_urgency(urgency: object) -> Urgency:
     if not isinstance(urgency, Urgency):
         raise TypeError("urgency must be an Urgency")
     return urgency
+
+
+def check_framing(framing: object) -> "Framing | None":
+    """``framing``, or ``TypeError`` unless it is a ``Framing`` or ``None``."""
+    if framing is not None and not isinstance(framing, Framing):
+        raise TypeError("framing must be a Framing or None")
+    return framing
 
 
 # Values ---------------------------------------------------------------------------------------
@@ -289,3 +306,18 @@ def check_blocks(blocks: Sequence[UntrustedBlock]) -> str:
     if len(set(ids)) != len(ids):
         raise ValueError("blocks must not repeat a block_id")
     return subjects.pop()
+
+
+@dataclass(frozen=True, slots=True)
+class Framing:
+    """The trusted text a drafting call adds around the route's prompt (Story 4.15); see the
+    module docstring."""
+
+    brief: str = field(repr=False)
+    facts: str = field(repr=False)
+    note: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _utf8("brief", self.brief)
+        _utf8("facts", self.facts)
+        _utf8("note", self.note)

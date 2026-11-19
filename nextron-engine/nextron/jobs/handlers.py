@@ -99,6 +99,14 @@ handler runs in.
   ``bulk`` for a job on the bulk lane and ``interactive`` otherwise, and returns ``None``. It is
   never budget-gated (the grounding routes are ``essential``), and a timeout or an unreachable
   API is recorded as a grounding ``fail`` by the use case, not retried.
+- ``draft_step(step_drafts)`` (Story 4.15): ``step_drafts`` returns the ``drafting`` service's
+  ``StepDrafts`` (``nextron.main`` passes ``lambda: step_drafts``). The payload's
+  ``enrollment_id`` must be a ULID and its ``step`` a positive ``int`` (not a ``bool``), else
+  ``InvalidJob``; it calls ``step_drafts().draft(enrollment_id, step, urgency)`` once, with
+  ``urgency`` ``Urgency.BULK`` on the bulk lane and ``Urgency.SOON`` on the interactive lane
+  (Step 1 is due at once), and returns ``None``. It is never budget-gated
+  (``draft_sequence`` is ``essential``); a retryable ``AdapterError`` (the API unavailable)
+  propagates, so the runner retries it with nothing stored.
 
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
@@ -118,6 +126,7 @@ from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job, Lane
 from nextron.domain.restore_test import RestoreTestKind
+from nextron.domain.step_drafting import ENROLLMENT_ID_FIELD, STEP_FIELD
 
 ALERT_ID_FIELD: Final = "alert_id"
 ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
@@ -541,3 +550,24 @@ def check_grounding(checks: Callable[[], CheckingGrounding]) -> Handler:
         checks().check(draft_id, rev, urgency)
 
     return handle_check_grounding
+
+
+class DraftingSteps(Protocol):
+    """What ``draft_step`` needs of the ``drafting`` service's ``StepDrafts``."""
+
+    def draft(self, enrollment_id: str, step: int, urgency: Urgency) -> object: ...
+
+
+def draft_step(step_drafts: Callable[[], DraftingSteps]) -> Handler:
+    """The ``draft_step`` job's handler: draft the payload's Enrollment's Step through
+    ``step_drafts()``."""
+
+    def handle_draft_step(job: Job) -> None:
+        enrollment_id = _ulid_field(job, ENROLLMENT_ID_FIELD)
+        step = job.payload.get(STEP_FIELD)
+        if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+            raise InvalidJob(f"{job.type}: the {STEP_FIELD} field must be a positive int")
+        urgency = Urgency.BULK if job.lane == Lane.BULK else Urgency.SOON
+        step_drafts().draft(enrollment_id, step, urgency)
+
+    return handle_draft_step

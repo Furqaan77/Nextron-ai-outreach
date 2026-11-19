@@ -63,6 +63,13 @@ Copilot, Excel…), but no first name (Harvey, Sage, May, Will, April, June and 
 for names; a tool or month replaced by mistake is the over-replacement this module accepts). An
 all-capitals word (``STOP``, ``ERP``) is taken for a name only on a signature line, so an
 opt-out keeps its words. A word of ``names`` is replaced even when allowed.
+
+``mask_contact_details(text) -> str`` (Story 4.15) replaces only email addresses (``[email]``)
+and phone numbers (``[phone]``) as step 2 does, but a phone number there must also hold at most
+15 digits and not be a shape ``nextron.domain.grounding_rules`` doesn't take for a phone number
+(a date, a year range such as ``2019-2024`` or ``2019 - 2024``, or a number grouped in thousands
+such as ``10 000 000`` or ``1.250.000``), so a figure reaches the model unchanged. It is
+idempotent.
 """
 
 import re
@@ -77,6 +84,7 @@ ORGANISATION: Final = "[organisation]"
 NAME: Final = "[name]"
 PLACEHOLDERS: Final = (EMAIL, URL, PHONE, ADDRESS, ORGANISATION, NAME)
 MIN_PHONE_DIGITS: Final = 7
+MAX_PHONE_DIGITS: Final = 15  # mask_contact_details only, as grounding_rules
 MAX_SIGNATURE_WORDS: Final = 4
 MIN_PART_LENGTH: Final = 2
 
@@ -106,6 +114,15 @@ _PHONE_PATTERN: Final = re.compile("\\+?\\(?\\d[\\d \\t().\\-/–—]{5,}\\d\\)?
 _DATES: Final = (
     re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"),
     re.compile(r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"),
+)
+# mask_contact_details only: grounding_rules' _NOT_PHONE shapes (dates, year ranges, numbers
+# grouped in thousands), kept in step with it by tests/unit/test_step_drafting.py.
+_NOT_PHONE: Final = re.compile(
+    r"\d{1,2}([./-])\d{1,2}\1\d{4}"
+    r"|\d{4}([./-])\d{1,2}\2\d{1,2}"
+    r"|(?:19|20)\d{2}\s*-\s*(?:19|20)\d{2}"
+    r"|\d{1,3}([.,])\d{3}(?:\3\d{3})+"
+    r"|\d{1,2}( )\d{3}(?:\4\d{3})+"
 )
 _STREET_SUFFIX: Final = (
     r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl"
@@ -271,12 +288,17 @@ def _urls(text: str) -> str:
     return _URL_PATTERN.sub(replace, text)
 
 
-def _phones(text: str) -> str:
+def _phones(text: str, *, numbers_kept: bool = False) -> str:
+    """``text`` with its phone numbers replaced; ``numbers_kept`` also keeps what
+    ``grounding_rules`` doesn't take for a phone number (``mask_contact_details``)."""
+
     def replace(match: re.Match[str]) -> str:
         run = match.group(0)
         digits = sum(ch.isdigit() for ch in run)
         bare = run.strip("() \t")
         if digits < MIN_PHONE_DIGITS or any(date.fullmatch(bare) for date in _DATES):
+            return run
+        if numbers_kept and (digits > MAX_PHONE_DIGITS or _NOT_PHONE.fullmatch(bare)):
             return run
         trail = run[len(run.rstrip(" \t")) :]
         return PHONE + trail
@@ -468,6 +490,15 @@ def _names(text: str) -> str:
         for index, part in enumerate(parts)
     )
     return _NAME_RUN.sub(NAME, named)
+
+
+def mask_contact_details(text: str) -> str:
+    """``text`` with its email addresses and phone numbers replaced; see the module
+    docstring."""
+    if not isinstance(text, str):
+        raise TypeError("text must be a str")
+    found = _outside(text, _sub(_EMAIL_PATTERN, EMAIL))
+    return _outside(found, lambda part: _phones(part, numbers_kept=True))
 
 
 def pseudonymise(text: str, *, names: Iterable[str] = (), organisations: Iterable[str] = ()) -> str:
