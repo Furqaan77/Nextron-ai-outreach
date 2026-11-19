@@ -447,3 +447,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-11-8-create-and-edit-campaigns-and-variants.md`
   summary: Resolved by Story 11.8: the 11.7 item about Variant `step_angles` notes shifting when a middle Step is removed. The Sequence editor now refuses removing Step k while an active Variant has a note on Step k or later, and retired Variants no longer block.
   evidence: `nextron/app/setup/sequence_editing.py` `_check_variants`; tests in `tests/app/test_campaign_editing.py` (middle removal, a note on the removed Step, retired Variant, removal after every note).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-6-report-offer-validation-after-the-first-10-held-calls.md`
+  summary: The Calls report can miss an accepted audit recorded under a merged Lead when the merge didn't change the survivor's stage, because no `leads_merged` events row then links the two Leads.
+  evidence: `Pipeline.reparent_lead` appends its `leads_merged` row only on a stage change; 9.6 may read only `call_outcomes` and `events`, so the link would need either an always-written merge event or permission to read `leads.merged_into` (rare: needs two records of one organization both past a held call).

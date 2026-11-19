@@ -186,7 +186,7 @@ development_status:
   9-3-email-the-call-prep-sheet-to-furqaan-when-a-call-is-booked: backlog
   9-4-prompt-for-and-record-each-call-outcome: review
   9-5-draft-a-rebooking-email-after-a-no-show: backlog
-  9-6-report-offer-validation-after-the-first-10-held-calls: backlog
+  9-6-report-offer-validation-after-the-first-10-held-calls: review
   9-7-view-the-pipeline-by-stage-with-filters: review
   9-8-show-each-lead-s-complete-history: backlog
   epic-9-retrospective: optional

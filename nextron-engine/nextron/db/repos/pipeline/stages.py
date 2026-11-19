@@ -16,9 +16,18 @@ Pipeline Stage machine.
 - ``last_close(lead_id)``: the Lead's latest ``events`` row (entity ``leads``, read-only) that
   moved it into ``lost`` or ``disqualified`` from another stage (or from none): a ``StageEntry``
   with its ``from_status``, ``to_status`` and ``cause_ref``, latest by ``at`` then ``id``; a
-  same-stage row (a deal save on a closed Lead) is no close; ``None`` without one.
+  same-stage row (a deal save on a closed Lead) is no close; ``None`` without one;
+- ``leads_reached(lead_ids, stage)`` (Story 9.6): those of ``lead_ids`` with any ``events`` row
+  (entity ``leads``, read-only) whose ``to_status`` is ``stage``, as a ``frozenset``;
+- ``merged_refs(lead_ids)`` (Story 9.6): for each of ``lead_ids``, the Leads merged into it,
+  followed transitively through ``events`` rows (entity ``leads``, read-only) of the Lead with
+  cause ``leads_merged`` and a ``cause_ref`` (the merged Lead's id), as a mapping to a
+  ``frozenset`` (Leads with none are left out). A visited set makes it cycle-safe and bounds it
+  by the number of Leads. A merge that left the survivor's stage unchanged writes no such row,
+  so that merged Lead isn't found.
 """
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
 from sqlalchemy import CursorResult, or_, select
@@ -27,7 +36,7 @@ from sqlalchemy import update as update_rows
 from nextron.db.models.events import EventRecord
 from nextron.db.models.leads import LeadRecord
 from nextron.db.uow import current
-from nextron.domain.pipeline_stage import CLOSED_STAGES
+from nextron.domain.pipeline_stage import CLOSED_STAGES, StageCause
 
 LEADS_ENTITY = "leads"
 
@@ -106,3 +115,52 @@ def last_close(lead_id: str) -> StageEntry | None:
     )
     row = current().session.execute(statement).one_or_none()
     return None if row is None else StageEntry(row[0], row[1], row[2])
+
+
+def leads_reached(lead_ids: Collection[str], stage: str) -> frozenset[str]:
+    """Those of ``lead_ids`` with an ``events`` row into ``stage``."""
+    if not lead_ids:
+        return frozenset()
+    statement = (
+        select(EventRecord.entity_id)
+        .where(
+            EventRecord.entity == LEADS_ENTITY,
+            EventRecord.entity_id.in_(sorted(lead_ids)),
+            EventRecord.to_status == stage,
+        )
+        .distinct()
+    )
+    return frozenset(current().session.execute(statement).scalars())
+
+
+def merged_refs(lead_ids: Collection[str]) -> Mapping[str, frozenset[str]]:
+    """The Leads merged into each of ``lead_ids``; see the module docstring."""
+    children: dict[str, set[str]] = {}
+    seen: set[str] = set(lead_ids)
+    frontier = sorted(seen)
+    while frontier:
+        statement = select(EventRecord.entity_id, EventRecord.cause_ref).where(
+            EventRecord.entity == LEADS_ENTITY,
+            EventRecord.entity_id.in_(frontier),
+            EventRecord.cause == str(StageCause.LEADS_MERGED),
+            EventRecord.cause_ref.is_not(None),
+        )
+        found: set[str] = set()
+        for parent, child in current().session.execute(statement):
+            children.setdefault(parent, set()).add(child)
+            if child not in seen:
+                found.add(child)
+        seen |= found
+        frontier = sorted(found)
+    result: dict[str, frozenset[str]] = {}
+    for lead_id in lead_ids:
+        reached: set[str] = set()
+        stack = [lead_id]
+        while stack:
+            for child in children.get(stack.pop(), ()):
+                if child != lead_id and child not in reached:
+                    reached.add(child)
+                    stack.append(child)
+        if reached:
+            result[lead_id] = frozenset(reached)
+    return result

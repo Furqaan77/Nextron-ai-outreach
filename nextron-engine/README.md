@@ -3032,6 +3032,23 @@ erasing a Contact sets them to `[erased]` on every booking of its Lead and of th
 into it, whichever Contact the call was with. Migration
 `0053_9_4_call_outcomes` adds the outcome columns to `call_outcomes`.
 
+**The Calls report (`/reports/calls`, Story 9.6, FR-69, NFR-49, NFR-50).** Follow **Calls report**
+on the Pipeline board. The page counts engine-sourced Leads only (a Lead whose creation `events`
+row has a `created_from_<source>` cause for an engine Lead source; today every source) and shows
+booked (every booking that wasn't superseded by a rebooking), held and no-shows. Below 10 held
+calls it adds "Offer validation starts at 10 held calls: <n> of 10 recorded" and nothing else.
+From 10 held calls it shows the Offer validation figures: audits proposed as a share of held
+calls ("5 of 12 (42%)", rounded half up), audits accepted (distinct Leads with a held call that
+reached `audit_won`; one that skipped to `build_proposed` or `won` doesn't count), the proposed
+audit price range and median (whole dollars, cents only when the median isn't whole; "—"
+without a proposal), the qualified share, each price reaction with its count, and the top 3
+objections by count. With fewer than 2 audits accepted it shows the checkpoint "Review the
+Offer's price and scope before the next Variant". The report is computed at each render by
+`nextron.app.analytics.offer.offer_validation` from `call_outcomes` and the Pipeline Stage
+`events` rows only, and writes nothing. It shows counts, codes and prices, never a reason, next
+step or name, so it declares no personal data. The report body (`calls_report_panel.html`) is
+its own template, for Epic 11's Funnel to include.
+
 **The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
 to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created
 date, with a link back to **All Leads**. **Contacts** lists every Contact, oldest first, with its

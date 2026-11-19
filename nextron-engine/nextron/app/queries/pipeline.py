@@ -38,6 +38,13 @@ current unit of work, read-only ones included.
   ``cutoff`` whose Lead is at ``call_booked`` and not merged (``bookings.due``), oldest first,
   each a ``DueBooking`` (``booking_id``, ``lead_id``, ``lead_name``). ``cutoff`` must be an
   aware ``datetime`` (``TypeError``/``ValueError``).
+- ``call_report_facts()`` (Story 9.6): the Calls report's inputs, ``(facts, accepted)``:
+  ``facts`` one ``offer_validation.CallFact`` per unsuperseded ``call_outcomes`` row of an
+  engine-sourced Lead (``bookings.report_rows`` with ``offer_validation.engine_creation_causes()``),
+  oldest first; ``accepted`` the Leads with a held call among them that have an ``events`` row
+  into ``audit_won`` (``stages.leads_reached``), either under its own id or under a Lead merged
+  into it (``stages.merged_refs``: a merge moves the bookings to the survivor but leaves the
+  merged Lead's ``events`` rows under its own id). It reads only ``call_outcomes`` and ``events``.
 - ``export_pii(contact_id, lead_ids, terms) -> {section: tuple[dict, ...]}`` (Stories 9.1 and
   10.7, the
   subject access export): ``call_bookings``, every ``call_outcomes`` row of the Contact (all
@@ -79,12 +86,15 @@ from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.pipeline.assist_accounts import StoredAccount
 from nextron.db.repos.pipeline.board import BoardLead
 from nextron.db.repos.pipeline.bookings import DueBooking, StoredBooking
+from nextron.domain.call_outcomes import OBJECTIONS_SEPARATOR, CallResult, PriceReaction
 from nextron.domain.contact_export import MentionTerm, excerpts
 from nextron.db.repos.pipeline.channel_permissions import StoredPermission
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.linkedin_caps import TASKS_OFF, AccountCaps, AccountStatus
+from nextron.domain.offer_validation import CallFact, engine_creation_causes
 from nextron.domain.pipeline_stage import PipelineStage, operator_moves
+from nextron.domain.reply_classes import ObjectionType
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
 
 # The setting's key under a name of its own: a read of a setting, never a fetch (Story 10.1's
@@ -113,6 +123,7 @@ __all__ = [
     "assist_setup",
     "board",
     "call_outcomes_due",
+    "call_report_facts",
     "export_pii",
     "health_issues",
     "lead_pipeline",
@@ -202,6 +213,33 @@ def call_outcomes_due(cutoff: datetime) -> tuple[DueBooking, ...]:
     """The bookings whose Call Outcome is due by ``cutoff``; see the module docstring."""
     _check_aware("cutoff", cutoff)
     return bookings_repo.due(cutoff)
+
+
+def _fact(row: bookings_repo.ReportRow) -> CallFact:
+    codes = () if row.objections is None else row.objections.split(OBJECTIONS_SEPARATOR)
+    return CallFact(
+        lead_id=row.lead_id,
+        outcome=None if row.outcome is None else CallResult(row.outcome),
+        qualified=row.qualified,
+        audit_proposed=row.audit_proposed,
+        audit_price=row.audit_price,
+        objections=tuple(ObjectionType(code) for code in codes if code),
+        price_reaction=None if row.price_reaction is None else PriceReaction(row.price_reaction),
+    )
+
+
+def call_report_facts() -> tuple[tuple[CallFact, ...], frozenset[str]]:
+    """The Calls report's facts and accepted Leads; see the module docstring."""
+    facts = tuple(_fact(row) for row in bookings_repo.report_rows(engine_creation_causes()))
+    held = {fact.lead_id for fact in facts if fact.outcome is CallResult.HELD}
+    merged = stages_repo.merged_refs(held)
+    reached = stages_repo.leads_reached(
+        held.union(*merged.values()), str(PipelineStage.AUDIT_WON)
+    )
+    accepted = frozenset(
+        lead for lead in held if lead in reached or not reached.isdisjoint(merged.get(lead, ()))
+    )
+    return facts, accepted
 
 
 def export_pii(
