@@ -535,9 +535,11 @@ its Step briefs (see [Sequences](#sequences)); once any Sequence is stored, the 
 them (see [Editing Sequences](#editing-sequences)). The Approved Company Facts (FR-72) come from
 `seed/company_facts.yaml`: the claims a Draft may make about Nextron (see
 [Approved Company Facts](#approved-company-facts)). The Offers and Campaigns (FR-3) come from
-`seed/offers.yaml` and `seed/campaigns.yaml`: the commercial ladder and one Campaign per Segment
-and Market (see [Campaigns, Offers and Variants](#campaigns-offers-and-variants)). All six files
-are required. Edit them, then load them:
+`seed/offers.yaml` and `seed/campaigns.yaml` only into a database that holds no Campaign: the
+commercial ladder and one Campaign per Segment and Market (see
+[Campaigns, Offers and Variants](#campaigns-offers-and-variants)); once any Campaign is stored,
+the dashboard owns Campaigns, Variants and Offers (see [Editing Campaigns](#editing-campaigns)).
+All six files are required. Edit them, then load them:
 
 ```powershell
 uv run nextron seed sync                 # the environment NEXTRON_ENV names
@@ -593,6 +595,23 @@ A line per difference: a key only the file has, a key both have with the changed
 dashboard's version against the file's), and a key only the database has. The other files'
 references (Sequence angles, Campaigns, facts) are then checked against the **stored** Segment
 keys. Edit Segments on the Segments page instead.
+
+**Campaigns and Offers after the first sync (Story 11.8).** Once the database holds any
+Campaign, a sync writes no Offer, Campaign or Variant and prints, instead of their counts:
+
+```text
+offers: Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored
+  default: differs in ladder
+campaigns: Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored
+  law_private_ai_us: differs in name, variants[B]
+  law_ai_us: only in the file
+```
+
+A line per difference, as for the Segments: a Campaign's paths are `name`, `segment`, `market`,
+`offer`, `sequence` and, per Variant, `variants[<name>]` (only one side has it) or
+`variants[<name>].name`, `.status` and `.step_angles`; an Offer's are `name` and `ladder`. The
+two files are then only checked for their shape (a third Variant or a broken Offer ladder is
+still refused); their references aren't, since the files are ignored.
 
 **What a sync does.** It inserts each Segment (into an empty `segments` table only), then each
 Market by code into the `markets` table, then each Sequence by key into the `sequences` and
@@ -846,10 +865,11 @@ and field (`steps[3].delay_days: must be more than Step 2's delay_days (3)`), re
 as typed and saves nothing. The form carries the version it showed; if the Sequence changed
 meanwhile the save is refused ("This Sequence changed since you opened it"). A save that would
 leave fewer Steps than a Campaign Variant's angle note names is refused, naming the Campaign and
-Variant. A save identical to the stored Sequence writes nothing. Otherwise the Sequence gets its
-next version, an immutable `sequence_versions` row (migration `0044_11_7_sequence_editing`,
-which also stored each existing Sequence's current version, actor `seed`) and an `events` row
-(`v<n>` to `v<n+1>`, cause `operator_edit`, actor `operator`).
+Variant; so is removing a Step at or before an active Variant's note (Story 11.8; retired
+Variants never block). A save identical to the stored Sequence writes nothing. Otherwise the
+Sequence gets its next version, an immutable `sequence_versions` row (migration
+`0044_11_7_sequence_editing`, which also stored each existing Sequence's current version, actor
+`seed`) and an `events` row (`v<n>` to `v<n+1>`, cause `operator_edit`, actor `operator`).
 
 **Running Enrollments keep their version.** Each Enrollment stores the `sequence_versions` row
 it started with (`enrollments.sequence_version_id`); every later Step's slot takes its brief and
@@ -967,17 +987,11 @@ refused naming its field, such as `seed/campaigns.yaml:
 campaigns[law_private_ai_uk].variants[A].step_angles[0].note: An angle note can't name a price
 (FR-4)`.
 
-**The seed rules.** A new Campaign is stored at `draft`, with no legitimate-interests
-assessment, and its Variants. A stored one keeps its Segment and Market (a change is refused:
-"can't change: a Campaign keeps its Segment and Market"), so a US Campaign can never become a UK
-one and skip the assessment. The file lists every Variant: a third (in the file, or stored and
-in the file together) is refused ("A Campaign can have at most 2 Variants"), and a stored
-Variant left out is refused ("keep it, and set its status to inactive to retire it"), since
-Variants are never deleted. A changed name, Offer or Sequence, or a Variant added or changed,
-updates the Campaign in place at the next version (its version and event cover its Variants).
-The seed never writes a Campaign's status or assessment. A stored Campaign left out of the file
-stays as it is and is reported; a file Campaign that takes its Segment and Market is refused
-("keep that Campaign's key").
+**The seed rules.** Into a database with no Campaign, each Campaign is stored at `draft`, with
+no legitimate-interests assessment, and its Variants; a third Variant in the file is refused ("A
+Campaign can have at most 2 Variants"). Once a Campaign is stored (Story 11.8) the seed writes
+no Campaign, Variant or Offer and only lists how the files differ (see [Seeds](#seeds)): edit
+them on the Campaigns page. The seed never writes a Campaign's status or assessment.
 
 **The machine (AD-4).** A Campaign is `draft`, `active` or `paused`: `draft` to `active`
 (Activate), `active` to `paused` (Pause) and `paused` to `active` (Resume), nothing else. Each
@@ -1007,11 +1021,10 @@ Enrollment (4.8) and the send gate (6.9) ask it; a paused Campaign enrolls nothi
 nothing to the Approval Queue.
 
 **Variants by command.** `Campaigns.add_variant(campaign_id, name, step_angles)` adds an `active`
-Variant (no screen until Epic 11) with the same rules as the file, a third refused, and gives the
-Campaign its next version (cause `operator_add_variant`). Add that Variant to
-`seed/campaigns.yaml` before the next seed sync: the file lists every Variant, so until then the
-sync refuses with "leaves out the stored Variant <name>" (decision 4). A database trigger
-(`trg_variants_at_most_two`) refuses inserting a third Variant.
+Variant (the Campaigns page's "Add a Variant", Story 11.8) with the same rules as the file, a
+third active one refused, and gives the Campaign its next version (cause
+`operator_add_variant`). A database trigger (`trg_variants_at_most_two`, active Variants only
+since migration `0045_11_8_campaign_editing`) refuses inserting a third active Variant.
 
 **The panel.** The Settings page's Campaigns section lists each Campaign with its status,
 Segment, Market, Offer, Sequence and Variants ("A (active)"), and for a UK Campaign its
@@ -1029,6 +1042,55 @@ shown: <field>: <reason>" in its place, and the rest of the Settings page still 
 its ids, status, assessment and Variants by name). Only `nextron/app/setup/api.py` writes the
 three tables, and only its `_move` writes a Campaign's status
 (`tests/contracts/test_campaign_contracts.py`).
+
+### Editing Campaigns
+
+Settings links the **Campaigns page** (`/campaigns`, Story 11.8). It lists each Campaign with its
+status, Segment, Market and number of active Variants, and has a create form; each Campaign has
+its own page (`/campaigns/<id>`). Activate, Pause, Resume and the UK assessment stay in the
+Settings page's Campaigns section. There is no delete, no key change and no Offer editor: Offers
+come only from the first seed sync.
+
+**Create.** A key (`[a-z][a-z0-9_]`, at most 31 characters, unique; it never changes), a name
+(at most 100 characters) and one each of the stored Segments, Markets, Offers and Sequences. One
+Campaign per Segment and Market ("A Campaign already exists for this Segment and Market"). It is
+stored at `draft`, version 1, with **no Variant** and no assessment, with an `events` row (`None`
+to `v1`, cause `operator_create`). Activate refuses a Campaign with no active Variant ("Add an
+active Variant first", checked before the assessment); so does Resume.
+
+**Edit.** The name, Segment, Market, Offer and Sequence, each refusal beside its field. The form
+carries the version it showed: a stale save is refused ("This Campaign changed since you opened
+it") and the page shows the current Campaign. An identical save writes nothing; otherwise the
+Campaign gets its next version (cause `operator_edit`). Once any Contact is enrolled (any
+Enrollment status) the Segment and Market show read-only ("Segment and Market can't change once
+Contacts are enrolled"). A new Sequence must still have every Step an active Variant's angle note
+names; a new Market re-runs the angle-note floor on the active Variants. A Segment or Market
+change clears the stored UK assessment, which was made for the old pair, so a running (not
+`draft`) Campaign can't move to a new Segment or Market in a GB Market ("Only a draft Campaign
+can move to a new UK Segment or Market: its assessment must be made for the new pair", beside
+the Market); a draft one may, and Activate then asks for a new assessment. A new Offer or
+Sequence reaches new Enrollments only: each Enrollment keeps the Variant, Offer and Sequence
+version it started with.
+
+**Variants.** At most 2 **active** Variants; names are unique case-insensitively, retired ones
+included. Each Variant shows its status, angle notes and number of Enrollments. A Variant with no
+Enrollment can be edited (name and notes, the same rules as adding one; cause
+`operator_edit_variant`). Once enrolled it never changes ("Retire this Variant and add a new one,
+so its results stay comparable"): Retire sets it `inactive` for good (cause
+`operator_retire_variant`), its Enrollments keep it, and new Enrollments round-robin over the
+active Variants only. A running Campaign can't retire its last active Variant: the page shows
+why in place of Retire, and Retire asks for confirmation. With 2 active Variants the page shows
+"A Campaign can have at most 2 Variants" in place of the add form. Each Variant
+write gives the Campaign its next version. Migration `0045_11_8_campaign_editing` backs this up
+with triggers: a third active Variant (`trg_variants_at_most_two`), a retired Variant made active
+again (`trg_variants_retired_final`), an enrolled Variant's name or notes changed
+(`trg_variants_enrolled_frozen`) and an enrolled Campaign's Segment or Market changed
+(`trg_campaigns_pair_frozen`) are all refused.
+
+**Sequences.** Since this story the Sequences page ignores retired Variants, and refuses removing
+a Step at or before an active Variant's angle note ("Campaign <key>'s Variant <name> has angle
+notes on Steps after a removed Step; retire it and add a new one before removing Step <k>"), so a
+note never silently moves onto another Step.
 
 ## Leads and identity
 

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Campaigns{% endblock %}
+{% block content %}
+<h1>Campaigns</h1>
+<p>A Campaign sends one Sequence to one Segment in one Market, leading to one Offer, through 1 or 2 active Variants. A new Campaign starts as a draft with no Variant: add one on its page, then activate it on the <a href="/settings">Settings page</a>, where it is also paused and resumed and a UK Campaign's legitimate-interests assessment is recorded.</p>
+{% include "campaign_list_panel.html" %}
+{% endblock %}

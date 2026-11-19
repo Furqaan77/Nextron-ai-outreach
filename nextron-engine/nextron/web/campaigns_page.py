@@ -7,8 +7,9 @@ after the settings form; ``create_app`` builds its context with ``panel_context`
 ``@personal_data(False)``: Campaigns, Offers, Sequences and the LIA reference are configuration,
 never a person.
 
-**The panel.** With no Campaign it reads "No Campaigns yet. Run nextron seed sync to load
-them." Otherwise each Campaign, by key, shows its name, status, Segment, Market, Offer and
+**The panel.** With no Campaign it reads "No Campaigns yet. Create one on the Campaigns page,
+or run nextron seed sync to load them." (Story 11.8: ``/campaigns`` creates and edits them; see
+``nextron.web.campaign_editor_page``). Otherwise each Campaign, by key, shows its name, status, Segment, Market, Offer and
 Sequence names (an id that names nothing stored shows "unknown Segment" and so on) and its
 Variants ("A (active), B (inactive)"). A UK Campaign (its Market's country is ``GB``) also shows
 "Legitimate-interests assessment: <ref> dated <date>" or "Legitimate-interests assessment: not

@@ -786,6 +786,7 @@ def test_the_repository_has_no_setter_for_a_bound_column() -> None:
         "ended_with_step",
         "live_counts_by_inbox",
         "live_counts_by_version",  # Story 11.7
+        "counts_by_variant",  # Story 11.8 (a read)
         "insert",
         "set_status",
         "record_step_sent",  # Story 4.9

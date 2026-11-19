@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0044_11_7_sequence_editing"
+HEAD = "0045_11_8_campaign_editing"
 
 
 @pytest.fixture

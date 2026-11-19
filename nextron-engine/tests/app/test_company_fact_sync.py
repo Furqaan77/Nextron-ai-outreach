@@ -97,7 +97,10 @@ OFFERS_CAMPAIGNS_FIRST = (
     "campaigns: 4 changed, 0 unchanged\n"
     + "".join(f"  {key}: created (version 1)\n" for key in CAMPAIGN_KEYS)
 )
-OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
+CAMPAIGNS_MANAGED = (  # Story 11.8: once a Campaign is stored, the dashboard owns them
+    "Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored"
+)
+OFFERS_CAMPAIGNS_UNCHANGED = f"offers: {CAMPAIGNS_MANAGED}\ncampaigns: {CAMPAIGNS_MANAGED}\n"
 LEGAL_AI_WORDING = (
     "    wording: Built an AI legal assistant platform for research and document help for a "
     "legal-tech venture (Legal AI).\n"

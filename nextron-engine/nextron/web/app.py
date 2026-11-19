@@ -95,6 +95,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   refused save (``SequenceRefused``) answers 200 with the form re-rendered as submitted. An
   unknown Sequence (a text that isn't a ULID included) answers 404 with the plain text "That
   Sequence doesn't exist.", which never echoes the id.
+- ``GET /campaigns`` (``campaigns_list``), ``GET /campaigns/{campaign_id}``
+  (``campaign_editor``), and ``POST /campaigns/create``, ``/campaigns/{campaign_id}/edit``,
+  ``/campaigns/{campaign_id}/variants/add``, ``/campaigns/{campaign_id}/variants/{variant_id}/
+  edit`` and ``.../retire``, all ``@personal_data(False)``: the Campaigns page (FR-3, Story
+  11.8), linked from the Settings page; see ``nextron.web.campaign_editor_page``. Each POST runs
+  its ``campaigns`` (``Campaigns``) use case in its own unit of work, then renders the panel
+  again in a read-only one; a refusal (``CampaignRefused``) answers 200 with the form
+  re-rendered as submitted, a stale one with the current stored Campaign. An unknown Campaign (a
+  text that isn't a ULID included) answers 404 with the plain text "That Campaign doesn't
+  exist.", which never echoes the id.
 - ``GET /ai`` (``ai_content_page``) and ``POST /ai/check`` (``ai_content_check``), both
   ``@personal_data(False)``: the AI content view (Story 4.4), linked from the Settings page; see
   ``nextron.web.ai_content_page``. The GET reads ``queries.playbook.route_tuples()`` and
@@ -366,7 +376,7 @@ from nextron.app.setup.api import (
 from nextron.app.setup.segment_editing import SegmentEditor
 from nextron.app.setup.sequence_editing import STALE as SEQUENCE_STALE
 from nextron.app.setup.sequence_editing import SequenceEditor
-from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
+from nextron.domain.campaign import STALE_CAMPAIGN, CampaignRefused, InvalidCampaigns
 from nextron.domain.company_facts import InvalidFact
 from nextron.domain.contacts import PrimaryRefusal, PrimaryRefused
 from nextron.domain.data_subject_request import check_request_ref
@@ -398,6 +408,7 @@ from nextron.domain.suppression_list import (
 )
 from nextron.domain.unsub_token import UnsubKeyInUse
 from nextron.web import ai_content_page as ai_rows
+from nextron.web import campaign_editor_page as campaign_editor_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
 from nextron.web import erase_page as erase_rows
@@ -827,6 +838,268 @@ def create_app(
             lambda saved: campaign_rows.lia_outcome(saved, campaign_id),
             lambda refused: campaign_rows.Refusal(
                 campaign_rows.SAVE_LIA, campaign_id, refused.problems, lia_ref, lia_date
+            ),
+        )
+
+    def campaign_references() -> campaign_editor_rows.References:
+        return campaign_editor_rows.References(
+            setup_queries.segments(),
+            setup_queries.markets(),
+            setup_queries.offers(),
+            setup_queries.sequences(),
+        )
+
+    def campaign_list_answer(
+        request: Request,
+        template: str,
+        *,
+        notice: str | None = None,
+        created_id: str | None = None,
+        refusal: campaign_editor_rows.Refusal | None = None,
+    ) -> HTMLResponse:
+        """The Campaigns list (a page or its panel), in the caller's read-only unit of work."""
+        try:
+            context = campaign_editor_rows.list_context(
+                setup_queries.campaigns(),
+                campaign_references(),
+                notice=notice,
+                created_id=created_id,
+                refusal=refusal,
+            )
+        except STORED_ROW_REFUSED as unreadable:
+            context = campaign_editor_rows.unavailable_context(unreadable.message)
+        return page(request, template, **context)
+
+    def campaign_editor_answer(
+        request: Request,
+        campaign_id: str,
+        template: str,
+        *,
+        notice: str | None = None,
+        alert: str | None = None,
+        refusal: campaign_editor_rows.Refusal | None = None,
+    ) -> Response:
+        """One Campaign's page or panel, in the caller's read-only unit of work; 404 for an
+        unknown id (never echoed); the unavailable notice when a stored row no longer
+        decodes (on the full list page for the full-page GET, else the list panel)."""
+        try:
+            seeded = setup_queries.campaign(campaign_id)
+            if seeded is None:
+                return not_found_text(campaign_editor_rows.NOT_FOUND)
+            context = campaign_editor_rows.edit_context(
+                seeded,
+                campaign_references(),
+                sequencing_queries.enrollment_counts(seeded.id),
+                notice=notice,
+                alert=alert,
+                refusal=refusal,
+            )
+        except STORED_ROW_REFUSED as unreadable:
+            return campaign_unavailable(request, template, unreadable.message)
+        return page(request, template, **context)
+
+    def campaign_unavailable(request: Request, template: str, problem: str) -> HTMLResponse:
+        """The unavailable notice: the full list page in place of a full page, else the list
+        panel."""
+        full = template == campaign_editor_rows.CAMPAIGN_TEMPLATE
+        shown = campaign_editor_rows.unavailable_context(problem)
+        if full:
+            return page(request, campaign_editor_rows.LIST_TEMPLATE, **shown)
+        return page(request, campaign_editor_rows.LIST_PANEL_TEMPLATE, **shown)
+
+    def campaign_editor_run(
+        request: Request,
+        campaign_id: str,
+        run: Callable[[], object],
+        notice: Callable[[object], str],
+        refusal: Callable[[CampaignRefused], campaign_editor_rows.Refusal],
+    ) -> Response:
+        """Run a Campaign page use case in its own unit of work, then render the panel in a
+        read-only one: with its notice, refused with the refused form, or stale with the
+        current stored Campaign."""
+        try:
+            with units.open():
+                result = run()
+        except CampaignRefused as refused:  # 200, so HTMX swaps the panel in; nothing was saved
+            with units.open(read_only=True):
+                if campaign_editor_rows.is_stale(refused.problems, STALE_CAMPAIGN):
+                    return campaign_editor_answer(
+                        request,
+                        campaign_id,
+                        campaign_editor_rows.CAMPAIGN_PANEL_TEMPLATE,
+                        alert=campaign_editor_rows.stale_notice(refused.problems),
+                    )
+                return campaign_editor_answer(
+                    request,
+                    campaign_id,
+                    campaign_editor_rows.CAMPAIGN_PANEL_TEMPLATE,
+                    refusal=refusal(refused),
+                )
+        except STORED_ROW_REFUSED as unreadable:  # a stored row no longer decodes; no write
+            with units.open(read_only=True):
+                return campaign_unavailable(
+                    request, campaign_editor_rows.CAMPAIGN_PANEL_TEMPLATE, unreadable.message
+                )
+        with units.open(read_only=True):
+            return campaign_editor_answer(
+                request,
+                campaign_id,
+                campaign_editor_rows.CAMPAIGN_PANEL_TEMPLATE,
+                notice=notice(result),
+            )
+
+    @app.get("/campaigns", name="campaigns_list")
+    @personal_data(False)  # Campaigns, Variants and their references are configuration
+    def campaigns_list(request: Request) -> HTMLResponse:
+        return campaign_list_answer(request, campaign_editor_rows.LIST_TEMPLATE)
+
+    @app.post("/campaigns/create", name="campaign_create")
+    @personal_data(False)
+    def campaign_create(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        texts = campaign_editor_rows.submitted_create(fields)
+        try:
+            with units.open():
+                saved = campaigns.create_campaign(
+                    texts["key"],
+                    texts["name"],
+                    texts["segment"],
+                    texts["market"],
+                    texts["offer"],
+                    texts["sequence"],
+                )
+        except CampaignRefused as refused:
+            refusal = campaign_editor_rows.Refusal(
+                campaign_editor_rows.CREATE, refused.problems, texts
+            )
+            with units.open(read_only=True):
+                return campaign_list_answer(
+                    request, campaign_editor_rows.LIST_PANEL_TEMPLATE, refusal=refusal
+                )
+        except STORED_ROW_REFUSED as unreadable:  # a stored row no longer decodes; no write
+            with units.open(read_only=True):
+                return campaign_unavailable(
+                    request, campaign_editor_rows.LIST_PANEL_TEMPLATE, unreadable.message
+                )
+        with units.open(read_only=True):
+            return campaign_list_answer(
+                request,
+                campaign_editor_rows.LIST_PANEL_TEMPLATE,
+                notice=campaign_editor_rows.created_notice(saved.key),
+                created_id=saved.campaign_id,
+            )
+
+    @app.get("/campaigns/{campaign_id}", name="campaign_editor")
+    @personal_data(False)
+    def campaign_editor(request: Request, campaign_id: str) -> Response:
+        return campaign_editor_answer(request, campaign_id, campaign_editor_rows.CAMPAIGN_TEMPLATE)
+
+    @app.post("/campaigns/{campaign_id}/edit", name="campaign_edit")
+    @personal_data(False)
+    def campaign_edit(
+        request: Request, campaign_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        based_on, texts = campaign_editor_rows.submitted_edit(fields)
+        return campaign_editor_run(
+            request,
+            campaign_id,
+            lambda: campaigns.edit_campaign(
+                campaign_id,
+                based_on,
+                texts["name"],
+                texts["segment"],
+                texts["market"],
+                texts["offer"],
+                texts["sequence"],
+            ),
+            lambda saved: campaign_editor_rows.saved_notice(
+                saved.key, saved.version, saved.changed  # type: ignore[attr-defined]
+            ),
+            lambda refused: campaign_editor_rows.Refusal(
+                campaign_editor_rows.EDIT, refused.problems, texts
+            ),
+        )
+
+    @app.post("/campaigns/{campaign_id}/variants/add", name="campaign_variant_add")
+    @personal_data(False)
+    def campaign_variant_add(
+        request: Request, campaign_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        based_on, submitted = campaign_editor_rows.submitted_variant(fields)
+        return campaign_editor_run(
+            request,
+            campaign_id,
+            lambda: campaigns.add_variant(
+                campaign_id,
+                submitted.name,
+                campaign_editor_rows.step_angles(submitted),
+                based_on=based_on,
+            ),
+            lambda added: campaign_editor_rows.variant_added_notice(
+                added.name  # type: ignore[attr-defined]
+            ),
+            lambda refused: campaign_editor_rows.Refusal(
+                campaign_editor_rows.ADD_VARIANT,
+                refused.problems,
+                {"name": submitted.name},
+                submitted.angles,
+            ),
+        )
+
+    @app.post(
+        "/campaigns/{campaign_id}/variants/{variant_id}/edit", name="campaign_variant_edit"
+    )
+    @personal_data(False)
+    def campaign_variant_edit(
+        request: Request,
+        campaign_id: str,
+        variant_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> Response:
+        based_on, submitted = campaign_editor_rows.submitted_variant(fields)
+        return campaign_editor_run(
+            request,
+            campaign_id,
+            lambda: campaigns.edit_variant(
+                campaign_id,
+                variant_id,
+                based_on,
+                submitted.name,
+                campaign_editor_rows.step_angles(submitted),
+            ),
+            lambda saved: campaign_editor_rows.variant_saved_notice(
+                saved.name, saved.changed  # type: ignore[attr-defined]
+            ),
+            lambda refused: campaign_editor_rows.Refusal(
+                campaign_editor_rows.EDIT_VARIANT,
+                refused.problems,
+                {"name": submitted.name},
+                submitted.angles,
+                variant_id,
+            ),
+        )
+
+    @app.post(
+        "/campaigns/{campaign_id}/variants/{variant_id}/retire", name="campaign_variant_retire"
+    )
+    @personal_data(False)
+    def campaign_variant_retire(
+        request: Request,
+        campaign_id: str,
+        variant_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> Response:
+        based_on = campaign_editor_rows.submitted_retire(fields)
+        return campaign_editor_run(
+            request,
+            campaign_id,
+            lambda: campaigns.retire_variant(campaign_id, variant_id, based_on),
+            lambda saved: campaign_editor_rows.variant_retired_notice(
+                saved.name  # type: ignore[attr-defined]
+            ),
+            lambda refused: campaign_editor_rows.Refusal(
+                campaign_editor_rows.RETIRE_VARIANT, refused.problems, variant_id=variant_id
             ),
         )
 

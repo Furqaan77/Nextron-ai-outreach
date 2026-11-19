@@ -72,8 +72,11 @@ OFFERS_FIRST = "offers: 1 changed, 0 unchanged\n  default: created (version 1)\n
 CAMPAIGNS_FIRST = "campaigns: 4 changed, 0 unchanged\n" + "".join(
     f"  {key}: created (version 1)\n" for key in KEYS
 )
-OFFERS_UNCHANGED = "offers: 0 changed, 1 unchanged\n"
-CAMPAIGNS_UNCHANGED = "campaigns: 0 changed, 4 unchanged\n"
+MANAGED = (
+    "Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored"
+)
+OFFERS_MANAGED = f"offers: {MANAGED}\n"
+CAMPAIGNS_MANAGED = f"campaigns: {MANAGED}\n"
 NO_CAMPAIGN = "No Campaign has this id"
 ONLY_UK = "Only a UK Campaign records a legitimate-interests assessment"
 
@@ -236,47 +239,43 @@ def test_the_first_sync_creates_the_offer_and_four_draft_campaigns(database: Pat
     assert keys_in_event_order == list(KEYS)  # file order
 
 
-def test_a_second_sync_changes_nothing(database: Path) -> None:
+def test_a_second_sync_is_managed_and_changes_nothing(database: Path) -> None:
+    """Story 11.8: once a Campaign is stored, the dashboard owns Campaigns and Offers."""
     sync()
     before = sha256(database)
 
     result = sync(clock=FrozenClock(LATER))
 
     assert (result.code, result.err) == (0, "")
-    assert result.out.endswith(OFFERS_UNCHANGED + CAMPAIGNS_UNCHANGED)
+    assert result.out.endswith(OFFERS_MANAGED + CAMPAIGNS_MANAGED)
     assert sha256(database) == before
 
 
 # The seed: edits ---------------------------------------------------------------------------------
 
 
-def test_a_changed_name_updates_in_place_and_never_touches_status_or_lia(
+def test_a_changed_name_is_reported_and_never_written(
     database: Path, units: UnitOfWorkFactory, tmp_path: Path
 ) -> None:
     sync()
     uk = ids(units)["law_private_ai_uk"]
     run(units, "activate", uk, "LIA-2026-01", "2026-11-16")
-    events_before = event_rows(database)
+    before = sha256(database)
     text = edited("    name: Law-PrivateAI × UK\n", "    name: Law UK\n")
 
     result = sync(seed_dir(tmp_path, campaigns=text), clock=FrozenClock(LATER))
 
-    assert result.out.endswith(
-        "campaigns: 1 changed, 3 unchanged\n  law_private_ai_uk: changed (version 1 -> 2)\n"
-    )
-    assert campaign_rows(database)[0] == (
-        "law_private_ai_uk", "Law UK", "active", "LIA-2026-01", "2026-11-16", 2
-    )
-    assert event_rows(database) == [
-        *events_before,
-        ("campaigns", uk, "v1", "v2", "seed_sync", None, "seed", LATER_STAMP),
-    ]
+    assert (result.code, result.err) == (0, "")
+    assert result.out.endswith(CAMPAIGNS_MANAGED + "  law_private_ai_uk: differs in name\n")
+    assert sha256(database) == before
     assert active(units, uk)
 
 
-def test_changed_offer_terms_give_the_offer_version_2(database: Path, tmp_path: Path) -> None:
+def test_changed_offer_terms_are_reported_and_never_written(
+    database: Path, tmp_path: Path
+) -> None:
     sync()
-    events_before = event_rows(database)
+    before = sha256(database)
     offers = edited(
         "        terms: Fixed fee, credited in full toward a build.\n",
         "        terms: Fixed fee.\n",
@@ -285,14 +284,35 @@ def test_changed_offer_terms_give_the_offer_version_2(database: Path, tmp_path: 
 
     result = sync(seed_dir(tmp_path, offers=offers), clock=FrozenClock(LATER))
 
-    assert "offers: 1 changed, 0 unchanged\n  default: changed (version 1 -> 2)\n" in result.out
-    assert result.out.endswith(CAMPAIGNS_UNCHANGED)
-    [(offer_id, version)] = query(database, "SELECT id, version FROM offers")
-    assert version == 2
-    assert event_rows(database) == [
-        *events_before,
-        ("offers", offer_id, "v1", "v2", "seed_sync", None, "seed", LATER_STAMP),
+    assert result.out.endswith(
+        OFFERS_MANAGED + "  default: differs in ladder\n" + CAMPAIGNS_MANAGED
+    )
+    assert query(database, "SELECT version FROM offers") == [(1,)]
+    assert sha256(database) == before
+
+
+def test_a_new_offer_and_a_renamed_offer_are_reported_and_never_written(
+    database: Path, tmp_path: Path
+) -> None:
+    sync()
+    before = sha256(database)
+    block = OFFERS_TEXT[OFFERS_TEXT.index("  - key: default\n") :]
+    offers = edited(
+        "    name: Reply, then the audit, then a build\n",
+        "    name: Reply first\n",
+        OFFERS_TEXT,
+    ) + block.replace("  - key: default\n", "  - key: pilot\n")
+
+    result = sync(seed_dir(tmp_path, offers=offers), clock=FrozenClock(LATER))
+
+    assert (result.code, result.err) == (0, "")
+    start, end = result.out.index(OFFERS_MANAGED), result.out.index(CAMPAIGNS_MANAGED)
+    assert sorted(result.out[start:end].splitlines()[1:]) == [
+        "  default: differs in name",
+        "  pilot: only in the file",
     ]
+    assert query(database, "SELECT key, version FROM offers") == [("default", 1)]
+    assert sha256(database) == before
 
 
 def with_variants(*lines: str, key: str = "law_private_ai_us") -> str:
@@ -310,25 +330,20 @@ B_INACTIVE = "      - name: B\n        status: inactive\n"
 C_ACTIVE = "      - name: C\n        status: active\n"
 
 
-def test_an_added_variant_then_its_retirement_each_add_a_version(
-    database: Path, units: UnitOfWorkFactory, tmp_path: Path
+def test_variant_changes_in_the_file_are_reported_and_never_written(
+    database: Path, tmp_path: Path
 ) -> None:
     sync()
-    us = ids(units)["law_private_ai_us"]
-    run(units, "activate", us)
+    before = sha256(database)
 
     added = sync(seed_dir(tmp_path, campaigns=with_variants(A_ACTIVE, B_ACTIVE), name="b"))
     retired = sync(seed_dir(tmp_path, campaigns=with_variants(A_ACTIVE, B_INACTIVE), name="r"))
 
-    assert "  law_private_ai_us: changed (version 1 -> 2)\n" in added.out
-    assert "  law_private_ai_us: changed (version 2 -> 3)\n" in retired.out
-    assert [row for row in variant_rows(database) if row[0] == "law_private_ai_us"] == [
-        ("law_private_ai_us", "A", "active", "[]"),
-        ("law_private_ai_us", "B", "inactive", "[]"),
-    ]
-    assert campaign_rows(database)[1][2:] == ("active", None, None, 3)
-    statuses = [(e[2], e[3]) for e in event_rows(database, "campaigns") if e[1] == us]
-    assert statuses == [(None, "v1"), ("draft", "active"), ("v1", "v2"), ("v2", "v3")]
+    assert added.out.endswith(CAMPAIGNS_MANAGED + "  law_private_ai_us: differs in variants[B]\n")
+    assert retired.out.endswith(
+        CAMPAIGNS_MANAGED + "  law_private_ai_us: differs in variants[B]\n"
+    )
+    assert sha256(database) == before
 
 
 def test_notes_are_stored_as_canonical_json(database: Path, tmp_path: Path) -> None:
@@ -363,7 +378,7 @@ def test_a_third_variant_in_the_file_is_refused(database: Path, tmp_path: Path) 
     assert sha256(database) == before
 
 
-def test_stored_a_and_c_with_a_file_of_a_and_b_is_refused(
+def test_stored_a_and_c_with_a_file_of_a_and_b_is_reported(
     database: Path, tmp_path: Path
 ) -> None:
     stored = seed_dir(tmp_path, campaigns=with_variants(A_ACTIVE, C_ACTIVE), name="ac")
@@ -372,25 +387,21 @@ def test_stored_a_and_c_with_a_file_of_a_and_b_is_refused(
 
     result = sync(seed_dir(tmp_path, campaigns=with_variants(A_ACTIVE, B_ACTIVE), name="ab"))
 
-    assert (result.code, result.err) == (
-        1,
-        "seed/campaigns.yaml: campaigns[law_private_ai_us].variants: "
-        f"{TOO_MANY_VARIANTS}\n",
+    assert (result.code, result.err) == (0, "")
+    assert result.out.endswith(
+        CAMPAIGNS_MANAGED + "  law_private_ai_us: differs in variants[C], variants[B]\n"
     )
     assert sha256(database) == before
 
 
-def test_a_stored_variant_left_out_is_refused(database: Path, tmp_path: Path) -> None:
+def test_a_stored_variant_left_out_is_reported(database: Path, tmp_path: Path) -> None:
     sync(seed_dir(tmp_path, campaigns=with_variants(A_ACTIVE, B_ACTIVE), name="ab"))
     before = sha256(database)
 
     result = sync(seed_dir(tmp_path, campaigns=with_variants(B_ACTIVE), name="b"))
 
-    assert (result.code, result.err) == (
-        1,
-        "seed/campaigns.yaml: campaigns[law_private_ai_us].variants: leaves out the stored "
-        "Variant A: keep it, and set its status to inactive to retire it\n",
-    )
+    assert (result.code, result.err) == (0, "")
+    assert result.out.endswith(CAMPAIGNS_MANAGED + "  law_private_ai_us: differs in variants[A]\n")
     assert sha256(database) == before
 
 
@@ -418,18 +429,6 @@ SWAPPED_MARKETS = in_campaign(
 @pytest.mark.parametrize(
     ("campaigns", "offers", "expected"),
     [
-        (
-            SWAPPED_SEGMENTS,
-            OFFERS_TEXT,
-            "seed/campaigns.yaml: campaigns[law_private_ai_us].segment: can't change: a "
-            "Campaign keeps its Segment and Market",
-        ),
-        (
-            SWAPPED_MARKETS,
-            OFFERS_TEXT,
-            "seed/campaigns.yaml: campaigns[law_private_ai_us].market: can't change: a "
-            "Campaign keeps its Segment and Market",
-        ),
         (
             with_variants("      - name: A\n        status: inactive\n"),
             OFFERS_TEXT,
@@ -493,17 +492,8 @@ SWAPPED_MARKETS = in_campaign(
             "seed/offers.yaml: offers[default].ladder[1].price_usd_min: missing: an audit rung "
             "needs both prices",
         ),
-        (
-            edited("  - key: law_private_ai_us\n", "  - key: law_ai_us\n"),
-            OFFERS_TEXT,
-            "seed/campaigns.yaml: campaigns[law_ai_us]: uses the Segment and Market of the "
-            "stored Campaign law_private_ai_us, which is no longer in the file: keep that "
-            "Campaign's key",
-        ),
     ],
     ids=[
-        "segment-change",
-        "market-change",
         "no-active",
         "duplicate-pair",
         "unknown-offer",
@@ -512,18 +502,54 @@ SWAPPED_MARKETS = in_campaign(
         "aba-on-uk",
         "offer-reply-first",
         "audit-without-prices",
-        "renamed-key",
     ],
 )
 def test_an_invalid_seed_names_its_field_and_changes_nothing(
     database: Path, tmp_path: Path, campaigns: str, offers: str, expected: str
 ) -> None:
-    sync()
+    """Into a database with no Campaign: the shape and reference checks of Story 4.2."""
     before = sha256(database)
 
     result = sync(seed_dir(tmp_path, campaigns=campaigns, offers=offers))
 
     assert (result.code, result.out, result.err) == (1, "", expected + "\n")
+    assert sha256(database) == before
+
+
+@pytest.mark.parametrize(
+    ("campaigns", "expected"),
+    [
+        (
+            SWAPPED_SEGMENTS,
+            "  law_private_ai_us: differs in segment\n  ops_automation_us: differs in segment\n",
+        ),
+        (
+            SWAPPED_MARKETS,
+            "  law_private_ai_us: differs in market\n  law_private_ai_uk: differs in market\n",
+        ),
+        (
+            in_campaign("law_private_ai_us", "offer: default", "offer: premium"),
+            "  law_private_ai_us: differs in offer\n",
+        ),
+        (
+            edited("  - key: law_private_ai_us\n", "  - key: law_ai_us\n"),
+            "  law_ai_us: only in the file\n  law_private_ai_us: only in the dashboard\n",
+        ),
+    ],
+    ids=["segment-change", "market-change", "unknown-offer", "renamed-key"],
+)
+def test_managed_mode_checks_the_shape_only_and_lists_the_differences(
+    database: Path, tmp_path: Path, campaigns: str, expected: str
+) -> None:
+    """Story 11.8: with a Campaign stored, a file that names no stored row is not refused; the
+    file is ignored and only its differences are listed."""
+    sync()
+    before = sha256(database)
+
+    result = sync(seed_dir(tmp_path, campaigns=campaigns))
+
+    assert (result.code, result.err) == (0, "")
+    assert result.out.endswith(CAMPAIGNS_MANAGED + expected)
     assert sha256(database) == before
 
 
@@ -553,20 +579,18 @@ def test_a_stored_campaign_or_offer_left_out_stays_and_is_reported(
     )
     sync(seed_dir(tmp_path, offers=extra_offer, name="with_extra"))
     without_ops_uk = CAMPAIGNS_TEXT[: CAMPAIGNS_TEXT.index("  - key: ops_automation_uk\n")]
-    before = campaign_rows(database)
-    events_before = event_rows(database)
+    before = sha256(database)
 
     result = sync(seed_dir(tmp_path, campaigns=without_ops_uk, name="without"))
 
     assert result.code == 0, result.err
     assert result.out.endswith(
-        "offers: 0 changed, 1 unchanged\n"
-        "  extra: not in seed/offers.yaml, left as it is (version 1)\n"
-        "campaigns: 0 changed, 3 unchanged\n"
-        "  ops_automation_uk: not in seed/campaigns.yaml, left as it is (version 1)\n"
+        OFFERS_MANAGED
+        + "  extra: only in the dashboard\n"
+        + CAMPAIGNS_MANAGED
+        + "  ops_automation_uk: only in the dashboard\n"
     )
-    assert campaign_rows(database) == before
-    assert event_rows(database) == events_before
+    assert sha256(database) == before
 
 
 def test_a_stored_campaign_that_no_longer_decodes(
@@ -796,8 +820,8 @@ def test_add_variant_then_a_third_is_refused(
     )
     [record] = [r for r in caplog.records if r.getMessage() == "variant_added"]
     assert record.campaign == "law_private_ai_us"  # type: ignore[attr-defined]
-    # the seed now needs B in the file, as for any stored Variant
-    assert "leaves out the stored Variant B" in sync().err
+    # the seed is managed now: it lists the dashboard's Variant B as a difference
+    assert "  law_private_ai_us: differs in variants[B]\n" in sync().out
 
 
 def test_add_variant_checks_the_steps_and_the_floor(
@@ -897,7 +921,7 @@ def test_campaign_active_is_false_for_an_unknown_id(units: UnitOfWorkFactory) ->
             "'active', '[]', created_at, updated_at FROM variants, "
             "(SELECT 'V' AS n UNION SELECT 'W') WHERE name = 'A' "
             "AND campaign_id = (SELECT id FROM campaigns WHERE key = 'law_private_ai_us')",
-            "a Campaign can have at most 2 Variants",
+            "a Campaign can have at most 2 active Variants",
         ),
         (
             "UPDATE campaigns SET lia_ref = 'LIA' WHERE key = 'law_private_ai_us'",
@@ -1075,14 +1099,21 @@ def test_the_sync_logs_the_offers_and_campaigns_counts(
     sync()
     sync()
 
-    counts = ("created_count", "changed_count", "unchanged_count", "not_in_file_count")
+    counts = (
+        "created_count",
+        "changed_count",
+        "unchanged_count",
+        "not_in_file_count",
+        "managed",
+        "differences_count",
+    )
     found = {
         name: [[getattr(r, c) for c in counts] for r in caplog.records if r.getMessage() == name]
         for name in ("offers_synced", "campaigns_synced")
     }
     assert found == {
-        "offers_synced": [[1, 0, 0, 0], [0, 0, 1, 0]],
-        "campaigns_synced": [[4, 0, 0, 0], [0, 0, 4, 0]],
+        "offers_synced": [[1, 0, 0, 0, False, 0], [0, 0, 0, 0, True, 0]],
+        "campaigns_synced": [[4, 0, 0, 0, False, 0], [0, 0, 0, 0, True, 0]],
     }
 
 
@@ -1143,16 +1174,15 @@ WITH_OTHER_SEQUENCE = SEQUENCES_TEXT + _FIRST_SEQUENCE.replace(
 )
 
 
-def test_a_campaign_moved_to_another_offer_or_sequence_updates_in_place(
+def test_a_campaign_moved_to_another_offer_or_sequence_is_only_reported(
     database: Path, units: UnitOfWorkFactory, tmp_path: Path
 ) -> None:
     first = seed_dir(tmp_path, offers=EXTRA_OFFER, sequences=WITH_OTHER_SEQUENCE, name="first")
     assert sync(first).code == 0
     found = ids(units)
-    us, uk = found["law_private_ai_us"], found["law_private_ai_uk"]
-    run(units, "activate", us)
-    run(units, "activate", uk, "LIA-2026-01", "2026-11-16")
-    events_before = event_rows(database)
+    run(units, "activate", found["law_private_ai_us"])
+    run(units, "activate", found["law_private_ai_uk"], "LIA-2026-01", "2026-11-16")
+    before = sha256(database)
     moved = in_campaign(
         "law_private_ai_us",
         "offer: default",
@@ -1173,25 +1203,11 @@ def test_a_campaign_moved_to_another_offer_or_sequence_updates_in_place(
 
     assert (result.code, result.err) == (0, "")
     assert result.out.endswith(
-        "campaigns: 2 changed, 2 unchanged\n"
-        "  law_private_ai_us: changed (version 1 -> 2)\n"
-        "  law_private_ai_uk: changed (version 1 -> 2)\n"
+        CAMPAIGNS_MANAGED
+        + "  law_private_ai_us: differs in offer\n"
+        + "  law_private_ai_uk: differs in sequence\n"
     )
-    assert query(
-        database,
-        "SELECT c.key, o.key, s.key FROM campaigns c JOIN offers o ON o.id = c.offer_id "
-        "JOIN sequences s ON s.id = c.sequence_id WHERE c.key LIKE 'law_private_ai_%' "
-        "ORDER BY c.key",
-    ) == [("law_private_ai_uk", "default", "other"), ("law_private_ai_us", "extra", "default")]
-    assert campaign_rows(database)[:2] == [
-        ("law_private_ai_uk", "Law-PrivateAI × UK", "active", "LIA-2026-01", "2026-11-16", 2),
-        ("law_private_ai_us", "Law-PrivateAI × US", "active", None, None, 2),
-    ]
-    assert event_rows(database) == [
-        *events_before,
-        ("campaigns", us, "v1", "v2", "seed_sync", None, "seed", LATER_STAMP),
-        ("campaigns", uk, "v1", "v2", "seed_sync", None, "seed", LATER_STAMP),
-    ]
+    assert sha256(database) == before
 
 
 NOTES = (
@@ -1200,43 +1216,25 @@ NOTES = (
 )
 
 
-def test_notes_re_sync_unchanged_and_a_note_edit_or_a_case_rename_is_a_change(
-    database: Path, units: UnitOfWorkFactory, tmp_path: Path
+def test_notes_re_sync_unchanged_and_a_note_edit_or_a_case_rename_is_a_difference(
+    database: Path, tmp_path: Path
 ) -> None:
     assert sync(seed_dir(tmp_path, campaigns=with_variants(NOTES), name="notes")).code == 0
-    us = ids(units)["law_private_ai_us"]
     before = sha256(database)
 
     again = sync(seed_dir(tmp_path, campaigns=with_variants(NOTES), name="again"))
-
-    assert again.out.endswith(OFFERS_UNCHANGED + CAMPAIGNS_UNCHANGED)
-    assert sha256(database) == before
-    events_before = event_rows(database)
-
     note = NOTES.replace("Lead with client data", "Lead with their document workload")
-    edited_note = sync(
-        seed_dir(tmp_path, campaigns=with_variants(note), name="note"), clock=FrozenClock(LATER)
-    )
+    edited_note = sync(seed_dir(tmp_path, campaigns=with_variants(note), name="note"))
     renamed = sync(
-        seed_dir(tmp_path, campaigns=with_variants(note.replace("name: A", "name: a")), name="a"),
-        clock=FrozenClock(LATER),
+        seed_dir(tmp_path, campaigns=with_variants(NOTES.replace("name: A", "name: a")), name="a")
     )
 
-    assert "  law_private_ai_us: changed (version 1 -> 2)\n" in edited_note.out
-    assert "  law_private_ai_us: changed (version 2 -> 3)\n" in renamed.out
-    assert [row for row in variant_rows(database) if row[0] == "law_private_ai_us"] == [
-        (
-            "law_private_ai_us",
-            "a",
-            "active",
-            '[{"note":"Lead with their document workload","step":2}]',
-        )
-    ]
-    assert event_rows(database) == [
-        *events_before,
-        ("campaigns", us, "v1", "v2", "seed_sync", None, "seed", LATER_STAMP),
-        ("campaigns", us, "v2", "v3", "seed_sync", None, "seed", LATER_STAMP),
-    ]
+    assert again.out.endswith(OFFERS_MANAGED + CAMPAIGNS_MANAGED)
+    assert edited_note.out.endswith(
+        "  law_private_ai_us: differs in variants[A].step_angles\n"
+    )
+    assert renamed.out.endswith("  law_private_ai_us: differs in variants[A].name\n")
+    assert sha256(database) == before
 
 
 def test_a_stored_offer_that_no_longer_decodes(database: Path, units: UnitOfWorkFactory) -> None:

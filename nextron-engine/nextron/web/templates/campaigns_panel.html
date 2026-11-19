@@ -33,7 +33,7 @@ id="{{ form.prefix }}-{{ name }}" name="{{ name }}"
 <p class="notice notice-refused" role="alert">{{ panel.alert|plain }}</p>
 {%- endif %}
 {%- if not panel.campaigns and not panel.unavailable %}
-<p>No Campaigns yet. Run <code>nextron seed sync</code> to load them.</p>
+<p>No Campaigns yet. Create one on the <a href="/campaigns">Campaigns page</a>, or run <code>nextron seed sync</code> to load them.</p>
 {%- endif %}
 {%- for campaign in panel.campaigns %}
 <section class="campaign" aria-labelledby="campaign-{{ campaign.id }}-heading">

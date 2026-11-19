@@ -129,12 +129,16 @@ values, are synced only through ``seed_sync``, keyed by ``key`` into the ``offer
 Before any transaction ``_offer_inputs`` refuses an item that isn't an ``OfferDef``
 (``TypeError``) or a repeated key (``ValueError``) and, when there is at least one, validates the
 definitions again as the file form (``validate_offers`` on each ``offer_form``), raising
-``InvalidOffers``. Inside the transaction, in input order: a key with no row is inserted at
-version 1 with one ``events`` row (entity ``offers``, ``None`` to ``v1``, cause ``seed_sync``,
-actor ``seed``); an Offer whose decoded ``OfferDef`` differs is updated to version n+1 with one
-``events`` row ``v<n>`` to ``v<n+1>``; anything else writes nothing. A stored Offer the input
-leaves out is never changed or deleted. The result is ``OfferSync(created, changed, unchanged,
-not_in_file)``, shaped like ``SequenceSync``.
+``InvalidOffers``. Inside the transaction, while the database holds no Campaign, in input
+order: a key with no row is inserted at version 1 with one ``events`` row (entity ``offers``,
+``None`` to ``v1``, cause ``seed_sync``, actor ``seed``); an Offer whose decoded ``OfferDef``
+differs is updated to version n+1 with one ``events`` row ``v<n>`` to ``v<n+1>``; anything else
+writes nothing. A stored Offer the input leaves out is never changed or deleted. The result is
+``OfferSync(created, changed, unchanged, not_in_file, managed, differences)``, shaped like
+``SequenceSync``. **Managed** (Story 11.8: the database holds any Campaign, so the dashboard's
+Campaigns page owns Campaigns, Variants and Offers): nothing is written, and ``differences``
+lists ``OfferDifference(key, only_in, paths)`` like the Sequences' (``paths``: ``name`` and
+``ladder`` where they differ).
 
 The Campaigns of ``seed/campaigns.yaml`` (FR-3, AD-4, NFR-3, Story 4.2), as
 ``nextron.domain.campaign.CampaignDef`` values, are synced only through ``seed_sync``, keyed by
@@ -143,52 +147,52 @@ transaction ``_campaign_inputs`` refuses an item that isn't a ``CampaignDef`` (`
 a repeated key (``ValueError``) and, when there is at least one, validates the definitions again
 as the file form (``validate_campaigns`` on each ``campaign_form``), then runs
 ``check_campaign_references`` against this call's Segments, Markets (``{code: country_code}``),
-Offers and Sequences (``{key: number of Steps}``), raising ``InvalidCampaigns``. Inside the
-transaction it maps keys and codes to ids through ``setup``'s own repositories (which see this
-transaction's rows), then, before any write, refuses a file Campaign whose (Segment, Market)
-pair a stored Campaign the input leaves out holds (``campaigns[<key>]``: "uses the Segment and
-Market of the stored Campaign <other>, which is no longer in the file: keep that Campaign's
-key"). Then, per file Campaign in input order (decision 4):
+Offers and Sequences (``{key: number of Steps}``), raising ``InvalidCampaigns``; in managed
+mode (``campaigns_managed``, below) it checks the file's shape only, with no reference check.
+Inside the transaction (Story 11.8: once a Campaign exists the dashboard's Campaigns page owns
+the Campaigns, their Variants and the Offers, AD-12):
 
-- no row: it is inserted at ``draft`` with no LIA and its Variants, with one ``events`` row
-  (entity ``campaigns``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``);
-- a stored row whose Segment or Market differs: ``InvalidCampaigns`` on ``.segment`` or
-  ``.market`` ("can't change: a Campaign keeps its Segment and Market");
-- stored and file Variant names together (case-insensitively) more than 2:
-  ``TOO_MANY_VARIANTS`` on ``.variants``; a stored Variant the file leaves out: ``.variants``,
-  "leaves out the stored Variant <name>: keep it, and set its status to inactive to retire it";
-- otherwise, when the name, the Offer, the Sequence, or any Variant's name, status or notes
-  changed, or a Variant was added: the Variants that differ are updated, new ones inserted, and
-  the Campaign updated in place to version n+1 with one ``events`` row ``v<n>`` to ``v<n+1>``;
-- otherwise nothing is written.
+- **Bootstrap** (no stored Campaign): it maps keys and codes to ids through ``setup``'s own
+  repositories (which see this transaction's rows), then inserts each Campaign, in input order,
+  at ``draft`` with no LIA and its Variants, with one ``events`` row (entity ``campaigns``,
+  ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``).
+- **Managed** (any stored Campaign): nothing is written. ``differences`` lists
+  ``CampaignDifference(key, only_in, paths)`` like the Sequences', the paths from
+  ``nextron.domain.campaign.campaign_form_diff`` (stored against file). Decoding a stored
+  Campaign that no longer validates raises ``InvalidCampaigns``.
 
-The seed never writes a Campaign's ``status``, ``lia_ref`` or ``lia_date``. A stored Campaign
-the input leaves out is never changed or deleted. The result is ``CampaignSync(created,
-changed, unchanged, not_in_file)``, shaped like ``SequenceSync``.
+The seed never writes a Campaign's ``status``, ``lia_ref`` or ``lia_date``. The result is
+``CampaignSync(created, changed, unchanged, not_in_file, managed, differences)``, shaped like
+``SequenceSync``: in bootstrap mode only ``created``, in managed mode only ``managed`` (true)
+and ``differences``.
 
 **The seed sync** (Story 4.3 split it so the Approved Company Facts, owned by ``playbook``,
 load in the same transaction; ``nextron.app.ops.api.Seeds.sync_seed`` is the use case
 ``nextron seed sync`` calls, and a unit of work runs one use case):
 
 - ``check_seed(segments, markets, sequences, offers, campaigns, stored_segment_keys=None,
-  stored_sequence_steps=None) -> CheckedSeed`` runs every check of the five syncs that needs
+  stored_sequence_steps=None, campaigns_managed=False) -> CheckedSeed`` runs every check of the
+  five syncs that needs
   no database (Segments, Markets, Sequences, whose angles are checked against the Segments and
   this call's Markets, Offers, then Campaigns, whose references are checked against the
   Segments, this call's Markets and Offers, and the Sequences), raising as described above.
   "The Segments" are this call's, or, when ``stored_segment_keys`` is given (Story 11.5: the
   database holds Segments, so the file's are ignored), those stored keys. "The Sequences" are
   this call's ``{key: number of Steps}``, or, when ``stored_sequence_steps`` is given (Story
-  11.7: the database holds Sequences), the stored ones. ``CheckedSeed`` holds what they
-  return, with ``segment_keys``
+  11.7: the database holds Sequences), the stored ones. ``campaigns_managed`` (Story 11.8: the
+  database holds a Campaign) skips the Campaigns' reference checks, since the file is ignored.
+  ``CheckedSeed`` holds what they return, with ``segment_keys``
   (the keys the references were checked against) and ``market_countries`` (``{code:
   country_code}`` of this sync's Markets) for the facts' checks.
 - ``@command Setup.seed_sync(checked, now) -> SetupSeedSync(segments, markets, sequences,
   offers, campaigns)`` runs the five syncs in the caller's transaction, in that order, all at
-  ``now``, so a failure anywhere changes nothing.
+  ``now``, so a failure anywhere changes nothing. The Offers and Campaigns are managed when
+  ``checked.campaigns_managed`` is true or the database holds a Campaign, so Campaigns whose
+  references weren't checked are never inserted.
 - ``log_seed_sync(result)``, after the commit, logs ``segments_synced``, ``markets_synced``,
   ``sequences_synced``, ``offers_synced`` and then ``campaigns_synced``, each with the four
-  ``*_count`` fields (``segments_synced`` and ``sequences_synced`` also with ``managed`` and
-  ``differences_count``).
+  ``*_count`` fields (``segments_synced``, ``sequences_synced``, ``offers_synced`` and
+  ``campaigns_synced`` also with ``managed`` and ``differences_count``).
 
 **The Operator's Campaign commands** (FR-3, AD-4, AD-5, NFR-3, NFR-7, Story 4.2).
 ``Campaigns(clock)``: each method is a ``@use_case`` that reads the clock once and runs one
@@ -216,15 +220,61 @@ whose Market's ``country_code`` is ``GB`` (read live with the Campaign).
   Campaign, in any status, with the same validation; values equal to the stored ones are a
   no-op (``changed`` false, no event); otherwise ``set_lia`` and an event ``<status>`` to
   ``<status>`` (cause ``operator_record_lia``).
-- ``add_variant(campaign_id, name, step_angles=()) -> VariantAdded``: ``variant_from_fields``
-  against the stored Sequence's Step count and the Market's country (a third Variant is
-  ``{"form": TOO_MANY_VARIANTS}``); it inserts the Variant ``active``, gives the Campaign the
-  next version and appends ``v<n>`` to ``v<n+1>`` (cause ``operator_add_variant``).
+- ``add_variant(campaign_id, name, step_angles=(), based_on=None) -> VariantAdded``:
+  ``variant_from_fields`` against the stored Sequence's Step count and the Market's country,
+  every stored Variant's name (retired ones included) and the number of **active** ones (a third
+  active Variant is ``{"form": TOO_MANY_VARIANTS}``); it inserts the Variant ``active``, gives
+  the Campaign the next version and appends ``v<n>`` to ``v<n+1>`` (cause
+  ``operator_add_variant``). ``based_on`` (Story 11.8's page) other than the stored version is
+  ``{"form": STALE_CAMPAIGN}``.
 
-Every event has entity ``campaigns`` and actor ``operator``, and holds no value. After the
-commit they log ``campaign_activated``, ``campaign_paused``, ``campaign_resumed``,
-``campaign_lia_saved`` (when an LIA was written) and ``variant_added``, each with the Campaign's
-``key`` only (field ``campaign``).
+Story 11.8 adds the Campaigns page's commands. "Enrolled" is read through
+``nextron.app.queries.sequencing.enrollment_counts`` (every Enrollment status counts). A
+``based_on`` other than the stored version is ``{"form": "This Campaign changed since you opened
+it"}``, checked right after the Campaign is read. The references are row ids: a blank one is
+``{"<field>": "Choose one"}`` and one that names no stored row ``{"<field>": "No stored
+<Segment|Market|Offer|Sequence> has this id"}`` (fields ``segment``, ``market``, ``offer``,
+``sequence``). Every field problem is collected into one refusal.
+
+- ``activate`` and ``resume`` of a Campaign with no ``active`` Variant are ``{"form": "Add an
+  active Variant first"}``, checked before the LIA.
+- ``create_campaign(key, name, segment_id, market_id, offer_id, sequence_id) -> CampaignSaved``:
+  the stripped key and name through ``campaign_fields_problems``, a stored key ``{"key": "A
+  Campaign with this key already exists"}``, the references, then a (Segment, Market) pair a
+  Campaign holds ``{"form": PAIR_TAKEN}``. It inserts the Campaign at ``draft``, version 1, with
+  no Variant and no LIA, and appends ``None`` to ``v1`` (cause ``operator_create``).
+- ``edit_campaign(campaign_id, based_on, name, segment_id, market_id, offer_id, sequence_id) ->
+  CampaignSaved``: in order, the unknown id, the stale form, an LIA-less non-draft UK Campaign
+  (``LIA_FIRST``, as below), the name and references, then an identical save (nothing written,
+  ``changed`` false); a changed Segment or Market of a Campaign with any Enrollment
+  (``{"form": PAIR_FROZEN}``), onto a pair another Campaign holds (``PAIR_TAKEN``), or of a
+  non-draft Campaign onto a pair in a GB Market (``{"form": LIA_FIRST, "market":
+  UK_PAIR_DRAFT_ONLY}``, even when only the Segment changed); a new Sequence with fewer Steps
+  than an active Variant's note (``{"sequence": ...}``); a new Market whose country an active
+  Variant's note breaks the floor for (``note_floor_problem``, ``{"market": ...}``). It updates
+  the definition to version n+1 and appends ``v<n>`` to ``v<n+1>`` (cause ``operator_edit``). A
+  Segment or Market change also clears the stored LIA, which was made for the old pair: a draft
+  UK Campaign then asks for a new one at activation. The key never changes. Enrollments already
+  bind their Offer, Sequence and Sequence version, so an Offer or Sequence change reaches new
+  Enrollments only.
+- ``edit_variant(campaign_id, variant_id, based_on, name, step_angles) -> VariantSaved``: a
+  Variant this Campaign doesn't have is ``{"form": NO_SUCH_VARIANT}``, a retired one
+  ``{"form": VARIANT_RETIRED}``, one with any Enrollment ``{"form": VARIANT_ENROLLED}``; then
+  ``variant_from_fields`` against the other Variants' names and no cap. An identical save writes
+  nothing; otherwise it updates the Variant and appends ``v<n>`` to ``v<n+1>`` (cause
+  ``operator_edit_variant``).
+- ``retire_variant(campaign_id, variant_id, based_on) -> VariantSaved``: an unknown Variant or a
+  retired one is refused as above; the last active Variant of a Campaign that isn't ``draft`` is
+  ``{"form": LAST_ACTIVE_VARIANT}``. It sets the Variant ``inactive`` (final) and appends
+  ``v<n>`` to ``v<n+1>`` (cause ``operator_retire_variant``). Its Enrollments keep it.
+
+Each of the three Variant commands and ``edit_campaign`` is refused by the LIA-gap rule first,
+as ``add_variant`` is. Every event has entity ``campaigns`` and actor ``operator``, and holds no
+value. After the commit they log ``campaign_activated``, ``campaign_paused``,
+``campaign_resumed``, ``campaign_lia_saved`` (when an LIA was written), ``variant_added``,
+``campaign_created``, ``campaign_edited``, ``variant_edited`` and ``variant_retired`` (the last
+three only when something was written), each with the Campaign's ``key`` only (field
+``campaign``).
 
 ``Credentials`` (AD-12, FR-56, NFR-18) stores the external credentials declared in
 ``nextron.domain.credentials`` in Windows Credential Manager through ``SecretsPort``. Its
@@ -387,6 +437,7 @@ from typing import Final, NoReturn
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nextron.app.queries import compliance as compliance_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.setup import campaigns as campaigns_repo
@@ -399,12 +450,29 @@ from nextron.db.uow import command, current, use_case
 from nextron.domain import credentials as credential_registry
 from nextron.domain import settings_schema
 from nextron.domain.campaign import (
+    CAMPAIGN_CREATED_CAUSE,
+    CAMPAIGN_EDITED_CAUSE,
+    CHOOSE_ONE,
     FORM_FIELD,
+    KEY_FIELD,
+    KEY_TAKEN,
+    LAST_ACTIVE_VARIANT,
     LIA_FIRST,
     LIA_RECORDED_CAUSE,
-    MAX_VARIANTS,
-    TOO_MANY_VARIANTS,
+    MARKET_FIELD,
+    NEEDS_VARIANT_FIRST,
+    NO_SUCH_VARIANT,
+    OFFER_FIELD,
+    PAIR_FROZEN,
+    PAIR_TAKEN,
+    SEGMENT_FIELD,
+    SEQUENCE_FIELD,
+    STALE_CAMPAIGN,
     VARIANT_ADDED_CAUSE,
+    VARIANT_EDITED_CAUSE,
+    VARIANT_ENROLLED,
+    VARIANT_RETIRED,
+    VARIANT_RETIRED_CAUSE,
     CampaignCause,
     CampaignDef,
     CampaignEvent,
@@ -412,11 +480,14 @@ from nextron.domain.campaign import (
     CampaignStatus,
     InvalidCampaigns,
     StepAngleNote,
-    VariantDef,
+    VariantStatus,
+    campaign_fields_problems,
     campaign_form,
+    campaign_form_diff,
     check_campaign_references,
     lia_from_fields,
     needs_lia,
+    note_floor_problem,
     transition,
     validate_campaigns,
     variant_from_fields,
@@ -431,6 +502,7 @@ from nextron.domain.credentials import (
     unsub_key,
 )
 from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.ids import is_ulid
 from nextron.domain.google_oauth import (
     CLIENT_META_NAME,
     CLIENT_SECRET_NAME,
@@ -566,10 +638,25 @@ CAMPAIGN_PAUSED: Final = "campaign_paused"
 CAMPAIGN_RESUMED: Final = "campaign_resumed"
 CAMPAIGN_LIA_SAVED: Final = "campaign_lia_saved"
 VARIANT_ADDED: Final = "variant_added"
+CAMPAIGN_CREATED: Final = "campaign_created"
+CAMPAIGN_EDITED: Final = "campaign_edited"
+VARIANT_EDITED: Final = "variant_edited"
+VARIANT_RETIRED_LOG: Final = "variant_retired"
+# Story 11.8: a reference row id that names no stored row, by form field.
+NO_SUCH_REFERENCE: Final = {
+    SEGMENT_FIELD: "No stored Segment has this id",
+    MARKET_FIELD: "No stored Market has this id",
+    OFFER_FIELD: "No stored Offer has this id",
+    SEQUENCE_FIELD: "No stored Sequence has this id",
+}
 CAMPAIGN_LOG_FIELD: Final = "campaign"  # the Campaign's key, the only field its logs carry
 NO_SUCH_CAMPAIGN: Final = "No Campaign has this id"
+# Story 11.8: a non-draft Campaign moving to a new pair in a GB Market (the market field's reason).
+UK_PAIR_DRAFT_ONLY: Final = (
+    "Only a draft Campaign can move to a new UK Segment or Market: its assessment must be made "
+    "for the new pair"
+)
 ONLY_UK_LIA: Final = "Only a UK Campaign records a legitimate-interests assessment"
-KEEPS_SEGMENT_AND_MARKET: Final = "can't change: a Campaign keeps its Segment and Market"
 CAMPAIGN_CHANGED: Final = "This Campaign changed meanwhile; reload the page and try again"
 # How a refusal names each event: "This Campaign is <status>, so it can't be <verb>".
 EVENT_VERBS: Final = {
@@ -653,28 +740,54 @@ class SequenceSync:
 
 
 @dataclass(frozen=True, slots=True)
+class OfferDifference:
+    """How the seed file and the database differ on one Offer key (Story 11.8), shaped like
+    ``SegmentDifference``."""
+
+    key: str
+    only_in: str | None
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class OfferSync:
     """What ``seed_sync`` did to the Offers: ``created`` as ``(key, version)``, ``changed`` as
     ``(key, from_version, to_version)`` and ``unchanged`` keys, each in input order, and
-    ``not_in_file`` as ``(key, version)`` of each stored Offer the input left out, by key."""
+    ``not_in_file`` as ``(key, version)`` of each stored Offer the input left out, by key.
+    ``managed`` (Story 11.8) says the database held a Campaign, so nothing was written and
+    ``differences`` lists how the file differs."""
 
     created: tuple[tuple[str, int], ...]
     changed: tuple[tuple[str, int, int], ...]
     unchanged: tuple[str, ...]
     not_in_file: tuple[tuple[str, int], ...]
+    managed: bool = False
+    differences: tuple[OfferDifference, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignDifference:
+    """How the seed file and the database differ on one Campaign key (Story 11.8), shaped like
+    ``SegmentDifference``."""
+
+    key: str
+    only_in: str | None
+    paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class CampaignSync:
-    """What ``seed_sync`` did to the Campaigns: ``created`` as ``(key, version)``, ``changed``
-    as ``(key, from_version, to_version)`` and ``unchanged`` keys, each in input order, and
-    ``not_in_file`` as ``(key, version)`` of each stored Campaign the input left out, by
-    key."""
+    """What ``seed_sync`` did to the Campaigns: ``created`` as ``(key, version)`` in input
+    order. The other counts stay for the summary's shape: since Story 11.8 only a bootstrap
+    writes, and ``managed`` says the database already held a Campaign, so nothing was written
+    and ``differences`` lists how the file differs."""
 
     created: tuple[tuple[str, int], ...]
     changed: tuple[tuple[str, int, int], ...]
     unchanged: tuple[str, ...]
     not_in_file: tuple[tuple[str, int], ...]
+    managed: bool = False
+    differences: tuple[CampaignDifference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,6 +815,7 @@ class CheckedSeed:
     campaigns: tuple[CampaignDef, ...]
     stored_segment_keys: frozenset[str] | None = None
     stored_sequence_steps: Mapping[str, int] | None = None
+    campaigns_managed: bool = False
 
     @property
     def segment_keys(self) -> frozenset[str]:
@@ -725,6 +839,7 @@ def check_seed(
     campaigns: Sequence[CampaignDef],
     stored_segment_keys: Collection[str] | None = None,
     stored_sequence_steps: Mapping[str, int] | None = None,
+    campaigns_managed: bool = False,
 ) -> CheckedSeed:
     """Every check of the seed's five syncs that needs no database; see the module
     docstring."""
@@ -750,6 +865,7 @@ def check_seed(
             if stored_steps is None
             else stored_steps
         ),
+        check_references=not campaigns_managed,
     )
     return CheckedSeed(
         chosen_segments,
@@ -760,6 +876,7 @@ def check_seed(
         chosen_campaigns,
         stored_keys,
         stored_steps,
+        bool(campaigns_managed),
     )
 
 
@@ -767,7 +884,8 @@ def log_seed_sync(result: SetupSeedSync) -> None:
     """Log ``segments_synced``, ``markets_synced``, ``sequences_synced``, ``offers_synced`` and
     ``campaigns_synced`` with their counts; ``segments_synced`` also carries ``managed`` and
     ``differences_count`` (Story 11.5), so a managed sync is told apart from a no-op, and so
-    does ``sequences_synced`` (Story 11.7)."""
+    do ``sequences_synced`` (Story 11.7), ``offers_synced`` and ``campaigns_synced`` (Story
+    11.8)."""
     _log_segment_sync(result.segments)
     _log_sync(MARKETS_SYNCED, result.markets)
     _log_sync(
@@ -776,8 +894,18 @@ def log_seed_sync(result: SetupSeedSync) -> None:
         managed=result.sequences.managed,
         differences_count=len(result.sequences.differences),
     )
-    _log_sync(OFFERS_SYNCED, result.offers)
-    _log_sync(CAMPAIGNS_SYNCED, result.campaigns)
+    _log_sync(
+        OFFERS_SYNCED,
+        result.offers,
+        managed=result.offers.managed,
+        differences_count=len(result.offers.differences),
+    )
+    _log_sync(
+        CAMPAIGNS_SYNCED,
+        result.campaigns,
+        managed=result.campaigns.managed,
+        differences_count=len(result.campaigns.differences),
+    )
 
 
 def _log_changed(keys: list[str]) -> None:
@@ -940,14 +1068,16 @@ class Setup:
     @command
     def seed_sync(self, checked: CheckedSeed, now: datetime) -> SetupSeedSync:
         """Upsert the checked Segments, Markets, Sequences, Offers and Campaigns in the caller's
-        transaction; see the module docstring."""
+        transaction; see the module docstring. Managed (Story 11.8: the dashboard owns the
+        Offers and Campaigns) when the check skipped the references or a Campaign is stored."""
         if not isinstance(checked, CheckedSeed):
             raise TypeError(f"seed_sync takes a CheckedSeed, not {type(checked).__name__}")
         segment_result = _sync_segments(checked.segments, checked.segment_texts, now)
         market_result = _sync_markets(checked.markets, now)
         sequence_result = _sync_sequences(checked.sequences, now)
-        offer_result = _sync_offers(checked.offers, now)
-        campaign_result = _sync_campaigns(checked.campaigns, now)
+        managed = checked.campaigns_managed or bool(campaigns_repo.keys())
+        offer_result = _sync_offers(checked.offers, now, managed=managed)
+        campaign_result = _sync_campaigns(checked.campaigns, now, managed=managed)
         return SetupSeedSync(
             segment_result, market_result, sequence_result, offer_result, campaign_result
         )
@@ -1251,8 +1381,13 @@ def _offer_inputs(offers: Sequence[OfferDef]) -> tuple[OfferDef, ...]:
     return validate_offers({"offers": [offer_form(offer) for offer in chosen]})
 
 
-def _sync_offers(chosen: tuple[OfferDef, ...], now: datetime) -> OfferSync:
-    """The Offers' upsert, inside the running use case's transaction."""
+def _sync_offers(
+    chosen: tuple[OfferDef, ...], now: datetime, *, managed: bool = False
+) -> OfferSync:
+    """The Offers' upsert, or (Story 11.8) the managed mode's differences, inside the running
+    use case's transaction."""
+    if managed:
+        return OfferSync((), (), (), (), True, _offer_differences(chosen, offers_repo.all_offers()))
     created: list[tuple[str, int]] = []
     changed: list[tuple[str, int, int]] = []
     unchanged: list[str] = []
@@ -1274,6 +1409,30 @@ def _sync_offers(chosen: tuple[OfferDef, ...], now: datetime) -> OfferSync:
             unchanged.append(offer.key)
     not_in_file = tuple((row.key, row.version) for row in left_out)
     return OfferSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+
+
+def _offer_differences(
+    chosen: Sequence[OfferDef], stored: Sequence[offers_repo.StoredOffer]
+) -> tuple[OfferDifference, ...]:
+    """How the file's Offers differ from the stored ones: the file's keys in input order, then
+    the stored keys the file leaves out, by key."""
+    by_key = {row.key: row for row in stored}
+    found: list[OfferDifference] = []
+    for offer in chosen:
+        row = by_key.get(offer.key)
+        if row is None:
+            found.append(OfferDifference(offer.key, SEGMENT_ONLY_IN_FILE))
+            continue
+        paths = tuple(
+            name for name in ("name", "ladder") if getattr(row.offer, name) != getattr(offer, name)
+        )
+        if paths:
+            found.append(OfferDifference(offer.key, None, paths))
+    keys = {offer.key for offer in chosen}
+    found += [
+        OfferDifference(row.key, SEGMENT_ONLY_IN_DASHBOARD) for row in stored if row.key not in keys
+    ]
+    return tuple(found)
 
 
 def _record_version(
@@ -1301,10 +1460,14 @@ def _campaign_inputs(
     market_countries: Mapping[str, str],
     offer_keys: Collection[str],
     sequence_steps: Mapping[str, int],
+    *,
+    check_references: bool = True,
 ) -> tuple[CampaignDef, ...]:
     """``check_seed``'s Campaign checks before any transaction: the Campaigns as validation
     returns them from their file form, their references checked against this call's Segments,
-    Markets, Offers and Sequences, or ``TypeError``, ``ValueError`` or ``InvalidCampaigns``."""
+    Markets, Offers and Sequences (unless ``check_references`` is false: Story 11.8's managed
+    mode checks the file's shape only), or ``TypeError``, ``ValueError`` or
+    ``InvalidCampaigns``."""
     chosen = tuple(campaigns)
     for campaign in chosen:
         if not isinstance(campaign, CampaignDef):
@@ -1316,9 +1479,10 @@ def _campaign_inputs(
     if not chosen:
         return ()
     validated = validate_campaigns({"campaigns": [campaign_form(c) for c in chosen]})
-    check_campaign_references(
-        validated, segment_keys, market_countries, offer_keys, sequence_steps
-    )
+    if check_references:
+        check_campaign_references(
+            validated, segment_keys, market_countries, offer_keys, sequence_steps
+        )
     return validated
 
 
@@ -1355,57 +1519,14 @@ def _campaign_ids(campaign: CampaignDef, ids: Sequence[Mapping[str, str]]) -> _C
     return _CampaignIds(*found)
 
 
-def _refuse_held_pairs(
-    chosen: Sequence[CampaignDef],
-    refs: Mapping[str, _CampaignIds],
-    left_out: Sequence[campaigns_repo.StoredCampaign],
-) -> None:
-    """One Campaign per Segment and Market across every stored Campaign: raise
-    ``InvalidCampaigns`` for the first file Campaign, in file order, whose pair a stored
-    Campaign the input leaves out still holds (a Campaign whose key was renamed, say)."""
-    held = {(row.segment_id, row.market_id): row.key for row in left_out}
-    for campaign in chosen:
-        found = refs[campaign.key]
-        other = held.get((found.segment_id, found.market_id))
-        if other is not None:
-            raise InvalidCampaigns(
-                f"campaigns[{campaign.key}]",
-                f"uses the Segment and Market of the stored Campaign {other}, which is no longer "
-                "in the file: keep that Campaign's key",
-            )
-
-
-def _variant_writes(
-    campaign: CampaignDef, stored: campaigns_repo.StoredCampaign
-) -> list[tuple[campaigns_repo.StoredVariant | None, VariantDef]]:
-    """The Variants a stored Campaign's sync writes, in file order (``None``: a new one), after
-    refusing more than 2 Variants in all or a stored Variant the file leaves out."""
-    path = f"campaigns[{campaign.key}].variants"
-    stored_variants = {variant.name.casefold(): variant for variant in stored.variants}
-    file_variants = {variant.name.casefold(): variant for variant in campaign.variants}
-    if len(stored_variants.keys() | file_variants.keys()) > MAX_VARIANTS:
-        raise InvalidCampaigns(path, TOO_MANY_VARIANTS)
-    for name, variant in stored_variants.items():
-        if name not in file_variants:
-            raise InvalidCampaigns(
-                path,
-                f"leaves out the stored Variant {variant.name}: keep it, and set its status to "
-                "inactive to retire it",
-            )
-    writes: list[tuple[campaigns_repo.StoredVariant | None, VariantDef]] = []
-    for name, variant in file_variants.items():
-        before = stored_variants.get(name)
-        if before is None or before.definition != variant:
-            writes.append((before, variant))
-    return writes
-
-
-def _sync_campaigns(chosen: tuple[CampaignDef, ...], now: datetime) -> CampaignSync:
-    """The Campaigns' upsert, inside the running use case's transaction. It never writes a
-    Campaign's status or LIA."""
-    created: list[tuple[str, int]] = []
-    changed: list[tuple[str, int, int]] = []
-    unchanged: list[str] = []
+def _sync_campaigns(
+    chosen: tuple[CampaignDef, ...], now: datetime, *, managed: bool = False
+) -> CampaignSync:
+    """The Campaigns' bootstrap, or (Story 11.8) the managed mode's differences, inside the
+    running use case's transaction. It never writes a Campaign's status or LIA."""
+    if managed:
+        stored = campaigns_repo.all_campaigns()
+        return CampaignSync((), (), (), (), True, _campaign_differences(chosen, stored))
     ids = (
         {row.key: row.id for row in segments_repo.all_segments()},
         {row.code: row.id for row in markets_repo.all_markets()},
@@ -1413,52 +1534,44 @@ def _sync_campaigns(chosen: tuple[CampaignDef, ...], now: datetime) -> CampaignS
         {row.key: row.id for row in sequences_repo.all_sequences()},
     )
     refs = {campaign.key: _campaign_ids(campaign, ids) for campaign in chosen}
-    stored_campaigns = {row.key: row for row in campaigns_repo.all_campaigns()}
-    left_out = [row for key, row in stored_campaigns.items() if key not in refs]
-    _refuse_held_pairs(chosen, refs, left_out)  # before any write
+    created: list[tuple[str, int]] = []
     for campaign in chosen:
         found = refs[campaign.key]
-        stored = stored_campaigns.get(campaign.key)
-        if stored is None:
-            campaign_id = campaigns_repo.insert(
-                campaign,
-                segment_id=found.segment_id,
-                market_id=found.market_id,
-                offer_id=found.offer_id,
-                sequence_id=found.sequence_id,
-                at=now,
-            )
-            _record_version(CAMPAIGNS_ENTITY, campaign_id, None, campaigns_repo.FIRST_VERSION, now)
-            created.append((campaign.key, campaigns_repo.FIRST_VERSION))
-            continue
-        path = f"campaigns[{campaign.key}]"
-        if stored.segment_id != found.segment_id:
-            raise InvalidCampaigns(f"{path}.segment", KEEPS_SEGMENT_AND_MARKET)
-        if stored.market_id != found.market_id:
-            raise InvalidCampaigns(f"{path}.market", KEEPS_SEGMENT_AND_MARKET)
-        writes = _variant_writes(campaign, stored)
-        config = (campaign.name, found.offer_id, found.sequence_id)
-        if not writes and config == (stored.name, stored.offer_id, stored.sequence_id):
-            unchanged.append(campaign.key)
-            continue
-        for before, variant in writes:
-            if before is None:
-                campaigns_repo.insert_variant(stored.id, variant, now)
-            else:
-                campaigns_repo.update_variant(before.id, variant, now)
-        version = stored.version + 1
-        campaigns_repo.update_config(
-            stored.id,
-            name=campaign.name,
+        campaign_id = campaigns_repo.insert(
+            campaign,
+            segment_id=found.segment_id,
+            market_id=found.market_id,
             offer_id=found.offer_id,
             sequence_id=found.sequence_id,
-            version=version,
             at=now,
         )
-        _record_version(CAMPAIGNS_ENTITY, stored.id, stored.version, version, now)
-        changed.append((campaign.key, stored.version, version))
-    not_in_file = tuple((row.key, row.version) for row in left_out)
-    return CampaignSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+        _record_version(CAMPAIGNS_ENTITY, campaign_id, None, campaigns_repo.FIRST_VERSION, now)
+        created.append((campaign.key, campaigns_repo.FIRST_VERSION))
+    return CampaignSync(tuple(created), (), (), ())
+
+
+def _campaign_differences(
+    chosen: Sequence[CampaignDef], stored: Sequence[campaigns_repo.StoredCampaign]
+) -> tuple[CampaignDifference, ...]:
+    """How the file's Campaigns differ from the stored ones: the file's keys in input order,
+    then the stored keys the file leaves out, by key."""
+    by_key = {row.key: row for row in stored}
+    found: list[CampaignDifference] = []
+    for campaign in chosen:
+        row = by_key.get(campaign.key)
+        if row is None:
+            found.append(CampaignDifference(campaign.key, SEGMENT_ONLY_IN_FILE))
+            continue
+        paths = campaign_form_diff(row.campaign, campaign)
+        if paths:
+            found.append(CampaignDifference(campaign.key, None, paths))
+    keys = {campaign.key for campaign in chosen}
+    found += [
+        CampaignDifference(row.key, SEGMENT_ONLY_IN_DASHBOARD)
+        for row in stored
+        if row.key not in keys
+    ]
+    return tuple(found)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1492,8 +1605,188 @@ class VariantAdded:
     version: int
 
 
+@dataclass(frozen=True, slots=True)
+class CampaignSaved:
+    """What ``create_campaign`` or ``edit_campaign`` did: the Campaign's id, key and (new or
+    unchanged) version, and whether anything was written (Story 11.8)."""
+
+    campaign_id: str
+    key: str
+    version: int
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VariantSaved:
+    """What ``edit_variant`` or ``retire_variant`` did: the Variant's id and name, the
+    Campaign's (new or unchanged) version, and whether anything was written (Story 11.8)."""
+
+    campaign_id: str
+    variant_id: str
+    name: str
+    version: int
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _References:
+    """The stored rows a Campaign form's ids name: the Market's country and the Sequence's
+    Step count, which the checks need."""
+
+    segment_id: str
+    market_id: str
+    offer_id: str
+    sequence_id: str
+    country_code: str
+    sequence_steps: int
+
+
+def _text(value: object, label: str) -> str:
+    """A submitted text, stripped; ``TypeError`` for anything that isn't text."""
+    if not isinstance(value, str):
+        raise TypeError(f"the Campaign {label} is text, not {type(value).__name__}")
+    return value.strip()
+
+
+def _references(
+    segment_id: object,
+    market_id: object,
+    offer_id: object,
+    sequence_id: object,
+    problems: dict[str, str],
+) -> _References | None:
+    """The stored rows the four ids name, or ``None`` after adding each blank id
+    (``CHOOSE_ONE``) or id that names no stored row to ``problems``."""
+    given = {
+        SEGMENT_FIELD: _text(segment_id, SEGMENT_FIELD),
+        MARKET_FIELD: _text(market_id, MARKET_FIELD),
+        OFFER_FIELD: _text(offer_id, OFFER_FIELD),
+        SEQUENCE_FIELD: _text(sequence_id, SEQUENCE_FIELD),
+    }
+    for name, text in given.items():
+        if not text:
+            problems[name] = CHOOSE_ONE
+        elif not is_ulid(text):
+            problems[name] = NO_SUCH_REFERENCE[name]
+            given[name] = ""  # names no stored row
+    segment_text = given[SEGMENT_FIELD]
+    if segment_text and segments_repo.get(segment_text) is None:
+        problems[SEGMENT_FIELD] = NO_SUCH_REFERENCE[SEGMENT_FIELD]
+    countries = {row.id: row.market.country_code for row in markets_repo.all_markets()}
+    if given[MARKET_FIELD] and given[MARKET_FIELD] not in countries:
+        problems[MARKET_FIELD] = NO_SUCH_REFERENCE[MARKET_FIELD]
+    offer_ids = {row.id for row in offers_repo.all_offers()}
+    if given[OFFER_FIELD] and given[OFFER_FIELD] not in offer_ids:
+        problems[OFFER_FIELD] = NO_SUCH_REFERENCE[OFFER_FIELD]
+    sequence = sequences_repo.by_id(given[SEQUENCE_FIELD]) if given[SEQUENCE_FIELD] else None
+    if given[SEQUENCE_FIELD] and sequence is None:
+        problems[SEQUENCE_FIELD] = NO_SUCH_REFERENCE[SEQUENCE_FIELD]
+    if any(name in problems for name in given) or sequence is None:
+        return None
+    return _References(
+        segment_id=given[SEGMENT_FIELD],
+        market_id=given[MARKET_FIELD],
+        offer_id=given[OFFER_FIELD],
+        sequence_id=given[SEQUENCE_FIELD],
+        country_code=countries[given[MARKET_FIELD]],
+        sequence_steps=len(sequence.sequence.steps),
+    )
+
+
+def _pair_holder(segment_id: str, market_id: str, other_than: str | None) -> bool:
+    """Whether a stored Campaign other than ``other_than`` holds this (Segment, Market) pair;
+    read without decoding the Campaigns."""
+    return any(
+        held != other_than
+        for held in campaigns_repo.ids_for_pair(segment_id, market_id)
+    )
+
+
+def _active(stored: campaigns_repo.StoredCampaign) -> list[campaigns_repo.StoredVariant]:
+    return [found for found in stored.variants if found.status == VariantStatus.ACTIVE]
+
+
+def _refuse_no_active_variant(stored: campaigns_repo.StoredCampaign) -> None:
+    """``CampaignRefused`` (``NEEDS_VARIANT_FIRST``) for a Campaign with no active Variant."""
+    if not _active(stored):
+        raise CampaignRefused({FORM_FIELD: NEEDS_VARIANT_FIRST})
+
+
+def _refuse_stale(stored: campaigns_repo.StoredCampaign, based_on: object) -> None:
+    if isinstance(based_on, bool) or based_on != stored.version:
+        raise CampaignRefused({FORM_FIELD: STALE_CAMPAIGN})
+
+
+def _stored_variant(
+    stored: campaigns_repo.StoredCampaign, variant_id: object
+) -> campaigns_repo.StoredVariant:
+    """The Campaign's Variant ``variant_id``, still ``active``; ``CampaignRefused`` when it has
+    no such Variant or the Variant is retired."""
+    for found in stored.variants:
+        if found.id == variant_id:
+            if found.status != VariantStatus.ACTIVE:
+                raise CampaignRefused({FORM_FIELD: VARIANT_RETIRED})
+            return found
+    raise CampaignRefused({FORM_FIELD: NO_SUCH_VARIANT})
+
+
+def _bump(stored: campaigns_repo.StoredCampaign, cause: str, now: datetime) -> int:
+    """Give the Campaign its next version, unchanged otherwise, with its event; the new
+    version."""
+    version = stored.version + 1
+    campaigns_repo.update_config(
+        stored.id,
+        name=stored.name,
+        offer_id=stored.offer_id,
+        sequence_id=stored.sequence_id,
+        version=version,
+        at=now,
+    )
+    _record_campaign(
+        stored.id, _version_status(stored.version), _version_status(version), cause, now
+    )
+    return version
+
+
+def _steps_text(steps: int) -> str:
+    return f"{steps} Step" if steps == 1 else f"{steps} Steps"
+
+
+def _edit_problems(
+    stored: campaigns_repo.StoredCampaign, found: _References, enrolled: bool
+) -> dict[str, str]:
+    """``edit_campaign``'s checks of a changed definition, in order; the first problem only."""
+    if (found.segment_id, found.market_id) != (stored.segment_id, stored.market_id):
+        if enrolled:
+            return {FORM_FIELD: PAIR_FROZEN}
+        if _pair_holder(found.segment_id, found.market_id, stored.id):
+            return {FORM_FIELD: PAIR_TAKEN}
+        if stored.status != CampaignStatus.DRAFT and needs_lia(found.country_code):
+            # The stored LIA was made for the old pair and is cleared, so only a draft
+            # Campaign (which asks for a new one at activation) may move into a UK pair.
+            return {FORM_FIELD: LIA_FIRST, MARKET_FIELD: UK_PAIR_DRAFT_ONLY}
+    active = _active(stored)
+    if found.sequence_id != stored.sequence_id:
+        for variant in active:
+            beyond = [note.step for note in variant.step_angles if note.step > found.sequence_steps]
+            if beyond:
+                return {
+                    SEQUENCE_FIELD: f"Variant {variant.name} has an angle note for Step "
+                    f"{max(beyond)}, but this Sequence has {_steps_text(found.sequence_steps)}"
+                }
+    if found.market_id != stored.market_id:
+        for variant in active:
+            for index, note in enumerate(variant.step_angles):
+                problem = note_floor_problem(note.note, found.country_code)
+                if problem is not None:
+                    return {
+                        MARKET_FIELD: f"Variant {variant.name}'s angle note {index + 1} {problem}"
+                    }
+    return {}
+
+
 def _record_campaign(
-    campaign_id: str, from_status: str, to_status: str, cause: str, at: datetime
+    campaign_id: str, from_status: str | None, to_status: str, cause: str, at: datetime
 ) -> None:
     """An Operator's ``campaigns`` event."""
     eventlog.append(
@@ -1569,8 +1862,9 @@ def _given(text: str | None) -> str:
 
 
 class Campaigns:
-    """The Operator's Campaign commands: activate, pause, resume, record the LIA and add a
-    Variant; see the module docstring."""
+    """The Operator's Campaign commands: activate, pause, resume, record the LIA, add a Variant,
+    and (Story 11.8) create and edit a Campaign and edit and retire a Variant; see the module
+    docstring."""
 
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
@@ -1611,6 +1905,7 @@ class Campaigns:
         with current().transaction():
             stored = _stored_campaign(campaign_id)
             moved = _allowed(stored, CampaignEvent.ACTIVATE)
+            _refuse_no_active_variant(stored)  # Story 11.8: before the LIA
             lia_saved = False
             if needs_lia(stored.country_code):
                 lia_saved = self._save_lia(stored, lia_ref, lia_date, now)
@@ -1641,6 +1936,7 @@ class Campaigns:
         with current().transaction():
             stored = _stored_campaign(campaign_id)
             moved = _allowed(stored, CampaignEvent.RESUME)
+            _refuse_no_active_variant(stored)  # Story 11.8: before the LIA
             _refuse_lia_gap(stored)  # a paused UK Campaign resumes only with its stored LIA
             result = _move(stored, moved, now)
         _log_campaign(CAMPAIGN_RESUMED, stored.key)
@@ -1661,12 +1957,18 @@ class Campaigns:
 
     @use_case
     def add_variant(
-        self, campaign_id: str, name: str, step_angles: Sequence[StepAngleNote] = ()
+        self,
+        campaign_id: str,
+        name: str,
+        step_angles: Sequence[StepAngleNote] = (),
+        based_on: int | None = None,
     ) -> VariantAdded:
         """Add an ``active`` Variant to a Campaign, giving the Campaign the next version."""
         now = self._clock.now()
         with current().transaction():
             stored = _stored_campaign(campaign_id)
+            if based_on is not None:
+                _refuse_stale(stored, based_on)
             _refuse_lia_gap(stored)
             sequence = sequences_repo.by_key(stored.campaign.sequence)
             variant = variant_from_fields(
@@ -1675,26 +1977,171 @@ class Campaigns:
                 existing_names=[found.name for found in stored.variants],
                 steps=0 if sequence is None else len(sequence.sequence.steps),
                 country_code=stored.country_code,
+                active_count=len(_active(stored)),
             )
             variant_id = campaigns_repo.insert_variant(stored.id, variant, now)
+            version = _bump(stored, VARIANT_ADDED_CAUSE, now)
+        _log_campaign(VARIANT_ADDED, stored.key)
+        return VariantAdded(stored.id, variant_id, variant.name, version)
+
+    @use_case
+    def create_campaign(
+        self,
+        key: str,
+        name: str,
+        segment_id: str,
+        market_id: str,
+        offer_id: str,
+        sequence_id: str,
+    ) -> CampaignSaved:
+        """Create a ``draft`` Campaign with no Variant (Story 11.8)."""
+        chosen_key = _text(key, KEY_FIELD)
+        chosen_name = _text(name, "name")
+        now = self._clock.now()
+        with current().transaction():
+            problems = campaign_fields_problems(chosen_name, chosen_key)
+            if KEY_FIELD not in problems and chosen_key in campaigns_repo.keys():
+                problems[KEY_FIELD] = KEY_TAKEN
+            found = _references(segment_id, market_id, offer_id, sequence_id, problems)
+            if problems or found is None:
+                raise CampaignRefused(problems)
+            if _pair_holder(found.segment_id, found.market_id, None):
+                raise CampaignRefused({FORM_FIELD: PAIR_TAKEN})
+            # Only the ids are stored; the keys are what the file form would name.
+            definition = CampaignDef(chosen_key, chosen_name, "", "", "", "", ())
+            campaign_id = campaigns_repo.insert(
+                definition,
+                segment_id=found.segment_id,
+                market_id=found.market_id,
+                offer_id=found.offer_id,
+                sequence_id=found.sequence_id,
+                at=now,
+            )
+            _record_campaign(
+                campaign_id,
+                None,
+                _version_status(campaigns_repo.FIRST_VERSION),
+                CAMPAIGN_CREATED_CAUSE,
+                now,
+            )
+        _log_campaign(CAMPAIGN_CREATED, chosen_key)
+        return CampaignSaved(campaign_id, chosen_key, campaigns_repo.FIRST_VERSION, True)
+
+    @use_case
+    def edit_campaign(
+        self,
+        campaign_id: str,
+        based_on: int,
+        name: str,
+        segment_id: str,
+        market_id: str,
+        offer_id: str,
+        sequence_id: str,
+    ) -> CampaignSaved:
+        """Change a Campaign's name, Segment, Market, Offer or Sequence (Story 11.8); its key
+        never changes."""
+        chosen_name = _text(name, "name")
+        now = self._clock.now()
+        with current().transaction():
+            stored = _stored_campaign(campaign_id)
+            _refuse_stale(stored, based_on)
+            _refuse_lia_gap(stored)
+            problems = campaign_fields_problems(chosen_name)
+            found = _references(segment_id, market_id, offer_id, sequence_id, problems)
+            if problems or found is None:
+                raise CampaignRefused(problems)
+            proposed = (
+                chosen_name,
+                found.segment_id,
+                found.market_id,
+                found.offer_id,
+                found.sequence_id,
+            )
+            before = (
+                stored.name,
+                stored.segment_id,
+                stored.market_id,
+                stored.offer_id,
+                stored.sequence_id,
+            )
+            if proposed == before:
+                return CampaignSaved(stored.id, stored.key, stored.version, False)
+            enrolled = any(sequencing_queries.enrollment_counts(stored.id).values())
+            problems = _edit_problems(stored, found, enrolled)
+            if problems:
+                raise CampaignRefused(problems)
             version = stored.version + 1
-            campaigns_repo.update_config(
+            campaigns_repo.update_definition(
                 stored.id,
-                name=stored.name,
-                offer_id=stored.offer_id,
-                sequence_id=stored.sequence_id,
+                name=chosen_name,
+                segment_id=found.segment_id,
+                market_id=found.market_id,
+                offer_id=found.offer_id,
+                sequence_id=found.sequence_id,
                 version=version,
                 at=now,
+                clear_lia=(found.segment_id, found.market_id)
+                != (stored.segment_id, stored.market_id),
             )
             _record_campaign(
                 stored.id,
                 _version_status(stored.version),
                 _version_status(version),
-                VARIANT_ADDED_CAUSE,
+                CAMPAIGN_EDITED_CAUSE,
                 now,
             )
-        _log_campaign(VARIANT_ADDED, stored.key)
-        return VariantAdded(stored.id, variant_id, variant.name, version)
+        _log_campaign(CAMPAIGN_EDITED, stored.key)
+        return CampaignSaved(stored.id, stored.key, version, True)
+
+    @use_case
+    def edit_variant(
+        self,
+        campaign_id: str,
+        variant_id: str,
+        based_on: int,
+        name: str,
+        step_angles: Sequence[StepAngleNote] = (),
+    ) -> VariantSaved:
+        """Change an active, never-enrolled Variant's name and notes (Story 11.8)."""
+        now = self._clock.now()
+        with current().transaction():
+            stored = _stored_campaign(campaign_id)
+            _refuse_stale(stored, based_on)
+            _refuse_lia_gap(stored)
+            before = _stored_variant(stored, variant_id)
+            if sequencing_queries.enrollment_counts(stored.id).get(before.id, 0) > 0:
+                raise CampaignRefused({FORM_FIELD: VARIANT_ENROLLED})
+            sequence = sequences_repo.by_id(stored.sequence_id)
+            variant = variant_from_fields(
+                name,
+                step_angles,
+                existing_names=[found.name for found in stored.variants if found.id != before.id],
+                steps=0 if sequence is None else len(sequence.sequence.steps),
+                country_code=stored.country_code,
+                active_count=0,  # it is already one of the active Variants
+            )
+            if variant == before.definition:
+                return VariantSaved(stored.id, before.id, before.name, stored.version, False)
+            campaigns_repo.update_variant(before.id, variant, now)
+            version = _bump(stored, VARIANT_EDITED_CAUSE, now)
+        _log_campaign(VARIANT_EDITED, stored.key)
+        return VariantSaved(stored.id, before.id, variant.name, version, True)
+
+    @use_case
+    def retire_variant(self, campaign_id: str, variant_id: str, based_on: int) -> VariantSaved:
+        """Retire an active Variant for good (Story 11.8); its Enrollments keep it."""
+        now = self._clock.now()
+        with current().transaction():
+            stored = _stored_campaign(campaign_id)
+            _refuse_stale(stored, based_on)
+            _refuse_lia_gap(stored)
+            before = _stored_variant(stored, variant_id)
+            if stored.status != CampaignStatus.DRAFT and len(_active(stored)) <= 1:
+                raise CampaignRefused({FORM_FIELD: LAST_ACTIVE_VARIANT})
+            campaigns_repo.set_variant_status(before.id, VariantStatus.INACTIVE, now)
+            version = _bump(stored, VARIANT_RETIRED_CAUSE, now)
+        _log_campaign(VARIANT_RETIRED_LOG, stored.key)
+        return VariantSaved(stored.id, before.id, before.name, version, True)
 
 
 # Credentials ----------------------------------------------------------------------------------

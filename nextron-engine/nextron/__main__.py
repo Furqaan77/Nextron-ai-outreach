@@ -22,7 +22,9 @@ Commands:
   Sequence, Approved Company Fact, Offer and Campaign, give each changed one a new version, and
   leave a stored one the file no longer lists as it is (Segments and Sequences each load only
   into a database that holds none of them: once one exists they are edited on the dashboard's
-  Segments or Sequences page, and the sync writes none and lists how the file differs; a fact the Operator edited or retracted
+  Segments or Sequences page, and the sync writes none and lists how the file differs; Offers
+  and Campaigns likewise once the database holds a Campaign, edited on the dashboard's Campaigns
+  page; a fact the Operator edited or retracted
   on the facts page keeps the Operator's version: a changed seed entry is reported as a
   conflict; a Campaign is created as a draft, and the seed never sets its status or its
   legitimate-interests assessment); print ``segments: <n> changed, <m> unchanged`` and a line
@@ -30,7 +32,9 @@ Commands:
   seed/segments.yaml ignored`` and a line per difference), then the same for ``markets``,
   ``sequences`` (or ``sequences: Sequences are managed in the dashboard; seed/sequences.yaml
   ignored`` and a line per difference), ``company_facts`` (with ``, <c> conflict(s)`` and a line per conflict),
-  ``offers`` and ``campaigns``. ``--env`` syncs that
+  ``offers`` and ``campaigns`` (or, for each, ``Campaigns are managed in the dashboard;
+  seed/campaigns.yaml and seed/offers.yaml ignored`` and a line per difference). ``--env`` syncs
+  that
   environment instead of ``NEXTRON_ENV``. The database must exist and be migrated: start the
   engine once first (exit 0: synced; exit 1: a file is missing, unreadable or invalid (the
   message names the file and the line or field), the database is missing, behind, ahead of the
@@ -90,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
         "Campaigns from seed/segments.yaml, seed/markets.yaml, seed/sequences.yaml, "
         "seed/company_facts.yaml, seed/offers.yaml and seed/campaigns.yaml (never re-scores a "
         "Lead; Segments and Sequences load only into a database that holds none, after that "
-        "they are edited in the dashboard and the sync lists how the file differs; a fact the Operator edited "
+        "they are edited in the dashboard and the sync lists how the file differs; Offers and "
+        "Campaigns likewise once the database holds a Campaign; a fact the Operator edited "
         "or retracted keeps the Operator's version; a Campaign "
         "starts as a draft, and only the Operator activates it and records its LIA)"
     )

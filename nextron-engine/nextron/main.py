@@ -658,10 +658,9 @@ the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``
    Market's country, a date in the future, or a stored fact that no longer validates) prints
    ``seed/company_facts.yaml: <message>``; its ``InvalidOffers`` (a stored Offer that no longer
    validates) prints ``seed/offers.yaml: <message>``; and its ``InvalidCampaigns`` (a reference
-   that isn't in this sync's files, a Step beyond its Sequence, an angle note below the floor,
-   a changed Segment or Market, a third Variant, a stored Variant left out, a Segment and Market
-   a stored Campaign no longer in the file holds, or a stored Campaign that no longer validates)
-   prints ``seed/campaigns.yaml: <message>``; each exits 1. Any other exception prints ``seed
+   that isn't in this sync's files, a Step beyond its Sequence or an angle note below the floor,
+   checked only while the database holds no Campaign, or a stored Campaign that no longer
+   validates) prints ``seed/campaigns.yaml: <message>``; each exits 1. Any other exception prints ``seed
    sync failed (<type>); nothing was changed`` and exits 1. Either way the transaction rolled
    back, so no table changed.
 5. The summary on ``out`` (``format_seed_sync``) and exit 0: while the database held no
@@ -680,7 +679,11 @@ the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``
    (version <n>); seed/company_facts.yaml differs`` per conflict, and a line per fact not in
    the file; then the Offers' block (``offers: <n> changed, <m> unchanged`` and a line per Offer
    key) and the Campaigns' block (``campaigns: <n> changed, <m> unchanged`` and a line per
-   Campaign key), shaped like the Segments'. The seed never sets a Campaign's status or LIA.
+   Campaign key), shaped like the Segments'. Once the database holds a Campaign (Story 11.8:
+   the dashboard's Campaigns page owns Campaigns, Variants and Offers, and nothing is written)
+   both read ``<offers|campaigns>: Campaigns are managed in the dashboard; seed/campaigns.yaml
+   and seed/offers.yaml ignored``, then a line per difference like the Segments'. The seed
+   never sets a Campaign's status or LIA.
 
 It takes no lock, configures no logging, reads no Credential Manager entry and builds no app,
 runner or scheduler; the engine is disposed in a ``finally``. A sync never re-scores a Lead.
@@ -788,11 +791,13 @@ from nextron.app.setup import api as setup_api
 from nextron.app.setup.api import (
     SEGMENT_ONLY_IN_DASHBOARD,
     SEGMENT_ONLY_IN_FILE,
+    CampaignDifference,
     Campaigns,
     CampaignSync,
     Credentials,
     GoogleAccess,
     MarketSync,
+    OfferDifference,
     OfferSync,
     SegmentDifference,
     SegmentSync,
@@ -2849,6 +2854,11 @@ SEQUENCES_MANAGED: Final = (
 )
 
 
+CAMPAIGNS_MANAGED: Final = (
+    "Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored"
+)
+
+
 def _segments_block(result: SegmentSync) -> list[str]:
     """The Segments' summary lines: ``_sync_block``'s while the database held none (the
     bootstrap), else (Story 11.5) the managed notice and a line per difference."""
@@ -2864,8 +2874,27 @@ def _sequences_block(result: SequenceSync) -> list[str]:
     return _managed_block("sequences", SEQUENCES_MANAGED, result.differences)
 
 
+def _offers_block(result: OfferSync) -> list[str]:
+    """The Offers' summary lines: ``_sync_block``'s while the database held no Campaign, else
+    (Story 11.8) the Campaigns' managed notice and a line per difference."""
+    if not result.managed:
+        return _sync_block("offers", OFFERS_FILE_LABEL, result)
+    return _managed_block("offers", CAMPAIGNS_MANAGED, result.differences)
+
+
+def _campaigns_block(result: CampaignSync) -> list[str]:
+    """The Campaigns' summary lines, like the Offers' (Story 11.8)."""
+    if not result.managed:
+        return _sync_block("campaigns", CAMPAIGNS_FILE_LABEL, result)
+    return _managed_block("campaigns", CAMPAIGNS_MANAGED, result.differences)
+
+
 def _managed_block(
-    name: str, notice: str, differences: Iterable[SegmentDifference | SequenceDifference]
+    name: str,
+    notice: str,
+    differences: Iterable[
+        SegmentDifference | SequenceDifference | OfferDifference | CampaignDifference
+    ],
 ) -> list[str]:
     """A managed entity's notice and a line per difference between the file and the
     database."""
@@ -2913,8 +2942,8 @@ def format_seed_sync(result: SeedSync) -> str:
     lines += _sync_block("markets", MARKETS_FILE_LABEL, result.markets)
     lines += _sequences_block(result.sequences)
     lines += _facts_block(result.company_facts)
-    lines += _sync_block("offers", OFFERS_FILE_LABEL, result.offers)
-    lines += _sync_block("campaigns", CAMPAIGNS_FILE_LABEL, result.campaigns)
+    lines += _offers_block(result.offers)
+    lines += _campaigns_block(result.campaigns)
     return "\n".join(lines)
 
 

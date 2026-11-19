@@ -18,7 +18,9 @@ Variant the Operator adds as a version event with cause ``VARIANT_ADDED_CAUSE``
 
 **Variants.** ``VariantStatus`` (``active``, ``inactive``); ``StepAngleNote(step, note)`` (the
 angle a Variant takes on one Step of the Campaign's Sequence) and ``VariantDef(name, status,
-step_angles)``. A Campaign has at most ``MAX_VARIANTS`` (2): ``TOO_MANY_VARIANTS``.
+step_angles)``. A Campaign has at most ``MAX_VARIANTS`` (2) **active** Variants:
+``TOO_MANY_VARIANTS``. Since Story 11.8 a Variant is retired by setting it ``inactive``, which is
+final; retired Variants stay as history and don't count towards the cap.
 
 **The LIA (NFR-3).** ``Lia(ref, date)``. ``needs_lia(country_code)`` is true exactly for a GB
 Market (``nextron.domain.markets.GB``). ``may_run(status, country_code, lia)`` is the one
@@ -83,6 +85,21 @@ their values, lists as lists, ``step_angles`` only when non-empty; a value of th
 left as it is, so validation refuses it); ``campaign_from_form(form)`` validates one such
 mapping, so ``campaign_from_form(campaign_form(c)) == c`` for a valid ``c``.
 
+**The stored form** (Story 11.8). ``stored_campaign_from_form(form)`` validates a stored
+Campaign's mapping with the same rules but one: its ``variants`` may hold any number of Variants,
+none active included, with at most ``MAX_VARIANTS`` ``active`` ones (``TOO_MANY_VARIANTS``) and
+names unique case-insensitively. The seed **file** keeps the 1-to-2 rule.
+``campaign_form_diff(old, new)`` gives the changed field paths between two ``CampaignDef``s, for
+the seed sync's managed-mode differences: ``key``, ``name``, ``segment``, ``market``, ``offer``
+and ``sequence`` first, then per Variant (by name, case-insensitively, in ``old``'s order then
+``new``'s) ``variants[<name>]`` for one only one side has, else ``variants[<name>].name``,
+``.status`` and ``.step_angles`` where they differ.
+
+**Create and edit fields** (Story 11.8). ``campaign_fields_problems(name, key=None)`` checks a
+stripped Campaign ``name`` (``ENTER_A_VALUE`` when blank, else the text rules, at most 100
+characters) and, when given, a stripped ``key`` (``ENTER_A_VALUE`` or the key pattern's reason),
+returning ``{field: reason}`` (``{}`` when both pass).
+
 **The command path.** ``variant_from_fields(name, step_angles, *, existing_names, steps,
 country_code)`` is a new Variant from the Operator (Story 4.2's ``add_variant``): the name and
 each note stripped, then the same rules, every problem collected into one ``CampaignRefused``:
@@ -90,6 +107,16 @@ each note stripped, then the same rules, every problem collected into one ``Camp
 a value"), against the text rules, or already used case-insensitively ("A Variant with this
 name already exists"); ``step_angles`` for the first broken note (at most 6, a step from 1 to
 ``steps`` and unique, the note's text rules and the floor). It returns the Variant ``active``.
+``existing_names`` holds every other Variant's name, retired ones included (names stay unique);
+``active_count`` (default: ``len(existing_names)``) is how many of them are active, and the cap
+refuses when it is already 2. An edit of an active Variant passes 0.
+
+**Story 11.8 causes and messages.** The Operator's Campaign version events have causes
+``CAMPAIGN_CREATED_CAUSE`` (``operator_create``, ``None`` to ``v1``), ``CAMPAIGN_EDITED_CAUSE``
+(``operator_edit``), ``VARIANT_EDITED_CAUSE`` (``operator_edit_variant``) and
+``VARIANT_RETIRED_CAUSE`` (``operator_retire_variant``). The refusals are ``NEEDS_VARIANT_FIRST``,
+``PAIR_FROZEN``, ``VARIANT_ENROLLED``, ``VARIANT_RETIRED``, ``LAST_ACTIVE_VARIANT``,
+``STALE_CAMPAIGN``, ``KEY_TAKEN``, ``CHOOSE_ONE`` and ``NO_SUCH_VARIANT``.
 """
 
 import datetime as dt
@@ -111,6 +138,10 @@ from nextron.domain.segments import mentions_aba_512, mentions_sra_notice
 MACHINE: Final = "campaign"
 LIA_RECORDED_CAUSE: Final = "operator_record_lia"
 VARIANT_ADDED_CAUSE: Final = "operator_add_variant"
+CAMPAIGN_CREATED_CAUSE: Final = "operator_create"
+CAMPAIGN_EDITED_CAUSE: Final = "operator_edit"
+VARIANT_EDITED_CAUSE: Final = "operator_edit_variant"
+VARIANT_RETIRED_CAUSE: Final = "operator_retire_variant"
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 DATE_PATTERN: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # matched with fullmatch
@@ -121,6 +152,11 @@ FORM_FIELD: Final = "form"  # an Operator problem that belongs to no one field
 LIA_REF_FIELD: Final = "lia_ref"
 LIA_DATE_FIELD: Final = "lia_date"
 NAME_FIELD: Final = "name"
+KEY_FIELD: Final = "key"
+SEGMENT_FIELD: Final = "segment"
+MARKET_FIELD: Final = "market"
+OFFER_FIELD: Final = "offer"
+SEQUENCE_FIELD: Final = "sequence"
 STEP_ANGLES_FIELD: Final = "step_angles"
 MAX_CAMPAIGNS: Final = 50
 MAX_NAME: Final = 100  # a Campaign's name
@@ -143,6 +179,17 @@ DATE_REASON: Final = "Use a date written YYYY-MM-DD"
 FUTURE_REASON: Final = "can't be in the future"
 VARIANT_NAME_TAKEN: Final = "A Variant with this name already exists"
 LIA_PAIR_REASON: Final = "the LIA reference and date must both be set or both be empty"
+NEEDS_VARIANT_FIRST: Final = "Add an active Variant first"
+PAIR_FROZEN: Final = "Segment and Market can't change once Contacts are enrolled"
+VARIANT_ENROLLED: Final = "Retire this Variant and add a new one, so its results stay comparable"
+VARIANT_RETIRED: Final = "This Variant is retired, and a retired Variant never changes"
+LAST_ACTIVE_VARIANT: Final = (
+    "A running Campaign needs an active Variant: add another before retiring this one"
+)
+STALE_CAMPAIGN: Final = "This Campaign changed since you opened it"
+KEY_TAKEN: Final = "A Campaign with this key already exists"
+CHOOSE_ONE: Final = "Choose one"
+NO_SUCH_VARIANT: Final = "This Campaign has no Variant with this id"
 _KEY_REASON: Final = (
     "must be lowercase letters, digits and underscores, starting with a letter, at most 31 "
     "characters"
@@ -535,12 +582,49 @@ def _variants(value: object, path: str) -> tuple[VariantDef, ...]:
     return tuple(variants)
 
 
-class _Validator:
-    """One validation run: the Campaign keys and (Segment, Market) pairs seen so far."""
+def _stored_variants(value: object, path: str) -> tuple[VariantDef, ...]:
+    """A stored Campaign's Variants (Story 11.8): any number, names unique case-insensitively,
+    at most 2 ``active``."""
+    if not isinstance(value, list):
+        raise InvalidCampaigns(path, "must be a list")
+    variants: list[VariantDef] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        name = item.get("name") if isinstance(item, dict) else None
+        shown = str(index)
+        if (
+            isinstance(name, str)
+            and _text_problem(name, MAX_VARIANT_NAME) is None
+            and name.casefold() not in seen
+        ):
+            shown = name
+        item_path = f"{path}[{shown}]"
+        checked = _fields(
+            item,
+            item_path,
+            {"name": _variant_name, "status": _variant_status, "step_angles": _step_angles},
+            _VARIANT_REQUIRED,
+        )
+        chosen = checked["name"]
+        if chosen.casefold() in seen:
+            raise InvalidCampaigns(
+                f"{item_path}.name", f"repeats an earlier Variant's name ({chosen})"
+            )
+        seen.add(chosen.casefold())
+        variants.append(VariantDef(chosen, checked["status"], checked.get("step_angles", ())))
+    if sum(1 for variant in variants if variant.status == VariantStatus.ACTIVE) > MAX_VARIANTS:
+        raise InvalidCampaigns(path, TOO_MANY_VARIANTS)
+    return tuple(variants)
 
-    def __init__(self) -> None:
+
+class _Validator:
+    """One validation run: the Campaign keys and (Segment, Market) pairs seen so far, and
+    whether it validates a stored Campaign (any number of Variants, at most 2 active)."""
+
+    def __init__(self, *, stored: bool = False) -> None:
         self._keys: set[str] = set()
         self._pairs: set[tuple[str, str]] = set()
+        self._variants = _stored_variants if stored else _variants
 
     def campaigns(self, data: object) -> tuple[CampaignDef, ...]:
         if not isinstance(data, dict):
@@ -571,7 +655,7 @@ class _Validator:
                 "market": _market_code,
                 "offer": _reference_key,
                 "sequence": _reference_key,
-                "variants": _variants,
+                "variants": self._variants,
             },
             _CAMPAIGN_REQUIRED,
         )
@@ -704,6 +788,60 @@ def campaign_from_form(form: object) -> CampaignDef:
     return _Validator().campaign(form, 0)
 
 
+def stored_campaign_from_form(form: object) -> CampaignDef:
+    """The ``CampaignDef`` of one stored Campaign's mapping (Story 11.8): ``campaign_from_form``
+    with any number of Variants, at most 2 of them active; ``InvalidCampaigns`` otherwise."""
+    return _Validator(stored=True).campaign(form, 0)
+
+
+def _angles_text(angles: Iterable[StepAngleNote]) -> tuple[tuple[int, str], ...]:
+    return tuple((angle.step, angle.note) for angle in angles)
+
+
+def campaign_form_diff(old: CampaignDef, new: CampaignDef) -> tuple[str, ...]:
+    """The changed field paths from ``old`` to ``new``; see the module docstring."""
+    paths = [
+        name
+        for name in ("key", "name", "segment", "market", "offer", "sequence")
+        if getattr(old, name) != getattr(new, name)
+    ]
+    before = {variant.name.casefold(): variant for variant in old.variants}
+    after = {variant.name.casefold(): variant for variant in new.variants}
+    for folded in [*before, *(name for name in after if name not in before)]:
+        was, now = before.get(folded), after.get(folded)
+        if was is None or now is None:
+            only = was if was is not None else now
+            assert only is not None
+            paths.append(f"variants[{only.name}]")
+            continue
+        path = f"variants[{was.name}]"
+        if was.name != now.name:
+            paths.append(f"{path}.name")
+        if was.status != now.status:
+            paths.append(f"{path}.status")
+        if _angles_text(was.step_angles) != _angles_text(now.step_angles):
+            paths.append(f"{path}.step_angles")
+    return tuple(paths)
+
+
+def campaign_fields_problems(name: str, key: str | None = None) -> dict[str, str]:
+    """The problems of a stripped Campaign ``name`` and, when given, ``key``; see the module
+    docstring."""
+    problems: dict[str, str] = {}
+    if key is not None:
+        if not key:
+            problems[KEY_FIELD] = ENTER_A_VALUE
+        elif not _is_key(key):
+            problems[KEY_FIELD] = _KEY_REASON
+    if not name:
+        problems[NAME_FIELD] = ENTER_A_VALUE
+    else:
+        reason = _text_problem(name, MAX_NAME)
+        if reason is not None:
+            problems[NAME_FIELD] = reason
+    return problems
+
+
 # The command path --------------------------------------------------------------------------------
 
 
@@ -732,6 +870,7 @@ def variant_from_fields(
     existing_names: Collection[str],
     steps: int,
     country_code: str,
+    active_count: int | None = None,
 ) -> VariantDef:
     """A new ``active`` Variant from the Operator; ``CampaignRefused`` with every problem. See
     the module docstring."""
@@ -763,7 +902,8 @@ def variant_from_fields(
             if problem is not None:
                 problems[STEP_ANGLES_FIELD] = problem
                 break
-    if len(existing_names) >= MAX_VARIANTS:
+    active = len(existing_names) if active_count is None else active_count
+    if active >= MAX_VARIANTS:
         problems[FORM_FIELD] = TOO_MANY_VARIANTS
     if problems:
         raise CampaignRefused(problems)
