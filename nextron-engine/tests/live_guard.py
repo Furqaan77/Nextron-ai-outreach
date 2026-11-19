@@ -28,6 +28,8 @@ a real external system to raise ``LiveAdapterInTests``:
   ``nextron.adapters.unsubscribe.default_http_client`` (the unsubscribe Worker) and
   ``nextron.adapters.places.default_http_client`` (Google Places), so a ``HunterFinder``,
   ``ProspeoFinder``, ``WorkerUnsubscribe`` or ``GooglePlaces`` without an injected ``http``
+  (and ``nextron.adapters.postmaster.default_http_client``, Google Postmaster Tools, so a
+  ``GooglePostmaster`` without one too)
   raises on its first request;
 - the ``build`` of each ``nextron.main.ROLE_ADAPTERS`` entry (every ``mail`` and ``alert``
   adapter), so ``build_role_adapter`` raises for any registered name.
@@ -126,6 +128,7 @@ LIVE_CONSTRUCTORS: Final[tuple[tuple[str, str], ...]] = (
     ("nextron.adapters.prospeo", "default_http_client"),
     ("nextron.adapters.unsubscribe", "default_http_client"),
     ("nextron.adapters.places", "default_http_client"),
+    ("nextron.adapters.postmaster", "default_http_client"),
 )
 # The WinVaultKeyring methods that call Windows Credential Manager; never restored.
 CREDENTIAL_MANAGER_CALLS: Final = (
@@ -195,6 +198,7 @@ ADAPTER_PACKAGES: Final[dict[str, Guarded | NoExternalSystem | NotYetBuilt]] = {
     "prospeo": Guarded(("default_http_client",)),
     "unsubscribe": Guarded(("default_http_client",)),
     "places": Guarded(("default_http_client",)),
+    "postmaster": Guarded(("default_http_client",)),
 }
 
 

@@ -19,7 +19,11 @@ the running use case's transaction. It checks nothing; ``nextron.app.sending`` d
   6.4);
 - ``update_pacing(inbox_id, *, next_send_at, last_sent_at=UNCHANGED) -> bool``: set the inbox's
   ``next_send_at`` and, unless left ``UNCHANGED``, its ``last_sent_at``; whether a row changed
-  (Story 6.11).
+  (Story 6.11);
+- ``active_ids_of(sending_domain_id)``: the ids of that Sending Domain's ``active`` inboxes,
+  sorted (Story 6.6);
+- ``set_status(inbox_id, *, from_status, to_status) -> bool``: move the inbox to ``to_status``,
+  fenced on ``status = from_status``; whether a row changed (Story 6.6).
 
 ``StoredInbox`` carries the six warm-up columns (Story 6.4) and the two pacing columns,
 ``next_send_at`` and ``last_sent_at`` (Story 6.11), too.
@@ -37,6 +41,8 @@ from sqlalchemy import select, update
 from nextron.db.models.base import new_id
 from nextron.db.models.sending import SendingDomainRecord, SendingInboxRecord
 from nextron.db.uow import current
+
+ACTIVE: Final = "active"  # nextron.domain.sending_inbox.InboxStatus.ACTIVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,5 +195,28 @@ def update_pacing(
         values["last_sent_at"] = last_sent_at
     result = current().session.execute(
         update(SendingInboxRecord).where(SendingInboxRecord.id == inbox_id).values(**values)
+    )
+    return bool(result.rowcount)  # type: ignore[attr-defined]
+
+
+def active_ids_of(sending_domain_id: str) -> list[str]:
+    """The ids of ``sending_domain_id``'s ``active`` inboxes, sorted."""
+    rows = current().session.execute(
+        select(SendingInboxRecord.id)
+        .where(SendingInboxRecord.sending_domain_id == sending_domain_id)
+        .where(SendingInboxRecord.status == ACTIVE)
+        .order_by(SendingInboxRecord.id)
+    )
+    return list(rows.scalars())
+
+
+def set_status(inbox_id: str, *, from_status: str, to_status: str) -> bool:
+    """Move the inbox to ``to_status`` only while it is at ``from_status``; whether a row
+    changed."""
+    result = current().session.execute(
+        update(SendingInboxRecord)
+        .where(SendingInboxRecord.id == inbox_id)
+        .where(SendingInboxRecord.status == str(from_status))
+        .values(status=str(to_status))
     )
     return bool(result.rowcount)  # type: ignore[attr-defined]

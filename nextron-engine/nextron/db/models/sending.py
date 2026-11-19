@@ -33,21 +33,38 @@
   and ``details`` (``nextron.domain.domain_auth.encode_details``: each item's reason). Index
   ``ix_domain_checks_sending_domain_id_checked_at`` finds a domain's newest check.
 
-The nextronai.com checks repeat ``nextron.domain.sending_inbox.check_address`` as defence in
-depth (FR-32). Every column but the three warm-up record columns and the two pacing columns is NOT
-NULL; every column is PII class ``none``: these are Nextron's own sender
+  Story 6.6 (migration ``0047_6_6_reputation``) adds the reputation results
+  (``nextron.domain.reputation``), NULL in rows recorded before it and set in every new one:
+  ``dnsbl_result`` (``encode_dnsbl``: each zone's outcome), ``spam_rate`` (the Postmaster spam
+  rate in parts per million, NULL for no data) and ``spam_rate_status``
+  (``ck_domain_checks_spam_rate_status``: ``ok``, ``alert``, ``pause`` or ``no_data``).
+
+The nextronai.com checks repeat ``nextron.domain.sending_inbox.check_address`` as defence in depth
+(FR-32). Every column but the three warm-up record columns, the two pacing columns and the three
+reputation columns is NOT NULL; every column is PII class ``none``: these are Nextron's own sender
 identity, never a data subject's. Story 6.4 added the warm-up columns (migration
-``0039_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story 6.2 will add the
-Gmail connection.
+``0039_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story 6.2 will add the Gmail
+connection.
 """
 
 from datetime import date, datetime
 from typing import Final
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, String, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
+from nextron.domain.reputation import SpamStatus
 from nextron.domain.sending_inbox import (
     BRAND_DOMAIN,
     MAX_LABEL_LENGTH,
@@ -95,6 +112,9 @@ WARMUP_RANGES_CHECK: Final = " AND ".join(
     )
 )
 PASSED_CHECK: Final = "passed = (spf_ok AND dkim_ok AND dmarc_ok AND aligned_ok)"
+SPAM_RATE_STATUS_CHECK: Final = "spam_rate_status IN ({})".format(
+    ",".join(f"'{status}'" for status in SpamStatus)
+)
 
 
 class SendingDomainRecord(Base):
@@ -153,6 +173,7 @@ class DomainCheckRecord(Base):
     __tablename__ = "domain_checks"
     __table_args__ = (
         CheckConstraint(PASSED_CHECK, name="passed"),
+        CheckConstraint(SPAM_RATE_STATUS_CHECK, name="spam_rate_status"),
         Index("ix_domain_checks_sending_domain_id_checked_at", "sending_domain_id", "checked_at"),
     )
 
@@ -165,3 +186,6 @@ class DomainCheckRecord(Base):
     aligned_ok: Mapped[bool] = mapped_column(Boolean)
     passed: Mapped[bool] = mapped_column(Boolean)
     details: Mapped[str] = mapped_column(String(DETAILS_LENGTH))
+    dnsbl_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spam_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    spam_rate_status: Mapped[str | None] = mapped_column(String(STATUS_LENGTH), nullable=True)

@@ -52,8 +52,12 @@ authentication", which HTMX re-fetches every 30 seconds from ``GET /inboxes/auth
 ``auth_context`` renders it from ``DomainChecks.auths()`` (``queries.sending.domain_auths`` at
 the clock's now): one row per listed Sending Domain, by domain, with the Sending Domain, Last
 checked (``YYYY-MM-DD HH:MM UTC`` or "Not checked yet"), SPF, DKIM, DMARC and Alignment (each
-``Pass``, ``Fail: <reason text>`` or ``Not checked yet``), Cold sends (the verdict text; when
-blocked the cell has ``class="auth-blocked"``) and a Recheck form. With no listed domain it
+``Pass``, ``Fail: <reason text>`` or ``Not checked yet``), DNSBL and Spam rate (Story 6.6:
+``reputation.dnsbl_text``, such as "Clean", "Listed (dbl.spamhaus.org)" or "Query refused", and
+``reputation.spam_rate_text``, such as "0.12%" or "No data"; "Not checked yet" for no check or
+one recorded before Story 6.6; a cell whose result paused the inboxes has
+``class="auth-blocked"``), Cold sends (the verdict text; when blocked the cell has
+``class="auth-blocked"``) and a Recheck form. With no listed domain it
 shows "No Sending Domains to check yet." Both its routes are ``@personal_data(False)``: they
 show domain names and check results only.
 
@@ -72,6 +76,7 @@ from typing import Final
 from nextron.app.queries.sending import DomainAuthView, InboxCapView, SendingInboxView
 from nextron.domain.domain_auth import REASON_TEXTS, AuthItem, AuthReason
 from nextron.domain.ids import is_ulid
+from nextron.domain.reputation import SpamStatus, ZoneOutcome, dnsbl_text, spam_rate_text
 from nextron.domain.sending_inbox import (
     CONNECTING_NOTE,
     InboxRefused,
@@ -269,7 +274,8 @@ def submitted_warmup(fields: FormFields) -> WarmupForm:
 @dataclass(frozen=True, slots=True)
 class AuthRow:
     """One listed Sending Domain as the authentication table shows it; ``items`` are the SPF,
-    DKIM, DMARC and Alignment cells, in that order."""
+    DKIM, DMARC and Alignment cells, in that order; ``dnsbl`` and ``spam_rate`` the DNSBL and
+    Spam rate cells (Story 6.6), ``dnsbl_paused`` and ``spam_paused`` whether each pauses."""
 
     sending_domain_id: str
     domain: str
@@ -277,6 +283,10 @@ class AuthRow:
     items: tuple[str, ...]
     cold_sends: str
     blocked: bool
+    dnsbl: str = NOT_CHECKED
+    spam_rate: str = NOT_CHECKED
+    dnsbl_paused: bool = False
+    spam_paused: bool = False
 
 
 def _item_cell(reason: AuthReason | None) -> str:
@@ -290,12 +300,20 @@ def _item_cell(reason: AuthReason | None) -> str:
 def auth_row(view: DomainAuthView) -> AuthRow:
     """``view`` as a table row."""
     latest = view.latest
+    dnsbl = spam = NOT_CHECKED
+    dnsbl_paused = spam_paused = False
     if latest is None:
         last_checked = NOT_CHECKED
         items = tuple(_item_cell(None) for _ in AuthItem)
     else:
         last_checked = f"{latest.checked_at.astimezone(UTC):{LAST_CHECKED_FORMAT}}"
         items = tuple(_item_cell(latest.reasons.get(item)) for item in AuthItem)
+        if latest.dnsbl is not None:  # recorded since Story 6.6
+            dnsbl = dnsbl_text(latest.dnsbl)
+            dnsbl_paused = latest.dnsbl_outcome is ZoneOutcome.LISTED
+        if latest.spam_status is not None:
+            spam = spam_rate_text(latest.spam_rate)
+            spam_paused = latest.spam_status is SpamStatus.PAUSE
     return AuthRow(
         view.sending_domain_id,
         view.domain,
@@ -303,6 +321,10 @@ def auth_row(view: DomainAuthView) -> AuthRow:
         items,
         view.verdict.text,
         view.verdict.blocked,
+        dnsbl,
+        spam,
+        dnsbl_paused,
+        spam_paused,
     )
 
 

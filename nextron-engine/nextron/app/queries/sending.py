@@ -43,8 +43,23 @@ reported.
   isn't a listed Sending Domain (unknown, not a ULID, or every inbox removed). It is the send
   gate's read (Story 6.9): ``None`` means cold sends are blocked, so the gate fails closed.
   "Newest" is the last check recorded (``repos.sending.checks``), whatever its stamp.
-- ``health_issues(now)``: one ``HealthIssue("domain_auth_failing", <id>, "<domain>: <verdict
-  text>", detail=RECHECK_HINT)`` per listed Sending Domain whose verdict is blocked, by domain.
+- ``health_issues(now, postmaster_grant_missing=None)``: one ``HealthIssue("domain_auth_failing",
+  <id>, "<domain>: <verdict text>", detail=RECHECK_HINT)`` per listed Sending Domain whose
+  verdict is blocked, by domain; then the reputation issues (Story 6.6), below.
+
+**Reputation (Story 6.6, FR-38, FR-58).** ``DomainCheckView`` also carries ``dnsbl`` (each
+zone's ``ZoneOutcome``, decoded from ``dnsbl_result``), ``spam_rate`` (ppm) and ``spam_status``
+(a ``SpamStatus``); all three are ``None`` for a check recorded before migration
+``0047_6_6_reputation``. Its ``dnsbl_outcome`` is the worst outcome (``None`` without a result).
+From each listed domain's newest check, ``health_issues`` adds, by domain:
+
+- ``domain_blocklisted`` (``<domain>: blocklisted on <zones>; each check pauses its active
+  inboxes``) for a ``listed`` outcome, or else ``dnsbl_query_refused`` (a warning: nothing was paused) for
+  ``query_refused`` or ``unrecognised``;
+- ``spam_rate_pause`` or ``spam_rate_high`` for a spam status ``pause`` or ``alert``;
+- then one ``postmaster_grant_missing`` (``Postmaster grant missing``, subject ``postmaster``)
+  when a Sending Domain is listed and ``postmaster_grant_missing()`` (``nextron.main``: whether
+  ``GoogleAccess.check_stored_grant("postmaster")`` raises) is true. It is called only then.
 
 **Sent counts (Story 6.9's fail-closed seams).** Both answer ``None`` (unknown) until Story 6.10
 stores sent messages (and Story 6.8 syncs ``other_sent``), so the send gate's
@@ -60,6 +75,7 @@ stores sent messages (and Story 6.8 syncs ``other_sent``), so the send gate's
 Every read goes through the current unit of work, read-only ones included.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final
@@ -82,6 +98,25 @@ from nextron.domain.domain_auth import (
 )
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
+from nextron.domain.reputation import (
+    DELIST_HINT,
+    DNSBL_QUERY_REFUSED,
+    DOMAIN_BLOCKLISTED,
+    POSTMASTER_GRANT_HINT,
+    POSTMASTER_GRANT_MISSING,
+    POSTMASTER_GRANT_TEXT,
+    POSTMASTER_SUBJECT,
+    REFUSED_HINT,
+    SPAM_HINT,
+    SPAM_RATE_HIGH,
+    SPAM_RATE_PAUSE,
+    SpamStatus,
+    ZoneOutcome,
+    decode_dnsbl,
+    overall,
+    spam_rate_text,
+    zones_with,
+)
 from nextron.domain.sending_inbox import BINDABLE_STATUSES, TERMINAL_STATUSES, InboxStatus
 from nextron.domain.sending_policy import WarmupPlan, cold_cap, daily_cap, tool_send_figure
 from nextron.domain.sending_policy import warmup_days as count_warmup_days
@@ -227,6 +262,14 @@ class DomainCheckView:
     aligned_ok: bool
     passed: bool
     reasons: dict[AuthItem, AuthReason]
+    dnsbl: dict[str, ZoneOutcome] | None = None
+    spam_rate: int | None = None
+    spam_status: SpamStatus | None = None
+
+    @property
+    def dnsbl_outcome(self) -> ZoneOutcome | None:
+        """The worst DNSBL outcome, or ``None`` for a check recorded before Story 6.6."""
+        return None if self.dnsbl is None else overall(self.dnsbl.values())
 
     @property
     def failing(self) -> tuple[AuthItem, ...]:
@@ -260,6 +303,9 @@ def _check_view(row: StoredCheck) -> DomainCheckView:
         aligned_ok=row.aligned_ok,
         passed=row.passed,
         reasons=decode_details(row.details),
+        dnsbl=None if row.dnsbl_result is None else decode_dnsbl(row.dnsbl_result),
+        spam_rate=row.spam_rate,
+        spam_status=None if row.spam_rate_status is None else SpamStatus(row.spam_rate_status),
     )
 
 
@@ -286,19 +332,88 @@ def domain_auth(sending_domain_id: str, now: datetime) -> DomainAuthView | None:
     return _auth_view(domain, now)
 
 
-def health_issues(now: datetime) -> tuple[HealthIssue, ...]:
+def _reputation_issues(view: DomainAuthView) -> list[HealthIssue]:
+    """The reputation issues of one listed domain's newest check."""
+    latest = view.latest
+    if latest is None:
+        return []
+    found: list[HealthIssue] = []
+    outcome = latest.dnsbl_outcome
+    if latest.dnsbl is not None and outcome is ZoneOutcome.LISTED:
+        zones = ", ".join(zones_with(latest.dnsbl, ZoneOutcome.LISTED))
+        found.append(
+            HealthIssue(
+                DOMAIN_BLOCKLISTED,
+                view.sending_domain_id,
+                f"{view.domain}: blocklisted on {zones}; each check pauses its active inboxes",
+                detail=DELIST_HINT,
+            )
+        )
+    elif latest.dnsbl is not None and outcome in (
+        ZoneOutcome.QUERY_REFUSED,
+        ZoneOutcome.UNRECOGNISED,
+    ):
+        zones = ", ".join(zones_with(latest.dnsbl, outcome))
+        found.append(
+            HealthIssue(
+                DNSBL_QUERY_REFUSED,
+                view.sending_domain_id,
+                f"{view.domain}: the blocklist query on {zones} got no usable answer "
+                "(warning only; nothing was paused)",
+                detail=REFUSED_HINT,
+            )
+        )
+    if latest.spam_status is SpamStatus.PAUSE:
+        found.append(
+            HealthIssue(
+                SPAM_RATE_PAUSE,
+                view.sending_domain_id,
+                f"{view.domain}: spam rate {spam_rate_text(latest.spam_rate)}, at or above "
+                "0.30%; each check pauses its active inboxes",
+                detail=SPAM_HINT,
+            )
+        )
+    elif latest.spam_status is SpamStatus.ALERT:
+        found.append(
+            HealthIssue(
+                SPAM_RATE_HIGH,
+                view.sending_domain_id,
+                f"{view.domain}: spam rate {spam_rate_text(latest.spam_rate)}, at or above "
+                "0.10%",
+                detail=SPAM_HINT,
+            )
+        )
+    return found
+
+
+def health_issues(
+    now: datetime, postmaster_grant_missing: Callable[[], bool] | None = None
+) -> tuple[HealthIssue, ...]:
     """One ``domain_auth_failing`` issue per listed Sending Domain whose cold sends are
-    blocked, by domain."""
-    return tuple(
+    blocked, by domain, then the reputation issues (see the module docstring)."""
+    views = domain_auths(now)
+    issues = [
         HealthIssue(
             DOMAIN_AUTH_FAILING,
             view.sending_domain_id,
             f"{view.domain}: {view.verdict.text}",
             detail=RECHECK_HINT,
         )
-        for view in domain_auths(now)
+        for view in views
         if view.verdict.blocked
-    )
+    ]
+    for view in views:
+        issues.extend(_reputation_issues(view))
+    if views and postmaster_grant_missing is not None and postmaster_grant_missing():
+        issues.append(
+            HealthIssue(
+                POSTMASTER_GRANT_MISSING,
+                POSTMASTER_SUBJECT,
+                POSTMASTER_GRANT_TEXT,
+                detail=POSTMASTER_GRANT_HINT,
+            )
+        )
+    return tuple(issues)
 
 
 

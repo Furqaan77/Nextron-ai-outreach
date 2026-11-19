@@ -531,6 +531,7 @@ def test_the_declared_keys_in_order() -> None:
         "lead_score_fit_weight",
         "lead_score_signal_weight",
         "unsub_worker_host",
+        "dnsbl_zones",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -561,6 +562,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.LEAD_SCORE_FIT_WEIGHT),
         setting(Key.LEAD_SCORE_SIGNAL_WEIGHT),
         setting(Key.UNSUB_WORKER_HOST),
+        setting(Key.DNSBL_ZONES),
     )
 
 
@@ -1292,7 +1294,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
-            "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
+            "crawl_max_pages, dnsbl_zones, lead_score_fit_weight, lead_score_signal_weight, "
+            "legal_name, "
             "optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
             "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "
@@ -1360,3 +1363,23 @@ def test_total_daily_ceiling_refuses_anything_outside_0_to_100(text: str, rule: 
     with pytest.raises(InvalidSettingValue) as raised:
         parse(setting(Key.TOTAL_DAILY_CEILING), text)
     assert raised.value.rule == rule
+
+
+# The DNSBL zones (Story 6.6) --------------------------------------------------------------------
+
+
+def test_the_dnsbl_zones_default_to_spamhaus_dbl_and_never_switch_the_guard_off() -> None:
+    found = setting(Key.DNSBL_ZONES)
+
+    assert (found.type, found.section, found.default) == (
+        SettingType.LIST,
+        Section.SENDING,
+        ("dbl.spamhaus.org",),
+    )
+    assert parse(found, "multi.uribl.com\ndbl.spamhaus.org") == (
+        "multi.uribl.com",
+        "dbl.spamhaus.org",
+    )
+    for refused in ("", "zen.spamhaus.org", "dbl.spamhaus.org\nexample.com"):
+        with pytest.raises(InvalidSettingValue):
+            parse(found, refused)

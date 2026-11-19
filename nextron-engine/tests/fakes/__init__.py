@@ -17,9 +17,11 @@ recording every call;
 repeats) and records every host; ``ScriptedPlaces`` (``places``) fakes ``PlacesPort`` by
 ``(query, location, page_token)``, recording every call;
 ``nextron.adapters.renderer`` itself is tested on the fake Playwright objects of ``browser``.
-``FakeDns`` (``dns``) fakes ``DnsPort``: it answers TXT and MX queries from scripts keyed by
-name (``()`` for a name not scripted), raises the scripted ``AdapterError`` for a name in
-``errors`` and records every query.
+``FakeDns`` (``dns``) fakes ``DnsPort``: it answers TXT, MX and A queries from scripts keyed
+by name (``()`` for a name not scripted), raises the scripted ``AdapterError`` for a name in
+``errors`` and records every query. ``FakePostmaster`` (``postmaster``) fakes
+``PostmasterPort``: it answers each domain's scripted spam rate (no data when not scripted),
+raises the scripted ``AdapterError`` for a domain in ``errors`` and records every query.
 
 ``ScriptedFinder`` and ``ScriptedDomainSearch`` (``email_finder``) fake ``EmailFinderPort`` and
 ``DomainSearchPort``: each answers with the next scripted answer or ``AdapterError``, and with
@@ -47,6 +49,7 @@ from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
 from nextron.ports.places import PlacesPort
+from nextron.ports.postmaster import PostmasterPort
 from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort
@@ -66,6 +69,7 @@ from tests.fakes.job_board import ScriptedJobBoards
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.mail import InMemoryMail
 from tests.fakes.places import ScriptedPlaces
+from tests.fakes.postmaster import FakePostmaster
 from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.secrets import InMemorySecrets
@@ -98,5 +102,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         DomainSearchPort: ScriptedDomainSearch,
         UnsubscribePort: ScriptedUnsubscribe,
         PlacesPort: ScriptedPlaces,
+        PostmasterPort: FakePostmaster,
     }
 )

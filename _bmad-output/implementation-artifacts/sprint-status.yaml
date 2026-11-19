@@ -141,7 +141,7 @@ development_status:
   6-3-pause-resume-and-remove-sending-inboxes: backlog
   6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total: review
   6-5-check-sending-domain-authentication-on-connect-and-daily: review
-  6-6-pause-inboxes-on-blocklistings-and-postmaster-spam-rates: backlog
+  6-6-pause-inboxes-on-blocklistings-and-postmaster-spam-rates: review
   6-7-assemble-plain-text-messages-in-one-thread-per-contact: backlog
   6-8-sync-each-sending-inbox-every-2-minutes-and-confirm-engine-s: backlog
   6-9-evaluate-the-closed-send-gate-including-stop-rules-before-ev: review

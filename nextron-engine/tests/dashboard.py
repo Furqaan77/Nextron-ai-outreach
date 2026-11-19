@@ -74,10 +74,12 @@ registers through it. The default ``env`` is ``dev``, so a panel test that regis
 saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
 work.
 
-Its ``DomainChecks`` (``domain_checks``, Story 6.5) is ``DomainChecks(clock, dns, queue)`` on
-``dns``, a ``FakeDns`` unless a test passes another; the Sending Inboxes page's authentication
-section reads it and its Recheck queues through it, and the job types' ``check_domains`` calls
-it. The health-issue registry reads the Sending Domains on the dashboard's clock.
+Its ``DomainChecks`` (``domain_checks``, Story 6.5) is ``DomainChecks(clock, dns, queue,
+postmaster=postmaster, notify=notify)`` on ``dns``, a ``FakeDns``, and ``postmaster``, a
+``FakePostmaster`` (no data; Story 6.6), unless a test passes others; the Sending Inboxes
+page's authentication section reads it and its Recheck queues through it, and the job types'
+``check_domains`` calls it. The health-issue registry reads the Sending Domains on the
+dashboard's clock.
 """
 
 import json
@@ -127,6 +129,7 @@ from nextron.domain.prompts import PromptFile
 from nextron.domain.readiness import CheckResult, Status
 from nextron.ports.alert import AlertPort
 from nextron.ports.dns import DnsPort
+from nextron.ports.postmaster import PostmasterPort
 from nextron.ports.email_syntax import EmailSyntaxPort
 from nextron.ports.google_oauth import Query
 from nextron.web.app import create_app
@@ -140,6 +143,7 @@ from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
+from tests.fakes.postmaster import FakePostmaster
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 from tests.fakes.usage_meter import InMemoryUsageMeter
@@ -314,6 +318,7 @@ class Dashboard:
     inspect: Callable[[Path], CopyInspection] = inspect_copy
     email_syntax: EmailSyntaxPort = field(default_factory=FakeEmailSyntax)
     dns: DnsPort = field(default_factory=FakeDns)
+    postmaster: PostmasterPort = field(default_factory=FakePostmaster)
     ai_content: Callable[
         [], tuple[Sequence[PromptFile], Sequence[RouteSpec], PlaybookSnapshot | PlaybookProblem]
     ] = shipped_ai_content
@@ -409,7 +414,9 @@ class Dashboard:
             queue=self.queue,
         )
         self.sending = Sending(self.clock, env=self.env)
-        self.domain_checks = DomainChecks(self.clock, self.dns, self.queue)
+        self.domain_checks = DomainChecks(
+            self.clock, self.dns, self.queue, postmaster=self.postmaster, notify=self.notify
+        )
         self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
         self.meter = meter

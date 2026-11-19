@@ -548,6 +548,7 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "unsub_active_kid",
         "total_daily_ceiling",
         "unsub_worker_host",
+        "dnsbl_zones",
         "quota_hunter_credits",
         "quota_prospeo_credits",
         "quota_places_enterprise",

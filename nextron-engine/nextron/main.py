@@ -504,12 +504,21 @@ later than process start (fail closed).
 **Domain checks (Story 6.5; FR-64, NFR-4, NFR-20).** ``build_app(..., dns=None)`` builds one
 ``DnspythonDns(meter=meter)`` (``nextron.adapters.dns``) unless a ``dns=`` is injected; building
 it builds no resolver and reads no DNS configuration (its first query does). ``DomainChecks(clock,
-dns, queue)`` (``nextron.app.sending.checks``) runs the ``check_domains`` jobs, reached through
-``domain_checks=lambda: domain_checks``; the scheduler reads the daily time through
-``read_domain_check_schedule(units, domain_checks)``; the health-issue registry gets its
+dns, queue, postmaster=..., notify=notify)`` (``nextron.app.sending.checks``) runs the
+``check_domains`` jobs, reached through ``domain_checks=lambda: domain_checks``; the scheduler
+reads the daily time through ``read_domain_check_schedule(units, domain_checks)``; the health-issue registry gets its
 ``sending`` source on the same clock; and the dashboard gets it (``create_app(...,
 domain_checks=...)``) for the Sending Inboxes page's Recheck. Story 6.2 calls
 ``DomainChecks.queue_check`` inside its connect transaction.
+
+Story 6.6 (FR-38, FR-58, AD-9) adds the reputation guardrails to each check: ``build_app(...,
+postmaster=None)`` builds one ``GooglePostmaster(token=lambda:
+google.access_token("postmaster"), meter=meter)`` (``nextron.adapters.postmaster``) unless a
+``postmaster=`` is injected; it builds no HTTP client until its first read. The checks get the
+same ``Notify`` for their deduplicated alerts, so ``domain_checks`` is built after it. The
+health registry gets ``postmaster_grant_missing=functools.partial(postmaster_grant_missing,
+google)`` (whether ``GoogleAccess.check_stored_grant("postmaster")`` raises; it never calls
+Google).
 
 **The Suppression List panel (Story 3.5; AD-16, FR-50, FR-41).** ``build_app`` builds one
 ``Compliance(clock, codec=TokenCodec(secrets), ledger=...)`` (``nextron.app.compliance.api``;
@@ -582,15 +591,16 @@ health-issue registry: the only code that constructs ``HealthIssues`` or calls
 ``IssueSource("backups", queries.ops.health_issues)`` (each failed backup newer than the newest
 verified one), then ``IssueSource("playbook", queries.playbook.health_issues)`` (the newest
 Sales Playbook check's problem, Story 4.4), then ``IssueSource("sending", lambda:
-queries.sending.health_issues(clock.now()))`` (each listed Sending Domain whose cold sends are
-blocked, Story 6.5; ``clock=None`` means ``SystemClock()``), then ``IssueSource("erasure",
+queries.sending.health_issues(clock.now(), postmaster_grant_missing))`` (each listed Sending
+Domain whose cold sends are blocked, Story 6.5, and its blocklist and spam-rate issues, Story
+6.6; ``clock=None`` means ``SystemClock()``), then ``IssueSource("erasure",
 queries.compliance.health_issues)`` (each open erase request and each failed erasure store,
 Story 3.14), then, given ``ledger``, ``IssueSource("compliance",
 functools.partial(queries.compliance.ledger_health_issues, ledger))`` (a missing or unreapplied
 erasure ledger after a restore, Story 3.16), then freezes it; each later owner
 registers its ``queries.<owner>.health_issues`` there. ``build_app`` builds one
 ``EngineHealth(clock, job_types, issues=build_health_issues(budget=budget, clock=clock,
-ledger=<the ledger's path>),
+ledger=<the ledger's path>, postmaster_grant_missing=...),
 readiness=functools.partial(run_checks, build_doctor_checks(), context))``
 (``nextron.app.ops.api``) and hands it, with the ``JobQueue`` (which dismisses a dead job), to
 ``create_app(..., health=health, queue=queue)``: the health panel (``GET /health/panel``)
@@ -765,6 +775,7 @@ from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.crypto.unsub_token import TokenCodec
 from nextron.adapters.dns import DnspythonDns
+from nextron.adapters.postmaster import GooglePostmaster
 from nextron.adapters.email_syntax import EmailValidatorSyntax
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.hunter import HunterFinder
@@ -871,6 +882,7 @@ from nextron.domain.backup import (
 )
 from nextron.domain.ai import RouteSpec
 from nextron.domain.ai_test_cases import InvalidTestCases, TestCase, extraction_case
+from nextron.domain.google_oauth import GoogleGrant
 from nextron.domain.ai_test_gate import RUN_AI_TEST_SETS_JOB, TestSet
 from nextron.domain.ai_test_sets import set_case
 from nextron.domain.budget import AiCall, ApiCall, Usage, month_of
@@ -963,6 +975,7 @@ from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
 from nextron.ports.mail import MailPort
 from nextron.ports.places import PlacesPort
+from nextron.ports.postmaster import PostmasterPort
 from nextron.ports.registry import RegistryPort
 from nextron.ports.renderer import RendererPort
 from nextron.ports.secrets import SecretsPort, read_credential
@@ -1017,6 +1030,7 @@ WORKERS: Final = 1
 LOGS_DIR_NAME: Final = "logs"
 DB_FILE_NAME: Final = "nextron.db"
 SINK_DIR_NAME: Final = "sink"
+POSTMASTER_GRANT: Final = str(GoogleGrant.POSTMASTER)  # the domain checks' spam-rate grant
 HEARTBEAT_FILE_NAME: Final = "heartbeat"
 DATABASE_REVISION_CHECK: Final = DATABASE_REVISION
 ENV_SOURCE_FLAG: Final = "--env"
@@ -1150,6 +1164,7 @@ def build_app(
     prospeo: EmailFinderPort | None = None,
     unsubscribe: UnsubscribePort | None = None,
     places: PlacesPort | None = None,
+    postmaster: PostmasterPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -1197,7 +1212,9 @@ def build_app(
     meter=meter)`` unless injected), which builds its HTTP client on its first fetch, and applies
     it through a ``Compliance`` with the ``TokenCodec``. Google Places is
     searched through ``places`` (``build_places(config.env, secrets, meter)`` unless injected),
-    kept with its ``PlaceSearches`` on ``app.state.place_searches``."""
+    kept with its ``PlaceSearches`` on ``app.state.place_searches``. The domain checks read
+    Postmaster spam rates through ``postmaster`` (``GooglePostmaster`` on the ``postmaster``
+    grant's access token unless injected), which builds its HTTP client on its first read."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1255,9 +1272,6 @@ def build_app(
     people = PeopleExtractions(clock, meter, llm, research, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
-    domain_checks = DomainChecks(
-        clock, dns if dns is not None else DnspythonDns(meter=meter), queue
-    )
     lead_scores = LeadScores(clock, Scoring(clock, Pipeline(clock), research), queue)
     job_boards = JobBoards(
         clock,
@@ -1291,6 +1305,17 @@ def build_app(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
     )
     notify = Notify(clock, queue, alert_ports={Channel.TELEGRAM: telegram})
+    domain_checks = DomainChecks(
+        clock,
+        dns if dns is not None else DnspythonDns(meter=meter),
+        queue,
+        postmaster=(
+            postmaster
+            if postmaster is not None
+            else GooglePostmaster(token=lambda: google.access_token(POSTMASTER_GRANT), meter=meter)
+        ),
+        notify=notify,
+    )
     sink_files = (
         SinkRecorder(config.data_dir / SINK_DIR_NAME, clock) if sink_applies(config.env) else None
     )
@@ -1362,7 +1387,12 @@ def build_app(
     health = EngineHealth(
         clock,
         job_types,
-        issues=build_health_issues(budget=budget, clock=clock, ledger=ledger_file.path),
+        issues=build_health_issues(
+            budget=budget,
+            clock=clock,
+            ledger=ledger_file.path,
+            postmaster_grant_missing=functools.partial(postmaster_grant_missing, google),
+        ),
         readiness=functools.partial(run_checks, build_doctor_checks(), context),
     )
     app = create_app(
@@ -1833,13 +1863,30 @@ def _no_erasure_stores() -> handlers.StoreErasing:
     raise RuntimeError("erase_external has no ErasureStores wired")
 
 
+def postmaster_grant_missing(google: GoogleAccess) -> bool:
+    """Whether the ``postmaster`` grant is missing or unusable (``check_stored_grant`` raises:
+    no client, not granted, needs re-consent, or Credential Manager failed); never calls
+    Google."""
+    try:
+        google.check_stored_grant(POSTMASTER_GRANT)
+    except AdapterError:
+        return True
+    return False
+
+
 def build_health_issues(
-    *, budget: Budget, clock: Clock | None = None, ledger: Path | None = None
+    *,
+    budget: Budget,
+    clock: Clock | None = None,
+    ledger: Path | None = None,
+    postmaster_grant_missing: Callable[[], bool] | None = None,
 ) -> HealthIssues:
     """The health-issue registry, frozen: jobqueue's dead jobs, then the budget's AI spend and
     quotas, then the failed backups, then the Sales Playbook's problem, then the Sending
-    Domains whose cold sends are blocked, read at ``clock.now()`` (``SystemClock()`` when
-    ``clock`` is ``None``), then the erasures' open requests and failed stores, then, given the
+    Domains whose cold sends are blocked and their reputation issues (with one
+    ``postmaster_grant_missing`` issue while ``postmaster_grant_missing()`` is true; never when
+    it is ``None``), read at ``clock.now()`` (``SystemClock()`` when ``clock`` is ``None``),
+    then the erasures' open requests and failed stores, then, given the
     erasure ledger's path ``ledger`` (``build_app`` always gives it), compliance's missing or
     unreapplied ledger (Story 3.16). Each later owner registers its
     ``queries.<owner>.health_issues`` here, before ``freeze()``."""
@@ -1849,7 +1896,12 @@ def build_health_issues(
     issues.register_source(IssueSource("budget", budget.health_issues))
     issues.register_source(IssueSource("backups", ops_queries.health_issues))
     issues.register_source(IssueSource("playbook", playbook_queries.health_issues))
-    issues.register_source(IssueSource("sending", lambda: sending_queries.health_issues(now())))
+    issues.register_source(
+        IssueSource(
+            "sending",
+            lambda: sending_queries.health_issues(now(), postmaster_grant_missing),
+        )
+    )
     issues.register_source(IssueSource("erasure", compliance_queries.health_issues))
     if ledger is not None:
         issues.register_source(

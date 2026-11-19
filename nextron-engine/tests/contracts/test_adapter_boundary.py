@@ -2,13 +2,13 @@
 transport raises or answers, only ``AdapterError`` comes out of a port call, and no planted
 secret is in the error.
 
-- **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__``
-  takes an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway``,
-  ``HttpCrawler``, ``CompaniesHouseRegistry``, ``HunterFinder``, ``ProspeoFinder``,
-  ``WorkerUnsubscribe`` and ``GooglePlaces`` today) has a driver in ``DRIVERS``: it builds the
-  adapter on a client whose transport is the probe's, with secrets
-  planted where the adapter reads them, and makes each of its port calls. The coverage check
-  fails for a new such class until it gets one.
+- **Every HTTP adapter is driven.** Every class under ``nextron.adapters`` whose ``__init__`` takes
+  an ``http`` client (``TelegramAlert``, ``GoogleOAuthClient``, ``ClaudeGateway``, ``HttpCrawler``,
+  ``CompaniesHouseRegistry``, ``HunterFinder``, ``ProspeoFinder``, ``WorkerUnsubscribe``,
+  ``GooglePlaces`` and ``GooglePostmaster`` today) has a driver in ``DRIVERS``: it builds the
+  adapter on a client whose transport is the probe's, with secrets planted where the adapter reads
+  them, and makes each of its port calls. The coverage check fails for a new such class until it
+  gets one.
 - **Only AdapterError.** The transport raises each ``httpx2`` exception class, ``OSError``,
   ``ssl.SSLError``, ``ValueError`` and ``RuntimeError``, and answers 200 with garbage, 400,
   401, 403, 404, 429, 500 and 503, every message and body holding the planted secrets. Each
@@ -35,6 +35,7 @@ import traceback
 import types
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from datetime import date
 from typing import Final
 
 import httpx2
@@ -44,6 +45,7 @@ import nextron.adapters
 from nextron.adapters.ai import LLM_INVALID, LLM_TRUNCATED, ClaudeGateway
 from nextron.adapters.companies_house import CompaniesHouseRegistry
 from nextron.adapters.places import GooglePlaces
+from nextron.adapters.postmaster import GooglePostmaster
 from nextron.adapters.crawler import HttpCrawler
 from nextron.adapters.google_oauth import GoogleOAuthClient
 from nextron.adapters.hunter import HunterFinder
@@ -73,6 +75,7 @@ HUNTER_KEY: Final = "Hk6Tb2Wq8Ln4Zr9Xv3Mp"
 PROSPEO_KEY: Final = "Pk9Rm3Vx7Lq2Tn6Wz4Hb"
 UNSUB_BEARER: Final = "Ub4Xq8Lm2Vz6Np1Rt5Hk9Jc3Wd7Gs0Fy4Tb8Mn2Qe6Ah"
 PLACES_KEY: Final = "Gp4Yt8Rm2Kx6Wq1Zv9Ld"
+POSTMASTER_TOKEN: Final = "Pt7Kw3Zq9Lm2Xv6Nr4Hc"
 PLANTED: Final = (
     BOT_TOKEN,
     BOT_TOKEN.split(":")[1],
@@ -86,6 +89,7 @@ PLANTED: Final = (
     PROSPEO_KEY,
     UNSUB_BEARER,
     PLACES_KEY,
+    POSTMASTER_TOKEN,
 )
 CHAT: Final = "-1001234567890"
 ALERT_TEXT: Final = "Job dead: send_alert 01JD3QZ8X5V9K2M7N4P6R8T0WY, attempts: 6"
@@ -277,6 +281,11 @@ def places_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tup
     )
 
 
+def postmaster_calls(http: httpx2.Client, meter: InMemoryUsageMeter) -> Iterator[tuple[str, Call]]:
+    adapter = GooglePostmaster(token=lambda: POSTMASTER_TOKEN, meter=meter, http=http)
+    yield "spam_rate", lambda: adapter.spam_rate("example-sender.com", date(2026, 11, 18))
+
+
 # Every adapter class whose __init__ takes an http client, with its driver.
 DRIVERS: Final[dict[type, Driver]] = {
     TelegramAlert: telegram_calls,
@@ -288,6 +297,7 @@ DRIVERS: Final[dict[type, Driver]] = {
     ProspeoFinder: prospeo_calls,
     WorkerUnsubscribe: unsubscribe_calls,
     GooglePlaces: places_calls,
+    GooglePostmaster: postmaster_calls,
 }
 # What each adapter records per request: an ApiCall, unless it is listed here.
 RECORDS: Final[dict[type, type]] = {ClaudeGateway: AiCall}

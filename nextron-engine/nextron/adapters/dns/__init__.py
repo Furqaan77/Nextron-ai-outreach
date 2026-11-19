@@ -14,7 +14,7 @@ injected, and later queries reuse it. After a retryable failure (``dns_timeout``
 system configuration then (the PC may have changed network or VPN since); an injected one is
 kept.
 
-**Each query** (``txt`` or ``mx``):
+**Each query** (``txt``, ``mx`` or ``a``, Story 6.6's DNSBL lookups):
 
 1. the name is checked with ``nextron.ports.dns.is_dns_name``: a non-``str`` raises
    ``TypeError``; a name that isn't a non-empty ASCII DNS name (labels of 1 to 63 letters,
@@ -22,7 +22,7 @@ kept.
    characters without it) is ``dns_invalid_name``;
 2. it is made absolute (``dns.name.from_text``); a name dnspython refuses is
    ``dns_invalid_name`` too;
-3. inside ``Metered(meter, "dns", "txt" | "mx")``, ``resolver.resolve(name, type,
+3. inside ``Metered(meter, "dns", "txt" | "mx" | "a")``, ``resolver.resolve(name, type,
    lifetime=lifetime, search=False)`` is called exactly once.
 
 So each query records one ``ApiCall``, and a refused name records none.
@@ -30,7 +30,7 @@ So each query records one ``ApiCall``, and a refused name records none.
 **Answers.** NXDOMAIN and NODATA (``dns.resolver.NXDOMAIN``, ``dns.resolver.NoAnswer``) answer
 ``()``. A TXT record's character-strings are joined with nothing and decoded as UTF-8 with
 replacement; an MX record's exchange is lower-cased without its final dot, and the root (a null
-MX, RFC 7505) is ``""``. Both answers are sorted.
+MX, RFC 7505) is ``""``; an A record is its dotted IPv4 address. Every answer is sorted.
 
 **Errors.** A timeout (``dns.exception.Timeout``, ``LifetimeTimeout`` included) is the
 retryable ``dns_timeout``; ``dns.resolver.NoNameservers`` (SERVFAIL, REFUSED or a network error
@@ -64,6 +64,7 @@ from nextron.ports.usage_meter import Metered, UsageMeterPort
 PROVIDER: Final = "dns"  # the usage meter's provider and operations
 TXT: Final = "txt"
 MX: Final = "mx"
+A: Final = "a"
 DEFAULT_LIFETIME_S: Final = 5.0
 
 
@@ -166,3 +167,9 @@ class DnspythonDns:
         if answer is None:
             return ()
         return tuple(sorted(MxRecord(int(rr.preference), _exchange(rr.exchange)) for rr in answer))
+
+    def a(self, name: str) -> tuple[str, ...]:
+        answer = self._resolve(name, dns.rdatatype.A, A)
+        if answer is None:
+            return ()
+        return tuple(sorted(str(record.address) for record in answer))

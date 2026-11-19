@@ -17,10 +17,12 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import IntegrityError
 
 from nextron import main
+from nextron.adapters.postmaster import GooglePostmaster
 from nextron.app.jobqueue.api import JobQueue
+from nextron.app.notify.api import Notify
 from nextron.app.queries import sending as sending_queries
 from nextron.app.sending.checks import DomainChecks
-from nextron.app.setup.api import Setup
+from nextron.app.setup.api import GoogleAccess, Setup
 from nextron.bootstrap import load_bootstrap
 from nextron.db.models.base import new_id
 from nextron.db.uow import UnitOfWorkFactory, in_transaction
@@ -35,6 +37,7 @@ from nextron.domain.job import InvalidJob, Job, JobStatus, Lane
 from nextron.ports.errors import AdapterError
 from tests.fakes.clock import FrozenClock
 from tests.fakes.dns import FakeDns
+from tests.fakes.postmaster import FakePostmaster
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 
@@ -76,6 +79,13 @@ def no_jobs() -> Any:
     raise AssertionError("only check_domains jobs run in these tests")
 
 
+class NoAlerts:
+    """The ``notify`` service: no authentication check raises an alert."""
+
+    def alert(self, *args: object) -> object:
+        raise AssertionError("an authentication check raised an alert")
+
+
 @dataclass
 class World:
     """``DomainChecks`` on real units of work, with a queue on the real job types."""
@@ -106,7 +116,9 @@ class World:
             domain_checks=lambda: self.checks,
         )
         self.queue = JobQueue(self.clock, job_types)
-        self.checks = DomainChecks(self.clock, self.dns, self.queue)
+        self.checks = DomainChecks(
+            self.clock, self.dns, self.queue, postmaster=FakePostmaster(), notify=NoAlerts()
+        )
 
     def sql(self, statement: str, params: tuple[object, ...] = ()) -> list[Any]:
         with self.engine.connect() as connection:
@@ -189,6 +201,7 @@ def test_a_passing_domain_records_one_row_and_allows_cold_sends(
         ("txt", DOMAIN),
         ("txt", f"google._domainkey.{DOMAIN}"),
         ("txt", f"_dmarc.{DOMAIN}"),
+        ("a", f"{DOMAIN}.dbl.spamhaus.org"),  # Story 6.6: the default DNSBL zone
     ]
     assert listed.rows() == [(DOMAIN_ID, STAMP, 1, 1, 1, 1, 1, details())]
     view = listed.auth()
@@ -692,8 +705,8 @@ def test_build_app_builds_domain_checks_on_its_dnspython_dns(
         built_dns.append(real_dns(**kwargs))
         return built_dns[-1]
 
-    def domain_checks(*args: Any) -> DomainChecks:
-        built_checks.append(real_checks(*args))
+    def domain_checks(*args: Any, **kwargs: Any) -> DomainChecks:
+        built_checks.append(real_checks(*args, **kwargs))
         return built_checks[-1]
 
     def recording_job_types(**kwargs: Any) -> Any:
@@ -714,6 +727,18 @@ def test_build_app_builds_domain_checks_on_its_dnspython_dns(
     assert dns._resolver is None  # noqa: SLF001 - building it built no resolver
     assert checks._dns is dns  # noqa: SLF001 - the wiring under test
     assert checks._clock is clock  # noqa: SLF001
+    assert isinstance(checks._postmaster, GooglePostmaster)  # noqa: SLF001 - Story 6.6
+    assert checks._postmaster._http is None  # noqa: SLF001 - building it built no client
+    asked: list[str] = []
+
+    def access_token(self: Any, grant: str) -> str:
+        asked.append(grant)
+        return "fake-token"
+
+    monkeypatch.setattr(GoogleAccess, "access_token", access_token)  # never the keyring
+    assert checks._postmaster._token() == "fake-token"  # noqa: SLF001 - read at call time
+    assert asked == ["postmaster"]
+    assert isinstance(checks._notify, Notify)  # noqa: SLF001
     [given] = registries  # the check_domains jobs reach the built service, not the default
     assert given["domain_checks"]() is checks
 
@@ -724,15 +749,17 @@ def test_build_app_takes_an_injected_dns(tmp_path: Path, monkeypatch: pytest.Mon
     built: list[DomainChecks] = []
     real_checks = main.DomainChecks
 
-    def domain_checks(*args: Any) -> DomainChecks:
-        built.append(real_checks(*args))
+    def domain_checks(*args: Any, **kwargs: Any) -> DomainChecks:
+        built.append(real_checks(*args, **kwargs))
         return built[-1]
 
     monkeypatch.setattr(main, "KeyringSecrets", lambda env: InMemorySecrets(env))
     monkeypatch.setattr(main, "DomainChecks", domain_checks)
     fake = FakeDns()
+    postmaster = FakePostmaster()
 
-    main.build_app(load_bootstrap(), units=FakeUnits(), dns=fake)
+    main.build_app(load_bootstrap(), units=FakeUnits(), dns=fake, postmaster=postmaster)
 
     [checks] = built
     assert checks._dns is fake  # noqa: SLF001
+    assert checks._postmaster is postmaster  # noqa: SLF001

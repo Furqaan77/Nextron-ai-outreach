@@ -385,6 +385,10 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "aligned_ok": PiiClass.NONE,
         "passed": PiiClass.NONE,
         "details": PiiClass.NONE,
+        # Story 6.6: blocklist outcomes and a spam rate, about Nextron's own domains.
+        "dnsbl_result": PiiClass.NONE,
+        "spam_rate": PiiClass.NONE,
+        "spam_rate_status": PiiClass.NONE,
     },
     # Story 4.8. An Enrollment holds IDs, codes and times only: who it is lives in contacts.
     "enrollments": {
