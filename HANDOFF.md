@@ -40,7 +40,7 @@ The project owner and operator is **Mac** (the user). Mac prefers fast paths, fe
 | Architecture spine | ✅ final (amended 2026-11-15: any rejected Step stops the Sequence; owner-map additions) |
 | Epics and stories | ✅ final, 146 stories |
 | Sprint planning | ✅ done; readiness gate PASS |
-| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`), **Story 1.21** (merge `932cd0a`), **Story 3.8** (merge `f29d1f6`), **Story 2.9** (merge `c5781f1`), **Story 4.4** (merge `f437364`), **Story 2.6** (merge `1e53e10`), **Story 3.4** (merge `6826855`), **Story 3.5** (merge `0236df2`), **Story 3.6** (merge `f7a1dbb`), **Story 2.10** (merge `da145d0`) the 2.9 follow-up **2.9a** (merge `8f190c3`), **Story 4.5** (merge `d121f0a`), **Story 3.7** (merge `e767cee`), **Story 3.13** (merge `4d46a06`), **Story 6.5** (merge `1857f69`), **Story 3.15** (merge `52c47bc`), **Story 4.6** (merge `97a216b`), **Story 2.11** (merge `9b5f7bb`), **Story 2.12** (merge `0df50b1`), **Story 3.14** (merge `424c070`), **Story 4.8** (merge `9c3764a`), **Story 3.10** (merge `e391ab4`), **Story 3.16** (merge `818a8ff`), **Story 6.4** (merge `42df580`), **Story 2.13** (merge `777aae2`), **Story 2.15** (merge `5a415d7`), **Story 4.9** (merge `09b6bf1`), **Story 10.1** (merge `e5d70b3`), **Story 9.7** (merge `5d502de`), **Story 3.11** (merge `a257c96`), **Story 8.2** (merge `68472bb`), **Story 4.12** (merge `63c5797`), **Story 3.12** (merge `6f654ec`), **Story 8.3** (merge `c8166d5`), **Story 10.2** (merge `c7744a6`), **Story 9.1** (merge `13963a5`), **Story 2.14** (merge `a39174b`), **Story 10.7** (merge `863ef3e`), **Story 4.10** (merge `f15e2b0`), **Story 9.4** (merge `46bc888`) and **Story 2.16** (merge `f512511`). **Epics 1 and 2 are complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
+| **Build** | **Stories 1.1–1.15 complete** (commits `c2e1b78`, `5adc1aa`, `b1a7384`, `8a92a32`, `ec55442`, `542bc92`, `0966ef1`, `81478a5`, `5352826`, `c50fff3`, `dfc2cdb`, `6e34a17`, `712357d`, `970454c`, `6ec7164`, `b0eb26e`; sprint status `review`), plus **Story 1.17** (merge `a442dd9`), **Story 2.1** (merge `cb63e02`), **Story 2.7** (merge `d4026d2`), **Story 3.1** (merge `93fd888`), **Story 2.2** (merge `8b32024`), **Story 1.18** (merge `5572b62`), **Story 4.1** (merge `8a32d7a`), **Story 2.8** (merge `2acd2c0`), **Story 2.3** (merge `24bbda4`), **Story 1.19** (merge `ac54f23`), **Story 4.3** (merge `84c0f80`), **Story 4.7** (merge `fb662d6`), **Story 2.4** (merge `04a9a64`), **Story 3.2** (merge `b6cf191`), **Story 2.5** (merge `9b91549`), **Story 1.20** (merge `ba3b062`), **Story 4.2** (merge `c511e23`), **Story 3.3** (merge `75f39d5`), **Story 4.11** (merge `8cd08e5`), **Story 1.21** (merge `932cd0a`), **Story 3.8** (merge `f29d1f6`), **Story 2.9** (merge `c5781f1`), **Story 4.4** (merge `f437364`), **Story 2.6** (merge `1e53e10`), **Story 3.4** (merge `6826855`), **Story 3.5** (merge `0236df2`), **Story 3.6** (merge `f7a1dbb`), **Story 2.10** (merge `da145d0`) the 2.9 follow-up **2.9a** (merge `8f190c3`), **Story 4.5** (merge `d121f0a`), **Story 3.7** (merge `e767cee`), **Story 3.13** (merge `4d46a06`), **Story 6.5** (merge `1857f69`), **Story 3.15** (merge `52c47bc`), **Story 4.6** (merge `97a216b`), **Story 2.11** (merge `9b5f7bb`), **Story 2.12** (merge `0df50b1`), **Story 3.14** (merge `424c070`), **Story 4.8** (merge `9c3764a`), **Story 3.10** (merge `e391ab4`), **Story 3.16** (merge `818a8ff`), **Story 6.4** (merge `42df580`), **Story 2.13** (merge `777aae2`), **Story 2.15** (merge `5a415d7`), **Story 4.9** (merge `09b6bf1`), **Story 10.1** (merge `e5d70b3`), **Story 9.7** (merge `5d502de`), **Story 3.11** (merge `a257c96`), **Story 8.2** (merge `68472bb`), **Story 4.12** (merge `63c5797`), **Story 3.12** (merge `6f654ec`), **Story 8.3** (merge `c8166d5`), **Story 10.2** (merge `c7744a6`), **Story 9.1** (merge `13963a5`), **Story 2.14** (merge `a39174b`), **Story 10.7** (merge `863ef3e`), **Story 4.10** (merge `f15e2b0`), **Story 9.4** (merge `46bc888`) **Story 2.16** (merge `f512511`), **Story 5.11** (merge `5eaacc6`), **Story 11.5** (merge `917902e`), **Story 11.7** (merge `b6d0b48`), **Story 11.8** (merge `1af4568`), **Story 9.6** (merge `3cd459b`), **Story 9.8** (merge `52f3c3f`), **Story 4.13** (merge `f8276b0`), **Story 4.14** (merge `f8beb44`), **Story 8.4** (merge `510f672`) and **Story 8.1** (merge `f597413`). **Epics 1 and 2 are complete.** The build runs in parallel tracks (§4). See `sprint-status.yaml` for what is in progress. Built unattended overnight on 2026-11-17 per Mac's instruction; overnight decisions are listed under "Decisions made overnight (pending user review)" in each spec. |
 
 **Story 1.1 result:** `nextron-engine/` scaffold with exact version pins, the spine's package layout (16 owner services), 28 import-linter contracts in 7 AD-1 groups, startup safety checks, a per-environment instance lock, `nextron serve`, `nextron doctor`, and `GET /health` on 127.0.0.1. 190 tests pass. The three-layer review found 37 findings: 15 fixed (including a high one, Uvicorn's exit code 3 colliding with "lock held"), 2 deferred, 20 rejected with reasons.
 
@@ -321,11 +321,30 @@ The User-Agent is `NextronBot/1.0`. It has never fetched a real website; it is t
 
 **Story 2.16 result:** the Signal Inbox turns pasted posts into researched, scored Leads; unparseable items are flagged for Mac.
 
-Main now: **18613 tests, 29 contracts.** Migration head `0054_2_16_signal_inbox`.
+**Story 5.11 result:** away dates (Settings) stop new Sequences being picked automatically while Mac is away. The Dashboard shows "Away until ...". Leads picked by hand still enroll.
+
+**Stories 11.5, 11.7 and 11.8 result:** Segments, Sequences with their Step briefs, and Campaigns with their Variants are edited in the dashboard.
+- Every save is a new version that can't be changed later. Running Enrollments keep the version they started with.
+- Once rows exist, `nextron seed sync` reports the seed files as ignored ("managed in the dashboard").
+
+**Story 9.6 result:** `/reports/calls` validates the Offer after the first 10 held calls. It shows only counts and codes, never names or erased data.
+
+**Story 9.8 result:** each Lead has a History tab listing everything that happened to it, with filters.
+
+**Story 4.13 result:** every Draft revision is checked against 14 deterministic grounding rules before it is stored, and the result is saved.
+
+**Story 4.14 result:** every revision gets an AI grounding check (Haiku, with Opus as fallback) that fails closed. The Lead page shows a pass/fail/pending badge with the flagged spans.
+- **Until a grounding route passes the 4.5 test gate, every revision fails with "checker unavailable".** This is by design.
+
+**Story 8.4 result:** active UK companies are discovered through Companies House keyword and SIC searches. An officer becomes a Contact only when their occupation matches a target role.
+
+**Story 8.1 result:** every job has a budget class. Supply work (discovery, enrichment, re-checks) stops at a provider quota or the AI budget. Sending, replies and unsubscribe polling always keep running.
+
+Main now: **19526 tests, 29 contracts.** Migration head `0060_8_4_registry_discovery`.
 
 **Faster tests (chore `aee9466`):** `uv run pytest -q -n 6 --dist loadgroup` runs the suite in about 75 s instead of about 250 s, with pytest-xdist 3.8.0 as a dev dependency. The spine's tool table doesn't list pytest-xdist yet.
 
-**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 67 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
+**Story counts:** 146 total. Release 1 (Epics 1–7, first approved sends) is 109 stories, of which 70 are done. Release 2 (Epics 8–9) is 20 stories, and Release 3 (Epics 10–11) is 17.
 
 ### For Mac to review (overnight build, 2026-11-17)
 - **Overnight decisions.** From Story 1.3 onward, every spec has a section `### Decisions made overnight (pending user review)` with the conservative choices made while you were away. Read them and say if any should change.
@@ -399,6 +418,12 @@ Main now: **18613 tests, 29 contracts.** Migration head `0054_2_16_signal_inbox`
   - DMARC passes without a valid `p=`.
 - **Story 2.12:** a firm registered at its accountant's address that quotes no company number stays unconfirmed (and so not eligible).
 - **Story 2.11:** EU Greenhouse and Lever boards aren't included; postings on careers pages no longer crawled never close.
+- **Story 11.8:** there is no Offer editor, and Offers are frozen once any Campaign exists. A new Offer would need a small follow-up story.
+- **Story 11.5:** once any Segment exists, seed sync never writes Segments again, so the dashboard is the only place they change.
+- **Story 8.4:**
+  - the website lookup trusts the first Places match;
+  - each run searches the first pages only (Story 8.10 rotates queries).
+- **Story 4.14:** no revision passes grounding until a grounding route passes its AI test set.
 - **Story 3.12:** restoring a backup older than the Worker's 30-day window silently loses opt-outs from that gap; the unsubscribe key guard only holds during recovery mode.
 - **Story 2.16:** the author's name and role are accepted separately, so one person's role could attach to another's name.
 - **Story 9.4:** a recorded no-show no longer counts as a pending booking.
