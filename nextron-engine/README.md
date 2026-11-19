@@ -4673,6 +4673,42 @@ spend against the budget, with the warning, reached or off line; each quota's us
 limit (Hunter in credits, with halves) and its state (`OK`, `Reached: <work> stopped` or
 `Off (quota 0)`); and every provider, operation and SKU's calls, failed calls and units.
 
+### Supply jobs inside the quotas and the AI budget (Story 8.1)
+
+**Budget classes on job types.** Every job type declares `budget_class` (`JobType(...,
+budget_class=BudgetClass.ESSENTIAL)`, the default; `BudgetClass` now lives in
+`nextron/domain/budget_class.py` and `nextron.domain.budget` re-exports it). Only these are
+`blockable`: `enrich_lead`, `render_pages`, `extract_lead`, `check_legal_form`,
+`check_job_boards`, `recheck_event`, `discover_places`, `discover_registry`,
+`process_signal_item` (the Signal Inbox parse, Story 2.16), `find_contact_email` and
+`verify_contact_email` (Hunter and Prospeo, Stories 2.13 and 2.14), and `run_ai_test_sets` (an
+AI Test Set run is deferrable AI spend, Story 4.5). Every other type
+(sending, replies, unsubscribe polling, alerts, backups, `daily_selection`, `recontact_due` and
+the rest) is `essential` and is never blocked. `tests/contracts/test_budget_classes.py` proves
+it: blockable types sit only in the Discovery, Enrichment and Re-check groups (or the one named
+exception), the epics' supply list is blockable wherever registered, and every essential handler
+runs cleanly with the month's AI spend at 150% and every quota used up, never returning
+`DEFERRED` and never asking `allow` about blockable work. A new essential type needs a sample
+payload there (`ESSENTIAL_SAMPLES`).
+
+**Places calls are atomic.** One process-wide lock covers each `PlaceSearches.page`: the budget
+and quota check, the request and its usage record. Every Places request goes through it, so two
+calls at 999 of 1,000 make one request and the other is refused. `page()` raises `RuntimeError`
+when called inside a transaction.
+
+**Discovery runs check before they start.** A Places or Companies House discovery run checks
+the budget (and, for Places, its quota) before it writes its `discovery_runs` row. A refused
+run writes no row, fetches nothing and its job returns `DEFERRED` (re-queued an hour later), so
+a run refused all month leaves no trail of empty `deferred` rows. The page-by-page checks stay.
+
+**The health panel** lists "Discovery stopped: Places Enterprise quota reached" (one per
+reached discovery quota) and "Discovery stopped: AI budget reached" (source `discovery`, after
+`sending`); a quota of 0 (off) is never listed. Its job groups show the last successful run of
+`discover_places` and `discover_registry` (Discovery) and `recheck_event` (Re-check).
+
+**Only the Settings form changes a quota.** `tests/contracts/test_quota_settings.py` fails when
+any module but `domain/settings_schema.py` and `domain/budget.py` names a `quota_*` setting.
+
 ## The Claude gateway
 
 Every call to Claude goes through one gateway, `ClaudeGateway` in `nextron/adapters/ai` (FR-57,
@@ -5986,9 +6022,10 @@ Places queries is refused with nothing queued. Nothing runs automatically yet.
 e.g. `law firm`, `solicitors`) in seed order, each paged to its end, until the page cap. A run
 that starts first ends any run row still `running` as `failed` (a crash left it). Before each
 page the run re-checks that the Campaign may still run in the same country, and otherwise
-ends `stopped`. The budget's per-call check comes before each page; a refusal ends the run `deferred` and the job
-is re-queued an hour later (the Leads already made stay; a re-run starts again at page 1 and
-merges what it already found). For each candidate, in memory only:
+ends `stopped`. The same check runs before the run's row is written (Story 8.1): refused there,
+the run writes no row and the job is re-queued an hour later. The budget's per-call check comes
+before each page; a refusal ends the run `deferred` and the job is re-queued an hour later (the
+Leads already made stay; a re-run starts again at page 1 and merges what it already found). For each candidate, in memory only:
 
 1. the location's country must be an enabled Market, else **Market blocked**;
 2. a Lead already holding the place ID (normalised; at any stage, merged included) means
@@ -6016,8 +6053,9 @@ page lists the newest 20 (`Cache-Control: no-store`). Logs hold ids, outcomes an
 that no table, job payload, `events` row or log line holds a Places name, website path or
 coordinate text; `tests/contracts/test_ad16_callers.py` checks the gate precedes each insert.
 
-**Not yet:** the job budget class (Story 8.1), Companies House and aggregator discovery (8.4,
-8.6), the daily top-up (8.10), and the pool and quota figures on the Discovery page.
+**Not yet:** aggregator discovery (8.6), the daily top-up (8.10), and the pool and quota
+figures on the Discovery page.
+
 ## The Signal Inbox
 
 A post or job ad Mac finds by hand goes into the **Signal Inbox** (`/signals`, the nav's "Signal
@@ -6112,9 +6150,10 @@ matches one of the Segment's decision-maker titles become Contacts with no email
 **Website needed** filter (`/leads?website=needed`), where you can enter its website; a website
 another Lead already holds merges the two (the older one is kept), then the crawl is queued.
 
-**Deferral.** The AI budget is checked before each search page, and a Companies House rate
-limit (HTTP 429) also ends the run `deferred`: the job is re-queued an hour later and the Leads
-already created stay.
+**Deferral.** The AI budget is checked before the run's row is written (refused there: no row,
+and the job is re-queued an hour later; Story 8.1) and before each search page, and a Companies
+House rate limit (HTTP 429) also ends the run `deferred`: the job is re-queued an hour later and
+the Leads already created stay.
 
 ## Engine health
 
@@ -6229,9 +6268,11 @@ view; the area isn't polled.
 registers it in `nextron.main.build_health_issues`, the only code that builds the registry
 (`tests/contracts/test_health_contracts.py`). The sources so far, in order: `jobqueue` (dead
 jobs), `budget` (AI spend and quotas), `backups` (failed backups, then failed off-PC copies,
-then failed restore tests), `playbook` (the Sales Playbook's problem) and `sending` (each
+then failed restore tests), `playbook` (the Sales Playbook's problem), `sending` (each
 listed Sending Domain whose cold sends are blocked, `domain_auth_failing`, read at the engine's
-clock; see [Sending Domain authentication](#sending-domain-authentication)).
+clock; see [Sending Domain authentication](#sending-domain-authentication)) and `discovery`
+(`discovery_stopped`: "Discovery stopped: <label> quota reached" or "Discovery stopped: AI
+budget reached", Story 8.1).
 
 ## Logs
 

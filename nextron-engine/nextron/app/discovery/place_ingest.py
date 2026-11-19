@@ -19,7 +19,7 @@ Then it enqueues the ``discover_places`` job on the bulk lane, key
 or ``places_run_refused`` (the reason).
 
 ``@use_case run(campaign_id, location_hash, country_code) -> bool`` (the job): ``False`` means
-the budget refused a page (the handler returns ``DEFERRED``).
+the budget refused the run or a page (the handler returns ``DEFERRED``).
 
 1. **Start** (a transaction). First every ``running`` ``places`` run row is ended ``failed``
    (finished now; logged ``places_runs_recovered`` with the count): all ``discover_places``
@@ -28,7 +28,12 @@ the budget refused a page (the handler returns ``DEFERRED``).
    location hash and code that no item of the setting holds any more: logs
    ``places_run_skipped`` and returns ``True`` with no run row.
    A Campaign that can't run now: a ``stopped`` run row (finished at once) and ``True``, with
-   nothing fetched. Otherwise a ``running`` row: source ``places``, the Campaign's Segment, the
+   nothing fetched. **The pre-check (Story 8.1):** otherwise, still in that transaction and
+   before any row is written, ``PlaceSearches.refusal()`` (the same AI-budget and quota check
+   every page makes); a refusal logs ``places_run_deferred`` (``campaign_id``, ``reason``)
+   and ``run`` returns ``False`` with no run row and nothing fetched, so an hourly
+   re-deferral adds no row.
+   Otherwise a ``running`` row: source ``places``, the Campaign's Segment, the
    code (uppercase), the location's text, ``query_hash`` of the Segment's Places queries,
    ``started_at`` = now, and the page cap ``places_max_pages_per_run``.
 2. **Pages.** The queries run in seed order, each paged by its ``next_page_token`` until there is
@@ -120,6 +125,7 @@ PLACES_RUN_REFUSED: Final = "places_run_refused"
 PLACES_RUN_SKIPPED: Final = "places_run_skipped"
 PLACES_RUN_ENDED: Final = "places_run_ended"
 PLACES_RUNS_RECOVERED: Final = "places_runs_recovered"
+PLACES_RUN_DEFERRED: Final = "places_run_deferred"
 PLACE_CANDIDATE_INGESTED: Final = "place_candidate_ingested"
 # Why a request was refused
 REFUSED_CAMPAIGN: Final = "campaign_not_active"
@@ -304,7 +310,9 @@ class PlaceDiscovery:
         """Run one Places discovery; ``False`` when the budget refused a page. See the module
         docstring."""
         started = self._start(campaign_id, location_hash, country_code)
-        if started is None:
+        if started is RunStatus.DEFERRED:
+            return False
+        if not isinstance(started, _Run):
             return True
         try:
             status = self._pages(started)
@@ -314,8 +322,11 @@ class PlaceDiscovery:
         self._end(started.run_id, status)
         return status is not RunStatus.DEFERRED
 
-    def _start(self, campaign_id: str, location_hash: str, country_code: str) -> _Run | None:
-        """Step 1: the started run, or ``None`` when there is nothing to fetch."""
+    def _start(
+        self, campaign_id: str, location_hash: str, country_code: str
+    ) -> _Run | RunStatus | None:
+        """Step 1: the started run, ``RunStatus.DEFERRED`` when the budget refuses the run
+        (no row written), or ``None`` when there is nothing to fetch."""
         now = self._clock.now()
         code = country_code.upper() if isinstance(country_code, str) else ""
         with current().transaction():
@@ -333,6 +344,12 @@ class PlaceDiscovery:
                 return None
             queries = segment.definition.discovery_queries.places
             active = setup_queries.campaign_active(campaign.id)
+            refusal = self._searches.refusal() if active else None
+            if refusal is not None:  # Story 8.1: refused before any row is written
+                log.info(
+                    PLACES_RUN_DEFERRED, extra={"campaign_id": campaign.id, "reason": refusal}
+                )
+                return RunStatus.DEFERRED
             status = RunStatus.RUNNING if active else RunStatus.STOPPED
             run_id = runs_repo.insert(
                 source=SOURCE_PLACES,

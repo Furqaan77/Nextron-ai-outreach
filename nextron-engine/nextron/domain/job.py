@@ -62,20 +62,23 @@ UTC time ``YYYY-MM-DDTHH:MM:SS[.ffffff]Z``, or a token fullmatching ``[a-z0-9_:.
 ``null``, float, list or object, and a string holding ``@`` or a space fits no rule. A
 refusal's reason names the field, never its value.
 
-**Job types.** ``JobType(name, default_lane, lanes, priority, max_runtime, retry_limit,
-handler, group=JobGroup.OTHER)`` is checked when it is built (``TypeError`` or
-``ValueError``): ``name`` a ``verb_noun`` name of at most 48 characters; ``lanes`` a non-empty
-``frozenset`` of ``Lane`` holding ``default_lane``; ``priority`` an int from 0 to 100 (higher
-runs first); ``max_runtime`` a ``timedelta`` of whole seconds from 1 s to 24 h;
-``retry_limit`` an int from 0 to 20; ``handler`` callable; ``group`` a ``JobGroup``, the
+**Job types.** ``JobType(name, default_lane, lanes, priority, max_runtime, retry_limit, handler,
+group=JobGroup.OTHER, budget_class=BudgetClass.ESSENTIAL)`` is checked when it is built
+(``TypeError`` or ``ValueError``): ``name`` a ``verb_noun`` name of at most 48 characters;
+``lanes`` a non-empty ``frozenset`` of ``Lane`` holding ``default_lane``; ``priority`` an int
+from 0 to 100 (higher runs first); ``max_runtime`` a ``timedelta`` of whole seconds from 1 s to
+24 h; ``retry_limit`` an int from 0 to 20; ``handler`` callable; ``group`` a ``JobGroup``, the
 health panel's group for the type (``discovery`` "Discovery", ``enrichment`` "Enrichment",
 ``recheck`` "Re-check", ``sending`` "Sending", ``reply_check`` "Reply check",
 ``unsubscribe_poll`` "Unsubscribe Endpoint poll", ``backup`` "Backup" or ``other`` "Other";
-``JobGroup.label`` is the heading). Every registration names its group
-(``tests/contracts/test_health_contracts.py``). A ``bool`` is refused wherever an int is
-expected. ``JobTypes``
-is the registry: ``register_job_type`` until ``freeze()``, then ``get(name)`` (raising
-``UnknownJobType``) and ``names()``. Only ``nextron.main.build_job_types`` builds one.
+``JobGroup.label`` is the heading); ``budget_class`` a ``BudgetClass``
+(``nextron.domain.budget_class``), ``essential`` when left out: ``blockable`` work is what the
+budget and the quotas may stop, and only the discovery, enrichment and re-check types (plus
+``run_ai_test_sets``) are blockable (``tests/contracts/test_budget_classes.py``). Every
+registration names its group (``tests/contracts/test_health_contracts.py``). A ``bool`` is
+refused wherever an int is expected. ``JobTypes`` is the registry: ``register_job_type`` until
+``freeze()``, then ``get(name)`` (raising ``UnknownJobType``) and ``names()``. Only
+``nextron.main.build_job_types`` builds one.
 
 A handler receives a ``Job(id, type, lane, payload, attempts)``, calls one use case and returns
 ``None``, or ``DEFERRED`` when the use case was refused by the budget (``Handler``).
@@ -91,6 +94,7 @@ from types import MappingProxyType
 from typing import Final
 
 from nextron.domain.ai_test_gate import set_of
+from nextron.domain.budget_class import BudgetClass
 from nextron.domain.errors import DomainError
 from nextron.domain.ids import is_ulid
 from nextron.domain.machines import IllegalTransition, Transition
@@ -546,6 +550,7 @@ class JobType:
     retry_limit: int
     handler: Handler
     group: JobGroup = JobGroup.OTHER
+    budget_class: BudgetClass = BudgetClass.ESSENTIAL
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
@@ -579,6 +584,8 @@ class JobType:
             raise TypeError(f"job type {self.name}: handler must be callable")
         if not isinstance(self.group, JobGroup):
             raise TypeError(f"job type {self.name}: group must be a JobGroup")
+        if not isinstance(self.budget_class, BudgetClass):
+            raise TypeError(f"job type {self.name}: budget_class must be a BudgetClass")
 
 
 class JobTypes:

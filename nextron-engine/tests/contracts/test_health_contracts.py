@@ -40,12 +40,13 @@ from tests.fakes.usage_meter import InMemoryUsageMeter
 HEALTH_ISSUES = Registry(
     "build_health_issues", "HealthIssues", "nextron.domain.health", "register_source"
 )
-SOURCES = (  # 4.4, 6.5, 3.14, 3.12, 10.2
+SOURCES = (  # 4.4, 6.5, 8.1, 3.14, 3.12, 10.2
     "jobqueue",
     "budget",
     "backups",
     "playbook",
     "sending",
+    "discovery",
     "erasure",
     "unsub_poll",
     "pipeline",
@@ -124,7 +125,7 @@ def test_the_registry_check_catches_another_function_in_main(tmp_path: Path) -> 
     assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
-def test_the_registry_ships_frozen_with_the_eight_owner_sources(
+def test_the_registry_ships_frozen_with_the_nine_owner_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     meter = InMemoryUsageMeter(FrozenClock())
@@ -141,15 +142,21 @@ def test_the_registry_ships_frozen_with_the_eight_owner_sources(
         lambda now, *, polling_on: compliance_reads.append((now, polling_on)) or (),
     )
     monkeypatch.setattr(main, "unsub_polling_on", lambda: True)
+    assessed: list[object] = []
+    monkeypatch.setattr(budget, "status", lambda: "the assessment")
+    monkeypatch.setattr(
+        main.discovery_queries, "health_issues", lambda found: assessed.append(found) or ()
+    )
 
     issues = main.build_health_issues(budget=budget, clock=clock)
 
     assert isinstance(issues, HealthIssues)
     assert issues.frozen
     assert tuple(source.name for source in issues.sources) == SOURCES
-    jobqueue, budget_source, backups, playbook, sending, erasure, unsub_poll, pipeline = (
-        issues.sources
+    (jobqueue, budget_source, backups, playbook, sending, discovery, erasure, unsub_poll) = (
+        issues.sources[:-1]
     )
+    pipeline = issues.sources[-1]
     assert pipeline.read is main.pipeline_queries.health_issues  # Story 10.2
     assert jobqueue.read is main.jobqueue_queries.health_issues
     assert budget_source.read == budget.health_issues
@@ -160,6 +167,8 @@ def test_the_registry_ships_frozen_with_the_eight_owner_sources(
     assert erasure.read is main.compliance_queries.health_issues
     assert tuple(unsub_poll.read()) == ()
     assert compliance_reads == [(clock.now(), True)]  # Story 3.12: the poll, at the clock's now
+    assert tuple(discovery.read()) == ()
+    assert assessed == ["the assessment"]  # Story 8.1: "Discovery stopped", from the budget
     with pytest.raises(RuntimeError):
         issues.register_source(IssueSource("late", tuple))
     assert main.build_health_issues(budget=budget) is not issues  # a new registry each time

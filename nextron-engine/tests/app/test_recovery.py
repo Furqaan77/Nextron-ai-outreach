@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -326,6 +327,9 @@ def test_the_health_report_carries_the_newest_recovery_row(
 class _NoBudget:
     def health_issues(self) -> tuple[()]:
         return ()
+
+    def status(self) -> Any:  # Story 8.1's discovery source: nothing reached
+        return SimpleNamespace(ai=SimpleNamespace(state=None), quotas=())
 
 
 # The table's checks -------------------------------------------------------------------------------

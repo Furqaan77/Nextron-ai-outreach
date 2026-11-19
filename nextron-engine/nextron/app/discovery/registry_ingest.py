@@ -18,14 +18,19 @@ concurrency key ``domain:api.company-information.service.gov.uk``; while that jo
 same request returns it (``created=False``). It logs ``registry_run_requested`` or
 ``registry_run_refused`` (the reason).
 
-``@use_case run(campaign_id) -> bool`` (the job): ``False`` means the run ended ``deferred``
-(the handler returns ``DEFERRED``).
+``@use_case run(campaign_id) -> bool`` (the job): ``False`` means the budget refused the run
+at its start or the run ended ``deferred`` (the handler returns ``DEFERRED``).
 
 1. **Start** (a transaction). Every ``running`` ``companies_house`` run row is ended ``failed``
    (logged ``registry_runs_recovered``): every such job shares one concurrency key, so such a
    row was left by a crash; a Places run's row is never touched. An unknown Campaign or Segment
    logs ``registry_run_skipped`` and returns ``True`` with no row. A Campaign that can't run, or
    whose Market isn't an enabled ``GB`` one: a ``stopped`` row, finished at once, and ``True``.
+   **The pre-check (Story 8.1):** otherwise, still in that transaction and before any row is
+   written, ``budget.allow(BudgetClass.BLOCKABLE, meter.snapshot(now), budget_limits())`` (the
+   check every page makes); a refusal logs ``registry_run_deferred`` (``campaign_id``,
+   ``reason`` ``ai_budget``) and ``run`` returns ``False`` with no run row and nothing
+   fetched, so an hourly re-deferral adds no row.
    Otherwise a ``running`` row: source ``companies_house``, the Segment, ``GB``, no location,
    the ``registry_query_hash`` of the Segment's current queries; the page cap is
    ``registry_max_pages_per_run``.
@@ -90,7 +95,7 @@ from typing import Final
 
 from nextron.app.discovery.api import Discovery
 from nextron.app.discovery.place_ingest import own_site
-from nextron.app.discovery.places import PlaceSearches
+from nextron.app.discovery.places import REASON_AI_BUDGET, PlaceSearches
 from nextron.app.jobqueue.api import Enqueued, JobQueue
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
@@ -141,6 +146,7 @@ REGISTRY_RUN_REFUSED: Final = "registry_run_refused"
 REGISTRY_RUN_SKIPPED: Final = "registry_run_skipped"
 REGISTRY_RUN_ENDED: Final = "registry_run_ended"
 REGISTRY_RUNS_RECOVERED: Final = "registry_runs_recovered"
+REGISTRY_RUN_DEFERRED: Final = "registry_run_deferred"
 REGISTRY_HIT_INGESTED: Final = "registry_hit_ingested"
 REGISTRY_CALL_FAILED: Final = "registry_call_failed"
 WEBSITE_LOOKUP_FAILED: Final = "registry_website_lookup_failed"
@@ -283,7 +289,9 @@ class RegistryDiscovery:
         """Run one Companies House discovery; ``False`` when it ended ``deferred``. See the
         module docstring."""
         started = self._start(campaign_id)
-        if started is None:
+        if started is RunStatus.DEFERRED:
+            return False
+        if not isinstance(started, _Run):
             return True
         try:
             status = self._pages(started)
@@ -300,8 +308,9 @@ class RegistryDiscovery:
         self._end(started.run_id, status)
         return status is not RunStatus.DEFERRED
 
-    def _start(self, campaign_id: str) -> _Run | None:
-        """Step 1: the started run, or ``None`` when there is nothing to fetch."""
+    def _start(self, campaign_id: str) -> _Run | RunStatus | None:
+        """Step 1: the started run, ``RunStatus.DEFERRED`` when the budget refuses the run
+        (no row written), or ``None`` when there is nothing to fetch."""
         now = self._clock.now()
         with current().transaction():
             stale = runs_repo.fail_running(SOURCE_COMPANIES_HOUSE, now)
@@ -316,6 +325,12 @@ class RegistryDiscovery:
                 return None
             queries = segment.definition.discovery_queries.registry
             may_run = _may_run(campaign.id)
+            if may_run and not self._budget_allows():  # Story 8.1: before any row is written
+                log.info(
+                    REGISTRY_RUN_DEFERRED,
+                    extra={"campaign_id": campaign.id, "reason": REASON_AI_BUDGET},
+                )
+                return RunStatus.DEFERRED
             status = RunStatus.RUNNING if may_run else RunStatus.STOPPED
             run_id = runs_repo.insert(
                 source=SOURCE_COMPANIES_HOUSE,
@@ -360,14 +375,19 @@ class RegistryDiscovery:
         with current().transaction():
             if not _may_run(run.campaign_id):
                 return False
-            allowed = allow(
-                BudgetClass.BLOCKABLE,
-                self._meter.snapshot(self._clock.now()),
-                setup_queries.budget_limits(),
-            )
+            allowed = self._budget_allows()
         if not allowed:
             raise _Deferred
         return True
+
+    def _budget_allows(self) -> bool:
+        """The budget's check for the next Companies House call, inside the caller's open
+        transaction: a fresh ``meter.snapshot`` against ``budget_limits()``."""
+        return allow(
+            BudgetClass.BLOCKABLE,
+            self._meter.snapshot(self._clock.now()),
+            setup_queries.budget_limits(),
+        )
 
     def _end(self, run_id: str, status: RunStatus) -> None:
         with current().transaction():
