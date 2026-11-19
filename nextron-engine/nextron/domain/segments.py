@@ -8,8 +8,9 @@ ship; the ``segments`` table (owner ``setup``) stores each one as ``definition_t
 **Types** (frozen, slotted; every list is a tuple): ``SizeRange(minimum, maximum, unit)``,
 ``Disqualifier(key, kind, size_clue, threshold, description)``, ``PreferredRoles(when_terms,
 roles)``, ``SignalType(key, name, signal_class, tier, evidence, sources, score_only, weight,
-match_terms, preferred_roles)``, ``DiscoveryQueries(places, registry_keywords,
-registry_sic_codes, job_titles)`` and ``SegmentDef(key, name,
+match_terms, preferred_roles)``, ``RegistryQueries(keywords, sic_codes)``,
+``DiscoveryQueries(places, registry=RegistryQueries((), ()), job_titles=())`` and
+``SegmentDef(key, name,
 industry_keywords, size_range, decision_maker_roles, disqualifiers, signal_types,
 discovery_queries)``. ``decision_maker_roles`` is a tuple of ranks, best first; each rank is a
 tuple of equal titles. ``SegmentDef.titles()`` is every decision-maker title: the ranked titles
@@ -19,9 +20,9 @@ in rank order, then each preferred role not already listed, in file order.
 is ``class``. The top level is exactly ``segments: [<segment>, ...]``. A segment has exactly
 ``key``, ``name``, ``industry_keywords``, ``size_range`` (``minimum``, ``maximum``, ``unit``),
 ``decision_maker_roles``, ``disqualifiers``, ``signal_types`` and ``discovery_queries``
-(``places``, plus the optional ``registry`` (optional ``keywords`` and ``sic_codes``) and
-``job_titles``, Story 11.5: lists that may be empty; a SIC code is a text of 4 or 5 digits); a
-disqualifier exactly ``key``, ``kind``, ``size_clue``, ``threshold`` and
+(``places``, and optionally ``registry``: exactly ``keywords`` and ``sic_codes``, Story 8.4,
+and ``job_titles``, Story 11.5); a disqualifier exactly ``key``, ``kind``, ``size_clue``,
+``threshold`` and
 ``description``; a signal type ``key``, ``name``, ``class``, ``tier``, ``evidence``,
 ``sources``, ``score_only`` and ``weight``, plus optional ``match_terms`` and
 ``preferred_roles`` (each exactly ``when_terms`` and ``roles``). Missing and unknown fields are
@@ -42,7 +43,10 @@ repeats a value longer than 40 characters.
   ``Zl`` or ``Zp`` character: ``name`` and ``description`` at most 200 characters, terms,
   titles, keywords and queries at most 100.
 - Lists hold 1 to 50 items with no duplicates (case-insensitive for texts); ``disqualifiers``,
-  ``match_terms`` and ``preferred_roles`` may be empty.
+  ``match_terms``, ``preferred_roles`` and the ``registry`` ``keywords`` and ``sic_codes`` may
+  be empty. A ``registry`` keyword follows the query rule; a SIC code is a text of exactly 5
+  ASCII digits (``legal_form.SIC_CODE_PATTERN``). A missing ``registry`` (a file or a stored
+  definition from before Story 8.4) reads as no keywords and no SIC codes.
 - Integers are an ``int``, never a ``bool``: ``tier`` 1 to 3, ``weight`` 1 to 100,
   ``threshold`` at least 1, and ``0 <= minimum <= maximum``. ``score_only`` is a ``bool``.
 - The rules, each failing on its own field: (1) within a Segment every weight of a lower Tier
@@ -60,7 +64,7 @@ repeats a value longer than 40 characters.
 **Stored form.** ``definition_text(segment)`` is the canonical JSON of the segment's file form
 (``sort_keys``, ``ensure_ascii=False``, no spaces) of ``file_form(segment)``, with enums as
 their values and every optional field present, except the discovery queries' ``registry``
-(and each of its two lists) and ``job_titles``, which appear only when non-empty, so every
+(with both its lists, when either is non-empty) and ``job_titles`` (when non-empty), so every
 text stored before Story 11.5 stays byte-identical (AI test-set fingerprints hash them).
 ``segment_from_text(text)`` is its inverse: ``json.loads`` plus the same validation of one
 segment (keys unique within it); a text that no longer validates, or isn't JSON, raises
@@ -98,6 +102,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from nextron.domain.errors import DomainError
+from nextron.domain.legal_form import SIC_CODE_PATTERN
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 MAX_TEXT: Final = 200  # name, description
@@ -108,7 +113,6 @@ TIERS: Final = (1, 2, 3)
 MIN_WEIGHT: Final = 1
 MAX_WEIGHT: Final = 100  # Signal and Fit Scores cap at 100
 REFUSED_TEXT_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
-SIC_CODE_PATTERN: Final = re.compile(r"[0-9]{4,5}")  # matched with fullmatch
 
 
 class SignalClass(StrEnum):
@@ -208,15 +212,22 @@ class SignalType:
 
 
 @dataclass(frozen=True, slots=True)
+class RegistryQueries:
+    """A Segment's Companies House discovery queries (Story 8.4): name keywords and SIC codes."""
+
+    keywords: tuple[str, ...] = ()
+    sic_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryQueries:
     """The Segment's discovery queries: Places query texts (required), and the optional
-    Companies House keywords and SIC codes and aggregator job titles (Story 11.5), each of
-    which may be empty."""
+    Companies House keywords and SIC codes (Story 8.4's ``registry``) and aggregator job titles
+    (Story 11.5), each of which may be empty."""
 
     places: tuple[str, ...]
-    registry_keywords: tuple[str, ...] = ()
-    registry_sic_codes: tuple[str, ...] = ()
-    job_titles: tuple[str, ...] = ()
+    registry: RegistryQueries = RegistryQueries()  # Story 8.4
+    job_titles: tuple[str, ...] = ()  # Story 11.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,24 +466,24 @@ def _preferred_roles(value: object, path: str) -> tuple[PreferredRoles, ...]:
 
 
 def _sic_codes(value: object, path: str) -> tuple[str, ...]:
-    """SIC codes: unique texts of 4 or 5 ASCII digits; the list may be empty."""
+    """SIC codes: unique texts of exactly 5 ASCII digits; the list may be empty."""
     codes = _texts(value, path, may_be_empty=True)
     for index, code in enumerate(codes):
         if SIC_CODE_PATTERN.fullmatch(code) is None:
-            raise InvalidSegments(f"{path}[{index}]", "must be a SIC code of 4 or 5 digits")
+            raise InvalidSegments(f"{path}[{index}]", "must be a 5-digit SIC code")
     return codes
 
 
-def _registry(value: object, path: str) -> dict[str, tuple[str, ...]]:
-    return _fields(
+def _registry_queries(value: object, path: str) -> RegistryQueries:
+    checked = _fields(
         value,
         path,
         {
             "keywords": lambda v, p: _texts(v, p, may_be_empty=True),
             "sic_codes": _sic_codes,
         },
-        required=(),
     )
+    return RegistryQueries(keywords=checked["keywords"], sic_codes=checked["sic_codes"])
 
 
 def _queries(value: object, path: str) -> DiscoveryQueries:
@@ -481,16 +492,14 @@ def _queries(value: object, path: str) -> DiscoveryQueries:
         path,
         {
             "places": lambda v, p: _texts(v, p),
-            "registry": _registry,
+            "registry": _registry_queries,
             "job_titles": lambda v, p: _texts(v, p, may_be_empty=True),
         },
         required=("places",),
     )
-    registry = checked.get("registry", {})
     return DiscoveryQueries(
         places=checked["places"],
-        registry_keywords=registry.get("keywords", ()),
-        registry_sic_codes=registry.get("sic_codes", ()),
+        registry=checked.get("registry", RegistryQueries()),
         job_titles=checked.get("job_titles", ()),
     )
 
@@ -702,17 +711,15 @@ def validate_segments(data: object) -> tuple[SegmentDef, ...]:
 
 
 def _queries_form(queries: DiscoveryQueries) -> dict[str, object]:
-    """The discovery queries' file form: ``places``, then ``registry`` (holding only its
-    non-empty ``keywords`` and ``sic_codes``) and ``job_titles`` only when non-empty, so a
-    Segment without them keeps the canonical text it had before Story 11.5."""
+    """The discovery queries' file form: ``places``, then ``registry`` (both its ``keywords``
+    and its ``sic_codes``, Story 8.4) when either is non-empty, and ``job_titles`` (Story 11.5)
+    when non-empty, so a Segment without them keeps the canonical text it had before."""
     form: dict[str, object] = {"places": list(queries.places)}
-    registry: dict[str, object] = {}
-    if queries.registry_keywords:
-        registry["keywords"] = list(queries.registry_keywords)
-    if queries.registry_sic_codes:
-        registry["sic_codes"] = list(queries.registry_sic_codes)
-    if registry:
-        form["registry"] = registry
+    if queries.registry.keywords or queries.registry.sic_codes:
+        form["registry"] = {
+            "keywords": list(queries.registry.keywords),
+            "sic_codes": list(queries.registry.sic_codes),
+        }
     if queries.job_titles:
         form["job_titles"] = list(queries.job_titles)
     return form

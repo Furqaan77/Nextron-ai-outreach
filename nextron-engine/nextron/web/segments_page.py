@@ -359,15 +359,10 @@ def proposed_form(submitted: SubmittedSegment, key: str | None = None) -> Propos
         row for row in submitted.signal_types if not row.removed and not _blank_signal(row)
     ]
     queries: dict[str, object] = {"places": _lines(values["discovery_queries.places"])}
-    registry: dict[str, object] = {}
     keywords = _lines(values["discovery_queries.registry.keywords"])
     codes = _lines(values["discovery_queries.registry.sic_codes"])
-    if keywords:
-        registry["keywords"] = keywords
-    if codes:
-        registry["sic_codes"] = codes
-    if registry:
-        queries["registry"] = registry
+    if keywords or codes:  # Story 8.4: a registry holds both its lists
+        queries["registry"] = {"keywords": keywords, "sic_codes": codes}
     titles = _lines(values["discovery_queries.job_titles"])
     if titles:
         queries["job_titles"] = titles
@@ -531,8 +526,8 @@ def submitted_from(segment: SegmentDef) -> SubmittedSegment:
             RANK_SEPARATOR.join(rank) for rank in segment.decision_maker_roles
         ),
         "discovery_queries.places": _joined(queries.places),
-        "discovery_queries.registry.keywords": _joined(queries.registry_keywords),
-        "discovery_queries.registry.sic_codes": _joined(queries.registry_sic_codes),
+        "discovery_queries.registry.keywords": _joined(queries.registry.keywords),
+        "discovery_queries.registry.sic_codes": _joined(queries.registry.sic_codes),
         "discovery_queries.job_titles": _joined(queries.job_titles),
     }
     disqualifiers = tuple(

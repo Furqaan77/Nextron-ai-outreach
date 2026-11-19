@@ -289,6 +289,7 @@ NEVER_RUN = [
         ["Job type", "Last success"],
         ["discover_places", "never"],  # Story 8.3
         ["process_signal_item", "never"],  # Story 2.16
+        ["discover_registry", "never"],  # Story 8.4
     ],  # Discovery
     [
         ["Job type", "Last success"],

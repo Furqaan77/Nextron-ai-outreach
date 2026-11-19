@@ -79,6 +79,9 @@ segments:
         weight: 15
     discovery_queries:
       places: [law firm, solicitors]
+      registry:  # Companies House (Story 8.4): 69102 is solicitors
+        keywords: [solicitors, law, legal]
+        sic_codes: ['69102']
 
   - key: ops_automation
     name: Ops-Automation
@@ -154,3 +157,8 @@ segments:
         weight: 15
     discovery_queries:
       places: [wholesale distributor, logistics company, freight company, manufacturer]
+      registry:  # Companies House (Story 8.4): SIC codes only, no name keywords
+        keywords: []
+        # wholesale 46190, 46690, 46900; freight 49410, 52103, 52290;
+        # light manufacturing 22290, 25990, 28290, 32990
+        sic_codes: ['46190', '46690', '46900', '49410', '52103', '52290', '22290', '25990', '28290', '32990']

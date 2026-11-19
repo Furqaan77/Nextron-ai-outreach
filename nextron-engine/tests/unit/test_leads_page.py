@@ -399,7 +399,7 @@ def test_the_filter_form_is_a_get_form_without_a_token(world: World) -> None:
     assert "hx-post" not in form.attrs
     assert not form.find_all("input", name="csrf_token")
     names = [node.attrs["name"] for node in form.walk() if "name" in node.attrs]
-    assert names == ["stage", "segment", "q"]  # a named button would 400 every submission
+    assert names == ["stage", "segment", "q", "website"]  # a named button would 400 every submission
     reply = world.get("/leads")
     form_html = reply.text[reply.text.index("<form") : reply.text.index("</form>")]
     token = world.dashboard.csrf_token(world.cookie)
@@ -442,7 +442,7 @@ def test_the_filters_keep_their_values(world: World) -> None:
     assert [row[0] for row in rows[1:]] == ["Smith_Law"]
     assert page.find("p", class_="lead-count").text == "Showing 1–1 of 1 Lead"
     selected = [o.attrs["value"] for o in page.find_all("option") if "selected" in o.attrs]
-    assert selected == ["contacted", "law_private_ai"]
+    assert selected == ["contacted", "law_private_ai", ""]  # the website filter: Any
     assert page.find("input", name="q").attrs["value"] == "Smith_"
     assert page.find("main").find("a", href="/leads").text == "Clear filters"
 

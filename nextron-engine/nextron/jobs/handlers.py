@@ -115,6 +115,10 @@ handler runs in.
   ``bulk`` for a job on the bulk lane and ``interactive`` otherwise, and returns ``None``. It is
   never budget-gated (the grounding routes are ``essential``), and a timeout or an unreachable
   API is recorded as a grounding ``fail`` by the use case, not retried.
+- ``discover_registry(registry_discovery)`` (Story 8.4): calls
+  ``registry_discovery().run(campaign_id)`` once (the discovery service's
+  ``RegistryDiscovery``) and returns ``DEFERRED`` when it returns ``False`` (the budget or the
+  register's rate limit deferred the run).
 
 **The chain's lane (Story 2.16).** ``enrich_lead``, ``extract_lead``, ``check_job_boards``,
 ``check_legal_form`` and ``select_primary_contact`` pass ``lane=job.lane`` to their use case,
@@ -677,3 +681,22 @@ def check_grounding(checks: Callable[[], CheckingGrounding]) -> Handler:
         checks().check(draft_id, rev, urgency)
 
     return handle_check_grounding
+
+
+class DiscoveringRegistry(Protocol):
+    """What ``discover_registry`` needs of the ``discovery`` service's ``RegistryDiscovery``."""
+
+    def run(self, campaign_id: str) -> bool: ...
+
+
+def discover_registry(registry_discovery: Callable[[], DiscoveringRegistry]) -> Handler:
+    """The ``discover_registry`` job's handler (Story 8.4): run the payload's Campaign's
+    Companies House discovery through ``registry_discovery()``."""
+
+    def handle_discover_registry(job: Job) -> HandlerResult | None:
+        campaign_id = _ulid_field(job, CAMPAIGN_ID_FIELD)
+        if not registry_discovery().run(campaign_id):
+            return DEFERRED
+        return None
+
+    return handle_discover_registry

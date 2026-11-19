@@ -201,7 +201,8 @@ the registry cycle.
 
 **Jobs (AD-10).** ``build_job_types(*, alerts, backups, restore_tests, recovery,
 contact_markets, crawls, discovery, research, extractions, primary, test_runs,
-domain_checks=..., unsubscribes=..., place_discovery=...)`` is the job type registry: the only
+domain_checks=..., unsubscribes=..., place_discovery=..., registry_discovery=...)`` is the
+job type registry: the only
 code that constructs ``JobTypes`` or calls ``register_job_type``. It registers each story's
 ``JobType`` (lanes, priority, ``max_runtime``, retry limit, a thin handler from
 ``nextron.jobs.handlers`` and the health panel's ``JobGroup``, always named), then freezes it.
@@ -256,11 +257,13 @@ is registered after them, and Story 8.3's ``discover_places`` (bulk only, priori
 left out its handler raising a ``RuntimeError``, and Story 4.14's ``check_grounding``
 (interactive by default, or bulk, priority 50, ``max_runtime`` 25 minutes (up to four Claude
 requests of 300 s each), retry limit 3, ``handlers.check_grounding(grounding)``, ``other``;
-never budget-gated) last. ``SignalInbox(clock, meter, llm, discovery, research,
+never budget-gated) after it, and Story 8.4's ``discover_registry`` (bulk only, priority 30,
+``max_runtime`` 1 hour, retry limit 2, ``handlers.discover_registry(registry_discovery)``,
+``discovery``) last. ``SignalInbox(clock, meter, llm, discovery, research,
 queue)`` (``nextron.app.discovery.signal_inbox``) runs those jobs, reached through
 ``signal_inbox=lambda: signal_inbox``, and the dashboard gets it (``create_app(...,
 signal_inbox=...)``) for the Signal Inbox page. ``domain_checks``, ``unsubscribes``,
-``place_discovery`` and ``grounding`` are optional services: each defaults
+``place_discovery``, ``grounding`` and ``registry_discovery`` are optional services: each defaults
 to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
@@ -351,6 +354,14 @@ email_syntax=, verifier=)`` (``nextron.app.research.verification``) runs the
 looks up MX records through the same ``dns`` as ``DomainChecks``, checks syntax with the offline
 ``EmailValidatorSyntax`` and verifies through ``verifier`` (the same ``HunterFinder`` unless
 injected).
+
+**Companies House discovery (Story 8.4).** ``RegistryDiscovery(clock, meter, registry,
+place_searches, site_crawler, discovery, research, queue)``
+(``nextron.app.discovery.registry_ingest``) runs the ``discover_registry`` jobs (reached through
+``registry_discovery=lambda: registry_discovery``) on the SAME ``registry`` instance the
+legal-form check uses, so both share its rate window, and the Discovery page's "Run Companies
+House discovery" (``create_app(..., registry_discovery=...)``); it is also kept on
+``app.state.registry_discovery``.
 
 **Notify and alerts (AD-15, INT-8).** ``build_app`` builds one ``Notify(clock, queue,
 alert_ports=...)`` (``nextron.app.notify.api``), which owns the ``alerts`` and
@@ -838,6 +849,7 @@ from nextron.app.discovery import api as discovery_api
 from nextron.app.discovery.api import Discovery, LeadImports, SignalInboxRows
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.place_ingest import PlaceDiscovery
+from nextron.app.discovery.registry_ingest import RegistryDiscovery
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.drafting import api as drafting_api
@@ -975,6 +987,7 @@ from nextron.domain.notifications import (
 from nextron.domain.offers import InvalidOffers, validate_offers
 from nextron.domain.people import SELECT_PRIMARY_CONTACT_JOB
 from nextron.domain.place_discovery import DISCOVER_PLACES_JOB
+from nextron.domain.registry_discovery import DISCOVER_REGISTRY_JOB
 from nextron.domain.places import PURGE_PLACE_COORDS_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
 from nextron.domain.scoring import RECOMPUTE_TIERS_JOB, SCORE_LEAD_JOB
@@ -1282,7 +1295,9 @@ def build_app(
     kept with its ``PlaceSearches`` on ``app.state.place_searches``; ``PlaceDiscovery`` runs the
     Places discovery on them and the crawl's ``crawler``, kept on ``app.state.place_discovery``. The address checks (Story 2.14) look up MX records
     through that same ``dns`` and call Hunter's Email Verifier through ``verifier`` (that same
-    ``HunterFinder`` unless injected)."""
+    ``HunterFinder`` unless injected).
+    ``RegistryDiscovery`` runs the Companies House discovery on that same ``registry``, those
+    ``PlaceSearches`` and the crawl's ``crawler``, kept on ``app.state.registry_discovery``."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
@@ -1299,7 +1314,8 @@ def build_app(
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
     # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes,
-    # place_discovery, signal_inbox and grounding_checks are bound just below
+    # place_discovery, signal_inbox, grounding_checks and registry_discovery are bound just
+    # below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1323,6 +1339,7 @@ def build_app(
         place_discovery=lambda: place_discovery,
         signal_inbox=lambda: signal_inbox,
         grounding=lambda: grounding_checks,
+        registry_discovery=lambda: registry_discovery,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1355,14 +1372,11 @@ def build_app(
         site_crawler,
         queue,
     )
-    legal_forms = LegalFormChecks(
-        clock,
-        meter,
-        registry if registry is not None else CompaniesHouseRegistry(secrets, meter=meter),
-        discovery,
-        research,
-        queue,
+    # one registry serves the legal-form check and the discovery, so they share its rate window
+    companies_house = (
+        registry if registry is not None else CompaniesHouseRegistry(secrets, meter=meter)
     )
+    legal_forms = LegalFormChecks(clock, meter, companies_house, discovery, research, queue)
     signal_inbox = SignalInbox(clock, meter, llm, discovery, research, queue)  # Story 2.16
     hunter_finder = HunterFinder(secrets, meter=meter)
     email_finding = EmailFinding(
@@ -1385,6 +1399,9 @@ def build_app(
         dns=site_dns,
         email_syntax=EmailValidatorSyntax(),
         verifier=verifier if verifier is not None else hunter_finder,
+    )
+    registry_discovery = RegistryDiscovery(
+        clock, meter, companies_house, place_searches, site_crawler, discovery, research, queue
     )
     telegram = functools.partial(
         build_role_adapter, "telegram", AdapterContext(config, secrets, clock, meter), units=units
@@ -1510,6 +1527,8 @@ def build_app(
         signal_inbox=signal_inbox,
         segment_editor=SegmentEditor(clock),  # Story 11.5: the Segments page
         sequence_editor=SequenceEditor(clock),  # Story 11.7: the Sequences page
+        registry_discovery=registry_discovery,
+        discovery=discovery,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1521,6 +1540,7 @@ def build_app(
     )
     app.state.place_searches = place_searches  # Story 8.2
     app.state.place_discovery = place_discovery  # Story 8.3
+    app.state.registry_discovery = registry_discovery  # Story 8.4
     return app
 
 
@@ -1624,6 +1644,7 @@ def build_job_types(
     verification: Callable[[], handlers.VerifyingEmail] | None = None,
     signal_inbox: Callable[[], handlers.ProcessingSignalItems] | None = None,
     grounding: Callable[[], handlers.CheckingGrounding] | None = None,
+    registry_discovery: Callable[[], handlers.DiscoveringRegistry] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1656,7 +1677,9 @@ def build_job_types(
     jobs call (``None``: the same), and ``signal_inbox`` the ``discovery`` service's
     ``SignalInbox`` that ``process_signal_item`` jobs call (left out, the handler raises
     ``RuntimeError`` when a job runs), and ``grounding`` the ``drafting`` service's
-    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise)."""
+    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise),
+    and ``registry_discovery`` the ``discovery`` service's ``RegistryDiscovery`` that
+    ``discover_registry`` jobs call (Story 8.4; ``None``: likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     verifying = verification if verification is not None else _no_verification
@@ -1664,6 +1687,9 @@ def build_job_types(
     discovering = place_discovery if place_discovery is not None else no_place_discovery
     inbox = signal_inbox if signal_inbox is not None else _no_signal_inbox
     checks_grounding = grounding if grounding is not None else no_grounding
+    registry_runs = (
+        registry_discovery if registry_discovery is not None else no_registry_discovery
+    )
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1992,6 +2018,20 @@ def build_job_types(
             group=JobGroup.OTHER,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=DISCOVER_REGISTRY_JOB,
+            default_lane=Lane.BULK,  # AD-10: supply work runs on the bulk lane
+            lanes=frozenset({Lane.BULK}),
+            priority=30,
+            # up to 10 search pages of 20 companies, each a profile, a Places lookup, a paced
+            # robots.txt and homepage fetch and an officers list
+            max_runtime=timedelta(hours=1),
+            retry_limit=2,
+            handler=handlers.discover_registry(registry_runs),
+            group=JobGroup.DISCOVERY,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -2036,6 +2076,7 @@ def enqueue_only_job_types() -> JobTypes:
         verification=_unwired,
         signal_inbox=_unwired,
         grounding=_unwired,
+        registry_discovery=_unwired,
     )
 
 
@@ -2043,6 +2084,12 @@ def no_grounding() -> handlers.CheckingGrounding:
     """``build_job_types``'s default ``grounding``: a registry built without the service fails a
     ``check_grounding`` job instead of checking nothing."""
     raise RuntimeError("this job type registry was built without grounding")
+
+
+def no_registry_discovery() -> handlers.DiscoveringRegistry:
+    """``build_job_types``'s default ``registry_discovery``: a registry built without the
+    service fails a ``discover_registry`` job instead of discovering nothing."""
+    raise RuntimeError("this job type registry was built without registry_discovery")
 
 
 def no_domain_checks() -> handlers.DomainChecking:

@@ -338,6 +338,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
             (
                 LastRun("discover_places", None),  # Story 8.3
                 LastRun("process_signal_item", None),  # Story 2.16
+                LastRun("discover_registry", None),  # Story 8.4
             ),
         ),
         GroupRuns(

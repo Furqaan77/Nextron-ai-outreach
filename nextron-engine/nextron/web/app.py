@@ -180,6 +180,17 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/{lead_id}``: the Discovery page (Story 8.3), linked from the Leads list; see
   ``nextron.web.discovery_page``. The POST runs ``place_discovery.request_run`` in its own unit
   of work, then renders the panel again in a read-only one with its notice, always 200.
+  ``POST /leads/discovery/companies-house`` (``discovery_companies_house``,
+  ``@personal_data(False)``, Story 8.4) does the same with ``registry_discovery.request_run``;
+  the page's Companies House form lists the active Campaigns whose Market is an enabled ``GB``
+  one.
+- ``POST /leads/{lead_id}/website`` (``lead_enter_website``, ``@personal_data(False)``, Story
+  8.4): the Leads list's "Website needed" form. Its fields are exactly ``website``
+  (``leads_page.submitted_website``); it runs ``discovery.enter_website(lead_id, website)`` in
+  its own unit of work and answers 200 with the row's website cell
+  (``lead_website_form.html``): what saving did, or the refusal's message above the form
+  (``WebsiteRefused``: nothing written). The cell never shows the Lead's name or the typed
+  text.
 - ``GET /signals`` (``signal_inbox_page``), ``POST /signals`` (``signal_inbox_submit``) and
   ``POST /signals/{item_id}/reprocess`` (``signal_inbox_reprocess``), all
   ``@personal_data(True)``: the Signal Inbox (Story 2.16, the nav's "Signal Inbox"); see
@@ -429,12 +440,19 @@ from nextron.app.analytics.history import LeadHistory
 from nextron.app.analytics.offer import offer_validation
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
-from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
+from nextron.app.discovery.api import (
+    Discovery,
+    ImportRequest,
+    ImportStopped,
+    LeadImports,
+    WebsiteRefused,
+)
 from nextron.app.discovery.place_ingest import (
     PlaceDiscovery,
     PlacesRunRefused,
     configured_locations,
 )
+from nextron.app.discovery.registry_ingest import RegistryDiscovery, RegistryRunRefused
 from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -492,7 +510,7 @@ from nextron.domain.lead_import import ImportRefused
 from nextron.domain.linkedin_caps import LABEL, OWNER_NAME, OWNER_ROLE, STATUS, AccountRefused
 from nextron.domain.call_outcomes import OutcomeForm, OutcomeRefused
 from nextron.domain.manual_stages import StageRefused, clean_notes, parse_deal_value
-from nextron.domain.markets import InvalidMarkets
+from nextron.domain.markets import GB, InvalidMarkets
 from nextron.domain.offers import InvalidOffers
 from nextron.domain.open_code import CodeCheck
 from nextron.domain.playbook import SyncTrigger
@@ -757,6 +775,8 @@ def create_app(
     signal_inbox: SignalInbox,
     segment_editor: SegmentEditor,
     sequence_editor: SequenceEditor,
+    registry_discovery: RegistryDiscovery,
+    discovery: Discovery,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -790,7 +810,9 @@ def create_app(
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
     subject access export; ``channel_permissions`` runs a Contact's Channel Permission page
     (Story 10.7); ``domain_checks`` reads the Sending Domain authentication section and queues
-    its Recheck; ``place_discovery`` queues the Discovery page's Places runs.
+    its Recheck; ``place_discovery`` queues the Discovery page's Places runs and
+    ``registry_discovery`` its Companies House runs (Story 8.4); ``discovery`` saves the website
+    the Operator enters on the Leads list's "Website needed" rows (Story 8.4).
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -2356,16 +2378,26 @@ def create_app(
         *,
         notice: discovery_rows.Notice | None = None,
         chosen: discovery_rows.SubmittedRun | None = None,
+        chosen_uk_campaign: str = "",
     ) -> HTMLResponse:
         campaigns = setup_queries.campaigns()
         active = [found for found in campaigns if setup_queries.campaign_active(found.id)]
         names = {found.id: found.name for found in campaigns}
+        uk_markets = {
+            market.id
+            for market in setup_queries.markets()
+            if market.definition.country_code == GB and market.definition.enabled
+        }
         context = discovery_rows.panel_context(
             campaigns=discovery_rows.campaign_options(active),
             locations=discovery_rows.location_options(configured_locations()),
             runs=discovery_rows.run_rows(discovery_queries.recent_runs(), names),
             notice=notice,
             chosen=chosen,
+            uk_campaigns=discovery_rows.campaign_options(
+                found for found in active if found.market_id in uk_markets
+            ),
+            chosen_uk_campaign=chosen_uk_campaign,
         )
         return page(request, template, **context)
 
@@ -2396,6 +2428,32 @@ def create_app(
                 request, discovery_rows.PANEL_TEMPLATE, notice=notice, chosen=submitted
             )
 
+    @app.post("/leads/discovery/companies-house", name="discovery_companies_house")
+    @personal_data(False)
+    def discovery_companies_house(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        campaign_id = discovery_rows.submitted_registry_run(fields)
+        try:
+            with units.open():
+                enqueued = registry_discovery.request_run(campaign_id)
+        except RegistryRunRefused as refused:
+            notice = discovery_rows.Notice("alert", refused.message)
+        else:
+            notice = discovery_rows.Notice(
+                "status",
+                discovery_rows.REGISTRY_QUEUED
+                if enqueued.created
+                else discovery_rows.REGISTRY_ALREADY_QUEUED,
+            )
+        with units.open(read_only=True):
+            return discovery_answer(
+                request,
+                discovery_rows.PANEL_TEMPLATE,
+                notice=notice,
+                chosen_uk_campaign=campaign_id,
+            )
+
     @app.get("/leads", name="pipeline_page")
     @personal_data(True)  # a Lead's name can be a sole trader's name
     def pipeline_page(request: Request) -> HTMLResponse:
@@ -2407,6 +2465,7 @@ def create_app(
             search=filters.search,
             page=filters.page,
             sort=filters.sort,
+            website_needed=filters.website_needed,
         )
         context = lead_rows.list_context(filters, found, segments)
         return page(request, lead_rows.LIST_TEMPLATE, **context)
@@ -2568,6 +2627,24 @@ def create_app(
     def calls_report_page(request: Request) -> HTMLResponse:
         context = report_rows.report_context(offer_validation())
         return page(request, report_rows.TEMPLATE, **context)
+
+    @app.post("/leads/{lead_id}/website", name="lead_enter_website")
+    @personal_data(False)  # the cell shows a notice and a link, never the Lead's name
+    def lead_enter_website(
+        request: Request, lead_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        website = lead_rows.submitted_website(fields)
+        try:
+            with units.open():
+                entered = discovery.enter_website(lead_id, website)
+        except WebsiteRefused as refused:  # nothing was written; never echoes the typed text
+            notice = lead_rows.Notice(lead_rows.Role.ALERT, refused.message)
+            context = lead_rows.website_cell(lead_id, notice=notice)
+        else:
+            context = lead_rows.website_cell(
+                lead_id, saved=lead_rows.WebsiteSaved(entered.lead_id, entered.merged)
+            )
+        return page(request, lead_rows.WEBSITE_TEMPLATE, **context)
 
     # before /leads/{lead_id}, like every /leads/<word> path
     @app.get("/leads/{lead_id}/contacts/{contact_id}/erase", name="contact_erase_page")

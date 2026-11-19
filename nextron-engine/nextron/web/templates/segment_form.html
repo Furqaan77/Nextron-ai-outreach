@@ -118,7 +118,7 @@ id="{{ element_id(form, name) }}" name="{{ name }}"
 <legend>Discovery queries</legend>
 {{- text_area(form, "discovery_queries.places", "Places queries", form.values.get("discovery_queries.places", ""), "One per line; at least one.") }}
 {{- text_area(form, "discovery_queries.registry.keywords", "Companies House keywords", form.values.get("discovery_queries.registry.keywords", ""), "Optional; one per line.") }}
-{{- text_area(form, "discovery_queries.registry.sic_codes", "Companies House SIC codes", form.values.get("discovery_queries.registry.sic_codes", ""), "Optional; one 4- or 5-digit code per line.") }}
+{{- text_area(form, "discovery_queries.registry.sic_codes", "Companies House SIC codes", form.values.get("discovery_queries.registry.sic_codes", ""), "Optional; one 5-digit code per line.") }}
 {{- text_area(form, "discovery_queries.job_titles", "Aggregator job titles", form.values.get("discovery_queries.job_titles", ""), "Optional; one per line.") }}
 </fieldset>
 {%- endmacro %}

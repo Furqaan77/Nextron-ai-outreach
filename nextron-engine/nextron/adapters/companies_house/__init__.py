@@ -28,10 +28,26 @@ Each call, in order:
   ``q=<name>`` (whitespace collapsed) and ``items_per_page=20``. Each item of ``items`` is read
   from ``company_number``, ``title``, ``company_type``, ``company_status`` and
   ``address.postal_code``; an item that doesn't make a valid ``RegistryCompany`` is skipped, and
-  a body without ``items`` has no hits.
+  a body without ``items`` (or with ``items: null``) has no hits.
 - ``company(number)`` (operation ``get_company``): ``/company/<number>``, read from
-  ``company_number``, ``company_name``, ``type``, ``company_status`` and
-  ``registered_office_address.postal_code``; a 404 is ``None``.
+  ``company_number``, ``company_name``, ``type``, ``company_status``,
+  ``registered_office_address.postal_code``, ``accounts.last_accounts.type`` (the accounts
+  category, Story 8.4) and ``sic_codes``; a 404 is ``None``.
+- ``search(keyword, sic_codes, page)`` (operation ``search_registry``, Story 8.4):
+  ``/advanced-search/companies`` with ``company_status=active``,
+  ``company_name_includes=<keyword>`` (whitespace collapsed; left out when ``keyword`` is
+  ``None``), ``sic_codes=<codes joined by ,>`` (left out when empty), ``size=20`` and
+  ``start_index=<page * 20>``. Each item of ``items`` is read like a profile
+  (``company_number``, ``company_name``, ``company_type``, ``company_status``,
+  ``registered_office_address.postal_code`` and ``sic_codes``; a search item has no accounts);
+  an invalid item is skipped, and a 404 (the API's answer when nothing matches) or a body
+  without ``items`` (or with ``items: null``) has no hits. Neither a keyword nor a SIC code, a blank keyword, a code that
+  isn't 5 digits, or a page that isn't an ``int`` from 0 is ``registry_refused`` with no request.
+- ``officers(company_number)`` (operation ``list_officers``, Story 8.4):
+  ``/company/<number>/officers`` with ``items_per_page=100``. Each item of ``items`` is read
+  from ``name``, ``officer_role``, ``occupation`` (whitespace collapsed; ``None`` when missing,
+  blank or over 200 characters) and ``resigned_on`` (resigned when it is a non-blank text); an
+  item without a valid name or role is skipped. A 404 is ``()``.
 
 A number or a name is read stripped (the number uppercased, the name's whitespace collapsed); an
 unknown or invalid type or status, and a postcode that isn't a text of at most 16 characters,
@@ -42,6 +58,7 @@ Answer                                          Outcome
 ==============================================  ========================================
 2xx, a JSON object of the right shape           the hits, or the company
 404 to ``company``                              ``None``
+404 to ``search`` or ``officers`` (Story 8.4)   no hits, no officers (``()``)
 429                                             retryable ``registry_rate_limited``
 5xx, or any transport failure                   retryable ``registry_unavailable``
 401 or 403                                      ``registry_unauthorized``
@@ -74,14 +91,18 @@ from nextron.domain.legal_form import (
 )
 from nextron.ports.errors import AdapterError
 from nextron.ports.registry import (
+    ACCOUNTS_CATEGORY_PATTERN,
     MAX_NAME,
     MAX_POSTCODE,
+    PAGE_SIZE,
     REGISTRY_BAD_RESPONSE,
     REGISTRY_RATE_LIMITED,
     REGISTRY_REFUSED,
     REGISTRY_UNAUTHORIZED,
     REGISTRY_UNAVAILABLE,
+    SIC_CODE_PATTERN,
     RegistryCompany,
+    RegistryOfficer,
 )
 from nextron.ports.secrets import SecretsPort, read_credential
 from nextron.ports.usage_meter import Metered, UsageMeterPort
@@ -92,7 +113,11 @@ CONNECT_TIMEOUT_S: Final = 10.0
 PROVIDER: Final = "companies_house"  # the usage meter's provider and operations
 SEARCH_COMPANIES: Final = "search_companies"
 GET_COMPANY: Final = "get_company"
+SEARCH_REGISTRY: Final = "search_registry"  # Story 8.4
+LIST_OFFICERS: Final = "list_officers"  # Story 8.4
 ITEMS_PER_PAGE: Final = 20
+OFFICERS_PER_PAGE: Final = 100
+ACTIVE_STATUS: Final = "active"
 RATE_LIMIT: Final = 600  # requests ...
 RATE_WINDOW_S: Final = 300.0  # ... per 5 minutes (the API's own limit)
 MAX_BODY_BYTES: Final = 1_000_000
@@ -126,8 +151,37 @@ def _postcode(address: object) -> str | None:
     return value if 1 <= len(value) <= MAX_POSTCODE else None
 
 
+def _accounts_category(accounts: object) -> str | None:
+    """``accounts.last_accounts.type``, or ``None`` when it isn't a valid code."""
+    if not isinstance(accounts, Mapping):
+        return None
+    last = accounts.get("last_accounts")
+    if not isinstance(last, Mapping):
+        return None
+    return _code(last.get("type"), ACCOUNTS_CATEGORY_PATTERN)
+
+
+def _sic_codes(value: object) -> tuple[str, ...]:
+    """The valid 5-digit codes of a ``sic_codes`` list, each once, in order."""
+    if not isinstance(value, list):
+        return ()
+    codes: list[str] = []
+    for code in value:
+        if isinstance(code, str):
+            code = code.strip()
+            if SIC_CODE_PATTERN.fullmatch(code) is not None and code not in codes:
+                codes.append(code)
+    return tuple(codes)
+
+
 def _company(
-    number: object, name: object, company_type: object, status: object, address: object
+    number: object,
+    name: object,
+    company_type: object,
+    status: object,
+    address: object,
+    accounts: object = None,
+    sic_codes: object = None,
 ) -> RegistryCompany | None:
     """A ``RegistryCompany`` from an answer's fields, or ``None`` when its number or name isn't
     valid."""
@@ -144,6 +198,33 @@ def _company(
             company_type=_code(company_type, LEGAL_FORM_PATTERN),
             company_status=_code(status, COMPANY_STATUS_PATTERN),
             office_postcode=_postcode(address),
+            accounts_category=_accounts_category(accounts),
+            sic_codes=_sic_codes(sic_codes),
+        )
+    except (TypeError, ValueError):  # the checks above make this unreachable
+        return None
+
+
+def _officer(item: Mapping[str, Any]) -> RegistryOfficer | None:
+    """A ``RegistryOfficer`` from an officers item, or ``None`` when its name or role isn't
+    valid."""
+    name = item.get("name")
+    role = item.get("officer_role")
+    if not isinstance(name, str) or not isinstance(role, str):
+        return None
+    name = " ".join(name.split())
+    role = role.strip()
+    if not 1 <= len(name) <= MAX_NAME or LEGAL_FORM_PATTERN.fullmatch(role) is None:
+        return None
+    raw = item.get("occupation")
+    occupation = " ".join(raw.split()) if isinstance(raw, str) else ""
+    resigned_on = item.get("resigned_on")
+    try:
+        return RegistryOfficer(
+            name=name,
+            role=role,
+            occupation=occupation if 1 <= len(occupation) <= MAX_NAME else None,
+            resigned=isinstance(resigned_on, str) and bool(resigned_on.strip()),
         )
     except (TypeError, ValueError):  # the checks above make this unreachable
         return None
@@ -206,6 +287,66 @@ class CompaniesHouseRegistry:
         return self._get(
             GET_COMPANY, f"/company/{number}", None, document_company, missing_ok=True
         )
+
+    def search(
+        self, keyword: str | None, sic_codes: tuple[str, ...], page: int
+    ) -> tuple[RegistryCompany, ...]:
+        query = None
+        if keyword is not None:
+            query = " ".join(keyword.split()) if isinstance(keyword, str) else ""
+            if not query:
+                raise AdapterError(
+                    False, REGISTRY_REFUSED, "a Companies House search keyword can't be blank"
+                ) from None
+        if (
+            not isinstance(sic_codes, tuple)
+            or not all(
+                isinstance(code, str) and SIC_CODE_PATTERN.fullmatch(code) is not None
+                for code in sic_codes
+            )
+            or (query is None and not sic_codes)
+        ):
+            raise AdapterError(
+                False,
+                REGISTRY_REFUSED,
+                "a Companies House search needs a keyword or 5-digit SIC codes",
+            ) from None
+        if isinstance(page, bool) or not isinstance(page, int) or page < 0:
+            raise AdapterError(
+                False, REGISTRY_REFUSED, "a Companies House search page is an int from 0"
+            ) from None
+        params = {"company_status": ACTIVE_STATUS}
+        if query is not None:
+            params["company_name_includes"] = query
+        if sic_codes:
+            params["sic_codes"] = ",".join(sic_codes)
+        params["size"] = str(PAGE_SIZE)
+        params["start_index"] = str(page * PAGE_SIZE)
+        hits = self._get(
+            SEARCH_REGISTRY,
+            "/advanced-search/companies",
+            params,
+            document_search_hits,
+            missing_ok=True,
+        )
+        return () if hits is None else hits  # a 404 is the API's "nothing matches"
+
+    def officers(self, company_number: str) -> tuple[RegistryOfficer, ...]:
+        if (
+            not isinstance(company_number, str)
+            or COMPANY_NUMBER_PATTERN.fullmatch(company_number) is None
+        ):
+            raise AdapterError(
+                False, REGISTRY_REFUSED, "a Companies House officers list needs a company number"
+            ) from None
+        found = self._get(
+            LIST_OFFICERS,
+            f"/company/{company_number}/officers",
+            {"items_per_page": str(OFFICERS_PER_PAGE)},
+            document_officers,
+            missing_ok=True,
+        )
+        return () if found is None else found
 
     def _get[T](
         self,
@@ -277,7 +418,9 @@ def _answer(response: httpx2.Response, *, missing_ok: bool) -> Document | None:
 
 def document_hits(document: Document) -> tuple[RegistryCompany, ...]:
     """The valid hits of a search answer, in its order."""
-    items = document.get("items", [])
+    items = document.get("items")
+    if items is None:
+        items = []
     if not isinstance(items, list):
         raise AdapterError(
             False,
@@ -300,6 +443,51 @@ def document_hits(document: Document) -> tuple[RegistryCompany, ...]:
     return tuple(hits)
 
 
+def _items(document: Document, what: str) -> list[Any]:
+    items = document.get("items")
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        raise AdapterError(
+            False,
+            REGISTRY_BAD_RESPONSE,
+            f"Companies House answered {what} whose items aren't a list",
+        ) from None
+    return items
+
+
+def document_search_hits(document: Document) -> tuple[RegistryCompany, ...]:
+    """The valid hits of an advanced search answer, in its order (Story 8.4)."""
+    hits: list[RegistryCompany] = []
+    for item in _items(document, "an advanced search"):
+        if not isinstance(item, Mapping):
+            continue
+        found = _company(
+            item.get("company_number"),
+            item.get("company_name"),
+            item.get("company_type"),
+            item.get("company_status"),
+            item.get("registered_office_address"),
+            None,
+            item.get("sic_codes"),
+        )
+        if found is not None:
+            hits.append(found)
+    return tuple(hits)
+
+
+def document_officers(document: Document) -> tuple[RegistryOfficer, ...]:
+    """The valid officers of an officers answer, in its order (Story 8.4)."""
+    found: list[RegistryOfficer] = []
+    for item in _items(document, "an officers list"):
+        if not isinstance(item, Mapping):
+            continue
+        officer = _officer(item)
+        if officer is not None:
+            found.append(officer)
+    return tuple(found)
+
+
 def document_company(document: Document) -> RegistryCompany:
     """The company of a profile answer; ``registry_bad_response`` without a valid number and
     name."""
@@ -309,6 +497,8 @@ def document_company(document: Document) -> RegistryCompany:
         document.get("type"),
         document.get("company_status"),
         document.get("registered_office_address"),
+        document.get("accounts"),
+        document.get("sic_codes"),
     )
     if found is None:
         raise AdapterError(

@@ -102,13 +102,16 @@ from nextron import main
 from nextron.app.compliance import api as compliance_api
 from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
+from nextron.app.discovery.api import WebsiteRefused
 from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.drafting.api import Drafting, Traceability
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.discovery.place_ingest import PlaceDiscovery
+from nextron.app.discovery.registry_ingest import RegistryDiscovery
 from nextron.app.discovery.places import PlaceSearches
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.ops.api import Seeds
+from nextron.app.queries import setup as setup_queries
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.queries import drafting as drafting_queries
@@ -155,6 +158,7 @@ from nextron.ports.dns import MxRecord
 from nextron.ports.email_finder import VerifierAnswer
 from nextron.ports.llm import LlmOk, LlmUsage
 from nextron.ports.places import PlaceCandidate
+from nextron.ports.registry import RegistryCompany, RegistryOfficer
 from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
 from tests.app.test_signal_extraction import HOME_HTML as RESEARCH_HOME_HTML
 from tests.app.test_signal_extraction import build_world as research_world
@@ -167,6 +171,7 @@ from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.places import ScriptedPlaces
+from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 GUARDED_TABLES: Final = frozenset(
@@ -225,6 +230,26 @@ MANIFEST: Final = (
         ("app/discovery/",),
         r"PlaceDiscovery\.ingest_candidate",
         calls="upsert_lead",
+    ),
+    # Story 8.4: each Companies House hit through upsert_lead(companies_house), then its kept
+    # officers through add_contact(registry)
+    Caller(
+        "discovery.registry_ingest",
+        ("app/discovery/",),
+        r"RegistryDiscovery\.(?:_decided|_officers)",
+    ),
+    # Story 8.4: a registry Lead's website, found by the lookup or entered by the Operator
+    Caller(
+        "discovery.attach_web_domain",
+        ("app/discovery/",),
+        r"Discovery\.attach_web_domain",
+        calls="assert_contactable",
+    ),
+    Caller(
+        "discovery.enter_website",
+        ("app/discovery/",),
+        r"Discovery\._enter_website",
+        calls="assert_contactable",
     ),
     *(
         Caller(
@@ -1724,6 +1749,84 @@ def _inbox(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     return action, expected
 
 
+OFFICER: Final = "Jane Smith"
+
+
+def _registry_lead(world: World, tag: str) -> str:
+    """A Lead Companies House discovery created: a company number, no website."""
+    number = f"{abs(hash(tag)) % 10**8:08d}"
+    identity = LeadIdentity(f"Firm {tag}", world.segment, ch_number=number, country_code="GB")
+    upserted = world.transact(
+        lambda: world.discovery.upsert_lead(identity, LeadSource.COMPANIES_HOUSE)
+    )
+    assert upserted.lead_id is not None
+    return upserted.lead_id
+
+
+def _registry(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.4's Companies House ingest (``RegistryDiscovery.ingest_hit``) of one active
+    company with no registered office postcode (so no website lookup) and one kept officer:
+    the gate for the new Lead (no website yet), then for the officer's Contact."""
+    campaign = _seed_campaigns(world)
+    run_id = world.transact(
+        lambda: runs_repo.insert(
+            source="companies_house",
+            campaign_id=campaign,
+            segment_id=world.segment,
+            country_code="GB",
+            location=None,
+            query_hash="0" * 16,
+            status=RunStatus.RUNNING,
+            started_at=T0,
+            finished_at=None,
+        )
+    )
+    segment = world.transact(lambda: setup_queries.segment_by_id(world.segment))
+    assert segment is not None
+    number = f"{abs(hash(tag)) % 10**8:08d}"
+    registry = ScriptedRegistry(
+        companies={
+            number: RegistryCompany(
+                number, f"FIRM {tag} LIMITED", "ltd", "active", None, "full", ("69102",)
+            )
+        },
+        officers={number: (RegistryOfficer("SMITH, Jane", "director", "Owner", False),)},
+    )
+    clock = FrozenClock(T0)
+    meter = InMemoryUsageMeter(clock)
+    ingest = RegistryDiscovery(
+        clock,
+        meter,
+        registry,
+        PlaceSearches(clock, meter, ScriptedPlaces()),
+        ScriptedCrawler(),
+        world.discovery,
+        world.research,
+        queue_on(clock),
+    )
+
+    @use_case
+    def ingest_one() -> object:  # as the discover_registry run calls it: inside a use case
+        return ingest.ingest_hit(run_id, number, world.segment, segment.definition)
+
+    def action() -> object:
+        with world.units.open():
+            return ingest_one()
+
+    def expected() -> tuple[GateCall, ...]:  # the Lead's id exists only after the run
+        with world.engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                "SELECT id FROM leads WHERE ch_number = ?", (number,)
+            ).first()
+        assert row is not None
+        return (
+            _gate(NewLeadSubject(None)),
+            _gate(NewContactSubject(str(row[0]), name=OFFICER)),
+        )
+
+    return action, expected
+
+
 def _inbox_flagged(world: World) -> None:
     """A blocked new organization flags the item and creates nothing else."""
     assert world.last_event() == (
@@ -1738,6 +1841,33 @@ def _inbox_flagged(world: World) -> None:
             "SELECT flag_reason FROM signal_inbox_items WHERE status = 'flagged'"
         ).all()
     assert reasons == [("organization_suppressed",)]
+
+
+def _attach_web_domain(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.4's ``attach_web_domain`` of a found website: one gate call for its domain."""
+    lead_id = _registry_lead(world, tag)
+    domain = f"firm-{tag}.co.uk"
+
+    def action() -> object:
+        return world.transact(lambda: world.discovery.attach_web_domain(lead_id, domain))
+
+    return action, lambda: (_gate(NewLeadSubject(domain)),)
+
+
+def _enter_website(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.4's ``enter_website`` (the Operator's "Website needed" form): one gate call for
+    the entered website's domain."""
+    lead_id = _registry_lead(world, tag)
+    domain = f"firm-{tag}.co.uk"
+
+    def action() -> object:
+        try:
+            with world.units.open():
+                return world.discovery.enter_website(lead_id, f"https://www.{domain}/about")
+        except WebsiteRefused as refused:  # blocked: nothing written
+            return refused
+
+    return action, lambda: (_gate(NewLeadSubject(domain)),)
 
 
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
@@ -1774,6 +1904,14 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
         ),
         # Story 4.9: Blocked answers before any write, so nothing at all is added
         "drafting.request_*": Scenario((_request_steps,), after_blocked=_requested),
+        "discovery.registry_ingest": Scenario(
+            (_registry,),
+            gates_first=False,  # the officer's gate comes after the Lead's writes
+            # blocked, the run still counts the company as suppressed
+            blocked_writes=frozenset({("UPDATE", "discovery_runs")}),
+        ),
+        "discovery.attach_web_domain": Scenario((_attach_web_domain,)),
+        "discovery.enter_website": Scenario((_enter_website,)),
         "discovery.places_ingest": Scenario(
             (_places,),
             # blocked, the run still counts the candidate as suppressed
@@ -1892,6 +2030,9 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "discovery.upsert_lead",
         "discovery.csv_import",
         "discovery.places_ingest",
+        "discovery.registry_ingest",
+        "discovery.attach_web_domain",
+        "discovery.enter_website",
         *(f"research.add_contact[{source}]" for source in CONTACT_SOURCES),
         "research.people_extraction",
         "sequencing.enroll",  # Story 4.8

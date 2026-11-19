@@ -94,6 +94,32 @@ normaliser).
   unknown Lead raises ``LookupError``. Only a Places discovery run calls it, for the Lead it
   just created; the daily purge nulls the three after 30 days.
 
+- **A registry Lead's website (Story 8.4, FR-9, FR-49).** A Lead that Companies House
+  discovery created has no ``web_domain`` until one is found or entered:
+
+  - ``@command attach_web_domain(lead_id, domain) -> bool``: Companies House discovery's
+    website lookup found ``domain`` (a registrable domain that isn't a shared platform; else
+    ``ValueError``). It is attached only when the Lead exists, isn't merged and has no
+    ``web_domain`` (else ``LookupError``, ``ValueError``), no Lead holds ``domain``, and
+    ``compliance_api.assert_contactable(NewLeadSubject(domain), email, discovery)`` is
+    ``Allowed``: then the Lead's ``web_domain`` becomes it and its ``enrich_lead`` job is
+    enqueued (the keys ``upsert_lead`` uses), and the answer is ``True``. Otherwise nothing is
+    written and the answer is ``False``.
+  - ``@command record_website_lookup(lead_id)``: sets the Lead's ``website_lookup_at`` to now
+    (an unknown Lead raises ``LookupError``).
+  - ``@use_case enter_website(lead_id, url) -> EnteredWebsite(lead_id, merged)`` (the Leads
+    list's "Website needed" form, ``POST /leads/{lead_id}/website``), in one transaction: the
+    Lead must be stored and not merged (else ``WebsiteRefused(REFUSED_LEAD)``) and have no
+    ``web_domain`` (``REFUSED_HAS_WEBSITE``). ``url`` (an address without a scheme is read as
+    ``https://<address>``) must pass ``fetch_policy.url_refusal`` (the FR-49 denylist included)
+    and key to a registrable domain (``REFUSED_URL``) that isn't a shared platform
+    (``REFUSED_SHARED``), and the gate must allow it (``REFUSED_BLOCKED``). Then, when no Lead
+    holds the domain, it becomes the Lead's ``web_domain``; when another Lead does, the two
+    survivors are ``merge``d (FR-9), the older surviving (``merged=True``). Either way the
+    survivor's ``enrich_lead`` job is enqueued and ``lead_id`` is the survivor. A refusal writes
+    nothing and logs ``website_entry_refused`` (the reason); success logs ``website_entered``
+    (ids and whether it merged). Nothing logged holds the URL or the domain.
+
 - ``@use_case purge_place_coords() -> int`` (the daily ``purge_place_coords`` job, Story 8.2):
   in one transaction it nulls ``place_lat``, ``place_lng`` and ``place_coords_at`` on every
   Lead whose coordinates were stored strictly before ``now - 30 days``
@@ -127,6 +153,12 @@ through ``upsert_lead`` (source ``places``) and ``record_place_coords``.
   is one of those Leads' (``ERASURE``: the URL, text, author, company, the parsed author and
   the quote become ``[erased]``). It reads the Contact before research tombstones it, so it is
   registered second, after compliance's hook.
+
+**Companies House discovery (Story 8.4).** ``RegistryDiscovery``
+(``nextron.app.discovery.registry_ingest``) runs the ``discover_registry`` jobs: it pages
+through a UK Campaign's Companies House searches and turns each active company into a Lead
+through ``upsert_lead`` (source ``companies_house``), then looks its website up once through
+Places (``attach_web_domain``, ``record_website_lookup``) and stores its kept officers.
 
 **The legal form (Story 2.12, FR-12).** ``LegalFormChecks`` (``nextron.app.discovery
 .legal_form``) runs the ``check_legal_form`` jobs: it links a GB Lead to its Companies House
@@ -182,6 +214,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Final
+from urllib.parse import urlsplit
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.jobqueue.api import JobQueue
@@ -208,6 +241,9 @@ from nextron.domain.contactability import (
 from nextron.domain.contacts import ProvenanceSource
 from nextron.domain.crawl import ENRICH_LEAD_JOB, LEAD_ID_FIELD, PAYLOAD_VERSION, lead_job_keys
 from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.errors import DomainError
+from nextron.domain.fetch_policy import check_url, url_refusal
+from nextron.domain.identity import IdentityError, registrable_domain
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import TICK, VERSION_FIELD, Lane
 from nextron.domain.lead_import import (
@@ -250,6 +286,30 @@ from nextron.ports.email_syntax import EmailSyntaxPort
 log = logging.getLogger(__name__)
 
 MAX_MERGE_CHAIN: Final = 64
+WEBSITE_ENTERED: Final = "website_entered"
+WEBSITE_ENTRY_REFUSED: Final = "website_entry_refused"
+DEFAULT_SCHEME: Final = "https://"
+# Why an entered website was refused (Story 8.4)
+REFUSED_LEAD: Final = "lead_unknown"
+REFUSED_HAS_WEBSITE: Final = "lead_has_website"
+REFUSED_URL: Final = "url_refused"
+REFUSED_SHARED: Final = "shared_platform"
+REFUSED_BLOCKED: Final = "blocked"
+WEBSITE_REFUSAL_MESSAGES: Final = {
+    REFUSED_LEAD: "That Lead isn't on the Leads list any more. Nothing was saved.",
+    REFUSED_HAS_WEBSITE: "That Lead already has a website. Nothing was saved.",
+    REFUSED_URL: (
+        "That isn't a website address the engine may use (a public http or https address, "
+        "not LinkedIn, Instagram, Google Maps or a job board). Nothing was saved."
+    ),
+    REFUSED_SHARED: (
+        "That address is on a shared platform, not the firm's own website. Nothing was saved."
+    ),
+    REFUSED_BLOCKED: (
+        "That website is on the Suppression List or otherwise blocked from contact. "
+        "Nothing was saved."
+    ),
+}
 # The sources whose new Leads get their enrich_lead job in the creating transaction
 CRAWLED_SOURCES: Final = frozenset({LeadSource.CSV, LeadSource.PLACES})
 PLACE_COORDS_PURGED: Final = "place_coords_purged"
@@ -291,6 +351,57 @@ class UpsertedLead:
     created: bool
     merged: tuple[str, ...]
     blocked: Blocked | None = None
+
+
+class WebsiteRefused(DomainError):
+    """An entered website that can't be saved; ``reason`` is one of the ``REFUSED_*`` codes
+    and ``message`` what the page says."""
+
+    code = "website_refused"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(WEBSITE_REFUSAL_MESSAGES[reason])
+        self.reason = reason
+        self.message = WEBSITE_REFUSAL_MESSAGES[reason]
+
+
+@dataclass(frozen=True, slots=True)
+class EnteredWebsite:
+    """What an entered website did: the Lead that now holds it (the survivor) and whether a
+    merge happened."""
+
+    lead_id: str
+    merged: bool
+
+
+def website_domain(url: str) -> str | None:
+    """The registrable domain of an egress-allowed URL that isn't a shared platform, else
+    ``None`` (Stories 8.3 and 8.4)."""
+    if not isinstance(url, str) or url_refusal(url) is not None:
+        return None
+    try:
+        domain = registrable_domain(check_url(url).host)
+    except IdentityError:
+        return None
+    return None if is_shared_platform(domain) else domain
+
+
+def _entered_domain(url: str) -> str:
+    """The registrable domain of an Operator-entered website; ``WebsiteRefused`` otherwise."""
+    if not isinstance(url, str):
+        raise WebsiteRefused(REFUSED_URL)
+    text = url.strip()
+    if text and not urlsplit(text).scheme:
+        text = f"{DEFAULT_SCHEME}{text}"
+    if not text or url_refusal(text) is not None:
+        raise WebsiteRefused(REFUSED_URL)
+    try:
+        domain = registrable_domain(check_url(text).host)
+    except IdentityError:
+        raise WebsiteRefused(REFUSED_URL) from None
+    if is_shared_platform(domain):
+        raise WebsiteRefused(REFUSED_SHARED)
+    return domain
 
 
 def _survivor(lead: StoredLead) -> StoredLead:
@@ -477,6 +588,90 @@ class Discovery:
         older, newer = sorted((survivor, other), key=_age)
         self.merge(older.id, newer.id)
         return older.id, MERGED
+
+    # A registry Lead's website (Story 8.4) ------------------------------------------------------
+
+    @command
+    def attach_web_domain(self, lead_id: str, domain: str) -> bool:
+        """Give the registry Lead ``lead_id`` the website its lookup found; whether it was
+        attached. See the module docstring."""
+        if not isinstance(lead_id, str) or not isinstance(domain, str):
+            raise TypeError("attach_web_domain takes a Lead id and a domain as str")
+        if website_domain(f"{DEFAULT_SCHEME}{domain}/") != domain:
+            raise ValueError("attach_web_domain takes a registrable domain of a firm's own site")
+        lead = leads_repo.get(lead_id) if is_ulid(lead_id) else None
+        if lead is None:
+            raise LookupError("attach_web_domain: the Lead is unknown")
+        if lead.merged_into is not None or lead.web_domain is not None:
+            raise ValueError("attach_web_domain: the Lead is merged or already has a website")
+        if leads_repo.by_web_domain(domain) is not None:
+            return False
+        answer = compliance_api.assert_contactable(
+            NewLeadSubject(domain), Channel.EMAIL, Purpose.DISCOVERY
+        )
+        if isinstance(answer, Blocked):
+            return False
+        if not isinstance(answer, Allowed):  # never proceed on anything else
+            raise TypeError(f"assert_contactable answered a {type(answer).__name__}")
+        leads_repo.set_web_domain(lead.id, domain)
+        self._enqueue_crawl(lead.id, domain, None)
+        return True
+
+    @command
+    def record_website_lookup(self, lead_id: str) -> None:
+        """Record that the Lead's website lookup was decided now; see the module docstring."""
+        if not isinstance(lead_id, str) or not is_ulid(lead_id) or leads_repo.get(lead_id) is None:
+            raise LookupError("record_website_lookup: the Lead is unknown")
+        leads_repo.set_website_lookup_at(lead_id, self._clock.now())
+
+    @use_case
+    def enter_website(self, lead_id: str, url: str) -> EnteredWebsite:
+        """Save the website the Operator entered for a Lead without one; see the module
+        docstring."""
+        try:
+            with current().transaction():
+                entered = self._enter_website(lead_id, url)
+        except WebsiteRefused as refused:
+            log.info(WEBSITE_ENTRY_REFUSED, extra={"reason": refused.reason})
+            raise
+        log.info(
+            WEBSITE_ENTERED,
+            extra={"lead_id": lead_id, "survivor_id": entered.lead_id, "merged": entered.merged},
+        )
+        return entered
+
+    def _enter_website(self, lead_id: str, url: str) -> EnteredWebsite:
+        lead = leads_repo.get(lead_id) if isinstance(lead_id, str) and is_ulid(lead_id) else None
+        if lead is None or lead.merged_into is not None:
+            raise WebsiteRefused(REFUSED_LEAD)
+        if lead.web_domain is not None:
+            raise WebsiteRefused(REFUSED_HAS_WEBSITE)
+        domain = _entered_domain(url)
+        answer = compliance_api.assert_contactable(
+            NewLeadSubject(domain), Channel.EMAIL, Purpose.DISCOVERY
+        )
+        if isinstance(answer, Blocked):
+            raise WebsiteRefused(REFUSED_BLOCKED)
+        if not isinstance(answer, Allowed):  # never proceed on anything else
+            raise TypeError(f"assert_contactable answered a {type(answer).__name__}")
+        holder = leads_repo.by_web_domain(domain)
+        merged = False
+        if holder is None:
+            leads_repo.set_web_domain(lead.id, domain)
+            survivor_id = lead.id
+        else:
+            other = _survivor(holder)
+            if other.id == lead.id:  # only a Lead holding a domain keeps a loser's other domain
+                raise WebsiteRefused(REFUSED_HAS_WEBSITE)
+            older, newer = sorted((lead, other), key=_age)
+            self.merge(older.id, newer.id)
+            survivor_id, merged = older.id, True
+        survivor = leads_repo.get(survivor_id)
+        if survivor is None:  # merging never deletes a row
+            raise RuntimeError(f"Lead {survivor_id} has no row")
+        if survivor.web_domain is not None:
+            self._enqueue_crawl(survivor.id, survivor.web_domain, None)
+        return EnteredWebsite(survivor.id, merged)
 
     @command
     def record_place_coords(self, lead_id: str, lat: float, lng: float) -> None:

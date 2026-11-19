@@ -48,6 +48,8 @@ ADD_CONTACT_CALLERS: Final = {
     "nextron.app.research.people:PeopleExtractions._contacts": ProvenanceSource.WEBSITE,
     # Story 2.16: the Signal Inbox item's author (name and role only, no linkedin_url)
     "nextron.app.research.api:Research._inbox_author": ProvenanceSource.SIGNAL_INBOX,
+    # Story 8.4: a Companies House officer (name and role only, no linkedin_url)
+    "nextron.app.discovery.registry_ingest:RegistryDiscovery._officers": ProvenanceSource.REGISTRY,
 }
 CONTACTS_REPO: Final = "nextron.db.repos.research.contacts"
 CONTACTS_REPO_WRITES: Final = frozenset({"insert", "fill"})
@@ -342,10 +344,14 @@ def test_a_linkedin_url_from_another_source_is_refused_before_any_write(
     assert world.contact_rows() == []
 
 
-def test_the_refused_sources_are_finder_pattern_and_replier() -> None:
-    assert {ProvenanceSource.FINDER, ProvenanceSource.PATTERN, ProvenanceSource.REPLIER} == (
-        REFUSED_SOURCES
-    )
+def test_the_refused_sources_are_finder_pattern_replier_and_registry() -> None:
+    # Story 8.4's registry (a Companies House officer) never carries a LinkedIn URL either
+    assert {
+        ProvenanceSource.FINDER,
+        ProvenanceSource.PATTERN,
+        ProvenanceSource.REPLIER,
+        ProvenanceSource.REGISTRY,
+    } == REFUSED_SOURCES
 
 
 @pytest.mark.parametrize("source", sorted(LINKEDIN_URL_SOURCES))

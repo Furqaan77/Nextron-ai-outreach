@@ -17,6 +17,7 @@ from nextron.domain.segments import (
     DiscoveryQueries,
     FieldChange,
     InvalidSegments,
+    RegistryQueries,
     SegmentRefused,
     SignalClass,
     definition_text,
@@ -50,8 +51,8 @@ def test_the_new_queries_default_to_empty() -> None:
     law, _ = validate_segments(seed_file())
 
     assert law.discovery_queries == DiscoveryQueries(("law firm",))
-    assert law.discovery_queries.registry_keywords == ()
-    assert law.discovery_queries.registry_sic_codes == ()
+    # one representation since the merge with Story 8.4: the registry queries are nested
+    assert law.discovery_queries.registry == RegistryQueries((), ())
     assert law.discovery_queries.job_titles == ()
 
 
@@ -59,23 +60,26 @@ def test_the_new_queries_are_read_from_the_file_form() -> None:
     data = seed_file()
     law_of(data)["discovery_queries"] = {
         "places": ["law firm"],
-        "registry": {"keywords": ["solicitors"], "sic_codes": ["69102", "6910"]},
+        "registry": {"keywords": ["solicitors"], "sic_codes": ["69102", "69109"]},
         "job_titles": ["Legal Operations Manager"],
     }
 
     law, _ = validate_segments(data)
 
     assert law.discovery_queries == DiscoveryQueries(
-        ("law firm",), ("solicitors",), ("69102", "6910"), ("Legal Operations Manager",)
+        ("law firm",),
+        RegistryQueries(("solicitors",), ("69102", "69109")),
+        ("Legal Operations Manager",),
     )
 
 
 @pytest.mark.parametrize(
     "queries",
     [
-        {"places": ["law firm"], "registry": {}},
-        {"places": ["law firm"], "registry": {"keywords": []}},
-        {"places": ["law firm"], "registry": {"sic_codes": []}, "job_titles": []},
+        # Story 8.4: a registry holds both its lists (a missing one is refused there)
+        {"places": ["law firm"], "registry": {"keywords": [], "sic_codes": []}},
+        {"places": ["law firm"], "job_titles": []},
+        {"places": ["law firm"], "registry": {"keywords": [], "sic_codes": []}, "job_titles": []},
     ],
 )
 def test_the_new_queries_may_be_empty_or_left_out(queries: dict[str, Any]) -> None:
@@ -90,16 +94,18 @@ def test_the_new_queries_may_be_empty_or_left_out(queries: dict[str, Any]) -> No
 @pytest.mark.parametrize(
     ("code", "needle"),
     [
-        ("691", "a SIC code of 4 or 5 digits"),
-        ("691020", "a SIC code of 4 or 5 digits"),
-        ("69a02", "a SIC code of 4 or 5 digits"),
-        ("６９１０２", "a SIC code of 4 or 5 digits"),  # full-width digits aren't ASCII
+        # one rule since the merge with Story 8.4: exactly 5 digits (legal_form.SIC_CODE_PATTERN)
+        ("691", "a 5-digit SIC code"),
+        ("6910", "a 5-digit SIC code"),
+        ("691020", "a 5-digit SIC code"),
+        ("69a02", "a 5-digit SIC code"),
+        ("６９１０２", "a 5-digit SIC code"),  # full-width digits aren't ASCII
         (69102, "must be text"),
     ],
 )
-def test_a_sic_code_is_4_or_5_ascii_digits(code: object, needle: str) -> None:
+def test_a_sic_code_is_5_ascii_digits(code: object, needle: str) -> None:
     data = seed_file()
-    law_of(data)["discovery_queries"]["registry"] = {"sic_codes": ["69102", code]}
+    law_of(data)["discovery_queries"]["registry"] = {"keywords": [], "sic_codes": ["69102", code]}
 
     with pytest.raises(InvalidSegments) as caught:
         validate_segments(data)
@@ -135,8 +141,21 @@ def test_the_new_queries_follow_the_list_rules(
 
 def test_the_shipped_texts_are_byte_identical_to_story_2_1s() -> None:
     for each in shipped():
-        assert definition_text(each) == old_text(each)
-        assert '"registry"' not in definition_text(each)
+        # without the registry queries Story 8.4 gave the shipped seeds: Story 2.1's text
+        bare = dataclasses.replace(
+            each, discovery_queries=DiscoveryQueries(each.discovery_queries.places)
+        )
+        assert definition_text(bare) == old_text(bare)
+        assert '"registry"' not in definition_text(bare)
+        # with them: Story 2.1's text plus the registry, and still no job_titles
+        form = json.loads(old_text(each))
+        form["discovery_queries"]["registry"] = {
+            "keywords": list(each.discovery_queries.registry.keywords),
+            "sic_codes": list(each.discovery_queries.registry.sic_codes),
+        }
+        assert definition_text(each) == json.dumps(
+            form, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        )
         assert '"job_titles"' not in definition_text(each)
 
 
@@ -144,14 +163,16 @@ def test_only_non_empty_new_queries_are_stored() -> None:
     law = shipped()[0]
     with_codes = dataclasses.replace(
         law,
-        discovery_queries=dataclasses.replace(law.discovery_queries, registry_sic_codes=("69102",)),
+        discovery_queries=DiscoveryQueries(
+            law.discovery_queries.places, RegistryQueries((), ("69102",))
+        ),
     )
 
     form = file_form(with_codes)
 
     assert form["discovery_queries"] == {
         "places": list(law.discovery_queries.places),
-        "registry": {"sic_codes": ["69102"]},
+        "registry": {"keywords": [], "sic_codes": ["69102"]},  # Story 8.4: both lists
     }
 
 
@@ -160,7 +181,9 @@ def test_a_segment_with_every_new_query_round_trips() -> None:
     full = dataclasses.replace(
         law,
         discovery_queries=DiscoveryQueries(
-            law.discovery_queries.places, ("solicitors",), ("69102",), ("Head of Legal Ops",)
+            law.discovery_queries.places,
+            RegistryQueries(("solicitors",), ("69102",)),
+            ("Head of Legal Ops",),
         ),
     )
 

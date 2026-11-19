@@ -217,11 +217,13 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/exports/{ticket}",
         "/leads/discovery",  # Story 8.3
         "/leads/discovery/places",
+        "/leads/discovery/companies-house",  # Story 8.4
         "/leads",
         "/leads/ready",  # Story 4.10
         "/leads/ready/pick",
         "/leads/pipeline",  # Story 9.7
         "/reports/calls",  # Story 9.6
+        "/leads/{lead_id}/website",  # Story 8.4
         "/leads/{lead_id}/contacts/{contact_id}/erase",  # Story 3.13
         "/leads/{lead_id}/contacts/{contact_id}/erase",
         "/leads/{lead_id}/contacts/{contact_id}/permissions",  # Story 10.7
@@ -732,6 +734,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_pipeline.html",
         "lead_score.html",
         "lead_tabs.html",
+        "lead_website_form.html",
         "leads.html",
         "leads_ready.html",
         "leads_ready_list.html",

@@ -54,7 +54,9 @@ work, so the job is deferred), in three phases:
    - ``research.record_legal_form(<the Lead's survivor>, finding)``: with a link, the
      ``LegalFormFinding`` of the record (``status_for(type, status)``, the site quote, the
      ``registry_quote`` and ``retrieved_at``, when the record was read); without one,
-     ``UNLINKED`` (``unconfirmed``);
+     ``UNLINKED`` (``unconfirmed``), except that a Lead whose stored finding is registry-only
+     (Story 8.4: site Evidence pointer NULL, registry pointer set, as Companies House discovery
+     records it) keeps it as it is: it stays ``unconfirmed`` either way (FR-12);
    - ``select_primary_contact`` for the survivor.
 
    Then it logs ``legal_form_checked`` (``lead_id``, ``status``, ``path``: ``number``, ``name``
@@ -180,6 +182,17 @@ def _postcodes(pages: Iterable[_Page]) -> dict[str, tuple[PostcodeQuote, _Page]]
         for quoted in find_postcodes(page.text):
             found.setdefault(quoted.key, (quoted, page))
     return found
+
+
+def _registry_only(lead_id: str) -> bool:
+    """Whether the Lead's stored legal form is registry-only (Story 8.4: Companies House
+    discovery recorded the register's record, and no site Evidence links it yet)."""
+    stored = research_queries.legal_form(lead_id)
+    return (
+        stored is not None
+        and stored.site_evidence_id is None
+        and stored.registry_evidence_id is not None
+    )
 
 
 class LegalFormChecks:
@@ -326,9 +339,12 @@ class LegalFormChecks:
                     else:
                         target = owner
                         finding = link.finding()
-                if not conflict or target == lead.id:
+                if (not conflict or target == lead.id) and not (
+                    not finding.linked and _registry_only(target)
+                ):
                     # after a merge into another survivor, a conflict records nothing: that
-                    # survivor's own legal form and Evidence stay as they are
+                    # survivor's own legal form and Evidence stay as they are; and no link
+                    # leaves a registry-only finding (Story 8.4) in place
                     self._research.record_legal_form(target, finding)
                 survivor = discovery_queries.lead(target)
                 if survivor is None:  # Leads are never deleted

@@ -170,6 +170,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         # name a person, so erasing a Contact redacts its Lead's notes
         "deal_value": PiiClass.NONE,
         "notes": PiiClass.REDACT,
+        # Story 8.4: when a registry Lead's website lookup was decided
+        "website_lookup_at": PiiClass.NONE,
     },
     # Story 9.1. A booked call holds IDs, a zone, an actor code and times; the Contact is kept
     # as its id only.
@@ -444,6 +446,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "suppressed": PiiClass.NONE,
         "no_website": PiiClass.NONE,
         "market_blocked": PiiClass.NONE,
+        "inactive": PiiClass.NONE,  # Story 8.4
     },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.

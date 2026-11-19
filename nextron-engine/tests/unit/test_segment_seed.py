@@ -17,6 +17,7 @@ from nextron.domain.segments import (
     DisqualifierKind,
     EvidenceType,
     PreferredRoles,
+    RegistryQueries,
     SegmentDef,
     SignalClass,
     SignalSource,
@@ -121,7 +122,10 @@ LAW = SegmentDef(
             15,
         ),
     ),
-    discovery_queries=DiscoveryQueries(("law firm", "solicitors")),
+    discovery_queries=DiscoveryQueries(
+        ("law firm", "solicitors"),
+        RegistryQueries(("solicitors", "law", "legal"), ("69102",)),  # Story 8.4
+    ),
 )
 
 OPS = SegmentDef(
@@ -213,7 +217,22 @@ OPS = SegmentDef(
         ),
     ),
     discovery_queries=DiscoveryQueries(
-        ("wholesale distributor", "logistics company", "freight company", "manufacturer")
+        ("wholesale distributor", "logistics company", "freight company", "manufacturer"),
+        RegistryQueries(  # Story 8.4: wholesale, freight, light manufacturing
+            (),
+            (
+                "46190",
+                "46690",
+                "46900",
+                "49410",
+                "52103",
+                "52290",
+                "22290",
+                "25990",
+                "28290",
+                "32990",
+            ),
+        ),
     ),
 )
 

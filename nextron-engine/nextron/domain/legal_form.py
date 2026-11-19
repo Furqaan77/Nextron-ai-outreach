@@ -58,18 +58,25 @@ at the text's start), and each key appears once, with its first quote. ``postcod
 a stored postcode's key (whitespace dropped, uppercased), or ``None`` when it isn't one.
 
 **The registry quote.** ``registry_quote(number=, name=, company_type=, company_status=,
-office_postcode=)`` renders a record canonically: ``Companies House record <number>: company type
-<type|unknown>, company status <status|unknown>, registered office postcode <postcode|none>,
-registered name <name>``, normalised and cut to ``MAX_QUOTE`` (300) characters at the name's
-end. ``company_page_url(number)`` is the record's public page.
+office_postcode=, accounts_category=None, sic_codes=())`` renders a record canonically:
+``Companies House record <number>: company type <type|unknown>, company status
+<status|unknown>, registered office postcode <postcode|none>, registered name <name>``,
+normalised and cut to ``MAX_QUOTE`` (300) characters at the name's end. Story 8.4: when given,
+``, accounts category <category>`` and then ``, SIC codes <code> <code> ...`` come right before
+``, registered name``, so a quote without them renders as before and the name stays last.
+``company_page_url(number)`` is the record's public page. ``SIC_CODE_PATTERN`` (``[0-9]{5}``),
+``ACCOUNTS_CATEGORY_PATTERN`` (``[a-z][a-z0-9-]{0,31}``) and ``DORMANT`` (``dormant``) are
+Story 8.4's register codes.
 
 **The finding.** ``SiteQuote(page_url, quote, fetched_at)`` is the site Evidence (a quote of at
 most 300 normalised characters from a stored page). ``LegalFormFinding(status, number,
 legal_form, company_status, site, registry_quote, retrieved_at)`` is what a check found: with no
 ``number`` (nothing links the Lead), there is no site quote, registry quote, legal form or
-company status and the status is ``unconfirmed``; with a number, the site quote, the registry
-quote and ``retrieved_at`` (when the record was read) are required and the status is
-``status_for(legal_form, company_status)``. A wrong type raises ``TypeError``, a bad value
+company status and the status is ``unconfirmed``; with a number, the registry quote and
+``retrieved_at`` (when the record was read) are required. With a site quote too, the status is
+``status_for(legal_form, company_status)``. Without one (``registry_only``, Story 8.4: a Lead
+Companies House discovery created, before its website shows the number), the legal form and
+company status are required and the status is ``unconfirmed`` (FR-12: only the site confirms). A wrong type raises ``TypeError``, a bad value
 ``ValueError``; no message holds a value.
 
 ``CHECK_LEGAL_FORM_JOB`` is the job's name (``check_legal_form``).
@@ -100,6 +107,9 @@ NONE: Final = "none"
 LEGAL_FORM_PATTERN: Final = re.compile(r"[a-z][a-z0-9-]{0,63}")  # matched with fullmatch
 COMPANY_STATUS_PATTERN: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")  # matched with fullmatch
 COMPANY_NUMBER_PATTERN: Final = re.compile(r"[A-Z0-9]{8}")  # matched with fullmatch
+SIC_CODE_PATTERN: Final = re.compile(r"[0-9]{5}")  # matched with fullmatch (Story 8.4)
+ACCOUNTS_CATEGORY_PATTERN: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")  # fullmatch (Story 8.4)
+DORMANT: Final = "dormant"  # the accounts category of a dormant company (Story 8.4)
 
 # The Companies House company types that are corporate subscribers (PECR). A GB Market may list
 # these and no other (nextron.domain.markets).
@@ -327,6 +337,8 @@ def registry_quote(
     company_type: str | None,
     company_status: str | None,
     office_postcode: str | None,
+    accounts_category: str | None = None,
+    sic_codes: tuple[str, ...] = (),
 ) -> str:
     """The canonical rendering of a record, as the registry Evidence's quote; see the module
     docstring."""
@@ -334,13 +346,23 @@ def registry_quote(
         raise ValueError("registry_quote takes a Companies House number")
     if not isinstance(name, str) or not normalise(name):
         raise ValueError("registry_quote takes a non-blank registered name")
-    for value in (company_type, company_status, office_postcode):
+    for value in (company_type, company_status, office_postcode, accounts_category):
         if value is not None and not isinstance(value, str):
-            raise TypeError("registry_quote takes the type, status and postcode as str or None")
+            raise TypeError(
+                "registry_quote takes the type, status, postcode and accounts category as str "
+                "or None"
+            )
+    if not isinstance(sic_codes, tuple) or not all(isinstance(code, str) for code in sic_codes):
+        raise TypeError("registry_quote takes the SIC codes as a tuple of str")
+    extra = ""
+    if accounts_category is not None:
+        extra += f", accounts category {accounts_category}"
+    if sic_codes:
+        extra += f", SIC codes {' '.join(sic_codes)}"
     head = normalise(
         f"Companies House record {number}: company type {company_type or UNKNOWN}, "
         f"company status {company_status or UNKNOWN}, registered office postcode "
-        f"{office_postcode or NONE}, registered name"
+        f"{office_postcode or NONE}{extra}, registered name"
     )
     room = MAX_QUOTE - len(head) - 1
     return normalise(normalise(f"{head} {normalise(name)[: max(room, 0)]}")[:MAX_QUOTE])
@@ -432,18 +454,32 @@ class LegalFormFinding:
             if self.status is not LegalFormStatus.UNCONFIRMED:
                 raise ValueError("a LegalFormFinding without a number is unconfirmed")
             return
-        if self.site is None or self.registry_quote is None or self.retrieved_at is None:
+        if self.registry_quote is None or self.retrieved_at is None:
             raise ValueError(
-                "a linked LegalFormFinding needs its site quote, its registry quote and "
-                "retrieved_at"
+                "a LegalFormFinding with a number needs its registry quote and retrieved_at"
             )
+        if self.site is None:  # registry-only (Story 8.4): the site hasn't confirmed it yet
+            if self.legal_form is None or self.company_status is None:
+                raise ValueError(
+                    "a registry-only LegalFormFinding needs its legal form and company status"
+                )
+            if self.status is not LegalFormStatus.UNCONFIRMED:
+                raise ValueError("a registry-only LegalFormFinding is unconfirmed")
+            return
         if self.status is not status_for(self.legal_form, self.company_status):
             raise ValueError("a linked LegalFormFinding's status must follow its record")
 
     @property
     def linked(self) -> bool:
-        """Whether Evidence links the Lead to a record."""
+        """Whether the finding names a record (Evidence on the site links it, or, registry-only,
+        the record itself)."""
         return self.number is not None
+
+    @property
+    def registry_only(self) -> bool:
+        """Whether the finding is the register's record alone, with no site Evidence yet
+        (Story 8.4): always ``unconfirmed``."""
+        return self.number is not None and self.site is None
 
 
 UNLINKED: Final = LegalFormFinding(

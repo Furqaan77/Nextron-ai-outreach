@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{#- The Discovery page (nextron.web.discovery_page): the Places discovery form and the recent
-    runs, in discovery_panel.html. -#}
+{#- The Discovery page (nextron.web.discovery_page): the Places and Companies House discovery
+    forms and the recent runs, in discovery_panel.html. -#}
 {% block title %}Nextron: Discovery{% endblock %}
 {% block content %}
 <h1>Discovery</h1>
@@ -9,5 +9,11 @@
 fetches each place's own website, and adds each new organization as a Lead named from that
 website, after the Suppression List check. No email is sent. Each new Lead is queued for a
 polite crawl of its site.</p>
+<p>A Companies House discovery run searches the UK register for active companies matching the
+Campaign's Segment, skips dissolved and dormant ones, and adds each new company as a Lead under
+its registered name, after the Suppression List check. It then looks up the company's website
+once through Google Places; a Lead left without one shows under "Website needed" on the Leads
+list, where you can enter it. The register's legal form stays unconfirmed until the firm's own
+website confirms it.</p>
 {% include "discovery_panel.html" %}
 {% endblock %}

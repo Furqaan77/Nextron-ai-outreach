@@ -663,16 +663,18 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "discover_places",
         "process_signal_item",
         "check_grounding",
+        "discover_registry",
     )
-    discover = job_types.get("discover_places")  # Story 8.3
-    assert (
-        discover.default_lane,
-        discover.lanes,
-        discover.priority,
-        discover.max_runtime,
-        discover.retry_limit,
-        discover.group,
-    ) == (Lane.BULK, frozenset({Lane.BULK}), 30, timedelta(hours=1), 2, JobGroup.DISCOVERY)
+    for name in ("discover_places", "discover_registry"):  # Stories 8.3 and 8.4
+        discover = job_types.get(name)
+        assert (
+            discover.default_lane,
+            discover.lanes,
+            discover.priority,
+            discover.max_runtime,
+            discover.retry_limit,
+            discover.group,
+        ) == (Lane.BULK, frozenset({Lane.BULK}), 30, timedelta(hours=1), 2, JobGroup.DISCOVERY)
     send_alert = job_types.get("send_alert")
     assert (
         send_alert.default_lane,
@@ -1069,6 +1071,46 @@ def test_the_enqueue_only_registry_declares_check_grounding_as_the_runners_does(
         found.handler(
             Job(RUN, "check_grounding", Lane.INTERACTIVE, {"v": 1, "draft_id": LEAD, "rev": 1}, 1)
         )
+
+
+class RecordingRegistryDiscovery:
+    """Stands in for the ``discovery`` service's ``RegistryDiscovery`` (Story 8.4); ``allowed``
+    is what ``run`` returns (``False``: deferred)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[str] = []
+
+    def run(self, campaign_id: str) -> bool:
+        self.calls.append(campaign_id)
+        return self.allowed
+
+
+def test_discover_registry_runs_the_payloads_campaign_and_defers_when_refused() -> None:
+    done, refused = RecordingRegistryDiscovery(), RecordingRegistryDiscovery(allowed=False)
+    job = Job(RUN, "discover_registry", Lane.BULK, {"v": 1, "campaign_id": LEAD}, 1)
+
+    assert registry(registry_discovery=lambda: done).get("discover_registry").handler(job) is None
+    deferred = registry(registry_discovery=lambda: refused).get("discover_registry").handler(job)
+    assert deferred is DEFERRED
+    assert (done.calls, refused.calls) == ([LEAD], [LEAD])
+
+
+@pytest.mark.parametrize("payload", [{"v": 1}, {"v": 1, "campaign_id": "not-a-ulid"}])
+def test_discover_registry_refuses_a_payload_without_a_campaign(payload: dict[str, object]) -> None:
+    runs = RecordingRegistryDiscovery()
+    handler = registry(registry_discovery=lambda: runs).get("discover_registry").handler
+
+    with pytest.raises(InvalidJob, match="campaign_id"):
+        handler(Job(RUN, "discover_registry", Lane.BULK, payload, 1))
+    assert runs.calls == []
+
+
+def test_a_registry_built_without_registry_discovery_fails_a_discover_registry_job() -> None:
+    handler = registry().get("discover_registry").handler
+
+    with pytest.raises(RuntimeError, match="without registry_discovery"):
+        handler(Job(RUN, "discover_registry", Lane.BULK, {"v": 1, "campaign_id": LEAD}, 1))
 
 
 @pytest.mark.parametrize(("attempts", "may_retry"), [(1, True), (3, True), (4, False)])

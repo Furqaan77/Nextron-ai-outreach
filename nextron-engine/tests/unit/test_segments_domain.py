@@ -903,6 +903,10 @@ def test_definition_text_is_canonical_json_of_the_file_form() -> None:
     for item in expected["signal_types"]:
         item.setdefault("match_terms", [])
         item.setdefault("preferred_roles", [])
+    # Story 8.4's registry is written when it holds a keyword or a SIC code; with neither it is
+    # left out, so the text stays Story 2.1's (Story 11.5's byte stability, kept at the merge)
+    if expected["discovery_queries"].get("registry") == {"keywords": [], "sic_codes": []}:
+        del expected["discovery_queries"]["registry"]
     assert json.loads(text) == expected
 
 

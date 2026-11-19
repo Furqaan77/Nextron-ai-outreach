@@ -249,6 +249,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "discover_places",
         "process_signal_item",  # Story 2.16
         "check_grounding",  # Story 4.14
+        "discover_registry",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):

@@ -1,0 +1,19 @@
+{#- A "Website needed" row's website cell (nextron.web.leads_page, Story 8.4): rendered inside
+    leads.html for each row of the website=needed list, and alone as the answer to POST
+    /leads/{lead_id}/website, which HTMX swaps in for this cell. It never shows the Lead's name;
+    every value is autoescaped and nothing typed is rendered back. -#}
+<td class="website-entry" id="website-{{ lead_id }}">
+{%- if notice %}
+<p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
+{%- endif %}
+{%- if saved %}
+<a href="{{ kept_href }}">Open the Lead</a>
+{%- else %}
+<form class="website-form" method="post" action="/leads/{{ lead_id }}/website" hx-post="/leads/{{ lead_id }}/website" hx-target="#website-{{ lead_id }}" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<label for="website-input-{{ lead_id }}">Website</label>
+<input type="text" id="website-input-{{ lead_id }}" name="website" maxlength="2048" placeholder="https://www.example.co.uk/">
+<button type="submit" class="secondary">Save website</button>
+</form>
+{%- endif %}
+</td>

@@ -37,7 +37,9 @@ an input.
 **Runs.** ``RunStatus``: ``running``, ``finished``, ``deferred`` (the budget refused a page),
 ``failed`` (an error ended it) or ``stopped`` (the Campaign could no longer run when the job
 ran: nothing fetched). ``Outcome``: what one candidate came to (``created``, ``merged``,
-``suppressed``, ``no_website``, ``market_blocked``), each a count on the run besides ``seen``.
+``suppressed``, ``no_website``, ``market_blocked`` and, Story 8.4, ``inactive``), each a count on
+the run besides ``seen``. ``SOURCES`` are the run sources: ``places`` and (Story 8.4)
+``companies_house``.
 """
 
 import hashlib
@@ -55,6 +57,8 @@ from nextron.domain.leads import check_name as check_lead_name
 DISCOVER_PLACES_JOB: Final = "discover_places"
 PLACES_CONCURRENCY_KEY: Final = "domain:places.googleapis.com"
 SOURCE_PLACES: Final = "places"  # discovery_runs.source
+SOURCE_COMPANIES_HOUSE: Final = "companies_house"  # discovery_runs.source (Story 8.4)
+SOURCES: Final = (SOURCE_PLACES, SOURCE_COMPANIES_HOUSE)
 PAYLOAD_VERSION: Final = 1
 CAMPAIGN_ID_FIELD: Final = "campaign_id"
 LOCATION_FIELD: Final = "location"
@@ -62,6 +66,9 @@ COUNTRY_CODE_FIELD: Final = "country_code"
 MAX_LOCATION_LENGTH: Final = 100
 MAX_PAGES_PER_RUN: Final = 3
 DEFAULT_PAGES_PER_RUN: Final = 3
+# Story 8.4's registry_max_pages_per_run, here so settings_schema needs no other import
+MAX_REGISTRY_PAGES_PER_RUN: Final = 10
+DEFAULT_REGISTRY_PAGES_PER_RUN: Final = 3
 HASH_LENGTH: Final = 16
 SEPARATOR: Final = "|"
 SITE_NAME_PROPERTY: Final = "og:site_name"
@@ -83,6 +90,7 @@ class Outcome(StrEnum):
     SUPPRESSED = "suppressed"
     NO_WEBSITE = "no_website"
     MARKET_BLOCKED = "market_blocked"
+    INACTIVE = "inactive"  # Story 8.4: a dissolved or dormant company
 
 
 COUNT_FIELDS: Final = ("seen", *(str(outcome) for outcome in Outcome))

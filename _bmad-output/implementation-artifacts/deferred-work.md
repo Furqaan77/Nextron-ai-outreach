@@ -473,3 +473,28 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-14-run-the-ai-grounding-check-and-fail-closed.md`
   summary: Add a migration data test for 0047 (a `grounding_results` row seeded at 0046 keeps its data and gains `"source": "rules"` on each flag).
   evidence: Review pass 1 of Story 4.14 (VG6, low). No test seeds a row at 0046; `_decoded` already treats a missing `source` as `rules`, so the impact is small.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Resume a Companies House Lead's website lookup and officers when the run that created it failed, deferred or was retried before those steps ran (the next run counts its number as merged).
+  evidence: Story 8.4 review pass 1 (edge #3, #4; implementer risk). A 429 or crash between creating the Lead and reading its officers loses them for good; needs a per-Lead resume marker.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Page through Companies House officers beyond the first 100 entries.
+  evidence: Story 8.4 review pass 1 (edge #6). `officers` reads one page of 100, resigned officers included.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Retry a Companies House Lead's website lookup left undecided by a Places quota refusal or error.
+  evidence: Story 8.4 review pass 1 (verification other #12). Such Leads keep `website_lookup_at` NULL and rely only on the Operator's "Website needed" form; fits 8.1/8.10 scheduling.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Check the first Places candidate's name against the registered name before attaching its website to a Companies House Lead.
+  evidence: Story 8.4 review pass 1 (blind #13, medium; rejected only because the approved spec uses the first candidate). A registered office at an accountant's or formation agent's postcode can return another business; FR-12 keeps the legal form unconfirmed, but the wrong site is crawled.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Remember how far earlier Companies House runs paged, so repeat runs reach later keywords and new companies instead of refetching page 0.
+  evidence: Story 8.4 review pass 1 (blind #14, medium; rejected only because Decision 3 fixes query order and the run-wide cap). With cap 3, Law-PrivateAI's "law" and "legal" keywords are never searched.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Treat a company_status_detail such as active-proposal-to-strike-off as inactive in Companies House discovery.
+  evidence: Story 8.4 review pass 1 (blind #18). The AC defines inactive only as status not active or dormant accounts.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Skip non-corporate company types (limited partnerships etc.) in Companies House discovery before the Places lookup, crawl and officers.
+  evidence: Story 8.4 review pass 1 (blind #19, medium). Eligibility blocks them later, but each costs a Places lookup and stores officers.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-4-discover-active-uk-companies-through-companies-house.md`
+  summary: Bound a Companies House discovery run's time so a 10-page run with slow sites can't exceed the 1 h max_runtime.
+  evidence: Story 8.4 review pass 1 (blind #21). Default cap 3 pages makes it unlikely.

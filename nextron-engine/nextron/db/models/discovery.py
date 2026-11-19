@@ -1,16 +1,19 @@
-"""The ``discovery`` service's run log (Story 8.3, FR-5, AD-7; migration
-``0047_8_3_discovery_runs``), written only by ``nextron.db.repos.discovery.runs``.
+"""The ``discovery`` service's run log (Story 8.3, FR-5, AD-7; migrations
+``0047_8_3_discovery_runs`` and ``0060_8_4_registry_discovery``), written only by
+``nextron.db.repos.discovery.runs``.
 
 ``discovery_runs``: one row per discovery run. ``id``; ``source`` (``ck_discovery_runs_source``:
-``places``); the run's Campaign (``campaign_id``, ``fk_discovery_runs_campaign_id_campaigns``)
-and its Segment (``segment_id``, ``fk_discovery_runs_segment_id_segments``); ``country_code``
+``places`` or, Story 8.4, ``companies_house``); the run's Campaign (``campaign_id``,
+``fk_discovery_runs_campaign_id_campaigns``) and its Segment (``segment_id``,
+``fk_discovery_runs_segment_id_segments``); ``country_code``
 (``ck_discovery_runs_country_code``: two uppercase letters) and ``location`` (the Operator's
-setting text, at most 100 characters); ``query_hash`` (16 hex characters:
-``nextron.domain.place_discovery.query_hash`` of the Segment's queries, never the queries);
+setting text, at most 100 characters; set exactly on a ``places`` run:
+``ck_discovery_runs_location``); ``query_hash`` (16 hex characters: the hash of the Segment's
+queries, never the queries);
 ``status`` (``ck_discovery_runs_status``: one of ``RunStatus``); ``started_at`` and the nullable
 ``finished_at`` (NULL exactly while ``running``: ``ck_discovery_runs_finished_at``); and the
-counts ``seen``, ``created``, ``merged``, ``suppressed``, ``no_website`` and
-``market_blocked`` (``ck_discovery_runs_counts``: none negative). Index
+counts ``seen``, ``created``, ``merged``, ``suppressed``, ``no_website``, ``market_blocked``
+and, Story 8.4, ``inactive`` (``ck_discovery_runs_counts``: none negative). Index
 ``ix_discovery_runs_started_at``. No column holds anything a Places search returned, and every
 column is PII class ``none`` (Operator settings, ids, counts and times). No foreign key
 cascades.
@@ -27,7 +30,7 @@ from nextron.domain.place_discovery import (
     COUNT_FIELDS,
     HASH_LENGTH,
     MAX_LOCATION_LENGTH,
-    SOURCE_PLACES,
+    SOURCES,
     RunStatus,
 )
 
@@ -35,7 +38,8 @@ SOURCE_LENGTH: Final = 16
 COUNTRY_CODE_LENGTH: Final = 2
 STATUS_LENGTH: Final = 16
 
-SOURCE_CHECK: Final = f"source IN ('{SOURCE_PLACES}')"
+SOURCE_CHECK: Final = "source IN ({})".format(",".join(f"'{source}'" for source in SOURCES))
+LOCATION_CHECK: Final = "(source = 'places') = (location IS NOT NULL)"
 STATUS_CHECK: Final = "status IN ({})".format(",".join(f"'{status}'" for status in RunStatus))
 COUNTRY_CODE_CHECK: Final = "country_code GLOB '[A-Z][A-Z]'"
 FINISHED_AT_CHECK: Final = (
@@ -54,6 +58,7 @@ class DiscoveryRunRecord(Base):
         CheckConstraint(STATUS_CHECK, name="status"),
         CheckConstraint(COUNTRY_CODE_CHECK, name="country_code"),
         CheckConstraint(FINISHED_AT_CHECK, name="finished_at"),
+        CheckConstraint(LOCATION_CHECK, name="location"),
         CheckConstraint(COUNTS_CHECK, name="counts"),
     )
 
@@ -62,7 +67,7 @@ class DiscoveryRunRecord(Base):
     campaign_id: Mapped[str] = mapped_column(Ulid, ForeignKey("campaigns.id"))
     segment_id: Mapped[str] = mapped_column(Ulid, ForeignKey("segments.id"))
     country_code: Mapped[str] = mapped_column(String(COUNTRY_CODE_LENGTH))
-    location: Mapped[str] = mapped_column(String(MAX_LOCATION_LENGTH))
+    location: Mapped[str | None] = mapped_column(String(MAX_LOCATION_LENGTH))
     query_hash: Mapped[str] = mapped_column(String(HASH_LENGTH))
     status: Mapped[str] = mapped_column(String(STATUS_LENGTH))
     started_at: Mapped[datetime] = mapped_column(UtcDateTime)
@@ -73,3 +78,4 @@ class DiscoveryRunRecord(Base):
     suppressed: Mapped[int] = mapped_column(Integer)
     no_website: Mapped[int] = mapped_column(Integer)
     market_blocked: Mapped[int] = mapped_column(Integer)
+    inactive: Mapped[int] = mapped_column(Integer)

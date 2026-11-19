@@ -552,7 +552,7 @@ def test_the_proposed_form_keeps_typed_numbers_and_raw_text() -> None:
     assert proposed.form["decision_maker_roles"] == [["CEO", "Owner"], ["CFO"]]
     assert proposed.form["discovery_queries"] == {
         "places": ["accountants"],
-        "registry": {"sic_codes": ["69201"]},
+        "registry": {"keywords": [], "sic_codes": ["69201"]},  # Story 8.4: both lists
     }
     assert [each["key"] for each in proposed.form["signal_types"]] == ["a"]  # type: ignore[index]
     assert proposed.signal_rows == (0,)
