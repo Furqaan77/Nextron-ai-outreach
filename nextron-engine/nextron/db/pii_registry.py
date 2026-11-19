@@ -507,6 +507,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "stale": PiiClass.NONE,
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
+        "draft_failed_at": PiiClass.NONE,  # Story 4.15: a time and a code
+        "draft_failed_reason": PiiClass.NONE,
         "status": PiiClass.NONE,
         "reapproval_required": PiiClass.NONE,
         "event_expired": PiiClass.NONE,

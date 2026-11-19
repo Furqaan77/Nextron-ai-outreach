@@ -29,6 +29,8 @@ SCHEMA_SHA256: Final[dict[tuple[str, int], str]] = {
     ("grounding_check_fallback", 1): (
         "bbb16b7e365fd3c68a1ac73ec17eb8b78be2b6a514ad8a7c13a651ff3b9132b4"
     ),
+    # Story 4.15: DraftSequenceV1
+    ("draft_sequence", 1): "f03e18c5bfe54412235253f523493dc8d2736852befc21332c15d7adea7ea38b",
 }
 
 
@@ -69,10 +71,10 @@ def test_every_shipped_schema_version_is_pinned_and_unchanged() -> None:
 
 def test_the_lock_catches_an_edited_schema_and_an_unpinned_one() -> None:
     found = shipped()
-    edited = {**found, ("extract_people", 1): "0" * 64, ("draft_sequence", 1): "1" * 64}
+    edited = {**found, ("extract_people", 1): "0" * 64, ("draft_reply", 1): "1" * 64}
 
     assert lock_problems(edited) == [
-        "draft_sequence schema 1 has no pin in SCHEMA_SHA256",
+        "draft_reply schema 1 has no pin in SCHEMA_SHA256",
         f"extract_people schema 1: {NEVER_CHANGES}",
     ]
 

@@ -263,10 +263,13 @@ SHIPPED_CANDIDATES: Final = (
     ("signal_inbox_parse", "claude-haiku-5-5", "medium", "v1", 1),
     ("grounding_check", "claude-haiku-5-5", "medium", "v1", 1),  # Story 4.14
     ("grounding_check_fallback", "claude-opus-5-5", "medium", "v1", 1),  # Story 4.14
+    ("draft_sequence", "claude-opus-5-5", "medium", "v1", 1),  # Story 4.15
 )
 # The shipped routes whose candidates pin a Sales Playbook snapshot (uses_playbook): add-only too,
 # so a candidate never silently flips uses_playbook.
-PLAYBOOK_ROUTES: Final = frozenset({"grounding_check", "grounding_check_fallback"})
+PLAYBOOK_ROUTES: Final = frozenset(
+    {"grounding_check", "grounding_check_fallback", "draft_sequence"}  # 4.15: draft_sequence
+)
 
 
 @pytest.mark.parametrize("shipped", SHIPPED_CANDIDATES, ids=lambda s: f"{s[0]}-{s[3]}")

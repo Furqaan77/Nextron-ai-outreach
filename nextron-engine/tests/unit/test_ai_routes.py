@@ -1,6 +1,7 @@
 """The AI routes as data (``nextron.adapters.ai.routes``, Story 2.7): the exact candidate table,
 the lookups, the token-limit rules refused at construction, a price for every model, and
-server-side ``fallbacks`` only on the Opus ``grounding_check_fallback`` (Story 4.14)."""
+server-side ``fallbacks`` only on the Opus candidates (``grounding_check_fallback``, Story 4.14;
+the batchable ``draft_sequence``, Story 4.15)."""
 
 import dataclasses
 from dataclasses import replace
@@ -11,10 +12,12 @@ import pytest
 from nextron.adapters.ai import pricing, routes
 from nextron.adapters.ai.routes import CANDIDATES, Candidate, candidates, default_candidate, find
 from nextron.adapters.ai.schemas import (
+    DRAFT_SEQUENCE_V1,
     EXTRACT_PEOPLE_V1,
     EXTRACT_SIGNALS_V1,
     GROUNDING_CHECK_V1,
     SIGNAL_INBOX_PARSE_V1,
+    DraftSequenceV1,
     ExtractPeopleV1,
     ExtractSignalsV1,
     GroundingCheckV1,
@@ -101,6 +104,20 @@ TABLE: Final = [
         True,
         True,
     ),
+    (  # Story 4.15
+        "draft_sequence",
+        "claude-opus-5-5",
+        Effort.MEDIUM,
+        "v1",
+        DraftSequenceV1,
+        1,
+        True,
+        8_000,
+        16_000,
+        BudgetClass.ESSENTIAL,
+        True,
+        True,
+    ),
 ]
 
 
@@ -140,11 +157,13 @@ def test_the_candidates_are_exactly_the_specified_table() -> None:
         "signal_inbox_parse",
         "grounding_check",
         "grounding_check_fallback",
+        "draft_sequence",
     ]
     assert [_row(found) for route in CANDIDATES for found in CANDIDATES[route]] == TABLE
     assert [schema.version for schema in (EXTRACT_SIGNALS_V1, EXTRACT_PEOPLE_V1)] == [1, 1]
     assert SIGNAL_INBOX_PARSE_V1 == OutputSchema(1, SignalInboxParseV1)
     assert GROUNDING_CHECK_V1 == OutputSchema(1, GroundingCheckV1)
+    assert DRAFT_SEQUENCE_V1 == OutputSchema(1, DraftSequenceV1)
 
 
 def test_each_candidate_is_filed_under_its_own_route() -> None:
@@ -205,7 +224,7 @@ def test_the_default_specs_carry_uses_playbook() -> None:
     specs = routes.default_specs()
 
     assert [spec.route for spec in specs] == list(CANDIDATES)
-    assert [spec.uses_playbook for spec in specs] == [False, False, False, True, True]
+    assert [spec.uses_playbook for spec in specs] == [False, False, False, True, True, True]
     assert specs[0] == RouteSpec(
         "extract_signals", "claude-haiku-5-5", Effort.MEDIUM, "v1", 1, uses_playbook=False
     )
@@ -275,16 +294,20 @@ def test_every_candidate_model_has_a_price() -> None:
     assert models <= set(pricing.PRICES)
 
 
-def test_only_an_opus_candidate_that_isnt_batchable_carries_server_fallbacks() -> None:
+def test_only_an_opus_candidate_carries_server_fallbacks_batchable_or_not() -> None:
     opus = CANDIDATES["grounding_check_fallback"][0]
 
     assert [c.name for r in CANDIDATES.values() for c in r if c.server_fallbacks] == [
-        "grounding_check_fallback"
+        "grounding_check_fallback",
+        "draft_sequence",
     ]
-    with pytest.raises(ValueError, match="batchable"):
-        replace(opus, batchable=True)
+    # Story 4.15: a batchable Opus candidate may carry them; only its direct request does
+    assert replace(opus, batchable=True).server_fallbacks
+    assert CANDIDATES["draft_sequence"][0].batchable
     with pytest.raises(ValueError, match="Opus"):
         replace(opus, model="claude-haiku-5-5")
+    with pytest.raises(TypeError, match="batchable"):
+        replace(opus, batchable=1)
 
 
 def test_the_candidate_fields_are_exactly_these() -> None:

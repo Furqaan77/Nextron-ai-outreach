@@ -1,6 +1,7 @@
 """The ``drafts`` content group's repository (AD-3, AD-4, AD-21; Story 4.9): the only code that
 writes ``id``, ``kind``, ``enrollment_id``, ``step_no``, ``day_offset``, ``current_rev``,
-``due_at``, ``generic``, ``stale``, ``created_at`` and ``updated_at``.
+``due_at``, ``generic``, ``stale``, ``created_at``, ``updated_at`` and, since Story 4.15,
+``draft_failed_at`` and ``draft_failed_reason``.
 
 Every function runs one explicit Core statement through the current unit of work's session
 (``nextron.db.uow.current()``): reads work in a read-only unit of work too, writes only inside
@@ -22,7 +23,11 @@ writes them (AD-3), and ``insert_slots`` leaves them to their server defaults (`
 - ``set_current_rev(draft_id, rev, at) -> bool`` (Story 4.12): ``current_rev`` and
   ``updated_at`` (the foreign key makes ``rev`` name an existing revision); whether a row
   changed;
-- ``ready_with_text()`` (Story 4.12): every ``ready`` Draft with a ``current_rev``, by ``id``.
+- ``ready_with_text()`` (Story 4.12): every ``ready`` Draft with a ``current_rev``, by ``id``;
+- ``mark_draft_failed(draft_id, reason, at) -> bool`` (Story 4.15): ``draft_failed_at`` = ``at``,
+  ``draft_failed_reason`` = ``reason`` and ``updated_at``; whether a row changed;
+- ``clear_draft_failed(draft_id, at) -> bool`` (Story 4.15): both back to NULL (and
+  ``updated_at``) on a Draft that has them set; whether a row changed.
 """
 
 from collections.abc import Sequence
@@ -63,6 +68,8 @@ class StoredDraft:
     event_expired: bool
     skipped_at: datetime | None
     status_at: datetime | None
+    draft_failed_at: datetime | None = None  # Story 4.15
+    draft_failed_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +101,9 @@ _COLUMNS: Final = (
     DraftRecord.event_expired,
     DraftRecord.skipped_at,
     DraftRecord.status_at,
+    # Story 4.15, the content group again
+    DraftRecord.draft_failed_at,
+    DraftRecord.draft_failed_reason,
 )
 
 
@@ -190,3 +200,24 @@ def ready_with_text() -> list[StoredDraft]:
         .order_by(DraftRecord.id)
     )
     return [_stored(row) for row in current().session.execute(statement)]
+
+
+def mark_draft_failed(draft_id: str, reason: str, at: datetime) -> bool:
+    """Record that the Draft's drafting stored no revision, for ``reason``, at ``at``; whether a
+    row changed."""
+    result = current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id)
+        .values(draft_failed_at=at, draft_failed_reason=reason, updated_at=at)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+
+def clear_draft_failed(draft_id: str, at: datetime) -> bool:
+    """Clear the Draft's drafting failure, at ``at``; whether a row changed."""
+    result = current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id, DraftRecord.draft_failed_at.is_not(None))
+        .values(draft_failed_at=None, draft_failed_reason=None, updated_at=at)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]

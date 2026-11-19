@@ -263,15 +263,19 @@ never budget-gated) after it, and Story 8.4's ``discover_registry`` (bulk only, 
 priority 20, 10 minutes, retry limit 2, ``handlers.recheck_leads(rechecks)``, ``recheck``) and
 ``recheck_lead`` (bulk only, priority 30, 20 minutes, retry limit 3
 (``handlers.RECHECK_LEAD_RETRIES``), ``handlers.recheck_lead(rechecks)``, ``recheck``; budget
-class blockable) last. ``SignalInbox(clock, meter, llm, discovery, research,
+class blockable) after them, and Story 4.15's ``draft_step`` (interactive by default, or bulk,
+priority 40, ``max_runtime`` 15 minutes (a Claude request of 300 s and its one doubled retry),
+retry limit 3, ``handlers.draft_step(step_drafts)``, ``other``; never budget-gated:
+``draft_sequence`` is ``essential``; ``build_app`` passes ``lambda: step_drafts``, the
+``drafting`` service's ``StepDrafts(clock, llm, queue)``) last. ``SignalInbox(clock, meter, llm, discovery, research,
 queue)`` (``nextron.app.discovery.signal_inbox``) runs those jobs, reached through
 ``signal_inbox=lambda: signal_inbox``, and the dashboard gets it (``create_app(...,
 signal_inbox=...)``) for the Signal Inbox page. ``Rechecks(clock, meter, crawls, job_boards,
 queue, compliance)`` (``nextron.app.research.recheck``) runs the re-check jobs, reached through
 ``rechecks=lambda: rechecks``, and is kept on ``app.state.rechecks``. ``domain_checks``,
-``unsubscribes``, ``place_discovery``, ``grounding``, ``registry_discovery`` and ``rechecks`` are
-optional services: each defaults to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
-tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
+``unsubscribes``, ``place_discovery``, ``grounding``, ``registry_discovery``, ``rechecks`` and
+``step_drafts`` are optional services: each defaults to a provider that raises ``RuntimeError``
+when called, so a registry built without it (only tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
 dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
 **Budget classes (Story 8.1).** ``enrich_lead``, ``render_pages``, ``extract_lead``,
@@ -315,7 +319,7 @@ chain, queued by the Primary Contact's selection) and the daily ``recompute_tier
 through ``scores=lambda: lead_scores``, and the Lead page's "Re-score"
 (``create_app(..., lead_scores=...)``).
 
-**Today's capacity and the picks (Story 4.10).** ``Selection(clock, Sequencing(clock),
+**Today's capacity and the picks (Story 4.10).** ``Selection(clock, Sequencing(clock, queue),
 compliance)`` (``nextron.app.scoring.selection``, on the dashboard's one ``Compliance``) gives
 the "Ready to draft" page (``GET /leads/ready``, ``POST /leads/ready/pick``) its list, today's
 capacity and the picks, and the notification area its "signal shortfall" line
@@ -346,7 +350,7 @@ meter=meter)`` (``nextron.adapters.hunter``) serves Domain Search and Email Find
 ``ProspeoFinder(secrets, meter=meter)`` (``nextron.adapters.prospeo``) the fallback, unless
 injected.
 
-**Stop Sequence (Story 6.9).** The dashboard gets one ``Sequencing(clock)``
+**Stop Sequence (Story 6.9).** The dashboard gets that same ``Sequencing(clock, queue)``
 (``create_app(..., sequencing=...)``) for the Lead page's Stop Sequence. The send gate
 (``nextron.app.compliance.send_gate.SendGate``) isn't wired yet: Story 6.10's send path builds
 and calls it.
@@ -894,6 +898,7 @@ from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.discovery.topup import DiscoveryTopUp
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
+from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
@@ -1014,6 +1019,7 @@ from nextron.domain.email_finding import FIND_CONTACT_EMAIL_JOB
 from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.grounding_check import CHECK_GROUNDING_JOB
+from nextron.domain.step_drafting import DRAFT_STEP_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
@@ -1359,8 +1365,8 @@ def build_app(
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
     # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes,
-    # place_discovery, signal_inbox, grounding_checks, registry_discovery and rechecks are bound
-    # just below
+    # place_discovery, signal_inbox, grounding_checks, registry_discovery, rechecks and step_drafts
+    # are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1386,6 +1392,7 @@ def build_app(
         grounding=lambda: grounding_checks,
         registry_discovery=lambda: registry_discovery,
         rechecks=lambda: rechecks,
+        step_drafts=lambda: step_drafts,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1407,6 +1414,7 @@ def build_app(
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
     grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
+    step_drafts = StepDrafts(clock, llm, queue)  # Story 4.15: the draft_step jobs
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
     site_dns = dns if dns is not None else DnspythonDns(meter=meter)
@@ -1480,7 +1488,9 @@ def build_app(
     rechecks = Rechecks(clock, meter, crawls, job_boards, queue, compliance)
     # Story 4.10: today's capacity and the picks, on the same Compliance; the daily
     # recompute_tiers job also records the day's capacity through it
-    selection = Selection(clock, Sequencing(clock), compliance)
+    # Story 4.15: enroll enqueues Step 1's draft_step job, so the Sequencing has the queue
+    sequencing = Sequencing(clock, queue)
+    selection = Selection(clock, sequencing, compliance)
     lead_scores = LeadScores(
         clock, Scoring(clock, Pipeline(clock), research), queue, selection=selection
     )
@@ -1580,7 +1590,7 @@ def build_app(
         sequence_editor=SequenceEditor(clock),  # Story 11.7: the Sequences page
         registry_discovery=registry_discovery,
         discovery=discovery,
-        sequencing=Sequencing(clock),  # Story 6.9: the Lead page's Stop Sequence
+        sequencing=sequencing,  # Story 6.9: the Lead page's Stop Sequence
         units=units,
         discovery_topup=discovery_topup,
         lifespan=engine_lifespan(
@@ -1720,6 +1730,7 @@ def build_job_types(
     grounding: Callable[[], handlers.CheckingGrounding] | None = None,
     registry_discovery: Callable[[], handlers.DiscoveringRegistry] | None = None,
     rechecks: Callable[[], handlers.Rechecking] | None = None,
+    step_drafts: Callable[[], handlers.DraftingSteps] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``; a type the
@@ -1759,7 +1770,8 @@ def build_job_types(
     and ``registry_discovery`` the ``discovery`` service's ``RegistryDiscovery`` that
     ``discover_registry`` jobs call (Story 8.4; ``None``: likewise), and ``rechecks`` the
     ``research`` service's ``Rechecks`` that ``recheck_leads`` and ``recheck_lead`` jobs call
-    (Story 8.7; left out, likewise)."""
+    (Story 8.7; left out, likewise), and ``step_drafts`` the ``drafting`` service's
+    ``StepDrafts`` that ``draft_step`` jobs call (Story 4.15; ``None``: likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     verifying = verification if verification is not None else _no_verification
@@ -1771,6 +1783,7 @@ def build_job_types(
         registry_discovery if registry_discovery is not None else no_registry_discovery
     )
     rechecking = rechecks if rechecks is not None else _no_rechecks
+    drafts_steps = step_drafts if step_drafts is not None else no_step_drafts
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -2151,6 +2164,18 @@ def build_job_types(
             budget_class=BudgetClass.BLOCKABLE,  # Story 8.1: supply work
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=DRAFT_STEP_JOB,
+            default_lane=Lane.INTERACTIVE,  # Story 4.15: Step 1 is due at once; bulk on request
+            lanes=frozenset({Lane.INTERACTIVE, Lane.BULK}),
+            priority=40,
+            max_runtime=timedelta(minutes=15),  # a Claude request of 300 s and its doubled retry
+            retry_limit=3,  # an unavailable API is retried; nothing is stored before the answer
+            handler=handlers.draft_step(drafts_steps),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -2196,6 +2221,7 @@ def enqueue_only_job_types() -> JobTypes:
         signal_inbox=_unwired,
         grounding=_unwired,
         registry_discovery=_unwired,
+        step_drafts=_unwired,
     )
 
 
@@ -2209,6 +2235,12 @@ def no_registry_discovery() -> handlers.DiscoveringRegistry:
     """``build_job_types``'s default ``registry_discovery``: a registry built without the
     service fails a ``discover_registry`` job instead of discovering nothing."""
     raise RuntimeError("this job type registry was built without registry_discovery")
+
+
+def no_step_drafts() -> handlers.DraftingSteps:
+    """``build_job_types``'s default ``step_drafts`` (Story 4.15): a registry built without the
+    service fails a ``draft_step`` job instead of drafting nothing."""
+    raise RuntimeError("this job type registry was built without step_drafts")
 
 
 def no_domain_checks() -> handlers.DomainChecking:

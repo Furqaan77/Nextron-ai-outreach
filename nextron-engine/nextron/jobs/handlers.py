@@ -115,6 +115,14 @@ handler runs in.
   ``bulk`` for a job on the bulk lane and ``interactive`` otherwise, and returns ``None``. It is
   never budget-gated (the grounding routes are ``essential``), and a timeout or an unreachable
   API is recorded as a grounding ``fail`` by the use case, not retried.
+- ``draft_step(step_drafts)`` (Story 4.15): ``step_drafts`` returns the ``drafting`` service's
+  ``StepDrafts`` (``nextron.main`` passes ``lambda: step_drafts``). The payload's
+  ``enrollment_id`` must be a ULID and its ``step`` a positive ``int`` (not a ``bool``), else
+  ``InvalidJob``; it calls ``step_drafts().draft(enrollment_id, step, urgency)`` once, with
+  ``urgency`` ``Urgency.BULK`` on the bulk lane and ``Urgency.SOON`` on the interactive lane
+  (Step 1 is due at once), and returns ``None``. It is never budget-gated
+  (``draft_sequence`` is ``essential``); a retryable ``AdapterError`` (the API unavailable)
+  propagates, so the runner retries it with nothing stored.
 - ``discover_registry(registry_discovery)`` (Story 8.4): calls
   ``registry_discovery().run(campaign_id)`` once (the discovery service's
   ``RegistryDiscovery``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused
@@ -138,7 +146,8 @@ handler runs in.
 ``nextron.main.build_job_types`` registers ``blockable`` (``enrich_lead``, ``render_pages``,
 ``extract_lead``, ``check_legal_form``, ``run_ai_test_sets``, ``check_job_boards``,
 ``discover_places``, ``discover_registry``, ``recheck_lead``; ``recheck_event`` is
-``blockable`` too, as Re-check work). Every other type is ``essential``: its handler never returns ``DEFERRED``.
+``blockable`` too, as Re-check work). Every other type is ``essential``: its handler never
+returns ``DEFERRED``.
 
 **The chain's lane (Story 2.16).** ``enrich_lead``, ``extract_lead``, ``check_job_boards``,
 ``check_legal_form`` and ``select_primary_contact`` pass ``lane=job.lane`` to their use case,
@@ -177,6 +186,7 @@ from nextron.domain.recheck import MODE_FIELD, RecheckMode
 from nextron.domain.restore_test import RestoreTestKind
 from nextron.domain.scoring import USE_CURRENT_FIELD
 from nextron.domain.signal_inbox_item import ITEM_ID_FIELD
+from nextron.domain.step_drafting import ENROLLMENT_ID_FIELD, STEP_FIELD
 
 ALERT_ID_FIELD: Final = "alert_id"
 ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
@@ -784,3 +794,24 @@ def recheck_lead(rechecks: Callable[[], Rechecking]) -> Handler:
         return None
 
     return handle_recheck_lead
+
+
+class DraftingSteps(Protocol):
+    """What ``draft_step`` needs of the ``drafting`` service's ``StepDrafts``."""
+
+    def draft(self, enrollment_id: str, step: int, urgency: Urgency) -> object: ...
+
+
+def draft_step(step_drafts: Callable[[], DraftingSteps]) -> Handler:
+    """The ``draft_step`` job's handler: draft the payload's Enrollment's Step through
+    ``step_drafts()``."""
+
+    def handle_draft_step(job: Job) -> None:
+        enrollment_id = _ulid_field(job, ENROLLMENT_ID_FIELD)
+        step = job.payload.get(STEP_FIELD)
+        if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+            raise InvalidJob(f"{job.type}: the {STEP_FIELD} field must be a positive int")
+        urgency = Urgency.BULK if job.lane == Lane.BULK else Urgency.SOON
+        step_drafts().draft(enrollment_id, step, urgency)
+
+    return handle_draft_step

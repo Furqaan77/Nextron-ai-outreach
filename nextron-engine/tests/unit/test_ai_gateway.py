@@ -29,9 +29,9 @@ from nextron.adapters.ai import (
 )
 from nextron.adapters.ai.prompting import user_turn
 from nextron.adapters.ai.routes import CANDIDATES
-from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import Effort, Framing, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.budget import AiCall, Usage
-from nextron.domain.playbook import PlaybookSnapshot
+from nextron.domain.playbook import PlaybookSnapshot, playbook_section
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import (
     LlmFailed,
@@ -422,6 +422,54 @@ def test_a_candidate_already_at_its_cap_is_truncated_after_one_request(
     assert len(recorder.requests) == 1
     assert recorder.body()["max_tokens"] == 16_000
     assert [call.error_code for call in ai_calls(meter)] == [LLM_TRUNCATED]
+
+
+# The drafting framing (Story 4.15) ----------------------------------------------------------------
+
+FRAMING: Final = Framing(
+    brief="Br1efMarker: the Step 1 brief",
+    facts="F4ctsMarker: the approved facts",
+    note="N0teMarker: the Campaign angle",
+)
+DRAFT_PLAYBOOK: Final = PlaybookSnapshot("0.2.0", "---\nversion: 0.2.0\n---\nVoice rules.\n")
+
+
+def test_a_framed_request_and_its_truncation_retry_carry_the_framing() -> None:
+    recorder = Recorder(message("max_tokens", text="{"))
+    gateway, _ = gateway_on(recorder)
+    draft = route("draft_sequence", playbook=DRAFT_PLAYBOOK)
+
+    result = gateway.run(draft, [block()], Urgency.SOON, framing=FRAMING)
+
+    assert isinstance(result, LlmTruncated) and len(recorder.requests) == 2
+    for index in (0, 1):
+        body = recorder.body(index)
+        assert [part["text"] for part in body["system"]] == [
+            PROMPT,
+            FRAMING.brief,
+            playbook_section(DRAFT_PLAYBOOK),
+            FRAMING.facts,
+        ]
+        assert [("cache_control" in part) for part in body["system"]] == [False] * 3 + [True]
+        content = body["messages"][0]["content"]
+        assert content.startswith("<campaign_note>\n" + FRAMING.note + "\n</campaign_note>\n\n")
+        assert content.endswith(user_turn([block()]))
+    assert recorder.body(0) | {"max_tokens": recorder.body(1)["max_tokens"]} == recorder.body(1)
+
+
+def test_a_framing_that_isnt_one_is_refused_before_any_request() -> None:
+    recorder = Recorder(message())
+    gateway, meter = gateway_on(recorder)
+
+    with pytest.raises(TypeError, match="framing"):
+        gateway.run(
+            route("draft_sequence", playbook=DRAFT_PLAYBOOK),
+            [block()],
+            Urgency.SOON,
+            framing="brief",  # type: ignore[arg-type]
+        )
+
+    assert recorder.requests == [] and meter.calls == []
 
 
 def test_a_retry_that_fails_keeps_the_first_requests_usage() -> None:

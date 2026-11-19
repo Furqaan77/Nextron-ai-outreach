@@ -286,7 +286,7 @@ def build_world(engine: Engine, *, inboxes: tuple[str, ...] = (FIRST_INBOX,)) ->
         clock,
         Discovery(clock, Pipeline(clock), queue_on(clock)),
         Research(clock),
-        Sequencing(clock),
+        Sequencing(clock, queue_on(clock)),  # Story 4.15: enroll enqueues Step 1's draft_step
     )
     seed_all(world)
     [(segment,)] = world.sql("SELECT id FROM segments WHERE key = 'law_private_ai'")
@@ -343,7 +343,9 @@ def test_an_enroll_binds_variant_a_then_b_and_the_least_loaded_inbox(two_inboxes
     assert gained(before, world.counts()) == {
         "drafts": 1,  # Story 4.9: the Step 1 slot
         "enrollments": 1,
-        "events": 3,  # the Enrollment's and the slot's creation, and the Lead's move to queued
+        "events": 4,  # the Enrollment's and the slot's creation, the Lead's move to queued
+        # and (Story 4.15) the draft_step job's
+        "jobs": 1,  # Story 4.15: draft_step for Step 1
         "provenance_records": 1,
         "variant_counters": 1,
     }

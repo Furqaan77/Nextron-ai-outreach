@@ -3076,6 +3076,44 @@ older revision stays on that revision. Erasure also turns the AI flags' explanat
 `fail` or `pending`) and, for `fail`, each flag's code, the flagged words highlighted and the
 explanation.
 
+## Drafting Step 1
+
+Story 4.15 (FR-20, FR-21, AD-7, AD-8, AD-16, AD-17, AD-18) writes each Enrollment's Step 1 email
+with Claude Opus from the Lead's Evidence and the Approved Company Facts. Nothing is sent: the
+text waits for its grounding check and your approval.
+
+**The job.** Enrolling a Contact enqueues `draft_step:<enrollment id>:1` in the same transaction
+(interactive lane, priority 40; a bulk request for Step 1 uses the bulk lane and drafts at
+`bulk`). The job never asks the AI budget (`draft_sequence` is
+`essential`, so drafting still runs when the AI spend is at 100 %). An unreachable API is retried
+by the runner with nothing stored. Steps 2 to 4 are drafted later (Story 4.18).
+
+**The route.** `draft_sequence` runs on `claude-opus-5-5` (effort `medium`) under the pinned
+Sales Playbook, with the server-side refusal fallbacks on its direct requests. It is never
+bootstrap-activated: it serves only once its tuple passes the drafting smoke set (the 14 cases in
+`tests/ai_sets/drafting_smoke/`): each case is drafted, checked by code and the grounding rules,
+then read by the active `grounding_check`; any flag, or no active grounding check, fails it.
+
+**What it reads.** The cached system prompt holds the route's rules (law and platform rules,
+then the Step brief, then the Playbook), the Step 1 brief of the Enrollment's Sequence (with its
+Segment and Market angle), the Playbook and the facts allowed for the Campaign's Segment and
+Market. The user turn holds the Variant's Step 1 angle note and the Market's English spelling,
+then one Lead's live Evidence, its current Signals and the Contact's name and role, each as an
+`<untrusted>` block. Every email address and phone number is replaced by `[email]` or `[phone]`;
+the Contact's address never enters the prompt. A Contact that may not be reached gets no call
+(an `events` row records `drafting_blocked`).
+
+**The result.** Code checks the answer: a subject and body, each claim citing exactly one of the
+Lead's Evidence items or allowed fact versions, and the cited Signal a live Event of the Lead.
+A good answer becomes revision 1 (`generated`) with its Evidence ids, fact versions, cited
+Signal, route tuple, Playbook version and prompt version, its grounding rules result and its
+`check_grounding` job. Otherwise nothing is stored and the Draft records why
+(`draft_failed_at` and `draft_failed_reason`: `no_route`, `refused`, `truncated`, `invalid`,
+`failed`, `invalid_proposal` or `not_composable`). A second run of the same job changes nothing.
+
+**On the Lead page** a Draft whose drafting failed shows "Drafting failed: <reason>. Regenerate
+to retry." (the Regenerate button is Story 4.20).
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
@@ -3606,6 +3644,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0061_8_10_discovery_topup` | rebuilds `discovery_runs` (new nullable `scheduled_for` and `ready_pool`; `ck_discovery_runs_status` also `target_reached`, `paced` and `pool_sufficient`; `ck_discovery_runs_location` relaxed for `pool_sufficient` rows; new `ck_discovery_runs_scheduled_for` and `ck_discovery_runs_ready_pool`) (see [Weekday discovery top-up (Story 8.10)](#weekday-discovery-top-up-story-810)) | `discovery` |
 | `0062_8_7_crawl_run_mode` | rebuilds `crawl_runs` (from its exact table, every row, check, foreign key and index kept) to add `mode` (`initial`, `recheck_full` or `recheck_jobs`, default `initial`) with `ck_crawl_runs_mode` (see [Scheduled re-checks](#scheduled-re-checks)) | `research` |
 | `0063_6_11_inbox_pacing` | adds the nullable `sending_inboxes.next_send_at` and `last_sent_at` in place (no rebuild; every row, check and index kept) for cold-send pacing | `sending` |
+| `0064_4_15_draft_failed` | rebuilds `drafts` (from its exact table, every row, check, index and foreign key kept) to add the nullable `draft_failed_at` and `draft_failed_reason` with `ck_drafts_draft_failed` | `drafting` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

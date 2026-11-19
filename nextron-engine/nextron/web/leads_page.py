@@ -258,11 +258,15 @@ and only asks for the confirmation: the panel comes back with "Stop this Lead's 
 ready Drafts are cancelled; an approved Draft stays approved but is blocked from sending while
 the Sequence is stopped." (role ``alert``), a "Yes, stop the Sequence" form holding the hidden
 ``confirm=yes`` and a Cancel link to the Lead page. ``submitted_stop(fields)`` is ``True`` for
-``confirm=yes``,
-``False`` for no field but the CSRF token, and ``MalformedForm`` otherwise. After the stop the
+``confirm=yes``, ``False`` for no field but the CSRF token, and ``MalformedForm`` otherwise. After the stop the
 notice is ``sequence_stopped()`` ("Sequence stopped. Its ready Drafts were cancelled; approved
 Drafts are blocked from sending.", role ``status``), or ``no_live_sequence()`` ("This Lead has
 no live Sequence.", role ``alert``) when nothing was live, after the first click too.
+
+**Drafting failures (Story 4.15).** A Draft whose ``draft_failed_at`` is set and that has no
+revision shows "Drafting failed: <reason text>. Regenerate to retry." (``draft_failed``;
+``nextron.domain.step_drafting.failure_text`` of its ``draft_failed_reason``, autoescaped
+through ``|plain``); with a revision, or no failure, it shows nothing.
 """
 
 import re
@@ -324,6 +328,7 @@ from nextron.domain.pipeline_stage import PipelineStage
 from nextron.domain.postings import PostingSource, PostingStatus
 from nextron.domain.scoring import Factor, FactorKind
 from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass
+from nextron.domain.step_drafting import failure_text
 from nextron.web.credentials_page import Notice, Role
 from nextron.web.csrf import CSRF_FIELD
 from nextron.web.erase_page import ERASE_LABEL, ReceiptView, erase_href, receipt_view
@@ -1755,6 +1760,7 @@ FAIL_GROUNDING: Final = GroundingStatus.FAIL.value
 DRAFTS_TEMPLATE: Final = "lead_drafts.html"
 NO_TEXT: Final = "No text yet"
 AFTER_STEP: Final = "after Step {step} is sent"
+DRAFTING_FAILED: Final = "Drafting failed: {reason}. Regenerate to retry."
 STEP_LINE: Final = "Step {step}"
 SHORT_HASH_LENGTH: Final = 12
 BLOCKING_STATUSES: Final = frozenset({"ready", "approved"})
@@ -1833,6 +1839,15 @@ class DraftRow:
     revisions: tuple[RevisionRow, ...]
     grounding: str = PENDING_GROUNDING  # pass, fail or pending (Story 4.14)
     grounding_flags: tuple[GroundingFlagRow, ...] = ()
+    draft_failed: str | None = None  # Story 4.15: the drafting failure notice
+
+
+def draft_failed_notice(draft: DraftView, current: RevisionView | None) -> str | None:
+    """"Drafting failed: <reason text>. Regenerate to retry." for a Draft whose drafting
+    failed and that has no revision, else ``None``."""
+    if current is not None or draft.draft_failed_at is None:
+        return None
+    return DRAFTING_FAILED.format(reason=failure_text(draft.draft_failed_reason or ""))
 
 
 def grounding_of(
@@ -1899,6 +1914,7 @@ def draft_row(source: DraftSource) -> DraftRow:
         revisions=tuple(revision_row(revision) for revision in source.revisions),
         grounding=grounding,
         grounding_flags=flags,
+        draft_failed=draft_failed_notice(draft, current),
     )
 
 

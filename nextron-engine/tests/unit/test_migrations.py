@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0063_6_11_inbox_pacing"
+HEAD = "0064_4_15_draft_failed"
 
 
 @pytest.fixture
@@ -2005,3 +2005,82 @@ def test_0063_adds_the_nullable_pacing_columns_and_keeps_every_inbox(tmp_path: P
     finally:
         reader.close()
     assert stored == (at, at)
+
+
+def test_0064_keeps_every_draft_and_adds_the_failure_columns(tmp_path: Path) -> None:
+    """0064 (Story 4.15) rebuilds ``drafts`` with the failure columns, every row kept."""
+    location = _chain_to(tmp_path, "0063_6_11_inbox_pacing")
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0063_6_11_inbox_pacing",
+        )
+    at, due = "2026-11-18T09:00:00.000000Z", "2026-11-19T14:00:00.000000Z"
+    market, footer, revision_id = (
+        "01JD3QZ8X5V9K2M7N4P6R8T0E1",
+        "01JD3QZ8X5V9K2M7N4P6R8T0E2",
+        "01JD3QZ8X5V9K2M7N4P6R8T0E3",
+    )
+    hex64 = "a" * 64
+    # Non-step kinds only (as for 0045); the channel Draft has a revision, so its current_rev
+    # (and that revision's footer snapshot and Market) must survive the post-upgrade key check
+    run_sql(
+        path,
+        "INSERT INTO markets (id, code, name, enabled, country_code, cctlds, "
+        "cold_email_allowed, free_webmail_blocked, default_timezone, unknown_timezone, "
+        "english_variant, footer_template, privacy_line_required, version, created_at, "
+        f"updated_at) VALUES ('{market}', 'GB', 'UK', 1, 'GB', '[\".uk\"]', 1, 1, "
+        f"'Europe/London', 'Europe/London', 'en-GB', 'Footer', 1, 1, '{at}', '{at}')",
+        "INSERT INTO footer_snapshots (id, market_id, sha256, text, created_at) VALUES "
+        f"('{footer}', '{market}', '{hex64}', 'Footer', '{at}')",
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('{CHANNEL_DRAFT}', 'channel', NULL, NULL, "
+        f"NULL, NULL, '{due}', 1, 0, '{at}', '{at}', 'approved', 1, 0, NULL, '{at}')",
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('{REPLY_DRAFT}', 'reply', NULL, NULL, "
+        f"NULL, NULL, NULL, 0, 1, '{at}', '{at}', 'ready', 0, 1, '{at}', NULL)",
+        "INSERT INTO draft_revisions (id, draft_id, rev, subject, body, footer_snapshot_id, "
+        "evidence_ids, fact_versions, origin, text_hash, created_at) VALUES "
+        f"('{revision_id}', '{CHANNEL_DRAFT}', 1, 'Hello', 'Body', '{footer}', '[]', '[]', "
+        f"'generated', '{hex64}', '{at}')",
+        f"UPDATE drafts SET current_rev = 1 WHERE id = '{CHANNEL_DRAFT}'",
+    )
+    before = draft_rows(path)
+    assert {row[5] for row in before} == {1, None}
+    shutil.copy2(
+        SCRIPT_LOCATION / "versions" / "0064_4_15_draft_failed.py",
+        location / "versions" / "0064_4_15_draft_failed.py",
+    )
+
+    with engine_on(path) as engine:  # the post-upgrade foreign key check passes
+        assert ensure_current(engine, script_location=location) == (
+            "0063_6_11_inbox_pacing",
+            "0064_4_15_draft_failed",
+        )
+
+    assert draft_rows(path) == before  # every row and column unchanged, current_rev kept
+    reader = sqlite3.connect(path)
+    try:
+        failures = reader.execute(
+            "SELECT draft_failed_at, draft_failed_reason FROM drafts ORDER BY id"
+        ).fetchall()
+        [(index_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_drafts_enrollment_step'"
+        ).fetchall()
+        keys = reader.execute("PRAGMA foreign_key_list(drafts)").fetchall()
+    finally:
+        reader.close()
+    assert failures == [(None, None), (None, None)]
+    assert "WHERE kind IN ('step','recontact')" in index_sql
+    assert {row[2] for row in keys} == {"enrollments", "draft_revisions"}
+    for assignments in (
+        f"draft_failed_at = '{at}'",
+        "draft_failed_reason = 'refused'",
+        f"draft_failed_at = '{at}', draft_failed_reason = 'other'",
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=r"ck_drafts_draft_failed$"):
+            run_sql(path, f"UPDATE drafts SET {assignments} WHERE id = '{REPLY_DRAFT}'")
+    run_sql(
+        path,
+        f"UPDATE drafts SET draft_failed_at = '{at}', draft_failed_reason = 'refused' "
+        f"WHERE id = '{REPLY_DRAFT}'",
+    )

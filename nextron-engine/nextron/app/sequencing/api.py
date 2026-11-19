@@ -55,11 +55,13 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
    (``None`` to ``active``, cause ``enrolled``, ``cause_ref`` the Campaign);
    ``research.record_eligibility_basis(contact_id, decision, campaign_id, lia_ref, lia_date,
    now)`` with the Campaign's LIA only when ``needs_lia`` of its Market's country, else
-   ``None, None``; ``Drafting(clock).request_steps(enrollment_id, steps, Urgency.SOON)`` (Story
-   4.9: one ``ready`` slot per Step, Step 1 due at once), whose ``Blocked`` raises
-   ``RuntimeError`` so the whole enroll rolls back (fail closed); then
+   ``None, None``; ``Drafting(clock, queue).request_steps(enrollment_id, steps,
+   Urgency.SOON)`` (Story 4.9: one ``ready`` slot per Step, Step 1 due at once; Story 4.15: and
+   the ``draft_step`` job that drafts Step 1, through the ``queue`` the ``Sequencing`` was built
+   with, so an ``enroll`` without one raises ``RuntimeError`` before any write), whose
+   ``Blocked`` raises ``RuntimeError`` so the whole enroll rolls back (fail closed); then
    ``Enrolled(enrollment_id, lead_id)`` is published (its subscriber, ``Pipeline.on_enrolled``,
-   moves a ``new`` Lead to ``queued``). No job is enqueued. It returns ``NewEnrollment``.
+   moves a ``new`` Lead to ``queued``). It returns ``NewEnrollment``.
 
 Only ``enroll`` has "enroll" in a def name here (the AD-16 manifest matches ``*enroll*``), and
 the ``enrollments`` insert is called lexically inside it.
@@ -136,6 +138,7 @@ from nextron.app.approval.api import Approval
 from nextron.app.compliance import api as compliance_api
 from nextron.app.compliance.api import Compliance
 from nextron.app.drafting.api import Drafting
+from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import pipeline as pipeline_queries
@@ -326,8 +329,9 @@ def _country_of(market_id: str) -> str | None:
 class Sequencing:
     """Enrollments of Contacts in Campaigns; see the module docstring."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, queue: JobQueue | None = None) -> None:
         self._clock = clock
+        self._queue = queue  # Story 4.15: request_steps enqueues Step 1's draft_step job
 
     @command
     def enroll(
@@ -339,6 +343,8 @@ class Sequencing:
             raise TypeError("enroll takes the Contact and Campaign ids as str")
         chosen_origin = _origin_of(origin)
         chosen_steps = _checked_steps(steps)
+        if self._queue is None:  # Story 4.15: Step 1's draft_step job needs one
+            raise RuntimeError("this Sequencing was built without a job queue")
         contact = research_queries.contact(contact_id)
         if contact is None:
             raise LookupError("enroll: the Contact is unknown")
@@ -420,7 +426,9 @@ class Sequencing:
             None if lia is None else lia.date,
             now,
         )
-        slots = Drafting(self._clock).request_steps(enrollment_id, chosen_steps, Urgency.SOON)
+        slots = Drafting(self._clock, self._queue).request_steps(
+            enrollment_id, chosen_steps, Urgency.SOON
+        )
         if isinstance(slots, Blocked):  # the gate answered Allowed above: fail closed
             raise RuntimeError("enroll: the gate blocked the Enrollment's Draft slots")
         current().publish(Enrolled(enrollment_id=enrollment_id, lead_id=lead.id))

@@ -49,7 +49,9 @@ def world(db_engine: Engine) -> World:
 
 
 def selection_of(world: World) -> Selection:
-    return Selection(world.clock, Sequencing(world.clock), Compliance(world.clock))
+    # Story 4.15: enroll enqueues Step 1's draft_step job, so the Sequencing has a queue
+    sequencing = Sequencing(world.clock, queue_on(world.clock))
+    return Selection(world.clock, sequencing, Compliance(world.clock))
 
 
 def warm(world: World, level: int = 30) -> None:
@@ -303,7 +305,7 @@ def test_picks_within_capacity_enroll_in_order_and_count(world: World) -> None:
     a, _ = scored(world, Tier.B, 60)
     b, _ = scored(world, Tier.B, 60)
     c, _ = scored(world, Tier.B, 60)
-    jobs = world.sql("SELECT COUNT(*) FROM jobs")
+    [(jobs,)] = world.sql("SELECT COUNT(*) FROM jobs")
 
     outcomes = pick(world, a, b, c)
 
@@ -323,7 +325,16 @@ def test_picks_within_capacity_enroll_in_order_and_count(world: World) -> None:
             (outcome.enrollment_id,),
         )
         assert slots == [(1,), (2,), (3,), (4,)]
-    assert world.sql("SELECT COUNT(*) FROM jobs") == jobs  # no job, AI call or email
+    # Story 4.15: each enrollment adds only its Step 1 draft_step job; no AI call or email
+    assert world.sql("SELECT COUNT(*) FROM jobs") == [(jobs + 2,)]
+    drafted = world.sql(
+        "SELECT payload FROM jobs WHERE type = 'draft_step' ORDER BY payload"
+    )
+    assert len(drafted) == 2
+    assert all(
+        str(outcome.enrollment_id) in "".join(str(row[0]) for row in drafted)
+        for outcome in outcomes[:2]
+    )
     [row] = capacity_rows(world)
     assert row[:6] == (LATER.date().isoformat(), 8, 0, 2, 2, None)
     assert world.read(selection_of(world).today).remaining == 0

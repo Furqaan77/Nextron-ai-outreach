@@ -67,7 +67,7 @@ Its ``AiTestRuns`` (``test_runs``, Story 4.5) uses the same clock, ``meter`` and
 and ``llm``, a ``ScriptedLlm`` (empty unless a test passes one, so a test that runs a set
 scripts every answer); Check for changes queues its runs and the jobs run them.
 
-Its ``Selection`` (``selection``, Story 4.10) is ``Selection(clock, Sequencing(clock),
+Its ``Selection`` (``selection``, Story 4.10) is ``Selection(clock, Sequencing(clock, queue),
 compliance)`` on the same ``Compliance``; the "Ready to draft" page and the notification area's
 signal shortfall line read it, and ``lead_scores`` records the day's capacity through it.
 
@@ -386,6 +386,7 @@ class Dashboard:
     discovery: Discovery = field(init=False)
     place_discovery: PlaceDiscovery = field(init=False)
     channel_permissions: ChannelPermissions = field(init=False)
+    sequencing: Sequencing = field(init=False)
     selection: Selection = field(init=False)
     signal_inbox: SignalInbox = field(init=False)
     segment_editor: SegmentEditor = field(init=False)
@@ -484,7 +485,9 @@ class Dashboard:
             hunter=ScriptedFinder(),
             prospeo=ScriptedFinder(),
         )
-        self.selection = Selection(self.clock, Sequencing(self.clock), self.compliance)
+        # Story 4.15: enroll enqueues Step 1's draft_step job, so the Sequencing has the queue
+        self.sequencing = Sequencing(self.clock, self.queue)
+        self.selection = Selection(self.clock, self.sequencing, self.compliance)
         self.lead_scores = LeadScores(
             self.clock,
             Scoring(self.clock, Pipeline(self.clock), self.research),
@@ -568,7 +571,7 @@ class Dashboard:
             sequence_editor=self.sequence_editor,
             registry_discovery=self.registry_discovery,
             discovery=self.discovery,
-            sequencing=Sequencing(self.clock),
+            sequencing=self.sequencing,
             units=self.units,
             **extra,
         )

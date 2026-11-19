@@ -95,6 +95,7 @@ RUN: Final = "01JD0000000000000000000011"
 ALERT: Final = "01JD0000000000000000000012"
 CONTACT: Final = "01JD0000000000000000000013"
 DRAFT: Final = "01JD0000000000000000000014"
+ENROLLMENT: Final = "01JD0000000000000000000015"
 # One payload per essential type: the handler runs it at 150% of the AI budget. A type without
 # one fails ``test_essential_handlers_never_defer_or_ask_about_blockable_work`` by name.
 ESSENTIAL_SAMPLES: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType(
@@ -116,6 +117,7 @@ ESSENTIAL_SAMPLES: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType(
         "poll_unsubscribes": {"v": 1},  # Story 3.11
         "check_grounding": {"v": 1, "draft_id": DRAFT, "rev": 1},  # Story 4.14
         "recheck_leads": {"v": 1},  # Story 8.7: the daily tick only reads and enqueues
+        "draft_step": {"v": 1, "enrollment_id": ENROLLMENT, "step": 1},  # Story 4.15
     }
 )
 

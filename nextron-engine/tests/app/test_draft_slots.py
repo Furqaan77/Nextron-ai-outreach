@@ -146,7 +146,8 @@ def test_enroll_creates_a_ready_slot_per_step_and_step_1_is_due_at_once(world: W
         ("step", enrollment_id, 4, 14, None, None, "ready"),
     ]
     gained = {k: world.counts()[k] - before[k] for k in ("drafts", "events", "jobs")}
-    assert gained == {"drafts": 4, "events": 6, "jobs": 0}  # + the Enrollment's and the Lead's
+    # events: + the Enrollment's and the Lead's; jobs: Step 1's draft_step (Story 4.15)
+    assert gained == {"drafts": 4, "events": 7, "jobs": 1}
     for draft_id in draft_ids(world, enrollment_id):
         assert world.events("drafts", draft_id) == [
             (None, "ready", "requested", enrollment_id, "system:drafting", stamp(LATER))
@@ -181,7 +182,7 @@ def test_a_recontact_enrollment_gets_recontact_slots(world: World) -> None:
 
 def test_request_steps_adds_only_missing_steps(world: World) -> None:
     _, _, enrollment_id = enrolled(world, steps=(1,))
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
 
     added = world.transact(lambda: drafting.request_steps(enrollment_id, [1, 3], Urgency.BULK))
 
@@ -197,7 +198,7 @@ def test_request_steps_checks_its_arguments_before_any_write(world: World) -> No
     _, _, enrollment_id = enrolled(world, steps=(1,))
     _, _, ended_id = enrolled(world, steps=(1,))
     world.stop(ended_id)
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
     soon = Urgency.SOON
     before = world.counts()
 
@@ -237,7 +238,7 @@ def test_request_steps_uses_the_bound_version_after_the_sequence_moved_on(
     Step 2's slot still takes v1's delay; a new Enrollment binds v2."""
     _, _, enrollment_id = enrolled(world, steps=(1,))
     edit_step_2_delay(world, 4)
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
 
     world.transact(lambda: drafting.request_steps(enrollment_id, (2,), Urgency.SOON))
 
@@ -260,7 +261,7 @@ def test_request_steps_refuses_an_unbound_enrollment_whose_sequence_version_move
     _, _, enrollment_id = enrolled(world, steps=(1,))
     world.sql("DROP TRIGGER trg_enrollments_bound")
     world.sql("UPDATE enrollments SET sequence_version_id = NULL")
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
     world.transact(lambda: drafting.request_steps(enrollment_id, (2,), Urgency.SOON))
     world.sql("UPDATE sequences SET version = version + 1")
 
@@ -274,7 +275,7 @@ def test_a_running_enrollment_keeps_its_versions_step_3_delay_and_brief(world: W
     _, _, enrollment_id = enrolled(world, steps=(1,))
     new_texts = {"purpose": "A rewritten third touch", "ask": "Would a short reply help?"}
     edit_default(world, {3: {"delay_days": 9, **new_texts}})
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
 
     world.transact(lambda: drafting.request_steps(enrollment_id, (3,), Urgency.SOON))
 
@@ -299,7 +300,7 @@ def test_a_running_enrollment_can_request_a_step_its_sequence_since_removed(
     """After a save removes the last Step, an Enrollment bound to v1 still requests Step 4."""
     _, _, enrollment_id = enrolled(world, steps=(1,))
     edit_default(world, {}, keep=3)
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
 
     world.transact(lambda: drafting.request_steps(enrollment_id, (4,), Urgency.SOON))
 
@@ -342,7 +343,7 @@ def edit_default(
 
 def test_a_blocked_request_writes_nothing(world: World) -> None:
     _, _, enrollment_id = enrolled(world, steps=(1,))
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
     before = world.counts()
 
     with gate_answers(BLOCKED):
@@ -582,7 +583,7 @@ def test_set_due_only_moves_a_pending_draft(world: World) -> None:
     _, _, enrollment_id = enrolled(world)
     step_1, step_2, *_ = draft_ids(world, enrollment_id)
     world.sql("UPDATE drafts SET status = 'rejected' WHERE id = ?", (step_2,))
-    drafting = Drafting(world.clock)
+    drafting = Drafting(world.clock, queue_on(world.clock))
     when = datetime(2026, 12, 1, 15, 0, tzinfo=UTC)
 
     assert world.transact(lambda: drafting.set_due(step_1, when))
