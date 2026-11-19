@@ -12,7 +12,8 @@
   2.11, ``check_legal_form``, Story 2.12, ``purge_place_coords``, Story 8.2, ``erase_external``,
   Story 3.14, ``find_contact_email``, Story 2.13, ``verify_contact_email``, Story 2.14,
   ``score_lead`` and ``recompute_tiers``, Story 2.15, ``poll_unsubscribes``, Story 3.11,
-  ``discover_places``, Story 8.3, and ``process_signal_item``, Story 2.16, with their settings);
+  ``discover_places``, Story 8.3, ``process_signal_item``, Story 2.16, and ``check_grounding``,
+  Story 4.14, with their settings);
   the triggers are exactly ``backup_db``'s and ``restore_test``'s daily schedules,
   ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s and
   ``purge_place_coords``'s daily ``Every`` at startup, ``check_domains``'s daily schedule,
@@ -54,6 +55,7 @@ from nextron.db.models import Base
 from nextron.db.models.jobqueue import JobRecord
 from nextron.db.models.notify import AlertRecord, NotificationRecord
 from nextron.db.models.ops import HeartbeatRecord
+from nextron.domain.ai import Urgency
 from nextron.domain.job import DEFERRED, InvalidJob, Job, JobGroup, JobTypes, Lane
 from nextron.domain.unsub_requests import poll_period
 from nextron.jobs import handlers
@@ -535,6 +537,16 @@ class RecordingUnsubscribes:
         self.polls += 1
 
 
+class RecordingGrounding:
+    """Stands in for the ``drafting`` service's ``GroundingChecks``."""
+
+    def __init__(self) -> None:
+        self.checks: list[tuple[str, int, Urgency]] = []
+
+    def check(self, draft_id: str, rev: int, urgency: Urgency) -> None:
+        self.checks.append((draft_id, rev, urgency))
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -557,6 +569,7 @@ def registry(**overrides: object) -> JobTypes:
         "scores": RecordingScores,
         "unsubscribes": RecordingUnsubscribes,
         "signal_inbox": RecordingSignalInbox,
+        "grounding": RecordingGrounding,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -649,6 +662,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "poll_unsubscribes",
         "discover_places",
         "process_signal_item",
+        "check_grounding",
     )
     discover = job_types.get("discover_places")  # Story 8.3
     assert (
@@ -971,6 +985,90 @@ def test_a_registry_built_without_unsubscribes_fails_a_poll_unsubscribes_job() -
 
     with pytest.raises(RuntimeError, match="without unsubscribes"):
         handler(Job(RUN, "poll_unsubscribes", Lane.REALTIME, {"v": 1}, 1))
+
+
+def test_build_job_types_registers_check_grounding_as_specified() -> None:
+    """Story 4.14: interactive by default, or bulk, priority 50, 25 minutes, retry limit 3,
+    group Other."""
+    found = registry().get("check_grounding")
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.max_runtime,
+        found.retry_limit,
+        found.group,
+    ) == (
+        Lane.INTERACTIVE,
+        frozenset({Lane.INTERACTIVE, Lane.BULK}),
+        50,
+        timedelta(minutes=25),
+        3,
+        JobGroup.OTHER,
+    )
+
+
+@pytest.mark.parametrize(
+    ("lane", "urgency"), [(Lane.INTERACTIVE, Urgency.INTERACTIVE), (Lane.BULK, Urgency.BULK)]
+)
+def test_check_grounding_checks_the_payloads_revision_once(lane: Lane, urgency: Urgency) -> None:
+    checks = RecordingGrounding()
+    handler = registry(grounding=lambda: checks).get("check_grounding").handler
+
+    result = handler(Job(RUN, "check_grounding", lane, {"v": 1, "draft_id": LEAD, "rev": 2}, 1))
+
+    assert (result, checks.checks) == (None, [(LEAD, 2, urgency)])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"v": 1, "rev": 1},
+        {"v": 1, "draft_id": "not-a-ulid", "rev": 1},
+        {"v": 1, "draft_id": LEAD},
+        {"v": 1, "draft_id": LEAD, "rev": 0},
+        {"v": 1, "draft_id": LEAD, "rev": True},
+        {"v": 1, "draft_id": LEAD, "rev": "1"},
+    ],
+)
+def test_check_grounding_refuses_a_bad_payload(payload: dict[str, object]) -> None:
+    checks = RecordingGrounding()
+    handler = registry(grounding=lambda: checks).get("check_grounding").handler
+
+    with pytest.raises(InvalidJob):
+        handler(Job(RUN, "check_grounding", Lane.INTERACTIVE, payload, 1))
+    assert checks.checks == []
+
+
+def test_a_registry_built_without_grounding_fails_a_check_grounding_job() -> None:
+    services = _services()
+    services.pop("grounding", None)
+    job_types = main.build_job_types(**services)  # type: ignore[arg-type]
+    handler = job_types.get("check_grounding").handler
+
+    with pytest.raises(RuntimeError, match="without grounding"):
+        handler(
+            Job(RUN, "check_grounding", Lane.INTERACTIVE, {"v": 1, "draft_id": LEAD, "rev": 1}, 1)
+        )
+
+
+def test_the_enqueue_only_registry_declares_check_grounding_as_the_runners_does() -> None:
+    """Story 4.14: the FooterChanged subscriber's queue enqueues on the runner's lanes and
+    priority, and never runs a job."""
+    runner = registry().get("check_grounding")
+    found = main.enqueue_only_job_types().get("check_grounding")
+
+    assert (found.default_lane, found.lanes, found.priority, found.max_runtime) == (
+        runner.default_lane,
+        runner.lanes,
+        runner.priority,
+        runner.max_runtime,
+    )
+    with pytest.raises(RuntimeError, match="never runs a job"):
+        found.handler(
+            Job(RUN, "check_grounding", Lane.INTERACTIVE, {"v": 1, "draft_id": LEAD, "rev": 1}, 1)
+        )
 
 
 @pytest.mark.parametrize(("attempts", "may_retry"), [(1, True), (3, True), (4, False)])

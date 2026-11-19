@@ -30,9 +30,9 @@ Story 4.12 (a Draft's text):
 Story 4.13 (grounding):
 
 - ``GroundingResultView``: one revision's grounding result (``status`` a
-  ``GroundingStatus``; ``flags`` a tuple of ``StoredFlag(rule, span, explanation)``, in the
-  stored order); ``grounding_result(draft_id, rev)``: the result of that revision, or ``None``
-  (a text that isn't a ULID included).
+  ``GroundingStatus``; ``flags`` a tuple of ``StoredFlag(rule, span, explanation, source)``, in
+  the stored order; Story 4.14 adds ``ai_checked_at``); ``grounding_result(draft_id, rev)``: the
+  result of that revision, or ``None`` (a text that isn't a ULID included).
 """
 
 from collections.abc import Mapping
@@ -228,6 +228,7 @@ class GroundingResultView:
     route_tuple_id: str | None
     served_model: str | None
     checked_at: datetime
+    ai_checked_at: datetime | None = None  # Story 4.14
 
 
 def grounding_result(draft_id: str, rev: int) -> GroundingResultView | None:
@@ -247,4 +248,5 @@ def grounding_result(draft_id: str, rev: int) -> GroundingResultView | None:
         route_tuple_id=stored.route_tuple_id,
         served_model=stored.served_model,
         checked_at=stored.checked_at,
+        ai_checked_at=stored.ai_checked_at,
     )

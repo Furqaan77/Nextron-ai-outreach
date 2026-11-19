@@ -57,7 +57,10 @@ explanation}``; ``fail`` exactly when it holds one); ``rules_version``; the null
 ``route_tuple_id`` and ``served_model`` (the AI check's, Story 4.14) and ``checked_at``. A
 flag's ``span`` quotes Draft text, so ``flags`` is classed ``redact``: the erasure turns each
 span into ``[erased]`` and keeps the rule, explanation and status. The rest hold no personal
-data.
+data. Story 4.14 (migration ``0059_4_14_ai_grounding``) adds the nullable ``ai_checked_at``
+(when the AI check's result was recorded; PII class ``none``), gives each flag a ``source``
+(``rules`` or ``ai``), and ``ck_grounding_results_pass``: a ``pass`` row has a
+``route_tuple_id``, a ``served_model`` and an ``ai_checked_at``.
 """
 
 from collections.abc import Iterable
@@ -244,6 +247,11 @@ GROUNDING_STATUS_CHECK: Final = _one_of("status", GroundingStatus)
 GROUNDING_FLAGS_CHECK: Final = _json_list("flags")
 GROUNDING_FAIL_CHECK: Final = "(status = 'fail') = (json_array_length(flags) > 0)"
 RULES_VERSION_CHECK: Final = "rules_version >= 1"
+# Story 4.14: a pass names the tuple, the served model and the AI check's time (fail closed)
+GROUNDING_PASS_CHECK: Final = (
+    "status != 'pass' OR (route_tuple_id IS NOT NULL AND served_model IS NOT NULL AND "
+    "ai_checked_at IS NOT NULL)"
+)
 
 
 class GroundingResultRecord(Base):
@@ -259,6 +267,7 @@ class GroundingResultRecord(Base):
         CheckConstraint(GROUNDING_FLAGS_CHECK, name="flags"),
         CheckConstraint(GROUNDING_FAIL_CHECK, name="fail"),
         CheckConstraint(RULES_VERSION_CHECK, name="rules_version"),
+        CheckConstraint(GROUNDING_PASS_CHECK, name="pass"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -270,3 +279,4 @@ class GroundingResultRecord(Base):
     route_tuple_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("ai_route_tuples.id"))
     served_model: Mapped[str | None] = mapped_column(String(SERVED_MODEL_LENGTH))
     checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    ai_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)

@@ -68,7 +68,32 @@ def events(engine: Engine) -> list[tuple[Any, ...]]:
 
 
 def shipped() -> tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]:
-    return main.load_prompts()
+    """The shipped prompts and defaults of the extraction routes (Story 2.8's bootstrap); the
+    grounding routes (Story 4.14) have their own test below."""
+    files, defaults = main.load_prompts()
+    return (
+        tuple(f for f in files if f.route in ROUTES),
+        tuple(s for s in defaults if s.route in ROUTES),
+    )
+
+
+# Story 4.14: the grounding routes are recorded as candidates, never bootstrap-activated
+def test_the_grounding_routes_get_candidate_tuples_but_no_activation(
+    units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    files, defaults = main.load_prompts()
+
+    result = sync(units, files, defaults)
+
+    grounding = ("grounding_check", "grounding_check_fallback")
+    assert [route for route, _ in result.activated] == list(ROUTES)
+    assert {route for route, _ in result.candidates} >= set(grounding)
+    for route in grounding:
+        assert active(units, route) is None
+        [(playbook,)] = query(
+            db_engine, "SELECT playbook_sha256 FROM ai_route_tuples WHERE route = ?", (route,)
+        )
+        assert playbook == PLAYBOOK.sha256  # pinned to the Playbook read
 
 
 def sync(

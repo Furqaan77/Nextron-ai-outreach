@@ -467,3 +467,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-13-check-every-draft-against-deterministic-grounding-rules.md`
   summary: Epic 5's approval gate must treat a revision with no `grounding_results` row as not grounded, and Story 4.14 should add a DB guard that `status = 'pass'` needs `route_tuple_id` and `served_model`.
   evidence: Review pass 1 of Story 4.13 (VG-other, BH3, low). Migration 0046 doesn't backfill rows for revisions written under 0045, and no trigger or CHECK limits updates of `grounding_results`; 4.14 owns the update path.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-14-run-the-ai-grounding-check-and-fail-closed.md`
+  summary: Give a revision a way to be AI-checked again: today a revision checked before a `grounding_check` tuple is activated, or after a timeout or transient gateway failure, keeps `fail` with `checker_unavailable` for good, and only an edit or regenerate makes a new revision to check.
+  evidence: Review pass 1 of Story 4.14 (BH4, medium). The spec excludes a recheck button and decision 2 makes a timeout a final fail. Options: re-enqueue `check_grounding` for current revisions whose only AI flag is `checker_unavailable` when a grounding tuple is activated, or an Operator "Recheck" action (a new result row needs `record_ai_result` to allow replacing a `checker_unavailable` result).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-14-run-the-ai-grounding-check-and-fail-closed.md`
+  summary: Add a migration data test for 0047 (a `grounding_results` row seeded at 0046 keeps its data and gains `"source": "rules"` on each flag).
+  evidence: Review pass 1 of Story 4.14 (VG6, low). No test seeds a row at 0046; `_decoded` already treats a missing `source` as `rules`, so the impact is small.

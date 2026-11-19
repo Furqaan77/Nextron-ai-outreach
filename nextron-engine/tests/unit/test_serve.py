@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import Engine
 
 from nextron import main
+from nextron.domain.ai_test_gate import BOOTSTRAP_ROUTES
 from nextron.app.approval.api import Approval
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery import api as discovery_api
@@ -917,7 +918,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0059_more", create_table("more")))
+    extend(location, ("0060_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -931,7 +932,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0059_more"
+    assert spy.calls[0]["db_revision"] == "0060_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade
@@ -1167,17 +1168,21 @@ def test_a_first_start_stores_the_prompts_and_activates_each_route(dev: Path) ->
     assert (code, err) == (0, "")
     snapshots, activations = prompt_rows(dev / "nextron.db")
     assert snapshots == sorted((f.route, f.version, f.sha256) for f in files)
+    bootstrapped = [f for f in files if f.route in BOOTSTRAP_ROUTES]
     assert activations == sorted(
-        (f.route, f.version, f.sha256, "seed", 1, None, None) for f in files
+        (f.route, f.version, f.sha256, "seed", 1, None, None) for f in bootstrapped
     )
-    assert {spec.route for spec in defaults} == {row[0] for row in activations}
+    # Story 4.14: the grounding routes serve only after their gate
+    assert {s.route for s in defaults if s.route in BOOTSTRAP_ROUTES} == {
+        row[0] for row in activations
+    }
     lines = log_lines(dev)
     logged = [line["event"] for line in lines]
     assert logged.index("prompts_synced") < logged.index("engine_started")
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
     assert (synced["logger"], synced["stored_count"], synced["activated_count"]) == (
         "nextron.app.playbook.api",
-        3,
+        5,
         3,
     )
 
@@ -1191,7 +1196,7 @@ def test_a_restart_changes_no_prompt_row(dev: Path) -> None:
 
     assert prompt_rows(dev / "nextron.db") == before
     synced = [line for line in log_lines(dev) if line["event"] == "prompts_synced"]
-    assert [(line["unchanged_count"], line["kept_count"]) for line in synced] == [(0, 0), (3, 3)]
+    assert [(line["unchanged_count"], line["kept_count"]) for line in synced] == [(0, 0), (5, 3)]
 
 
 def test_the_loader_runs_outside_any_unit_of_work(dev: Path) -> None:
@@ -1349,11 +1354,13 @@ def test_a_first_start_stores_the_playbook_and_records_the_tuples_and_the_check(
     assert tuples == [
         ("extract_people", "v1", None),
         ("extract_signals", "v1", None),
+        ("grounding_check", "v1", read.sha256),  # Story 4.14: pinned to the Playbook read
+        ("grounding_check_fallback", "v1", read.sha256),
         ("signal_inbox_parse", "v1", None),
     ]
     assert checks == [("startup", read.sha256, None)]
     [synced] = [line for line in log_lines(dev) if line["event"] == "prompts_synced"]
-    assert synced["candidate_count"] == 3
+    assert synced["candidate_count"] == 5
 
 
 @pytest.mark.parametrize(

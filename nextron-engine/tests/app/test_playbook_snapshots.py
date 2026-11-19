@@ -106,7 +106,13 @@ def tuple_events(engine: Engine) -> list[tuple[Any, ...]]:
 
 
 def shipped() -> tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...]]:
-    return main.load_prompts()
+    """The extraction routes' shipped prompts and defaults (the grounding routes of Story 4.14
+    are covered in ``tests/app/test_playbook_prompts.py`` and ``test_ai_grounding.py``)."""
+    files, defaults = main.load_prompts()
+    return (
+        tuple(f for f in files if f.route in ROUTES),
+        tuple(s for s in defaults if s.route in ROUTES),
+    )
 
 
 def at(days: int) -> FrozenClock:

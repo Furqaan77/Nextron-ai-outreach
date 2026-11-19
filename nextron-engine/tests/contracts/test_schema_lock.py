@@ -24,6 +24,11 @@ SCHEMA_SHA256: Final[dict[tuple[str, int], str]] = {
     ("extract_signals", 1): "ad078b705ddc91e884d9f2ad707e00f8d878f64aae50814d25bfb83066fa1f99",
     ("extract_people", 1): "2ec227d8365c189eb87a9f14a022e7b5fea4ff9eed662fcf5d35a3793f81b1cc",
     ("signal_inbox_parse", 1): "e1eaa2b871a11c212621d69d7bc6bc3cbfe031f7ff4f07b4e9e1b852fb50fd91",
+    # Story 4.14: GroundingCheckV1, shared by Haiku and its Opus fallback
+    ("grounding_check", 1): "bbb16b7e365fd3c68a1ac73ec17eb8b78be2b6a514ad8a7c13a651ff3b9132b4",
+    ("grounding_check_fallback", 1): (
+        "bbb16b7e365fd3c68a1ac73ec17eb8b78be2b6a514ad8a7c13a651ff3b9132b4"
+    ),
 }
 
 

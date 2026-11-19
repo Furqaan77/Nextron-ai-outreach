@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0058_4_13_grounding_results"
+HEAD = "0059_4_14_ai_grounding"
 
 
 @pytest.fixture

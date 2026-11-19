@@ -133,9 +133,12 @@ no-ops: their tables never hold a Contact's data), then pipeline's, last
 (``Pipeline(clock).erase_pii``, Stories 9.1 and 10.7: the Contact's Lead's notes, and those of
 every Lead merged into it, become ``[erased]``, and it revokes the Contact's Channel Permissions
 and NULLs their number and handle; ``linkedin_accounts`` never holds a Contact's data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
-``queued``); ``FooterChanged`` -> ``Drafting(clock).recompose_ready`` (Story 4.12: the Market's
-``ready`` Drafts get a ``footer_change`` revision). Each uses ``SystemClock()`` when no clock is
-given.
+``queued``); ``FooterChanged`` -> ``Drafting(clock, queue).recompose_ready`` (Story 4.12: the
+Market's ``ready`` Drafts get a ``footer_change`` revision; Story 4.14: each new revision's
+``check_grounding`` job is enqueued in the same transaction, through a ``JobQueue`` on
+``enqueue_only_job_types()``, ``build_job_types`` with every service unwired, so the job type's
+lanes and priority are the runner's own; the runner's registry runs the job). Each uses
+``SystemClock()`` when no clock is given.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance,
 queue=queue)`` (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the
@@ -249,12 +252,15 @@ is registered after them, and Story 8.3's ``discover_places`` (bulk only, priori
 ``max_runtime`` 1 hour, retry limit 2, ``handlers.discover_places(place_discovery)``,
 ``discovery``) after it, and Story 2.16's ``process_signal_item`` (interactive only, priority
 60, 5 minutes, retry limit 3 (``handlers.PROCESS_SIGNAL_ITEM_RETRIES``),
-``handlers.process_signal_item(signal_inbox)``, ``discovery``) last; with ``signal_inbox`` left
-out its handler raises a ``RuntimeError``. ``SignalInbox(clock, meter, llm, discovery, research,
+``handlers.process_signal_item(signal_inbox)``, ``discovery``) after it, with ``signal_inbox``
+left out its handler raising a ``RuntimeError``, and Story 4.14's ``check_grounding``
+(interactive by default, or bulk, priority 50, ``max_runtime`` 25 minutes (up to four Claude
+requests of 300 s each), retry limit 3, ``handlers.check_grounding(grounding)``, ``other``;
+never budget-gated) last. ``SignalInbox(clock, meter, llm, discovery, research,
 queue)`` (``nextron.app.discovery.signal_inbox``) runs those jobs, reached through
 ``signal_inbox=lambda: signal_inbox``, and the dashboard gets it (``create_app(...,
-signal_inbox=...)``) for the Signal Inbox page. ``domain_checks``, ``unsubscribes`` and
-``place_discovery`` are optional services: each defaults
+signal_inbox=...)``) for the Signal Inbox page. ``domain_checks``, ``unsubscribes``,
+``place_discovery`` and ``grounding`` are optional services: each defaults
 to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
@@ -798,7 +804,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType, MappingProxyType
-from typing import Final, Protocol, TextIO
+from typing import Final, Never, Protocol, TextIO
 
 import uvicorn
 from fastapi import FastAPI
@@ -836,6 +842,7 @@ from nextron.app.discovery.places import PlaceSearches
 from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
+from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify import api as notify_api
@@ -952,6 +959,7 @@ from nextron.domain.email_checks import VERIFY_CONTACT_EMAIL_JOB
 from nextron.domain.email_finding import FIND_CONTACT_EMAIL_JOB
 from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
+from nextron.domain.grounding_check import CHECK_GROUNDING_JOB
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
@@ -1291,7 +1299,7 @@ def build_app(
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
     # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes,
-    # place_discovery and signal_inbox are bound just below
+    # place_discovery, signal_inbox and grounding_checks are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1314,6 +1322,7 @@ def build_app(
         unsubscribes=lambda: unsubscribes,
         place_discovery=lambda: place_discovery,
         signal_inbox=lambda: signal_inbox,
+        grounding=lambda: grounding_checks,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1334,6 +1343,7 @@ def build_app(
 
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
+    grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
     site_dns = dns if dns is not None else DnspythonDns(meter=meter)
@@ -1613,6 +1623,7 @@ def build_job_types(
     place_discovery: Callable[[], handlers.DiscoveringPlaces] | None = None,
     verification: Callable[[], handlers.VerifyingEmail] | None = None,
     signal_inbox: Callable[[], handlers.ProcessingSignalItems] | None = None,
+    grounding: Callable[[], handlers.CheckingGrounding] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1644,13 +1655,15 @@ def build_job_types(
     ``place_discovery`` the ``discovery`` service's ``PlaceDiscovery`` that ``discover_places``
     jobs call (``None``: the same), and ``signal_inbox`` the ``discovery`` service's
     ``SignalInbox`` that ``process_signal_item`` jobs call (left out, the handler raises
-    ``RuntimeError`` when a job runs)."""
+    ``RuntimeError`` when a job runs), and ``grounding`` the ``drafting`` service's
+    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     verifying = verification if verification is not None else _no_verification
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     discovering = place_discovery if place_discovery is not None else no_place_discovery
     inbox = signal_inbox if signal_inbox is not None else _no_signal_inbox
+    checks_grounding = grounding if grounding is not None else no_grounding
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1967,6 +1980,18 @@ def build_job_types(
             group=JobGroup.DISCOVERY,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=CHECK_GROUNDING_JOB,
+            default_lane=Lane.INTERACTIVE,  # an edit recheck, a Step 1; bulk for a footer change
+            lanes=frozenset({Lane.INTERACTIVE, Lane.BULK}),
+            priority=50,
+            max_runtime=timedelta(minutes=25),  # up to four Claude requests of 300 s each
+            retry_limit=3,  # a timeout is a recorded fail, never retried; only a bug retries
+            handler=handlers.check_grounding(checks_grounding),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1975,6 +2000,49 @@ def no_place_discovery() -> handlers.DiscoveringPlaces:
     """``build_job_types``'s default ``place_discovery``: a registry built without the service
     fails a ``discover_places`` job instead of discovering nothing."""
     raise RuntimeError("this job type registry was built without place_discovery")
+
+
+def _unwired() -> Never:
+    """A service provider of the enqueue-only registry (``enqueue_only_job_types``): it never
+    runs a job."""
+    raise RuntimeError("the enqueue-only job type registry never runs a job")
+
+
+def enqueue_only_job_types() -> JobTypes:
+    """``build_job_types`` with every service unwired (Story 4.14): the registry of the queue
+    that the ``FooterChanged`` subscriber's ``Drafting`` enqueues its revisions'
+    ``check_grounding`` jobs through. It only enqueues (each job type's lanes and priority are
+    the runner's own); the runner's registry runs the jobs."""
+    return build_job_types(
+        alerts=_unwired,
+        backups=_unwired,
+        restore_tests=_unwired,
+        recovery=_unwired,
+        contact_markets=_unwired,
+        crawls=_unwired,
+        discovery=_unwired,
+        research=_unwired,
+        extractions=_unwired,
+        primary=_unwired,
+        test_runs=_unwired,
+        job_boards=_unwired,
+        legal_forms=_unwired,
+        scores=_unwired,
+        domain_checks=_unwired,
+        erasure_stores=_unwired,
+        finding=_unwired,
+        unsubscribes=_unwired,
+        place_discovery=_unwired,
+        verification=_unwired,
+        signal_inbox=_unwired,
+        grounding=_unwired,
+    )
+
+
+def no_grounding() -> handlers.CheckingGrounding:
+    """``build_job_types``'s default ``grounding``: a registry built without the service fails a
+    ``check_grounding`` job instead of checking nothing."""
+    raise RuntimeError("this job type registry was built without grounding")
 
 
 def no_domain_checks() -> handlers.DomainChecking:
@@ -2409,7 +2477,9 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     # Story 4.9: the next Step's due time, or the Enrollment's completion
     subscribers.register_subscriber(MessageSent, Sequencing(chosen).on_step_sent)
     # Story 4.12: a footer change recomposes the Market's ready Drafts
-    subscribers.register_subscriber(FooterChanged, Drafting(chosen).recompose_ready)
+    # (Story 4.14: each new revision's check_grounding job, through an enqueue-only queue)
+    enqueue_only = JobQueue(chosen, enqueue_only_job_types())
+    subscribers.register_subscriber(FooterChanged, Drafting(chosen, enqueue_only).recompose_ready)
     subscribers.freeze()
     return subscribers
 

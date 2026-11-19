@@ -66,6 +66,7 @@ def test_each_route_has_its_set_and_the_bootstrap_routes_are_the_extraction_ones
     assert dict(ROUTE_SETS) == {
         "classify_reply": TestSet.REPLY,
         "grounding_check": TestSet.GROUNDING,
+        "grounding_check_fallback": TestSet.GROUNDING,  # Story 4.14
         "draft_sequence": TestSet.DRAFTING_SMOKE,
         "draft_reply": TestSet.DRAFTING_SMOKE,
         "draft_channel": TestSet.DRAFTING_SMOKE,

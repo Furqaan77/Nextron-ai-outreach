@@ -63,6 +63,9 @@ def model_problems(tree: Mapping[str, Any]) -> list[str]:
                 problems.append(f"property {name} is named like reasoning")
             if "explanation" in lowered:
                 limit = child.get("maxLength") if isinstance(child, Mapping) else None
+                if limit is None and isinstance(child, Mapping):  # the wire moves it (4.14)
+                    moved = re.search(r"maxLength: (\d+)", str(child.get("description", "")))
+                    limit = int(moved.group(1)) if moved else None
                 if not isinstance(limit, int) or limit > MAX_EXPLANATION:
                     problems.append(f"property {name} has no maxLength of 200 or fewer")
         values = [*(node.get("enum") or ()), *([node["const"]] if "const" in node else [])]

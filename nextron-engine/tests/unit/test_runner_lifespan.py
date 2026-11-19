@@ -58,6 +58,7 @@ import nextron.adapters.telegram as telegram_adapter
 from nextron.adapters.backup_target import FolderBackupTarget
 from nextron.adapters.crypto import ScryptParams
 from nextron import main
+from nextron.domain.ai_test_gate import ROUTE_SETS
 from nextron.app.discovery.api import Discovery
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
@@ -247,6 +248,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "poll_unsubscribes",
         "discover_places",
         "process_signal_item",  # Story 2.16
+        "check_grounding",  # Story 4.14
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -979,9 +981,11 @@ def test_the_built_startup_queues_contact_markets_then_the_test_runs(
         "SELECT lane, idempotency_key FROM jobs WHERE type = 'run_ai_test_sets' "
         "ORDER BY idempotency_key",
     )
-    tuples = raw_query(units, "SELECT id FROM ai_route_tuples ORDER BY id")
-    assert jobs == [("bulk", f"run_ai_test_sets:{row[0]}:extraction") for row in tuples]
-    assert len(jobs) == 3
+    tuples = raw_query(units, "SELECT id, route FROM ai_route_tuples ORDER BY id")
+    assert jobs == [
+        ("bulk", f"run_ai_test_sets:{row[0]}:{ROUTE_SETS[row[1]].value}") for row in tuples
+    ]
+    assert len(jobs) == 5  # the three extraction tuples and, Story 4.14, the two grounding ones
 
 
 def test_a_failed_startup_step_is_logged_with_its_name_and_the_next_still_runs(

@@ -666,6 +666,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "route_tuple_id",
             "served_model",
             "checked_at",
+            "ai_checked_at",  # Story 4.14
         ),
     },
     "unsub_tokens": {

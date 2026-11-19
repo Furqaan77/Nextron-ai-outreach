@@ -371,7 +371,7 @@ def test_the_default_tuples_carry_the_prompt_files_text() -> None:
     found = default_tuples(files, specs)
 
     assert set(found) == {"extract_signals", "extract_people", "signal_inbox_parse"}
-    for prompt in files:
+    for prompt in (f for f in files if f.route in found):
         assert found[prompt.route].system_prompt == prompt.text
         assert found[prompt.route].prompt_sha256 == prompt.sha256
 

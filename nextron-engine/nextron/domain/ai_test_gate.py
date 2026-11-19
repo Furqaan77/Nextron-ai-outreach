@@ -10,7 +10,8 @@ value is also a job key's discriminator (``nextron.domain.job``: ``run_ai_test_s
 id>:<set>``, decision 1).
 
 - ``ROUTE_SETS`` (read-only) maps a route to its set: ``classify_reply`` to ``reply``,
-  ``grounding_check`` to ``grounding``; ``draft_sequence``, ``draft_reply``, ``draft_channel``
+  ``grounding_check`` and its Opus fallback ``grounding_check_fallback`` (Story 4.14) to
+  ``grounding``; ``draft_sequence``, ``draft_reply``, ``draft_channel``
   and ``call_prep`` to ``drafting_smoke``; ``extract_signals``, ``extract_people`` and
   ``signal_inbox_parse`` to ``extraction``. A route outside it has no set and is never run.
 - ``BOOTSTRAP_ROUTES`` are the three extraction routes: the only routes
@@ -113,6 +114,7 @@ ROUTE_SETS: Final[Mapping[str, TestSet]] = MappingProxyType(
     {
         "classify_reply": TestSet.REPLY,
         "grounding_check": TestSet.GROUNDING,
+        "grounding_check_fallback": TestSet.GROUNDING,
         "draft_sequence": TestSet.DRAFTING_SMOKE,
         "draft_reply": TestSet.DRAFTING_SMOKE,
         "draft_channel": TestSet.DRAFTING_SMOKE,

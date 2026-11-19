@@ -5,16 +5,22 @@ Every function runs explicit Core statements through the current unit of work's 
 (``nextron.db.uow.current()``): reads work in a read-only unit of work too, writes only inside
 the running use case's transaction. It checks nothing; ``nextron.app.drafting`` does.
 
-- ``StoredFlag(rule, span, explanation)`` and ``StoredGroundingResult``: one row, ``flags``
-  decoded from its JSON array of ``{rule, span, explanation}`` objects;
+- ``StoredFlag(rule, span, explanation, source="rules")`` and ``StoredGroundingResult``: one
+  row, ``flags`` decoded from its JSON array of ``{rule, span, explanation, source}`` objects
+  (``rule`` is the flag's code; ``source`` ``rules`` or ``ai``, Story 4.14; a flag stored
+  without one reads as ``rules``);
 - ``NewGroundingResult(draft_id, rev, status, flags, rules_version)`` and ``insert(result, at)
-  -> id``: one new row checked at ``at`` (``route_tuple_id`` and ``served_model`` NULL until the
-  AI check, Story 4.14); its new ULID;
+  -> id``: one new row checked at ``at`` (``route_tuple_id``, ``served_model`` and
+  ``ai_checked_at`` NULL until the AI check, Story 4.14); its new ULID;
+- ``record_ai_result(draft_id, rev, *, status, flags, route_tuple_id, served_model, at) ->
+  bool`` (Story 4.14): the AI check's result for that revision: status, flags, tuple, served
+  model and ``ai_checked_at`` = ``at``, set only while ``ai_checked_at`` is NULL (one
+  conditional ``UPDATE``), so a re-run is a no-op; whether a row changed;
 - ``of_revision(draft_id, rev)``: the row, or ``None``;
 - ``tombstone(draft_ids) -> int``: every result of those Drafts gets each flag's non-empty
-  ``span`` replaced by ``[erased]`` (an empty span, a whole-revision flag, stays ``""``; rule,
-  explanation, status and the rest kept); the number of
-  rows changed. Running it again changes nothing;
+  ``span`` replaced by ``[erased]`` (an empty span, a whole-revision flag, stays ``""``), and
+  each ``ai`` flag's explanation (model text) too (Story 4.14); rule, rules' explanations,
+  status and the rest kept; the number of rows changed. Running it again changes nothing;
 - ``for_export(contact_id) -> tuple[dict, ...]`` (Story 3.15's subject access export): every
   column of each result of the Drafts of the Contact's Enrollments (a generic ``select`` of the
   table), oldest first. It reads ``drafts.enrollment_id`` and ``enrollments.contact_id`` (owner
@@ -36,6 +42,10 @@ from nextron.db.models.drafting import DraftRecord, GroundingResultRecord
 from nextron.db.models.sequencing import EnrollmentRecord
 from nextron.db.uow import current
 from nextron.domain.erasure import REDACTED
+from nextron.domain.grounding_check import FlagSource
+
+RULES_SOURCE: Final = FlagSource.RULES.value
+AI_SOURCE: Final = FlagSource.AI.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +55,7 @@ class StoredFlag:
     rule: str
     span: str
     explanation: str
+    source: str = RULES_SOURCE
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +82,7 @@ class StoredGroundingResult:
     route_tuple_id: str | None
     served_model: str | None
     checked_at: datetime
+    ai_checked_at: datetime | None
 
 
 _COLUMNS: Final = (
@@ -83,18 +95,32 @@ _COLUMNS: Final = (
     GroundingResultRecord.route_tuple_id,
     GroundingResultRecord.served_model,
     GroundingResultRecord.checked_at,
+    GroundingResultRecord.ai_checked_at,
 )
 
 
 def _encoded(flags: Iterable[StoredFlag]) -> str:
     return json.dumps(
-        [{"rule": flag.rule, "span": flag.span, "explanation": flag.explanation} for flag in flags]
+        [
+            {
+                "rule": flag.rule,
+                "span": flag.span,
+                "explanation": flag.explanation,
+                "source": flag.source,
+            }
+            for flag in flags
+        ]
     )
 
 
 def _decoded(text: str) -> tuple[StoredFlag, ...]:
     return tuple(
-        StoredFlag(str(each["rule"]), str(each["span"]), str(each["explanation"]))
+        StoredFlag(
+            str(each["rule"]),
+            str(each["span"]),
+            str(each["explanation"]),
+            str(each.get("source", RULES_SOURCE)),
+        )
         for each in json.loads(text)
     )
 
@@ -110,6 +136,7 @@ def _stored(row: Row[Any]) -> StoredGroundingResult:
         route_tuple_id=row.route_tuple_id,
         served_model=row.served_model,
         checked_at=row.checked_at,
+        ai_checked_at=row.ai_checked_at,
     )
 
 
@@ -127,9 +154,39 @@ def insert(result: NewGroundingResult, at: datetime) -> str:
             route_tuple_id=None,
             served_model=None,
             checked_at=at,
+            ai_checked_at=None,
         )
     )
     return result_id
+
+
+def record_ai_result(
+    draft_id: str,
+    rev: int,
+    *,
+    status: str,
+    flags: tuple[StoredFlag, ...],
+    route_tuple_id: str | None,
+    served_model: str | None,
+    at: datetime,
+) -> bool:
+    """Record the AI check's result for the revision, once; whether a row changed."""
+    changed = current().session.execute(
+        update_rows(GroundingResultRecord)
+        .where(
+            GroundingResultRecord.draft_id == draft_id,
+            GroundingResultRecord.rev == rev,
+            GroundingResultRecord.ai_checked_at.is_(None),
+        )
+        .values(
+            status=status,
+            flags=_encoded(flags),
+            route_tuple_id=route_tuple_id,
+            served_model=served_model,
+            ai_checked_at=at,
+        )
+    )
+    return bool(changed.rowcount)
 
 
 def of_revision(draft_id: str, rev: int) -> StoredGroundingResult | None:
@@ -157,7 +214,12 @@ def tombstone(draft_ids: Iterable[str]) -> int:
     for row in rows:
         flags = _decoded(row.flags)
         erased = tuple(
-            StoredFlag(flag.rule, REDACTED if flag.span else "", flag.explanation)
+            StoredFlag(
+                flag.rule,
+                REDACTED if flag.span else "",
+                REDACTED if flag.source == AI_SOURCE else flag.explanation,
+                flag.source,
+            )
             for flag in flags
         )
         if erased == flags:

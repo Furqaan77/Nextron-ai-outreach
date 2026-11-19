@@ -2850,7 +2850,7 @@ the same transaction.
   `ready` Draft with text, a one-line subject of 1 to 200 characters (stored stripped) and a
   body of at most 10,000 characters (empty allowed). It appends an `operator_edit` revision with
   the previous traceability and returns the new revision number. Its grounding rules run as for
-  every revision (Story 4.13, below); the AI check is Story 4.14.
+  every revision (Story 4.13, below), then its AI check (Story 4.14, below) on the interactive lane.
 - `Drafting.recompose_ready` subscribes to `FooterChanged`: saving a footer setting, or a
   `nextron seed sync` that changes a Market's footer template or `privacy_line_required`, gives
   each `ready` Draft with text in that Market a `footer_change` revision (same subject and body,
@@ -2945,6 +2945,46 @@ Sequence or Segment) is refused before anything is written. Erasing a Contact tu
 non-empty flag span into `[erased]` (an empty span stays empty; the rule, explanation and status
 stay), and the subject access export lists the
 results under `drafting.grounding_results`.
+
+## The AI grounding check
+
+Story 4.14 (FR-21, AD-7, AD-8, AD-16, AD-18) checks every revision's claims against its own
+Evidence and Approved Company Facts with Claude, and fails closed: a revision is `pass` only when
+a tested checker answered and nothing at all was flagged.
+
+**The job.** Every revision (generated, your edit, a footer change) enqueues
+`check_grounding:<draft id>:<rev>` in the same transaction: on the interactive lane for an edit
+and a Step 1, on the bulk lane for a footer change. The job never asks the AI budget (the
+grounding routes are `essential`), and a timeout or an unreachable API is recorded as a `fail`,
+not retried; there is no recheck button yet.
+
+**The routes.** `grounding_check` runs on `claude-haiku-5-5` under the pinned Sales Playbook. A
+refused, invalid or truncated Haiku answer runs once more on `grounding_check_fallback`
+(`claude-opus-5-5`, with the server-side refusal fallbacks). Neither is ever bootstrap-activated:
+each serves only once its tuple passes the Grounding set (the 49 cases in
+`tests/ai_sets/grounding/`, which the fallback runs too) and is activated. Until then every
+revision fails with `checker_unavailable`.
+
+**What it reads.** One Lead per call: the Step number and Market, the subject and body (no
+signature or footer), the revision's cited Evidence and fact versions, and the earlier Steps'
+current text, each as an `<untrusted>` block. No Settings value, email address or phone number
+is added. A Contact that may no longer be reached (suppressed, Lead lost, erased) gets no call
+and a `checker_unavailable` fail.
+
+**The result.** The answer lists every claim (span, cited Evidence or fact, supported or not)
+and any of six banned patterns (`fake_familiarity`, `false_urgency`, `competitor_claim`,
+`two_calls_to_action`, `deceptive_subject`, `repeats_earlier_step`). A claim citing nothing is
+`uncited_claim`, an unsupported one `unsupported_claim`. The claims then re-run the grounding
+rules, so a claim citing Evidence outside the revision's set is `citation_outside_set`. The
+stored flags are the rules' first, then the AI's, each with its `source` (`rules` or `ai`); the
+row records the tuple that served, the model that answered and `ai_checked_at`. The database
+refuses a `pass` without them. A second run of the same job changes nothing. A result for an
+older revision stays on that revision. Erasure also turns the AI flags' explanations into
+`[erased]`.
+
+**On the Lead page** each Draft shows a **Grounding** badge for its current revision (`pass`,
+`fail` or `pending`) and, for `fail`, each flag's code, the flagged words highlighted and the
+explanation.
 
 ## Leads list and Lead page
 

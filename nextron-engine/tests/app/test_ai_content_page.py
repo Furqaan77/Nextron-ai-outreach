@@ -50,6 +50,16 @@ from tests.dashboard import FORM, TEST_PLAYBOOK, Dashboard
 from tests.fakes.clock import DEFAULT_NOW, FrozenClock
 
 ROUTES = ("extract_people", "extract_signals", "signal_inbox_parse")
+
+
+def extraction_prompts() -> tuple[Any, Any]:
+    """The extraction routes' shipped prompts and defaults (Story 4.14's grounding routes are
+    tested in ``tests/app/test_ai_grounding.py``)."""
+    files, defaults = main.load_prompts()
+    return (
+        tuple(f for f in files if f.route in ROUTES),
+        tuple(s for s in defaults if s.route in ROUTES),
+    )
 PROBE = "draft_probe"  # a Playbook route that only these tests define
 MARKER = "PlaybookTextMarker"
 EDITED = f"---\nversion: 0.3.0\n---\n\n{MARKER}: an edited Playbook.\n"
@@ -58,7 +68,7 @@ Loaded = tuple[tuple[PromptFile, ...], tuple[RouteSpec, ...], PlaybookSnapshot |
 
 def loader(playbook: PlaybookSnapshot | PlaybookProblem) -> Callable[[], Loaded]:
     def load() -> Loaded:
-        files, defaults = main.load_prompts()
+        files, defaults = extraction_prompts()
         return files, defaults, playbook
 
     return load
@@ -95,7 +105,7 @@ def counts(units: UnitOfWorkFactory) -> tuple[int, int, int, int]:
 
 
 def startup_sync(units: UnitOfWorkFactory, playbook: PlaybookSnapshot | PlaybookProblem) -> None:
-    files, defaults = main.load_prompts()
+    files, defaults = extraction_prompts()
     with units.open():
         Playbook(FrozenClock()).sync_prompts(files, defaults, playbook)
 
@@ -164,7 +174,7 @@ def test_a_candidate_is_listed_with_its_fields_and_created_time(
     units: UnitOfWorkFactory,
 ) -> None:
     startup_sync(units, read_playbook(TEST_PLAYBOOK.encode("utf-8")))
-    files, defaults = main.load_prompts()
+    files, defaults = extraction_prompts()
     changed = tuple(
         dataclasses.replace(s, effort=Effort.HIGH) if s.route == "extract_people" else s
         for s in defaults
@@ -192,7 +202,7 @@ def test_a_playbook_route_shows_its_tested_tuple_and_a_playbook_candidate(
 ) -> None:
     first = read_playbook(TEST_PLAYBOOK.encode("utf-8"))
     edited = read_playbook(EDITED.encode("utf-8"))
-    files, defaults = main.load_prompts()
+    files, defaults = extraction_prompts()
     probe_file = PromptFile(PROBE, "v1", "Draft one email for the Lead.")
     probe_spec = RouteSpec(PROBE, "claude-opus-5-5", Effort.HIGH, "v1", 1, uses_playbook=True)
     with units.open():
@@ -289,11 +299,11 @@ def test_a_check_syncs_and_renders_the_panel_with_its_notice(units: UnitOfWorkFa
     assert reply.text.startswith('<div id="ai-content-panel">')
     assert "<html" not in reply.text
     assert (
-        '<p class="notice" role="status">Checked for changes: 3 new candidate tuples. Stored '
-        f"Sales Playbook version 9.9.9-test ({pinned.sha256[:12]}). Queued 3 test runs.</p>"
-    ) in reply.text  # Story 4.5: each new tuple's paid test run is announced
+        '<p class="notice" role="status">Checked for changes: 5 new candidate tuples. Stored '
+        f"Sales Playbook version 9.9.9-test ({pinned.sha256[:12]}). Queued 5 test runs.</p>"
+    ) in reply.text  # Story 4.5: each new tuple's paid test run is announced (4.14: grounding)
     assert 'role="alert"' not in reply.text
-    assert counts(units) == (1, 3, 1, 3)
+    assert counts(units) == (1, 5, 1, 3)  # the grounding tuples are never bootstrap-activated
     assert "with Check for changes: read without a problem." in texts(reply.text)
 
 
@@ -305,7 +315,7 @@ def test_a_second_check_with_nothing_changed_says_so(units: UnitOfWorkFactory) -
 
     assert "Checked for changes: 0 new candidate tuples.</p>" in reply.text
     assert "Stored Sales Playbook" not in reply.text
-    assert counts(units) == (1, 3, 2, 3)
+    assert counts(units) == (1, 5, 2, 3)
 
 
 def test_a_check_of_an_edited_playbook_stores_it(units: UnitOfWorkFactory) -> None:
@@ -386,7 +396,7 @@ def test_a_rewritten_prompt_found_in_the_sync_stores_nothing(units: UnitOfWorkFa
     startup_sync(units, read_playbook(TEST_PLAYBOOK.encode("utf-8")))
 
     def rewritten() -> Loaded:
-        files, defaults = main.load_prompts()
+        files, defaults = extraction_prompts()
         changed = tuple(
             PromptFile(f.route, f.version, f.text + "\nEdited.") if f.route == "extract_people"
             else f
@@ -613,7 +623,7 @@ def newer_people_tuple(units: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
     high = dataclasses.replace(default, effort=Effort.HIGH)
     changed = {**routes.CANDIDATES, "extract_people": (default, high)}
     monkeypatch.setattr(routes, "CANDIDATES", MappingProxyType(changed))
-    files, defaults = main.load_prompts()
+    files, defaults = extraction_prompts()
     high = tuple(
         dataclasses.replace(spec, effort=Effort.HIGH) if spec.route == "extract_people" else spec
         for spec in defaults
@@ -745,14 +755,18 @@ def test_check_for_changes_queues_a_run_of_each_tuple_without_one(
             sql("SELECT idempotency_key FROM jobs WHERE type = 'run_ai_test_sets'")
         ).scalars().all()
     assert sorted(keys) == sorted(
-        f"run_ai_test_sets:{tuple_id_of(units, route)}:extraction" for route in ROUTES
+        [f"run_ai_test_sets:{tuple_id_of(units, route)}:extraction" for route in ROUTES]
+        + [  # Story 4.14: both grounding tuples run the Grounding set
+            f"run_ai_test_sets:{tuple_id_of(units, route)}:grounding"
+            for route in ("grounding_check", "grounding_check_fallback")
+        ]
     )
     check(dashboard)  # the live jobs absorb a second check
     with units.open(read_only=True) as unit:
         again = unit.session.execute(
             sql("SELECT COUNT(*) FROM jobs WHERE type = 'run_ai_test_sets'")
         ).scalar_one()
-    assert again == 3
+    assert again == 5
 
 
 def test_the_health_panel_shows_a_failed_active_tuple(units: UnitOfWorkFactory) -> None:

@@ -2436,7 +2436,8 @@ def create_app(
 
     def lead_drafts(lead_id: str) -> tuple[lead_rows.DraftSource, ...]:
         """What the Lead page's Drafts section shows of each Draft of the Lead's Enrollments
-        (Story 4.12), oldest Enrollment first, each by Step."""
+        (Story 4.12), oldest Enrollment first, each by Step, with its current revision's
+        grounding result (Story 4.14)."""
         settings = setup_queries.footer_settings()
         found: list[lead_rows.DraftSource] = []
         for enrollment in sequencing_queries.enrollments_of_lead(lead_id):
@@ -2465,6 +2466,9 @@ def create_app(
                         footer,
                         None if erased or contact is None else contact.email,
                         check,
+                        None
+                        if current is None
+                        else drafting_queries.grounding_result(draft.id, current.rev),
                     )
                 )
         return tuple(found)

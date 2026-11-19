@@ -33,7 +33,10 @@ text. The file is an object with exactly ``id``, ``set``, ``route``, ``input``, 
 - ``id`` is the file's stem, fullmatches ``CASE_KEY_PATTERN`` and never starts with
   ``override-`` (``OVERRIDE_PREFIX``, the Operator's override cases);
 - ``set`` is the folder's set and ``route`` the set's case route (``CASE_ROUTES``):
-  ``classify_reply``, ``grounding_check`` or ``draft_sequence``;
+  ``classify_reply``, ``grounding_check`` or ``draft_sequence``. ``case_route(route)`` (Story
+  4.14) is the route whose cases a route's runs read: its set's case route, so the Opus
+  ``grounding_check_fallback`` is gated on the ``grounding_check`` cases; an extraction route
+  (or a route of no set) is its own;
 - every text is a non-empty string that encodes as UTF-8; every date is ISO ``YYYY-MM-DD``;
 - every block and Evidence item has a ``source`` and ``id`` that ``UntrustedBlock`` accepts
   (``nextron.domain.ai_test_cases.check_block_fields``); the ids of a case's blocks, Evidence
@@ -143,7 +146,7 @@ from nextron.domain.ai_test_cases import (
     TestCase,
     check_block_fields,
 )
-from nextron.domain.ai_test_gate import MIN_CASES, GroundingCase, TestSet
+from nextron.domain.ai_test_gate import MIN_CASES, ROUTE_SETS, GroundingCase, TestSet
 from nextron.domain.company_facts import FACT_ID_PATTERN
 from nextron.domain.grounding_rules import RULE_IDS
 from nextron.domain.reply_classes import ObjectionType, ReplyClass
@@ -159,6 +162,16 @@ CASE_ROUTES: Final[Mapping[TestSet, str]] = MappingProxyType(
         TestSet.DRAFTING_SMOKE: DRAFT_SEQUENCE,
     }
 )
+
+
+def case_route(route: str) -> str:
+    """The route whose cases ``route`` is gated on (Story 4.14): its set's case route
+    (``CASE_ROUTES``), so ``grounding_check_fallback`` runs the ``grounding_check`` cases; a
+    route of a set without one (extraction) or of no set is its own."""
+    test_set = ROUTE_SETS.get(route)
+    return route if test_set is None else CASE_ROUTES.get(test_set, route)
+
+
 ENVELOPE_FIELDS: Final = frozenset({"id", "set", "route", "input", "expected", "covers"})
 DATE_PATTERN: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")  # a Segment or Signal type key
