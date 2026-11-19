@@ -147,6 +147,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
     assert [route.path for route in app.routes] == [
         "/enter",
         "/",
+        "/queue",  # Story 5.1
         "/health",
         "/static/{name}",
         "/settings",
@@ -746,6 +747,7 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "macros.html",
         "notifications.html",
         "pipeline.html",
+        "queue.html",
         "quotas.html",
         "segment.html",
         "segment_form.html",

@@ -729,6 +729,7 @@ def test_the_locked_page_carries_no_csrf_token(dashboard: Dashboard) -> None:
 
 def test_the_nav_lists_only_the_sections_that_exist(dashboard: Dashboard) -> None:
     assert home_page(dashboard).nav_links == [
+        ("/queue", "Queue"),  # Story 5.1
         ("/signals", "Signal Inbox"),  # Story 2.16
         ("/leads", "Leads/Pipeline"),
         ("/settings", "Settings"),
@@ -743,16 +744,33 @@ def test_the_nav_lists_existing_sections_in_order(dashboard: Dashboard) -> None:
     def section() -> PlainTextResponse:
         return PlainTextResponse("section")
 
-    # added out of order (Signal Inbox, Leads/Pipeline, Settings and Health are the real pages);
-    # a POST-only route and an unknown name don't count
-    app.add_api_route("/queue", section, methods=["POST"], name="queue_page")
-    app.add_api_route("/other", section, methods=["GET"], name="other_page")
+    # added out of order (Queue, Signal Inbox, Leads/Pipeline, Settings and Health are the real
+    # pages); an unknown name doesn't count
     app.add_api_route("/funnel", section, methods=["GET"], name="funnel_page")
+    app.add_api_route("/other", section, methods=["GET"], name="other_page")
 
     assert home_page(dashboard).nav_links == [
+        ("/queue", "Queue"),
         ("/signals", "Signal Inbox"),
         ("/leads", "Leads/Pipeline"),
         ("/funnel", "Funnel"),
+        ("/settings", "Settings"),
+        ("/health/panel", "Health"),
+    ]
+
+
+def test_a_post_only_section_route_is_not_listed(dashboard: Dashboard) -> None:
+    @personal_data(False)
+    def section() -> PlainTextResponse:
+        return PlainTextResponse("section")
+
+    dashboard.app.add_api_route("/funnel", section, methods=["POST"], name="funnel_page")
+
+    assert ("/funnel", "Funnel") not in home_page(dashboard).nav_links
+    assert home_page(dashboard).nav_links == [
+        ("/queue", "Queue"),
+        ("/signals", "Signal Inbox"),
+        ("/leads", "Leads/Pipeline"),
         ("/settings", "Settings"),
         ("/health/panel", "Health"),
     ]

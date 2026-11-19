@@ -573,6 +573,7 @@ class Dashboard:
             discovery=self.discovery,
             sequencing=self.sequencing,
             units=self.units,
+            now=self.clock.now,
             **extra,
         )
 

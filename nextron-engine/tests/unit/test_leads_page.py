@@ -1503,6 +1503,7 @@ def test_the_nav_links_the_leads_list(world: World) -> None:
     nav = page.find("nav", **{"aria-label": "Sections"})
     links = [(a.attrs["href"], a.text) for a in nav.find_all("a")]
     assert links == [
+        ("/queue", "Queue"),  # Story 5.1
         ("/signals", "Signal Inbox"),  # Story 2.16
         ("/leads", "Leads/Pipeline"),
         ("/settings", "Settings"),

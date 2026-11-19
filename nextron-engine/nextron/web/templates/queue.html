@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{#- The Approval Queue (nextron.web.queue_page, Story 5.1): the session's elapsed time, the group
+    headers with their counts, one focused card ("k of N") with plain GET links to the previous
+    and next cards, and the Held back list. With no card: "Queue clear" and the next due time,
+    or "Nothing scheduled". A card's Lead and Contact details come from imported or crawled text
+    and its message is AI-written: the card and the Held back list (prospect, crawled and AI
+    text) render through |plain inside hx-disable; the headers, the position nav and the empty
+    state carry engine text only. The page holds no form and no action. The away banner
+    (away_banner.html, Story 5.11) shows above the groups. -#}
+{% block title %}Nextron: Queue{% endblock %}
+{% block content %}
+<h1>Approval Queue</h1>
+{%- if elapsed %}
+<p class="queue-elapsed">Session time: {{ elapsed|plain }}</p>
+{%- endif %}
+{% include "away_banner.html" %}
+<ul class="queue-groups" aria-label="Queue groups">
+{%- for group in groups %}
+<li class="queue-group" data-group="{{ group.key|plain }}">{{ group.label|plain }} <span class="queue-count">({{ group.count }})</span></li>
+{%- endfor %}
+</ul>
+{%- if card %}
+<nav class="queue-position" aria-label="Cards">
+{%- if previous_href %}
+<a class="queue-previous" href="{{ previous_href|plain }}">Previous</a>
+{%- endif %}
+<span class="queue-n-of-n">{{ position|plain }}</span>
+{%- if next_href %}
+<a class="queue-next" href="{{ next_href|plain }}">Next</a>
+{%- endif %}
+</nav>
+<article class="queue-card" data-draft="{{ card.draft_id|plain }}" hx-disable>
+<h2>{{ card.lead_name|plain }}</h2>
+<dl class="queue-card-facts">
+<dt>Draft</dt>
+<dd>{{ card.kind|plain }}{% if card.step %}: {{ card.step|plain }}{% endif %}</dd>
+<dt>Segment</dt>
+<dd>{{ card.segment|plain }}</dd>
+<dt>Market</dt>
+<dd>{{ card.market|plain }}</dd>
+<dt>Tier</dt>
+<dd>{{ card.tier|plain }}</dd>
+<dt>Lead Score</dt>
+<dd>{{ card.score|plain }}</dd>
+<dt>Contact</dt>
+<dd>{{ card.contact_name|plain }}</dd>
+<dt>Role</dt>
+<dd>{{ card.contact_role|plain }}</dd>
+<dt>Address Class</dt>
+<dd>{{ card.address_class|plain }}</dd>
+</dl>
+{%- if card.blocked %}
+<p class="draft-blocked" role="alert">{{ card.blocked|plain }}</p>
+{%- endif %}
+{%- if card.message %}
+<div class="draft-message">
+<p class="draft-to">To: {{ card.message.to_address|plain }}</p>
+<p class="draft-subject">Subject: {{ card.message.subject|plain }}</p>
+<pre class="draft-body">{{ card.message.body|plain }}</pre>
+</div>
+{%- else %}
+<p class="draft-no-text">No text yet</p>
+{%- endif %}
+</article>
+{%- else %}
+<section class="queue-empty">
+<p class="queue-clear">Queue clear</p>
+<p class="queue-next-due">{% if next_due %}Next due: {{ next_due|plain }}{% else %}{{ nothing_scheduled|plain }}{% endif %}</p>
+</section>
+{%- endif %}
+<section class="queue-held-back" aria-labelledby="held-back-heading" hx-disable>
+<h2 id="held-back-heading">Held back</h2>
+{%- if held_back %}
+<ul>
+{%- for held in held_back %}
+<li class="held-back-row"><span class="held-back-name">{{ held.name|plain }}</span>: {% for reason in held.reasons %}{% if not loop.first %}, {% endif %}<span class="held-back-reason">{{ reason|plain }}</span>{% endfor %}</li>
+{%- endfor %}
+</ul>
+{%- else %}
+<p>Nothing held back.</p>
+{%- endif %}
+</section>
+{% endblock %}

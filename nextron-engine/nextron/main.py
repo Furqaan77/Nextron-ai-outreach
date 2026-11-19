@@ -1593,6 +1593,7 @@ def build_app(
         sequencing=sequencing,  # Story 6.9: the Lead page's Stop Sequence
         units=units,
         discovery_topup=discovery_topup,
+        now=clock.now,  # Story 5.1: the Approval Queue and each session's start
         lifespan=engine_lifespan(
             runner,
             scheduler,

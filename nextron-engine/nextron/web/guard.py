@@ -53,7 +53,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nextron.web.csrf import CSRF_SCOPE_KEY, SECURITY_CHECK_FAILED
 from nextron.web.routing import declared_personal_data
-from nextron.web.sessions import SESSION_COOKIE, SessionStore
+from nextron.web.sessions import SessionStore, session_cookie_values
 
 ENTER_PATH: Final = "/enter"
 CONTENT_SECURITY_POLICY: Final = (
@@ -153,12 +153,10 @@ class Guard:
         """The CSRF token of the first ``nextron_session`` cookie value that names a live
         session; ``None`` when none does."""
         for header in _header_values(scope, b"cookie"):
-            for pair in header.decode("latin-1").split(";"):
-                name, separator, value = pair.partition("=")
-                if separator and name.strip() == SESSION_COOKIE:
-                    csrf_token = self.sessions.csrf_token(value.strip())
-                    if csrf_token is not None:
-                        return csrf_token
+            for value in session_cookie_values(header.decode("latin-1")):
+                csrf_token = self.sessions.csrf_token(value)
+                if csrf_token is not None:
+                    return csrf_token
         return None
 
     async def _http(self, scope: Scope, receive: Receive, send: Send) -> None:

@@ -560,3 +560,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-15-draft-step-1-with-opus-from-evidence-and-facts.md`
   summary: Mask (or refuse) email addresses and phone numbers in the route system prompt and the pinned Playbook snapshot text as well, so a future Playbook edit can't put one into a drafting prompt.
   evidence: Story 4.15 review pass 1 (EC9, low). Only framing and untrusted blocks pass through `mask_contact_details`; today's `docs/playbook/sales-playbook.md` holds none.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
+  summary: Give the queue's focused card a stable target (for example `?draft=<id>` falling back to `?card=k`) before the approve/edit/reject/skip stories post decisions from it, so a queue that changed between loads never applies a decision to a different Draft than the one shown.
+  evidence: Review pass 1 of Story 5.1 (BH3, low). `/queue?card=k` picks the k-th card of the current build; a Draft becoming due or held back between loads shifts positions. Harmless while the page has no actions.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
+  summary: Decide whether responsive Drafts (reply, rebook, channel) in the queue are checked with cold-email Eligibility (Not Now, FR-63 re-contact, Market cold rules) or only with `assert_contactable` for a reply purpose; today `due_queue` applies `Compliance.evaluate_eligibility` (cold) to every Draft, so a Reply to a Lead marked Not Now would be held back.
+  evidence: Review pass 1 of Story 5.1 (VG other, unverified medium). No reply Draft exists before Epic 7; the Epic 7 story that writes reply Drafts should settle it.
