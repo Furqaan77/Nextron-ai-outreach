@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{#- The Lead page (nextron.web.leads_page): the header facts, the Score panel (lead_score.html,
+{#- The Lead page (nextron.web.leads_page): the header facts, the tab bar
+    (lead_tabs.html, Story 9.8: Overview and History), the Score panel (lead_score.html,
     Story 2.15: the Tier, the scores and their factors, and the "Re-score" form), a GB Lead's
     legal form (lead_legal_form.html, Story 2.12), the Pipeline panel (lead_pipeline.html, Story
     9.1: the Operator's moves, the call booking and the deal value and notes), the Signals, the
@@ -33,6 +34,7 @@
 <dd>{{ lead.created }}</dd>
 </dl>
 </header>
+{% include "lead_tabs.html" %}
 {% include "lead_score.html" %}
 {%- if legal_form %}
 {% include "lead_legal_form.html" %}

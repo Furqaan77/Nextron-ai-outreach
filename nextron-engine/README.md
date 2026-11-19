@@ -3049,6 +3049,23 @@ Offer's price and scope before the next Variant". The report is computed at each
 step or name, so it declares no personal data. The report body (`calls_report_panel.html`) is
 its own template, for Epic 11's Funnel to include.
 
+**A Lead's History tab (`/leads/<id>/history`, Story 9.8, FR-46, FR-51, UX-DR17).** Under the
+Lead's name, both the Lead page and its history show two tabs, **Overview** and **History**. The
+History tab is one timeline, newest first, 100 entries per page, of everything that happened with
+the Lead and every Lead merged into it: each `events` row about the Lead or about any row linked
+to it by foreign keys (found generically from the models, so later tables such as Drafts,
+Enrollments, messages and Replies appear without code changes), each change of a suppression
+entry matching a key of its Contacts or web domain, or written by one of its Contacts' data
+subject requests (its kind and source only, never a hash or value), and entries derived from rows that have no events: Contacts added (with their Provenance
+source), Evidence added, superseded and retracted, and Signals added, expired and retracted.
+Each row shows when, the type, the change (from → to, stage labels for stage changes), the
+cause, who acted (Operator, Sender, Engine (<owner>), AI (<route>)), the Contact's stored name
+("[erased]" once erased) and any detail: Evidence text with a link to its source, a link to the
+Lead page's Contacts or Pipeline section. Filter with **All**, **Messages**, **Drafts**, **Stage
+changes**, **Evidence and Signals** and **Calls** (`?type=`); the pager keeps the filter. A merged
+Lead redirects to its survivor's history. An unknown parameter, a repeated one, an unknown type or
+a bad page answers 400. The page only reads (`nextron.app.analytics.history`) and writes nothing.
+
 **The Lead page (`/leads/<id>`, UX-DR17).** The header shows the Lead's name, its website (a link
 to `https://<domain>/`, or "No website on record"), Segment, country, Pipeline Stage and created
 date, with a link back to **All Leads**. **Contacts** lists every Contact, oldest first, with its

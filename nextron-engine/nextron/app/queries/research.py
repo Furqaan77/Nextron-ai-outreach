@@ -45,6 +45,9 @@ Lead: empty, or ``None``):
   ``first_seen_at``, then ``id``.
 - ``evidence(lead_id)``: the Lead's live Evidence (neither superseded nor retracted), as
   ``StoredEvidence`` rows (``pages_checked`` a tuple of URLs), oldest first.
+- ``all_evidence(lead_id)`` and ``all_signals(lead_id)`` (Story 9.8): every Evidence row and
+  every Signal of the Lead, superseded or retracted ones included, in the same orders; a Lead's
+  history reads them.
 - ``hq_tz(lead_id)``: the Lead's headquarters zone, or ``None``.
 - ``last_ok_extraction(lead_id)``: the Lead's ``ok`` ``extract_signals`` run started last, as
   a ``StoredExtractionRun``, or ``None``; ``extraction_runs(lead_id)``: every run (of every
@@ -160,6 +163,8 @@ __all__ = [
     "StoredPage",
     "StoredProvenance",
     "StoredSignal",
+    "all_evidence",
+    "all_signals",
     "ats_links",
     "contact",
     "contact_methods",
@@ -351,6 +356,16 @@ def other_contacts_with_keys(contact_id: str, keys: Iterable[SuppressionKey]) ->
         if any((key.kind, key.value_hash) in wanted for key in theirs):
             found.append(other.id)
     return tuple(sorted(found))
+
+
+def all_evidence(lead_id: str) -> tuple[StoredEvidence, ...]:
+    """Every Evidence row of the Lead, superseded and retracted ones included, oldest first."""
+    return signals_repo.evidence(lead_id, live_only=False) if is_ulid(lead_id) else ()
+
+
+def all_signals(lead_id: str) -> tuple[StoredSignal, ...]:
+    """Every Signal of the Lead, retracted ones included, first seen first."""
+    return signals_repo.signals(lead_id, current_only=False) if is_ulid(lead_id) else ()
 
 
 def hq_tz(lead_id: str) -> str | None:

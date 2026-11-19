@@ -407,6 +407,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-8-3-turn-places-candidates-into-deduplicated-contactable-leads.md`
   summary: A `discover_places` job the quota keeps refusing re-runs every hour and writes a new zero-count `deferred` `discovery_runs` row each time, until the monthly quota resets, which can push real runs off the Discovery page's 20 recent rows.
   evidence: Story 8.3 review pass 1 (blind #1). The runner's `DEFER_DELAY` is 1 h and `_start` inserts a run row before the first page's budget check. Story 8.1 (deferred handling, "Discovery stopped: quota reached" health issue) should hold such jobs or reuse the last deferred row.
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-8-show-each-lead-s-complete-history.md`
+  summary: When the messaging, drafting and call-prep tables reach this tree, give the History tab their richer per-type detail: a sent message's text from the OM copy with its inbox label and Step, a Reply's class and class source, a Bounce's class, a Draft's rejection reason, Call Prep Sheet revisions, and links to the Draft or Thread. Their status changes already show generically (entity label, from → to, cause, actor) through the foreign-key lineage.
+  evidence: Story 9.8 overnight decision 5. `outbound_messages`, `threads`, `replies`, `bounces`, `drafts`, `draft_revisions` and `call_preps` aren't in this tree; the categories and labels for them are already in `nextron/domain/lead_history.py` (`ENTITY_TYPES`, `ENTITY_LABELS`).
 - source_spec: `_bmad-output/implementation-artifacts/spec-9-1-move-leads-through-the-later-pipeline-stages-by-hand-with-de.md`
   summary: When `drafts` (and Story 4.8's `enrollments`) reach this tree, make `Pipeline.close` (lost or disqualified, by hand or by an opt-out) cancel the Lead's pending Drafts and stop its `active`/`paused` Enrollments with cause `lead_closed` in the same transaction (AD-4); Story 4.8's Enrollment stop joins `close` at merge.
   evidence: Story 9.1 overnight decision 1. Neither table is in this tree; `close` keeps main's signature `close(lead_id, stage, cause_ref, *, cause=None, actor=None)` so the merge only adds the stops. AD-16 already blocks a closed Lead (`eligibility` reason `lead_closed`).
@@ -451,3 +454,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-9-6-report-offer-validation-after-the-first-10-held-calls.md`
   summary: The Calls report can miss an accepted audit recorded under a merged Lead when the merge didn't change the survivor's stage, because no `leads_merged` events row then links the two Leads.
   evidence: `Pipeline.reparent_lead` appends its `leads_merged` row only on a stage change; 9.6 may read only `call_outcomes` and `events`, so the link would need either an always-written merge event or permission to read `leads.merged_into` (rare: needs two records of one organization both past a held call).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-9-8-show-each-lead-s-complete-history.md`
+  summary: Check the History tab's cost on a large Lead: each view reads every linked events row and row-derived entry, sorts in memory and slices 100, and the events query nests an IN subquery per foreign-key path (incl. crawl tables with no events); bound parameters grow with merged Leads x paths.
+  evidence: Story 9.8 review triage #9/#21, maybe-false (medium if true). Settle it with a timing run on a Lead with thousands of events, many crawled pages and several merged Leads; a fix could limit the linked tables to entities present in `events` or page in SQL.

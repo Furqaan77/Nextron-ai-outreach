@@ -1,0 +1,10 @@
+{#- The Lead page's tab bar (nextron.web.history_page.lead_tabs, Story 9.8): Overview and History,
+    the shown one marked aria-current. Included under the Lead's name on lead.html and
+    lead_history.html. -#}
+{%- if tabs %}
+<nav class="lead-tabs" aria-label="Lead sections">
+{%- for tab in tabs %}
+<a href="{{ tab.href }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.label }}</a>
+{%- endfor %}
+</nav>
+{%- endif %}

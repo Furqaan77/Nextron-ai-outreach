@@ -23,6 +23,14 @@ entry is a ``ListedEntry`` (``id``, ``kind``, ``value_hash``, ``domain_plain``, 
   ``keys`` that have an ``active`` entry, as a ``frozenset``; a voided entry isn't active. An
   item that isn't a ``SuppressionKey`` raises ``TypeError`` before anything is read.
   ``compliance.assert_contactable`` passes it ``nextron.domain.contactability.lookup_keys``.
+- ``matching(keys)`` (Story 9.8): every entry, ``active`` or ``voided``, whose (``kind``,
+  ``value_hash``) is that of one of the ``SuppressionKey`` items in ``keys``, oldest first (by
+  ``created_at``, then ``id``); an item that isn't a ``SuppressionKey`` raises ``TypeError``
+  before anything is read. A Lead's history reads it for the keys of its Contacts and domain.
+- ``caused_by_requests(contact_ids)`` (Story 9.8): every entry, ``active`` or ``voided``, whose
+  ``cause_ref`` is the id of a data subject request of one of ``contact_ids`` (a DSR's own
+  entries, whose person keys can't be derived once the Contact is erased), oldest first; an id
+  that isn't a ULID is ignored.
 - ``newest_unsub_token(kid) -> datetime | None``: when the newest unsubscribe token under
   ``kid`` was issued, or ``None`` when ``kid`` has none (Story 3.8).
 - ``newest_unsub_tokens() -> Mapping[int, datetime]``: the same for every kid with a token, by
@@ -133,12 +141,14 @@ __all__ = [
     "UnsubPollStatus",
     "active_entry",
     "active_keys",
+    "caused_by_requests",
     "completed_erasures",
     "entries",
     "entry_list",
     "export_pii",
     "health_issues",
     "ledger_health_issues",
+    "matching",
     "newest_unsub_token",
     "newest_unsub_tokens",
     "open_request",
@@ -247,6 +257,23 @@ def active_keys(keys: Iterable[SuppressionKey]) -> frozenset[tuple[str, str]]:
         if pair not in pairs:
             pairs.append(pair)
     return frozenset(pair for pair in pairs if entries_repo.active_for(*pair) is not None)
+
+
+def matching(keys: Iterable[SuppressionKey]) -> tuple[ListedEntry, ...]:
+    """Every entry, of any status, of one of ``keys``, oldest first."""
+    pairs: set[tuple[str, str]] = set()
+    for key in keys:
+        if not isinstance(key, SuppressionKey):
+            raise TypeError(f"matching takes SuppressionKey items, not {type(key).__name__}")
+        pairs.add((str(key.kind), key.value_hash))
+    return entries_repo.matching(pairs)
+
+
+def caused_by_requests(contact_ids: Iterable[str]) -> tuple[ListedEntry, ...]:
+    """Every entry, of any status, caused by a data subject request of one of ``contact_ids``,
+    oldest first."""
+    wanted = [contact_id for contact_id in contact_ids if is_ulid(contact_id)]
+    return entries_repo.for_cause_refs(requests_repo.ids_for_contacts(wanted))
 
 
 def newest_unsub_token(kid: int) -> datetime | None:

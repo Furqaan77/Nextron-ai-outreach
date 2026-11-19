@@ -230,6 +230,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/revoke",
         "/leads/{lead_id}/contacts/{contact_id}/permissions/{permission_id}/do-not-contact",
         "/leads/{lead_id}",
+        "/leads/{lead_id}/history",  # Story 9.8
         "/leads/{lead_id}/rescore",
         "/leads/{lead_id}/stage",  # Story 9.1
         "/leads/{lead_id}/call",
@@ -723,12 +724,14 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "lead_call_outcome.html",
         "lead_contacts.html",
         "lead_drafts.html",  # Story 4.12
+        "lead_history.html",
         "lead_import.html",
         "lead_import_form.html",
         "lead_legal_form.html",
         "lead_missing.html",
         "lead_pipeline.html",
         "lead_score.html",
+        "lead_tabs.html",
         "leads.html",
         "leads_ready.html",
         "leads_ready_list.html",

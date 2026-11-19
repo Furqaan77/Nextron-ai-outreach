@@ -21,6 +21,10 @@ the running use case's transaction. It checks nothing; ``nextron.app.compliance`
   ``void_reason``: never its id, hash, domain or cause), by ``created_at``, then ``id``;
   ``all_for_ledger()`` (Story 3.16), every row, by ``created_at``, then ``id``;
   ``voided_for_ledger()``, every ``voided`` row, by ``voided_at``, then ``id``;
+  ``matching(pairs)`` (Story 9.8), every row, ``active`` or ``voided``, whose (``kind``,
+  ``value_hash``) is one of ``pairs``, as ``ListedEntry`` rows by ``created_at``, then ``id``;
+  ``for_cause_refs(cause_refs)`` (Story 9.8), every row, ``active`` or ``voided``, whose
+  ``cause_ref`` is in ``cause_refs``, as ``ListedEntry`` rows by ``created_at``, then ``id``;
 - the writers: ``insert(...) -> id``, a new ``active`` row; ``void(entry_id, voided_at,
   void_reason) -> bool``, which sets one ``active`` row ``voided`` with its time and reason
   (``UPDATE ... WHERE id = ? AND status = 'active'``) and says whether it did;
@@ -168,6 +172,34 @@ def by_ids(ids: Collection[str]) -> tuple[ListedEntry, ...]:
     if not ids:
         return ()
     statement = select(*_LISTED_COLUMNS).where(SuppressionEntryRecord.id.in_(list(ids)))
+    return tuple(ListedEntry(*row) for row in current().session.execute(statement))
+
+
+def matching(pairs: Collection[tuple[str, str]]) -> tuple[ListedEntry, ...]:
+    """Every entry, of any status, whose (``kind``, ``value_hash``) is one of ``pairs``,
+    oldest first (by ``created_at``, then ``id``)."""
+    wanted = set(pairs)
+    if not wanted:
+        return ()
+    statement = (
+        select(*_LISTED_COLUMNS)
+        .where(SuppressionEntryRecord.value_hash.in_(sorted({value for _, value in wanted})))
+        .order_by(SuppressionEntryRecord.created_at, SuppressionEntryRecord.id)
+    )
+    rows = (ListedEntry(*row) for row in current().session.execute(statement))
+    return tuple(row for row in rows if (row.kind, row.value_hash) in wanted)
+
+
+def for_cause_refs(cause_refs: Collection[str]) -> tuple[ListedEntry, ...]:
+    """Every entry, of any status, whose ``cause_ref`` is in ``cause_refs``, oldest first (by
+    ``created_at``, then ``id``)."""
+    if not cause_refs:
+        return ()
+    statement = (
+        select(*_LISTED_COLUMNS)
+        .where(SuppressionEntryRecord.cause_ref.in_(sorted(set(cause_refs))))
+        .order_by(SuppressionEntryRecord.created_at, SuppressionEntryRecord.id)
+    )
     return tuple(ListedEntry(*row) for row in current().session.execute(statement))
 
 

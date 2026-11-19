@@ -267,7 +267,8 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   per Contact (``export_page.lead_forms``, Story 3.15), and the Pipeline panel (Story 9.1,
   ``lead_pipeline.panel_context``) from ``queries.pipeline.lead_pipeline`` and, for its opt-out
   line, the suppression entry its latest close names (``queries.compliance.entries``). The list
-  also passes its ``sort`` to ``lead_list``.
+  also passes its ``sort`` to ``lead_list``. Under the Lead's name, the tab bar (Story 9.8,
+  ``history_page.lead_tabs``) links Overview and History.
 - ``GET /leads/ready`` (``ready_page``) and ``POST /leads/ready/pick`` (``ready_pick``), Story
   4.10, both ``@personal_data(True)`` and registered before ``/leads/{lead_id}``: the "Ready to
   draft" page (``leads_ready.html``; see ``nextron.web.ready_page``), from ``selection``
@@ -277,6 +278,12 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   own unit of work, then answers 200 with the list alone (``leads_ready_list.html``, read in a
   read-only unit of work) and one result row per picked Lead: "Enrolled" or "Refused: <plain
   reason>". The Leads list links to the page; the navigation is unchanged.
+- ``GET /leads/{lead_id}/history`` (``lead_history_page``, ``@personal_data(True)``, Story 9.8):
+  a Lead's History tab; see ``nextron.web.history_page``. It reads its query string through
+  ``history_page.history_query`` (a bad one is ``MalformedForm``, 400), then, like the Lead
+  page, ``queries.discovery.survivor_of`` (404 ``lead_missing.html`` never echoing the id; a
+  merged Lead a 303 to ``/leads/<survivor id>/history``, keeping the query), then
+  ``lead_history.view`` (``nextron.app.analytics.history.LeadHistory``), which writes nothing.
 - ``POST /leads/{lead_id}/rescore`` (``lead_rescore``, Story 2.15, ``@personal_data(True)``):
   the Score panel's "Re-score". The form holds nothing but the CSRF token
   (``leads_page.submitted_rescore``). It runs ``lead_scores.request_rescore(lead_id)`` in its
@@ -418,6 +425,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.analytics.history import LeadHistory
 from nextron.app.analytics.offer import offer_validation
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
@@ -522,6 +530,7 @@ from nextron.web import export_page as export_rows
 from nextron.web import facts_page as fact_rows
 from nextron.web import google_page as google_rows
 from nextron.web import health_page as health_rows
+from nextron.web import history_page as history_rows
 from nextron.web import inboxes_page as inbox_rows
 from nextron.web import lead_import_page as import_rows
 from nextron.web import lead_pipeline as pipeline_rows
@@ -735,6 +744,7 @@ def create_app(
     lead_imports: LeadImports,
     sending: Sending,
     lead_signals: LeadSignals,
+    lead_history: LeadHistory,
     compliance: Compliance,
     primary_contacts: PrimaryContacts,
     pipeline: Pipeline,
@@ -766,7 +776,8 @@ def create_app(
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
-    page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
+    page its Signals, Evidence and headquarters zone, ``lead_history`` its History tab's
+    timeline (Story 9.8), ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
     answers 503) and ``lead_scores`` its "Re-score" (Story 2.15) and both "Re-score with the
     current definition" controls (Story 11.5); ``segment_editor`` creates and edits Segments
@@ -2819,7 +2830,24 @@ def create_app(
             **context,
             **pipeline_context(found.id, contacts),
             export_forms=export_rows.lead_forms(contacts),
+            tabs=history_rows.lead_tabs(found.id, history_rows.OVERVIEW),
         )
+
+    @app.get(history_rows.HISTORY_ROUTE, name="lead_history_page")
+    @personal_data(True)  # Contact names and Evidence quotes
+    def lead_history_page(request: Request, lead_id: str) -> Response:
+        query = history_rows.history_query(request.query_params.multi_items())
+        found = discovery_queries.survivor_of(lead_id)
+        if found is None:  # never echoes the id
+            return missing_lead(request)
+        if found.id != lead_id:
+            survivor = history_rows.history_href(found.id, query.type, query.page)
+            return RedirectResponse(survivor, status_code=303, headers=NO_STORE)
+        view = lead_history.view(found.id, type=query.type, page=query.page)
+        if view is None:  # the survivor was checked first
+            return missing_lead(request)
+        context = history_rows.history_context(view, found.name)
+        return page(request, history_rows.TEMPLATE, **context)
 
     @app.post("/leads/{lead_id}/rescore", name="lead_rescore")
     @personal_data(True)  # the Lead page's panel; a Lead's name can be a sole trader's name
