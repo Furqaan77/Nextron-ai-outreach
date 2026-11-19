@@ -544,3 +544,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-6-9-evaluate-the-closed-send-gate-including-stop-rules-before-ev.md`
   summary: The send gate now covers the deferred Story 4.12 item "a Draft composed with another Market's footer". `footer_complete` fails when the revision's footer snapshot is for another Market or differs from the current footer, and `hash_matches` fails when the recompute differs. The approval side (Epic 5) still has to check it.
   evidence: Story 6.9 overnight decision 6.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-11-pace-cold-sends-inside-send-windows-and-catch-up-without-bur.md`
+  summary: When the `repace_cold_sends` startup step fails, cold sending stops silently. Story 6.10 should add a health issue or alert for it, plus a built-startup test that asserts an inbox's `next_send_at` is set after process start.
+  evidence: `run_startup_steps` only logs `startup_step_failed`. `cold_paced` then refuses every stale `next_send_at` until the next restart. This fails closed, so there is no burst, but nothing tells anyone (review T2).
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-11-pace-cold-sends-inside-send-windows-and-catch-up-without-bur.md`
+  summary: Story 6.12 reconciliation must not call `Sending.record_cold_send` with a `sent_at` older than the stored `last_sent_at`, or with one from before process start, because that lowers pacing.
+  evidence: `record_cold_send` writes `last_sent_at = sent_at` and `next_send_at = sent_at + gap` unconditionally. A late or pre-restart `sent_at` moves both backwards, or stalls the inbox. Unverified (medium if 6.12 uses it this way): it depends on how 6.12 records confirmed sends (review T10).

@@ -569,6 +569,15 @@ first beat).
 Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
 external service.
 
+**Cold-send pacing (Story 6.11).** That one ``Sending`` is built before the startup steps, so
+its ``process_started_at`` is the engine's start. The lifespan's last startup step,
+``repace_cold_sends(units, sending)`` (after ``queue_test_runs``), runs
+``sending.repace_after_start()`` in a unit of work of its own (inside a fresh
+``contextvars.Context()``): each listed inbox's ``next_send_at`` becomes the later of its
+``last_sent_at`` and process start, plus a fresh 4 to 12 minute gap, so no burst follows a
+restart. If it fails, ``sending_policy.cold_paced`` still refuses every ``next_send_at`` not
+later than process start (fail closed).
+
 **Domain checks (Story 6.5; FR-64, NFR-4, NFR-20).** ``build_app(..., dns=None)`` builds one
 ``DnspythonDns(meter=meter)`` (``nextron.adapters.dns``) unless a ``dns=`` is injected; building
 it builds no resolver and reads no DNS configuration (its first query does). ``DomainChecks(clock,
@@ -604,7 +613,7 @@ included). Building the app starts nothing. Startup first runs the recovery step
 read or written), the server doesn't start: Uvicorn exits 3, and ``serve`` reports
 ``server_start_failed`` and exits 2, which fails closed. Next it runs the ``startup`` step
 (``run_startup_steps``: ``sync_erasure_ledger``, then ``queue_contact_markets``, then
-``queue_test_runs``) through
+``queue_test_runs``, then ``repace_cold_sends``) through
 ``asyncio.to_thread``; an exception there is logged as ``startup_step_failed`` (ERROR, with the
 exception's type and, from ``run_startup_steps``, the step's name) and never stops the engine.
 The
@@ -1496,10 +1505,12 @@ def build_app(
         meter,
     )
     test_runs = AiTestRuns(clock, meter, llm, queue)
+    sending = Sending(clock, env=config.env)  # Story 6.11: built now, so it knows process start
     startup_steps = (
         ("sync_erasure_ledger", functools.partial(sync_erasure_ledger, units, erasure_ledger)),
         ("queue_contact_markets", functools.partial(queue_contact_markets, units, contact_markets)),
         ("queue_test_runs", functools.partial(queue_test_runs, units, test_runs)),
+        ("repace_cold_sends", functools.partial(repace_cold_sends, units, sending)),
     )
     budget = Budget(clock, meter, notify)  # the meter's hook reads it when it runs
     runner = Runner(units, queue, job_types, dead_jobs=DeadJobAlerts(notify))
@@ -1550,7 +1561,7 @@ def build_app(
         backups=backups,
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax(), queue),
-        sending=Sending(clock, env=config.env),
+        sending=sending,
         lead_signals=LeadSignals(clock),
         lead_history=LeadHistory(clock),  # Story 9.8: the Lead page's History tab
         compliance=compliance,
@@ -1621,6 +1632,18 @@ def queue_test_runs(units: Units, test_runs: AiTestRuns) -> None:
     def run() -> None:
         with units.open():
             test_runs.queue_runs()
+
+    contextvars.Context().run(run)
+
+
+def repace_cold_sends(units: Units, sending: Sending) -> None:
+    """The engine's startup step (Story 6.11): ``sending.repace_after_start()`` in a unit of
+    work of its own, inside a fresh ``contextvars.Context()``, so every listed inbox's next cold
+    send waits a fresh gap after the later of its last cold send and process start."""
+
+    def run() -> None:
+        with units.open():
+            sending.repace_after_start()
 
     contextvars.Context().run(run)
 

@@ -3,9 +3,9 @@
 Other services and the delivery layers change ``sending`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-``Sending(clock, *, env)`` owns the ``sending_domains`` and ``sending_inboxes`` tables and the
-SendingInbox machine (``nextron.domain.sending_inbox``). ``env`` is the engine's environment:
-outside ``prod`` only allowlisted test inboxes can be registered (AD-14).
+``Sending(clock, *, env, gap_source=None)`` owns the ``sending_domains`` and ``sending_inboxes``
+tables and the SendingInbox machine (``nextron.domain.sending_inbox``). ``env`` is the engine's
+environment: outside ``prod`` only allowlisted test inboxes can be registered (AD-14).
 
 - ``@use_case register_inbox(address, label) -> RegisteredInbox(inbox_id, sending_domain_id,
   domain, domain_created)``:
@@ -22,7 +22,9 @@ outside ``prod`` only allowlisted test inboxes can be registered (AD-14).
        ``InvalidSettingValue`` is ``sender_name_unset``;
      - the ``sending_domains`` row of the address's registrable domain is found or inserted
        (``domain_created``);
-     - the inbox is inserted at ``CREATION.to`` (``connecting``), ``created_at`` = now;
+     - the inbox is inserted at ``CREATION.to`` (``connecting``), ``created_at`` = now, and
+       paced: its ``next_send_at`` is ``sending_policy.repaced_next_send_at(None, now,
+       gap_source)``, one gap after its registration (Story 6.11);
      - one ``events`` row: entity ``sending_inboxes``, ``None`` to ``connecting``, cause
        ``registered``, no ``cause_ref``, actor ``operator``.
 
@@ -53,24 +55,54 @@ outside ``prod`` only allowlisted test inboxes can be registered (AD-14).
   read-only one included): today's date in ``sender_timezone`` (``UTC`` while it is unset or
   unreadable) and ``queries.sending.inbox_caps`` on it, what the Sending Inboxes panel shows.
 
-This service registers inboxes and records their warm-up: the Gmail connection, pause, resume
-and remove commands arrive with later Epic 6 stories, and enrollment (Story 4.8) binds a
-Sequence to one of ``queries.sending.inboxes_for_binding()``. Nothing here sends email or runs
-warm-up exchanges.
+**Cold-send pacing (Story 6.11, FR-31, AD-11, NFR-22).** ``Sending`` records
+``process_started_at = clock.now()`` when it is built (the engine builds it once, at start).
+``gap_source`` is the random source of every gap (``random.SystemRandom()`` when ``None``); the
+draw itself is ``sending_policy.draw_gap``'s. No planned send slot is stored: only
+``next_send_at`` and ``last_sent_at``.
+
+- ``@command record_cold_send(inbox_id, sent_at) -> datetime | None``: joins the caller's
+  transaction (Story 6.10's apply unit) and sets the inbox's ``last_sent_at`` to ``sent_at`` (an
+  aware ``datetime``, else ``ValueError``) and its ``next_send_at`` to
+  ``sending_policy.next_send_after(sent_at, gap_source)``; returns that ``next_send_at``, or
+  ``None`` when no inbox has that id (nothing is written).
+- ``@use_case repace_after_start() -> int``: one transaction; every listed (non-``removed``)
+  inbox's ``next_send_at`` becomes ``sending_policy.repaced_next_send_at(last_sent_at,
+  process_started_at, gap_source)`` (``last_sent_at`` unchanged); returns how many inboxes it
+  re-paced and logs ``cold_sends_repaced`` (``count``). The engine's startup step
+  ``repace_cold_sends`` runs it; an inbox registered later is paced by ``register_inbox``.
+- ``dispatch_state(inbox_id, now) -> InboxDispatchState``: a plain read in the current unit of
+  work. ``recovery_mode`` from ``queries.ops.recovery_mode``, ``next_send_at`` from the inbox
+  view, ``last_sync_completed_at`` from ``queries.replies.last_sync_completed`` (``None`` until
+  Story 6.8), and ``cold_sent_today`` (``queries.sending.cold_sent_on``, ``None`` until Story
+  6.10) and ``cold_cap`` (``queries.sending.cold_daily_caps``) on ``now``'s local date in
+  ``sender_timezone``. A missing inbox or one that isn't ``active`` (``connecting``,
+  ``paused``, ``auth_failed`` or ``removed``), or an unset or unreadable
+  ``sender_timezone``, gives a state with recovery mode on, no sync, no pace, no count and cap
+  0, which ``pick_dispatch`` turns into no pick (fail closed). A naive ``now`` raises
+  ``ValueError``.
+
+This service registers inboxes, records their warm-up and paces their cold sends: the Gmail
+connection, pause, resume and remove commands arrive with later Epic 6 stories, and enrollment
+(Story 4.8) binds a Sequence to one of ``queries.sending.inboxes_for_binding()``. Nothing here
+sends email or runs warm-up exchanges.
 """
 
 import logging
+import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Final
 
+from nextron.app.queries import ops as ops_queries
+from nextron.app.queries import replies as replies_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.sending import InboxCapView
 from nextron.db import eventlog
 from nextron.db.repos.sending import domains as domains_repo
 from nextron.db.repos.sending import inboxes as inboxes_repo
-from nextron.db.uow import current, use_case
+from nextron.db.uow import command, current, use_case
 from nextron.domain.ids import is_ulid
 from nextron.domain.sending_inbox import (
     CREATION,
@@ -86,7 +118,13 @@ from nextron.domain.sending_inbox import (
     check_label,
     check_warmup,
 )
-from nextron.domain.sending_policy import local_date
+from nextron.domain.sending_policy import (
+    GapSource,
+    InboxDispatchState,
+    local_date,
+    next_send_after,
+    repaced_next_send_at,
+)
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
 from nextron.domain.sink import sink_applies
 from nextron.ports.clock import Clock
@@ -97,6 +135,7 @@ INBOX_REGISTERED: Final = "sending_inbox_registered"
 INBOX_REFUSED: Final = "sending_inbox_refused"
 WARMUP_RECORDED: Final = "sending_warmup_recorded"
 WARMUP_REFUSED: Final = "sending_warmup_refused"
+COLD_SENDS_REPACED: Final = "cold_sends_repaced"
 FALLBACK_TIMEZONE: Final = "UTC"
 
 log = logging.getLogger(__name__)
@@ -124,9 +163,11 @@ class InboxCaps:
 class Sending:
     """Sending Inboxes and their Sending Domains; see the module docstring."""
 
-    def __init__(self, clock: Clock, *, env: str) -> None:
+    def __init__(self, clock: Clock, *, env: str, gap_source: GapSource | None = None) -> None:
         self._clock = clock
         self._env = env
+        self._gaps: GapSource = random.SystemRandom() if gap_source is None else gap_source
+        self.process_started_at: Final[datetime] = clock.now()
 
     @use_case
     def register_inbox(self, address: str, label: str) -> RegisteredInbox:
@@ -173,6 +214,9 @@ class Sending:
             from_name=from_name,
             status=CREATION.to,
             created_at=now,
+        )
+        inboxes_repo.update_pacing(
+            inbox_id, next_send_at=repaced_next_send_at(None, now, self._gaps)
         )
         eventlog.append(
             entity=ENTITY,
@@ -268,3 +312,61 @@ class Sending:
             timezone = FALLBACK_TIMEZONE
         today = local_date(self._clock.now(), timezone)
         return InboxCaps(today, sending_queries.inbox_caps(today))
+
+    # Cold-send pacing (Story 6.11) ------------------------------------------------------------
+
+    @command
+    def record_cold_send(self, inbox_id: str, sent_at: datetime) -> datetime | None:
+        """Record a cold send at ``sent_at`` and pace the inbox's next one; see the module
+        docstring."""
+        next_send_at = next_send_after(sent_at, self._gaps)
+        changed = inboxes_repo.update_pacing(
+            inbox_id, next_send_at=next_send_at, last_sent_at=sent_at
+        )
+        return next_send_at if changed else None
+
+    @use_case
+    def repace_after_start(self) -> int:
+        """Re-pace every listed inbox from process start; see the module docstring."""
+        with current().transaction():
+            listed = sending_queries.inboxes()
+            for inbox in listed:
+                inboxes_repo.update_pacing(
+                    inbox.id,
+                    next_send_at=repaced_next_send_at(
+                        inbox.last_sent_at, self.process_started_at, self._gaps
+                    ),
+                )
+        log.info(COLD_SENDS_REPACED, extra={"count": len(listed)})
+        return len(listed)
+
+    def dispatch_state(self, inbox_id: str, now: datetime) -> InboxDispatchState:
+        """The inbox's dispatch facts at ``now``, read in the current unit of work; see the
+        module docstring."""
+        local_date(now, FALLBACK_TIMEZONE)  # refuses a naive now before any read
+        closed = InboxDispatchState(
+            inbox_id=inbox_id,
+            recovery_mode=True,
+            process_started_at=self.process_started_at,
+            last_sync_completed_at=None,
+            next_send_at=None,
+            cold_sent_today=None,
+            cold_cap=0,
+        )
+        try:
+            timezone = str(setup_queries.get(Key.SENDER_TIMEZONE))
+        except (SettingNotSet, InvalidSettingValue):
+            return closed
+        today = local_date(now, timezone)
+        inbox = next((view for view in sending_queries.inboxes() if view.id == inbox_id), None)
+        if inbox is None or inbox.status is not InboxStatus.ACTIVE:
+            return closed
+        return InboxDispatchState(
+            inbox_id=inbox_id,
+            recovery_mode=ops_queries.recovery_mode(),
+            process_started_at=self.process_started_at,
+            last_sync_completed_at=replies_queries.last_sync_completed(inbox_id),
+            next_send_at=inbox.next_send_at,
+            cold_sent_today=sending_queries.cold_sent_on(inbox_id, today),
+            cold_cap=sending_queries.cold_daily_caps(today).get(inbox_id, 0),
+        )

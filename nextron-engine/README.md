@@ -2723,6 +2723,44 @@ approved, and the gate's `enrollment_active` blocks it; the panel's texts say so
 click that arrives after the Enrollment already ended answers "This Lead has no live
 Sequence." instead of an empty panel. Stories 5.2 and 6.10 add cancelling the queued OMs.
 
+## Cold-send pacing (Story 6.11)
+
+Cold mail goes out at a human pace, only inside the recipient's Send Window, and never in a
+burst after the PC was off (FR-31, AD-11, NFR-22). The rules live in one place,
+`nextron.domain.sending_policy`, as pure functions:
+
+- **The gap.** After each cold send, an inbox waits a gap drawn uniformly from 4 to 12 minutes
+  (`draw_gap`, through an injectable random source; production uses `random.SystemRandom()`).
+  A draw outside 4 to 12 minutes raises `ValueError`. No setting changes the gap, the Window or
+  the caps.
+- **After a restart.** At startup (`repace_cold_sends`, after `queue_test_runs`), each inbox's
+  `next_send_at` becomes the later of its `last_sent_at` and the engine's start, plus a fresh
+  gap. A `next_send_at` that isn't later than the start never releases a cold send, so if the
+  re-pace fails, cold sends stay stopped rather than burst. An inbox registered while the engine
+  runs is paced when it is registered: its `next_send_at` is one fresh gap after that moment.
+- **The pick** (`pick_dispatch`, at most one OutboundMessage per inbox per tick). Nothing goes
+  while recovery mode is on or before a mailbox sync of the inbox has completed since the
+  start, and nothing goes from an inbox that isn't `active` (`dispatch_state` then gives the
+  closed state). Replies and rebooks go first (oldest approval first) and skip the gap, the Window and
+  the Daily Cap, but each waits for a sync that completed after its approval (the plan then
+  asks for `sync_mailbox`). A cold message goes only when the gap has passed, it is due, it is
+  inside its recipient's Send Window and the inbox's cold count today is known and under its
+  cap. Follow-ups go before Step 1s and recontacts (highest Step, then oldest due time). A Step
+  1 or recontact citing a job posting last checked more than 24 hours ago (or never) is skipped
+  and the plan asks for `recheck_event` of that Signal. A message that can't go now is skipped,
+  so it never holds up the others; anything missed rolls to the next valid window. The pick
+  never replaces the send gate (Story 6.9).
+
+Only `next_send_at` and `last_sent_at` are stored, on `sending_inboxes` (migration
+`0063_6_11_inbox_pacing`); no planned send slot is stored. `Sending` gives Story 6.10 its seams:
+`record_cold_send(inbox_id, sent_at)` (in the send's apply unit), `repace_after_start()` and
+`dispatch_state(inbox_id, now)`.
+
+**Nothing is sent yet.** Story 6.10 builds the send job on these seams.
+`queries.replies.last_sync_completed` answers `None` until Story 6.8 syncs mailboxes, and
+`queries.sending.cold_sent_on` answers `None` until Story 6.10, so `dispatch_state` picks
+nothing for any inbox today.
+
 ## Enrollments
 
 An Enrollment (FR-3, FR-63, AD-4, AD-16, AD-21, Story 4.8) starts a Contact on a Campaign's
@@ -3567,6 +3605,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0060_8_4_registry_discovery` | rebuilds `discovery_runs` (`ck_discovery_runs_source` also `companies_house`; `location` nullable with `ck_discovery_runs_location`; new count `inactive`), adds `leads.website_lookup_at`, rebuilds `provenance_records` (`ck_provenance_records_source_kind` also `registry`) and re-creates its two erasure triggers (see [Companies House discovery](#companies-house-discovery)) | `discovery`, `research` |
 | `0061_8_10_discovery_topup` | rebuilds `discovery_runs` (new nullable `scheduled_for` and `ready_pool`; `ck_discovery_runs_status` also `target_reached`, `paced` and `pool_sufficient`; `ck_discovery_runs_location` relaxed for `pool_sufficient` rows; new `ck_discovery_runs_scheduled_for` and `ck_discovery_runs_ready_pool`) (see [Weekday discovery top-up (Story 8.10)](#weekday-discovery-top-up-story-810)) | `discovery` |
 | `0062_8_7_crawl_run_mode` | rebuilds `crawl_runs` (from its exact table, every row, check, foreign key and index kept) to add `mode` (`initial`, `recheck_full` or `recheck_jobs`, default `initial`) with `ck_crawl_runs_mode` (see [Scheduled re-checks](#scheduled-re-checks)) | `research` |
+| `0063_6_11_inbox_pacing` | adds the nullable `sending_inboxes.next_send_at` and `last_sent_at` in place (no rebuild; every row, check and index kept) for cold-send pacing | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

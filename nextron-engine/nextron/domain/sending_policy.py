@@ -2,8 +2,8 @@
 NFR-22). Standard library only, no clock (callers pass the local
 date or ``now``). Story 4.8 adds the two rules Enrollment needs and Story 4.9 the Step due
 time; Story 6.4 the cold-send volume policy (warm-up, the ramped Daily Cap and the total daily
-ceiling); Story 6.9 the Send Window and the approval lifetime; later stories add the gap draw
-here.
+ceiling); Story 6.9 the Send Window and the approval lifetime; Story 6.11 the gap draw, the
+restart rule and the per-tick dispatch pick.
 
 **Stories 4.8 and 4.9.**
 
@@ -103,8 +103,57 @@ this module only records and reads its facts.
   (fail closed).
 - ``APPROVAL_TTL`` is 72 hours; ``approval_expired(approved_at, now)`` is true once ``now -
   approved_at`` reaches it (both aware; otherwise ``ValueError``).
+
+**Story 6.11: cold-send pacing and the dispatch pick** (FR-31, AD-11, NFR-22).
+
+- ``GAP_MIN`` and ``GAP_MAX`` are 4 and 12 minutes. ``GapSource`` is anything with
+  ``uniform(a, b)`` (production passes ``random.SystemRandom()``; tests a seeded
+  ``random.Random`` or a stub). ``draw_gap(source) -> timedelta`` asks it for
+  ``uniform(4.0, 12.0)`` minutes, the only place a gap is drawn; an answer outside 4 to 12 (or
+  not a finite number) raises ``ValueError``.
+- ``next_send_after(sent_at, source)``: ``sent_at`` (aware) plus a fresh draw, the inbox's
+  ``next_send_at`` after a cold send.
+- ``repaced_next_send_at(last_sent_at, started_at, source)``: after a restart, the later of
+  ``last_sent_at`` (``None`` when the inbox never sent) and ``started_at`` (process start), plus
+  a fresh draw, so the first cold send after a wake is at least one gap after the last one and
+  after the start.
+- ``cold_paced(next_send_at, process_started_at, now) -> bool``: true only when
+  ``next_send_at`` is set, later than ``process_started_at`` and not later than ``now``. A value
+  left from before the restart (or ``None``) never releases a cold send, so a failed re-pace
+  fails closed.
+- ``POSTING_RECHECK_AFTER`` is 24 hours.
+- ``COLD_KIND_NAMES`` (``step``, ``recontact``) and ``RESPONSIVE_KIND_NAMES`` (``reply``,
+  ``rebook``) equal ``send_gate.COLD_KINDS`` and ``RESPONSIVE_KINDS`` (a unit test pins it);
+  ``send_gate`` imports this module, so this module can't import it back.
+- ``DispatchCandidate(om_id, kind, step, approved_at, due_at, contact_tz, market, signal_id,
+  posting_checked_at)``: what the pick needs of one queued OM (Story 6.10 builds it). ``step``
+  is the Step number of a ``step`` OM (``None`` otherwise); a follow-up is a ``step`` OM past
+  Step 1. ``cites_posting`` is ``signal_id is not None``. A kind outside the four raises
+  ``ValueError``, as does a ``step`` OM without a step of at least 1 or another kind with a
+  step; a naive time ``ValueError``.
+- ``InboxDispatchState(inbox_id, recovery_mode, process_started_at, last_sync_completed_at,
+  next_send_at, cold_sent_today, cold_cap)``: one inbox's dispatch facts; ``None`` is unknown.
+- ``pick_dispatch(state, candidates, now) -> DispatchPlan(om_id, sync_mailbox,
+  recheck_signal_ids)``: at most one OM for the inbox this tick. Nothing at all while
+  ``recovery_mode`` is on or until a sync of the inbox completed at or after process start.
+  Then:
+
+  1. responsive OMs, oldest ``approved_at`` first (then id): one goes only when a sync completed
+     after its ``approved_at`` (otherwise it is skipped and ``sync_mailbox`` is asked) and, when
+     it has a ``due_at``, that is not later than ``now``. They skip the gap, the Window and the
+     Cap.
+  2. cold OMs, only while ``cold_paced`` and ``cold_sent_today`` is known and under
+     ``cold_cap``: follow-ups (highest Step, then oldest ``due_at``), then Step 1 and
+     ``recontact`` (oldest ``due_at``), ties by id. One goes when its ``due_at`` is set and not
+     later than ``now`` and ``now`` is inside its recipient's Send Window. A Step 1 or
+     ``recontact`` citing a posting checked more than 24 hours before ``now``, never, or after
+     ``now`` is skipped and its ``signal_id`` asked to be rechecked.
+
+  A candidate that can't go is skipped, so it never blocks the others. The pick never replaces
+  the send gate: Story 6.10 still runs ``assert_sendable``.
 """
 
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -418,3 +467,212 @@ def in_send_window(contact_tz: str | None, market: WindowMarket, now: datetime) 
 def approval_expired(approved_at: datetime, now: datetime) -> bool:
     """Whether an approval given at ``approved_at`` has lapsed at ``now`` (72 hours on)."""
     return _aware(now, "now") - _aware(approved_at, "approved_at") >= APPROVAL_TTL
+
+
+# Cold-send pacing and the dispatch pick (Story 6.11) --------------------------------------------
+
+GAP_MIN: Final = timedelta(minutes=4)
+GAP_MAX: Final = timedelta(minutes=12)
+POSTING_RECHECK_AFTER: Final = timedelta(hours=24)
+_GAP_MIN_MINUTES: Final = 4.0
+_GAP_MAX_MINUTES: Final = 12.0
+
+COLD_KIND_NAMES: Final = frozenset({"step", "recontact"})
+RESPONSIVE_KIND_NAMES: Final = frozenset({"reply", "rebook"})
+STEP_KIND: Final = "step"
+FIRST_STEP: Final = 1
+
+
+class GapSource(Protocol):
+    """A random source: ``random.SystemRandom()`` in production, a seeded one in tests."""
+
+    def uniform(self, a: float, b: float) -> float: ...
+
+
+def draw_gap(source: GapSource) -> timedelta:
+    """One cold-send gap, drawn uniformly from 4 to 12 minutes through ``source``."""
+    minutes = source.uniform(_GAP_MIN_MINUTES, _GAP_MAX_MINUTES)
+    if isinstance(minutes, bool) or not isinstance(minutes, int | float):
+        raise ValueError("the gap source must answer a number of minutes")
+    if not math.isfinite(minutes) or not _GAP_MIN_MINUTES <= minutes <= _GAP_MAX_MINUTES:
+        raise ValueError("a cold-send gap must be 4 to 12 minutes")
+    return timedelta(minutes=minutes)
+
+
+def next_send_after(sent_at: datetime, source: GapSource) -> datetime:
+    """The inbox's ``next_send_at`` after a cold send at ``sent_at``: one fresh gap later."""
+    return _aware(sent_at, "sent_at") + draw_gap(source)
+
+
+def repaced_next_send_at(
+    last_sent_at: datetime | None, started_at: datetime, source: GapSource
+) -> datetime:
+    """The inbox's ``next_send_at`` after a restart: the later of ``last_sent_at`` and
+    ``started_at``, plus a fresh gap."""
+    start = _aware(started_at, "started_at")
+    if last_sent_at is None:
+        return start + draw_gap(source)
+    return max(_aware(last_sent_at, "last_sent_at"), start) + draw_gap(source)
+
+
+def cold_paced(next_send_at: datetime | None, process_started_at: datetime, now: datetime) -> bool:
+    """Whether the gap lets a cold send go at ``now``: ``next_send_at`` is set, later than
+    process start and not later than ``now``."""
+    moment = _aware(now, "now")
+    started = _aware(process_started_at, "process_started_at")
+    if next_send_at is None:
+        return False
+    return started < _aware(next_send_at, "next_send_at") <= moment
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchCandidate:
+    """One queued OM as the dispatch pick weighs it; see the module docstring."""
+
+    om_id: str
+    kind: str
+    step: int | None
+    approved_at: datetime
+    due_at: datetime | None
+    contact_tz: str | None
+    market: WindowMarket
+    signal_id: str | None = None
+    posting_checked_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.om_id, str):
+            raise TypeError("DispatchCandidate.om_id must be a str")
+        if self.kind not in COLD_KIND_NAMES | RESPONSIVE_KIND_NAMES:
+            raise ValueError("DispatchCandidate.kind must be step, recontact, reply or rebook")
+        if self.kind == STEP_KIND:
+            if self.step is None or _count(self.step, "DispatchCandidate.step") < FIRST_STEP:
+                raise ValueError("a step DispatchCandidate needs a step of at least 1")
+        elif self.step is not None:
+            raise ValueError(f"a {self.kind} DispatchCandidate has no step")
+        _aware(self.approved_at, "approved_at")
+        if self.due_at is not None:
+            _aware(self.due_at, "due_at")
+        if self.posting_checked_at is not None:
+            _aware(self.posting_checked_at, "posting_checked_at")
+
+    @property
+    def cites_posting(self) -> bool:
+        return self.signal_id is not None
+
+    @property
+    def responsive(self) -> bool:
+        return self.kind in RESPONSIVE_KIND_NAMES
+
+    @property
+    def follow_up(self) -> bool:
+        """A ``step`` OM past Step 1."""
+        return self.kind == STEP_KIND and self.step is not None and self.step > FIRST_STEP
+
+    @property
+    def first_touch(self) -> bool:
+        """A cold OM that isn't a follow-up: a Step 1 or a ``recontact``."""
+        return self.kind in COLD_KIND_NAMES and not self.follow_up
+
+
+@dataclass(frozen=True, slots=True)
+class InboxDispatchState:
+    """One inbox's dispatch facts; ``None`` is unknown and fails closed."""
+
+    inbox_id: str
+    recovery_mode: bool
+    process_started_at: datetime
+    last_sync_completed_at: datetime | None
+    next_send_at: datetime | None
+    cold_sent_today: int | None
+    cold_cap: int
+
+    def __post_init__(self) -> None:
+        _aware(self.process_started_at, "process_started_at")
+        if self.last_sync_completed_at is not None:
+            _aware(self.last_sync_completed_at, "last_sync_completed_at")
+        if self.next_send_at is not None:
+            _aware(self.next_send_at, "next_send_at")
+        if self.cold_sent_today is not None:
+            _count(self.cold_sent_today, "cold_sent_today")
+        _count(self.cold_cap, "cold_cap")
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchPlan:
+    """One inbox's pick this tick: the OM to send (or ``None``), whether a mailbox sync is
+    needed first, and the Signals whose posting needs a recheck."""
+
+    om_id: str | None
+    sync_mailbox: bool = False
+    recheck_signal_ids: tuple[str, ...] = ()
+
+
+NOTHING: Final = DispatchPlan(None)
+
+
+def _posting_stale(candidate: DispatchCandidate, now: datetime) -> bool:
+    checked = candidate.posting_checked_at
+    return checked is None or checked > now or now - checked > POSTING_RECHECK_AFTER
+
+
+def _cold_order(candidate: DispatchCandidate) -> tuple[int, int, datetime, str]:
+    due = candidate.due_at
+    assert due is not None  # only due candidates are sorted
+    if candidate.follow_up:
+        return (0, -(candidate.step or 0), due, candidate.om_id)
+    return (1, 0, due, candidate.om_id)
+
+
+def _cold_open(state: InboxDispatchState, now: datetime) -> bool:
+    if not cold_paced(state.next_send_at, state.process_started_at, now):
+        return False
+    return state.cold_sent_today is not None and state.cold_sent_today < state.cold_cap
+
+
+def pick_dispatch(
+    state: InboxDispatchState, candidates: Iterable[DispatchCandidate], now: datetime
+) -> DispatchPlan:
+    """At most one OM for the inbox this tick; see the module docstring."""
+    moment = _aware(now, "now")
+    if not isinstance(state, InboxDispatchState):
+        raise TypeError("pick_dispatch takes an InboxDispatchState")
+    found = list(candidates)
+    if not all(isinstance(candidate, DispatchCandidate) for candidate in found):
+        raise TypeError("pick_dispatch takes DispatchCandidate values")
+    synced = state.last_sync_completed_at
+    if state.recovery_mode or synced is None or synced < state.process_started_at:
+        return NOTHING
+    sync_needed = False
+    responsive = sorted(
+        (candidate for candidate in found if candidate.responsive),
+        key=lambda candidate: (candidate.approved_at, candidate.om_id),
+    )
+    for candidate in responsive:
+        if candidate.due_at is not None and candidate.due_at > moment:
+            continue
+        if synced <= candidate.approved_at:
+            sync_needed = True
+            continue
+        return DispatchPlan(candidate.om_id, sync_needed)
+    rechecks: list[str] = []
+    if _cold_open(state, moment):
+        due = (
+            candidate
+            for candidate in found
+            if not candidate.responsive
+            and candidate.due_at is not None
+            and candidate.due_at <= moment
+        )
+        for candidate in sorted(due, key=_cold_order):
+            if not in_send_window(candidate.contact_tz, candidate.market, moment):
+                continue
+            if (
+                candidate.first_touch
+                and candidate.signal_id is not None
+                and _posting_stale(candidate, moment)
+            ):
+                if candidate.signal_id not in rechecks:
+                    rechecks.append(candidate.signal_id)
+                continue
+            return DispatchPlan(candidate.om_id, sync_needed, tuple(rechecks))
+    return DispatchPlan(None, sync_needed, tuple(rechecks))

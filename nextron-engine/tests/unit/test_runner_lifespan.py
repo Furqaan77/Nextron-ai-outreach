@@ -981,7 +981,12 @@ def test_the_built_startup_queues_contact_markets_then_the_test_runs(
 
     startup()  # the lifespan's startup step alone: no runner starts
 
-    assert names == ["sync_erasure_ledger", "queue_contact_markets", "queue_test_runs"]
+    assert names == [
+        "sync_erasure_ledger",
+        "queue_contact_markets",
+        "queue_test_runs",
+        "repace_cold_sends",
+    ]
     jobs = raw_query(
         units,
         "SELECT lane, idempotency_key FROM jobs WHERE type = 'run_ai_test_sets' "

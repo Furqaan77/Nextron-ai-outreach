@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0062_8_7_crawl_run_mode"
+HEAD = "0063_6_11_inbox_pacing"
 
 
 @pytest.fixture
@@ -1948,3 +1948,60 @@ def test_0062_keeps_every_crawl_run_as_initial_and_checks_the_mode(tmp_path: Pat
     with pytest.raises(sqlite3.IntegrityError, match="ck_crawl_runs_mode"):
         run_sql(path, f"UPDATE crawl_runs SET mode = 'weekly' WHERE id = '{run}'")
     run_sql(path, f"UPDATE crawl_runs SET mode = 'recheck_jobs' WHERE id = '{run}'")
+
+
+def test_0063_adds_the_nullable_pacing_columns_and_keeps_every_inbox(tmp_path: Path) -> None:
+    """0063 (Story 6.11) adds the nullable pacing columns in place and keeps every inbox."""
+    location = _chain_to(tmp_path, "0062_8_7_crawl_run_mode")
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0062_8_7_crawl_run_mode",
+        )
+    at = "2026-11-18T09:00:00.000000Z"
+    domain, inbox = "01JD3QZ8X5V9K2M7N4P6R8T0E0", "01JD3QZ8X5V9K2M7N4P6R8T0E1"
+    run_sql(
+        path,
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{domain}', "
+        f"'nextron-ai.com', '{at}')",
+        "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, status, "
+        f"created_at) VALUES ('{inbox}', 'furqaan@nextron-ai.com', 'Main', '{domain}', "
+        f"'Furqaan Ahmed', 'active', '{at}')",
+    )
+    reader = sqlite3.connect(path)
+    try:
+        before = reader.execute("SELECT * FROM sending_inboxes").fetchall()
+    finally:
+        reader.close()
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0062_8_7_crawl_run_mode", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute("SELECT * FROM sending_inboxes").fetchall()
+        info = {row[1]: row for row in reader.execute("PRAGMA table_info(sending_inboxes)")}
+        indexes = {row[1] for row in reader.execute("PRAGMA index_list(sending_inboxes)")}
+    finally:
+        reader.close()
+    assert [row[: len(before[0])] for row in rows] == before  # every row and column kept
+    assert {name: (info[name][2], info[name][3]) for name in ("next_send_at", "last_sent_at")} == {
+        "next_send_at": ("VARCHAR(27)", 0),
+        "last_sent_at": ("VARCHAR(27)", 0),
+    }
+    assert "uq_sending_inboxes_address" in indexes
+    assert rows[0][len(before[0]) :][:2] == (None, None)
+    run_sql(
+        path,
+        f"UPDATE sending_inboxes SET next_send_at = '{at}', last_sent_at = '{at}' "
+        f"WHERE id = '{inbox}'",
+    )
+    reader = sqlite3.connect(path)
+    try:
+        stored = reader.execute(
+            "SELECT next_send_at, last_sent_at FROM sending_inboxes WHERE id = ?", (inbox,)
+        ).fetchone()
+    finally:
+        reader.close()
+    assert stored == (at, at)

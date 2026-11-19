@@ -426,6 +426,9 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "warmup_tool_daily": PiiClass.NONE,
         "ramp_step": PiiClass.NONE,
         "ramp_target": PiiClass.NONE,
+        # Story 6.11: the inbox's cold-send pacing (two times), about Nextron's own inbox.
+        "next_send_at": PiiClass.NONE,
+        "last_sent_at": PiiClass.NONE,
     },
     # Story 8.3. A discovery run: the Operator's Campaign and location setting, ids, a hash of the
     # Segment's queries, a status, times and counts. Nothing a Places search returned.

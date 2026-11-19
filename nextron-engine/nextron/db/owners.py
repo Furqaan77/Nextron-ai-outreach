@@ -381,6 +381,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "warmup_tool_daily",
             "ramp_step",
             "ramp_target",
+            "next_send_at",
+            "last_sent_at",
         ),
     },
     "discovery_runs": {  # Story 8.3
