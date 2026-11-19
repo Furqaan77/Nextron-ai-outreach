@@ -34,6 +34,8 @@ Table                      Owner        Exported as / why not
                                         Drafts of the Contact's Enrollments)
 ``grounding_results``      drafting     ``grounding_results`` (Story 4.13: each revision's
                                         grounding result; its flags quote Draft text)
+``outbound_messages``      sending      ``outbound_messages`` (Story 5.2: the Contact's
+                                        approved messages; ``unsub_token`` withheld)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``jobs``                   jobqueue     never linked to a Contact
@@ -183,6 +185,16 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
         "enrollments": Exported("sequencing", "enrollments"),
         "draft_revisions": Exported("drafting", "draft_revisions"),  # Story 4.12
         "grounding_results": Exported("drafting", "grounding_results"),  # Story 4.13
+        "outbound_messages": Exported(  # Story 5.2
+            "sending",
+            "outbound_messages",
+            withheld=MappingProxyType(
+                {
+                    "unsub_token": "the unsubscribe token: it decodes to the person's address "
+                    "hash and works as an opt-out link"
+                }
+            ),
+        ),
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

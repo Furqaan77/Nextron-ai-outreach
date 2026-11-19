@@ -168,15 +168,16 @@ def withheld_values(world: World, coverage: Mapping[str, Coverage]) -> dict[str,
 def test_every_personal_data_table_is_covered_by_its_owner() -> None:
     assert coverage_problems(COVERAGE, PII, TABLES) == []
     # Story 4.6's ai_test_cases, Story 2.11's job_postings, Story 4.12's draft_revisions and
-    # Story 4.13's grounding_results
-    assert len(personal_columns(PII)) == 19
-    assert len(COVERAGE) == 20  # Story 4.8's enrollments: no personal data, but a Contact's
+    # Story 4.13's grounding_results, Story 5.2's outbound_messages
+    assert len(personal_columns(PII)) == 20
+    assert len(COVERAGE) == 21  # Story 4.8's enrollments: no personal data, but a Contact's
     assert CONTACT_TABLES == {
         "provenance_records",
         "evidence",
         "data_subject_requests",
         "erasure_receipts",  # Story 3.14
         "enrollments",  # Story 4.8
+        "outbound_messages",  # Story 5.2
     }
 
 

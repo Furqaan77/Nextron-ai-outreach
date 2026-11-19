@@ -360,6 +360,34 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "details",
         ),
     },
+    # Story 5.2: each approved Draft's one live OutboundMessage
+    "outbound_messages": {
+        "sending": (
+            "id",
+            "draft_id",
+            "approval_id",
+            "kind",
+            "status",
+            "to_address",
+            "inbox_id",
+            "contact_id",
+            "lead_id",
+            "enrollment_id",
+            "subject",
+            "body",
+            "approved_hash",
+            "unsub_token",
+            "tier",
+            "lead_score",
+            "variant_id",
+            "segment_id",
+            "market_id",
+            "step_no",
+            "created_at",
+            "cancelled_at",
+            "sent_at",
+        ),
+    },
     # Story 4.8
     "enrollments": {
         "sequencing": (

@@ -575,6 +575,34 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "checked_at": PiiClass.NONE,
         "ai_checked_at": PiiClass.NONE,  # Story 4.14
     },
+    # Story 5.2. An OutboundMessage's copy is written to a person: the recipient, subject and body
+    # are redacted by erasure, and so is the unsubscribe token, which decodes to the person's
+    # address hash; approved_hash, the ids, the AD-4 snapshot and the times are kept.
+    "outbound_messages": {
+        "id": PiiClass.NONE,
+        "draft_id": PiiClass.NONE,
+        "approval_id": PiiClass.NONE,
+        "kind": PiiClass.NONE,
+        "status": PiiClass.NONE,
+        "to_address": PiiClass.REDACT,
+        "inbox_id": PiiClass.NONE,
+        "contact_id": PiiClass.NONE,
+        "lead_id": PiiClass.NONE,
+        "enrollment_id": PiiClass.NONE,
+        "subject": PiiClass.REDACT,
+        "body": PiiClass.REDACT,
+        "approved_hash": PiiClass.NONE,
+        "unsub_token": PiiClass.REDACT,
+        "tier": PiiClass.NONE,
+        "lead_score": PiiClass.NONE,
+        "variant_id": PiiClass.NONE,
+        "segment_id": PiiClass.NONE,
+        "market_id": PiiClass.NONE,
+        "step_no": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "cancelled_at": PiiClass.NONE,
+        "sent_at": PiiClass.NONE,
+    },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.
     "unsub_tokens": {

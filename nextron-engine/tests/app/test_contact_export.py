@@ -141,6 +141,17 @@ JANE_RESULT = "01JD3QZ8X5V9K2M7N4P6R8T0G6"
 BOB_RESULT = "01JD3QZ8X5V9K2M7N4P6R8T0G7"
 JANE_SUBJECT = "Jane, your new partner role"
 BOB_SUBJECT = "Bob, your litigation team"
+# Story 5.2: an OutboundMessage of each Draft, written directly; its token is withheld
+JANE_OM = "01JD3QZ8X5V9K2M7N4P6R8T0G8"
+BOB_OM = "01JD3QZ8X5V9K2M7N4P6R8T0G9"
+JANE_TOKEN = "jane-unsubscribe-token-value"
+BOB_TOKEN = "bob-unsubscribe-token-value"
+APPROVED_HASH = "e" * 64
+OM_COLUMNS = (
+    "id", "draft_id", "approval_id", "kind", "status", "to_address", "inbox_id", "contact_id",
+    "lead_id", "enrollment_id", "subject", "body", "approved_hash", "tier", "lead_score",
+    "variant_id", "segment_id", "market_id", "step_no", "created_at", "cancelled_at", "sent_at",
+)  # fmt: skip
 REVISION_COLUMNS = (
     "id", "draft_id", "rev", "subject", "body", "footer_snapshot_id", "evidence_ids",
     "fact_versions", "cited_signal_id", "origin", "route_tuple_id", "playbook_sha256",
@@ -391,6 +402,10 @@ class Seeded:
             enrollment(world, BOB_ENROLLMENT, self.lead, self.bob, ended=True)
             draft(world, JANE_DRAFT, JANE_ENROLLMENT, JANE_REVISION, JANE_SUBJECT, JANE_RESULT)
             draft(world, BOB_DRAFT, BOB_ENROLLMENT, BOB_REVISION, BOB_SUBJECT, BOB_RESULT)
+            outbound(world, JANE_OM, JANE_DRAFT, JANE_ENROLLMENT, self.lead, self.jane, EMAIL,
+                     JANE_SUBJECT, JANE_TOKEN)  # fmt: skip
+            outbound(world, BOB_OM, BOB_DRAFT, BOB_ENROLLMENT, self.lead, self.bob, BOB_EMAIL,
+                     BOB_SUBJECT, BOB_TOKEN)  # fmt: skip
         if receipts:
             self.jane_receipt = receipt(world, self.jane, JANE_RECEIPT_REF)
             self.bob_receipt = receipt(world, self.bob, BOB_RECEIPT_REF)
@@ -437,6 +452,46 @@ def draft(
         "INSERT INTO grounding_results (id, draft_id, rev, status, flags, rules_version, "
         "checked_at) VALUES (?, ?, 1, 'fail', ?, 1, ?)",
         (result_id, draft_id, flags, stamp),
+    )
+
+
+def outbound(
+    world: World,
+    om_id: str,
+    draft_id: str,
+    enrollment_id: str,
+    lead_id: str,
+    contact_id: str,
+    email: str,
+    subject: str,
+    token: str,
+) -> None:
+    """Store a ``queued`` OutboundMessage of ``draft_id`` for ``contact_id`` (Story 5.2)."""
+    stamp = "2026-11-18T09:00:00.000000Z"
+    [(segment_id,)] = world.sql("SELECT segment_id FROM leads WHERE id = ?", (lead_id,))
+    world.sql(
+        "INSERT INTO outbound_messages (id, draft_id, approval_id, kind, status, to_address, "
+        "inbox_id, contact_id, lead_id, enrollment_id, subject, body, approved_hash, "
+        "unsub_token, tier, lead_score, variant_id, segment_id, market_id, step_no, created_at) "
+        "VALUES (?, ?, ?, 'step', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, "
+        "1, ?)",
+        (
+            om_id,
+            draft_id,
+            om_id,  # a stand-in approval id
+            email,
+            BOUND["sending_inbox_id"],
+            contact_id,
+            lead_id,
+            enrollment_id,
+            subject,
+            f"{subject}.",
+            APPROVED_HASH,
+            token,
+            BOUND["variant_id"],
+            segment_id,
+            stamp,
+        ),
     )
 
 
@@ -507,6 +562,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "playbook",
         "sequencing",
         "drafting",
+        "sending",  # Story 5.2
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (
@@ -637,6 +693,10 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
     assert (result["id"], result["draft_id"]) == (JANE_RESULT, JANE_DRAFT)
     assert result["status"] == "fail"
     assert json.loads(result["flags"])[0]["span"] == JANE_SUBJECT
+    # Story 5.2: her OutboundMessage, every column but the withheld unsubscribe token
+    [om] = file["sending"]["outbound_messages"]
+    assert tuple(om) == OM_COLUMNS
+    assert (om["id"], om["to_address"], om["subject"]) == (JANE_OM, EMAIL, JANE_SUBJECT)
     [alert] = file["notify"]["alerts"]
     assert (alert["subject"], alert["text"]) == (seeded.jane, JANE_ALERT)
     [notice] = file["notify"]["notifications"]
@@ -696,6 +756,9 @@ def test_no_other_contacts_data_or_any_hash_id_or_cause_is_in_the_file(world: Wo
         BOB_DRAFT,  # Story 4.12: Bob's Draft and its revision
         BOB_REVISION,
         BOB_SUBJECT,
+        BOB_OM,  # Story 5.2: Bob's OutboundMessage, and either token
+        BOB_TOKEN,
+        JANE_TOKEN,
     ):
         assert value not in text, value
     assert TEAM_TEXT not in json.loads(text)["research"]["pages"][0].values()
@@ -886,6 +949,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     assert file["playbook"] == {"override_cases": []}
     assert file["sequencing"] == {"enrollments": []}
     assert file["drafting"] == {"draft_revisions": [], "grounding_results": []}
+    assert file["sending"] == {"outbound_messages": []}
     assert file["event_log"] == {"contact_history": []}
 
 
@@ -970,6 +1034,15 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     assert [(flag["rule"], flag["span"]) for flag in json.loads(result["flags"])] == [
         ("subject_rule", REDACTED)
     ]
+    # Story 5.2: sending's hook tombstoned her OutboundMessage's copy; status and hash stay
+    [om] = file["sending"]["outbound_messages"]
+    assert (om["id"], om["to_address"], om["subject"], om["body"]) == (
+        JANE_OM,
+        REDACTED,
+        REDACTED,
+        REDACTED,
+    )
+    assert (om["status"], om["approved_hash"]) == ("queued", APPROVED_HASH)
 
 
 def test_an_entry_found_only_by_a_request_is_exported(world: World) -> None:

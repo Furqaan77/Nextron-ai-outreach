@@ -414,3 +414,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
   summary: Decide whether responsive Drafts (reply, rebook, channel) in the queue are checked with cold-email Eligibility (Not Now, FR-63 re-contact, Market cold rules) or only with `assert_contactable` for a reply purpose; today `due_queue` applies `Compliance.evaluate_eligibility` (cold) to every Draft, so a Reply to a Lead marked Not Now would be held back.
   evidence: Review pass 1 of Story 5.1 (VG other, unverified medium). No reply Draft exists before Epic 7; the Epic 7 story that writes reply Drafts should settle it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-hold-each-approved-draft-as-exactly-one-queued-outboundmessage.md`
+  summary: Story 5.4's cascade (`approval.cancel_pending` on stop, suppression and erasure) must cancel each `queued` OutboundMessage of the stopped Enrollments through `sending.cancel` and move the Draft to `cancelled`; until then an erased or suppressed Contact's `queued` OM stays `queued` (an erased one with `to_address` `[erased]`).
+  evidence: Review pass 1 of Story 5.2 (EC5, BH4, medium; overnight decision 7). `sending.erase_pii` only tombstones; no `sending` subscriber cancels. Nothing sends before 6.10, and 6.9's `contactable` predicate blocks such an OM.

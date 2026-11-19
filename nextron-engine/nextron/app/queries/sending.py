@@ -45,6 +45,15 @@ reported.
 - ``health_issues(now)``: one ``HealthIssue("domain_auth_failing", <id>, "<domain>: <verdict
   text>", detail=RECHECK_HINT)`` per listed Sending Domain whose verdict is blocked, by domain.
 
+**OutboundMessages (Story 5.2, AD-6).** ``OutboundMessageView`` is one OM's row (``kind`` an
+``OmKind``, ``status`` an ``OmStatus``):
+
+- ``outbound_message(om_id)``: the OM, or ``None`` (a text that isn't a ULID included);
+- ``live_outbound_of_draft(draft_id)``: the Draft's OM that isn't ``cancelled``, or ``None``;
+- ``export_pii(contact_id) -> {"outbound_messages": tuple[dict, ...]}`` (Story 3.15's subject
+  access exporter): every column of each OM of the Contact but ``unsub_token`` (withheld),
+  oldest first (``()`` for a text that isn't a ULID).
+
 Every read goes through the current unit of work, read-only ones included.
 """
 
@@ -56,9 +65,11 @@ from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.sending import checks as checks_repo
 from nextron.db.repos.sending import domains as domains_repo
 from nextron.db.repos.sending import inboxes as inboxes_repo
+from nextron.db.repos.sending import outbound_messages as outbound_repo
 from nextron.db.repos.sending.checks import StoredCheck
 from nextron.db.repos.sending.domains import StoredDomain
 from nextron.db.repos.sending.inboxes import StoredInbox
+from nextron.db.repos.sending.outbound_messages import StoredOutboundMessage
 from nextron.domain.domain_auth import (
     DOMAIN_AUTH_FAILING,
     RECHECK_HINT,
@@ -70,6 +81,7 @@ from nextron.domain.domain_auth import (
 )
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
+from nextron.domain.outbound_message import OmKind, OmStatus
 from nextron.domain.sending_inbox import BINDABLE_STATUSES, TERMINAL_STATUSES, InboxStatus
 from nextron.domain.sending_policy import WarmupPlan, cold_cap, daily_cap, tool_send_figure
 from nextron.domain.sending_policy import warmup_days as count_warmup_days
@@ -284,3 +296,66 @@ def health_issues(now: datetime) -> tuple[HealthIssue, ...]:
         if view.verdict.blocked
     )
 
+
+
+# OutboundMessages (Story 5.2) -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundMessageView:
+    """One OutboundMessage: its copy, snapshot, status and times."""
+
+    id: str
+    draft_id: str
+    approval_id: str
+    kind: OmKind
+    status: OmStatus
+    to_address: str
+    inbox_id: str
+    contact_id: str
+    lead_id: str
+    enrollment_id: str | None
+    subject: str
+    body: str
+    approved_hash: str
+    unsub_token: str
+    tier: str | None
+    lead_score: int | None
+    variant_id: str | None
+    segment_id: str
+    market_id: str | None
+    step_no: int | None
+    created_at: datetime
+    cancelled_at: datetime | None
+    sent_at: datetime | None
+
+
+def _om_view(stored: StoredOutboundMessage) -> OutboundMessageView:
+    values = {name: getattr(stored, name) for name in StoredOutboundMessage.__slots__}
+    values["kind"] = OmKind(stored.kind)
+    values["status"] = OmStatus(stored.status)
+    return OutboundMessageView(**values)
+
+
+def outbound_message(om_id: str) -> OutboundMessageView | None:
+    """The OutboundMessage ``om_id``, or ``None``."""
+    if not is_ulid(om_id):
+        return None
+    stored = outbound_repo.get(om_id)
+    return None if stored is None else _om_view(stored)
+
+
+def live_outbound_of_draft(draft_id: str) -> OutboundMessageView | None:
+    """The Draft's OutboundMessage that isn't ``cancelled``, or ``None``."""
+    if not is_ulid(draft_id):
+        return None
+    stored = outbound_repo.live_of_draft(draft_id)
+    return None if stored is None else _om_view(stored)
+
+
+def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
+    """Every OutboundMessage of the Contact, ``unsub_token`` withheld; see the module
+    docstring."""
+    if not is_ulid(contact_id):
+        return {"outbound_messages": ()}
+    return {"outbound_messages": outbound_repo.for_export(contact_id)}

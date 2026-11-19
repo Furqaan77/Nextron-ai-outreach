@@ -31,6 +31,7 @@ from nextron.app.ops import api as ops_api
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research
+from nextron.app.sending import api as sending_api
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup import api as setup_api
 from nextron.bootstrap import ENV_ERROR, BootstrapConfig, load_bootstrap
@@ -788,9 +789,12 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert subscribers.frozen
     found = subscribers.subscribers_of(LeadsMerged)
     assert all(is_command(subscriber) for subscriber in found)
-    assert [subscriber.__name__ for subscriber in found] == ["reparent_lead"] * 3
-    owners = [type(getattr(subscriber, "__self__", None)) for subscriber in found]
-    assert owners == [Pipeline, Research, Sequencing]  # pipeline, research, then sequencing
+    assert [subscriber.__name__ for subscriber in found] == ["reparent_lead"] * 4
+    *bound, sending = found
+    owners = [type(getattr(subscriber, "__self__", None)) for subscriber in bound]
+    # pipeline, research, then sequencing, then sending's module-level command (Story 5.2)
+    assert owners == [Pipeline, Research, Sequencing]
+    assert sending == sending_api.reparent_lead
     suppressed = subscribers.subscribers_of(SubjectSuppressed)  # Stories 4.8, 4.9 and 3.3
     assert all(is_command(subscriber) for subscriber in suppressed)
     assert [subscriber.__name__ for subscriber in suppressed] == [
@@ -811,6 +815,7 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert rest == [
         setup_api.erase_pii,
         drafting_api.erase_pii,
+        sending_api.erase_pii,  # Story 5.2
         jobqueue_api.erase_pii,
         ops_api.erase_pii,
         notify_api.erase_pii,
@@ -844,7 +849,7 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
 
     subscribers = main.build_subscribers(clock=clock)
     found = [
-        *subscribers.subscribers_of(LeadsMerged),
+        *subscribers.subscribers_of(LeadsMerged)[:3],  # sending's is a module function
         *subscribers.subscribers_of(SubjectSuppressed),
         *subscribers.subscribers_of(ContactErased)[:4],  # the rest are module functions
         *subscribers.subscribers_of(Enrolled),

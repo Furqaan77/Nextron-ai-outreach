@@ -116,7 +116,8 @@ adds a subscriber registers its owner command there, in the order AD-3 lists. So
 the more advanced Pipeline Stage), then ``Research(clock).reparent_lead`` (Story 2.3: the merged
 Lead's Contacts move to the survivor; Story 2.5: so do its crawl runs, and its pages and ATS
 links the survivor lacks), then ``Sequencing(clock).reparent_lead`` (Story 4.8: the merged
-Lead's Enrollments move to the survivor); ``SubjectSuppressed`` ->
+Lead's Enrollments move to the survivor), then the module-level ``sending_api.reparent_lead``
+(Story 5.2: the merged Lead's OutboundMessages name the survivor); ``SubjectSuppressed`` ->
 ``Sequencing(clock).stop_suppressed`` (Story 4.8: the live Enrollments the suppression blocks
 stop), then ``Pipeline(clock).close_suppressed`` (Story 3.3: an opt-out closes the Lead ``lost``;
 AD-3's other subscribers go between them when their stories add them); ``ContactErased`` -> each
@@ -127,6 +128,7 @@ research's (``Research(clock).erase_pii``, which tombstones the Contact last), t
 ``erase_override_cases``), then ``Sequencing(clock).erase_pii`` (Story 4.8: the erased
 Contact's live Enrollments stop with ``contact_erased``), then the hooks of ``setup``,
 ``drafting`` (Story 4.12: it tombstones the text of the Contact's ``draft_revisions``),
+``sending`` (Story 5.2: it tombstones the copy of the Contact's ``outbound_messages``),
 ``jobqueue``, ``ops`` and ``notify`` (the others no-ops: their tables never hold a Contact's
 data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lead moves to
 ``queued``); ``FooterChanged`` -> ``Drafting(clock, queue).recompose_ready`` (Story 4.12: the
@@ -488,8 +490,10 @@ restarts the engine when the file stays unchanged for 300 s of its own polls (90
 first beat).
 
 **Sending Inboxes (Story 4.7; AD-14, AD-21, FR-32).** ``build_app`` builds one
-``Sending(clock, env=config.env)`` (``nextron.app.sending.api``) and hands it to
-``create_app(..., sending=sending)``: the Sending Inboxes panel registers inboxes through it.
+``Sending(clock, env=config.env, compliance=compliance)`` (``nextron.app.sending.api``; Story
+5.2: on the one codec-bearing ``Compliance``, so ``enqueue`` can issue unsubscribe tokens)
+and hands it to ``create_app(..., sending=sending)``: the Sending Inboxes panel registers
+inboxes through it.
 Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
 external service.
 
@@ -816,6 +820,7 @@ from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
+from nextron.app.sending import api as sending_api
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
 from nextron.app.sequencing.api import Sequencing
@@ -1380,7 +1385,7 @@ def build_app(
         backups=backups,
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
-        sending=Sending(clock, env=config.env),
+        sending=Sending(clock, env=config.env, compliance=compliance),
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,
@@ -2232,6 +2237,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Sequencing(chosen).reparent_lead)
+    # Story 5.2: the merged Lead's OutboundMessages name the survivor
+    subscribers.register_subscriber(LeadsMerged, sending_api.reparent_lead)
     # Story 4.8: stop the Enrollments first, then close an opted-out Lead (AD-3's order)
     subscribers.register_subscriber(SubjectSuppressed, Sequencing(chosen).stop_suppressed)
     # Story 4.9: then cancel the ready Drafts of every ended Enrollment (the backstop)
@@ -2246,7 +2253,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)
     # Story 4.8: stop the erased Contact's live Enrollments, before the no-op hooks
     subscribers.register_subscriber(ContactErased, Sequencing(chosen).erase_pii)
-    for owner_api in (setup_api, drafting_api, jobqueue_api, ops_api, notify_api):
+    # Story 5.2: sending's hook tombstones the Contact's OutboundMessage copies
+    for owner_api in (setup_api, drafting_api, sending_api, jobqueue_api, ops_api, notify_api):
         subscribers.register_subscriber(ContactErased, owner_api.erase_pii)
     subscribers.register_subscriber(Enrolled, Pipeline(chosen).on_enrolled)
     # Story 4.9: the next Step's due time, or the Enrollment's completion

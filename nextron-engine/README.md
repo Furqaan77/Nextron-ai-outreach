@@ -2735,6 +2735,41 @@ session has been open ("Session time: 0h 12m", since `nextron open`).
 **Empty.** "Queue clear", then the next due time in the Sender's timezone, or "Nothing
 scheduled" when no `ready` Draft has one.
 
+### Approved messages wait as OutboundMessages (Story 5.2)
+
+Story 5.2 (FR-26, AD-4, AD-6, AD-16, AD-17) adds the place an approved message waits for
+delivery: the `outbound_messages` table (migration `0048_5_2_outbound_messages`), owned by
+`sending`. Nothing in the dashboard changes yet: Story 5.4's **Approve** is what creates them,
+and nothing here sends anything.
+
+**One message per approval.** `Sending.enqueue(draft, approval)` runs inside the approval's
+own transaction. It copies the exact approved message into one `queued` OutboundMessage: the
+recipient, the Enrollment's Sending Inbox, the subject and the body with its signature and
+footer, the approval's hash and a fresh unsubscribe token. It also keeps a snapshot for
+analytics: the Lead's Tier and Lead Score (empty while unscored), the Variant, Segment, Market
+and Step number. Delivery (Epic 6) will read this copy, never the Draft.
+
+**When it refuses.** Nothing is written at all when:
+
+- the Draft is a Reply, Rebook or channel Draft, or has no Enrollment;
+- the Draft isn't approved, or the approval was for another revision;
+- the Draft already has a message waiting (cancel it first);
+- the Contact may no longer be emailed (suppressed, erased, the Lead closed);
+- the message composed now differs from what was approved (for example, the Contact's email
+  changed after approval).
+
+The database also refuses a second waiting message for one Draft, deleting a message, and any
+change to its copy or snapshot.
+
+**Cancelling.** `Sending.cancel(om_id)` (used by Story 5.4's un-approve) cancels a `queued`
+message; a cancelled one stays as a record, and the Draft can then be approved again. A message
+already being sent, sent, or in doubt (`unknown`) can't be cancelled: "already sending".
+
+**Erasure and export.** Erasing a Contact replaces the recipient, subject, body and token of
+each of their messages with `[erased]`; the ids, statuses, times, hash and snapshot stay. The
+subject access export lists their messages under `sending.outbound_messages`, without the
+unsubscribe token. A Lead merge moves the messages to the surviving Lead.
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
