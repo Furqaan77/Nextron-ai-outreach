@@ -1,14 +1,17 @@
-"""The Approval Queue page (``GET /queue``; FR-26, AD-13, AD-16; Story 5.1).
+"""The Approval Queue page (``GET /queue``; FR-26, AD-6, AD-13, AD-16; Stories 5.1, 5.3).
 
-``queue_context(queue, card_param, now, started, zone_name)`` turns
-``nextron.app.queries.approval.DueQueue`` into what ``templates/queue.html`` shows:
+``queue_context(queue, card_param, now, started, zone_name, *, draft_param=None,
+details_of=None)`` turns ``nextron.app.queries.approval.DueQueue`` into what
+``templates/queue.html`` shows:
 
 - ``groups``: each group's label and count (``GroupRow``), in queue order;
 - ``card``: the focused card (``CardRow``), card ``k`` of the flattened group order, where ``k``
-  is ``card_index(card_param, N)``: the ``card`` query parameter, 1-based, default 1, clamped to
+  is ``focused_index(cards, card_param, draft_param)``: the card whose Draft id is the ``draft``
+  query parameter when one of the cards has it (Story 5.3: the stable target), else
+  ``card_index(card_param, N)``: the ``card`` query parameter, 1-based, default 1, clamped to
   ``1..N``, and 1 for a text that isn't a whole number; ``None`` when N is 0;
 - ``position``: ``"k of N"``; ``previous_href`` and ``next_href``: plain GET links to the
-  neighbouring cards (``None`` at either end);
+  neighbouring cards by Draft id, ``/queue?draft=<id>`` (``None`` at either end);
 - ``held_back``: each held-back Draft's name (the Lead's, else the Contact's, else
   ``"Unknown Lead"``) and its reasons' texts (``HeldRow``);
 - ``elapsed``: the session's time since it started, ``"<H>h <MM>m"`` (``elapsed_text``), or
@@ -17,26 +20,84 @@
   ``ready`` Draft in the Sender's timezone (``"YYYY-MM-DD HH:MM <zone>"``; UTC when the setting
   is unset or unreadable), or, when ``next_due`` is ``None``, ``"Nothing scheduled"``.
 
-Every value is plain text; the template autoescapes it inside an ``hx-disable`` container. The
-page has no form and no action: deciding a card comes in later stories.
+**What lies behind the card (Story 5.3).** ``details_of(card)`` (the route passes
+``queries.approval.card_details``) is called for the focused card only, and ``card_row`` adds:
+
+- ``rev`` and ``shown_hash``: the hidden binding fields (``""`` when absent);
+- ``grounding`` and ``grounding_flags``: ``leads_page.grounding_of`` of the revision and its
+  result (``pending`` without one); ``failing`` when it is ``fail``;
+- ``badges``: the badge row, the grounding badge first, then ``generic`` and ``stale`` when those
+  Draft flags are set;
+- ``subject_segments`` and ``body_segments``: the shown subject and body as ``Segment(text,
+  marked)`` runs (``highlight``): for a ``fail`` result, the first occurrence of each non-empty
+  flag span, in flag order, in the subject, else in the body, is marked; a span whose
+  occurrence overlaps one already marked is skipped;
+- ``approve_disabled`` and ``approve_notices``: approval is disabled when grounding is ``fail``
+  ("Edit this Draft to remove the failing claims before approving") or ``pending``
+  ("Grounding check pending"), the card has no ``shown_hash`` ("This Draft can't be approved
+  yet"), or the card is ``blocked`` (its footer notice joins the notices); otherwise no approve
+  control renders (Story 5.4 adds it);
+- ``evidence`` (``EvidenceRow``s: type label, text, the ``fact: value`` line of a Quote, the
+  pages an Absence checked, the source URL, the retrieval time, "AI-extracted" and
+  "superseded"/"retracted"; "Evidence not found" with the id when missing), ``facts``
+  (``FactRow``s: wording, type, source URL, "retracted"; "Fact not found" when missing),
+  ``playbook_version`` ("—" when unrecorded) and ``earlier_steps`` (``EarlierStepRow``s:
+  ``Step <n>``, subject, the send date in the Sender's timezone and the body), with
+  ``has_earlier_steps`` from ``queries.approval.has_earlier_steps`` (a Step Draft above Step 1
+  with an Enrollment; the page then says "No earlier Step sent yet" when there are none).
+
+Every value is plain text; the template autoescapes it inside an ``hx-disable`` container and
+renders every source URL through ``safe_link``. The page has no form and no POST: deciding a
+card comes in later stories.
 """
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from nextron.app.queries.approval import DueQueue, QueueCard
+from nextron.app.queries.approval import (
+    EVIDENCE_RETRACTED,
+    EVIDENCE_SUPERSEDED,
+    CardDetails,
+    CardEvidence,
+    CardFact,
+    DueQueue,
+    EarlierStep,
+    QueueCard,
+    has_earlier_steps,
+)
 from nextron.domain.draft import DraftKind
+from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.render import Composed
+from nextron.domain.segments import EvidenceType
+from nextron.web.leads_page import (
+    EVIDENCE_TYPE_LABELS,
+    FAIL_GROUNDING,
+    PENDING_GROUNDING,
+    GroundingFlagRow,
+    grounding_of,
+)
 
 TEMPLATE: Final = "queue.html"
 QUEUE_PATH: Final = "/queue"
 CARD_PARAM: Final = "card"
+DRAFT_PARAM: Final = "draft"
 NO_VALUE: Final = "—"
 UNKNOWN_NAME: Final = "Unknown Lead"
 NOTHING_SCHEDULED: Final = "Nothing scheduled"
 TIME_FORMAT: Final = "%Y-%m-%d %H:%M"
+FAIL_NOTICE: Final = "Edit this Draft to remove the failing claims before approving"
+PENDING_NOTICE: Final = "Grounding check pending"
+UNBOUND_NOTICE: Final = "This Draft can't be approved yet"
+EVIDENCE_NOT_FOUND: Final = "Evidence not found"
+FACT_NOT_FOUND: Final = "Fact not found"
+AI_EXTRACTED: Final = "AI-extracted"
+GENERIC_BADGE: Final = "generic"
+STALE_BADGE: Final = "stale"
+NO_EARLIER_STEP: Final = "No earlier Step sent yet"
+STATE_LABELS: Final = {EVIDENCE_SUPERSEDED: "superseded", EVIDENCE_RETRACTED: "retracted"}
 KIND_LABELS: Final = {
     DraftKind.STEP: "Sequence Step",
     DraftKind.RECONTACT: "Re-contact",
@@ -56,6 +117,61 @@ class GroupRow:
 
 
 @dataclass(frozen=True, slots=True)
+class Segment:
+    """A run of the shown subject or body; ``marked`` runs render inside ``<mark>``."""
+
+    text: str
+    marked: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Badge:
+    """One badge of the card's badge row: its CSS classes and its text."""
+
+    classes: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRow:
+    """One cited Evidence id as the card shows it; ``found`` false: "Evidence not found"."""
+
+    evidence_id: str
+    found: bool
+    type: str = NO_VALUE
+    text: str = NO_VALUE
+    detail: str | None = None  # a Quote's "fact: value", a Count's sought text
+    pages_checked: tuple[str, ...] = ()
+    source_url: str | None = None
+    retrieved: str = NO_VALUE
+    ai_extracted: bool = False
+    state: str | None = None  # "superseded" or "retracted"
+
+
+@dataclass(frozen=True, slots=True)
+class FactRow:
+    """One fact version relied on; ``found`` false: "Fact not found"."""
+
+    fact_id: str
+    version: int
+    found: bool
+    type: str = NO_VALUE
+    wording: str = NO_VALUE
+    source_url: str | None = None
+    retracted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EarlierStepRow:
+    """One earlier Step already sent."""
+
+    step: str
+    subject: str
+    sent: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
 class CardRow:
     """The focused card as the page shows it."""
 
@@ -72,6 +188,25 @@ class CardRow:
     address_class: str
     message: Composed | None
     blocked: str | None
+    rev: str = ""
+    shown_hash: str = ""
+    grounding: str = PENDING_GROUNDING
+    grounding_flags: tuple[GroundingFlagRow, ...] = ()
+    badges: tuple[Badge, ...] = ()
+    subject_segments: tuple[Segment, ...] = ()
+    body_segments: tuple[Segment, ...] = ()
+    approve_disabled: bool = True
+    approve_notices: tuple[str, ...] = ()
+    evidence: tuple[EvidenceRow, ...] = ()
+    facts: tuple[FactRow, ...] = ()
+    playbook_version: str = NO_VALUE
+    has_earlier_steps: bool = False
+    earlier_steps: tuple[EarlierStepRow, ...] = ()
+
+    @property
+    def failing(self) -> bool:
+        """Whether the revision's grounding result is ``fail``."""
+        return self.grounding == FAIL_GROUNDING
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,8 +253,149 @@ def _text(value: object) -> str:
     return NO_VALUE if value is None or value == "" else str(value)
 
 
-def card_row(card: QueueCard) -> CardRow:
-    """The ``CardRow`` of ``card``."""
+def _marks(text: str, spans: Iterable[str], taken: list[tuple[int, int]]) -> list[str]:
+    """Mark in ``taken`` the first occurrence in ``text`` of each span; the spans not found."""
+    missing = []
+    for span in spans:
+        start = text.find(span)
+        if start < 0:
+            missing.append(span)
+            continue
+        end = start + len(span)
+        if any(start < other_end and other_start < end for other_start, other_end in taken):
+            continue  # overlaps a span already marked: the later span is skipped
+        taken.append((start, end))
+    return missing
+
+
+def _segments(text: str, taken: list[tuple[int, int]]) -> tuple[Segment, ...]:
+    found: list[Segment] = []
+    cursor = 0
+    for start, end in sorted(taken):
+        if start > cursor:
+            found.append(Segment(text[cursor:start]))
+        found.append(Segment(text[start:end], marked=True))
+        cursor = end
+    if cursor < len(text) or not found:
+        found.append(Segment(text[cursor:]))
+    return tuple(found)
+
+
+def highlight(
+    subject: str, body: str, spans: Iterable[str]
+) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
+    """The subject and body as ``Segment`` runs with each span marked; see the module
+    docstring."""
+    unique: list[str] = []
+    for span in spans:
+        if span and span not in unique:
+            unique.append(span)
+    in_subject: list[tuple[int, int]] = []
+    in_body: list[tuple[int, int]] = []
+    rest = _marks(subject, unique, in_subject)
+    _marks(body, rest, in_body)
+    return _segments(subject, in_subject), _segments(body, in_body)
+
+
+def evidence_row(evidence: CardEvidence, zone_name: str | None) -> EvidenceRow:
+    """One cited Evidence id as the card shows it."""
+    if not evidence.found:
+        return EvidenceRow(evidence_id=evidence.id, found=False)
+    kind = evidence.type
+    detail = None
+    pages: tuple[str, ...] = ()
+    if kind == EvidenceType.QUOTE:
+        text = _text(evidence.quote)
+        if evidence.fact:
+            detail = f"{evidence.fact}: {_text(evidence.value)}"
+    elif kind == EvidenceType.ABSENCE:
+        text = _text(evidence.sought)
+        pages = evidence.pages_checked
+    elif kind == EvidenceType.COUNT:
+        text = _text(evidence.number)
+        detail = evidence.sought
+    else:
+        text = _text(evidence.quote or evidence.sought)
+    return EvidenceRow(
+        evidence_id=evidence.id,
+        found=True,
+        type=EVIDENCE_TYPE_LABELS.get(str(kind), _text(kind)),
+        text=text,
+        detail=detail,
+        pages_checked=pages,
+        source_url=evidence.source_url,
+        retrieved=(
+            NO_VALUE
+            if evidence.retrieved_at is None
+            else local_text(evidence.retrieved_at, zone_name)
+        ),
+        ai_extracted=evidence.ai_extracted,
+        state=STATE_LABELS.get(evidence.state),
+    )
+
+
+def fact_row(fact: CardFact) -> FactRow:
+    """One fact version as the card shows it."""
+    if not fact.found:
+        return FactRow(fact_id=fact.fact_id, version=fact.version, found=False)
+    return FactRow(
+        fact_id=fact.fact_id,
+        version=fact.version,
+        found=True,
+        type=_text(fact.type),
+        wording=_text(fact.wording),
+        source_url=fact.source_url,
+        retracted=fact.retracted,
+    )
+
+
+def earlier_step_row(step: EarlierStep, zone_name: str | None) -> EarlierStepRow:
+    """One earlier sent Step as the card shows it."""
+    return EarlierStepRow(
+        step=NO_VALUE if step.step_no is None else f"Step {step.step_no}",
+        subject=step.subject,
+        sent=NO_VALUE if step.sent_at is None else local_text(step.sent_at, zone_name),
+        body=step.body,
+    )
+
+
+def _approval_block(
+    grounding: str, shown_hash: str, blocked: str | None
+) -> tuple[bool, tuple[str, ...]]:
+    notices = []
+    if grounding == FAIL_GROUNDING:
+        notices.append(FAIL_NOTICE)
+    elif grounding != GroundingStatus.PASS:
+        notices.append(PENDING_NOTICE)
+    if not shown_hash:
+        notices.append(UNBOUND_NOTICE)
+    if blocked:
+        notices.append(blocked)
+    return bool(notices), tuple(notices)
+
+
+def card_row(
+    card: QueueCard, details: CardDetails | None = None, zone_name: str | None = None
+) -> CardRow:
+    """The ``CardRow`` of ``card`` with its ``details``; see the module docstring."""
+    found = details if details is not None else CardDetails()
+    if found.revision is None:  # no details read: the card's own status, without flags
+        grounding, flags = str(card.grounding_status), ()
+    else:
+        grounding, flags = grounding_of(found.revision, found.grounding)
+    badges = [Badge(f"grounding-badge grounding-{grounding}", grounding)]
+    if card.generic:
+        badges.append(Badge(f"badge-{GENERIC_BADGE}", GENERIC_BADGE))
+    if card.stale:
+        badges.append(Badge(f"badge-{STALE_BADGE}", STALE_BADGE))
+    subject_segments: tuple[Segment, ...] = ()
+    body_segments: tuple[Segment, ...] = ()
+    if card.message is not None:
+        spans = (flag.span for flag in flags) if grounding == FAIL_GROUNDING else ()
+        subject_segments, body_segments = highlight(
+            card.message.subject, card.message.body, spans
+        )
+    disabled, notices = _approval_block(grounding, card.shown_hash, card.blocked)
     return CardRow(
         draft_id=card.draft_id,
         kind=KIND_LABELS.get(card.kind, str(card.kind)),
@@ -134,11 +410,37 @@ def card_row(card: QueueCard) -> CardRow:
         address_class=_text(card.address_class),
         message=card.message,
         blocked=card.blocked,
+        rev="" if card.rev is None else str(card.rev),
+        shown_hash=card.shown_hash,
+        grounding=grounding,
+        grounding_flags=flags,
+        badges=tuple(badges),
+        subject_segments=subject_segments,
+        body_segments=body_segments,
+        approve_disabled=disabled,
+        approve_notices=notices,
+        evidence=tuple(evidence_row(each, zone_name) for each in found.evidence),
+        facts=tuple(fact_row(each) for each in found.facts),
+        playbook_version=_text(found.playbook_version),
+        has_earlier_steps=has_earlier_steps(card),
+        earlier_steps=tuple(earlier_step_row(each, zone_name) for each in found.earlier_steps),
     )
 
 
-def _href(index: int) -> str:
-    return f"{QUEUE_PATH}?{CARD_PARAM}={index}"
+def focused_index(
+    cards: tuple[QueueCard, ...], card_param: str | None, draft_param: str | None
+) -> int:
+    """The 1-based card to show: the one whose Draft id is ``draft_param``, else
+    ``card_index(card_param, N)``."""
+    if draft_param:
+        for index, card in enumerate(cards, start=1):
+            if card.draft_id == draft_param:
+                return index
+    return card_index(card_param, len(cards))
+
+
+def _href(card: QueueCard) -> str:
+    return f"{QUEUE_PATH}?{DRAFT_PARAM}={card.draft_id}"
 
 
 def queue_context(
@@ -147,19 +449,30 @@ def queue_context(
     now: datetime,
     started: datetime | None,
     zone_name: str | None,
+    *,
+    draft_param: str | None = None,
+    details_of: Callable[[QueueCard], CardDetails] | None = None,
 ) -> dict[str, object]:
     """What ``queue.html`` renders; see the module docstring."""
     cards = queue.cards
     total = len(cards)
-    index = card_index(card_param, total)
-    focused = card_row(cards[index - 1]) if total else None
+    index = focused_index(cards, card_param, draft_param)
+    focused = None
+    if total:
+        shown = cards[index - 1]
+        details = None if details_of is None else details_of(shown)
+        focused = card_row(shown, details, zone_name)
     return {
         "groups": tuple(GroupRow(group.key, group.label, len(group.cards)) for group in queue.groups),
         "card": focused,
         "total": total,
         "position": f"{index} of {total}" if total else None,
-        "previous_href": _href(index - 1) if total and index > 1 else None,
-        "next_href": _href(index + 1) if total and index < total else None,
+        "previous_href": _href(cards[index - 2]) if total and index > 1 else None,
+        "next_href": _href(cards[index]) if total and index < total else None,
+        "no_earlier_step": NO_EARLIER_STEP,
+        "evidence_not_found": EVIDENCE_NOT_FOUND,
+        "fact_not_found": FACT_NOT_FOUND,
+        "ai_extracted": AI_EXTRACTED,
         "held_back": tuple(
             HeldRow(
                 name=held.card.lead_name or held.card.contact_name or UNKNOWN_NAME,

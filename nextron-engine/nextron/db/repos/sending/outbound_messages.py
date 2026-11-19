@@ -14,6 +14,8 @@ them but the erasure tombstone (``tombstone_contact``).
   new row;
 - ``get(om_id)``: the row, or ``None``;
 - ``live_of_draft(draft_id)``: the Draft's OM whose status isn't ``cancelled``, or ``None``;
+- ``sent_of_enrollment(enrollment_id)``: the Enrollment's OMs at status ``sent``, by
+  ``step_no`` (then ``sent_at`` and id; Story 5.3);
 - ``set_status(om_id, from_status, to_status, at) -> bool``: a conditional status update (only
   while the row is at ``from_status``); a move to ``cancelled`` sets ``cancelled_at`` and one to
   ``sent`` sets ``sent_at`` to ``at``. Whether a row changed;
@@ -137,6 +139,23 @@ def live_of_draft(draft_id: str) -> StoredOutboundMessage | None:
         )
     ).first()
     return None if row is None else StoredOutboundMessage(*row)
+
+
+def sent_of_enrollment(enrollment_id: str) -> tuple[StoredOutboundMessage, ...]:
+    """The Enrollment's OMs at status ``sent``, by ``step_no``, then ``sent_at`` and id."""
+    rows = current().session.execute(
+        select(*_COLUMNS)
+        .where(
+            OutboundMessageRecord.enrollment_id == enrollment_id,
+            OutboundMessageRecord.status == SENT,
+        )
+        .order_by(
+            OutboundMessageRecord.step_no,
+            OutboundMessageRecord.sent_at,
+            OutboundMessageRecord.id,
+        )
+    )
+    return tuple(StoredOutboundMessage(*row) for row in rows)
 
 
 def set_status(om_id: str, from_status: str, to_status: str, at: datetime) -> bool:

@@ -5,7 +5,13 @@
     or "Nothing scheduled". A card's Lead and Contact details come from imported or crawled text
     and its message is AI-written: the card and the Held back list (prospect, crawled and AI
     text) render through |plain inside hx-disable; the headers, the position nav and the empty
-    state carry engine text only. The page holds no form and no action. -#}
+    state carry engine text only. Story 5.3 adds, inside the card: the badge row (grounding,
+    then generic and stale), the hidden rev and shown_hash binding fields, the failing claims
+    (rule code, span, explanation) of a fail result with their spans marked in the message
+    (segments built in Python), a disabled Approve button with its notices when approval is
+    blocked, the cited Evidence, the fact versions and Playbook version, and the earlier sent
+    Steps (each body in a native <details>). Every source URL renders through safe_link. The
+    page holds no form and no POST. -#}
 {% block title %}Nextron: Queue{% endblock %}
 {% block content %}
 <h1>Approval Queue</h1>
@@ -27,8 +33,11 @@
 <a class="queue-next" href="{{ next_href|plain }}">Next</a>
 {%- endif %}
 </nav>
-<article class="queue-card" data-draft="{{ card.draft_id|plain }}" hx-disable>
+<article class="queue-card{% if card.failing %} grounding-fail{% endif %}" data-draft="{{ card.draft_id|plain }}" hx-disable>
 <h2>{{ card.lead_name|plain }}</h2>
+<p class="queue-badges">{% for badge in card.badges %}{% if not loop.first %} {% endif %}<span class="queue-badge {{ badge.classes|plain }}">{{ badge.text|plain }}</span>{% endfor %}</p>
+<input type="hidden" name="rev" value="{{ card.rev|plain }}">
+<input type="hidden" name="shown_hash" value="{{ card.shown_hash|plain }}">
 <dl class="queue-card-facts">
 <dt>Draft</dt>
 <dd>{{ card.kind|plain }}{% if card.step %}: {{ card.step|plain }}{% endif %}</dd>
@@ -53,11 +62,76 @@
 {%- if card.message %}
 <div class="draft-message">
 <p class="draft-to">To: {{ card.message.to_address|plain }}</p>
-<p class="draft-subject">Subject: {{ card.message.subject|plain }}</p>
-<pre class="draft-body">{{ card.message.body|plain }}</pre>
+<p class="draft-subject">Subject: {% for part in card.subject_segments %}{% if part.marked %}<mark>{{ part.text|plain }}</mark>{% else %}{{ part.text|plain }}{% endif %}{% endfor %}</p>
+<pre class="draft-body">{% for part in card.body_segments %}{% if part.marked %}<mark>{{ part.text|plain }}</mark>{% else %}{{ part.text|plain }}{% endif %}{% endfor %}</pre>
 </div>
 {%- else %}
 <p class="draft-no-text">No text yet</p>
+{%- endif %}
+{%- if card.grounding_flags %}
+<ul class="grounding-flags">
+{%- for flag in card.grounding_flags %}
+<li class="grounding-flag"><code>{{ flag.code|plain }}</code>{% if flag.span %} <mark>{{ flag.span|plain }}</mark>{% endif %} {{ flag.explanation|plain }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+{%- if card.approve_disabled %}
+<div class="queue-approve-blocked">
+<button type="button" class="queue-approve" disabled aria-describedby="queue-approve-notices">Approve</button>
+<div id="queue-approve-notices">
+{%- for notice in card.approve_notices %}
+<p class="queue-approve-notice">{{ notice|plain }}</p>
+{%- endfor %}
+</div>
+</div>
+{%- endif %}
+<section class="queue-evidence" aria-labelledby="queue-evidence-heading">
+<h3 id="queue-evidence-heading">Evidence</h3>
+{%- if card.evidence %}
+<ul>
+{%- for row in card.evidence %}
+{%- if row.found %}
+<li class="evidence-row"><span class="evidence-type">{{ row.type|plain }}</span> <span class="evidence-text">{{ row.text|plain }}</span>{% if row.detail %} <span class="evidence-detail">{{ row.detail|plain }}</span>{% endif %}{% if row.pages_checked %} <span class="evidence-pages">Pages checked:</span><ul class="pages-checked">{% for url in row.pages_checked %}<li>{{ safe_link(url) }}</li>{% endfor %}</ul>{% endif %} <span class="evidence-source">{% if row.source_url %}{{ safe_link(row.source_url) }}{% else %}—{% endif %}</span> <span class="evidence-retrieved">{{ row.retrieved|plain }}</span>{% if row.ai_extracted %} <span class="evidence-ai">{{ ai_extracted|plain }}</span>{% endif %}{% if row.state %} <span class="evidence-state">{{ row.state|plain }}</span>{% endif %}</li>
+{%- else %}
+<li class="evidence-row evidence-missing">{{ evidence_not_found|plain }}: <code>{{ row.evidence_id|plain }}</code></li>
+{%- endif %}
+{%- endfor %}
+</ul>
+{%- else %}
+<p>No Evidence cited.</p>
+{%- endif %}
+</section>
+<section class="queue-facts" aria-labelledby="queue-facts-heading">
+<h3 id="queue-facts-heading">Approved Company Facts</h3>
+<p class="queue-playbook-version">Playbook version: {{ card.playbook_version|plain }}</p>
+{%- if card.facts %}
+<ul>
+{%- for row in card.facts %}
+{%- if row.found %}
+<li class="fact-row"><span class="fact-id">{{ row.fact_id|plain }} v{{ row.version }}</span> <span class="fact-type">{{ row.type|plain }}</span> <span class="fact-wording">{{ row.wording|plain }}</span> <span class="fact-source">{% if row.source_url %}{{ safe_link(row.source_url) }}{% else %}—{% endif %}</span>{% if row.retracted %} <span class="fact-state">retracted</span>{% endif %}</li>
+{%- else %}
+<li class="fact-row fact-missing">{{ fact_not_found|plain }}: <code>{{ row.fact_id|plain }} v{{ row.version }}</code></li>
+{%- endif %}
+{%- endfor %}
+</ul>
+{%- else %}
+<p>No facts relied on.</p>
+{%- endif %}
+</section>
+{%- if card.has_earlier_steps %}
+<section class="queue-earlier-steps" aria-labelledby="queue-earlier-heading">
+<h3 id="queue-earlier-heading">Earlier Steps</h3>
+{%- if card.earlier_steps %}
+{%- for step in card.earlier_steps %}
+<details class="earlier-step">
+<summary>{{ step.step|plain }}: <span class="earlier-step-subject">{{ step.subject|plain }}</span> <span class="earlier-step-sent">sent {{ step.sent|plain }}</span></summary>
+<pre class="earlier-step-body">{{ step.body|plain }}</pre>
+</details>
+{%- endfor %}
+{%- else %}
+<p class="earlier-steps-none">{{ no_earlier_step|plain }}</p>
+{%- endif %}
+</section>
 {%- endif %}
 </article>
 {%- else %}

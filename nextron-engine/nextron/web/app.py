@@ -16,8 +16,11 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
 - ``GET /queue`` (``queue_page``, the navigation's Queue section, ``@personal_data(True)``;
   Story 5.1): the Approval Queue, ``app.queries.approval.due_queue(now(), ...)`` with the live
   Eligibility of ``compliance.evaluate_eligibility``, rendered by ``nextron.web.queue_page``:
-  the group headers with counts, one focused card (``?card=k``, clamped), the Held back list,
-  the empty state and the session's elapsed time (``SessionStore.started_at``). Read-only.
+  the group headers with counts, one focused card (``?draft=<id>`` when that Draft is a card,
+  else ``?card=k``, clamped; Story 5.3), the Held back list, the empty state and the session's
+  elapsed time (``SessionStore.started_at``). For the focused card only it also reads
+  ``approval_queries.card_details`` (its Evidence, facts, earlier Steps and grounding result,
+  Story 5.3). Read-only.
 - ``GET /health`` (``health``): the environment, the engine version and the process uptime in
   whole seconds, and nothing else.
 - ``GET /static/{name}`` (``static``): the vendored HTMX build and ``app.css``, read once when
@@ -693,6 +696,8 @@ def create_app(
             at,
             session_started(request),
             zone_name,
+            draft_param=request.query_params.get(queue_rows.DRAFT_PARAM),
+            details_of=lambda card: approval_queries.card_details(card),  # the focused card only
         )
         return page(request, queue_rows.TEMPLATE, **context)
 

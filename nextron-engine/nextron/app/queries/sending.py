@@ -50,6 +50,8 @@ reported.
 
 - ``outbound_message(om_id)``: the OM, or ``None`` (a text that isn't a ULID included);
 - ``live_outbound_of_draft(draft_id)``: the Draft's OM that isn't ``cancelled``, or ``None``;
+- ``sent_of_enrollment(enrollment_id)`` (Story 5.3): the Enrollment's ``sent`` OMs, by
+  ``step_no`` (``()`` for a text that isn't a ULID);
 - ``export_pii(contact_id) -> {"outbound_messages": tuple[dict, ...]}`` (Story 3.15's subject
   access exporter): every column of each OM of the Contact but ``unsub_token`` (withheld),
   oldest first (``()`` for a text that isn't a ULID).
@@ -351,6 +353,13 @@ def live_outbound_of_draft(draft_id: str) -> OutboundMessageView | None:
         return None
     stored = outbound_repo.live_of_draft(draft_id)
     return None if stored is None else _om_view(stored)
+
+
+def sent_of_enrollment(enrollment_id: str) -> tuple[OutboundMessageView, ...]:
+    """The Enrollment's ``sent`` OutboundMessages, by ``step_no``; see the module docstring."""
+    if not is_ulid(enrollment_id):
+        return ()
+    return tuple(_om_view(stored) for stored in outbound_repo.sent_of_enrollment(enrollment_id))
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:
