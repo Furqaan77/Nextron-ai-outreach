@@ -200,6 +200,7 @@ FILES = [
     "nextron/db/alembic/versions/0043_3_11_unsub_requests.py",
     "nextron/db/alembic/versions/0044_8_2_place_coords.py",
     "nextron/db/alembic/versions/0045_4_12_draft_revisions.py",
+    "nextron/db/alembic/versions/0046_6_11_inbox_pacing.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",

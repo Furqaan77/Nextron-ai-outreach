@@ -369,6 +369,9 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "warmup_tool_daily": PiiClass.NONE,
         "ramp_step": PiiClass.NONE,
         "ramp_target": PiiClass.NONE,
+        # Story 6.11: the inbox's cold-send pacing (two times), about Nextron's own inbox.
+        "next_send_at": PiiClass.NONE,
+        "last_sent_at": PiiClass.NONE,
     },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.

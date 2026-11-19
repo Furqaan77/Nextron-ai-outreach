@@ -20,6 +20,11 @@
   three set); ``warmup_tool_daily`` (0 to 100, server default 0), ``ramp_step`` (1 to 10, server
   default 5) and ``ramp_target`` (1 to 50, server default 30), each NOT NULL.
   ``ck_sending_inboxes_warmup_ranges`` holds every range.
+
+  Story 6.11 (migration ``0046_6_11_inbox_pacing``) adds the cold-send pacing
+  (``nextron.domain.sending_policy``): ``next_send_at`` (the earliest time the inbox's next
+  cold send may go) and ``last_sent_at`` (its last cold send), both nullable UTC times, NULL
+  until set. No planned send slot is stored (AD-11).
 - ``domain_checks``: one row per authentication check that ran (append-only: the repository
   only inserts and reads): ``id``, its ``sending_domain_id``
   (``fk_domain_checks_sending_domain_id_sending_domains``, no cascade), ``checked_at``, the
@@ -29,8 +34,8 @@
   ``ix_domain_checks_sending_domain_id_checked_at`` finds a domain's newest check.
 
 The nextronai.com checks repeat ``nextron.domain.sending_inbox.check_address`` as defence in
-depth (FR-32). Every column but the three warm-up record columns is NOT NULL; every column is
-PII class ``none``: these are Nextron's own sender
+depth (FR-32). Every column but the three warm-up record columns and the two pacing columns is NOT
+NULL; every column is PII class ``none``: these are Nextron's own sender
 identity, never a data subject's. Story 6.4 added the warm-up columns (migration
 ``0039_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story 6.2 will add the
 Gmail connection.
@@ -137,6 +142,8 @@ class SendingInboxRecord(Base):
     ramp_target: Mapped[int] = mapped_column(
         Integer, server_default=text(str(DEFAULT_RAMP_TARGET))
     )
+    next_send_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_sent_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class DomainCheckRecord(Base):

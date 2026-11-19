@@ -15,8 +15,14 @@ capacity forecast, the local-date day boundary, and the 6.4 acceptance examples 
 Story 6.9 (FR-19, FR-31): the Send Window on weekdays 08:00 to 17:00 in the recipient's zone
 (UK and US hours, weekends, the end outside), the US unknown-location window 11:00 to 17:00
 Eastern, the 2027 DST gap between 14 and 28 March (London 08:00 is New York 04:00), an unknown
-zone and a naive ``now``; ``approval_expired`` at exactly 72 hours."""
+zone and a naive ``now``; ``approval_expired`` at exactly 72 hours.
 
+Story 6.11 (FR-31, AD-11): every I/O matrix row with a stub gap source: the draw (4.0 and 12.0
+minutes kept, 3.99 and 12.01 refused), the restart rule, ``cold_paced`` (a stale pace never
+releases a send) and ``pick_dispatch`` (recovery, no sync since start, responsive first and its
+fresh-sync rule, the gap, the order, not due, the US window, the cap, the stale posting)."""
+
+import random
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -25,8 +31,22 @@ import pytest
 from nextron import main
 from nextron.domain import seed_yaml
 from nextron.domain.markets import MarketDef, validate_markets
+from nextron.domain.send_gate import COLD_KINDS, RESPONSIVE_KINDS
 from nextron.domain.sending_policy import (
+    COLD_KIND_NAMES,
     DEFAULT_CEILING,
+    GAP_MAX,
+    GAP_MIN,
+    POSTING_RECHECK_AFTER,
+    RESPONSIVE_KIND_NAMES,
+    DispatchCandidate,
+    DispatchPlan,
+    InboxDispatchState,
+    cold_paced,
+    draw_gap,
+    next_send_after,
+    pick_dispatch,
+    repaced_next_send_at,
     DEFAULT_RAMP_STEP,
     APPROVAL_TTL,
     DEFAULT_RAMP_TARGET,
@@ -396,3 +416,313 @@ def test_an_approval_expires_at_72_hours() -> None:
     assert approval_expired(T0, T0 + timedelta(hours=71, minutes=59, seconds=59)) is False
     assert approval_expired(T0, T0 + timedelta(hours=72)) is True
     assert approval_expired(T0, T0 + timedelta(days=4)) is True
+
+
+# Cold-send pacing and the dispatch pick (Story 6.11) --------------------------------------------
+
+# Wednesday 18 November 2026: London is UTC, New York UTC-5
+WED = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+STARTED = datetime(2026, 11, 18, 7, 0, tzinfo=UTC)
+SYNCED = datetime(2026, 11, 18, 11, 59, tzinfo=UTC)
+APPROVED = datetime(2026, 11, 18, 11, 0, tzinfo=UTC)
+PACED = WED - timedelta(minutes=1)  # next_send_at already passed, later than process start
+
+
+class Fixed:
+    """A gap source that always answers ``minutes`` and records each call's bounds."""
+
+    def __init__(self, minutes: float) -> None:
+        self.minutes = minutes
+        self.calls: list[tuple[float, float]] = []
+
+    def uniform(self, a: float, b: float) -> float:
+        self.calls.append((a, b))
+        return self.minutes
+
+
+def dispatch_state(**changes: object) -> InboxDispatchState:
+    fields: dict[str, object] = {
+        "inbox_id": "inbox-1",
+        "recovery_mode": False,
+        "process_started_at": STARTED,
+        "last_sync_completed_at": SYNCED,
+        "next_send_at": PACED,
+        "cold_sent_today": 0,
+        "cold_cap": 30,
+    }
+    fields.update(changes)
+    return InboxDispatchState(**fields)  # type: ignore[arg-type]
+
+
+def candidate(
+    om_id: str, kind: str = "step", step: int | None = 1, **changes: object
+) -> DispatchCandidate:
+    fields: dict[str, object] = {
+        "om_id": om_id,
+        "kind": kind,
+        "step": step,
+        "approved_at": APPROVED,
+        "due_at": WED - timedelta(hours=1),
+        "contact_tz": "Europe/London",
+        "market": UK,
+        "signal_id": None,
+        "posting_checked_at": None,
+    }
+    fields.update(changes)
+    return DispatchCandidate(**fields)  # type: ignore[arg-type]
+
+
+def test_the_kind_names_are_the_send_gates_kinds() -> None:
+    assert COLD_KIND_NAMES == COLD_KINDS
+    assert RESPONSIVE_KIND_NAMES == RESPONSIVE_KINDS
+
+
+@pytest.mark.parametrize("minutes", [4.0, 12.0, 7.5])
+def test_the_gap_is_the_draw_in_minutes(minutes: float) -> None:
+    source = Fixed(minutes)
+    assert draw_gap(source) == timedelta(minutes=minutes)
+    assert source.calls == [(4.0, 12.0)]
+    assert (GAP_MIN, GAP_MAX) == (timedelta(minutes=4), timedelta(minutes=12))
+
+
+@pytest.mark.parametrize("minutes", [3.99, 12.01, float("nan"), float("inf"), -5.0])
+def test_a_draw_outside_4_to_12_minutes_raises(minutes: float) -> None:
+    with pytest.raises(ValueError):
+        draw_gap(Fixed(minutes))
+
+
+@pytest.mark.parametrize("answer", ["7", None, True])
+def test_a_draw_that_is_no_number_raises(answer: object) -> None:
+    with pytest.raises(ValueError):
+        draw_gap(Fixed(answer))  # type: ignore[arg-type]
+
+
+def test_a_seeded_random_draws_inside_the_range() -> None:
+    source = random.Random(611)
+    gaps = [draw_gap(source) for _ in range(500)]
+    assert all(GAP_MIN <= gap <= GAP_MAX for gap in gaps)
+    assert max(gaps) - min(gaps) > timedelta(minutes=7)  # spread over the range
+
+
+def test_the_next_send_is_one_gap_after_the_send() -> None:
+    assert next_send_after(WED, Fixed(5.0)) == WED + timedelta(minutes=5)
+    with pytest.raises(ValueError):
+        next_send_after(datetime(2026, 11, 18, 12, 0), Fixed(5.0))  # noqa: DTZ001
+
+
+def test_a_restart_paces_from_the_start_when_the_last_send_is_earlier() -> None:
+    last, start = at(LONDON, 2026, 11, 18, 12, 58), at(LONDON, 2026, 11, 18, 13, 0)
+    assert repaced_next_send_at(last, start, Fixed(6.0)) == start + timedelta(minutes=6)
+
+
+def test_a_restart_paces_from_the_last_send_when_it_is_later() -> None:
+    last, start = at(LONDON, 2026, 11, 18, 13, 2), at(LONDON, 2026, 11, 18, 13, 0)
+    assert repaced_next_send_at(last, start, Fixed(4.0)) == last + timedelta(minutes=4)
+
+
+def test_a_restart_without_a_last_send_paces_from_the_start() -> None:
+    assert repaced_next_send_at(None, STARTED, Fixed(12.0)) == STARTED + timedelta(minutes=12)
+    with pytest.raises(ValueError):
+        repaced_next_send_at(None, datetime(2026, 11, 18, 7, 0), Fixed(4.0))  # noqa: DTZ001
+
+
+@pytest.mark.parametrize(
+    ("next_send_at", "paced"),
+    [
+        (None, False),
+        (STARTED - timedelta(minutes=1), False),  # stale: before process start
+        (STARTED, False),  # not later than process start
+        (STARTED + timedelta(seconds=1), True),
+        (WED, True),  # now >= next_send_at
+        (WED + timedelta(seconds=1), False),  # the gap hasn't passed
+    ],
+)
+def test_cold_paced(next_send_at: datetime | None, paced: bool) -> None:
+    assert cold_paced(next_send_at, STARTED, WED) is paced
+
+
+def test_recovery_mode_picks_nothing_and_asks_nothing() -> None:
+    plan = pick_dispatch(
+        dispatch_state(recovery_mode=True),
+        [candidate("reply", "reply", None), candidate("s1", signal_id="sig")],
+        WED,
+    )
+    assert plan == DispatchPlan(None, False, ())
+
+
+@pytest.mark.parametrize("synced", [None, STARTED - timedelta(seconds=1)])
+def test_no_sync_since_start_picks_nothing(synced: datetime | None) -> None:
+    plan = pick_dispatch(
+        dispatch_state(last_sync_completed_at=synced),
+        [candidate("reply", "reply", None), candidate("s1")],
+        WED,
+    )
+    assert plan == DispatchPlan(None, False, ())
+
+
+def test_a_sync_at_process_start_counts() -> None:
+    assert pick_dispatch(dispatch_state(last_sync_completed_at=STARTED), [candidate("s1")], WED) == (
+        DispatchPlan("s1")
+    )
+
+
+def test_a_reply_goes_first_even_inside_the_gap() -> None:
+    cold = candidate("fu", step=2)
+    reply = candidate("reply", "reply", None, contact_tz="Asia/Tokyo")  # outside its window too
+    assert pick_dispatch(dispatch_state(), [cold, reply], WED).om_id == "reply"
+    gapped = dispatch_state(next_send_at=WED + timedelta(minutes=3), cold_sent_today=30)
+    assert pick_dispatch(gapped, [cold, reply], WED) == DispatchPlan("reply")
+    assert pick_dispatch(gapped, [cold], WED) == DispatchPlan(None)
+
+
+def test_responsive_oms_go_oldest_approval_first() -> None:
+    older = candidate("b-rebook", "rebook", None, approved_at=APPROVED - timedelta(hours=1))
+    newer = candidate("a-reply", "reply", None)
+    assert pick_dispatch(dispatch_state(), [newer, older], WED).om_id == "b-rebook"
+
+
+def test_a_responsive_om_needs_a_sync_after_its_approval() -> None:
+    reply = candidate("reply", "reply", None, approved_at=SYNCED)  # sync not after approval
+    cold = candidate("s1")
+    plan = pick_dispatch(dispatch_state(), [reply, cold], WED)
+    assert plan == DispatchPlan("s1", True, ())  # skipped, sync asked, a cold OM still goes
+    assert pick_dispatch(dispatch_state(), [reply], WED) == DispatchPlan(None, True, ())
+    later = candidate("reply", "reply", None, approved_at=SYNCED + timedelta(seconds=1))
+    assert pick_dispatch(dispatch_state(), [later], WED) == DispatchPlan(None, True, ())
+
+
+def test_a_responsive_om_due_later_waits() -> None:
+    reply = candidate("reply", "reply", None, due_at=WED + timedelta(minutes=1))
+    assert pick_dispatch(dispatch_state(), [reply], WED) == DispatchPlan(None)
+
+
+@pytest.mark.parametrize(
+    "next_send_at", [WED + timedelta(seconds=1), STARTED, STARTED - timedelta(hours=1), None]
+)
+def test_the_gap_and_a_stale_pace_hold_every_cold_om(next_send_at: datetime | None) -> None:
+    plan = pick_dispatch(dispatch_state(next_send_at=next_send_at), [candidate("s1")], WED)
+    assert plan == DispatchPlan(None)
+
+
+def test_follow_ups_go_highest_step_first_then_step_1() -> None:
+    oms = [
+        candidate("s1", step=1, due_at=at(LONDON, 2026, 11, 18, 8, 0)),
+        candidate("s2", step=2, due_at=at(LONDON, 2026, 11, 18, 9, 0)),
+        candidate("s3", step=3, due_at=at(LONDON, 2026, 11, 18, 10, 0)),
+    ]
+    order = []
+    while oms:
+        plan = pick_dispatch(dispatch_state(), oms, WED)
+        assert plan.om_id is not None
+        order.append(plan.om_id)
+        oms = [om for om in oms if om.om_id != plan.om_id]
+    assert order == ["s3", "s2", "s1"]
+
+
+def test_same_step_follow_ups_go_oldest_due_first_then_by_id() -> None:
+    early = candidate("z", step=2, due_at=WED - timedelta(hours=3))
+    late = candidate("a", step=2, due_at=WED - timedelta(hours=1))
+    assert pick_dispatch(dispatch_state(), [late, early], WED).om_id == "z"
+    twin = candidate("b", step=2, due_at=WED - timedelta(hours=3))
+    assert pick_dispatch(dispatch_state(), [twin, early], WED).om_id == "b"
+
+
+def test_step_1_and_recontact_share_one_order_by_due_time() -> None:
+    step_1 = candidate("s1", due_at=WED - timedelta(hours=1))
+    recontact = candidate("rc", "recontact", None, due_at=WED - timedelta(hours=2))
+    follow_up = candidate("fu", step=2, due_at=WED - timedelta(minutes=1))
+    assert pick_dispatch(dispatch_state(), [step_1, recontact], WED).om_id == "rc"
+    assert pick_dispatch(dispatch_state(), [step_1, recontact, follow_up], WED).om_id == "fu"
+
+
+def test_an_om_not_due_is_skipped() -> None:
+    later = candidate("fu", step=3, due_at=WED + timedelta(seconds=1))
+    no_due = candidate("nodue", step=3, due_at=None)
+    now_due = candidate("s1", due_at=WED)
+    assert pick_dispatch(dispatch_state(), [later, no_due, now_due], WED).om_id == "s1"
+    assert pick_dispatch(dispatch_state(), [later, no_due], WED) == DispatchPlan(None)
+
+
+def test_a_us_recipient_before_11_new_york_is_skipped_for_a_later_candidate() -> None:
+    ten_59 = at(NEW_YORK, 2026, 11, 18, 10, 59)  # London 15:59
+    us = candidate("us", step=2, contact_tz=None, market=US, due_at=ten_59 - timedelta(hours=1))
+    uk = candidate("uk", step=1, due_at=ten_59 - timedelta(hours=1))
+    state = dispatch_state(next_send_at=ten_59 - timedelta(minutes=1))
+    assert pick_dispatch(state, [us, uk], ten_59).om_id == "uk"
+    assert pick_dispatch(state, [us], ten_59) == DispatchPlan(None)
+    eleven = ten_59 + timedelta(minutes=1)
+    assert pick_dispatch(state, [us, uk], eleven).om_id == "us"
+
+
+@pytest.mark.parametrize("count", [30, 31, None])
+def test_the_cap_reached_or_unknown_holds_cold_but_not_responsive(count: int | None) -> None:
+    state = dispatch_state(cold_sent_today=count)
+    assert pick_dispatch(state, [candidate("s1")], WED) == DispatchPlan(None)
+    reply = candidate("reply", "reply", None)
+    assert pick_dispatch(state, [candidate("s1"), reply], WED).om_id == "reply"
+    assert pick_dispatch(dispatch_state(cold_sent_today=29), [candidate("s1")], WED).om_id == "s1"
+
+
+@pytest.mark.parametrize(
+    "checked",
+    [None, WED - timedelta(hours=24, minutes=1), WED + timedelta(minutes=1)],
+)
+def test_a_step_1_citing_a_stale_posting_asks_a_recheck(checked: datetime | None) -> None:
+    stale = candidate("s1", signal_id="sig-1", posting_checked_at=checked)
+    other = candidate("s1-b", due_at=WED - timedelta(minutes=5))
+    assert pick_dispatch(dispatch_state(), [stale], WED) == DispatchPlan(None, False, ("sig-1",))
+    assert pick_dispatch(dispatch_state(), [stale, other], WED) == DispatchPlan(
+        "s1-b", False, ("sig-1",)
+    )
+
+
+def test_a_posting_checked_within_24_hours_goes() -> None:
+    fresh = candidate("s1", signal_id="sig-1", posting_checked_at=WED - timedelta(hours=24))
+    assert pick_dispatch(dispatch_state(), [fresh], WED) == DispatchPlan("s1")
+
+
+def test_a_recontact_citing_a_stale_posting_asks_a_recheck_but_a_follow_up_goes() -> None:
+    recontact = candidate("rc", "recontact", None, signal_id="sig-2")
+    assert pick_dispatch(dispatch_state(), [recontact], WED) == DispatchPlan(None, False, ("sig-2",))
+    follow_up = candidate("fu", step=2, signal_id="sig-3")
+    assert pick_dispatch(dispatch_state(), [follow_up], WED) == DispatchPlan("fu")
+
+
+def test_one_signal_is_asked_once() -> None:
+    oms = [candidate("a", signal_id="sig"), candidate("b", signal_id="sig")]
+    assert pick_dispatch(dispatch_state(), oms, WED) == DispatchPlan(None, False, ("sig",))
+
+
+@pytest.mark.parametrize(
+    ("kind", "step"),
+    [("step", None), ("step", 0), ("recontact", 1), ("reply", 1), ("rebook", 2)],
+)
+def test_a_candidate_has_a_step_exactly_when_it_is_a_step_om(kind: str, step: int | None) -> None:
+    with pytest.raises(ValueError):
+        candidate("x", kind, step)
+
+
+def test_a_step_candidate_takes_any_step_from_1() -> None:
+    assert candidate("x", "step", 1).first_touch is True
+    assert candidate("x", "step", 3).follow_up is True
+    assert candidate("x", "recontact", None).first_touch is True
+
+
+def test_dispatch_values_are_checked() -> None:
+    with pytest.raises(ValueError):
+        candidate("x", "channel", None)
+    with pytest.raises(ValueError):
+        candidate("x", approved_at=datetime(2026, 11, 18, 9, 0))  # noqa: DTZ001
+    with pytest.raises(TypeError):
+        candidate("x", step=True)
+    with pytest.raises(ValueError):
+        dispatch_state(cold_cap=-1)
+    with pytest.raises(ValueError):
+        dispatch_state(process_started_at=datetime(2026, 11, 18, 7, 0))  # noqa: DTZ001
+    with pytest.raises(TypeError):
+        pick_dispatch(dispatch_state(), ["s1"], WED)  # type: ignore[list-item]
+    with pytest.raises(ValueError):
+        pick_dispatch(dispatch_state(), [], datetime(2026, 11, 18, 12, 0))  # noqa: DTZ001
+    assert candidate("x", signal_id="sig").cites_posting is True
+    assert candidate("x").cites_posting is False
+    assert POSTING_RECHECK_AFTER == timedelta(hours=24)

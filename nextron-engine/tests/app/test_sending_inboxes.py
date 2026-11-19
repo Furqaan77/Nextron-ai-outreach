@@ -430,6 +430,8 @@ def test_the_views_carry_every_field(world: World) -> None:
 
     [view] = world.read(sending_queries.inboxes)
 
+    assert view.next_send_at is not None  # paced one random gap after registration (6.11)
+    assert T0 + timedelta(minutes=4) <= view.next_send_at <= T0 + timedelta(minutes=12)
     assert view == SendingInboxView(
         id=result.inbox_id,
         address=FIRST,
@@ -445,6 +447,7 @@ def test_the_views_carry_every_field(world: World) -> None:
         warmup_tool_daily=0,
         ramp_step=5,
         ramp_target=30,
+        next_send_at=view.next_send_at,
     )
     assert world.read(sending_queries.inboxes_for_binding) == (view,)
 

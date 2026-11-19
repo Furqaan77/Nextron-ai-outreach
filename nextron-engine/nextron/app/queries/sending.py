@@ -5,8 +5,9 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.sending``, plus one read 
 
 The inbox reads return ``SendingInboxView(id, address, label, sending_domain_id, domain,
 from_name, status, created_at, warmup_started_on, warmup_method, warm_level, warmup_tool_daily,
-ramp_step, ramp_target)`` tuples, oldest first (by ``created_at``, then ``id``); ``.plan`` is the
-inbox's ``sending_policy.WarmupPlan``:
+ramp_step, ramp_target, next_send_at, last_sent_at)`` tuples, oldest first (by ``created_at``,
+then ``id``); ``.plan`` is the inbox's ``sending_policy.WarmupPlan``, and ``next_send_at`` and
+``last_sent_at`` its cold-send pacing (Story 6.11, each ``None`` until set):
 
 - ``inboxes()``: every Sending Inbox that isn't ``removed`` (the Sending Inboxes panel);
 - ``inboxes_for_binding()``: only the inboxes at a ``BINDABLE_STATUSES`` status (``connecting``
@@ -109,6 +110,8 @@ class SendingInboxView:
     warmup_tool_daily: int
     ramp_step: int
     ramp_target: int
+    next_send_at: datetime | None = None
+    last_sent_at: datetime | None = None
 
     @property
     def plan(self) -> WarmupPlan:
@@ -138,6 +141,8 @@ def _view(row: StoredInbox) -> SendingInboxView:
         warmup_tool_daily=row.warmup_tool_daily,
         ramp_step=row.ramp_step,
         ramp_target=row.ramp_target,
+        next_send_at=row.next_send_at,
+        last_sent_at=row.last_sent_at,
     )
 
 

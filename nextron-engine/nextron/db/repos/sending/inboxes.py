@@ -16,14 +16,20 @@ the running use case's transaction. It checks nothing; ``nextron.app.sending`` d
   6.4);
 - ``update_warmup(inbox_id, *, warmup_started_on, warmup_method, warm_level, warmup_tool_daily,
   ramp_step, ramp_target) -> bool``: set the six warm-up columns; whether a row changed (Story
-  6.4).
+  6.4);
+- ``update_pacing(inbox_id, *, next_send_at, last_sent_at=UNCHANGED) -> bool``: set the inbox's
+  ``next_send_at`` and, unless left ``UNCHANGED``, its ``last_sent_at``; whether a row changed
+  (Story 6.11).
 
-``StoredInbox`` carries the six warm-up columns too (Story 6.4).
+``StoredInbox`` carries the six warm-up columns (Story 6.4) and the two pacing columns,
+``next_send_at`` and ``last_sent_at`` (Story 6.11), too.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
+from typing import Final, Literal
 
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import select, update
@@ -51,6 +57,15 @@ class StoredInbox:
     warmup_tool_daily: int
     ramp_step: int
     ramp_target: int
+    next_send_at: datetime | None
+    last_sent_at: datetime | None
+
+
+class _Unchanged(Enum):
+    UNCHANGED = "unchanged"
+
+
+UNCHANGED: Final = _Unchanged.UNCHANGED
 
 
 def id_by_address(address: str) -> str | None:
@@ -105,6 +120,8 @@ def listed(statuses: Iterable[str]) -> list[StoredInbox]:
             SendingInboxRecord.warmup_tool_daily,
             SendingInboxRecord.ramp_step,
             SendingInboxRecord.ramp_target,
+            SendingInboxRecord.next_send_at,
+            SendingInboxRecord.last_sent_at,
         )
         .join(SendingDomainRecord, SendingDomainRecord.id == SendingInboxRecord.sending_domain_id)
         .where(SendingInboxRecord.status.in_(wanted))
@@ -155,5 +172,22 @@ def update_warmup(
             ramp_step=ramp_step,
             ramp_target=ramp_target,
         )
+    )
+    return bool(result.rowcount)  # type: ignore[attr-defined]
+
+
+def update_pacing(
+    inbox_id: str,
+    *,
+    next_send_at: datetime,
+    last_sent_at: datetime | Literal[_Unchanged.UNCHANGED] = UNCHANGED,
+) -> bool:
+    """Set the inbox's ``next_send_at`` and, unless ``UNCHANGED``, its ``last_sent_at``;
+    whether a row changed."""
+    values: dict[str, datetime] = {"next_send_at": next_send_at}
+    if last_sent_at is not UNCHANGED:
+        values["last_sent_at"] = last_sent_at
+    result = current().session.execute(
+        update(SendingInboxRecord).where(SendingInboxRecord.id == inbox_id).values(**values)
     )
     return bool(result.rowcount)  # type: ignore[attr-defined]
