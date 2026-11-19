@@ -15,10 +15,14 @@ creates an Enrollment's Draft slots, with no text yet (Story 4.12 drafts it) and
 1. **Arguments**, checked before anything else: ``enrollment_id`` a ``str``, ``steps`` a
    non-empty ``tuple`` or ``list`` of ``int`` Step numbers (``bool`` refused) in strictly
    ascending order, and ``urgency`` an ``Urgency`` (``check_urgency``; validated, not stored).
-   A bad type raises ``TypeError``, a bad value ``ValueError``. An unknown Enrollment, or one
-   whose Sequence is missing or no longer at the version it was enrolled at, raises
+   A bad type raises ``TypeError``, a bad value ``ValueError``. An unknown Enrollment raises
    ``LookupError``; an ended one ``ValueError``; a Step outside its Sequence ``ValueError``.
-   Nothing is written.
+   Nothing is written. The Step briefs (and each slot's ``day_offset``) come from the
+   Enrollment's bound version (Story 11.7: ``sequence_version_id``, read through
+   ``queries.setup.sequence_version``), whatever the Sequence's current version is. An
+   Enrollment with no bound version row (one made before 11.7 at a version that was never kept)
+   uses the current Sequence while it is still at the version it was enrolled at; otherwise,
+   or when its bound row or Sequence is missing, ``LookupError``.
 2. **The gate.** ``compliance_api.assert_contactable(ContactSubject(contact), "email",
    "cold")``, looked up at call time (AD-16), answers before any write; ``Blocked`` is
    returned as it is, with nothing written.
@@ -97,6 +101,7 @@ from nextron.app.queries import research as research_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.drafting import DraftView, RevisionView
+from nextron.app.queries.sequencing import StoredEnrollment
 from nextron.db import eventlog
 from nextron.db.repos.drafting import drafts as drafts_repo
 from nextron.db.repos.drafting import footer_snapshots as footer_snapshots_repo
@@ -114,6 +119,7 @@ from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.notifications import ContactErased, FooterChanged
 from nextron.domain.sending_policy import step_due_at
+from nextron.domain.sequences import StepBrief
 from nextron.ports.clock import Clock
 
 log = logging.getLogger(__name__)
@@ -250,6 +256,20 @@ def _checked_steps(steps: object) -> tuple[int, ...]:
     return found
 
 
+def _bound_briefs(enrollment: StoredEnrollment) -> tuple[StepBrief, ...]:
+    """The Step briefs of the Sequence version the Enrollment is bound to (Story 11.7); see
+    the module docstring."""
+    if enrollment.sequence_version_id is not None:
+        bound = setup_queries.sequence_version(enrollment.sequence_version_id)
+        if bound is None or bound.sequence_id != enrollment.sequence_id:
+            raise LookupError("request_steps: the Enrollment's Sequence version isn't stored")
+        return bound.definition.steps
+    sequence = setup_queries.sequence_by_id(enrollment.sequence_id)
+    if sequence is None or sequence.version != enrollment.sequence_version:
+        raise LookupError("request_steps: the Enrollment's Sequence version isn't stored")
+    return sequence.definition.steps
+
+
 class Drafting:
     """Draft slots and their due times; see the module docstring."""
 
@@ -271,10 +291,7 @@ class Drafting:
             raise LookupError("request_steps: the Enrollment is unknown")
         if EnrollmentStatus(enrollment.status) not in LIVE_STATUSES:
             raise ValueError("request_steps: the Enrollment has ended")
-        sequence = setup_queries.sequence_by_id(enrollment.sequence_id)
-        if sequence is None or sequence.version != enrollment.sequence_version:
-            raise LookupError("request_steps: the Enrollment's Sequence version isn't stored")
-        briefs = sequence.definition.steps
+        briefs = _bound_briefs(enrollment)
         if chosen[0] < FIRST_STEP or chosen[-1] > len(briefs):
             raise ValueError("request_steps: a Step isn't in the Enrollment's Sequence")
 

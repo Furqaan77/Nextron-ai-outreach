@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0055_11_5_segment_editing"
+HEAD = "0056_11_7_sequence_editing"
 
 
 @pytest.fixture
@@ -1452,3 +1452,127 @@ def test_0055_stores_each_existing_segments_current_version_and_keeps_it_immutab
             f"actor) VALUES ('01JD3QZ8X5V9K2M7N4P6R8T0D8', '{law}', 4, '{{}}', '{updated}', "
             "'system')",
         )
+
+
+def test_0056_stores_each_sequence_s_current_version_and_binds_matching_enrollments(
+    tmp_path: Path,
+) -> None:
+    """Story 11.7: every Sequence stored before 0056 gets one immutable sequence_versions row at
+    its current version, its definition the canonical sequence_form JSON of its brief rows; each
+    Enrollment at that version is bound to it, one at a version never kept stays NULL; the
+    recreated trg_enrollments_bound covers the new column."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0055_11_5_segment_editing":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0055_11_5_segment_editing",
+        )
+    at, later = "2026-11-14T09:00:00.000000Z", "2026-11-18T09:00:00.000000Z"
+    ids = {name: f"01JD3QZ8X5V9K2M7N4P6R8T0{n:02d}" for n, name in enumerate(
+        ("seq", "seg", "mkt", "off", "cmp", "var", "dom", "box", "lead", "con", "e1", "e2", "b1",
+         "b2", "lead2", "con2")
+    )}
+    brief = (
+        "INSERT INTO step_briefs (id, sequence_id, step, delay_days, purpose, word_limit, "
+        "word_comparison, allowed_content, ask, link_rule, no_price, no_audit, subject_rule, "
+        "segment_angles, created_at, updated_at) VALUES "
+    )
+    enrollment = (
+        "INSERT INTO enrollments (id, lead_id, contact_id, campaign_id, variant_id, "
+        "sending_inbox_id, sequence_id, sequence_version, offer_id, origin, status, created_at, "
+        "updated_at) VALUES ('{id}', '{lead}', '{con}', '{cmp}', '{var}', '{box}', '{seq}', "
+        "{version}, '{off}', 'selection', '{status}', '{at}', '{at}')"
+    )
+    run_sql(
+        path,
+        "INSERT INTO sequences (id, key, name, version, created_at, updated_at) "
+        f"VALUES ('{ids['seq']}', 'default', 'Default', 2, '{at}', '{later}')",
+        brief + f"('{ids['b1']}', '{ids['seq']}', 1, 0, 'Open', 80, 'under', "
+        "'[\"One observed Signal\"]', 'Worth a look?', 'footer_only', 1, 1, "
+        "'{\"guidance\":[\"Short\"],\"word_comparison\":\"under\",\"word_limit\":7}', '[]', "
+        f"'{at}', '{at}')",
+        brief + f"('{ids['b2']}', '{ids['seq']}', 2, 3, 'New angle', 70, 'at_most', "
+        "'[\"A new fact\"]', 'Still relevant?', 'footer_only', 1, 1, NULL, "
+        "'[{\"angle\":\"Their intake\",\"market\":\"us\",\"segment\":\"law\"}]', "
+        f"'{at}', '{at}')",
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{ids['seg']}', 'law', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO markets (id, code, name, enabled, country_code, cctlds, cold_email_allowed, "
+        "free_webmail_blocked, default_timezone, unknown_timezone, english_variant, "
+        "footer_template, privacy_line_required, version, created_at, updated_at) VALUES "
+        f"('{ids['mkt']}', 'us', 'US', 1, 'US', '[]', 1, 1, 'America/New_York', "
+        f"'America/New_York', 'en-US', '[]', 0, 1, '{at}', '{at}')",
+        "INSERT INTO offers (id, key, name, ladder, version, created_at, updated_at) "
+        f"VALUES ('{ids['off']}', 'default', 'Default', '[]', 1, '{at}', '{at}')",
+        "INSERT INTO campaigns (id, key, name, segment_id, market_id, offer_id, sequence_id, "
+        f"status, version, created_at, updated_at) VALUES ('{ids['cmp']}', 'c', 'C', "
+        f"'{ids['seg']}', '{ids['mkt']}', '{ids['off']}', '{ids['seq']}', 'active', 1, "
+        f"'{at}', '{at}')",
+        "INSERT INTO variants (id, campaign_id, name, status, step_angles, created_at, "
+        f"updated_at) VALUES ('{ids['var']}', '{ids['cmp']}', 'A', 'active', '[]', '{at}', "
+        f"'{at}')",
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{ids['dom']}', "
+        f"'nextron-mail.com', '{at}')",
+        "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
+        f"created_at) VALUES ('{ids['box']}', 'mac@nextron-mail.com', 'Main', '{ids['dom']}', "
+        f"'Mac', '{at}')",
+        "INSERT INTO leads (id, name, segment_id, web_domain, created_at) VALUES "
+        f"('{ids['lead']}', 'Firm', '{ids['seg']}', 'firm.com', '{at}')",
+        "INSERT INTO contacts (id, lead_id, name, created_at, updated_at) VALUES "
+        f"('{ids['con']}', '{ids['lead']}', 'Zelda', '{at}', '{at}')",
+        enrollment.format(**ids, id=ids["e1"], version=2, status="active", at=at),
+        "INSERT INTO leads (id, name, segment_id, web_domain, created_at) VALUES "
+        f"('{ids['lead2']}', 'Other', '{ids['seg']}', 'other.com', '{at}')",
+        "INSERT INTO contacts (id, lead_id, name, created_at, updated_at) VALUES "
+        f"('{ids['con2']}', '{ids['lead2']}', 'Ada', '{at}', '{at}')",
+        enrollment.format(
+            **{**ids, "lead": ids["lead2"], "con": ids["con2"]},
+            id=ids["e2"],
+            version=1,
+            status="active",
+            at=at,
+        ),
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0055_11_5_segment_editing", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        [(version_id, sequence_id, version, definition, created, actor)] = reader.execute(
+            "SELECT id, sequence_id, version, definition, created_at, actor "
+            "FROM sequence_versions"
+        ).fetchall()
+        bound = reader.execute(
+            "SELECT id, sequence_version_id FROM enrollments ORDER BY id"
+        ).fetchall()
+    finally:
+        reader.close()
+    assert (sequence_id, version, created, actor, len(version_id)) == (
+        ids["seq"], 2, later, "seed", 26
+    )
+    assert definition == (
+        '{"key":"default","name":"Default","steps":[{"allowed_content":["One observed Signal"],'
+        '"ask":"Worth a look?","delay_days":0,"link_rule":"footer_only","no_audit":true,'
+        '"no_price":true,"purpose":"Open","subject_rule":{"guidance":["Short"],'
+        '"word_comparison":"under","word_limit":7},"word_comparison":"under","word_limit":80},'
+        '{"allowed_content":["A new fact"],"ask":"Still relevant?","delay_days":3,'
+        '"link_rule":"footer_only","no_audit":true,"no_price":true,"purpose":"New angle",'
+        '"segment_angles":[{"angle":"Their intake","market":"us","segment":"law"}],'
+        '"word_comparison":"at_most","word_limit":70}]}'
+    )
+    assert bound == [(ids["e1"], version_id), (ids["e2"], None)]
+    for statement in (
+        "UPDATE sequence_versions SET definition = '{}'",
+        "DELETE FROM sequence_versions",
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match="sequence_versions rows are immutable"):
+            run_sql(path, statement)
+    with pytest.raises(sqlite3.IntegrityError, match="bound columns"):
+        run_sql(path, f"UPDATE enrollments SET sequence_version_id = NULL WHERE id = '{ids['e1']}'")
+    run_sql(path, f"UPDATE enrollments SET status = 'paused', pause_cause = 'operator' "
+            f"WHERE id = '{ids['e1']}'")  # an unbound column still changes

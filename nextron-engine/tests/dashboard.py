@@ -132,6 +132,7 @@ from nextron.app.sending.checks import DomainChecks
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.app.setup.segment_editing import SegmentEditor
+from nextron.app.setup.sequence_editing import SequenceEditor
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.ai import RouteSpec
 from nextron.domain.alert import Channel
@@ -382,6 +383,7 @@ class Dashboard:
     selection: Selection = field(init=False)
     signal_inbox: SignalInbox = field(init=False)
     segment_editor: SegmentEditor = field(init=False)
+    sequence_editor: SequenceEditor = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -481,6 +483,7 @@ class Dashboard:
             selection=self.selection,
         )
         self.segment_editor = SegmentEditor(self.clock)
+        self.sequence_editor = SequenceEditor(self.clock)
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
         self.discovery = Discovery(self.clock, Pipeline(self.clock), self.queue)
         self.lead_imports = LeadImports(
@@ -542,6 +545,7 @@ class Dashboard:
             selection=self.selection,
             signal_inbox=self.signal_inbox,
             segment_editor=self.segment_editor,
+            sequence_editor=self.sequence_editor,
             units=self.units,
             **extra,
         )

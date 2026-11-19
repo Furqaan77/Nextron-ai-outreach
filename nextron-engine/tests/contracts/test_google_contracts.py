@@ -60,6 +60,7 @@ PARAMETER_VALUES: Final = {
     "contact_id": ["01KA0000000000000000000000", "start_grant"],  # Story 3.13's erase step
     "ticket": ["Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7dEf0hIj3", "start_grant"],
     "segment_id": ["01KA0000000000000000000000", "start_grant"],  # Story 11.5's Segments
+    "sequence_id": ["01KA0000000000000000000000", "start_grant"],  # Story 11.7's Sequences
 }
 QUERIES: Final = [b"", b"grant=internal_notify", b"grant=postmaster&confirm=yes&path=C:%5Cx.json"]
 

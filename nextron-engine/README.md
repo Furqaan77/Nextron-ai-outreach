@@ -536,8 +536,9 @@ decision-maker roles, disqualifiers, weighted Signal types (the PRD's FR-1 table
 and discovery queries. Once any Segment is stored, the dashboard owns them (AD-12; see
 [Editing Segments](#editing-segments)). The Markets (FR-2) come from `seed/markets.yaml`: the US and UK
 cold-email rules (see [Markets](#markets)). The Sequences (FR-4) come from
-`seed/sequences.yaml`: the default four-Step Sequence and its Step briefs (see
-[Sequences](#sequences)). The Approved Company Facts (FR-72) come from
+`seed/sequences.yaml` only into a database that holds none: the default four-Step Sequence and
+its Step briefs (see [Sequences](#sequences)); once any Sequence is stored, the dashboard owns
+them (see [Editing Sequences](#editing-sequences)). The Approved Company Facts (FR-72) come from
 `seed/company_facts.yaml`: the claims a Draft may make about Nextron (see
 [Approved Company Facts](#approved-company-facts)). The Offers and Campaigns (FR-3) come from
 `seed/offers.yaml` and `seed/campaigns.yaml`: the commercial ladder and one Campaign per Segment
@@ -805,17 +806,72 @@ Opinion 512, which only a US Market's angle may (market uk is GB)`.
 **Storage.** A Sequence is one `sequences` row (its `key`, `name` and `version`) and one
 `step_briefs` row per Step, keyed (`sequence_id`, `step`), with typed columns and canonical JSON
 for `allowed_content`, `subject_rule` (NULL when the Step has none) and `segment_angles` (`[]`
-for none). A Sequence's version and its `events` row cover its briefs. A changed Sequence
-updates only the brief rows that differ, adds rows for new Steps and deletes the rows of Steps
-no longer in it; a Sequence that is no longer in the file is left as it is.
+for none), plus one immutable `sequence_versions` row per version (Story 11.7). A Sequence's
+version and its `events` row cover its briefs. A changed Sequence updates only the brief rows
+that differ, adds rows for new Steps and deletes the rows of Steps no longer in it.
+
+**Seed sync.** `nextron seed sync` loads `seed/sequences.yaml` only into a database that holds
+no Sequence (each at version 1 with its `sequence_versions` row, actor `seed`). Once any
+Sequence is stored it writes none and prints this line, then a line per difference:
+
+```text
+sequences: Sequences are managed in the dashboard; seed/sequences.yaml ignored
+```
+
+The difference lines are `<key>: only in the file`, `<key>: differs in name, steps[3].ask`
+and `<key>: only in the dashboard`. The file is still
+validated, and a Campaign's Variant Steps are checked against the stored Sequences.
 
 **Reading the Sequences.** Other code reads them through `queries.setup.sequences()` (each
 `SeededSequence` with its `id`, `key`, `version` and decoded `SequenceDef`, its Step briefs in
 Step order) and `queries.setup.sequence(key)`; a stored Sequence that no longer validates raises
 `InvalidSequences`. Campaigns (4.2), Draft slots and due times (4.9), the grounding rules (4.13)
 and drafting (4.15, 4.18) read the briefs this way; `nextron.domain.sequences.max_words(limit,
-comparison)` turns a limit into a word count. Only `_sync_sequences` writes the Sequences
+comparison)` turns a limit into a word count. Only `_sync_sequences` (the bootstrap) and
+`SequenceEditor.edit` (the dashboard) write the Sequences
 (`tests/contracts/test_sequence_contracts.py`).
+
+### Editing Sequences
+
+Settings links the **Sequences page** (`/sequences`, Story 11.7). It lists each Sequence with
+its version, number of Steps and how many Campaigns use it, and per Sequence an edit page
+(`/sequences/<id>`) and its history (`/sequences/<id>/versions`). There is no create or delete:
+Campaigns choose among the stored Sequences.
+
+**The form.** The name, and per Step its delay (days after the Sequence starts), purpose, word
+limit, word count (`under` or `at_most`), allowed content (a textarea, one item per line) and
+ask. Steps can be removed (a "Remove this Step" box) or appended (the blank rows, up to 6
+Steps), never reordered; Step 1 can't be removed. **Fixed, read-only** ("Set in code (FR-4)"):
+Step 1's delay of 0 days and its stored subject rule, every Step's `footer_only` link rule, and
+`no_price` and `no_audit` true. The editor sets these itself and never reads them from the
+form. A kept Step keeps its stored Segment angles (so the US and UK regulatory angles can't be
+lost or moved); an appended Step has none.
+
+**Saving.** Every save goes through the Story 4.1 validator, unchanged; a refusal names the Step
+and field (`steps[3].delay_days: must be more than Step 2's delay_days (3)`), re-shows the form
+as typed and saves nothing. The form carries the version it showed; if the Sequence changed
+meanwhile the save is refused ("This Sequence changed since you opened it"). A save that would
+leave fewer Steps than a Campaign Variant's angle note names is refused, naming the Campaign and
+Variant. A save identical to the stored Sequence writes nothing. Otherwise the Sequence gets its
+next version, an immutable `sequence_versions` row (migration `0056_11_7_sequence_editing`,
+which also stored each existing Sequence's current version, actor `seed`) and an `events` row
+(`v<n>` to `v<n+1>`, cause `operator_edit`, actor `operator`).
+
+**Running Enrollments keep their version.** Each Enrollment stores the `sequence_versions` row
+it started with (`enrollments.sequence_version_id`); every later Step's slot takes its brief and
+delay from that version, so an edit changes only new Enrollments. The edit page says how many
+active Enrollments keep each version ("2 active Enrollments keep version 2"). An Enrollment made
+before this story at a version that was never kept has no bound row: it keeps working while the
+Sequence is at that version. `queries.setup.steps_per_sequence()` is the most Steps of any
+Sequence an active Campaign uses at its current version, for capacity. With no active Campaign
+it falls back to every stored Sequence; older versions bound by live Enrollments are not
+counted.
+
+**History.** The versions page lists every stored version, oldest first, with who saved it,
+when, and each changed field (`name` or `steps[2].word_limit`) with its value before and after.
+Steps are matched by number: only an added or removed last Step shows as a whole `steps[n]`.
+Removing a middle Step shows as field changes on each later Step (they move up one number) plus
+the old last `steps[n]` as removed.
 
 ### Approved Company Facts
 
@@ -2755,8 +2811,9 @@ and lets you pick the Leads to start. Nothing is picked automatically.
 **Capacity.** Computed live each time, for today in `sender_timezone` (UTC while unset):
 `new_sequence_capacity = min(total − follow-ups due, total ÷ steps)` (whole numbers, never below
 0), where `total` is the sum of the inboxes' cold Daily Caps (Story 6.4), the follow-ups due are
-every inbox's unsent follow-ups due today (overdue included), and `steps` is the largest Step
-count of the stored Sequences (4 by default). Example: 3 inboxes at 30 with 61 follow-ups due
+every inbox's unsent follow-ups due today (overdue included), and `steps` is
+`queries.setup.steps_per_sequence()`: the most Steps of the current version of any Sequence an
+active Campaign uses, else of every stored Sequence (4 by default). Example: 3 inboxes at 30 with 61 follow-ups due
 and 4 Steps give 22. **Remaining today** is that capacity less today's picks.
 
 **The `daily_capacity` table** (migration `0052_4_10_daily_capacity`, owner `scoring`, every

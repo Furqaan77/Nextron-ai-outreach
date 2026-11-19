@@ -17,12 +17,22 @@ longer validates (a JSON column that isn't JSON, or Steps that aren't numbered 1
 - ``by_key(key)``: the Sequence ``key``, or ``None``;
 - ``by_id(sequence_id)``: the Sequence with that row id, or ``None`` (Story 4.8: a Campaign names
   its Sequence by id);
-- ``insert(sequence, at) -> id``: a new Sequence at version 1 and one brief row per Step, all
-  created and updated at ``at``;
-- ``update(sequence_id, sequence, version, at)``: sets the Sequence's ``name``, ``version`` and
-  ``updated_at``; updates each brief row whose content differs (``updated_at`` = ``at``),
-  inserts a row for each new Step and deletes the row of each Step no longer in the Sequence.
-  An equal row is untouched.
+- ``insert(sequence, at, actor) -> id``: a new Sequence at version 1 and one brief row per
+  Step, all created and updated at ``at``, with its ``sequence_versions`` row (version 1,
+  ``actor``);
+- ``update(sequence_id, sequence, version, at, actor)``: sets the Sequence's ``name``,
+  ``version`` and ``updated_at``; updates each brief row whose content differs (``updated_at`` =
+  ``at``), inserts a row for each new Step and deletes the row of each Step no longer in the
+  Sequence. An equal row is untouched. It also inserts that version's ``sequence_versions`` row
+  (Story 11.7), so no Sequence write can skip a version;
+- ``version_row(version_id)`` (Story 11.7): the ``StoredSequenceVersion`` with that id, or
+  ``None``;
+- ``versions(sequence_id)``: every stored version of the Sequence, oldest first;
+- ``current_version_id(sequence_id)``: the id of the row of the Sequence's current version, or
+  ``None`` when it has none.
+
+A version row's ``definition`` is ``nextron.domain.sequences.definition_text`` of that version.
+``sequence_versions`` rows are never updated or deleted (its triggers refuse it).
 """
 
 import json
@@ -38,12 +48,13 @@ from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
 
 from nextron.db.models.base import new_id
-from nextron.db.models.setup import SequenceRecord, StepBriefRecord
+from nextron.db.models.setup import SequenceRecord, SequenceVersionRecord, StepBriefRecord
 from nextron.db.uow import current
 from nextron.domain.sequences import (
     KEY_PATTERN,
     InvalidSequences,
     SequenceDef,
+    definition_text,
     sequence_form,
     sequence_from_form,
 )
@@ -75,6 +86,26 @@ class StoredSequence:
     sequence: SequenceDef
 
 
+@dataclass(frozen=True, slots=True)
+class StoredSequenceVersion:
+    """One ``sequence_versions`` row."""
+
+    id: str
+    sequence_id: str
+    version: int
+    definition: str
+    created_at: datetime
+    actor: str
+
+
+_VERSION_COLUMNS = (
+    SequenceVersionRecord.id,
+    SequenceVersionRecord.sequence_id,
+    SequenceVersionRecord.version,
+    SequenceVersionRecord.definition,
+    SequenceVersionRecord.created_at,
+    SequenceVersionRecord.actor,
+)
 _SEQUENCE_COLUMNS = (
     SequenceRecord.id,
     SequenceRecord.key,
@@ -215,9 +246,24 @@ def _insert_brief(sequence_id: str, values: dict[str, Any], at: datetime) -> Non
     )
 
 
-def insert(sequence: SequenceDef, at: datetime) -> str:
-    """Store a new Sequence at version 1 with one brief row per Step, created at ``at``; return
-    its new ULID."""
+def _insert_version(
+    sequence_id: str, version: int, sequence: SequenceDef, at: datetime, actor: str
+) -> None:
+    current().session.execute(
+        insert_rows(SequenceVersionRecord).values(
+            id=new_id(),
+            sequence_id=sequence_id,
+            version=version,
+            definition=definition_text(sequence),
+            created_at=at,
+            actor=actor,
+        )
+    )
+
+
+def insert(sequence: SequenceDef, at: datetime, actor: str) -> str:
+    """Store a new Sequence at version 1 with one brief row per Step, created at ``at``, and its
+    version row; return its new ULID."""
     sequence_id = new_id()
     current().session.execute(
         insert_rows(SequenceRecord).values(
@@ -231,12 +277,16 @@ def insert(sequence: SequenceDef, at: datetime) -> str:
     )
     for values in _brief_values(sequence):
         _insert_brief(sequence_id, values, at)
+    _insert_version(sequence_id, FIRST_VERSION, sequence, at, actor)
     return sequence_id
 
 
-def update(sequence_id: str, sequence: SequenceDef, version: int, at: datetime) -> None:
+def update(
+    sequence_id: str, sequence: SequenceDef, version: int, at: datetime, actor: str
+) -> None:
     """Set the name and version of the Sequence ``sequence_id`` and bring its brief rows to
-    ``sequence``'s Steps, changed at ``at``; an equal brief row is untouched."""
+    ``sequence``'s Steps, changed at ``at`` (an equal brief row is untouched); store that
+    version's row."""
     session = current().session
     session.execute(
         update_rows(SequenceRecord)
@@ -259,3 +309,34 @@ def update(sequence_id: str, sequence: SequenceDef, version: int, at: datetime) 
     gone = [brief.id for step, brief in stored.items() if step not in kept]
     if gone:
         session.execute(delete_rows(StepBriefRecord).where(StepBriefRecord.id.in_(gone)))
+    _insert_version(sequence_id, version, sequence, at, actor)
+
+
+def version_row(version_id: str) -> StoredSequenceVersion | None:
+    """The ``sequence_versions`` row ``version_id``, or ``None``."""
+    statement = select(*_VERSION_COLUMNS).where(SequenceVersionRecord.id == str(version_id))
+    row = current().session.execute(statement).one_or_none()
+    return None if row is None else StoredSequenceVersion(*row)
+
+
+def versions(sequence_id: str) -> tuple[StoredSequenceVersion, ...]:
+    """Every stored version of the Sequence ``sequence_id``, oldest first."""
+    statement = (
+        select(*_VERSION_COLUMNS)
+        .where(SequenceVersionRecord.sequence_id == str(sequence_id))
+        .order_by(SequenceVersionRecord.version)
+    )
+    return tuple(StoredSequenceVersion(*row) for row in current().session.execute(statement))
+
+
+def current_version_id(sequence_id: str) -> str | None:
+    """The id of the row of the Sequence's current version, or ``None`` when it has none."""
+    statement = (
+        select(SequenceVersionRecord.id)
+        .join(SequenceRecord, SequenceRecord.id == SequenceVersionRecord.sequence_id)
+        .where(
+            SequenceRecord.id == str(sequence_id),
+            SequenceVersionRecord.version == SequenceRecord.version,
+        )
+    )
+    return current().session.execute(statement).scalar_one_or_none()

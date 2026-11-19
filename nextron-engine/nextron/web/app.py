@@ -102,6 +102,15 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   in a read-only one; a refused save (``SegmentRefused``) answers 200 with the form re-rendered
   as submitted. An unknown Segment (a text that isn't a ULID included) answers 404 with the
   plain text "That Segment doesn't exist.", which never echoes the id.
+- ``GET /sequences`` (``sequences_page``), ``GET /sequences/{sequence_id}`` (``sequence_page``),
+  ``GET /sequences/{sequence_id}/versions`` (``sequence_versions_page``) and ``POST
+  /sequences/{sequence_id}/edit`` (``sequence_edit``), all ``@personal_data(False)``: the
+  Sequences section of Settings (FR-4, Story 11.7), linked from the Settings page; see
+  ``nextron.web.sequences_page``. The edit POST runs ``sequence_editor`` (``SequenceEditor``, the
+  ``setup`` service) in its own unit of work, then renders the panel again in a read-only one; a
+  refused save (``SequenceRefused``) answers 200 with the form re-rendered as submitted. An
+  unknown Sequence (a text that isn't a ULID included) answers 404 with the plain text "That
+  Sequence doesn't exist.", which never echoes the id.
 - ``GET /ai`` (``ai_content_page``) and ``POST /ai/check`` (``ai_content_check``), both
   ``@personal_data(False)``: the AI content view (Story 4.4), linked from the Settings page; see
   ``nextron.web.ai_content_page``. The GET reads ``queries.playbook.route_tuples()`` and
@@ -446,6 +455,8 @@ from nextron.app.setup.api import (
     Setup,
 )
 from nextron.app.setup.segment_editing import SegmentEditor
+from nextron.app.setup.sequence_editing import STALE as SEQUENCE_STALE
+from nextron.app.setup.sequence_editing import SequenceEditor
 from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.channel_permission import PermissionRefused
 from nextron.domain.company_facts import InvalidFact
@@ -467,7 +478,7 @@ from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.render import footer_complete
 from nextron.domain.segments import InvalidSegments, SegmentDef, SegmentRefused
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
-from nextron.domain.sequences import InvalidSequences
+from nextron.domain.sequences import InvalidSequences, SequenceRefused
 from nextron.domain.signal_inbox_item import ItemsRefused, check_items
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.domain.suppression_list import (
@@ -502,6 +513,7 @@ from nextron.web import pipeline_page as board_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import ready_page as ready_rows
 from nextron.web import segments_page as segment_rows
+from nextron.web import sequences_page as sequence_rows
 from nextron.web import signal_inbox_page as inbox_page_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
@@ -717,6 +729,7 @@ def create_app(
     selection: Selection,
     signal_inbox: SignalInbox,
     segment_editor: SegmentEditor,
+    sequence_editor: SequenceEditor,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -740,8 +753,8 @@ def create_app(
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
     answers 503) and ``lead_scores`` its "Re-score" (Story 2.15) and both "Re-score with the
     current definition" controls (Story 11.5); ``segment_editor`` creates and edits Segments
-    (Story 11.5); ``pipeline`` runs its Pipeline
-    panel's moves, bookings and deal saves (Story 9.1); ``selection`` gives the "Ready to draft"
+    (Story 11.5); ``sequence_editor`` edits Sequences (Story 11.7); ``pipeline`` runs its
+    Pipeline panel's moves, bookings and deal saves (Story 9.1); ``selection`` gives the "Ready to draft"
     page its list, capacity and picks and the notification area its signal shortfall (Story
     4.10); ``signal_inbox`` stores the Signal Inbox's pasted items and reprocesses a flagged one
     (Story 2.16); ``compliance`` runs the Suppression List panel's add, import and Reverse, and
@@ -1213,6 +1226,110 @@ def create_app(
         with units.open(read_only=True):
             return segment_answer(
                 request, segment_id, segment_rows.SEGMENT_PANEL_TEMPLATE, notice=notice
+            )
+
+    def sequence_answer(
+        request: Request,
+        sequence_id: str,
+        template: str,
+        *,
+        notice: str | None = None,
+        alert: str | None = None,
+        refused: tuple[sequence_rows.SubmittedSequence, int, Mapping[str, str]] | None = None,
+    ) -> Response:
+        """One Sequence's page or panel, in the caller's read-only unit of work; 404 for an
+        unknown id (never echoed); the unavailable notice when a stored row no longer
+        decodes."""
+        try:
+            seeded = setup_queries.sequence_by_id(sequence_id)
+            if seeded is None:
+                return not_found_text(sequence_rows.NOT_FOUND)
+            context = sequence_rows.edit_context(
+                seeded,
+                setup_queries.campaigns(),
+                sequencing_queries.live_enrollments_by_version(seeded.id),
+                notice=notice,
+                alert=alert,
+                refused=refused,
+            )
+        except STORED_ROW_REFUSED as unreadable:
+            return sequence_unavailable(request, template, unreadable.message)
+        return page(request, template, **context)
+
+    def sequence_unavailable(request: Request, template: str, message: str) -> HTMLResponse:
+        """The Sequences list's unavailable notice, as a page (a page ``template``) or a panel."""
+        shown = (
+            sequence_rows.PANEL_TEMPLATE
+            if template == sequence_rows.SEQUENCE_PANEL_TEMPLATE
+            else sequence_rows.PAGE_TEMPLATE
+        )
+        return page(request, shown, **sequence_rows.list_context((), unavailable=message))
+
+    @app.get("/sequences", name="sequences_page")
+    @personal_data(False)  # Step briefs and rules, never a person
+    def sequences_page(request: Request) -> HTMLResponse:
+        try:
+            rows = sequence_rows.sequence_rows(
+                setup_queries.sequences(), setup_queries.campaigns()
+            )
+        except STORED_ROW_REFUSED as unreadable:
+            context = sequence_rows.list_context((), unavailable=unreadable.message)
+        else:
+            context = sequence_rows.list_context(rows)
+        return page(request, sequence_rows.PAGE_TEMPLATE, **context)
+
+    @app.get("/sequences/{sequence_id}", name="sequence_page")
+    @personal_data(False)
+    def sequence_page(request: Request, sequence_id: str) -> Response:
+        return sequence_answer(request, sequence_id, sequence_rows.SEQUENCE_TEMPLATE)
+
+    @app.get("/sequences/{sequence_id}/versions", name="sequence_versions_page")
+    @personal_data(False)
+    def sequence_versions_page(request: Request, sequence_id: str) -> Response:
+        try:
+            seeded = setup_queries.sequence_by_id(sequence_id)
+            if seeded is None:
+                return not_found_text(sequence_rows.NOT_FOUND)
+            context = sequence_rows.versions_context(
+                seeded, setup_queries.sequence_versions(seeded.id)
+            )
+        except STORED_ROW_REFUSED as unreadable:
+            return sequence_unavailable(request, sequence_rows.PAGE_TEMPLATE, unreadable.message)
+        return page(request, sequence_rows.VERSIONS_TEMPLATE, **context)
+
+    @app.post("/sequences/{sequence_id}/edit", name="sequence_edit")
+    @personal_data(False)
+    def sequence_edit(
+        request: Request, sequence_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        submitted = sequence_rows.submitted_sequence(fields)
+        based_on = sequence_rows.submitted_based_on(fields)
+        proposed = sequence_rows.proposed_fields(submitted)
+        try:
+            with units.open():
+                saved = sequence_editor.edit(sequence_id, based_on, proposed.fields)
+        except SequenceRefused as refusal:  # 200, so HTMX swaps the panel in; nothing was saved
+            if sequence_rows.is_stale(refusal.problems, SEQUENCE_STALE):
+                # The current stored version's form, so the next save isn't stale too.
+                with units.open(read_only=True):
+                    return sequence_answer(
+                        request,
+                        sequence_id,
+                        sequence_rows.SEQUENCE_PANEL_TEMPLATE,
+                        alert=sequence_rows.stale_notice(refusal.problems),
+                    )
+            problems = sequence_rows.form_problems(refusal.problems, proposed)
+            with units.open(read_only=True):
+                return sequence_answer(
+                    request,
+                    sequence_id,
+                    sequence_rows.SEQUENCE_PANEL_TEMPLATE,
+                    refused=(submitted, based_on, problems),
+                )
+        notice = sequence_rows.saved_notice(saved.key, saved.version, saved.changed)
+        with units.open(read_only=True):
+            return sequence_answer(
+                request, sequence_id, sequence_rows.SEQUENCE_PANEL_TEMPLATE, notice=notice
             )
 
     def ai_content_answer(

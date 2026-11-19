@@ -24,6 +24,9 @@ included.
   ``approved``) Step slots with ``step_no > 1`` due before the end of that date in ``zone``
   (``queries.drafting.follow_ups_due_before``). Both ``pick_inbox``'s weighing and the
   "Ready to draft" capacity read it.
+- ``live_enrollments_by_version(sequence_id)`` (Story 11.7): ``{sequence_version: live
+  Enrollments}`` of the Sequence, for each version that has any (the Sequences page's "n active
+  Enrollments keep version k"); ``{}`` for a text that isn't a ULID;
 - ``export_pii(contact_id) -> {"enrollments": tuple[dict, ...]}`` (Story 3.15's subject access
   exporter, ``nextron.domain.contact_export``; added at the merge of Story 4.8): every column of
   each of the Contact's Enrollments (Campaign, Variant, Sending Inbox, Sequence, Offer, origin,
@@ -107,6 +110,13 @@ def follow_ups_due(local_date: date, zone: tzinfo) -> Mapping[str, int]:
         if count:
             found[row.sending_inbox_id] = found.get(row.sending_inbox_id, 0) + count
     return MappingProxyType(found)
+
+
+def live_enrollments_by_version(sequence_id: str) -> Mapping[int, int]:
+    """The number of live Enrollments of the Sequence at each version that has any."""
+    if not is_ulid(sequence_id):
+        return MappingProxyType({})
+    return MappingProxyType(enrollments_repo.live_counts_by_version(sequence_id))
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:

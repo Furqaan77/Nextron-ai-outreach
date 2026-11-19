@@ -32,7 +32,9 @@ from nextron.app.compliance.erasure import Erasures
 from nextron.app.drafting.api import Drafting
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.sequencing import api as sequencing_api
+from nextron.app.queries import setup as setup_queries
 from nextron.app.setup.api import Setup
+from nextron.app.setup.sequence_editing import SequenceEditor
 from nextron.db.uow import current
 from nextron.domain.ai import Urgency
 from nextron.domain.contactability import Allowed, Blocked, BlockReason
@@ -216,15 +218,126 @@ def test_request_steps_checks_its_arguments_before_any_write(world: World) -> No
     assert world.counts() == before
 
 
-def test_request_steps_refuses_an_enrollment_whose_sequence_version_moved_on(
+def test_enroll_binds_the_current_sequence_version_row(world: World) -> None:
+    """Story 11.7: each Enrollment stores the sequence_versions row it started with."""
+    _, _, enrollment_id = enrolled(world, steps=(1,))
+
+    [(bound, version)] = world.sql(
+        "SELECT e.sequence_version_id, v.version FROM enrollments e "
+        "JOIN sequence_versions v ON v.id = e.sequence_version_id WHERE e.id = ?",
+        (enrollment_id,),
+    )
+    assert (len(bound), version) == (26, 1)
+
+
+def test_request_steps_uses_the_bound_version_after_the_sequence_moved_on(
     world: World,
 ) -> None:
+    """Story 11.7's matrix: enrolled at v1, the Sequence edited to v2 (Step 2 a day later),
+    Step 2's slot still takes v1's delay; a new Enrollment binds v2."""
     _, _, enrollment_id = enrolled(world, steps=(1,))
-    world.sql("UPDATE sequences SET version = version + 1")
+    edit_step_2_delay(world, 4)
     drafting = Drafting(world.clock)
 
+    world.transact(lambda: drafting.request_steps(enrollment_id, (2,), Urgency.SOON))
+
+    assert [row[2:4] for row in slots(world, enrollment_id)] == [(1, 0), (2, DAYS[1])]
+    _, _, later_id = enrolled(world, steps=(1, 2))
+    assert [row[2:4] for row in slots(world, later_id)] == [(1, 0), (2, 4)]
+    [(version,)] = world.sql(
+        "SELECT v.version FROM enrollments e JOIN sequence_versions v "
+        "ON v.id = e.sequence_version_id WHERE e.id = ?",
+        (later_id,),
+    )
+    assert version == 2
+
+
+def test_request_steps_refuses_an_unbound_enrollment_whose_sequence_version_moved_on(
+    world: World,
+) -> None:
+    """An Enrollment from before Story 11.7 (no bound row) keeps the old rule: it works while
+    the current version is the one it was enrolled at, and refuses after that."""
+    _, _, enrollment_id = enrolled(world, steps=(1,))
+    world.sql("DROP TRIGGER trg_enrollments_bound")
+    world.sql("UPDATE enrollments SET sequence_version_id = NULL")
+    drafting = Drafting(world.clock)
+    world.transact(lambda: drafting.request_steps(enrollment_id, (2,), Urgency.SOON))
+    world.sql("UPDATE sequences SET version = version + 1")
+
     with pytest.raises(LookupError):
-        world.transact(lambda: drafting.request_steps(enrollment_id, (2,), Urgency.SOON))
+        world.transact(lambda: drafting.request_steps(enrollment_id, (3,), Urgency.SOON))
+
+
+def test_a_running_enrollment_keeps_its_versions_step_3_delay_and_brief(world: World) -> None:
+    """Story 11.7's "Running Enrollment" row: enrolled at v1, Step 3's delay and brief text
+    edited in v2; Step 3's slot takes v1's delay and the bound version holds v1's brief."""
+    _, _, enrollment_id = enrolled(world, steps=(1,))
+    new_texts = {"purpose": "A rewritten third touch", "ask": "Would a short reply help?"}
+    edit_default(world, {3: {"delay_days": 9, **new_texts}})
+    drafting = Drafting(world.clock)
+
+    world.transact(lambda: drafting.request_steps(enrollment_id, (3,), Urgency.SOON))
+
+    assert [row[2:4] for row in slots(world, enrollment_id)] == [(1, 0), (3, DAYS[2])]
+    [(bound_id,)] = world.sql(
+        "SELECT sequence_version_id FROM enrollments WHERE id = ?", (enrollment_id,)
+    )
+    with world.units.open(read_only=True):
+        bound = setup_queries.sequence_version(str(bound_id))
+        current_sequence = setup_queries.sequence("default")
+    assert bound is not None and current_sequence is not None
+    old_3, new_3 = bound.definition.steps[2], current_sequence.definition.steps[2]
+    assert (bound.version, current_sequence.version) == (1, 2)
+    assert (new_3.delay_days, new_3.purpose, new_3.ask) == (9, *new_texts.values())
+    assert old_3.delay_days == DAYS[2]
+    assert (old_3.purpose, old_3.ask) != (new_3.purpose, new_3.ask)
+
+
+def test_a_running_enrollment_can_request_a_step_its_sequence_since_removed(
+    world: World,
+) -> None:
+    """After a save removes the last Step, an Enrollment bound to v1 still requests Step 4."""
+    _, _, enrollment_id = enrolled(world, steps=(1,))
+    edit_default(world, {}, keep=3)
+    drafting = Drafting(world.clock)
+
+    world.transact(lambda: drafting.request_steps(enrollment_id, (4,), Urgency.SOON))
+
+    assert [row[2:4] for row in slots(world, enrollment_id)] == [(1, 0), (4, DAYS[3])]
+
+
+def edit_step_2_delay(world: World, days: int) -> None:
+    """Story 11.7: edit the default Sequence through the dashboard's editor."""
+    edit_default(world, {2: {"delay_days": days}})
+
+
+def edit_default(
+    world: World, changes: dict[int, dict[str, object]], *, keep: int | None = None
+) -> None:
+    """Story 11.7: edit the default Sequence through the dashboard's editor: each Step's fields
+    in ``changes`` replaced, and only its first ``keep`` Steps kept when given."""
+    with world.units.open(read_only=True):
+        seeded = setup_queries.sequence("default")
+    assert seeded is not None
+    rows = [
+        {
+            "stored_step": brief.step,
+            "delay_days": brief.delay_days,
+            "purpose": brief.purpose,
+            "word_limit": brief.word_limit,
+            "word_comparison": str(brief.word_comparison),
+            "allowed_content": list(brief.allowed_content),
+            "ask": brief.ask,
+            **changes.get(brief.step, {}),
+        }
+        for brief in seeded.definition.steps
+    ]
+    steps = rows if keep is None else rows[:keep]
+    with world.units.open():
+        saved = SequenceEditor(world.clock).edit(
+            seeded.id, seeded.version, {"name": seeded.definition.name, "steps": steps}
+        )
+    assert saved.changed
 
 
 def test_a_blocked_request_writes_nothing(world: World) -> None:

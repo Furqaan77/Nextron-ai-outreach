@@ -751,7 +751,9 @@ the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``
    changed fields, the database's version against the file's) and ``  <key>: only in the
    dashboard`` per difference; then the same block for the Markets (``markets: <n> changed, <m>
    unchanged`` and a line per Market code) and for the Sequences (``sequences: <n> changed,
-   <m> unchanged`` and a line per Sequence key); then the facts' block: ``company_facts: <n>
+   <m> unchanged`` and a line per Sequence key, or, once the database holds any, Story 11.7,
+   ``sequences: Sequences are managed in the dashboard; seed/sequences.yaml ignored`` and a line
+   per difference like the Segments'); then the facts' block: ``company_facts: <n>
    changed, <m> unchanged`` (plus ``, <c> conflict`` or ``conflicts`` when there are any), a
    line per created and changed fact, ``  <fact_id>: conflict, left as the Operator set it
    (version <n>); seed/company_facts.yaml differs`` per conflict, and a line per fact not in
@@ -885,11 +887,14 @@ from nextron.app.setup.api import (
     GoogleAccess,
     MarketSync,
     OfferSync,
+    SegmentDifference,
     SegmentSync,
+    SequenceDifference,
     SequenceSync,
     Setup,
 )
 from nextron.app.setup.segment_editing import SegmentEditor
+from nextron.app.setup.sequence_editing import SequenceEditor
 from nextron.bootstrap import ENGINE_ROOT, BootstrapConfig, BootstrapError, load_bootstrap
 from nextron.db.engine import ConnectionSettingError, create_engine, create_read_only_engine
 from nextron.db.metering import UsageMeter
@@ -1487,6 +1492,7 @@ def build_app(
         selection=selection,
         signal_inbox=signal_inbox,
         segment_editor=SegmentEditor(clock),  # Story 11.5: the Segments page
+        sequence_editor=SequenceEditor(clock),  # Story 11.7: the Sequences page
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -3214,13 +3220,33 @@ def _sync_block(
 SEGMENTS_MANAGED: Final = "Segments are managed in the dashboard; seed/segments.yaml ignored"
 
 
+SEQUENCES_MANAGED: Final = (
+    "Sequences are managed in the dashboard; seed/sequences.yaml ignored"
+)
+
+
 def _segments_block(result: SegmentSync) -> list[str]:
     """The Segments' summary lines: ``_sync_block``'s while the database held none (the
     bootstrap), else (Story 11.5) the managed notice and a line per difference."""
     if not result.managed:
         return _sync_block("segments", SEGMENTS_FILE_LABEL, result)
-    lines = [f"segments: {SEGMENTS_MANAGED}"]
-    for difference in result.differences:
+    return _managed_block("segments", SEGMENTS_MANAGED, result.differences)
+
+
+def _sequences_block(result: SequenceSync) -> list[str]:
+    """The Sequences' summary lines, like the Segments' (Story 11.7)."""
+    if not result.managed:
+        return _sync_block("sequences", SEQUENCES_FILE_LABEL, result)
+    return _managed_block("sequences", SEQUENCES_MANAGED, result.differences)
+
+
+def _managed_block(
+    name: str, notice: str, differences: Iterable[SegmentDifference | SequenceDifference]
+) -> list[str]:
+    """A managed entity's notice and a line per difference between the file and the
+    database."""
+    lines = [f"{name}: {notice}"]
+    for difference in differences:
         if difference.only_in == SEGMENT_ONLY_IN_FILE:
             lines.append(f"  {difference.key}: only in the file")
         elif difference.only_in == SEGMENT_ONLY_IN_DASHBOARD:
@@ -3261,7 +3287,7 @@ def format_seed_sync(result: SeedSync) -> str:
     Approved Company Facts', the Offers' and the Campaigns'."""
     lines = _segments_block(result.segments)
     lines += _sync_block("markets", MARKETS_FILE_LABEL, result.markets)
-    lines += _sync_block("sequences", SEQUENCES_FILE_LABEL, result.sequences)
+    lines += _sequences_block(result.sequences)
     lines += _facts_block(result.company_facts)
     lines += _sync_block("offers", OFFERS_FILE_LABEL, result.offers)
     lines += _sync_block("campaigns", CAMPAIGNS_FILE_LABEL, result.campaigns)

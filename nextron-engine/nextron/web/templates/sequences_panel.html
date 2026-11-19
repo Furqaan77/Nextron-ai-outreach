@@ -1,0 +1,21 @@
+{#- The Sequences list (nextron.web.sequences_page, Story 11.7): rendered inside
+    sequences.html. Stored text is escaped with |plain. -#}
+<div id="sequences-panel">
+<h2>Sequences ({{ sequences|length }})</h2>
+{%- if unavailable %}
+<p class="notice notice-refused" role="alert">{{ unavailable|plain }}</p>
+{%- elif not sequences %}
+<p>No Sequences yet. Run <code>nextron seed sync</code> to load them.</p>
+{%- else %}
+<table class="sequence-table">
+<thead>
+<tr><th scope="col">Key</th><th scope="col">Name</th><th scope="col">Version</th><th scope="col">Steps</th><th scope="col">Campaigns</th><th scope="col">History</th></tr>
+</thead>
+<tbody>
+{%- for sequence in sequences %}
+<tr class="sequence-row-item"><td><a href="/sequences/{{ sequence.id }}">{{ sequence.key|plain }}</a></td><td>{{ sequence.name|plain }}</td><td>{{ sequence.version }}</td><td>{{ sequence.steps }}</td><td>{{ sequence.campaigns }}</td><td><a href="/sequences/{{ sequence.id }}/versions">Versions</a></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</div>

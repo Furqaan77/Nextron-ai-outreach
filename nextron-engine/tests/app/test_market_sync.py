@@ -83,7 +83,7 @@ MARKETS_FIRST = (
 MARKETS_UNCHANGED = "markets: 0 changed, 2 unchanged\n"
 # Story 4.1: the sequences block follows the markets block
 SEQUENCES_FIRST = "sequences: 1 changed, 0 unchanged\n  default: created (version 1)\n"
-SEQUENCES_UNCHANGED = "sequences: 0 changed, 1 unchanged\n"
+SEQUENCES_UNCHANGED = "sequences: Sequences are managed in the dashboard; seed/sequences.yaml ignored\n"
 # Story 4.3: the company_facts block follows the sequences block
 FACTS_FIRST = (
     "company_facts: 8 changed, 0 unchanged\n"

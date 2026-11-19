@@ -113,16 +113,22 @@ least one, validates the definitions again as the file form (``validate_sequence
 ``sequence_form``), then checks every angle against the Segments and Markets of the same call
 (``check_sequence_references``: a Segment key, a Market code, and ABA Formal Opinion 512 only on
 a US Market's angle and the SRA notice only on a GB Market's), raising ``InvalidSequences``; the
-Sequences it stores and compares are the ones validation returns. Then, inside the transaction,
-in input order: a key with no row is inserted at version 1 with its brief rows and one
-``events`` row (entity ``sequences``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``);
-a Sequence whose decoded ``SequenceDef`` differs is updated to version n+1 (only the brief rows
-that differ are written, new Steps are added and Steps no longer in it deleted) with one
-``events`` row ``v<n>`` to ``v<n+1>``; anything else writes nothing. A Sequence's version and
-event cover its briefs: there is no event per brief row. A stored Sequence missing from the
-input is never changed or deleted. Decoding a stored Sequence that no longer validates raises
-``InvalidSequences`` (nothing is written). The result is ``SequenceSync(created, changed,
-unchanged, not_in_file)``, shaped like ``MarketSync`` with keys.
+Sequences it stores and compares are the ones validation returns. Then, inside the transaction
+(Story 11.7: once a Sequence exists the dashboard's Sequences page owns them, AD-12):
+
+- **Bootstrap** (no stored Sequence): each Sequence, in input order, is inserted at version 1
+  with its brief rows, its ``sequence_versions`` row (actor ``seed``) and one ``events`` row
+  (entity ``sequences``, ``None`` to ``v1``, cause ``seed_sync``, actor ``seed``).
+- **Managed** (any stored Sequence): nothing is written. The result lists the differences
+  between the file and the database as ``SequenceDifference(key, only_in, paths)``: each file
+  key with no row (``only_in`` = ``file``) and each file key whose stored Sequence differs, with
+  the changed field paths (``sequence_form_diff`` from the stored Sequence to the file's), in
+  input order; then each stored key the file leaves out (``only_in`` = ``dashboard``), by key.
+  Decoding a stored Sequence that no longer validates raises ``InvalidSequences``.
+
+The result is ``SequenceSync(created, changed, unchanged, not_in_file, managed,
+differences)``: in bootstrap mode ``created`` holds ``(key, 1)`` in input order and the rest is
+empty; in managed mode only ``managed`` (true) and ``differences`` are set.
 
 The Offers of ``seed/offers.yaml`` (FR-3, Story 4.2), as ``nextron.domain.offers.OfferDef``
 values, are synced only through ``seed_sync``, keyed by ``key`` into the ``offers`` table.
@@ -170,13 +176,16 @@ changed, unchanged, not_in_file)``, shaped like ``SequenceSync``.
 load in the same transaction; ``nextron.app.ops.api.Seeds.sync_seed`` is the use case
 ``nextron seed sync`` calls, and a unit of work runs one use case):
 
-- ``check_seed(segments, markets, sequences, offers, campaigns, stored_segment_keys=None) ->
-  CheckedSeed`` runs every check of the five syncs that needs no database (Segments, Markets,
-  Sequences, whose angles are checked against the Segments and this call's Markets, Offers,
-  then Campaigns, whose references are checked against the Segments and this call's Markets,
-  Offers and Sequences), raising as described above. "The Segments" are this call's, or, when
-  ``stored_segment_keys`` is given (Story 11.5: the database holds Segments, so the file's are
-  ignored), those stored keys. ``CheckedSeed`` holds what they return, with ``segment_keys``
+- ``check_seed(segments, markets, sequences, offers, campaigns, stored_segment_keys=None,
+  stored_sequence_steps=None) -> CheckedSeed`` runs every check of the five syncs that needs
+  no database (Segments, Markets, Sequences, whose angles are checked against the Segments and
+  this call's Markets, Offers, then Campaigns, whose references are checked against the
+  Segments, this call's Markets and Offers, and the Sequences), raising as described above.
+  "The Segments" are this call's, or, when ``stored_segment_keys`` is given (Story 11.5: the
+  database holds Segments, so the file's are ignored), those stored keys. "The Sequences" are
+  this call's ``{key: number of Steps}``, or, when ``stored_sequence_steps`` is given (Story
+  11.7: the database holds Sequences), the stored ones. ``CheckedSeed`` holds what they
+  return, with ``segment_keys``
   (the keys the references were checked against) and ``market_countries`` (``{code:
   country_code}`` of this sync's Markets) for the facts' checks.
 - ``@command Setup.seed_sync(checked, now) -> SetupSeedSync(segments, markets, sequences,
@@ -184,7 +193,8 @@ load in the same transaction; ``nextron.app.ops.api.Seeds.sync_seed`` is the use
   ``now``, so a failure anywhere changes nothing.
 - ``log_seed_sync(result)``, after the commit, logs ``segments_synced``, ``markets_synced``,
   ``sequences_synced``, ``offers_synced`` and then ``campaigns_synced``, each with the four
-  ``*_count`` fields (``segments_synced`` also with ``managed`` and ``differences_count``).
+  ``*_count`` fields (``segments_synced`` and ``sequences_synced`` also with ``managed`` and
+  ``differences_count``).
 
 **The Operator's Campaign commands** (FR-3, AD-4, AD-5, NFR-3, NFR-7, Story 4.2).
 ``Campaigns(clock)``: each method is a ``@use_case`` that reads the clock once and runs one
@@ -487,6 +497,7 @@ from nextron.domain.sequences import (
     SequenceDef,
     check_sequence_references,
     sequence_form,
+    sequence_form_diff,
     validate_sequences,
 )
 from nextron.domain.settings_schema import (
@@ -627,15 +638,30 @@ class MarketSync:
 
 
 @dataclass(frozen=True, slots=True)
+class SequenceDifference:
+    """How the seed file and the database differ on one Sequence key (Story 11.7), shaped like
+    ``SegmentDifference``."""
+
+    key: str
+    only_in: str | None
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SequenceSync:
     """What ``seed_sync`` did to the Sequences: ``created`` as ``(key, version)``, ``changed``
     as ``(key, from_version, to_version)`` and ``unchanged`` keys, each in input order, and
-    ``not_in_file`` as ``(key, version)`` of each stored Sequence the input left out, by key."""
+    ``not_in_file`` as ``(key, version)`` of each stored Sequence the input left out, by key.
+    Since Story 11.7 only a bootstrap writes (``created``); ``managed`` says the database
+    already held Sequences, so nothing was written and ``differences`` lists how the file
+    differs."""
 
     created: tuple[tuple[str, int], ...]
     changed: tuple[tuple[str, int, int], ...]
     unchanged: tuple[str, ...]
     not_in_file: tuple[tuple[str, int], ...]
+    managed: bool = False
+    differences: tuple[SequenceDifference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -687,6 +713,7 @@ class CheckedSeed:
     offers: tuple[OfferDef, ...]
     campaigns: tuple[CampaignDef, ...]
     stored_segment_keys: frozenset[str] | None = None
+    stored_sequence_steps: Mapping[str, int] | None = None
 
     @property
     def segment_keys(self) -> frozenset[str]:
@@ -709,6 +736,7 @@ def check_seed(
     offers: Sequence[OfferDef],
     campaigns: Sequence[CampaignDef],
     stored_segment_keys: Collection[str] | None = None,
+    stored_sequence_steps: Mapping[str, int] | None = None,
 ) -> CheckedSeed:
     """Every check of the seed's five syncs that needs no database; see the module
     docstring."""
@@ -723,12 +751,17 @@ def check_seed(
     market_countries = {market.code: market.country_code for market in chosen_markets}
     chosen_sequences = _sequence_inputs(sequences, segment_keys, market_countries)
     chosen_offers = _offer_inputs(offers)
+    stored_steps = None if stored_sequence_steps is None else dict(stored_sequence_steps)
     chosen_campaigns = _campaign_inputs(
         campaigns,
         segment_keys,
         market_countries,
         frozenset(offer.key for offer in chosen_offers),
-        {sequence.key: len(sequence.steps) for sequence in chosen_sequences},
+        (
+            {sequence.key: len(sequence.steps) for sequence in chosen_sequences}
+            if stored_steps is None
+            else stored_steps
+        ),
     )
     return CheckedSeed(
         chosen_segments,
@@ -738,16 +771,23 @@ def check_seed(
         chosen_offers,
         chosen_campaigns,
         stored_keys,
+        stored_steps,
     )
 
 
 def log_seed_sync(result: SetupSeedSync) -> None:
     """Log ``segments_synced``, ``markets_synced``, ``sequences_synced``, ``offers_synced`` and
     ``campaigns_synced`` with their counts; ``segments_synced`` also carries ``managed`` and
-    ``differences_count`` (Story 11.5), so a managed sync is told apart from a no-op."""
+    ``differences_count`` (Story 11.5), so a managed sync is told apart from a no-op, and so
+    does ``sequences_synced`` (Story 11.7)."""
     _log_segment_sync(result.segments)
     _log_sync(MARKETS_SYNCED, result.markets)
-    _log_sync(SEQUENCES_SYNCED, result.sequences)
+    _log_sync(
+        SEQUENCES_SYNCED,
+        result.sequences,
+        managed=result.sequences.managed,
+        differences_count=len(result.sequences.differences),
+    )
     _log_sync(OFFERS_SYNCED, result.offers)
     _log_sync(CAMPAIGNS_SYNCED, result.campaigns)
 
@@ -1171,28 +1211,42 @@ def _sequence_inputs(
 
 
 def _sync_sequences(chosen: tuple[SequenceDef, ...], now: datetime) -> SequenceSync:
-    """The Sequences' upsert, inside the running use case's transaction."""
+    """The Sequences' bootstrap, or the managed mode's differences (Story 11.7), inside the
+    running use case's transaction."""
+    stored = sequences_repo.all_sequences()
+    if stored:
+        return SequenceSync((), (), (), (), True, _sequence_differences(chosen, stored))
     created: list[tuple[str, int]] = []
-    changed: list[tuple[str, int, int]] = []
-    unchanged: list[str] = []
-    stored_sequences = {row.key: row for row in sequences_repo.all_sequences()}
-    keys = {sequence.key for sequence in chosen}
-    left_out = [row for key, row in stored_sequences.items() if key not in keys]
     for sequence in chosen:
-        stored = stored_sequences.get(sequence.key)
-        if stored is None:
-            sequence_id = sequences_repo.insert(sequence, now)
-            _record_sequence(sequence_id, None, sequences_repo.FIRST_VERSION, now)
-            created.append((sequence.key, sequences_repo.FIRST_VERSION))
-        elif stored.sequence != sequence:
-            version = stored.version + 1
-            sequences_repo.update(stored.id, sequence, version, now)
-            _record_sequence(stored.id, stored.version, version, now)
-            changed.append((sequence.key, stored.version, version))
-        else:
-            unchanged.append(sequence.key)
-    not_in_file = tuple((row.key, row.version) for row in left_out)
-    return SequenceSync(tuple(created), tuple(changed), tuple(unchanged), not_in_file)
+        sequence_id = sequences_repo.insert(sequence, now, SEED_ACTOR)
+        _record_sequence(sequence_id, None, sequences_repo.FIRST_VERSION, now)
+        created.append((sequence.key, sequences_repo.FIRST_VERSION))
+    return SequenceSync(tuple(created), (), (), ())
+
+
+def _sequence_differences(
+    chosen: Sequence[SequenceDef], stored: Sequence[sequences_repo.StoredSequence]
+) -> tuple[SequenceDifference, ...]:
+    """How the file's Sequences differ from the stored ones: the file's keys in input order,
+    then the stored keys the file leaves out, by key."""
+    by_key = {row.key: row for row in stored}
+    found: list[SequenceDifference] = []
+    for sequence in chosen:
+        row = by_key.get(sequence.key)
+        if row is None:
+            found.append(SequenceDifference(sequence.key, SEGMENT_ONLY_IN_FILE))
+            continue
+        changes = sequence_form_diff(row.sequence, sequence)
+        if changes:
+            paths = tuple(change.path for change in changes)
+            found.append(SequenceDifference(sequence.key, None, paths))
+    keys = {sequence.key for sequence in chosen}
+    found += [
+        SequenceDifference(row.key, SEGMENT_ONLY_IN_DASHBOARD)
+        for row in stored
+        if row.key not in keys
+    ]
+    return tuple(found)
 
 
 def _record_sequence(

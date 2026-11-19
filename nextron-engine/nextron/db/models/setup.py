@@ -52,6 +52,15 @@ typed columns: ``delay_days`` (``ck_step_briefs_delay_days``: at least 0), ``pur
 column is NOT NULL. Briefs hold rules and angles, never a person, so no column of either table
 is personal data.
 
+``sequence_versions`` (Story 11.7, migration ``0056_11_7_sequence_editing``) holds one immutable
+row per version of a Sequence, written only by ``nextron.db.repos.setup.sequences`` whenever it
+inserts or updates a Sequence: its ``sequence_id`` (a foreign key to ``sequences``, no cascade),
+the ``version`` (unique per Sequence, ``uq_sequence_versions_sequence_id_version``;
+``ck_sequence_versions_version``: at least 1), that version's ``definition`` (the canonical JSON
+of ``nextron.domain.sequences.sequence_form``), ``created_at`` and the ``actor``
+(``ck_sequence_versions_actor``: ``seed`` or ``operator``). Triggers refuse every ``UPDATE`` and
+``DELETE`` and a reused id or (Sequence, version). No column is personal data.
+
 ``offers`` holds one row per Offer (FR-3, Story 4.2), written only by
 ``nextron.db.repos.setup.offers`` (migration ``0021_4_2_campaigns``): its ``key`` (unique,
 ``uq_offers_key``), its ``name``, its ``ladder`` (the canonical JSON list of its rungs' file
@@ -240,6 +249,28 @@ class StepBriefRecord(Base):
     segment_angles: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+SEQUENCE_VERSION_ACTOR_LENGTH: Final = 8  # seed, operator
+SEQUENCE_VERSION_ACTOR_CHECK: Final = "actor IN ('seed', 'operator')"
+
+
+class SequenceVersionRecord(Base):
+    """One immutable version of a Sequence and its Step briefs (Story 11.7)."""
+
+    __tablename__ = "sequence_versions"
+    __table_args__ = (
+        UniqueConstraint("sequence_id", "version"),
+        CheckConstraint("version >= 1", name="version"),
+        CheckConstraint(SEQUENCE_VERSION_ACTOR_CHECK, name="actor"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    sequence_id: Mapped[str] = mapped_column(Ulid, ForeignKey("sequences.id"))
+    version: Mapped[int] = mapped_column(Integer)
+    definition: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    actor: Mapped[str] = mapped_column(String(SEQUENCE_VERSION_ACTOR_LENGTH))
 
 
 class OfferRecord(Base):

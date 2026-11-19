@@ -65,6 +65,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "segment_versions": {
         "setup": ("id", "segment_id", "version", "definition", "created_at", "actor"),
     },
+    "sequence_versions": {
+        "setup": ("id", "sequence_id", "version", "definition", "created_at", "actor"),
+    },
     "markets": {
         "setup": (
             "id",
@@ -432,6 +435,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "updated_at",
             "last_step_sent_at",
             "ended_at",
+            "sequence_version_id",
         ),
     },
     "variant_counters": {

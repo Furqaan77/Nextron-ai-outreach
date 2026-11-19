@@ -1,0 +1,85 @@
+{#- One Sequence's edit form (nextron.web.sequences_page, Story 11.7): rendered inside
+    sequence.html, and alone as the answer to POST /sequences/{id}/edit, swapped in for this
+    whole panel. The fixed FR-4 fields are shown read-only and never sent. Stored text is
+    escaped with |plain. -#}
+{%- from "segment_form.html" import text_field, text_area, select_field, tick, field_error %}
+<div id="sequence-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<dl class="sequence-facts">
+<dt>Name</dt><dd>{{ sequence.name|plain }}</dd>
+<dt>Current version</dt><dd>{{ sequence.version }}</dd>
+<dt>Steps</dt><dd>{{ sequence.steps }}</dd>
+<dt>Campaigns</dt><dd>{{ sequence.campaigns }}</dd>
+</dl>
+{%- if enrollments %}
+<ul class="sequence-enrollments">
+{%- for line in enrollments %}
+<li>{{ line }}</li>
+{%- endfor %}
+</ul>
+<p>Running Enrollments keep the version they started with; a save changes only new Enrollments.</p>
+{%- endif %}
+<section class="sequence-fixed" aria-labelledby="sequence-fixed-heading">
+<h2 id="sequence-fixed-heading">Fixed rules</h2>
+<p>Set in code (FR-4): Step 1 is sent when the Sequence starts (delay 0 days) and keeps its subject rule; every Step's only links are in the signature and footer (footer only); no Step names a price or proposes the audit.</p>
+</section>
+<section class="sequence-edit" aria-labelledby="sequence-edit-heading">
+<h2 id="sequence-edit-heading">Edit</h2>
+<form method="post" action="/sequences/{{ sequence.id }}/edit" hx-post="/sequences/{{ sequence.id }}/edit" hx-target="#sequence-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="based_on" value="{{ based_on }}">
+{{- text_field(form, "name", "Name", form.values.get("name", ""), "At most 100 characters.") }}
+<fieldset class="sequence-steps">
+<legend>Steps</legend>
+<p class="hint">1 to 6 Steps. Step 1 can't be removed; Steps can be removed or appended, never reordered.</p>
+{{- field_error(form, "steps") }}
+{%- for row in form.steps %}
+{%- set base = "steps[" ~ row.index ~ "]." %}
+<fieldset class="sequence-step">
+<legend>{% if row.stored_step %}Step {{ row.stored_step }}{% else %}New Step{% endif %}</legend>
+{{- field_error(form, "steps[" ~ row.index ~ "]") }}
+<input type="hidden" name="{{ base }}stored_step" value="{{ row.stored_step or '' }}">
+{%- if row.first %}
+<p class="sequence-fixed-field">Delay: 0 days. Set in code (FR-4).</p>
+{%- if row.fixed and row.fixed.subject_rule %}
+<p class="sequence-fixed-field">Subject: {{ row.fixed.subject_rule|plain }}. Set in code (FR-4).</p>
+{%- endif %}
+{{- field_error(form, base ~ "delay_days") }}
+{{- field_error(form, base ~ "subject_rule") }}
+{%- else %}
+{{- text_field(form, base ~ "delay_days", "Delay (days after the Sequence starts)", row.values.get("delay_days", ""), "A whole number, 0 to 365, more than the Step before.") }}
+{%- endif %}
+{{- text_field(form, base ~ "purpose", "Purpose", row.values.get("purpose", ""), "At most 200 characters.") }}
+{{- text_field(form, base ~ "word_limit", "Word limit", row.values.get("word_limit", ""), "A whole number, 1 to 150.") }}
+{{- select_field(form, base ~ "word_comparison", "Word count", row.comparisons) }}
+{{- text_area(form, base ~ "allowed_content", "Allowed content", row.values.get("allowed_content", ""), "One item per line; 1 to 10.") }}
+{{- text_field(form, base ~ "ask", "Ask", row.values.get("ask", ""), "At most 200 characters.") }}
+{%- if row.fixed and row.fixed.angles %}
+<div class="sequence-angles">
+<p>Segment angles (kept with this Step; not edited here):</p>
+<ul>
+{%- for angle in row.fixed.angles %}
+<li>{{ angle|plain }}</li>
+{%- endfor %}
+</ul>
+</div>
+{%- endif %}
+{{- field_error(form, base ~ "link_rule") }}
+{{- field_error(form, base ~ "no_price") }}
+{{- field_error(form, base ~ "no_audit") }}
+{{- field_error(form, base ~ "segment_angles") }}
+{%- if not row.first %}
+{{- tick(form, base ~ "remove", "Remove this Step", row.removed) }}
+{%- endif %}
+</fieldset>
+{%- endfor %}
+</fieldset>
+<button type="submit">Save a new version</button>
+</form>
+</section>
+</div>

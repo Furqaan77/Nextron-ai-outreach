@@ -134,7 +134,7 @@ BOUND = {
 ENROLLMENT_COLUMNS = (
     "id", "lead_id", "contact_id", "campaign_id", "variant_id", "sending_inbox_id", "sequence_id",
     "sequence_version", "offer_id", "origin", "status", "pause_cause", "stop_cause", "created_at",
-    "updated_at", "last_step_sent_at", "ended_at",
+    "updated_at", "last_step_sent_at", "ended_at", "sequence_version_id",
 )  # fmt: skip
 # Story 4.12 (added at its merge): a Draft with one revision on each Enrollment, written
 # directly; its footer snapshot id is a stand-in

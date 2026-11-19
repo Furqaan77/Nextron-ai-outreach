@@ -85,7 +85,7 @@ OTHERS_FIRST = (
 OTHERS_UNCHANGED = (
     "segments: Segments are managed in the dashboard; seed/segments.yaml ignored\n"
     "markets: 0 changed, 2 unchanged\n"
-    "sequences: 0 changed, 1 unchanged\n"
+    "sequences: Sequences are managed in the dashboard; seed/sequences.yaml ignored\n"
 )
 FACTS_FIRST = "company_facts: 8 changed, 0 unchanged\n" + "".join(
     f"  {fact_id}: created (version 1)\n" for fact_id in FACT_IDS

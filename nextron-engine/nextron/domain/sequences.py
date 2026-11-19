@@ -74,8 +74,17 @@ their values, lists as lists, no Step numbers, ``subject_rule`` only when set an
 refuses it); ``sequence_from_form(form)`` validates one such mapping, so
 ``sequence_from_form(sequence_form(s)) == s`` for a valid ``s``. The ``sequences`` repository
 stores and decodes Sequences through these two.
+
+**Dashboard editing (Story 11.7).** ``definition_text(sequence)`` is the canonical JSON of
+``sequence_form`` that a ``sequence_versions`` row stores. ``SequenceRefused(problems)`` is a
+refused dashboard save (``{form field: reason}``); ``edited_field(path)`` turns a validator path
+(``sequences[default].steps[3].delay_days``) into the editor's form field
+(``steps[3].delay_days``). ``sequence_form_diff(old, new)`` lists each changed field as a
+``FieldChange(path, old, new)`` (``nextron.domain.segments``' type), Steps matched by number,
+for the version history view.
 """
 
+import json
 import re
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -84,7 +93,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from nextron.domain.errors import DomainError
-from nextron.domain.segments import mentions_aba_512, mentions_sra_notice
+from nextron.domain.segments import FORM_FIELD, FieldChange, mentions_aba_512, mentions_sra_notice
 
 KEY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,30}")  # matched with fullmatch
 MARKET_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,15}")  # nextron.domain.markets.CODE_PATTERN
@@ -662,3 +671,77 @@ def sequence_from_form(form: object) -> SequenceDef:
     """The ``SequenceDef`` of one file-form mapping, validated as one item of a file (path
     ``sequences[<key>]``); ``InvalidSequences`` for the first problem."""
     return _Validator().sequence(form, 0)
+
+
+# Dashboard editing (Story 11.7) -----------------------------------------------------------------
+
+
+def definition_text(sequence: SequenceDef) -> str:
+    """The canonical JSON of ``sequence_form(sequence)``: ``json.dumps`` with ``sort_keys``,
+    ``ensure_ascii=False`` and no spaces. A ``sequence_versions`` row stores it."""
+    return json.dumps(
+        sequence_form(sequence), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+class SequenceRefused(DomainError):
+    """A dashboard Sequence save refused, nothing written: ``problems`` maps each refused form
+    field (``name``, ``steps[<n>].<field>``, or ``form``) to its reason. The message names the
+    fields, never a value."""
+
+    code = "sequence_refused"
+
+    def __init__(self, problems: Mapping[str, str]) -> None:
+        self.problems: dict[str, str] = dict(problems)
+        super().__init__(f"sequence refused: {', '.join(self.problems) or 'no field'}")
+
+
+_EDITED_PATH: Final = re.compile(
+    r"sequences\[[^\]]*\]\."
+    r"(?P<rest>name|steps(?:\[(?P<step>[1-9][0-9]?)\](?:\.(?P<field>[a-z_]+))?)?)"
+)
+
+
+def edited_field(path: str) -> str:
+    """The editor's form field for the validator ``path`` of the edited Sequence: ``name``,
+    ``steps`` or ``steps[<n>]`` (a Step as a whole), or ``steps[<n>].<field>`` cut at any list
+    index or sub-field (``steps[2].allowed_content``, ``steps[1].subject_rule``); ``form`` for a
+    path it can't place."""
+    found = _EDITED_PATH.match(path)
+    if found is None:
+        return FORM_FIELD
+    if found.group("field") is not None:
+        return f"steps[{found.group('step')}].{found.group('field')}"
+    return found.group("rest")
+
+
+def _shown(value: object) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(", ", ": "))
+
+
+def sequence_form_diff(old: SequenceDef, new: SequenceDef) -> tuple[FieldChange, ...]:
+    """The fields that differ between ``old`` and ``new``: ``key`` and ``name`` first, then each
+    Step by its number, each of its fields in the new form's order then the ones only ``old`` has
+    (``steps[2].ask``); a Step only one version has is a single change of the whole Step
+    (``steps[4]``). Values are compact JSON, ``None`` where absent."""
+    before, after = sequence_form(old), sequence_form(new)
+    out: list[FieldChange] = []
+    for name in ("key", "name"):
+        if _shown(before.get(name)) != _shown(after.get(name)):
+            out.append(FieldChange(name, _shown(before.get(name)), _shown(after.get(name))))
+    old_steps = before["steps"] if isinstance(before["steps"], list) else []
+    new_steps = after["steps"] if isinstance(after["steps"], list) else []
+    for index in range(max(len(old_steps), len(new_steps))):
+        path = f"steps[{index + 1}]"
+        was = old_steps[index] if index < len(old_steps) else None
+        now = new_steps[index] if index < len(new_steps) else None
+        if isinstance(was, dict) and isinstance(now, dict):
+            for name in [*now, *(name for name in was if name not in now)]:
+                shown_old, shown_new = _shown(was.get(name)), _shown(now.get(name))
+                if shown_old != shown_new:
+                    out.append(FieldChange(f"{path}.{name}", shown_old, shown_new))
+        elif _shown(was) != _shown(now):
+            out.append(FieldChange(path, _shown(was), _shown(now)))
+    return tuple(out)

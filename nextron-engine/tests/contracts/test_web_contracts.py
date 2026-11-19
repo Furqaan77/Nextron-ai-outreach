@@ -167,6 +167,10 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/segments/{segment_id}/versions",
         "/segments/{segment_id}/edit",
         "/segments/{segment_id}/rescore-current",
+        "/sequences",  # Story 11.7
+        "/sequences/{sequence_id}",
+        "/sequences/{sequence_id}/versions",
+        "/sequences/{sequence_id}/edit",
         "/ai",
         "/ai/check",
         "/ai/rollback",
@@ -725,6 +729,11 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "segment_versions.html",
         "segments.html",
         "segments_panel.html",
+        "sequence.html",
+        "sequence_panel.html",
+        "sequence_versions.html",
+        "sequences.html",
+        "sequences_panel.html",
         "settings.html",
         "settings_form.html",
         "signal_inbox.html",  # Story 2.16

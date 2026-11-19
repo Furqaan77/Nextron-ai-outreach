@@ -1,0 +1,36 @@
+{#- A Sequence's version history (nextron.web.sequences_page, Story 11.7): every stored version,
+    oldest first, with the fields it changed from the version before, and a note when the
+    earliest stored version is above 1. Values render through |plain. -#}
+{% extends "base.html" %}
+{% block title %}Nextron: Sequence {{ sequence.key|plain }} versions{% endblock %}
+{% block content %}
+<h1>Sequence {{ sequence.key|plain }}: versions</h1>
+<p>Back to <a href="/sequences/{{ sequence.id }}">the Sequence</a> or <a href="/sequences">all Sequences</a>.</p>
+{%- if not_kept_before %}
+<p class="sequence-versions-not-kept">Versions before v{{ not_kept_before }} were not kept.</p>
+{%- endif %}
+{%- for found in versions %}
+<section class="sequence-version" aria-labelledby="sequence-version-{{ found.version }}">
+<h2 id="sequence-version-{{ found.version }}">Version {{ found.version }}{% if found.current %} (current){% endif %}</h2>
+<p class="sequence-version-made">Saved by {{ found.made_by|plain }} on {{ found.made_at }}</p>
+{%- if found.first %}
+<p>First stored version.</p>
+{%- elif not found.changes %}
+<p>No field changed.</p>
+{%- else %}
+<table class="sequence-changes">
+<thead>
+<tr><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th></tr>
+</thead>
+<tbody>
+{%- for change in found.changes %}
+<tr class="sequence-change"><td>{{ change.path|plain }}</td><td>{{ change.old|plain }}</td><td>{{ change.new|plain }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</section>
+{%- else %}
+<p>No stored version.</p>
+{%- endfor %}
+{% endblock %}

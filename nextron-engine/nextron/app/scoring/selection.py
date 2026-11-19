@@ -14,8 +14,9 @@ work too), computed live from the clock's now:
   caps; 0 for an inbox that isn't ``active`` or warmed up 14 days);
 - ``reserved``: the follow-ups due that date over every inbox
   (``queries.sequencing.follow_ups_due``);
-- ``steps``: the largest Step count among the stored Sequences (0 with none, or when they no
-  longer decode);
+- ``steps``: ``queries.setup.steps_per_sequence()`` (reconciled with Story 11.7 at its merge:
+  the most Steps of the current version of any Sequence an ``active`` Campaign uses, else of
+  every stored Sequence; 0 with none, or when they no longer decode);
 - ``capacity``: ``domain.sending_policy.new_sequence_capacity(total, reserved, steps)``, or 0
   while ``steps`` is 0;
 - ``picked``: today's ``daily_capacity`` row's ``picked`` (0 without one); ``remaining``:
@@ -156,12 +157,12 @@ def _sender_zone() -> tzinfo:
 
 
 def _largest_sequence() -> int:
-    """The largest Step count among the stored Sequences; 0 with none or when unreadable."""
+    """``queries.setup.steps_per_sequence()``, the one Steps-per-Sequence figure (Story 11.7);
+    0 when the Sequences or Campaigns are unreadable."""
     try:
-        found = setup_queries.sequences()
-    except InvalidSequences:
+        return setup_queries.steps_per_sequence()
+    except (InvalidSequences, InvalidCampaigns):
         return 0
-    return max((len(sequence.definition.steps) for sequence in found), default=0)
 
 
 def _min_lead_score() -> int:

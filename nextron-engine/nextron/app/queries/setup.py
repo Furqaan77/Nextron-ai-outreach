@@ -50,6 +50,17 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   Sequences only through these two and ``sequence_by_id(sequence_id)`` (Story 4.8: the Sequence
   with that row id, or ``None``, a text that isn't a ULID included; a Campaign names its
   Sequence by id, and Enrollment binds its version).
+- Story 11.7: ``sequence_version(version_id)``: one stored version of a Sequence as a
+  ``SequenceVersion(id, sequence_id, version, definition, created_at, actor)``, or ``None`` (an
+  id that isn't a ULID included); ``sequence_versions(sequence_id)``: every stored version of
+  the Sequence, oldest first; ``current_sequence_version_id(sequence_id)``: the id of the row of
+  its current version, or ``None``. Each ``definition`` is decoded with ``sequence_from_form``
+  (``InvalidSequences`` for one that no longer validates). Drafting reads an Enrollment's Step
+  briefs through ``sequence_version``. ``sequence_steps()``: ``{key: number of Steps}`` of every
+  stored Sequence (the seed sync's managed mode). ``steps_per_sequence()``: the most Steps any
+  Sequence an ``active`` Campaign uses has at its current version; with no active Campaign it
+  falls back to every stored Sequence's current version; 0 with no Sequence. Older versions that
+  live Enrollments are bound to are not counted.
 - ``offers()``: every stored Offer as a ``SeededOffer(id, key, version, definition)``, by key;
   ``offer(key)``: one, or ``None``. ``definition`` is the ``nextron.domain.offers.OfferDef`` the
   ``offers`` repository decodes through ``offer_from_form``, which raises ``InvalidOffers`` for a
@@ -75,6 +86,7 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
 All read through the current unit of work, read-only ones included.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, tzinfo
 from typing import Any
@@ -90,7 +102,7 @@ from nextron.db.repos.setup.campaigns import StoredCampaign
 from nextron.db.repos.setup.markets import StoredMarket
 from nextron.db.repos.setup.offers import StoredOffer
 from nextron.db.repos.setup.segments import StoredSegment, StoredSegmentVersion
-from nextron.db.repos.setup.sequences import StoredSequence
+from nextron.db.repos.setup.sequences import StoredSequence, StoredSequenceVersion
 from nextron.domain.budget import QUOTAS, Limits
 from nextron.domain.campaign import CampaignStatus, Lia, StepAngleNote, VariantStatus, may_run
 from nextron.domain.ids import is_ulid
@@ -100,7 +112,7 @@ from nextron.domain.render import FOOTER_SETTING_KEYS, FooterSettings
 from nextron.domain.segments import SegmentDef, segment_from_text
 from nextron.domain.sending_policy import AwayPeriod, parse_away_period
 from nextron.domain.sending_policy import away_until as _away_until
-from nextron.domain.sequences import SequenceDef
+from nextron.domain.sequences import InvalidSequences, SequenceDef, sequence_from_form
 from nextron.domain.settings_schema import (
     REQUIRED,
     InvalidSettingValue,
@@ -356,6 +368,76 @@ def sequence_by_id(sequence_id: str) -> SeededSequence | None:
         return None
     stored = sequences_repo.by_id(sequence_id)
     return None if stored is None else _seeded_sequence(stored)
+
+
+@dataclass(frozen=True, slots=True)
+class SequenceVersion:
+    """One stored version of a Sequence (Story 11.7), its definition decoded."""
+
+    id: str
+    sequence_id: str
+    version: int
+    definition: SequenceDef
+    created_at: datetime
+    actor: str
+
+
+def _sequence_version(stored: StoredSequenceVersion) -> SequenceVersion:
+    try:
+        form = json.loads(stored.definition)
+    except ValueError:
+        raise InvalidSequences("sequence_versions.definition", "is not valid JSON") from None
+    return SequenceVersion(
+        id=stored.id,
+        sequence_id=stored.sequence_id,
+        version=stored.version,
+        definition=sequence_from_form(form),
+        created_at=stored.created_at,
+        actor=stored.actor,
+    )
+
+
+def sequence_version(version_id: str) -> SequenceVersion | None:
+    """The stored Sequence version with the row id ``version_id``, or ``None``."""
+    if not is_ulid(version_id):
+        return None
+    stored = sequences_repo.version_row(version_id)
+    return None if stored is None else _sequence_version(stored)
+
+
+def sequence_versions(sequence_id: str) -> tuple[SequenceVersion, ...]:
+    """Every stored version of the Sequence ``sequence_id``, oldest first."""
+    if not is_ulid(sequence_id):
+        return ()
+    return tuple(_sequence_version(row) for row in sequences_repo.versions(sequence_id))
+
+
+def current_sequence_version_id(sequence_id: str) -> str | None:
+    """The id of the row of the Sequence's current version, or ``None``."""
+    if not is_ulid(sequence_id):
+        return None
+    return sequences_repo.current_version_id(sequence_id)
+
+
+def sequence_steps() -> dict[str, int]:
+    """Every stored Sequence's ``{key: number of Steps}``."""
+    return {stored.key: len(stored.sequence.steps) for stored in sequences_repo.all_sequences()}
+
+
+def steps_per_sequence() -> int:
+    """The most Steps of the current version of any Sequence an ``active`` Campaign uses; with
+    no active Campaign it falls back to every stored Sequence; 0 with none. Older versions bound
+    by live Enrollments are not counted."""
+    steps = {stored.id: len(stored.sequence.steps) for stored in sequences_repo.all_sequences()}
+    active = {
+        stored.sequence_id
+        for stored in campaigns_repo.all_campaigns()
+        if stored.status == CampaignStatus.ACTIVE
+    }
+    used = [steps[sequence_id] for sequence_id in active if sequence_id in steps]
+    if used:
+        return max(used)
+    return max(steps.values(), default=0)
 
 
 @dataclass(frozen=True, slots=True)

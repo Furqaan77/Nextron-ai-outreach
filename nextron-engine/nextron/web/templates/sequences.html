@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Sequences{% endblock %}
+{% block content %}
+<h1>Sequences</h1>
+<p>A Sequence is the Steps each Enrollment is sent, with each Step's brief. Every save keeps the earlier versions. Running Enrollments keep the version they started with; new Enrollments use the current one.</p>
+<p>Other settings are on the <a href="/settings">Settings page</a>.</p>
+{% include "sequences_panel.html" %}
+{% endblock %}
