@@ -42,7 +42,8 @@ non-``datetime`` time raises ``TypeError``, an unknown Draft ``LookupError``.
 **A Draft's text** (FR-20, FR-23, AD-6; Story 4.12) lives in immutable ``draft_revisions``
 (``nextron.db.repos.drafting.revisions``); ``drafts.current_rev`` names the latest. Every
 revision is appended by one private writer, ``_append(draft, subject, body, origin,
-traceability, at)``, which checks before any write, then writes in the caller's unit:
+traceability, at, claims=None)``, which checks before any write, then writes in the caller's
+unit:
 
 0. The text, whatever the origin (``_check_text``): a subject of 1 to ``MAX_SUBJECT`` (200)
    characters after strip, with no line break and no control character (Unicode category
@@ -58,9 +59,23 @@ traceability, at)``, which checks before any write, then writes in the caller's 
    A blank footer raises ``ValueError``.
 3. ``render.compose`` of the subject and body with that footer for the Contact's email, and
    ``render.text_hash`` of the result with the Enrollment's ``sending_inbox_id``.
-4. ``footer_snapshots.ensure`` (identical footer text reuses its row), one revision at
-   ``current_rev + 1`` (1 when there is none) with the traceability given, and
-   ``drafts.current_rev`` moved to it (``updated_at`` the clock's now).
+4. **The grounding rules** (Story 4.13): ``domain.grounding_rules.check`` over the subject, the
+   body, ``claims`` (the drafting output's claims; ``None`` for an edit or a footer change, so
+   only the text rules run) and the traceability's citation set, with the Step's brief (the
+   Sequence version the Enrollment is bound to, Story 11.7's ``_bound_briefs``, combined at
+   the merge; the Draft's ``step_no``) and a context of the Settings
+   ``sender_signature`` and ``privacy_notice_url``, the kinds of all the Lead's Evidence (live or
+   not, so a claim on superseded Absence Evidence is still checked) and its current
+   Signals (with their live Evidence ids), the strongest live Event
+   (``domain.signals.strongest_event`` with the Segment's weights, at ``at``), the facts
+   ``queries.playbook.allowed_facts`` allows for the Campaign's Segment and Market, and the
+   current revisions of the Enrollment's earlier Step Drafts. An unknown Campaign, Sequence or
+   Segment, or a Step without a brief, raises ``LookupError``.
+5. ``footer_snapshots.ensure`` (identical footer text reuses its row), one revision at
+   ``current_rev + 1`` (1 when there is none) with the traceability given, its one
+   ``grounding_results`` row (``fail`` with the flags when any rule flags, else ``pending``;
+   the ``RULES_VERSION``; checked at ``at``), and ``drafts.current_rev`` moved to it
+   (``updated_at`` the clock's now).
 
 **``@command revise(draft_id, subject, body) -> int``** (the Operator's edit; Epic 5 calls it
 through ``approval``). ``draft_id``, ``subject`` and ``body`` must be ``str`` (``TypeError``).
@@ -68,8 +83,8 @@ through ``approval``). ``draft_id``, ``subject`` and ``body`` must be ``str`` (`
 looked up (``ValueError``; the body may be empty). An unknown Draft raises ``LookupError``; one that
 isn't ``ready`` or has no revision yet ``ValueError``. It appends origin ``operator_edit`` with
 the previous revision's traceability (evidence, facts, cited Signal, route tuple, Playbook,
-prompt version) and no ``instruction``, and returns the new ``rev``. Its grounding stays pending
-(Stories 4.13 and 4.14 add grounding).
+prompt version) and no ``instruction``, and returns the new ``rev``. Its grounding result comes
+from the text rules (no claims); the AI check is Story 4.14.
 
 **``@command recompose_ready(n: FooterChanged)``**, ``FooterChanged``'s subscriber
 (``main.build_subscribers``): for each ``ready`` Draft with a revision whose Contact's
@@ -83,7 +98,10 @@ other status are untouched.
 - ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 3.13, AD-17): ``draft_revisions``
   is tombstoned: every revision of every Draft of each of the Contact's Enrollments gets
   ``subject``, ``body`` and a set ``instruction`` ``[erased]`` (rows, hashes and traceability
-  kept; the triggers allow only that). ``footer_snapshots`` holds the Sender's name and
+  kept; the triggers allow only that). ``grounding_results`` is tombstoned too (Story 4.13):
+  each flag's non-empty ``span`` becomes ``[erased]`` (an empty span, a whole-revision flag,
+  stays empty), the rule, explanation, status and rows kept.
+  ``footer_snapshots`` holds the Sender's name and
   Nextron's postal address, never a Contact's data; ``drafts`` holds none at all.
 """
 
@@ -97,6 +115,7 @@ from typing import Final
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.queries import drafting as drafting_queries
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
@@ -105,21 +124,34 @@ from nextron.app.queries.sequencing import StoredEnrollment
 from nextron.db import eventlog
 from nextron.db.repos.drafting import drafts as drafts_repo
 from nextron.db.repos.drafting import footer_snapshots as footer_snapshots_repo
+from nextron.db.repos.drafting import grounding_results as grounding_results_repo
 from nextron.db.repos.drafting import revisions as revisions_repo
 from nextron.db.repos.drafting.drafts import NewSlot
+from nextron.db.repos.drafting.grounding_results import NewGroundingResult, StoredFlag
 from nextron.db.repos.drafting.revisions import NewRevision
 from nextron.db.uow import command
 from nextron.domain import render
 from nextron.domain.ai import Urgency, check_urgency
 from nextron.domain.contactability import Blocked, ContactSubject
 from nextron.domain.contacts import ProvenanceSubject
-from nextron.domain.draft import CREATION, DraftKind, DraftStatus, RevisionOrigin
+from nextron.domain.draft import CREATION, STEP_KINDS, DraftKind, DraftStatus, RevisionOrigin
 from nextron.domain.enrollment import LIVE_STATUSES, EnrollmentOrigin, EnrollmentStatus
 from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.grounding_rules import (
+    Claim,
+    EarlierStep,
+    LeadSignal,
+    RevisionInput,
+    RulesContext,
+    RulesResult,
+)
+from nextron.domain.grounding_rules import check as check_grounding
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.notifications import ContactErased, FooterChanged
+from nextron.domain.segments import SignalClass
 from nextron.domain.sending_policy import step_due_at
 from nextron.domain.sequences import StepBrief
+from nextron.domain.signals import EventSignal, strongest_event
 from nextron.ports.clock import Clock
 
 log = logging.getLogger(__name__)
@@ -206,9 +238,106 @@ class _Prepared:
     market_id: str
     footer_text: str
     text_hash: str
+    grounding: RulesResult
 
 
-def _prepare(draft: DraftView, subject: str, body: str) -> _Prepared:
+def _earlier_steps(draft: DraftView, enrollment_id: str) -> tuple[EarlierStep, ...]:
+    """The current revisions of the Enrollment's Step Drafts before ``draft``'s Step."""
+    earlier = []
+    for other in drafting_queries.drafts_of(enrollment_id):
+        if (
+            other.kind not in STEP_KINDS
+            or other.step_no is None
+            or draft.step_no is None
+            or other.step_no >= draft.step_no
+        ):
+            continue
+        found = drafting_queries.current_revision(other)
+        if found is not None:
+            earlier.append(
+                EarlierStep(
+                    step=other.step_no,
+                    fact_ids=frozenset(fact_id for fact_id, _ in found.fact_versions),
+                    cited_signal_id=found.cited_signal_id,
+                )
+            )
+    return tuple(earlier)
+
+
+def _grounding(
+    draft: DraftView, enrollment: StoredEnrollment, revision: RevisionInput, now: datetime
+) -> RulesResult:
+    """The deterministic grounding rules over ``revision`` (Story 4.13); ``LookupError`` when
+    the context can't be built. See the module docstring."""
+    campaign = setup_queries.campaign(enrollment.campaign_id)
+    if campaign is None:
+        raise LookupError("the Draft's Campaign is unknown")
+    try:  # Story 11.7: the Enrollment's bound Sequence version, never the current one
+        steps = _bound_briefs(enrollment)
+    except LookupError:
+        raise LookupError("the Draft's Sequence is unknown") from None
+    if draft.step_no is None or not FIRST_STEP <= draft.step_no <= len(steps):
+        raise LookupError("the Draft's Step has no brief")
+    segment = setup_queries.segment_by_id(campaign.segment_id)
+    if segment is None:
+        raise LookupError("the Draft's Segment is unknown")
+    settings = setup_queries.footer_settings()
+    lead_id = enrollment.lead_id
+    linked = research_queries.signal_evidence_ids(lead_id)
+    stored = research_queries.signals(lead_id)
+    weights = {kind.key: kind.weight for kind in segment.definition.signal_types}
+    strongest = strongest_event(
+        (
+            EventSignal(
+                signal.id,
+                signal.signal_type,
+                signal.tier,
+                weights[signal.signal_type],
+                signal.event_date,
+                signal.first_seen_at,
+            )
+            for signal in stored
+            if signal.signal_class == SignalClass.EVENT and signal.signal_type in weights
+        ),
+        now,
+    )
+    context = RulesContext(
+        step=draft.step_no,
+        contact_details=tuple(
+            value for value in (settings.sender_signature, settings.privacy_notice_url) if value
+        ),
+        evidence_kinds=MappingProxyType(
+            {row.id: row.type for row in research_queries.evidence_history(lead_id)}
+        ),
+        signals=tuple(
+            LeadSignal(
+                id=signal.id,
+                signal_type=signal.signal_type,
+                signal_class=SignalClass(signal.signal_class),
+                tier=signal.tier,
+                score_only=bool(signal.score_only),
+                evidence_ids=linked.get(signal.id, ()),
+            )
+            for signal in stored
+        ),
+        strongest_event_id=None if strongest is None else strongest.signal_id,
+        allowed_facts=frozenset(
+            (found.fact_id, found.version)
+            for found in playbook_queries.allowed_facts(campaign.segment_id, campaign.market_id)
+        ),
+        earlier_steps=_earlier_steps(draft, enrollment.id),
+    )
+    return check_grounding(revision, steps[draft.step_no - 1], context)
+
+
+def _prepare(
+    draft: DraftView,
+    subject: str,
+    body: str,
+    traceability: Traceability,
+    now: datetime,
+    claims: tuple[Claim, ...] | None = None,
+) -> _Prepared:
     """``_append``'s checks and computation, before any write; see the module docstring."""
     _check_text(subject, body)
     if draft.enrollment_id is None:
@@ -239,7 +368,20 @@ def _prepare(draft: DraftView, subject: str, body: str) -> _Prepared:
     digest = render.text_hash(
         composed.to_address, enrollment.sending_inbox_id, composed.subject, composed.body
     )
-    return _Prepared(market.id, footer_text, digest)
+    grounding = _grounding(
+        draft,
+        enrollment,
+        RevisionInput(
+            subject=subject,
+            body=body,
+            claims=claims,
+            cited_signal_id=traceability.cited_signal_id,
+            evidence_ids=traceability.evidence_ids,
+            fact_versions=traceability.fact_versions,
+        ),
+        now,
+    )
+    return _Prepared(market.id, footer_text, digest, grounding)
 
 
 def _checked_steps(steps: object) -> tuple[int, ...]:
@@ -368,12 +510,14 @@ class Drafting:
         traceability: Traceability,
         at: datetime,
         prepared: _Prepared | None = None,
+        claims: tuple[Claim, ...] | None = None,
     ) -> int:
-        """Append a revision of ``draft`` and point the Draft at it; its ``rev``. ``prepared``
-        is ``_prepare``'s result for this text when the caller already has it. See the module
-        docstring."""
+        """Append a revision of ``draft`` and its grounding result, and point the Draft at it;
+        its ``rev``. ``prepared`` is ``_prepare``'s result for this text when the caller already
+        has it; ``claims`` are the drafting output's claims (``None`` without a claims array).
+        See the module docstring."""
         if prepared is None:
-            prepared = _prepare(draft, subject, body)
+            prepared = _prepare(draft, subject, body, traceability, at, claims)
         snapshot_id = footer_snapshots_repo.ensure(prepared.market_id, prepared.footer_text, at)
         rev = (draft.current_rev or 0) + 1
         revisions_repo.insert(
@@ -393,6 +537,19 @@ class Drafting:
                 prompt_version=traceability.prompt_version,
                 instruction=traceability.instruction,
                 text_hash=prepared.text_hash,
+            ),
+            at,
+        )
+        grounding = prepared.grounding
+        grounding_results_repo.insert(
+            NewGroundingResult(
+                draft_id=draft.id,
+                rev=rev,
+                status=str(grounding.status),
+                flags=tuple(
+                    StoredFlag(flag.rule, flag.span, flag.explanation) for flag in grounding.flags
+                ),
+                rules_version=grounding.rules_version,
             ),
             at,
         )
@@ -441,7 +598,9 @@ class Drafting:
             if previous is None:
                 continue
             try:
-                prepared = _prepare(draft, previous.subject, previous.body)
+                prepared = _prepare(
+                    draft, previous.subject, previous.body, _copied(previous), now
+                )
             except (ValueError, LookupError, InvalidMarkets) as error:  # before any write
                 log.warning(
                     RECOMPOSE_SKIPPED,
@@ -476,6 +635,11 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
             "the text of every revision of the Contact's Drafts becomes [erased]; the rows and "
             "their hashes stay (Story 4.12)",
         ),
+        "grounding_results": TableErasure(
+            Coverage.TOMBSTONED,
+            "each flag's span (a quote of Draft text) becomes [erased]; the rule, explanation, "
+            "status and rows stay (Story 4.13)",
+        ),
     }
 )
 
@@ -483,10 +647,12 @@ ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
 @command
 def erase_pii(n: ContactErased) -> None:
     """``drafting``'s ``ContactErased`` subscriber (Story 3.13, AD-17; Story 4.12): tombstone
-    the text of every revision of the Contact's Drafts (``ERASURE``)."""
+    the text of every revision of the Contact's Drafts, and every non-empty span of their
+    grounding results (Story 4.13) (``ERASURE``)."""
     draft_ids = [
         draft.id
         for enrollment in sequencing_queries.enrollments_of_contact(n.contact_id)
         for draft in drafting_queries.drafts_of(enrollment.id)
     ]
     revisions_repo.tombstone(draft_ids)
+    grounding_results_repo.tombstone(draft_ids)

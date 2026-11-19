@@ -143,6 +143,9 @@ BOB_DRAFT = "01JD3QZ8X5V9K2M7N4P6R8T0G2"
 JANE_REVISION = "01JD3QZ8X5V9K2M7N4P6R8T0G3"
 BOB_REVISION = "01JD3QZ8X5V9K2M7N4P6R8T0G4"
 FOOTER_SNAPSHOT = "01JD3QZ8X5V9K2M7N4P6R8T0G5"
+# Story 4.13 (added with it): each revision's grounding result, a flag quoting the subject
+JANE_RESULT = "01JD3QZ8X5V9K2M7N4P6R8T0G6"
+BOB_RESULT = "01JD3QZ8X5V9K2M7N4P6R8T0G7"
 JANE_SUBJECT = "Jane, your new partner role"
 BOB_SUBJECT = "Bob, your litigation team"
 REVISION_COLUMNS = (
@@ -414,8 +417,8 @@ class Seeded:
         if enrollments:
             enrollment(world, JANE_ENROLLMENT, self.lead, self.jane, ended=False)
             enrollment(world, BOB_ENROLLMENT, self.lead, self.bob, ended=True)
-            draft(world, JANE_DRAFT, JANE_ENROLLMENT, JANE_REVISION, JANE_SUBJECT)
-            draft(world, BOB_DRAFT, BOB_ENROLLMENT, BOB_REVISION, BOB_SUBJECT)
+            draft(world, JANE_DRAFT, JANE_ENROLLMENT, JANE_REVISION, JANE_SUBJECT, JANE_RESULT)
+            draft(world, BOB_DRAFT, BOB_ENROLLMENT, BOB_REVISION, BOB_SUBJECT, BOB_RESULT)
         if receipts:
             self.jane_receipt = receipt(world, self.jane, JANE_RECEIPT_REF)
             self.bob_receipt = receipt(world, self.bob, BOB_RECEIPT_REF)
@@ -480,9 +483,15 @@ class Seeded:
 
 
 def draft(
-    world: World, draft_id: str, enrollment_id: str, revision_id: str, subject: str
+    world: World,
+    draft_id: str,
+    enrollment_id: str,
+    revision_id: str,
+    subject: str,
+    result_id: str,
 ) -> None:
-    """Store a Step Draft of ``enrollment_id`` with one ``generated`` revision (Story 4.12)."""
+    """Store a Step Draft of ``enrollment_id`` with one ``generated`` revision (Story 4.12) and
+    its failed grounding result, a flag quoting the subject (Story 4.13)."""
     stamp = "2026-11-18T09:00:00.000000Z"
     world.sql(
         "INSERT INTO drafts (id, kind, enrollment_id, step_no, day_offset, current_rev, "
@@ -496,6 +505,12 @@ def draft(
         (revision_id, draft_id, subject, f"{subject}.", FOOTER_SNAPSHOT, "d" * 64, stamp),
     )
     world.sql("UPDATE drafts SET current_rev = 1 WHERE id = ?", (draft_id,))
+    flags = json.dumps([{"rule": "subject_rule", "span": subject, "explanation": "Too long."}])
+    world.sql(
+        "INSERT INTO grounding_results (id, draft_id, rev, status, flags, rules_version, "
+        "checked_at) VALUES (?, ?, 1, 'fail', ?, 1, ?)",
+        (result_id, draft_id, flags, stamp),
+    )
 
 
 def enrollment(
@@ -705,6 +720,11 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         JANE_SUBJECT,
         f"{JANE_SUBJECT}.",
     )
+    # Story 4.13: her revision's grounding result, every column
+    [result] = file["drafting"]["grounding_results"]
+    assert (result["id"], result["draft_id"]) == (JANE_RESULT, JANE_DRAFT)
+    assert result["status"] == "fail"
+    assert json.loads(result["flags"])[0]["span"] == JANE_SUBJECT
     [alert] = file["notify"]["alerts"]
     assert (alert["subject"], alert["text"]) == (seeded.jane, JANE_ALERT)
     [notice] = file["notify"]["notifications"]
@@ -1010,7 +1030,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     assert file["notify"] == {"alerts": [], "notifications": []}
     assert file["playbook"] == {"override_cases": []}
     assert file["sequencing"] == {"enrollments": []}
-    assert file["drafting"] == {"draft_revisions": []}
+    assert file["drafting"] == {"draft_revisions": [], "grounding_results": []}
     assert file["discovery"] == {"signal_inbox_items": []}  # Story 2.16
     assert file["event_log"] == {"contact_history": []}
 
@@ -1095,6 +1115,12 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
         REDACTED,
         "d" * 64,
     )
+    # Story 4.13: and every span of its grounding result; the rule and status stay
+    [result] = file["drafting"]["grounding_results"]
+    assert result["status"] == "fail"
+    assert [(flag["rule"], flag["span"]) for flag in json.loads(result["flags"])] == [
+        ("subject_rule", REDACTED)
+    ]
 
 
 def test_an_entry_found_only_by_a_request_is_exported(world: World) -> None:
@@ -1293,7 +1319,10 @@ def test_the_readers_return_every_column(world: World) -> None:
     assert world.read(lambda: sequencing_queries.export_pii("nope")) == {"enrollments": ()}
     bob_revisions = world.read(lambda: drafting_queries.export_pii(seeded.bob))["draft_revisions"]
     assert [row["id"] for row in bob_revisions] == [BOB_REVISION]  # Story 4.12
-    assert world.read(lambda: drafting_queries.export_pii("nope")) == {"draft_revisions": ()}
+    assert world.read(lambda: drafting_queries.export_pii("nope")) == {
+        "draft_revisions": (),
+        "grounding_results": (),
+    }
     assert world.read(lambda: compliance_queries.export_pii("nope", [])) == {
         "suppression": (),
         "requests": (),

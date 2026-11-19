@@ -110,7 +110,7 @@ development_status:
   4-10-show-today-s-capacity-and-pick-leads-to-draft: review
   4-11-fill-in-furqaan-s-signature-and-the-compliance-footer: review
   4-12-store-draft-text-as-immutable-revisions-bound-to-a-hash: review
-  4-13-check-every-draft-against-deterministic-grounding-rules: backlog
+  4-13-check-every-draft-against-deterministic-grounding-rules: review
   4-14-run-the-ai-grounding-check-and-fail-closed: backlog
   4-15-draft-step-1-with-opus-from-evidence-and-facts: backlog
   4-16-draft-signal-inbox-leads-within-15-minutes: backlog

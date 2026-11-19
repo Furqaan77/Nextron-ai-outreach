@@ -40,6 +40,8 @@ Table                      Owner        Exported as / why not
 ``leads``                  pipeline     ``lead_notes`` (Story 9.1: ``notes`` shown as
                                         ``notes_excerpts``, the lines of the Lead's notes
                                         that mention the Contact)
+``grounding_results``      drafting     ``grounding_results`` (Story 4.13: each revision's
+                                        grounding result; its flags quote Draft text)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``channel_permissions``    pipeline     ``channel_permissions`` (Story 10.7)
@@ -201,6 +203,7 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
             "signal_inbox_items",
             shown_as=MappingProxyType({"text": "text_excerpts"}),
         ),
+        "grounding_results": Exported("drafting", "grounding_results"),  # Story 4.13
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

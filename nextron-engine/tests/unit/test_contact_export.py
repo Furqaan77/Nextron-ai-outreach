@@ -74,7 +74,7 @@ def test_the_coverage_declares_every_section_once() -> None:
         "notify": ("alerts", "notifications"),
         "playbook": ("override_cases",),  # Story 4.6
         "sequencing": ("enrollments",),  # Story 4.8
-        "drafting": ("draft_revisions",),  # Story 4.12
+        "drafting": ("draft_revisions", "grounding_results"),  # Stories 4.12 and 4.13
         "pipeline": ("call_bookings", "lead_notes", "channel_permissions"),  # Stories 9.1, 10.7
         "discovery": ("signal_inbox_items",),  # Story 2.16
         "event_log": ("contact_history",),
@@ -378,7 +378,7 @@ def test_every_declared_section_is_an_array_and_none_is_omitted() -> None:
         "notify": {"alerts": [], "notifications": []},
         "playbook": {"override_cases": []},
         "sequencing": {"enrollments": []},
-        "drafting": {"draft_revisions": []},
+        "drafting": {"draft_revisions": [], "grounding_results": []},
         "pipeline": {"call_bookings": [], "lead_notes": [], "channel_permissions": []},
         "discovery": {"signal_inbox_items": []},
         "event_log": {"contact_history": []},

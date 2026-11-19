@@ -75,6 +75,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "settings": ("setup", Coverage.NOT_HELD),
     "footer_snapshots": ("drafting", Coverage.NOT_HELD),
     "draft_revisions": ("drafting", Coverage.TOMBSTONED),  # Story 4.12
+    "grounding_results": ("drafting", Coverage.TOMBSTONED),  # Story 4.13
     "jobs": ("jobqueue", Coverage.NOT_HELD),
     "backups": ("ops", Coverage.NOT_HELD),
     "restore_tests": ("ops", Coverage.NOT_HELD),
@@ -271,6 +272,7 @@ def test_the_declaration_check_names_stale_and_foreign_declarations() -> None:
         "drafting": {
             "footer_snapshots": erasure,
             "draft_revisions": erasure,  # Story 4.12
+            "grounding_results": erasure,  # Story 4.13
             "contacts": erasure,
         },
         "notify": {"alerts": erasure, "notifications": "not_held"},

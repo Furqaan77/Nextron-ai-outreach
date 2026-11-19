@@ -145,6 +145,7 @@ from nextron.domain.ai_test_cases import (
 )
 from nextron.domain.ai_test_gate import MIN_CASES, GroundingCase, TestSet
 from nextron.domain.company_facts import FACT_ID_PATTERN
+from nextron.domain.grounding_rules import RULE_IDS
 from nextron.domain.reply_classes import ObjectionType, ReplyClass
 from nextron.domain.segments import mentions_sra_notice
 
@@ -237,23 +238,8 @@ CLAIM_TAGS: Final[Mapping[ClaimCode, str]] = MappingProxyType(
     }
 )
 
-# Story 4.13's deterministic rule ids (its AC lists 14).
-GROUNDING_RULE_IDS: Final = (
-    "word_limit",
-    "subject_rule",
-    "link_in_step1",
-    "unapproved_contact_detail",
-    "banned_phrase",
-    "attachment",
-    "price_or_audit_in_step",
-    "multiple_ctas",
-    "citation_outside_set",
-    "unhedged_absence",
-    "signal_count",
-    "wrong_signal",
-    "score_only_cited",
-    "repeated_angle",
-)
+# Story 4.13's deterministic rule ids, defined once in nextron.domain.grounding_rules.
+GROUNDING_RULE_IDS: Final = RULE_IDS
 
 # The tags --------------------------------------------------------------------------------------
 

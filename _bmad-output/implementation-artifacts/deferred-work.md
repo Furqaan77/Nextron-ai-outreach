@@ -458,3 +458,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-9-8-show-each-lead-s-complete-history.md`
   summary: Check the History tab's cost on a large Lead: each view reads every linked events row and row-derived entry, sorts in memory and slices 100, and the events query nests an IN subquery per foreign-key path (incl. crawl tables with no events); bound parameters grow with merged Leads x paths.
   evidence: Story 9.8 review triage #9/#21, maybe-false (medium if true). Settle it with a timing run on a Lead with thousands of events, many crawled pages and several merged Leads; a fix could limit the linked tables to entities present in `events` or page in SQL.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-13-check-every-draft-against-deterministic-grounding-rules.md`
+  summary: Carry a generated revision's claims (or its claim-rule flags) forward to a `footer_change` revision, and give Operator edits the AI check's claims, so a claim-rule `fail` can't become a clean `pending` by an edit or a footer change.
+  evidence: Review pass 1 of Story 4.13 (BH1, EC1, medium). `revise` and `recompose_ready` call `_append` with `claims=None`, so only the text rules run on the new revision. Harmless until Story 4.15 writes generated revisions with claims; 4.14 (AI claims fed to `check`) and 4.15 (claims storage) must close it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-13-check-every-draft-against-deterministic-grounding-rules.md`
+  summary: The generation story must pass the drafting output's `claims` to `Drafting._append(..., claims=...)`; today the six claim rules run only in tests that call the private writer.
+  evidence: Review pass 1 of Story 4.13 (BH14, VG-other, low). No production caller passes claims yet.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-13-check-every-draft-against-deterministic-grounding-rules.md`
+  summary: Epic 5's approval gate must treat a revision with no `grounding_results` row as not grounded, and Story 4.14 should add a DB guard that `status = 'pass'` needs `route_tuple_id` and `served_model`.
+  evidence: Review pass 1 of Story 4.13 (VG-other, BH3, low). Migration 0046 doesn't backfill rows for revisions written under 0045, and no trigger or CHECK limits updates of `grounding_results`; 4.14 owns the update path.
