@@ -52,6 +52,9 @@ DETAILS = (
     "Shah",
     "intake coordinator",
 )
+_LOG_MACHINERY_NUMBERS = frozenset(
+    {"created", "msecs", "relativeCreated", "thread", "process", "lineno"}
+)
 COLUMNS = (
     "case_key, test_set, route, input, expected, covers, sha256, loaded_at, retired_at, "
     "origin, contact_id, id"
@@ -139,7 +142,10 @@ def test_an_override_is_stored_pseudonymised_with_its_contact_and_class(
     logged = [record for record in caplog.records if record.getMessage() == "override_case_added"]
     assert [record.case_key for record in logged] == [key]  # type: ignore[attr-defined]
     for record in caplog.records:
-        rendered = record.getMessage() + json.dumps(record.__dict__, default=str)
+        # Every attribute except the logging module's own timing and process numbers, whose
+        # digits (a timestamp such as ``...1001.7123506``) could collide with the phone number.
+        fields = {k: v for k, v in record.__dict__.items() if k not in _LOG_MACHINERY_NUMBERS}
+        rendered = record.getMessage() + json.dumps(fields, default=str)
         for detail in ("Dana", "Whitfield", "brightwell", "7123", CONTACT):
             assert detail not in rendered
 
