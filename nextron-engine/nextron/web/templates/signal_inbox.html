@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Signal Inbox{% endblock %}
+{% block content %}
+<h1>Signal Inbox</h1>
+<p>Paste a post or job ad you found, with its URL. The engine identifies the organization,
+stores the text as the Lead's Evidence and researches the Lead at once. A pasted URL is stored
+as a source only: the engine never fetches it. No email is sent.</p>
+{% include "signal_inbox_panel.html" %}
+{% endblock %}

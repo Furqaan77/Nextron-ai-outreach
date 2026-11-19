@@ -169,10 +169,11 @@ def test_every_personal_data_table_is_covered_by_its_owner() -> None:
     assert coverage_problems(COVERAGE, PII, TABLES) == []
     # Story 4.6's ai_test_cases, Story 2.11's job_postings, Story 4.12's draft_revisions,
     # Story 10.2's linkedin_accounts, Story 9.1's leads.notes, Story 10.7's
-    # channel_permissions and Story 9.4's call_outcomes (reason, next_step)
-    assert len(personal_columns(PII)) == 22
+    # channel_permissions, Story 9.4's call_outcomes (reason, next_step) and Story 2.16's
+    # signal_inbox_items
+    assert len(personal_columns(PII)) == 23
     # Story 4.8's enrollments: no personal data, but a Contact's
-    assert len(COVERAGE) == 23
+    assert len(COVERAGE) == 24
     assert CONTACT_TABLES == {
         "provenance_records",
         "evidence",

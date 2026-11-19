@@ -22,6 +22,8 @@ from sqlalchemy import Engine
 from nextron import main
 from nextron.app.approval.api import Approval
 from nextron.app.compliance.erasure import Erasures
+from nextron.app.discovery import api as discovery_api
+from nextron.app.discovery.api import SignalInboxRows
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue import api as jobqueue_api
@@ -787,9 +789,10 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert subscribers.frozen
     found = subscribers.subscribers_of(LeadsMerged)
     assert all(is_command(subscriber) for subscriber in found)
-    assert [subscriber.__name__ for subscriber in found] == ["reparent_lead"] * 3
+    assert [subscriber.__name__ for subscriber in found] == ["reparent_lead"] * 4
     owners = [type(getattr(subscriber, "__self__", None)) for subscriber in found]
-    assert owners == [Pipeline, Research, Sequencing]  # pipeline, research, then sequencing
+    # pipeline, research, sequencing, then discovery's Signal Inbox items (Story 2.16)
+    assert owners == [Pipeline, Research, Sequencing, SignalInboxRows]
     suppressed = subscribers.subscribers_of(SubjectSuppressed)  # Stories 4.8, 4.9 and 3.3
     assert all(is_command(subscriber) for subscriber in suppressed)
     assert [subscriber.__name__ for subscriber in suppressed] == [
@@ -802,8 +805,9 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     erased = subscribers.subscribers_of(ContactErased)  # Story 3.13
     assert all(is_command(subscriber) for subscriber in erased)
     assert {subscriber.__name__ for subscriber in erased} == {"erase_pii"}
-    compliance, research, playbook, sequencing, *rest, pipeline = erased
+    compliance, discovery, research, playbook, sequencing, *rest, pipeline = erased
     assert type(getattr(compliance, "__self__", None)) is Erasures  # compliance first
+    assert discovery is discovery_api.erase_pii  # Story 2.16: reads the Contact's plaintext
     assert type(getattr(research, "__self__", None)) is Research  # then research
     assert type(getattr(playbook, "__self__", None)) is Playbook  # Story 4.6's override cases
     assert type(getattr(sequencing, "__self__", None)) is Sequencing  # Story 4.8, then no-ops
@@ -848,7 +852,11 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     found = [
         *subscribers.subscribers_of(LeadsMerged),
         *subscribers.subscribers_of(SubjectSuppressed),
-        *subscribers.subscribers_of(ContactErased)[:4],  # the rest are module functions
+        *(  # discovery's (the second) and the no-op hooks are module functions
+            hook
+            for hook in subscribers.subscribers_of(ContactErased)[:5]
+            if hasattr(hook, "__self__")
+        ),
         *subscribers.subscribers_of(ContactErased)[-1:],  # Stories 9.1 and 10.7: pipeline's
         *subscribers.subscribers_of(Enrolled),
         *subscribers.subscribers_of(MessageSent),
@@ -856,7 +864,7 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 14
+    assert clocks == [clock] * 15  # Story 2.16: SignalInboxRows.reparent_lead too
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 
@@ -909,7 +917,7 @@ def real_chain_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dev: Path) 
     dev.mkdir(parents=True)
     with engine_on(dev / "nextron.db") as engine:
         ensure_current(engine, script_location=location)
-    extend(location, ("0054_more", create_table("more")))
+    extend(location, ("0055_more", create_table("more")))
     monkeypatch.setattr(migrations, "SCRIPT_LOCATION", location)
     return dev / "nextron.db"
 
@@ -923,7 +931,7 @@ def test_a_database_behind_is_copied_before_the_upgrade_and_the_copy_recorded(
     code, err, spy = run_serve()
 
     assert (code, err) == (0, "")
-    assert spy.calls[0]["db_revision"] == "0054_more"
+    assert spy.calls[0]["db_revision"] == "0055_more"
     [copy] = local_copies(local_app_data)
     assert re.fullmatch(r"nextron-dev-\d{8}T\d{6}\.\d{3}Z\.db", copy.name)
     assert copy_revision(copy) == HEAD  # taken before the upgrade

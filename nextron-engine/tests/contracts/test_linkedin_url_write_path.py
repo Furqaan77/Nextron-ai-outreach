@@ -46,6 +46,8 @@ CANDIDATE_WITH_LINKEDIN_URL: Final = {
 ADD_CONTACT_CALLERS: Final = {
     "nextron.app.discovery.api:LeadImports.run": ProvenanceSource.CSV,
     "nextron.app.research.people:PeopleExtractions._contacts": ProvenanceSource.WEBSITE,
+    # Story 2.16: the Signal Inbox item's author (name and role only, no linkedin_url)
+    "nextron.app.research.api:Research._inbox_author": ProvenanceSource.SIGNAL_INBOX,
 }
 CONTACTS_REPO: Final = "nextron.db.repos.research.contacts"
 CONTACTS_REPO_WRITES: Final = frozenset({"insert", "fill"})

@@ -25,7 +25,8 @@ work and opens its own transactions, in three phases:
    ``no_pages`` run. They go in ``PageKind`` order, then by URL, each cut by
    ``allot(texts, PAGE_TEXT_BUDGET)``, as one ``website`` block each (block id: the page's id,
    subject ``lead:<id>``). The full stored text of each page sent is kept for phase 3.
-2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, Urgency.BULK)``. An
+2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, chain_urgency(lane))``
+   (``bulk``, or ``soon`` when the ``extract_lead`` job ran on the interactive lane, Story 2.16). An
    ``AdapterError`` records a ``failed`` run with its code (in a transaction of its own) and is
    raised again (the runner retries only a retryable one). ``LlmRefused`` (``error_code``: its
    category), ``LlmTruncated``, ``LlmInvalid`` and ``LlmFailed`` (its code) record that outcome
@@ -136,7 +137,7 @@ from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import current, use_case
-from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import RouteTuple, UntrustedBlock, chain_urgency
 from nextron.domain.budget import allow
 from nextron.domain.contacts import ContactCandidate, PrimaryChoice, ProvenanceSource
 from nextron.domain.crawl import (
@@ -203,6 +204,7 @@ class _PeopleCall:
     lead_id: str
     web_domain: str | None
     run_id: str  # the payload's crawl run, passed down the chain (Story 2.11)
+    lane: Lane | None  # the lane the chain runs on (Story 2.16; None: each job's default)
     crawl_run_id: str | None
     started_at: datetime
     route_tuple: RouteTuple
@@ -248,9 +250,10 @@ class PeopleExtractions:
         self._research = research
         self._queue = queue
 
-    def extract(self, lead_id: str, run_id: str) -> bool:
+    def extract(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
         """Extract the Lead's named decision-makers from its people pages; see the module
-        docstring. ``False`` when the budget refused the call."""
+        docstring. ``False`` when the budget refused the call. ``lane`` is the lane the
+        ``extract_lead`` job ran on (Story 2.16)."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
@@ -265,7 +268,7 @@ class PeopleExtractions:
             elif lead.merged_into is not None:
                 skipped = MERGED_LEAD
             else:
-                call = self._prepare(lead, run_id, started_at)
+                call = self._prepare(lead, run_id, started_at, lane)
         if call is None:  # an unknown or merged Lead
             log.info(EXTRACTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return True
@@ -273,7 +276,7 @@ class PeopleExtractions:
             call.log()
             return True
         try:
-            result = self._llm.run(call.route_tuple, call.blocks, Urgency.BULK)
+            result = self._llm.run(call.route_tuple, call.blocks, chain_urgency(call.lane))
         except AdapterError as error:
             with uow.transaction():
                 recorded = self._finished(call, ExtractionOutcome.FAILED, error.code, select=False)
@@ -314,7 +317,7 @@ class PeopleExtractions:
     # Phase 1 ------------------------------------------------------------------------------------
 
     def _prepare(
-        self, lead: StoredLead, run_id: str, started_at: datetime
+        self, lead: StoredLead, run_id: str, started_at: datetime, lane: Lane | None
     ) -> _PeopleCall | RecordedRun:
         """The call to make, or the ``no_activation`` or ``no_pages`` run it recorded."""
         crawl_run_id = run_id if is_ulid(run_id) and crawl_repo.run(run_id) is not None else None
@@ -324,7 +327,7 @@ class PeopleExtractions:
         route_tuple = playbook_queries.active_tuple(ROUTE)
         if route_tuple is None:
             return self._recorded(
-                lead, run_id, crawl_run_id, ExtractionOutcome.NO_ACTIVATION, None, started_at
+                lead, run_id, crawl_run_id, ExtractionOutcome.NO_ACTIVATION, None, started_at, lane
             )
         last = signals_repo.last_ok_run(lead.id, ROUTE)
         pages = sorted(
@@ -339,6 +342,7 @@ class PeopleExtractions:
                 ExtractionOutcome.NO_PAGES,
                 route_tuple.actor,
                 started_at,
+                lane,
             )
         full = [page.text or "" for page in pages]
         cut = allot(full, PAGE_TEXT_BUDGET)
@@ -347,6 +351,7 @@ class PeopleExtractions:
             lead_id=lead.id,
             web_domain=lead.web_domain,
             run_id=run_id,
+            lane=lane,
             crawl_run_id=crawl_run_id,
             started_at=started_at,
             route_tuple=route_tuple,
@@ -373,10 +378,11 @@ class PeopleExtractions:
         outcome: ExtractionOutcome,
         actor: str | None,
         started_at: datetime,
+        lane: Lane | None,
     ) -> RecordedRun:
         """Record a run that made no call, and enqueue the next stage."""
         recorded = self._record(lead.id, crawl_run_id, outcome, actor=actor, started_at=started_at)
-        self._enqueue_next_stage(lead.id, run_id, lead.web_domain)
+        self._enqueue_next_stage(lead.id, run_id, lead.web_domain, lane)
         return RecordedRun(lead.id, recorded, outcome, None)
 
     # Runs and the next stage --------------------------------------------------------------------
@@ -431,19 +437,23 @@ class PeopleExtractions:
             pages_truncated=call.pages_truncated,
         )
         if select:
-            self._enqueue_next_stage(call.lead_id, call.run_id, call.web_domain)
+            self._enqueue_next_stage(call.lead_id, call.run_id, call.web_domain, call.lane)
         return RecordedRun(call.lead_id, run_id, outcome, code)
 
-    def _enqueue_next_stage(self, lead_id: str, run_id: str, web_domain: str | None) -> None:
-        """Enqueue the chain's next stage for the Lead, in the caller's transaction: the one
-        insertion point between the people step and ``select_primary_contact``. It is
-        ``check_job_boards`` (Story 2.11), whose finish enqueues ``check_legal_form`` (Story
-        2.12), which enqueues the Primary Contact's selection."""
+    def _enqueue_next_stage(
+        self, lead_id: str, run_id: str, web_domain: str | None, lane: Lane | None
+    ) -> None:
+        """Enqueue the chain's next stage for the Lead on ``lane`` (Story 2.16), in the caller's
+        transaction: the one insertion point between the people step and
+        ``select_primary_contact``. It is ``check_job_boards`` (Story 2.11), whose finish
+        enqueues ``check_legal_form`` (Story 2.12), which enqueues the Primary Contact's
+        selection."""
         self._queue.enqueue(
             CHECK_JOB_BOARDS_JOB,
             scope=lead_id,
             discriminator=TICK,
             payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id, RUN_ID_FIELD: run_id},
+            lane=lane,
             concurrency_key=None if web_domain is None else f"{DOMAIN_KEY_PREFIX}{web_domain}",
         )
 
@@ -488,7 +498,7 @@ class PeopleExtractions:
             stored=applied.stored,
             discarded=applied.discarded,
         )
-        self._enqueue_next_stage(call.lead_id, call.run_id, call.web_domain)
+        self._enqueue_next_stage(call.lead_id, call.run_id, call.web_domain, call.lane)
         return applied
 
     def _log_refusals(self, call: _PeopleCall, validation: PeopleValidation, now: datetime) -> None:
@@ -676,8 +686,12 @@ class PrimaryContacts:
         self._queue = queue
 
     @use_case
-    def select_primary_contact(self, lead_id: str) -> PrimaryChoice | None:
-        """Pick the Lead's Primary Contact; ``None`` for an unknown or merged Lead."""
+    def select_primary_contact(
+        self, lead_id: str, *, lane: Lane | None = None
+    ) -> PrimaryChoice | None:
+        """Pick the Lead's Primary Contact; ``None`` for an unknown or merged Lead. The jobs it
+        enqueues go on ``lane``, the lane its job ran on (Story 2.16; ``None``: their
+        default)."""
         skipped: str | None = None
         choice: PrimaryChoice | None = None
         with current().transaction():
@@ -688,12 +702,13 @@ class PrimaryContacts:
                 skipped = MERGED_LEAD
             else:
                 choice = self._research.select_primary(lead.id)
-                self._search(lead, choice.contact_id, lane=None)
+                self._search(lead, choice.contact_id, lane=lane)
                 self._queue.enqueue(
                     SCORE_LEAD_JOB,
                     scope=lead.id,
                     discriminator=TICK,
                     payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead.id},
+                    lane=lane,
                 )
         if choice is None:
             log.info(PRIMARY_SELECTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})

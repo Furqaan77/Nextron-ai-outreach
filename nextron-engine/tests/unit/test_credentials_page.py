@@ -361,12 +361,13 @@ def test_the_page_extends_the_layout_and_links_back_to_settings(
     # the brand, the navigation (its sections unchanged: no Credentials link) and the way back
     assert [(a.attrs.get("href"), a.text) for a in page.find("a") if a.row is None] == [
         ("/", "Nextron"),
+        ("/signals", "Signal Inbox"),
         ("/leads", "Leads/Pipeline"),
         ("/settings", "Settings"),
         ("/health/panel", "Health"),
         ("/settings", "Back to Settings"),
     ]
-    assert page.texts("nav") == ["Leads/Pipeline Settings Health"]
+    assert page.texts("nav") == ["Signal Inbox Leads/Pipeline Settings Health"]
     assert DECLINE in page.texts("p")  # browsers may still offer their password manager
 
 

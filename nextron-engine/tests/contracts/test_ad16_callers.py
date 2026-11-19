@@ -12,7 +12,7 @@ violation.
   ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever.
   ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method;
   ``verify_contact_email`` (Story 2.14) is ``EmailVerification.verify_contact_email``. Not built
-  yet: the Signal Inbox chain, replies, ``approval.approve``, the pipeline
+  yet: replies, ``approval.approve``, the pipeline
   Tasks and call sheets and ``compliance.assert_sendable``: their stories add a scenario here
   when they build them. ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with
   Law-PrivateAI x US active and one Sending Inbox: an eligible US Contact's first two gate calls
@@ -26,7 +26,11 @@ violation.
   ``daily_capacity`` row (or updates it) and no Enrollment. Story 10.7's
   ``pipeline.channel_permissions`` (``ChannelPermissions.record`` and ``update_inbound``) gates
   the Contact on ``whatsapp`` or ``instagram`` for ``follow_up`` before any write; Blocked, it
-  stores nothing, not even the Evidence.
+  stores nothing, not even the Evidence. The Signal Inbox (Story 2.16:
+  ``SignalInbox.process_signal_item``, ``Research.ingest_signal_item`` and the two helpers that
+  call ``upsert_lead`` and ``add_contact``) runs the real job on a submitted item whose scripted
+  parse names a new organization and its COO: the new Lead's gate call, then the author
+  Contact's; ``Blocked`` flags the item ``organization_suppressed`` and writes nothing else.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -93,6 +97,7 @@ from nextron import main
 from nextron.app.compliance import api as compliance_api
 from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
+from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.drafting.api import Drafting
 from nextron.app.discovery.place_ingest import PlaceDiscovery
 from nextron.app.discovery.places import PlaceSearches
@@ -137,6 +142,7 @@ from nextron.domain.offers import validate_offers
 from nextron.domain.place_discovery import DiscoveryLocation, RunStatus
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
+from nextron.domain.signal_inbox_item import SubmittedItem
 from nextron.ports.dns import MxRecord
 from nextron.ports.email_finder import VerifierAnswer
 from nextron.ports.llm import LlmOk, LlmUsage
@@ -229,7 +235,13 @@ MANIFEST: Final = (
         ANY + r"(?:\w*find\w*email\w*|EmailFinding\.\w+)",
     ),
     Caller("verify_contact_email", ("app/",), ANY + r"\w*verify\w*email\w*"),
-    Caller("signal_inbox", ("app/",), ANY + r"(?:process|ingest)_signal_item"),
+    # Story 2.16: the job, research's ingest, and the two helpers that reach the gate
+    Caller(
+        "signal_inbox",
+        ("app/",),
+        ANY + r"(?:(?:process|ingest)_signal_item|SignalInbox\._apply_website|"
+        r"Research\._inbox_author)",
+    ),
     Caller("replies.add_contact", ("app/replies/",), ANY + r"\w+", calls="add_contact"),
     Caller(
         "sequencing.enroll",
@@ -1597,6 +1609,67 @@ def _permission_inbound(world: World, tag: str) -> tuple[Callable[[], object], E
     return action, lambda: expected
 
 
+INBOX_AUTHOR = "Dana Cole"
+
+
+def _inbox(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 2.16's ``process_signal_item`` on a pasted COO post naming its organization's
+    website: the new Lead's gate call, then the author Contact's (``ingest_signal_item``)."""
+    site = research_world(world.engine)
+    domain = f"firm-{tag}.co.uk"
+    text = (
+        f"{INBOX_AUTHOR}, COO at Firm {tag} ({domain}). We re-key every order into our ERP "
+        "by hand."
+    )
+    answer = LlmOk(
+        {
+            "segment": "ops_automation",
+            "signal_type": "ops_rekeying_post",
+            "website": domain,
+            "author_name": INBOX_AUTHOR,
+            "author_role": "COO",
+            "event_date": None,
+            "quote": "We re-key every order into our ERP by hand.",
+        },
+        model=RESEARCH_MODEL,
+        usage=LlmUsage(requests=1),
+    )
+    inbox = SignalInbox(
+        site.clock, site.meter, ScriptedLlm(answer), site.discovery, site.research, site.queue
+    )
+    with site.units.open():
+        [item_id] = inbox.submit((SubmittedItem(f"https://example.org/post/{tag}", text),))
+
+    def action() -> object:  # as the job runner runs it: the use case in a unit of work
+        with site.units.open():
+            return inbox.process_signal_item(item_id)
+
+    def expected() -> tuple[GateCall, ...]:  # the Lead's id exists only after the run
+        lead_id = world.lead_id_of(domain)
+        return (
+            _gate(NewLeadSubject(domain)),
+            _gate(NewContactSubject(lead_id, name=INBOX_AUTHOR)),
+        )
+
+    return action, expected
+
+
+def _inbox_flagged(world: World) -> None:
+    """A blocked new organization flags the item and creates nothing else."""
+    assert world.last_event() == (
+        "signal_inbox_items",
+        "pending",
+        "flagged",
+        "flagged",
+        "system:discovery",
+    )
+    with world.engine.connect() as connection:
+        reasons = connection.exec_driver_sql(
+            "SELECT flag_reason FROM signal_inbox_items WHERE status = 'flagged'"
+        ).all()
+    assert reasons == [("organization_suppressed",)]
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
         "verify_contact_email": Scenario(
@@ -1604,6 +1677,17 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             # what a blocked check still writes: the Contact's result, never its class
             blocked_writes=frozenset({("UPDATE", "contacts")}),
             after_blocked=_verify_blocked,
+        ),
+        # Story 2.16: the parse is stored on the item before the new Lead's gate call, and the
+        # author's gate call follows the Lead's writes; blocked, the item is only flagged
+        "signal_inbox": Scenario(
+            (_inbox,),
+            gates_first=False,
+            blocked_rows={"events": 1},
+            blocked_writes=frozenset(
+                {("UPDATE", "signal_inbox_items"), ("INSERT", "events")}
+            ),
+            after_blocked=_inbox_flagged,
         ),
         "find_contact_email": Scenario(
             (_find,),
@@ -1740,6 +1824,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "verify_contact_email",  # Story 2.14
         "pipeline.channel_permissions",  # Story 10.7
         "scoring.pick",  # Story 4.10
+        "signal_inbox",  # Story 2.16
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
@@ -1810,9 +1895,9 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
 
     # Story 4.8's real scenario left out, so the probe's enroll has none
     without_enroll = [name for name in SCENARIOS if name != "sequencing.enroll"]
+    # Story 2.16: the probe's ingest_signal_item is built and the real signal_inbox scenario
+    # covers it, so only the other unbuilt names fail
     assert scenario_problems(index, without_enroll) == [
-        "signal_inbox is built (app/research/api.py Research.ingest_signal_item) but has no "
-        "scenario",
         "replies.add_contact is built (app/replies/api.py Replies.intake) but has no scenario",
         "sequencing.enroll is built (app/sequencing/api.py Sequencing.enroll) but has no "
         "scenario",

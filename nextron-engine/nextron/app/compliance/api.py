@@ -178,7 +178,9 @@ The two reapply writers (their caller is ``nextron.app.compliance.ledger.Erasure
   ``queries.drafting.export_pii`` (the revisions of their Drafts, Story 4.12),
   ``queries.pipeline.export_pii`` (Story 9.1: the Contact's booked calls, and the lines of the
   notes of its Lead and of every Lead merged into it, ``queries.discovery.merged_lead_ids``,
-  that mention it, by ``mention_terms(name, email)``; Story 10.7: its Channel Permissions) and
+  that mention it, by ``mention_terms(name, email)``; Story 10.7: its Channel Permissions),
+  ``queries.discovery.export_pii`` (the Signal Inbox items that mention the Contact, Story
+  2.16) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -840,6 +842,22 @@ class Compliance:
                     contact_id,
                     (contact.lead_id, *discovery_queries.merged_lead_ids(contact.lead_id)),
                     mention_terms(contact.name, contact.email),
+                ),
+                # Story 2.16: the Signal Inbox items of the Contact's Lead that mention them
+                "discovery": discovery_queries.export_pii(
+                    contact.lead_id,
+                    contact.name,
+                    [
+                        address
+                        for address in (
+                            contact.email,
+                            *(
+                                record.address
+                                for record in research_queries.provenance(contact_id)
+                            ),
+                        )
+                        if address is not None
+                    ],
                 ),
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },

@@ -147,6 +147,13 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``/leads/{lead_id}``: the Discovery page (Story 8.3), linked from the Leads list; see
   ``nextron.web.discovery_page``. The POST runs ``place_discovery.request_run`` in its own unit
   of work, then renders the panel again in a read-only one with its notice, always 200.
+- ``GET /signals`` (``signal_inbox_page``), ``POST /signals`` (``signal_inbox_submit``) and
+  ``POST /signals/{item_id}/reprocess`` (``signal_inbox_reprocess``), all
+  ``@personal_data(True)``: the Signal Inbox (Story 2.16, the nav's "Signal Inbox"); see
+  ``nextron.web.signal_inbox_page``. The submit POST checks the fieldsets
+  (``check_items``) and runs ``signal_inbox.submit`` in its own unit of work; the reprocess POST
+  runs ``signal_inbox.reprocess`` (an ``item_id`` that isn't a ULID is a malformed form). Both
+  answer 200 with the panel, read in a read-only unit of work.
 - ``GET /inboxes`` (``inboxes_page``) and ``POST /inboxes`` (``inbox_register``), both
   ``@personal_data(True)``: the Sending Inboxes panel (Story 4.7, FR-32, UX-DR26), linked from
   the Settings page; see ``nextron.web.inboxes_page``. The GET lists
@@ -376,6 +383,7 @@ from nextron.app.discovery.place_ingest import (
     PlacesRunRefused,
     configured_locations,
 )
+from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -438,6 +446,7 @@ from nextron.domain.render import footer_complete
 from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
+from nextron.domain.signal_inbox_item import ItemsRefused, check_items
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.domain.suppression_list import (
     ADDED,
@@ -470,6 +479,7 @@ from nextron.web import leads_page as lead_rows
 from nextron.web import pipeline_page as board_rows
 from nextron.web import quotas_page as quota_rows
 from nextron.web import ready_page as ready_rows
+from nextron.web import signal_inbox_page as inbox_page_rows
 from nextron.web import suppression_page as suppression_rows
 from nextron.web import templating
 from nextron.web.credentials_page import Notice
@@ -669,6 +679,7 @@ def create_app(
     lead_scores: LeadScores,
     place_discovery: PlaceDiscovery,
     selection: Selection,
+    signal_inbox: SignalInbox,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -693,7 +704,8 @@ def create_app(
     answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``pipeline`` runs its Pipeline
     panel's moves, bookings and deal saves (Story 9.1); ``selection`` gives the "Ready to draft"
     page its list, capacity and picks and the notification area its signal shortfall (Story
-    4.10); ``compliance`` runs the Suppression List panel's add, import and Reverse, and
+    4.10); ``signal_inbox`` stores the Signal Inbox's pasted items and reprocesses a flagged one
+    (Story 2.16); ``compliance`` runs the Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
     subject access export; ``channel_permissions`` runs a Contact's Channel Permission page
@@ -1430,6 +1442,59 @@ def create_app(
             )
             return import_answer(request, **context)
         return import_answer(request, **import_rows.form_context(summary=summary))
+
+    def signal_inbox_answer(
+        request: Request, template: str, **context: object
+    ) -> HTMLResponse:
+        found = inbox_page_rows.panel_context(
+            discovery_queries.signal_items(), setup_queries.segments(), **context
+        )
+        return page(request, template, **found)
+
+    @app.get("/signals", name="signal_inbox_page")
+    @personal_data(True)  # pasted text and the names in it
+    def signal_inbox_page(request: Request) -> HTMLResponse:
+        return signal_inbox_answer(request, inbox_page_rows.PAGE_TEMPLATE)
+
+    @app.post("/signals", name="signal_inbox_submit")
+    @personal_data(True)
+    def signal_inbox_submit(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        rows = inbox_page_rows.submitted_rows(fields)
+        try:
+            items = check_items(rows)
+        except ItemsRefused as refused:
+            # 200, so HTMX swaps the panel in; nothing was stored, and the typed values stay
+            with units.open(read_only=True):
+                return signal_inbox_answer(
+                    request, inbox_page_rows.PANEL_TEMPLATE, rows=rows, errors=refused.errors
+                )
+        with units.open():
+            signal_inbox.submit(items)
+        with units.open(read_only=True):
+            return signal_inbox_answer(
+                request,
+                inbox_page_rows.PANEL_TEMPLATE,
+                notice=inbox_page_rows.Notice("status", inbox_page_rows.SUBMITTED),
+            )
+
+    @app.post("/signals/{item_id}/reprocess", name="signal_inbox_reprocess")
+    @personal_data(True)
+    def signal_inbox_reprocess(
+        request: Request, item_id: str, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        choice = inbox_page_rows.submitted_reprocess(fields)
+        if not is_ulid(item_id):
+            raise MalformedForm(WRONG_FIELDS)
+        with units.open():
+            outcome = signal_inbox.reprocess(item_id, choice)
+        with units.open(read_only=True):
+            return signal_inbox_answer(
+                request,
+                inbox_page_rows.PANEL_TEMPLATE,
+                notice=inbox_page_rows.REPROCESS_NOTICES[outcome],
+            )
 
     def inboxes_answer(
         request: Request,

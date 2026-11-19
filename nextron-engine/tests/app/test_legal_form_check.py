@@ -808,3 +808,30 @@ def test_the_record_command_refuses_a_site_quote_that_isnt_on_the_page(world: Wo
 
     assert legal(world, lead) == (None, None, None, None, None, None)
     assert world.evidence(lead) == []
+
+
+# Row: The chain's lane (Story 2.16) -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lane", [Lane.BULK, Lane.INTERACTIVE])
+@pytest.mark.parametrize("path", ["gb", "not_gb", "non_retryable_failure"])
+def test_the_selection_is_enqueued_on_the_lane_the_check_ran_on(
+    world: World, lane: Lane, path: str
+) -> None:
+    if path == "not_gb":
+        lead = crawled(world, FOOTER, country="US")
+        registry = ScriptedRegistry()
+    elif path == "gb":
+        lead = crawled(world, FOOTER)
+        registry = ScriptedRegistry(companies={NUMBER: ACME_LTD})
+    else:
+        lead = crawled(world, f"Smith & Jones. {OFFICE}", SMITH)
+        registry = ScriptedRegistry(
+            searches={SMITH: AdapterError(False, "registry_refused", "refused")}
+        )
+
+    with world.units.open():
+        assert checks(world, registry).check_legal_form(lead, lane=lane) is True
+
+    [(_, _, _, queued_lane)] = selections(world)
+    assert queued_lane == str(lane)

@@ -27,7 +27,8 @@ step (below):
    blocks are the ``signal_types`` block (``signal_catalogue([segment])``, block id and source
    ``signal_types``) and one ``website`` block per page (block id: the page's id), all of
    subject ``lead:<id>``. The full stored text of each page sent is kept for phase 3.
-2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, Urgency.BULK)``. An
+2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, chain_urgency(lane))``
+   (``nextron.domain.ai``: ``bulk``, or ``soon`` for a job on the interactive lane, Story 2.16). An
    ``AdapterError`` records a ``failed`` run with its code (in a transaction of its own) and is
    raised again, so the runner retries only a retryable one. ``LlmRefused`` (``error_code``: its
    category), ``LlmTruncated``, ``LlmInvalid`` and ``LlmFailed`` (its code) record that outcome
@@ -81,7 +82,7 @@ step (below):
 
 **The people step (Story 2.10).** Whatever the Signals phases' outcome, except a budget
 refusal, an unknown or merged Lead (phase 1's skip, or phase 3's ``lead_merged`` run) or a
-raise, ``extract_lead`` then returns ``people.extract(lead_id, run_id)``
+raise, ``extract_lead`` then returns ``people.extract(lead_id, run_id, lane=lane)``
 (``nextron.app.research.people.PeopleExtractions``, typed here by the ``PeopleStep`` protocol):
 ``False`` when its own budget check refused (the job is deferred), else ``True``.
 ``RecordedRun``, ``outcome_of`` and ``page_order`` serve both steps.
@@ -116,7 +117,7 @@ from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.crawl import StoredPage
 from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import current, use_case
-from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import RouteTuple, UntrustedBlock, chain_urgency
 from nextron.domain.budget import allow
 from nextron.domain.crawl import PageKind
 from nextron.domain.extraction import (
@@ -141,6 +142,7 @@ from nextron.domain.extraction import (
     validate,
 )
 from nextron.domain.ids import is_ulid
+from nextron.domain.job import Lane
 from nextron.domain.notifications import EvidenceChanged
 from nextron.domain.postings import PostingSource, validate_postings
 from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass, signal_catalogue
@@ -163,7 +165,7 @@ KIND_ORDER: Final = {str(kind): index for index, kind in enumerate(PageKind)}
 class PeopleStep(Protocol):
     """What ``extract_lead`` needs of the people step (Story 2.10)."""
 
-    def extract(self, lead_id: str, run_id: str) -> bool: ...
+    def extract(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,9 +254,11 @@ class SignalExtractions:
         self._people = people
 
     @use_case
-    def extract_lead(self, lead_id: str, run_id: str) -> bool:
+    def extract_lead(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
         """Extract the Lead's Signals and Evidence from its changed pages, then its people; see
-        the module docstring. ``False`` when a budget check refused the work."""
+        the module docstring. ``False`` when a budget check refused the work. ``lane`` is the
+        lane the job ran on (Story 2.16): the call's urgency is ``chain_urgency(lane)`` and the
+        people step enqueues the chain's next stage on it."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
@@ -275,9 +279,9 @@ class SignalExtractions:
             return True
         if isinstance(call, RecordedRun):  # phase 1 recorded its run
             call.log()
-            return self._people.extract(lead_id, run_id)
+            return self._people.extract(lead_id, run_id, lane=lane)
         try:
-            result = self._llm.run(call.route_tuple, call.blocks, Urgency.BULK)
+            result = self._llm.run(call.route_tuple, call.blocks, chain_urgency(lane))
         except AdapterError as error:
             with uow.transaction():
                 recorded = self._finished(call, ExtractionOutcome.FAILED, error.code)
@@ -288,7 +292,7 @@ class SignalExtractions:
             with uow.transaction():
                 recorded = self._finished(call, outcome, code)
             recorded.log()
-            return self._people.extract(lead_id, run_id)
+            return self._people.extract(lead_id, run_id, lane=lane)
         with uow.transaction():
             applied = self._apply(call, result.parsed)
         if applied.merged is not None:
@@ -312,7 +316,7 @@ class SignalExtractions:
                 "hq_changed": applied.hq_changed,
             },
         )
-        return self._people.extract(lead_id, run_id)
+        return self._people.extract(lead_id, run_id, lane=lane)
 
     # Phase 1 ------------------------------------------------------------------------------------
 

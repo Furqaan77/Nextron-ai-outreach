@@ -122,8 +122,9 @@ Enrollments the suppression blocks stop), then ``Pipeline(clock).close_suppresse
 an opt-out closes the Lead ``lost``; AD-3's other subscribers go between them when their stories
 add them); ``ContactErased`` -> each owner's ``erase_pii`` hook (Story 3.13, AD-17):
 compliance's first (``Erasures(clock, Compliance(clock)).erase_pii``, which reads the Contact
-while it still holds its values), then research's (``Research(clock).erase_pii``, which
-tombstones the Contact; the hooks after it touch only their own tables), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
+while it still holds its values), then discovery's (``discovery_api.erase_pii``, Story 2.16: it
+matches the Signal Inbox items against the Contact's plaintext name and addresses), then
+research's (``Research(clock).erase_pii``, which tombstones the Contact; the hooks after it touch only their own tables), then playbook's (``Playbook(clock).erase_pii``, Story 4.6: it
 erases the Contact's override cases, ``erase_override_cases``), then
 ``Sequencing(clock).erase_pii`` (Story 4.8: the erased Contact's live Enrollments stop with
 ``contact_erased``), then the hooks of ``setup``, ``drafting`` (Story 4.12: it tombstones the
@@ -246,8 +247,14 @@ default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score
 limit 3, ``handlers.poll_unsubscribes(unsubscribes)``, ``unsubscribe_poll``; never budget-gated)
 is registered after them, and Story 8.3's ``discover_places`` (bulk only, priority 30,
 ``max_runtime`` 1 hour, retry limit 2, ``handlers.discover_places(place_discovery)``,
-``discovery``) last. ``domain_checks``, ``unsubscribes`` and ``place_discovery`` are optional
-services: each defaults
+``discovery``) after it, and Story 2.16's ``process_signal_item`` (interactive only, priority
+60, 5 minutes, retry limit 3 (``handlers.PROCESS_SIGNAL_ITEM_RETRIES``),
+``handlers.process_signal_item(signal_inbox)``, ``discovery``) last; with ``signal_inbox`` left
+out its handler raises a ``RuntimeError``. ``SignalInbox(clock, meter, llm, discovery, research,
+queue)`` (``nextron.app.discovery.signal_inbox``) runs those jobs, reached through
+``signal_inbox=lambda: signal_inbox``, and the dashboard gets it (``create_app(...,
+signal_inbox=...)``) for the Signal Inbox page. ``domain_checks``, ``unsubscribes`` and
+``place_discovery`` are optional services: each defaults
 to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
@@ -811,10 +818,12 @@ from nextron.app.compliance.erasure import Erasures
 from nextron.app.compliance.erasure_stores import ErasureStores
 from nextron.app.compliance.ledger import ErasureLedger, LedgerAppender, LedgerFile
 from nextron.app.compliance.unsub_poll import UnsubscribePolls
-from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.discovery import api as discovery_api
+from nextron.app.discovery.api import Discovery, LeadImports, SignalInboxRows
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.discovery.place_ingest import PlaceDiscovery
 from nextron.app.discovery.places import PlaceSearches
+from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue import api as jobqueue_api
@@ -943,6 +952,7 @@ from nextron.domain.place_discovery import DISCOVER_PLACES_JOB
 from nextron.domain.places import PURGE_PLACE_COORDS_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
 from nextron.domain.scoring import RECOMPUTE_TIERS_JOB, SCORE_LEAD_JOB
+from nextron.domain.signal_inbox_item import PROCESS_SIGNAL_ITEM_JOB
 from nextron.domain.playbook import (
     MAX_PLAYBOOK_BYTES,
     InvalidPlaybook,
@@ -1262,8 +1272,8 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes and
-    # place_discovery are bound just below
+    # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes,
+    # place_discovery and signal_inbox are bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1285,6 +1295,7 @@ def build_app(
         scores=lambda: lead_scores,
         unsubscribes=lambda: unsubscribes,
         place_discovery=lambda: place_discovery,
+        signal_inbox=lambda: signal_inbox,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1324,6 +1335,7 @@ def build_app(
         research,
         queue,
     )
+    signal_inbox = SignalInbox(clock, meter, llm, discovery, research, queue)  # Story 2.16
     hunter_finder = HunterFinder(secrets, meter=meter)
     email_finding = EmailFinding(
         clock,
@@ -1466,6 +1478,7 @@ def build_app(
         lead_scores=lead_scores,
         place_discovery=place_discovery,
         selection=selection,
+        signal_inbox=signal_inbox,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -1550,6 +1563,12 @@ def _no_verification() -> handlers.VerifyingEmail:
     raise RuntimeError("no EmailVerification was given to build_job_types")
 
 
+def _no_signal_inbox() -> handlers.ProcessingSignalItems:
+    """``build_job_types``' ``signal_inbox`` when none is given: a ``process_signal_item`` job
+    fails."""
+    raise RuntimeError("no SignalInbox was given to build_job_types")
+
+
 def build_job_types(
     *,
     alerts: Callable[[], handlers.AlertSending],
@@ -1572,6 +1591,7 @@ def build_job_types(
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
     place_discovery: Callable[[], handlers.DiscoveringPlaces] | None = None,
     verification: Callable[[], handlers.VerifyingEmail] | None = None,
+    signal_inbox: Callable[[], handlers.ProcessingSignalItems] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1601,12 +1621,15 @@ def build_job_types(
     ``unsubscribes`` the ``compliance`` service's ``UnsubscribePolls`` that ``poll_unsubscribes``
     jobs call (``None``: a provider that raises ``RuntimeError``, as for ``domain_checks``), and
     ``place_discovery`` the ``discovery`` service's ``PlaceDiscovery`` that ``discover_places``
-    jobs call (``None``: the same)."""
+    jobs call (``None``: the same), and ``signal_inbox`` the ``discovery`` service's
+    ``SignalInbox`` that ``process_signal_item`` jobs call (left out, the handler raises
+    ``RuntimeError`` when a job runs)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     verifying = verification if verification is not None else _no_verification
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     discovering = place_discovery if place_discovery is not None else no_place_discovery
+    inbox = signal_inbox if signal_inbox is not None else _no_signal_inbox
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1908,6 +1931,18 @@ def build_job_types(
             max_runtime=timedelta(hours=1),
             retry_limit=2,
             handler=handlers.discover_places(discovering),
+            group=JobGroup.DISCOVERY,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=PROCESS_SIGNAL_ITEM_JOB,
+            default_lane=Lane.INTERACTIVE,
+            lanes=frozenset({Lane.INTERACTIVE}),  # a pasted item is processed on submission
+            priority=60,
+            max_runtime=timedelta(minutes=5),  # one Claude call, then the apply transaction
+            retry_limit=handlers.PROCESS_SIGNAL_ITEM_RETRIES,  # the last attempt flags the item
+            handler=handlers.process_signal_item(inbox),
             group=JobGroup.DISCOVERY,
         )
     )
@@ -2324,6 +2359,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     subscribers.register_subscriber(LeadsMerged, Pipeline(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Research(chosen).reparent_lead)
     subscribers.register_subscriber(LeadsMerged, Sequencing(chosen).reparent_lead)
+    # Story 2.16: the merged Lead's Signal Inbox items
+    subscribers.register_subscriber(LeadsMerged, SignalInboxRows(chosen).reparent_lead)
     # Story 4.8: stop the Enrollments first, then close an opted-out Lead (AD-3's order)
     subscribers.register_subscriber(SubjectSuppressed, Sequencing(chosen).stop_suppressed)
     # Story 4.9: then cancel the ready Drafts of every ended Enrollment (the backstop)
@@ -2333,6 +2370,9 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     # hook-only, so no queue (its erase_contact fails closed)
     erasures = Erasures(chosen, Compliance(chosen))
     subscribers.register_subscriber(ContactErased, erasures.erase_pii)
+    # Story 2.16: the Signal Inbox items that may hold the Contact's data (it reads the Contact's
+    # plaintext name and addresses, so it runs before research tombstones them)
+    subscribers.register_subscriber(ContactErased, discovery_api.erase_pii)
     subscribers.register_subscriber(ContactErased, Research(chosen).erase_pii)
     # Story 4.6: the Operator's override cases of the Contact (ai_test_cases.input)
     subscribers.register_subscriber(ContactErased, Playbook(chosen).erase_pii)

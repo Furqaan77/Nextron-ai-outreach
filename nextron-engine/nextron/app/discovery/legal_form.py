@@ -80,7 +80,7 @@ from nextron.app.research.api import Research
 from nextron.db.uow import current, use_case
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.crawl import DOMAIN_KEY_PREFIX, LEAD_ID_FIELD, PAYLOAD_VERSION
-from nextron.domain.job import TICK, VERSION_FIELD
+from nextron.domain.job import TICK, VERSION_FIELD, Lane
 from nextron.domain.legal_form import (
     UNLINKED,
     LegalFormFinding,
@@ -202,9 +202,10 @@ class LegalFormChecks:
         self._queue = queue
 
     @use_case
-    def check_legal_form(self, lead_id: str) -> bool:
+    def check_legal_form(self, lead_id: str, *, lane: Lane | None = None) -> bool:
         """Confirm the GB Lead's legal form through Companies House; see the module
-        docstring. ``False`` when the budget refused the work."""
+        docstring. ``False`` when the budget refused the work. ``select_primary_contact`` is
+        enqueued on ``lane``, the lane the job ran on (Story 2.16; ``None``: its default)."""
         uow = current()
         check: _Check | None = None
         skipped: str | None = None
@@ -220,7 +221,7 @@ class LegalFormChecks:
             elif lead.merged_into is not None:
                 skipped = MERGED_LEAD
             elif lead.country_code != GB:
-                self._select(lead.id, lead.web_domain)
+                self._select(lead.id, lead.web_domain, lane)
                 skipped = NOT_GB
             else:
                 check = _Check(
@@ -242,8 +243,8 @@ class LegalFormChecks:
                 path = PATH_NAME
                 link = self._by_name(check)
         except AdapterError as error:
-            return self._failed(check, path, error)
-        return self._apply(check, link)
+            return self._failed(check, path, error, lane)
+        return self._apply(check, link, lane)
 
     # The calls ----------------------------------------------------------------------------------
 
@@ -289,7 +290,7 @@ class LegalFormChecks:
         site = SiteQuote(page.url, quoted.quote, page.fetched_at)
         return _Link(record, site, PATH_NAME, retrieved_at)
 
-    def _failed(self, check: _Check, path: str, error: AdapterError) -> bool:
+    def _failed(self, check: _Check, path: str, error: AdapterError, lane: Lane | None) -> bool:
         """A registry call failed: raise a retryable error again; after any other, keep the
         earlier legal form and enqueue the selection."""
         if error.retryable:
@@ -298,13 +299,13 @@ class LegalFormChecks:
         with current().transaction():
             lead = discovery_queries.lead(check.lead_id)
             if lead is not None and lead.merged_into is None:
-                self._select(lead.id, lead.web_domain)
+                self._select(lead.id, lead.web_domain, lane)
         self._log_checked(check.lead_id, None, path, error.code)
         return True
 
     # Phase 3 ------------------------------------------------------------------------------------
 
-    def _apply(self, check: _Check, link: _Link | None) -> bool:
+    def _apply(self, check: _Check, link: _Link | None, lane: Lane | None) -> bool:
         conflict = False
         finding: LegalFormFinding = UNLINKED
         with current().transaction():
@@ -332,7 +333,7 @@ class LegalFormChecks:
                 survivor = discovery_queries.lead(target)
                 if survivor is None:  # Leads are never deleted
                     raise RuntimeError(f"Lead {target} has no row")
-                self._select(survivor.id, survivor.web_domain)
+                self._select(survivor.id, survivor.web_domain, lane)
         if skipped is not None:
             log.info(LEGAL_FORM_SKIPPED, extra={"lead_id": check.lead_id, "reason": skipped})
             return True
@@ -342,13 +343,15 @@ class LegalFormChecks:
         self._log_checked(check.lead_id, str(finding.status), path, None)
         return True
 
-    def _select(self, lead_id: str, web_domain: str | None) -> None:
-        """Enqueue the Lead's ``select_primary_contact`` job in the caller's transaction."""
+    def _select(self, lead_id: str, web_domain: str | None, lane: Lane | None) -> None:
+        """Enqueue the Lead's ``select_primary_contact`` job on ``lane`` in the caller's
+        transaction."""
         self._queue.enqueue(
             SELECT_PRIMARY_CONTACT_JOB,
             scope=lead_id,
             discriminator=TICK,
             payload={VERSION_FIELD: PAYLOAD_VERSION, LEAD_ID_FIELD: lead_id},
+            lane=lane,
             concurrency_key=None if web_domain is None else f"{DOMAIN_KEY_PREFIX}{web_domain}",
         )
 

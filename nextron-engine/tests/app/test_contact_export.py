@@ -42,6 +42,8 @@ from nextron.db.repos.notify import notifications as notifications_repo
 from nextron.db.repos.pipeline import bookings as bookings_repo
 from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.discovery import signal_inbox as signal_inbox_repo
+from nextron.db.repos.discovery.signal_inbox import ParseColumns
 from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import UnitOfWorkFactory
@@ -280,6 +282,10 @@ def address_record(world: World, contact_id: str, address: str, at: datetime) ->
     )
 
 
+JANE_INBOX = "We are growing.\nJane Doe joined us as a partner this week.\nMore soon."
+FIRM_INBOX = "We re-key our client intake by hand."
+
+
 class Seeded:
     """Jane (the Contact exported) and Bob (another Contact on her Lead), and what each holds."""
 
@@ -380,6 +386,23 @@ class Seeded:
                     description=None,
                     posted_date=None,
                     checked_at=T0,
+                )
+            )
+        # Story 2.16: a Signal Inbox item naming Jane and one naming nobody
+        for text in (JANE_INBOX, FIRM_INBOX):
+            item_id = world.transact(
+                lambda text=text: signal_inbox_repo.insert(
+                    url="https://www.linkedin.com/posts/firm-1",
+                    text=text,
+                    author=None,
+                    company="Firm LLP",
+                    status="pending",
+                    submitted_at=T0,
+                )
+            )
+            world.transact(
+                lambda item_id=item_id: signal_inbox_repo.set_status(
+                    item_id, "processed", flag_reason=None, lead_id=self.lead, processed_at=T0
                 )
             )
         # an override case made from Jane's Reply (Story 4.6)
@@ -543,6 +566,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "sequencing",
         "drafting",
         "pipeline",  # Stories 9.1 and 10.7
+        "discovery",  # Story 2.16
         "event_log",
     ]
     assert (file["schema_version"], file["generated_at"], file["contact_id"]) == (
@@ -609,6 +633,11 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
     ]
     [posting] = research["job_postings"]  # never the firm's own posting
     assert (posting["title"], posting["mentions"]) == (JANE_POSTING, ["name"])
+    # Story 2.16: only the item that names her, its text as the lines that do
+    [inbox_item] = file["discovery"]["signal_inbox_items"]
+    assert "text" not in inbox_item
+    assert inbox_item["mentions"] == ["name"]
+    assert inbox_item["text_excerpts"] == ["Jane Doe joined us as a partner this week."]
     [contact_method] = research["contact_methods"]
     assert contact_method["page_url"] == "https://firm.co.uk/team"
     assert (contact_method["method"], contact_method["matched"]) == ("form", f"mailto:{EMAIL}")
@@ -813,6 +842,63 @@ def test_a_page_naming_only_an_earlier_provenance_address_is_exported(world: Wor
     )
 
 
+# Signal Inbox items (Story 2.16) ----------------------------------------------------------------
+
+
+def inbox_item(
+    world: World, text: str, *, lead_id: str | None = None, website: str | None = None
+) -> str:
+    """A Signal Inbox item: ``processed`` on ``lead_id``, else ``flagged`` with no Lead, its
+    parsed website ``website``."""
+    item_id = world.transact(
+        lambda: signal_inbox_repo.insert(
+            url="https://example.org/post",
+            text=text,
+            author=None,
+            company=None,
+            status="pending",
+            submitted_at=T0,
+        )
+    )
+    world.transact(
+        lambda: signal_inbox_repo.set_parse(
+            item_id,
+            ParseColumns(None, None, website, None, None, None, None, "ai:signal_inbox_parse@v1"),
+        )
+    )
+    world.transact(
+        lambda: signal_inbox_repo.set_status(
+            item_id,
+            "flagged" if lead_id is None else "processed",
+            flag_reason="organization_unknown" if lead_id is None else None,
+            lead_id=lead_id,
+            processed_at=None if lead_id is None else T0,
+        )
+    )
+    return item_id
+
+
+def test_inbox_items_naming_the_contact_by_address_or_with_no_lead_are_exported(
+    world: World,
+) -> None:
+    lead = world.lead()
+    jane = world.contact(lead, name="Jane Doe", email=EMAIL)
+    by_address = inbox_item(world, f"Intake\nWrite to {EMAIL} today\nThanks", lead_id=lead)
+    unlinked = inbox_item(world, "Jane Doe re-keys every order by hand.")
+    inbox_item(world, "Someone at the firm re-keys orders.", website="firm.co.uk")
+    inbox_item(world, "Bob re-keys orders.")
+
+    found = document(export(world, jane))["discovery"]["signal_inbox_items"]
+
+    assert [(item["id"], item["mentions"], item["text_excerpts"]) for item in found] == sorted(
+        [
+            (by_address, ["email"], [f"Write to {EMAIL} today"]),
+            (unlinked, ["name"], ["Jane Doe re-keys every order by hand."]),
+        ]
+    )
+    assert {item["status"] for item in found} == {"processed", "flagged"}
+
+
 # Voided entries ---------------------------------------------------------------------------------
 
 
@@ -925,6 +1011,7 @@ def test_a_bare_contact_has_every_section_with_empty_arrays(world: World) -> Non
     assert file["playbook"] == {"override_cases": []}
     assert file["sequencing"] == {"enrollments": []}
     assert file["drafting"] == {"draft_revisions": []}
+    assert file["discovery"] == {"signal_inbox_items": []}  # Story 2.16
     assert file["event_log"] == {"contact_history": []}
 
 
@@ -962,6 +1049,11 @@ def test_an_erased_contact_exports_only_tombstones_and_its_suppression_facts(
     assert [row["quote"] for row in research["evidence"]] == [REDACTED]
     assert research["pages"] == [] and research["contact_methods"] == []
     assert research["job_postings"] == []  # Story 2.11: tombstoned, so nothing mentions her
+    # Story 2.16: discovery's hook tombstoned the Lead's Signal Inbox items
+    assert file["discovery"] == {"signal_inbox_items": []}
+    assert world.sql("SELECT DISTINCT text, company FROM signal_inbox_items") == [
+        (REDACTED, REDACTED)
+    ]
     # Story 4.6: playbook's hook erased and retired her override case
     [override] = file["playbook"]["override_cases"]
     assert (override["input"], override["retired_at"]) == (

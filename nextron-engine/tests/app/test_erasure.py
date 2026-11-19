@@ -36,6 +36,8 @@ from nextron.app.research.api import ContactMarkets, Research
 from nextron.app.setup.api import Setup
 from nextron.db.models import Base
 from nextron.db.pii_registry import PII, PiiClass
+from nextron.db.repos.discovery import signal_inbox as signal_inbox_repo
+from nextron.db.repos.discovery.signal_inbox import ParseColumns
 from nextron.db.repos.pipeline import channel_permissions as permissions_repo
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -407,6 +409,38 @@ def plant(world: World) -> Planted:
                 checked_at=T0,
             )
         )
+    # Story 2.16: a Signal Inbox item of the Lead naming her, and one of the merged Lead
+    for item_lead in (lead_id, merged_lead_id):
+        item_id = world.transact(
+            lambda: signal_inbox_repo.insert(
+                url="https://www.linkedin.com/posts/jane-plantdoe-1",  # the URL names her too
+                text=f"{NAME}, {ROLE}: we re-key every plant order by hand.",
+                author=NAME,
+                company="Plantco Firm",
+                status="pending",
+                submitted_at=T0,
+            )
+        )
+        world.transact(
+            lambda item_id=item_id: signal_inbox_repo.set_parse(
+                item_id,
+                ParseColumns(
+                    segment=None,
+                    signal_type=None,
+                    website=None,
+                    author_name=NAME,
+                    author_role=ROLE,
+                    event_date=None,
+                    quote="we re-key every plant order by hand.",
+                    extracted_by="ai:signal_inbox_parse@v1",
+                ),
+            )
+        )
+        world.transact(
+            lambda item_id=item_id, item_lead=item_lead: signal_inbox_repo.set_status(
+                item_id, "processed", flag_reason=None, lead_id=item_lead, processed_at=T0
+            )
+        )
     world.transact(
         lambda: Playbook(world.clock).add_override_case(
             OVERRIDE, "question", contact_id=contact_id, names=(NAME,)
@@ -615,6 +649,13 @@ def test_no_planted_value_survives_in_any_table(world: World) -> None:
         ("channel_permissions", "instagram_handle"),  # Story 10.7: pipeline's hook NULLs it
         ("call_outcomes", "reason"),  # Story 9.4
         ("call_outcomes", "next_step"),
+        ("signal_inbox_items", "url"),  # Story 2.16: discovery's hook erases them
+        ("signal_inbox_items", "text"),
+        ("signal_inbox_items", "author"),
+        ("signal_inbox_items", "company"),
+        ("signal_inbox_items", "parsed_author_name"),
+        ("signal_inbox_items", "parsed_author_role"),
+        ("signal_inbox_items", "parsed_quote"),
     }
     not_planted = {
         (table, column)
@@ -943,6 +984,81 @@ def test_an_erasure_tombstones_each_posting_of_the_lead_uniquely(world: World) -
     ]
     assert len(ours) == 2
     assert [row[3:] for row in rows if row[1] == other_lead] == [(POSTING_TITLE, None)]
+
+
+def unlinked_item(
+    world: World,
+    text: str,
+    *,
+    author: str | None = None,
+    website: str | None = None,
+    status: str = "flagged",
+) -> str:
+    """A Signal Inbox item with no Lead (Story 2.16): ``flagged`` (no organization) or
+    ``pending``, its parsed website ``website``."""
+    item_id = world.transact(
+        lambda: signal_inbox_repo.insert(
+            url="https://example.org/post",
+            text=text,
+            author=author,
+            company=None,
+            status="pending",
+            submitted_at=T0,
+        )
+    )
+    world.transact(
+        lambda: signal_inbox_repo.set_parse(
+            item_id,
+            ParseColumns(
+                segment=None,
+                signal_type=None,
+                website=website,
+                author_name=None,
+                author_role=None,
+                event_date=None,
+                quote=None,
+                extracted_by="ai:signal_inbox_parse@v1",
+            ),
+        )
+    )
+    if status == "flagged":
+        world.transact(
+            lambda: signal_inbox_repo.set_status(
+                item_id,
+                "flagged",
+                flag_reason="organization_unknown",
+                lead_id=None,
+                processed_at=None,
+            )
+        )
+    return item_id
+
+
+def test_an_erasure_tombstones_the_unlinked_items_that_may_name_the_contact(
+    world: World,
+) -> None:
+    """Story 2.16: an item with no Lead (``pending`` or ``flagged``) is tombstoned when it
+    mentions the Contact (by name, or by address only) or its parsed website is the Contact's
+    Lead's or a merged Lead's; any other is left as it was."""
+    planted = plant(world)
+    by_name = unlinked_item(world, f"Met {NAME} today: we re-key orders.")
+    by_address = unlinked_item(world, "We re-key orders.", author=EMAIL, status="pending")
+    by_site = unlinked_item(world, "Someone re-keys orders.", website=WEB)
+    by_merged_site = unlinked_item(world, "Someone re-keys orders.", website="firm-old.co.uk")
+    other = unlinked_item(world, "Bob re-keys orders.", website="other.co.uk")
+
+    world.erase(planted.contact_id)
+
+    rows = dict(
+        (row[0], row[1:])
+        for row in world.sql("SELECT id, url, text, author FROM signal_inbox_items")
+    )
+    for item_id in (by_name, by_address, by_site, by_merged_site):
+        url, text, author = rows[item_id]
+        assert (url, text) == (REDACTED, REDACTED)
+        assert author in (None, REDACTED)
+    assert rows[by_address][2] == REDACTED
+    assert rows[other] == ("https://example.org/post", "Bob re-keys orders.", None)
 
 
 def test_a_retention_erasure_takes_no_reference(world: World) -> None:

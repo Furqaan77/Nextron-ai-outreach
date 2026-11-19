@@ -252,12 +252,13 @@ class World:
         *script: LlmResult | AdapterError,
         llm: Any = None,
         people: Sequence[LlmResult | AdapterError] = (NO_PEOPLE,),
+        lane: Lane | None = None,
     ) -> bool:
         scripted = ScriptedLlm(*script)
         extractions = self.extractions(scripted if llm is None else llm, people)
         try:
             with self.units.open():
-                return extractions.extract_lead(lead_id, run_id)
+                return extractions.extract_lead(lead_id, run_id, lane=lane)
         finally:
             self.calls.extend(scripted.calls)
             self.people_calls.extend(self._people_llms.pop().calls)

@@ -102,6 +102,7 @@ from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
 from nextron.app.discovery.place_ingest import PlaceDiscovery
 from nextron.app.discovery.places import PlaceSearches
+from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -367,6 +368,7 @@ class Dashboard:
     place_discovery: PlaceDiscovery = field(init=False)
     channel_permissions: ChannelPermissions = field(init=False)
     selection: Selection = field(init=False)
+    signal_inbox: SignalInbox = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -404,6 +406,7 @@ class Dashboard:
             legal_forms=no_crawl_jobs,
             scores=lambda: self.lead_scores,
             place_discovery=lambda: self.place_discovery,
+            signal_inbox=lambda: self.signal_inbox,
         )
         self.queue = JobQueue(self.clock, self.job_types)
         self.notify = Notify(
@@ -479,6 +482,14 @@ class Dashboard:
         self.channel_permissions = ChannelPermissions(
             self.clock, self.research, self.compliance
         )
+        self.signal_inbox = SignalInbox(
+            self.clock,
+            meter,
+            self.llm,
+            Discovery(self.clock, Pipeline(self.clock), self.queue),
+            self.research,
+            self.queue,
+        )
         extra = {"monotonic": self.monotonic} if self.monotonic is not None else {}
         self.app = create_app(
             env=self.env,
@@ -513,6 +524,7 @@ class Dashboard:
             lead_scores=self.lead_scores,
             place_discovery=self.place_discovery,
             selection=self.selection,
+            signal_inbox=self.signal_inbox,
             units=self.units,
             **extra,
         )

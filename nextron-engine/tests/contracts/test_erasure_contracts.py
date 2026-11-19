@@ -6,10 +6,11 @@ a violation.
   compliance's in ``nextron.app.compliance.erasure``), as a ``TableErasure``; no owner declares
   a table it doesn't own or one with no personal-data column. Each such owner's ``erase_pii`` is
   registered for ``ContactErased`` in ``nextron.main.build_subscribers``, every subscriber there
-  is an ``erase_pii``, compliance's runs first (it reads the Contact before it is tombstoned)
-  and research's second. The declarations are the I/O matrix's coverage row. A table several
-  owners write column group by column group (``leads``, Story 9.1) belongs to the single owner
-  of its personal-data columns (``owner_of``).
+  is an ``erase_pii``, compliance's runs first (it reads the Contact before it is tombstoned),
+  discovery's second (Story 2.16: it matches the Signal Inbox items against the Contact's
+  plaintext) and research's third. The declarations are the I/O matrix's coverage row. A table
+  several owners write column group by column group (``leads``, Story 9.1) belongs to the
+  single owner of its personal-data columns (``owner_of``).
 - **Every hashed column knows its kind.** Every ``keep_hash`` column is in
   ``pii_registry.HASH_KINDS``, every entry there is a ``keep_hash`` column, and each kind is
   ``None`` (already a hash) or a single-value key kind.
@@ -59,7 +60,8 @@ from tests.fakes.clock import FrozenClock
 
 HOOK = "erase_pii"
 DECLARATION = "ERASURE"
-FIRST = ("compliance", "research")  # the order the first hooks run in
+FIRST = ("compliance", "discovery", "research")  # the order the first hooks run in
+ORDER = "compliance's erase_pii must run first, then discovery's, then research's"
 COVERAGE = {  # the spec's I/O matrix, coverage row
     "contacts": ("research", Coverage.TOMBSTONED),
     "provenance_records": ("research", Coverage.TOMBSTONED),
@@ -83,6 +85,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "leads": ("pipeline", Coverage.TOMBSTONED),  # Story 9.1: the notes
     "channel_permissions": ("pipeline", Coverage.TOMBSTONED),  # Story 10.7
     "call_outcomes": ("pipeline", Coverage.TOMBSTONED),  # Story 9.4: reason, next step
+    "signal_inbox_items": ("discovery", Coverage.TOMBSTONED),  # Story 2.16
 }
 
 type Declarations = Mapping[str, object]  # owner -> its ERASURE (or None)
@@ -186,7 +189,7 @@ def hook_problems(
         if owner not in registered:
             problems.append(f"{owner} registers no erase_pii for ContactErased")
     if tuple(registered[: len(FIRST)]) != FIRST:
-        problems.append("compliance's erase_pii must run first, then research's")
+        problems.append(ORDER)
     return problems
 
 
@@ -289,13 +292,13 @@ def test_the_hook_check_names_a_missing_hook_a_stranger_and_a_wrong_order() -> N
     research = Research(clock)
     real = list(main.build_subscribers().subscribers_of(ContactErased))
 
-    assert hook_problems(PII, TABLES, [real[0], *real[2:]]) == [
+    assert hook_problems(PII, TABLES, [*real[:2], *real[3:]]) == [
         "research registers no erase_pii for ContactErased",
-        "compliance's erase_pii must run first, then research's",
+        "compliance's erase_pii must run first, then discovery's, then research's",
     ]
-    assert hook_problems(PII, TABLES, [research.erase_pii, erasures.erase_pii, *real[2:]]) == [
-        "compliance's erase_pii must run first, then research's"
-    ]
+    assert hook_problems(
+        PII, TABLES, [real[0], research.erase_pii, erasures.erase_pii, real[1], *real[3:]]
+    ) == ["compliance's erase_pii must run first, then discovery's, then research's"]
     assert hook_problems(PII, TABLES, [*real, research.reparent_lead]) == [
         "research's reparent_lead is registered for ContactErased"
     ]

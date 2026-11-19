@@ -53,7 +53,10 @@ the cap. ``text_hash(text)`` is the SHA-256 hex digest of the text's UTF-8 bytes
 ``<type>:<lead ULID>:<UTC date>``: ``lead_job_keys(site, now)`` gives the discriminator
 (``now``'s UTC date) and the concurrency key (``domain:<site>``), so one site is crawled by one
 job at a time. Their payloads are ``{"v": 1, "lead_id": ...}`` and ``{"v": 1, "lead_id": ...,
-"run_id": ...}`` (``PAYLOAD_VERSION``, ``LEAD_ID_FIELD``, ``RUN_ID_FIELD``).
+"run_id": ...}`` (``PAYLOAD_VERSION``, ``LEAD_ID_FIELD``, ``RUN_ID_FIELD``). ``render_pages`` runs
+on the bulk lane only; when its chain runs on the interactive lane (a Signal Inbox chain, Story
+2.16), its payload also holds ``"chain_lane": "interactive"`` (``CHAIN_LANE_FIELD``), so the
+``extract_lead`` it enqueues goes back to that lane.
 
 **Rendering (Story 2.6).** A stored page whose visible text is shorter than
 ``RENDER_THRESHOLD`` (500 characters) ``needs_render``: it is probably built by JavaScript. The
@@ -99,6 +102,8 @@ RENDER_TIMEOUT_S: Final = 20.0  # from navigation
 PAYLOAD_VERSION: Final = 1
 LEAD_ID_FIELD: Final = "lead_id"
 RUN_ID_FIELD: Final = "run_id"
+# render_pages' optional payload field: the lane the rest of the chain runs on (Story 2.16)
+CHAIN_LANE_FIELD: Final = "chain_lane"
 DOMAIN_KEY_PREFIX: Final = "domain:"  # nextron.domain.job.DOMAIN_PREFIX
 
 FETCH_TIMEOUT: Final = "fetch_timeout"

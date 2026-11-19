@@ -110,7 +110,7 @@ from nextron.domain.crawl import (
 )
 from nextron.domain.identity import IdentityError, registrable_domain
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import TICK, VERSION_FIELD
+from nextron.domain.job import TICK, VERSION_FIELD, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.scoring import SCORE_LEAD_JOB
 from nextron.domain.postings import (
@@ -238,9 +238,10 @@ class JobBoards:
     # check_job_boards ---------------------------------------------------------------------------
 
     @use_case
-    def check_job_boards(self, lead_id: str, run_id: str) -> bool:
+    def check_job_boards(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
         """Check the Lead's ATS boards; see the module docstring. ``False`` when the budget
-        refused the work."""
+        refused the work. The chain's next stage is enqueued on ``lane``, the lane the job ran
+        on (Story 2.16; ``None``: its default)."""
         uow = current()
         now = self._clock.now()
         skipped: str | None = None
@@ -266,7 +267,7 @@ class JobBoards:
             return True
         answers = [self._ask(board) for board in check.boards]
         with uow.transaction():
-            tally, errors, merged = self._apply(check, run_id, answers)
+            tally, errors, merged = self._apply(check, run_id, answers, lane)
         if merged:
             log.info(JOB_BOARDS_SKIPPED, extra={"lead_id": lead_id, "reason": MERGED_LEAD})
             return True
@@ -293,7 +294,7 @@ class JobBoards:
         return _Answer(board, self._clock.now(), listing=listing)
 
     def _apply(
-        self, check: _Check, run_id: str, answers: Sequence[_Answer]
+        self, check: _Check, run_id: str, answers: Sequence[_Answer], lane: Lane | None
     ) -> tuple[postings.Tally, int, bool]:
         """Step 3, in the caller's transaction: the tally, the board errors and whether the
         Lead was merged meanwhile."""
@@ -318,6 +319,7 @@ class JobBoards:
                 LEAD_ID_FIELD: check.lead_id,
                 RUN_ID_FIELD: run_id,
             },
+            lane=lane,
             concurrency_key=(
                 None if lead.web_domain is None else f"{DOMAIN_KEY_PREFIX}{lead.web_domain}"
             ),
