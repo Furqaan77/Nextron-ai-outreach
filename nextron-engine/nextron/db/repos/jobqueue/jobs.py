@@ -7,6 +7,8 @@ applies the Job machine. Rows come back as ``JobRow``, a frozen copy of every co
 
 - ``get(job_id)``: the job, or ``None``;
 - ``live_job(key)``: the ``queued`` or ``running`` job with that idempotency key, or ``None``;
+- ``live_in_scope(job_type, scope)``: whether a ``queued`` or ``running`` job of that type has
+  that scope, under any discriminator (Story 8.7);
 - ``insert(...)``: a new row; returns its id;
 - ``next_candidate(lane, now)``: the next ``queued`` job of the lane with ``run_after <= now``
   whose ``concurrency_key`` is ``NULL`` or held by no ``running`` job, by ``priority DESC,
@@ -90,6 +92,20 @@ def live_job(key: str) -> JobRow | None:
     instead, SQLite couldn't prove the index applies and wouldn't use ``uq_jobs_live_key``."""
     statement = select(*_COLUMNS).where(JobRecord.idempotency_key == key, text(LIVE_WHERE))
     return _one(statement)
+
+
+def live_in_scope(job_type: str, scope: str) -> bool:
+    """Whether a live job of ``job_type`` has scope ``scope`` (its key starts
+    ``<type>:<scope>:``), whatever its discriminator."""
+    prefix = f"{job_type}:{scope}:"
+    statement = select(
+        exists().where(
+            JobRecord.type == job_type,
+            JobRecord.idempotency_key.startswith(prefix, autoescape=True),
+            text(LIVE_WHERE),
+        )
+    )
+    return bool(current().session.execute(statement).scalar_one())
 
 
 def insert_job(

@@ -307,6 +307,8 @@ NEVER_RUN = [
     [
         ["Job type", "Last success"],
         ["recheck_event", "never"],  # Story 2.11, group Re-check
+        ["recheck_leads", "never"],  # Story 8.7
+        ["recheck_lead", "never"],
     ],
     [["Job type", "Last success"], ["check_domains", "never"]],  # Sending, Story 6.5
     [["Job type", "Last success"], ["poll_unsubscribes", "never"]],  # Story 3.11

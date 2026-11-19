@@ -12,13 +12,14 @@
   2.11, ``check_legal_form``, Story 2.12, ``purge_place_coords``, Story 8.2, ``erase_external``,
   Story 3.14, ``find_contact_email``, Story 2.13, ``verify_contact_email``, Story 2.14,
   ``score_lead`` and ``recompute_tiers``, Story 2.15, ``poll_unsubscribes``, Story 3.11,
-  ``discover_places``, Story 8.3, and ``process_signal_item``, Story 2.16, with their settings);
+  ``discover_places``, Story 8.3, ``process_signal_item``, Story 2.16, and ``recheck_leads`` and
+  ``recheck_lead``, Story 8.7, with their settings);
   the triggers are exactly ``backup_db``'s and ``restore_test``'s daily schedules,
   ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s and
   ``purge_place_coords``'s daily ``Every`` at startup, ``check_domains``'s daily schedule,
-  ``recompute_tiers``' daily ``Every`` at startup and ``poll_unsubscribes``' ``Every`` at startup
-  (5 minutes in ``prod``, 30 elsewhere): the one-off ``resolve_contact_markets`` has no
-  trigger.
+  ``recompute_tiers``' daily ``Every`` at startup, ``poll_unsubscribes``' ``Every`` at startup
+  (5 minutes in ``prod``, 30 elsewhere) and ``recheck_leads``' 24-hour ``Every`` at startup
+  (Story 8.7): the one-off ``resolve_contact_markets`` has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -509,6 +510,24 @@ class RecordingSignalInbox:
         return self.allowed
 
 
+class RecordingRechecks:
+    """Stands in for the ``research`` service's ``Rechecks`` (Story 8.7); ``allowed`` is what
+    ``refresh`` returns (``False``: the budget refused)."""
+
+    def __init__(self, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.ticks = 0
+        self.refreshed: list[tuple[str, str, bool]] = []
+
+    def enqueue_due(self) -> int:
+        self.ticks += 1
+        return 0
+
+    def refresh(self, lead_id: str, mode: object, *, may_retry: bool) -> bool:
+        self.refreshed.append((lead_id, str(mode), may_retry))
+        return self.allowed
+
+
 class RecordingScores:
     """Stands in for the ``scoring`` service's ``LeadScores``."""
 
@@ -556,6 +575,7 @@ def registry(**overrides: object) -> JobTypes:
         "scores": RecordingScores,
         "unsubscribes": RecordingUnsubscribes,
         "signal_inbox": RecordingSignalInbox,
+        "rechecks": RecordingRechecks,
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -648,6 +668,8 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "poll_unsubscribes",
         "discover_places",
         "process_signal_item",
+        "recheck_leads",  # Story 8.7
+        "recheck_lead",
     )
     discover = job_types.get("discover_places")  # Story 8.3
     assert (
@@ -1373,7 +1395,7 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore, recovery, purge, coords, domains, tiers, unsub] = triggers.specs()
+    [spec, restore, recovery, purge, coords, domains, tiers, unsub, rechecks] = triggers.specs()
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
@@ -1393,6 +1415,8 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
     assert tiers.schedule == Every(timedelta(days=1), at_startup=True)
     assert (unsub.trigger, unsub.job_type) == (Trigger.POLL_UNSUBSCRIBES, "poll_unsubscribes")
     assert unsub.schedule == Every(timedelta(minutes=30), at_startup=True)  # the default
+    assert (rechecks.trigger, rechecks.job_type) == (Trigger.RECHECK_LEADS, "recheck_leads")
+    assert rechecks.schedule == Every(timedelta(hours=24), at_startup=True)  # Story 8.7
     built_again = main.build_triggers(
         job_types,
         backup_schedule=schedule,
@@ -1985,3 +2009,98 @@ def test_a_render_pages_chain_lane_that_isnt_a_lane_is_invalid(value: object) ->
     with pytest.raises(InvalidJob, match="chain_lane"):
         handler(Job(RUN, "render_pages", Lane.BULK, payload, 1))
     assert crawls.renders == []
+
+
+# Story 8.7 --------------------------------------------------------------------------------------
+
+
+def test_the_recheck_jobs_are_registered_bulk_only_in_the_recheck_group() -> None:
+    """The daily tick and each Lead's re-check: bulk only, never essential."""
+    job_types = registry()
+
+    shapes = {
+        name: (
+            found.default_lane,
+            found.lanes,
+            found.priority,
+            found.max_runtime,
+            found.retry_limit,
+            found.group,
+        )
+        for name in ("recheck_leads", "recheck_lead")
+        for found in [job_types.get(name)]
+    }
+
+    bulk = frozenset({Lane.BULK})
+    assert shapes == {
+        "recheck_leads": (Lane.BULK, bulk, 20, timedelta(minutes=10), 2, JobGroup.RECHECK),
+        "recheck_lead": (Lane.BULK, bulk, 30, timedelta(minutes=20), 3, JobGroup.RECHECK),
+    }
+    assert handlers.RECHECK_LEAD_RETRIES == 3
+
+
+def test_the_recheck_lead_registration_carries_the_8_1_seam() -> None:
+    source = (ENGINE_ROOT / "nextron" / "main.py").read_text(encoding="utf-8")
+    start = source.index("name=RECHECK_LEAD_JOB,")
+    registration = source[start : source.index("job_types.freeze()", start)]
+
+    # on a line of its own, so Story 8.1's merge can turn it into the field
+    assert "\n            # Story 8.1: budget_class=BudgetClass.BLOCKABLE\n" in registration
+
+
+def test_recheck_leads_calls_enqueue_due_once() -> None:
+    rechecks = RecordingRechecks()
+    handler = registry(rechecks=lambda: rechecks).get("recheck_leads").handler
+
+    result = handler(Job(RUN, "recheck_leads", Lane.BULK, {"v": 1}, 1))
+
+    assert result is None
+    assert rechecks.ticks == 1
+
+
+@pytest.mark.parametrize(("attempts", "may_retry"), [(1, True), (3, True), (4, False)])
+def test_recheck_lead_refreshes_once_and_defers_on_a_budget_refusal(
+    attempts: int, may_retry: bool
+) -> None:
+    rechecks = RecordingRechecks()
+    refused = RecordingRechecks(allowed=False)
+    payload = {"v": 1, "lead_id": LEAD, "mode": "jobs"}
+
+    ran = registry(rechecks=lambda: rechecks).get("recheck_lead").handler(
+        Job(RUN, "recheck_lead", Lane.BULK, payload, attempts)
+    )
+    deferred = registry(rechecks=lambda: refused).get("recheck_lead").handler(
+        Job(RUN, "recheck_lead", Lane.BULK, payload, attempts)
+    )
+
+    assert (ran, deferred) == (None, DEFERRED)
+    assert rechecks.refreshed == [(LEAD, "jobs", may_retry)]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"v": 1, "mode": "full"}, "must be a ULID"),
+        ({"v": 1, "lead_id": "not-a-ulid", "mode": "full"}, "must be a ULID"),
+        ({"v": 1, "lead_id": LEAD}, "must be a re-check mode"),
+        ({"v": 1, "lead_id": LEAD, "mode": "partial"}, "must be a re-check mode"),
+    ],
+)
+def test_a_recheck_lead_job_without_its_lead_or_mode_is_invalid(
+    payload: dict[str, object], message: str
+) -> None:
+    rechecks = RecordingRechecks()
+    handler = registry(rechecks=lambda: rechecks).get("recheck_lead").handler
+
+    with pytest.raises(InvalidJob, match=message):
+        handler(Job(RUN, "recheck_lead", Lane.BULK, payload, 1))
+    assert rechecks.refreshed == []
+
+
+def test_a_registry_without_rechecks_fails_the_jobs() -> None:
+    services = {**_services(), "scores": RecordingScores}
+    services.pop("rechecks", None)
+    job_types = main.build_job_types(**services)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="Rechecks"):
+        job_types.get("recheck_leads").handler(Job(RUN, "recheck_leads", Lane.BULK, {"v": 1}, 1))

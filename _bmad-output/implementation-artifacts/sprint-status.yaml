@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 11-19-2026 09:00
+last_updated: 11-19-2026 10:00
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -172,7 +172,7 @@ development_status:
   8-4-discover-active-uk-companies-through-companies-house: backlog
   8-5-spike-choose-a-job-aggregator-api-and-confirm-its-terms-allo: backlog
   8-6-discover-hiring-organizations-through-the-chosen-job-aggrega: backlog
-  8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid: backlog
+  8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid: review
   8-8-re-contact-not-now-leads-on-their-chosen-date: backlog
   8-9-select-the-day-s-new-sequences-automatically-by-tier-and-eve: backlog
   8-10-top-up-discovery-each-weekday-within-quotas: backlog

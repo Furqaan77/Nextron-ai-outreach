@@ -10,7 +10,9 @@ the running use case's transaction. It stores and returns what it is given and c
   and ``StoredAtsLink``: one row of each table.
 - ``insert_run(...) -> id``; ``run(run_id)``; ``latest_run(lead_id)``: the Lead's run started
   last (then the greatest id), or ``None``; ``run_count(lead_id)``: how many runs the Lead
-  holds (Story 2.9: the revision of its ``extract_lead`` job).
+  holds (Story 2.9: the revision of its ``extract_lead`` job). Since Story 8.7 both ignore
+  ``recheck_jobs`` runs (``mode``), which fetch no page: ATS links and extraction keep reading
+  the last real crawl, and ``latest_run`` is the Lead's last full crawl.
 - ``page(lead_id, url)``; ``pages(lead_id)``, by URL; ``insert_page(...) -> id``;
   ``update_page(page_id, ...)``: a new fetch of a stored page.
 - ``ats_link(lead_id, url)``; ``ats_links(lead_id)``, by URL; ``insert_ats_link(...) -> id``;
@@ -55,6 +57,19 @@ of those Leads (``text`` and, from Story 2.13, ``mailto``, class ``null``: NULL;
 their tombstones (``nextron.db.erasure.tombstoned``), one statement per row that changes;
 returns how many pages it held.
 
+Story 8.7 (``crawl_runs.mode``, ``StoredCrawlRun.mode``; ``insert_run`` takes ``mode``, default
+``initial``):
+
+- ``last_hiring_check(lead_id)``: the Lead's run of any mode whose ``board_errors`` is set (its
+  ATS boards were checked), started last, or ``None``;
+- ``unchecked_jobs_run(lead_id)``: the Lead's ``recheck_jobs`` run whose boards weren't checked
+  yet (``board_errors`` NULL: its check was deferred or failed), started last, or ``None``;
+- ``last_recheck(lead_id)``: the Lead's ``recheck_full`` or ``recheck_jobs`` run started last, or
+  ``None``; an unchecked ``recheck_jobs`` run is left out;
+- ``recheck_candidates() -> dict[lead_id, RecheckFacts]``: for each Lead that holds a run, when
+  its last full crawl (as ``latest_run``), its last hiring check and its last run of any mode
+  (unchecked ``recheck_jobs`` runs left out) started (each ``None`` when it has none).
+
 Story 2.13 (``crawled_pages.mailto``, the addresses of the page's visible ``mailto:`` links,
 stored as a JSON list in the order given; NULL when there are none):
 
@@ -71,7 +86,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, case, func, or_, select
 from sqlalchemy import delete as delete_rows
 from sqlalchemy import insert as insert_rows
 from sqlalchemy import update as update_rows
@@ -86,6 +101,7 @@ from nextron.db.models.crawl import (
     PageContactMethodRecord,
 )
 from nextron.db.uow import current
+from nextron.domain.crawl import CrawlMode
 from nextron.domain.widgets import Detection
 
 PAGES_TABLE = "crawled_pages"
@@ -118,6 +134,18 @@ class StoredCrawlRun:
     ashby_postings: int | None = None
     ashby_events: int | None = None
     board_errors: int | None = None
+    mode: str = CrawlMode.INITIAL  # Story 8.7
+
+
+@dataclass(frozen=True, slots=True)
+class RecheckFacts:
+    """When a Lead's last full crawl, last hiring check and last run of any mode started (Story
+    8.7); ``None`` for each it has none of."""
+
+    lead_id: str
+    last_full_at: datetime | None
+    last_hiring_at: datetime | None
+    last_run_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +204,7 @@ _RUN_COLUMNS = (
     CrawlRunRecord.ashby_postings,
     CrawlRunRecord.ashby_events,
     CrawlRunRecord.board_errors,
+    CrawlRunRecord.mode,
 )
 # The crawl_runs counts set_posting_counts may write (Story 2.11)
 POSTING_COUNTS = frozenset(
@@ -271,8 +300,9 @@ def insert_run(
     pages_skipped_robots: int,
     renders: int,
     errors: int,
+    mode: str = CrawlMode.INITIAL,
 ) -> str:
-    """Store a crawl run; return its new ULID."""
+    """Store a crawl run (Story 8.7: made in ``mode``); return its new ULID."""
     run_id = new_id()
     current().session.execute(
         insert_rows(CrawlRunRecord).values(
@@ -288,6 +318,7 @@ def insert_run(
             pages_skipped_robots=pages_skipped_robots,
             renders=renders,
             errors=errors,
+            mode=mode,
         )
     )
     return run_id
@@ -309,9 +340,59 @@ def run(run_id: str) -> StoredCrawlRun | None:
     return _one_run(CrawlRunRecord.id == run_id)
 
 
+_FETCHED: ColumnElement[bool] = CrawlRunRecord.mode != CrawlMode.RECHECK_JOBS.value
+
+
 def latest_run(lead_id: str) -> StoredCrawlRun | None:
-    """The Lead's run started last, or ``None``."""
-    return _one_run(CrawlRunRecord.lead_id == lead_id)
+    """The Lead's run started last that isn't a ``recheck_jobs`` run, or ``None``."""
+    return _one_run((CrawlRunRecord.lead_id == lead_id) & _FETCHED)
+
+
+def last_hiring_check(lead_id: str) -> StoredCrawlRun | None:
+    """The Lead's run started last whose ATS boards were checked (``board_errors`` set), or
+    ``None``."""
+    return _one_run(
+        (CrawlRunRecord.lead_id == lead_id) & CrawlRunRecord.board_errors.is_not(None)
+    )
+
+
+# A run that counts as done: any run but a recheck_jobs run whose boards weren't checked yet
+_COUNTED: ColumnElement[bool] = or_(_FETCHED, CrawlRunRecord.board_errors.is_not(None))
+
+
+def unchecked_jobs_run(lead_id: str) -> StoredCrawlRun | None:
+    """The Lead's ``recheck_jobs`` run started last whose boards weren't checked
+    (``board_errors`` NULL), or ``None``."""
+    return _one_run(
+        (CrawlRunRecord.lead_id == lead_id)
+        & (CrawlRunRecord.mode == CrawlMode.RECHECK_JOBS.value)
+        & CrawlRunRecord.board_errors.is_(None)
+    )
+
+
+def last_recheck(lead_id: str) -> StoredCrawlRun | None:
+    """The Lead's ``recheck_full`` or ``recheck_jobs`` run started last, unchecked
+    ``recheck_jobs`` runs left out, or ``None``."""
+    modes = (CrawlMode.RECHECK_FULL.value, CrawlMode.RECHECK_JOBS.value)
+    return _one_run(
+        (CrawlRunRecord.lead_id == lead_id) & CrawlRunRecord.mode.in_(modes) & _COUNTED
+    )
+
+
+def recheck_candidates() -> dict[str, RecheckFacts]:
+    """For each Lead that holds a run, when its last full crawl, last hiring check and last run
+    (unchecked ``recheck_jobs`` runs left out) started."""
+    started = CrawlRunRecord.started_at
+    statement = select(
+        CrawlRunRecord.lead_id,
+        func.max(case((_FETCHED, started))),
+        func.max(case((CrawlRunRecord.board_errors.is_not(None), started))),
+        func.max(case((_COUNTED, started))),
+    ).group_by(CrawlRunRecord.lead_id)
+    return {
+        row[0]: RecheckFacts(row[0], row[1], row[2], row[3])
+        for row in current().session.execute(statement)
+    }
 
 
 def set_posting_counts(run_id: str, counts: Mapping[str, int]) -> None:
@@ -327,9 +408,11 @@ def set_posting_counts(run_id: str, counts: Mapping[str, int]) -> None:
 
 
 def run_count(lead_id: str) -> int:
-    """How many crawl runs the Lead holds."""
+    """How many crawl runs the Lead holds, ``recheck_jobs`` runs left out."""
     statement = (
-        select(func.count()).select_from(CrawlRunRecord).where(CrawlRunRecord.lead_id == lead_id)
+        select(func.count())
+        .select_from(CrawlRunRecord)
+        .where(CrawlRunRecord.lead_id == lead_id, _FETCHED)
     )
     return int(current().session.execute(statement).scalar_one())
 

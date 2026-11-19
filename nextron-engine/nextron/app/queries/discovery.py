@@ -33,6 +33,9 @@ current unit of work, read-only ones included.
   group's, read-only; ``None`` until scored), and ``sort=SORT_TIER`` (``"tier"``) orders by
   Tier, A to C, unscored last, then Lead Score descending, then newest; ``sort`` ``None`` is
   newest first, and any other value raises ``ValueError``.
+- ``recheck_pool(excluded_stages)`` (Story 8.7): ``(id, web_domain)`` of every Lead that isn't
+  merged, has a ``web_domain`` and whose ``PipelineStage`` isn't one of ``excluded_stages``, by
+  id: the Leads the scheduled re-check may pick from.
 - ``recent_runs(limit=20)`` (Story 8.3): the newest ``limit`` discovery runs, as ``StoredRun``
   rows, newest first (by ``started_at``, then ``id``). A ``limit`` that isn't an ``int`` from 1
   to ``MAX_RECENT_RUNS`` (200) raises ``ValueError``.
@@ -54,7 +57,7 @@ current unit of work, read-only ones included.
   ULID.
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from math import ceil
 from typing import Final
@@ -86,6 +89,7 @@ __all__ = [
     "export_pii",
     "merged_lead_ids",
     "recent_runs",
+    "recheck_pool",
     "signal_item",
     "signal_items",
     "survivor_of",
@@ -178,6 +182,11 @@ def merged_lead_ids(lead_id: str) -> tuple[str, ...]:
     if not is_ulid(lead_id):
         return ()
     return leads_repo.merged_from(lead_id)
+
+
+def recheck_pool(excluded_stages: Collection[PipelineStage]) -> tuple[tuple[str, str], ...]:
+    """The Leads the scheduled re-check may pick from; see the module docstring."""
+    return leads_repo.recheck_pool([stage.value for stage in excluded_stages])
 
 
 def recent_runs(limit: int = 20) -> tuple[StoredRun, ...]:

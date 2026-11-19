@@ -203,6 +203,10 @@ class Key(StrEnum):
     PRIVACY_NOTICE_URL = "privacy_notice_url"
     US_SOLICITATION_LABEL = "us_solicitation_label"
     CRAWL_MAX_PAGES = "crawl_max_pages"
+    # The scheduled re-check (Story 8.7).
+    RECHECK_FULL_DAYS = "recheck_full_days"
+    RECHECK_JOBS_DAYS = "recheck_jobs_days"
+    RECHECK_DAILY_LIMIT = "recheck_daily_limit"
     ATS_HOSTS = "ats_hosts"
     PLACES_DISCOVERY_LOCATIONS = "places_discovery_locations"
     UNSUB_ACTIVE_KID = "unsub_active_kid"
@@ -951,6 +955,12 @@ LOCATION_RULE: Final = Rule(
 
 # The website crawl (Story 2.5, FR-10, NFR-6): at most 15 pages per Lead, homepage included.
 MAX_CRAWL_PAGES: Final = 15
+# The scheduled re-check (Story 8.7, FR-11): a full crawl every 30 days, the ATS boards every 7.
+DEFAULT_RECHECK_FULL_DAYS: Final = 30
+DEFAULT_RECHECK_JOBS_DAYS: Final = 7
+DEFAULT_RECHECK_DAILY_LIMIT: Final = 40
+MAX_RECHECK_DAILY_LIMIT: Final = 1000
+MAX_RECHECK_DAYS: Final = 3650  # ten years: a larger day count would overflow a timedelta
 DEFAULT_ATS_HOSTS: Final = (
     "boards.greenhouse.io",
     "job-boards.greenhouse.io",
@@ -1312,6 +1322,46 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=MAX_CRAWL_PAGES,
         rules=(minimum(1, "1"), maximum(MAX_CRAWL_PAGES, str(MAX_CRAWL_PAGES))),
+    ),
+    # The scheduled re-check (Story 8.7), read each time the daily recheck_leads tick runs.
+    Setting(
+        key=Key.RECHECK_FULL_DAYS,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Full re-check every (days)",
+        unit=(
+            f"1 to {MAX_RECHECK_DAYS}. A Lead outside a Sequence has its website crawled again "
+            "once its last full crawl is this many days old."
+        ),
+        default=DEFAULT_RECHECK_FULL_DAYS,
+        rules=(minimum(1, "1"), maximum(MAX_RECHECK_DAYS, str(MAX_RECHECK_DAYS))),
+    ),
+    Setting(
+        key=Key.RECHECK_JOBS_DAYS,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Job-board re-check every (days)",
+        unit=(
+            f"1 to {MAX_RECHECK_DAYS}. Between full re-checks, a Lead's ATS job boards are "
+            "checked again once its last hiring check is this many days old."
+        ),
+        default=DEFAULT_RECHECK_JOBS_DAYS,
+        rules=(minimum(1, "1"), maximum(MAX_RECHECK_DAYS, str(MAX_RECHECK_DAYS))),
+    ),
+    Setting(
+        key=Key.RECHECK_DAILY_LIMIT,
+        type=SettingType.INTEGER,
+        section=Section.ENGINE,
+        label="Re-checks per day",
+        unit=(
+            f"1 to {MAX_RECHECK_DAILY_LIMIT}. The most Leads the daily re-check queues, those "
+            "checked longest ago first."
+        ),
+        default=DEFAULT_RECHECK_DAILY_LIMIT,
+        rules=(
+            minimum(1, "1"),
+            maximum(MAX_RECHECK_DAILY_LIMIT, str(MAX_RECHECK_DAILY_LIMIT)),
+        ),
     ),
     Setting(
         key=Key.ATS_HOSTS,

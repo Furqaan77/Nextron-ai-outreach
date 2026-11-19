@@ -270,7 +270,10 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
 (written only through ``nextron.db.repos.research.profile``, as ``hq_tz`` and
 ``hq_evidence_id`` are by ``SignalExtractions``).
 
-``@use_case enrich_lead(lead_id, *, may_retry) -> bool`` (the ``enrich_lead`` job):
+``@use_case enrich_lead(lead_id, *, may_retry, lane=None, mode=CrawlMode.INITIAL) -> bool`` (the
+``enrich_lead`` job). ``crawl_lead(...)``, with the same arguments, is its work inside a use case
+that is already running, with no transaction open (Story 8.7's ``Rechecks.refresh`` calls it for
+a full re-check, with ``mode=recheck_full``). ``mode`` is stored on the run:
 
 1. **First transaction.** When ``nextron.domain.budget.allow(BLOCKABLE, meter.snapshot(now),
    queries.setup.budget_limits())`` is false it returns ``False`` (the job is deferred) with
@@ -320,10 +323,14 @@ through the one-off ``resolve_contact_markets`` job (bulk lane):
    ``(lead_id, url)`` with its
    ``content_hash`` (``text_hash`` of its text), ``fetched_at``, ``text_purge_after``
    (``fetched_at`` + 30 days), ``changed_at`` (``fetched_at`` for a new page or a changed
-   hash, else kept) and ``mailto`` (Story 2.13: the fetch's ``FetchedPage.mailto`` addresses,
-   replacing what the page held, NULL when it has none; the hash and ``changed_at`` ignore
-   them); and every ``a``, ``iframe`` and ``script`` link of a stored page that
-   ``check_url`` accepts and whose host is in ``ats_hosts`` is upserted on ``(lead_id, url)``
+   hash, else kept; Story 8.7: a stored page whose hash is unchanged also confirms each live
+   website Evidence (``source`` ``website``) of the Lead whose ``source_url`` is the page's
+   URL, ``last_confirmed_at`` becoming the later of its own and the fetch's time, so its
+   Evidence is re-confirmed without an AI call: the extraction sends only changed pages) and
+   ``mailto`` (Story 2.13: the fetch's ``FetchedPage.mailto`` addresses, replacing what the
+   page held, NULL when it has none; the hash and ``changed_at`` ignore them); and every
+   ``a``, ``iframe`` and ``script`` link of a stored page that ``check_url`` accepts and whose host
+   is in ``ats_hosts`` is upserted on ``(lead_id, url)``
    (``first_seen_at`` kept, ``last_seen_at``, ``run_id`` and ``page_id`` updated; the first page
    that holds it in the run). Each upserted page's ``page_contact_methods`` rows are replaced
    by its detections (``detected_at`` now), and its ``tag_managers`` by the keys it loads
@@ -402,6 +409,10 @@ No page text, HTML, URL or matched text is logged; the run's row holds codes and
 careers page rule) and ``nextron.app.research.job_boards`` (``JobBoards``: the
 ``check_job_boards`` and ``recheck_event`` jobs).
 
+**The scheduled re-check (Story 8.7)** lives in ``nextron.app.research.recheck``: ``Rechecks``
+runs the daily ``recheck_leads`` tick and each Lead's ``recheck_lead`` job (``refresh``), which
+reuses ``WebsiteCrawls.crawl_lead`` and ``JobBoards.check_boards`` inline.
+
 **Signals and Evidence (Story 2.9)** live in ``nextron.app.research.extraction``:
 ``SignalExtractions`` runs the ``extract_lead`` jobs (the Lead's changed pages through Claude's
 ``extract_signals`` route, validated and reconciled into ``evidence``, ``signals`` and
@@ -478,6 +489,7 @@ from nextron.domain.crawl import (
     RUN_DEADLINE,
     RUN_ID_FIELD,
     TEXT_RETENTION,
+    CrawlMode,
     CrawlOutcome,
     PageKind,
     classify_link,
@@ -1714,6 +1726,7 @@ class _Run:
     lead_id: str
     site: str
     started_at: datetime
+    mode: CrawlMode = CrawlMode.INITIAL  # Story 8.7
     outcome: CrawlOutcome = CrawlOutcome.OK
     error_code: str | None = None
     final_domain: str | None = None
@@ -1753,9 +1766,28 @@ class WebsiteCrawls:
         self._queue = queue
 
     @use_case
-    def enrich_lead(self, lead_id: str, *, may_retry: bool, lane: Lane | None = None) -> bool:
+    def enrich_lead(
+        self,
+        lead_id: str,
+        *,
+        may_retry: bool,
+        lane: Lane | None = None,
+        mode: CrawlMode = CrawlMode.INITIAL,
+    ) -> bool:
         """Crawl the Lead's website and store what it shows; see the module docstring. ``lane``
-        is the lane the job ran on: the chain's next stages are enqueued on it (Story 2.16)."""
+        is the lane the job ran on: the chain's next stages are enqueued on it (Story 2.16).
+        ``mode`` is stored on the run (Story 8.7)."""
+        return self.crawl_lead(lead_id, may_retry=may_retry, lane=lane, mode=mode)
+
+    def crawl_lead(
+        self,
+        lead_id: str,
+        *,
+        may_retry: bool,
+        lane: Lane | None = None,
+        mode: CrawlMode = CrawlMode.INITIAL,
+    ) -> bool:
+        """``enrich_lead`` inside the caller's running use case, with no transaction open."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
@@ -1780,7 +1812,7 @@ class WebsiteCrawls:
         if skipped is not None:
             log.info(CRAWL_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
             return True
-        run = _Run(lead_id=lead_id, site=site, started_at=started_at)
+        run = _Run(lead_id=lead_id, site=site, started_at=started_at, mode=CrawlMode(mode))
         self._crawl(run, max_pages)
         with uow.transaction():
             run_id = self._apply(run, ats_hosts, lane)
@@ -1992,11 +2024,19 @@ class WebsiteCrawls:
             pages_skipped_robots=run.pages_skipped_robots,
             renders=0,
             errors=run.errors,
+            mode=str(run.mode),
         )
         if merged:
             run.outcome = CrawlOutcome.LEAD_MERGED
             return run_id
+        before = [crawl_repo.page(run.lead_id, page.url) for page in run.pages]
+        unchanged_pages = [  # Story 8.7: read before the upsert writes the new hashes
+            page
+            for page, stored in zip(run.pages, before, strict=True)
+            if stored is not None and stored.content_hash == text_hash(page.text)
+        ]
         page_ids = [self._upsert_page(run.lead_id, run_id, page) for page in run.pages]
+        self._confirm_unchanged(run.lead_id, unchanged_pages)
         for page_id, page in zip(page_ids, run.pages, strict=True):
             crawl_repo.replace_contact_methods(page_id, page.detections, now)
             crawl_repo.set_tag_managers(page_id, page.tag_managers)
@@ -2073,6 +2113,25 @@ class WebsiteCrawls:
             mailto=page.mailto,
         )
         return stored.id
+
+    @staticmethod
+    def _confirm_unchanged(lead_id: str, pages: Iterable[_Page]) -> int:
+        """Story 8.7: confirm each live website Evidence (``source`` ``website``) of the Lead
+        cited from one of ``pages`` (those whose hash is unchanged), at the later of its own and
+        the fetch's time; how many it confirmed."""
+        fetched = {page.url: page.fetched_at for page in pages}
+        if not fetched:
+            return 0
+        confirmed = 0
+        for row in signals_repo.evidence(lead_id, live_only=True):
+            if row.source != EvidenceSource.WEBSITE.value or row.source_url is None:
+                continue
+            at = fetched.get(row.source_url)
+            if at is None:
+                continue
+            signals_repo.confirm_evidence(row.id, max(row.last_confirmed_at, at))
+            confirmed += 1
+        return confirmed
 
     @staticmethod
     def _upsert_ats_link(

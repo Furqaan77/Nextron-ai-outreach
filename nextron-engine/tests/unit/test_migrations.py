@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0054_2_16_signal_inbox"
+HEAD = "0055_8_7_crawl_run_mode"
 
 
 @pytest.fixture
@@ -876,7 +876,8 @@ def test_0035_keeps_every_crawl_run_and_checks_each_job_posting(tmp_path: Path) 
     finally:
         reader.close()
     assert rows == [(run, 1, *([None] * 9))]  # kept, and never checked
-    assert columns[-9:] == counts.split(", ")
+    # Story 8.7's 0055 adds mode after them
+    assert [name for name in columns if name != "mode"][-9:] == counts.split(", ")
     insert = (
         "INSERT INTO job_postings (id, lead_id, source, board_token, url, title, description, "
         "posted_date, first_seen_at, last_checked_at, status, closed_at, signal_id, evidence_id) "
@@ -1393,3 +1394,53 @@ def test_0053_adds_the_outcome_columns_in_place_and_keeps_every_booking_pending(
     run_sql(  # any value fits: the code, not a CHECK, keeps the rules
         path, f"UPDATE call_outcomes SET outcome = 'maybe', audit_price = -1 WHERE id = '{booking}'"
     )
+
+
+def test_0055_keeps_every_crawl_run_as_initial_and_checks_the_mode(tmp_path: Path) -> None:
+    """Story 8.7: a crawl run stored before 0055 keeps every value and reads ``initial``; the
+    rebuild keeps the foreign keys to ``crawl_runs`` intact and refuses an unknown mode."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0054_2_16_signal_inbox":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0054_2_16_signal_inbox")
+    at = "2026-11-17T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0D0", "01JD3QZ8X5V9K2M7N4P6R8T0D1"
+    run, page = "01JD3QZ8X5V9K2M7N4P6R8T0D2", "01JD3QZ8X5V9K2M7N4P6R8T0D3"
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'law_private_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at) "
+        f"VALUES ('{lead}', 'Smith Law LLP', 'smith-law.com', '{segment}', '{at}')",
+        "INSERT INTO crawl_runs (id, lead_id, site_domain, started_at, ended_at, outcome, "
+        "pages_fetched, pages_skipped_robots, renders, errors, greenhouse_postings, board_errors) "
+        f"VALUES ('{run}', '{lead}', 'smith-law.com', '{at}', '{at}', 'ok', 3, 1, 0, 0, 2, 0)",
+        "INSERT INTO crawled_pages (id, lead_id, run_id, url, final_url, kind, fetched_at, "
+        "http_status, content_hash, text, text_purge_after, changed_at) "
+        f"VALUES ('{page}', '{lead}', '{run}', 'https://smith-law.com/', "
+        f"'https://smith-law.com/', 'home', '{at}', 200, '{'0' * 64}', 'Home', '{at}', '{at}')",
+    )
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0054_2_16_signal_inbox", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute(
+            "SELECT id, pages_fetched, pages_skipped_robots, greenhouse_postings, board_errors, "
+            "careers_postings, mode FROM crawl_runs"
+        ).fetchall()
+        broken = reader.execute("PRAGMA foreign_key_check").fetchall()
+        indexes = [row[1] for row in reader.execute("PRAGMA index_list(crawl_runs)")]
+    finally:
+        reader.close()
+    assert rows == [(run, 3, 1, 2, 0, None, "initial")]
+    assert broken == []
+    assert "ix_crawl_runs_lead_id" in indexes
+    with pytest.raises(sqlite3.IntegrityError, match="ck_crawl_runs_mode"):
+        run_sql(path, f"UPDATE crawl_runs SET mode = 'weekly' WHERE id = '{run}'")
+    run_sql(path, f"UPDATE crawl_runs SET mode = 'recheck_jobs' WHERE id = '{run}'")
+

@@ -14,7 +14,11 @@ and the endpoints are the adapter's, in code.
 **``JobBoards(clock, meter, boards, crawler, queue)``.**
 
 ``@use_case check_job_boards(lead_id, run_id) -> bool`` (the ``check_job_boards`` job that
-``extract_lead``'s people step enqueues; ``run_id`` is the crawl run of the chain):
+``extract_lead``'s people step enqueues; ``run_id`` is the crawl run of the chain).
+``check_boards(...)``, with the same arguments, is its work inside a use case that is already
+running, with no transaction open (Story 8.7's ``Rechecks.refresh`` calls it for a ``jobs``
+re-check, on the ``recheck_jobs`` run it inserted; the boards still come from the latest run
+that isn't one, ``crawl.latest_run``):
 
 1. **First transaction.** When ``nextron.domain.budget.allow(BudgetClass.BLOCKABLE,
    meter.snapshot(now), queries.setup.budget_limits())`` refuses, it returns ``False`` (the job
@@ -242,6 +246,11 @@ class JobBoards:
         """Check the Lead's ATS boards; see the module docstring. ``False`` when the budget
         refused the work. The chain's next stage is enqueued on ``lane``, the lane the job ran
         on (Story 2.16; ``None``: its default)."""
+        return self.check_boards(lead_id, run_id, lane=lane)
+
+    def check_boards(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool:
+        """``check_job_boards`` inside the caller's running use case, with no transaction
+        open."""
         uow = current()
         now = self._clock.now()
         skipped: str | None = None

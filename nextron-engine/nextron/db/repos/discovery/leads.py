@@ -38,8 +38,12 @@ nothing; ``nextron.app.discovery`` does.
   Story 2.15: ``listed`` also reads the score group's ``tier`` and ``lead_score`` (owner
   ``scoring``) read-only, and ``sort="tier"`` (``TIER_SORT``) orders by Tier (A, B, C, then
   unscored), then Lead Score descending, then newest first.
+- ``recheck_pool(excluded_stages)`` (Story 8.7): ``(id, web_domain)`` of every Lead that isn't
+  merged, has a ``web_domain`` and whose ``pipeline_stage`` (read-only, as above) isn't in
+  ``excluded_stages``, by id.
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -237,6 +241,21 @@ def merged_from(lead_id: str) -> tuple[str, ...]:
         found |= merged
         frontier = merged
     return tuple(sorted(found))
+
+
+def recheck_pool(excluded_stages: Collection[str]) -> tuple[tuple[str, str], ...]:
+    """``(id, web_domain)`` of each Lead that isn't merged, has a ``web_domain`` and whose stage
+    isn't in ``excluded_stages``, by id."""
+    statement = (
+        select(LeadRecord.id, LeadRecord.web_domain)
+        .where(
+            LeadRecord.merged_into.is_(None),
+            LeadRecord.web_domain.is_not(None),
+            LeadRecord.pipeline_stage.not_in(sorted(excluded_stages)),
+        )
+        .order_by(LeadRecord.id)
+    )
+    return tuple((str(row[0]), str(row[1])) for row in current().session.execute(statement))
 
 
 def _listed_where(

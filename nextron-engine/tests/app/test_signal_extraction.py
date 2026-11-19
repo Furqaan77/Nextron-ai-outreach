@@ -614,14 +614,14 @@ def test_a_re_proposed_identical_quote_only_moves_last_confirmed_at(world: World
         for row, old in zip(after, before, strict=True)
     }
     # the hiring quote, and the size quote still on the page, are confirmed; the about page
-    # wasn't sent, so its Evidence is untouched
+    # wasn't sent, but it is unchanged, so the crawl confirmed its Evidence (Story 8.7)
     ids = {row["quote"]: row["id"] for row in before}
     assert changed == {
         ids[HIRING]: {"last_confirmed_at"},
-        ids[CHICAGO]: set(),
+        ids[CHICAGO]: {"last_confirmed_at"},
         ids[TWELVE]: {"last_confirmed_at"},
     }
-    assert {row["last_confirmed_at"] for row in after if row["quote"] != CHICAGO} == {utc(t1)}
+    assert {row["last_confirmed_at"] for row in after} == {utc(t1)}
     assert world.recorder.seen == []
     assert len(world.signals(lead)) == 1 and world.signals(lead)[0][7] is None
     assert world.runs(lead)[1] == ("ok", None, ACTOR, "extract_signals", 1, 0, 0, 0)

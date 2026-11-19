@@ -5758,6 +5758,47 @@ websites; a subject access export lists those items that mention the Contact (th
 excerpts). Discovery's erasure hook runs second, after compliance's, so it can match the
 Contact's name and addresses before research tombstones them.
 
+## Scheduled re-checks
+
+Leads outside a Sequence are **re-checked on a schedule** (FR-11, AD-7, AD-10, AD-16; Story 8.7),
+so their Evidence is re-confirmed or superseded and new Events reach selection. The rules are in
+`nextron/domain/recheck.py` (pure); the service is `nextron/app/research/recheck.py`
+(`Rechecks`).
+
+**The daily tick** (`recheck_leads`: bulk only, priority 20, group Re-check; fired every 24 hours
+and at every start) picks the due Leads. A Lead is considered when it has a website, isn't
+merged, isn't Lost, Disqualified or Not Now, has no active or paused Enrollment, its domain isn't
+suppressed (`assert_contactable(NewLeadSubject(domain), email, discovery)`), and its Primary
+Contact (when it has one) is eligible or fails only on `recontact_not_allowed`. It is due a
+**full** re-check when its last full crawl is at least `recheck_full_days` (default 30, 1 to
+3,650) old, or it has none; otherwise a **jobs** re-check when its last hiring check is at least
+`recheck_jobs_days` (default 7, 1 to 3,650) old, or it has none. Due Leads go oldest first (by
+their last crawl run of any mode; never crawled first), up to `recheck_daily_limit` (default 40,
+at most 1,000). A Lead that already has a live (queued, deferred or running) `recheck_lead` job
+of any date, or a live `enrich_lead` job (its first crawl is still to come), isn't picked. Each gets one
+`recheck_lead` job (bulk only, priority 30, group Re-check), keyed `recheck_lead:<lead>:<local
+date in sender_timezone>`, payload `{v, lead_id, mode}`, concurrency key `domain:<website>`.
+
+**The job** checks the AI budget first (blockable: at 100% it is deferred and makes no crawl,
+board or AI call) and re-checks the Lead's eligibility (a Lead that stopped qualifying logs
+`recheck_skipped`). A **full** re-check runs the Epic 2 crawl inline (`crawl_runs.mode =
+recheck_full`): a page whose text hash is unchanged confirms its live website Evidence (only
+`last_confirmed_at` moves; Signal Inbox, CSV and other sources aren't touched), the extraction sends only changed pages to the AI (none: no AI call),
+a changed observation inserts new Evidence and supersedes the old row, a vanished quote is
+retracted, and the chain continues through job boards, legal form, Primary Contact and scoring. A
+**jobs** re-check stores a `recheck_jobs` run (no pages; a retry after a deferral or failure
+reuses the run whose boards weren't checked yet, and such a run counts for neither the order nor
+"Last re-check") and checks the Lead's ATS boards on it:
+postings no longer listed close (`EventClosed`), then legal form, Primary Contact and scoring.
+`recheck_jobs` runs never count as the Lead's latest crawl (its ATS links and extraction keep
+reading the last real crawl).
+
+Evidence is never edited: re-checks only insert, supersede, retract or confirm. When a re-score
+or the daily re-tiering changes a Lead's Tier, an `events` row records it (`tier_b` to `tier_a`,
+cause `lead_rescored` or `lead_retiered`). The Lead page shows "Last re-check: <date>" (or
+"never") and lists superseded Evidence, labeled "superseded", each linked to its replacement
+when the replacement is shown on the page (plain text when it was later retracted).
+
 ## Engine health
 
 The health panel (`/health/panel`, "Health" in the navigation; FR-58, UX-DR29) shows on one page

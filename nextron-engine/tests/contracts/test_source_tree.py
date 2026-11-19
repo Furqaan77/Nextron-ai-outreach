@@ -132,6 +132,7 @@ FILES = [
     "nextron/domain/draft.py",
     "nextron/domain/places.py",
     "nextron/domain/place_discovery.py",
+    "nextron/domain/recheck.py",  # Story 8.7
     "nextron/domain/linkedin_caps.py",
     "nextron/domain/channel_permission.py",
     "nextron/db/__init__.py",
@@ -218,6 +219,7 @@ FILES = [
     "nextron/db/alembic/versions/0052_4_10_daily_capacity.py",
     "nextron/db/alembic/versions/0053_9_4_call_outcomes.py",
     "nextron/db/alembic/versions/0054_2_16_signal_inbox.py",
+    "nextron/db/alembic/versions/0055_8_7_crawl_run_mode.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",
@@ -285,6 +287,7 @@ FILES = [
     "nextron/app/discovery/signal_inbox.py",
     "nextron/app/research/finding.py",
     "nextron/app/research/verification.py",
+    "nextron/app/research/recheck.py",  # Story 8.7
     "nextron/app/scoring/lead_scores.py",
     "nextron/app/discovery/places.py",
     "nextron/app/discovery/place_ingest.py",

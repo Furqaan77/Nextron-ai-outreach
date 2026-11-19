@@ -41,9 +41,16 @@ stores the Signal Score, the Lead Score, the Tier, ``tier_computed_at`` and the 
 the Fit Score and the Segment version (the Segment isn't read). When it dropped an Event factor,
 it also calls ``research.select_primary(lead_id)`` in the same transaction, so the Primary
 Contact's choice follows the Events still live.
+
+**Tier changes (Story 8.7).** When ``rescore`` (scored) or ``retier`` stores a Tier other than the
+one the Lead held (none included), it appends one ``events`` row: entity ``leads``, the Lead's
+id, ``tier_<x>`` (the old Tier, lowercase) or ``None`` to ``tier_<y>``, cause ``lead_rescored``
+or ``lead_retiered``, no ``cause_ref``, actor ``scoring.ACTOR``, at now. An unchanged Tier, and
+a disqualified rescore (the Pipeline's close records its own event), append none.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
@@ -53,6 +60,7 @@ from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
+from nextron.db import eventlog
 from nextron.db.repos.scoring import scores as scores_repo
 from nextron.db.uow import command
 from nextron.domain import scoring
@@ -69,6 +77,9 @@ MERGED_LEAD: Final = "merged_lead"
 LEAD_CLOSED: Final = "lead_closed"
 NOT_ENRICHED: Final = "not_enriched"
 UNKNOWN_SEGMENT: Final = "unknown_segment"
+ENTITY: Final = "leads"
+LEAD_RESCORED: Final = "lead_rescored"  # Story 8.7: the causes of a Tier change's event
+LEAD_RETIERED: Final = "lead_retiered"
 
 
 class RescoreResult(StrEnum):
@@ -138,6 +149,28 @@ def _closed(lead_id: str) -> bool:
     return pipeline_queries.stage(lead_id) in CLOSED_STAGES
 
 
+def _tier_status(tier: str | None) -> str | None:
+    return None if tier is None else f"tier_{tier.lower()}"
+
+
+def _record_tier_change(
+    lead_id: str, old: str | None, new: str, cause: str, now: datetime
+) -> None:
+    """Story 8.7: one ``events`` row when the stored Tier changes; see the module docstring."""
+    if old == new:
+        return
+    eventlog.append(
+        entity=ENTITY,
+        entity_id=lead_id,
+        from_status=_tier_status(old),
+        to_status=f"tier_{new.lower()}",
+        cause=cause,
+        cause_ref=None,
+        actor=scoring.ACTOR,
+        at=now,
+    )
+
+
 class Scoring:
     """The score group of ``leads``; see the module docstring."""
 
@@ -196,6 +229,7 @@ class Scoring:
                 segment_version=seeded.version,
             )
             return RescoreOutcome(RescoreResult.DISQUALIFIED, evidence_id=evidence_id)
+        stored = scores_repo.stored_row(lead.id)
         scores_repo.write_score(
             lead.id,
             fit=found.fit,
@@ -206,6 +240,8 @@ class Scoring:
             segment_version=seeded.version,
             factors=scoring.factors_text(found.fit_factors, found.signal_factors),
         )
+        old_tier = None if stored is None else stored.tier
+        _record_tier_change(lead.id, old_tier, str(found.tier), LEAD_RESCORED, now)
         return RescoreOutcome(
             RescoreResult.SCORED,
             tier=found.tier,
@@ -245,6 +281,7 @@ class Scoring:
             computed_at=now,
             factors=scoring.factors_text(result.score.fit_factors, result.score.signal_factors),
         )
+        _record_tier_change(lead.id, row.tier, str(result.score.tier), LEAD_RETIERED, now)
         if result.dropped:
             self._research.select_primary(lead.id)
         return True

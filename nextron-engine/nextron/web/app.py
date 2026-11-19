@@ -2246,6 +2246,8 @@ def create_app(
             receipts=lead_receipts(contacts),
             score=scoring_queries.stored(found.id),
             drafts=lead_drafts(found.id),
+            history=research_queries.evidence_history(found.id),  # Story 8.7
+            last_recheck=research_queries.last_recheck(found.id),
         )
         return page(
             request,

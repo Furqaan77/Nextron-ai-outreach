@@ -106,6 +106,15 @@ handler runs in.
   ``SignalInbox``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused the
   parse). A retryable ``AdapterError`` it raises is retried by the runner; on the last allowed
   attempt the use case flags the item ``parse_failed`` instead, so no item stays ``pending``.
+- ``recheck_leads(rechecks)`` (Story 8.7): the daily tick; calls ``rechecks().enqueue_due()``
+  once (the ``research`` service's ``Rechecks``), which enqueues the day's ``recheck_lead`` jobs,
+  and returns ``None``.
+- ``recheck_lead(rechecks)`` (Story 8.7): calls ``rechecks().refresh(lead_id, mode,
+  may_retry=job.attempts <= RECHECK_LEAD_RETRIES)`` once (``mode`` must be the value of a
+  ``nextron.domain.recheck.RecheckMode``, else ``InvalidJob``), and returns ``DEFERRED`` when it
+  returns ``False`` (the budget refused the re-check). ``may_retry`` matters only in mode
+  ``full``: the crawl's last allowed attempt completes instead of failing on a flaky site. In
+  mode ``jobs`` it is moot, since ``check_boards`` never raises for a board error (it counts it).
 
 **The chain's lane (Story 2.16).** ``enrich_lead``, ``extract_lead``, ``check_job_boards``,
 ``check_legal_form`` and ``select_primary_contact`` pass ``lane=job.lane`` to their use case,
@@ -136,6 +145,7 @@ from nextron.domain.place_discovery import (
     HASH_LENGTH,
     LOCATION_FIELD,
 )
+from nextron.domain.recheck import MODE_FIELD, RecheckMode
 from nextron.domain.restore_test import RestoreTestKind
 from nextron.domain.signal_inbox_item import ITEM_ID_FIELD
 
@@ -143,6 +153,7 @@ ALERT_ID_FIELD: Final = "alert_id"
 ENRICH_LEAD_RETRIES: Final = 3  # the enrich_lead job type's retry limit (nextron.main)
 ERASE_EXTERNAL_RETRIES: Final = 5  # the erase_external job type's retry limit (nextron.main)
 PROCESS_SIGNAL_ITEM_RETRIES: Final = 3  # the process_signal_item job type's (nextron.main)
+RECHECK_LEAD_RETRIES: Final = 3  # the recheck_lead job type's retry limit (nextron.main)
 
 
 def _chain_lane(job: Job) -> Lane | None:
@@ -637,3 +648,41 @@ def process_signal_item(inbox: Callable[[], ProcessingSignalItems]) -> Handler:
         return None
 
     return handle_process_signal_item
+
+
+class Rechecking(Protocol):
+    """What ``recheck_leads`` and ``recheck_lead`` need of the ``research`` service's
+    ``Rechecks``."""
+
+    def enqueue_due(self) -> int: ...
+
+    def refresh(self, lead_id: str, mode: RecheckMode, *, may_retry: bool) -> bool: ...
+
+
+def recheck_leads(rechecks: Callable[[], Rechecking]) -> Handler:
+    """The daily ``recheck_leads`` tick's handler: enqueue the due Leads' re-checks through
+    ``rechecks()``."""
+
+    def handle_recheck_leads(job: Job) -> None:
+        del job  # a trigger's tick payload holds only its version
+        rechecks().enqueue_due()
+
+    return handle_recheck_leads
+
+
+def recheck_lead(rechecks: Callable[[], Rechecking]) -> Handler:
+    """The ``recheck_lead`` job's handler: re-check the payload's Lead in its mode through
+    ``rechecks()``."""
+
+    def handle_recheck_lead(job: Job) -> HandlerResult | None:
+        lead_id = _ulid_field(job, LEAD_ID_FIELD)
+        value = job.payload.get(MODE_FIELD)
+        mode = next((mode for mode in RecheckMode if mode.value == value), None)
+        if mode is None:
+            raise InvalidJob(f"{job.type}: the {MODE_FIELD} field must be a re-check mode")
+        may_retry = job.attempts <= RECHECK_LEAD_RETRIES
+        if not rechecks().refresh(lead_id, mode, may_retry=may_retry):
+            return DEFERRED
+        return None
+
+    return handle_recheck_lead

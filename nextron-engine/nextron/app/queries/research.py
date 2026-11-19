@@ -27,7 +27,11 @@ current unit of work, read-only ones included.
   ``None`` for a text that isn't a ULID, like the reads below.
 - ``latest_crawl_run(lead_id)``: the Lead's run started last, or ``None``. The Lead page
   (Story 2.4) shows its outcome with ``nextron.domain.crawl.OUTCOME_LABELS`` ("website
-  unreachable").
+  unreachable"). Since Story 8.7 it is the last run that fetched pages: a ``recheck_jobs`` run
+  (an ATS board check alone) never counts.
+- ``last_recheck(lead_id)`` (Story 8.7): the Lead's scheduled re-check run (``recheck_full`` or
+  ``recheck_jobs``) started last, or ``None``; a ``recheck_jobs`` run whose boards weren't
+  checked yet doesn't count. The Lead page shows its date ("Last re-check").
 - ``crawled_pages(lead_id)``: the Lead's stored pages, by URL, each a ``StoredPage`` (whose
   ``text`` is ``None`` once purged).
 - ``ats_links(lead_id)``: the ATS board links found on the Lead's website, by URL.
@@ -173,6 +177,7 @@ __all__ = [
     "extraction_runs",
     "hq_tz",
     "last_ok_extraction",
+    "last_recheck",
     "latest_crawl_run",
     "lead_provenance",
     "legal_form",
@@ -288,6 +293,11 @@ def crawl_run(run_id: str) -> StoredCrawlRun | None:
 def latest_crawl_run(lead_id: str) -> StoredCrawlRun | None:
     """The Lead's crawl run started last, or ``None``."""
     return crawl_repo.latest_run(lead_id) if is_ulid(lead_id) else None
+
+
+def last_recheck(lead_id: str) -> StoredCrawlRun | None:
+    """The Lead's scheduled re-check run started last, or ``None``."""
+    return crawl_repo.last_recheck(lead_id) if is_ulid(lead_id) else None
 
 
 def crawled_pages(lead_id: str) -> tuple[StoredPage, ...]:
