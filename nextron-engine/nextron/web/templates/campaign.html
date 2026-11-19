@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Nextron: Campaign {{ campaign.key|plain }}{% endblock %}
+{% block content %}
+<h1>Campaign {{ campaign.key|plain }}</h1>
+<p>A Campaign's key never changes. Activate, pause and resume it, and record a UK Campaign's legitimate-interests assessment, on the <a href="/settings">Settings page</a>. Back to <a href="/campaigns">all Campaigns</a>.</p>
+{% include "campaign_edit_panel.html" %}
+{% endblock %}

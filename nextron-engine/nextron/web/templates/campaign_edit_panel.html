@@ -1,0 +1,115 @@
+{#- One Campaign's page (nextron.web.campaign_editor_page, Story 11.8): rendered inside
+    campaign.html, and alone as the answer to each of its POSTs, swapped in for this whole
+    panel. Stored text is escaped with |plain. -#}
+{%- from "segment_form.html" import text_field, select_field, field_error %}
+{%- macro variant_fields(form) %}
+{{- field_error(form, "form") }}
+{{- text_field(form, "name", "Variant name", form.values.get("name", ""), "At most 40 characters, unique in this Campaign (retired Variants included).") }}
+<fieldset class="variant-angles">
+<legend>Angle notes (optional)</legend>
+<p class="hint">At most one note per Step of the Campaign's Sequence; each note at most 200 characters, and never a price.</p>
+{{- field_error(form, "step_angles") }}
+{%- for row in form.angles %}
+<div class="variant-angle">
+{{- text_field(form, "angles[" ~ row.index ~ "].step", "Step", row.step) }}
+{{- text_field(form, "angles[" ~ row.index ~ "].note", "Note", row.note) }}
+</div>
+{%- endfor %}
+</fieldset>
+{%- endmacro %}
+<div id="campaign-edit-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<dl class="campaign-facts">
+<dt>Key</dt><dd>{{ campaign.key|plain }}</dd>
+<dt>Status</dt><dd>{{ status|plain }}</dd>
+<dt>Version</dt><dd>{{ campaign.version }}</dd>
+</dl>
+<section class="campaign-edit" aria-labelledby="campaign-edit-heading">
+<h2 id="campaign-edit-heading">Edit</h2>
+<p>A new Offer or Sequence reaches new Enrollments only: running Enrollments keep the Variant, Offer and Sequence version they started with.</p>
+<form method="post" action="/campaigns/{{ campaign.id }}/edit" hx-post="/campaigns/{{ campaign.id }}/edit" hx-target="#campaign-edit-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="based_on" value="{{ based_on }}">
+{{- field_error(form, "form") }}
+{{- text_field(form, "name", "Name", form.values.get("name", ""), "At most 100 characters.") }}
+{%- if enrolled %}
+<dl class="campaign-pair">
+<dt>Segment</dt><dd>{{ segment_label|plain }}</dd>
+<dt>Market</dt><dd>{{ market_label|plain }}</dd>
+</dl>
+<p class="hint">{{ pair_frozen }}.</p>
+<input type="hidden" name="segment" value="{{ form.values.get('segment', '')|plain }}">
+<input type="hidden" name="market" value="{{ form.values.get('market', '')|plain }}">
+{{- field_error(form, "segment") }}
+{{- field_error(form, "market") }}
+{%- else %}
+{{- select_field(form, "segment", "Segment", form.options["segment"]) }}
+{{- select_field(form, "market", "Market", form.options["market"]) }}
+{%- endif %}
+{{- select_field(form, "offer", "Offer", form.options["offer"]) }}
+{{- select_field(form, "sequence", "Sequence", form.options["sequence"]) }}
+<button type="submit">Save</button>
+</form>
+</section>
+<section class="campaign-variants" aria-labelledby="campaign-variants-heading">
+<h2 id="campaign-variants-heading">Variants</h2>
+<p>At most 2 active Variants. A Variant with Enrollments never changes: retire it and add a new one, so its results stay comparable. Retiring is final.</p>
+{%- if not variants %}
+<p>No Variants yet. Add one below before you activate this Campaign.</p>
+{%- endif %}
+{%- for variant in variants %}
+<section class="campaign-variant" aria-labelledby="variant-{{ variant.id }}-heading">
+<h3 id="variant-{{ variant.id }}-heading">{{ variant.name|plain }} ({{ variant.status|plain }})</h3>
+<p>{% if variant.enrollments == 1 %}1 Enrollment{% else %}{{ variant.enrollments }} Enrollments{% endif %}</p>
+{%- if variant.notes %}
+<ul class="variant-notes">
+{%- for note in variant.notes %}
+<li>{{ note|plain }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+{%- if variant.frozen_reason %}
+<p class="hint">{{ variant.frozen_reason }}.</p>
+{%- endif %}
+{%- if variant.edit_form %}
+<details class="variant-edit">
+<summary>Edit {{ variant.name|plain }}</summary>
+<form method="post" action="/campaigns/{{ campaign.id }}/variants/{{ variant.id }}/edit" hx-post="/campaigns/{{ campaign.id }}/variants/{{ variant.id }}/edit" hx-target="#campaign-edit-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="based_on" value="{{ based_on }}">
+{{- variant_fields(variant.edit_form) }}
+<button type="submit">Save the Variant</button>
+</form>
+</details>
+{%- endif %}
+{%- if variant.retirable %}
+<form method="post" action="/campaigns/{{ campaign.id }}/variants/{{ variant.id }}/retire" hx-post="/campaigns/{{ campaign.id }}/variants/{{ variant.id }}/retire" hx-target="#campaign-edit-panel" hx-swap="outerHTML" hx-sync="this:drop" hx-confirm="Retire Variant {{ variant.name|plain }}? Retiring is final.">
+{{ csrf_field() }}
+<input type="hidden" name="based_on" value="{{ based_on }}">
+<button type="submit" class="secondary" aria-label="Retire {{ variant.name|plain }}">Retire</button>
+</form>
+{%- elif variant.retire_reason %}
+<p class="hint">{{ variant.retire_reason }}.</p>
+{%- endif %}
+</section>
+{%- endfor %}
+<section class="variant-add" aria-labelledby="variant-add-heading">
+<h3 id="variant-add-heading">Add a Variant</h3>
+{%- if not add_form %}
+<p class="hint">{{ add_blocked }}.</p>
+{%- else %}
+<form method="post" action="/campaigns/{{ campaign.id }}/variants/add" hx-post="/campaigns/{{ campaign.id }}/variants/add" hx-target="#campaign-edit-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="based_on" value="{{ based_on }}">
+{{- variant_fields(add_form) }}
+<button type="submit">Add the Variant</button>
+</form>
+{%- endif %}
+</section>
+</section>
+</div>

@@ -157,6 +157,13 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/settings/campaigns/lia",
         "/settings/linkedin/add",  # Story 10.2
         "/settings/linkedin/save",
+        "/campaigns",  # Story 11.8
+        "/campaigns/create",
+        "/campaigns/{campaign_id}",
+        "/campaigns/{campaign_id}/edit",
+        "/campaigns/{campaign_id}/variants/add",
+        "/campaigns/{campaign_id}/variants/{variant_id}/edit",
+        "/campaigns/{campaign_id}/variants/{variant_id}/retire",
         "/facts",
         "/facts/add",
         "/facts/edit",
@@ -684,6 +691,10 @@ def test_templates_and_stylesheets_have_no_inline_code() -> None:
         "assist_accounts_panel.html",
         "away_banner.html",
         "base.html",
+        "campaign.html",
+        "campaign_edit_panel.html",
+        "campaign_list.html",
+        "campaign_list_panel.html",
         "campaigns_panel.html",
         "channel_permissions.html",  # Story 10.7
         "channel_permissions_panel.html",

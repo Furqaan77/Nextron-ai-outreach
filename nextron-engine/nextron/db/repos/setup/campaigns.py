@@ -9,22 +9,33 @@ Variant's ``step_angles`` is the canonical JSON list of its notes' file forms (`
 
 **Decoding.** A Campaign is read with the keys of its Segment, Offer and Sequence and the code
 and current ``country_code`` of its Market (joined, so the country is read live), and its
-Variants by name. It is decoded into its file form and validated again through
-``nextron.domain.campaign.campaign_from_form``, so a row set that no longer validates (a
-``step_angles`` that isn't JSON, no Variant, no active one, two names equal case-insensitively)
-raises ``InvalidCampaigns``; so do a ``status`` that isn't a ``CampaignStatus`` and an LIA whose
+Variants by name. It is decoded into its stored form and validated again through
+``nextron.domain.campaign.stored_campaign_from_form`` (Story 11.8: any number of Variants, none
+active included, at most 2 active), so a row set that no longer validates (a ``step_angles``
+that isn't JSON, more than 2 active Variants, two names equal case-insensitively) raises
+``InvalidCampaigns``; so do a ``status`` that isn't a ``CampaignStatus`` and an LIA whose
 reference breaks the text rules, whose date isn't a real ``YYYY-MM-DD`` date, or that has only
 one of the two columns set.
 
 - ``all_campaigns()``: every Campaign as a ``StoredCampaign``, by key;
+- ``keys()`` (Story 11.8): every stored Campaign's key, a ``frozenset``, without decoding (the
+  seed sync's managed mode); ``ids_for_pair(segment_id, market_id)``: the ids of the Campaigns
+  of that pair (at most one), without decoding;
 - ``by_id(campaign_id)``: the Campaign ``campaign_id``, or ``None`` (also for a text that isn't
   a ULID);
 - ``insert(campaign, *, segment_id, market_id, offer_id, sequence_id, at) -> id``: a new
-  Campaign at ``draft``, version 1, with no LIA, and a row per Variant of ``campaign``;
+  Campaign at ``draft``, version 1, with no LIA, and a row per Variant of ``campaign`` (none
+  included: a dashboard Campaign starts with no Variant);
 - ``update_config(campaign_id, *, name, offer_id, sequence_id, version, at)``: sets those
   columns and ``updated_at`` (never the Segment, the Market, the status or the LIA);
+- ``update_definition(campaign_id, *, name, segment_id, market_id, offer_id, sequence_id,
+  version, at, clear_lia=False)`` (Story 11.8): sets those columns and ``updated_at`` (never the
+  key or the status); with ``clear_lia`` it also sets ``lia_ref`` and ``lia_date`` NULL (a
+  Segment or Market change: the stored LIA was made for the old pair);
 - ``insert_variant(campaign_id, variant, at) -> id`` and ``update_variant(variant_id, variant,
   at)`` (its ``name``, ``status`` and ``step_angles``);
+- ``set_variant_status(variant_id, status, at)`` (Story 11.8): sets its ``status`` and
+  ``updated_at``;
 - ``set_status(campaign_id, from_status, to_status, at) -> bool``: one conditional ``UPDATE``
   (``WHERE id = ? AND status = from_status``); true when exactly one row changed;
 - ``set_lia(campaign_id, lia, at)``: sets ``lia_ref``, ``lia_date`` and ``updated_at``.
@@ -62,7 +73,7 @@ from nextron.domain.campaign import (
     StepAngleNote,
     VariantDef,
     VariantStatus,
-    campaign_from_form,
+    stored_campaign_from_form,
     stored_lia,
 )
 from nextron.domain.ids import is_ulid
@@ -188,7 +199,7 @@ def _stored(row: Row[Any], variants: Sequence[Row[Any]]) -> StoredCampaign:
             for variant in variants
         ],
     }
-    campaign = campaign_from_form(form)
+    campaign = stored_campaign_from_form(form)
     try:
         status = CampaignStatus(row.status)
     except ValueError:
@@ -243,6 +254,20 @@ def all_campaigns() -> tuple[StoredCampaign, ...]:
     rows = list(current().session.execute(_campaigns_query().order_by(CampaignRecord.key)))
     variants = _variants_of([row.id for row in rows])
     return tuple(_stored(row, variants.get(row.id, [])) for row in rows)
+
+
+def keys() -> frozenset[str]:
+    """Every stored Campaign's key, without decoding."""
+    return frozenset(current().session.scalars(select(CampaignRecord.key)))
+
+
+def ids_for_pair(segment_id: str, market_id: str) -> frozenset[str]:
+    """The ids of the stored Campaigns of this (Segment, Market) pair (at most one), without
+    decoding."""
+    statement = select(CampaignRecord.id).where(
+        CampaignRecord.segment_id == segment_id, CampaignRecord.market_id == market_id
+    )
+    return frozenset(current().session.scalars(statement))
 
 
 def by_id(campaign_id: str) -> StoredCampaign | None:
@@ -341,6 +366,45 @@ def update_config(
         .values(
             name=name, offer_id=offer_id, sequence_id=sequence_id, version=version, updated_at=at
         )
+    )
+
+
+def update_definition(
+    campaign_id: str,
+    *,
+    name: str,
+    segment_id: str,
+    market_id: str,
+    offer_id: str,
+    sequence_id: str,
+    version: int,
+    at: datetime,
+    clear_lia: bool = False,
+) -> None:
+    """Set the name, Segment, Market, Offer, Sequence and version of the Campaign
+    ``campaign_id``, changed at ``at``; with ``clear_lia``, also clear its stored LIA."""
+    values: dict[str, Any] = {
+        "name": name,
+        "segment_id": segment_id,
+        "market_id": market_id,
+        "offer_id": offer_id,
+        "sequence_id": sequence_id,
+        "version": version,
+        "updated_at": at,
+    }
+    if clear_lia:
+        values.update(lia_ref=None, lia_date=None)
+    current().session.execute(
+        update_rows(CampaignRecord).where(CampaignRecord.id == campaign_id).values(**values)
+    )
+
+
+def set_variant_status(variant_id: str, status: VariantStatus, at: datetime) -> None:
+    """Set the status of the Variant ``variant_id``, changed at ``at``."""
+    current().session.execute(
+        update_rows(VariantRecord)
+        .where(VariantRecord.id == variant_id)
+        .values(status=str(VariantStatus(status)), updated_at=at)
     )
 
 

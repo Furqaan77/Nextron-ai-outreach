@@ -219,7 +219,9 @@ def test_without_campaigns_the_panel_says_how_to_load_them(units: UnitOfWorkFact
 
     reply, panel = settings(dashboard, dashboard.open_session())
 
-    assert panel.paragraphs == ["No Campaigns yet. Run nextron seed sync to load them."]
+    assert panel.paragraphs == [
+        "No Campaigns yet. Create one on the Campaigns page, or run nextron seed sync to load them."
+    ]
     assert panel.forms == []
 
 

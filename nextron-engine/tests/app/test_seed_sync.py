@@ -181,7 +181,10 @@ OFFERS_CAMPAIGNS_FIRST = (
     "  ops_automation_us: created (version 1)\n"
     "  ops_automation_uk: created (version 1)\n"
 )
-OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
+CAMPAIGNS_MANAGED = (  # Story 11.8: once a Campaign is stored, the dashboard owns them
+    "Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored"
+)
+OFFERS_CAMPAIGNS_UNCHANGED = f"offers: {CAMPAIGNS_MANAGED}\ncampaigns: {CAMPAIGNS_MANAGED}\n"
 SUMMARY_FIRST = (
     SEGMENTS_FIRST + MARKETS_FIRST + SEQUENCES_FIRST + FACTS_FIRST + OFFERS_CAMPAIGNS_FIRST
 )

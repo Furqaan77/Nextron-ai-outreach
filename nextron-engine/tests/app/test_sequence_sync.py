@@ -103,7 +103,10 @@ OFFERS_CAMPAIGNS_FIRST = (
     "campaigns: 4 changed, 0 unchanged\n"
     + "".join(f"  {key}: created (version 1)\n" for key in CAMPAIGN_KEYS)
 )
-OFFERS_CAMPAIGNS_UNCHANGED = "offers: 0 changed, 1 unchanged\ncampaigns: 0 changed, 4 unchanged\n"
+CAMPAIGNS_MANAGED = (  # Story 11.8: once a Campaign is stored, the dashboard owns them
+    "Campaigns are managed in the dashboard; seed/campaigns.yaml and seed/offers.yaml ignored"
+)
+OFFERS_CAMPAIGNS_UNCHANGED = f"offers: {CAMPAIGNS_MANAGED}\ncampaigns: {CAMPAIGNS_MANAGED}\n"
 
 STEP_3_ASK = "        ask: Offer to send more detail by reply (no link or attachment)\n"
 STEP_5 = """\
@@ -605,6 +608,14 @@ def test_managed_mode_checks_variant_steps_against_the_stored_step_counts(
 
     with units.open():
         shorten()
+    # Story 11.8: with a Campaign stored the Campaigns file is ignored, so check a database
+    # that holds Sequences but no Campaign
+    writer = sqlite3.connect(database, isolation_level=None)
+    try:
+        writer.execute("DELETE FROM variants")
+        writer.execute("DELETE FROM campaigns")
+    finally:
+        writer.close()
     before = table_dump(database)
     folder = seed_dir(tmp_path, SEQUENCES_TEXT, "step_4_note")
     old = "    variants:\n      - name: A\n        status: active\n"

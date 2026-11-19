@@ -23,6 +23,8 @@ status group, and ``move_lead`` only ``lead_id``. The ``trg_enrollments_bound`` 
 - ``live_counts_by_inbox()``: ``{sending_inbox_id: number of live rows}``;
 - ``live_counts_by_version(sequence_id)`` (Story 11.7): ``{sequence_version: number of live
   rows}`` of the Sequence's live Enrollments;
+- ``counts_by_variant(campaign_id)`` (Story 11.8): ``{variant_id: number of rows}`` of the
+  Campaign, every status counted;
 - ``insert(...) -> id``: a new row;
 - ``set_status(enrollment_id, status, pause_cause, stop_cause, ended_at, at)``: the status
   group and ``updated_at``;
@@ -187,6 +189,20 @@ def live_counts_by_version(sequence_id: str) -> dict[int, int]:
     )
     return {
         int(version): int(count) for version, count in current().session.execute(statement)
+    }
+
+
+def counts_by_variant(campaign_id: str) -> dict[str, int]:
+    """The number of Enrollments, of any status, of the Campaign ``campaign_id`` per Variant
+    (Story 11.8)."""
+    statement = (
+        select(EnrollmentRecord.variant_id, func.count())
+        .where(EnrollmentRecord.campaign_id == campaign_id)
+        .group_by(EnrollmentRecord.variant_id)
+    )
+    return {
+        str(variant_id): int(count)
+        for variant_id, count in current().session.execute(statement)
     }
 
 

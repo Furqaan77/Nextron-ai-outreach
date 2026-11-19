@@ -71,6 +71,9 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   recorded ``Lia`` or ``None``, and ``variants`` a tuple of ``SeededVariant(id, name, status,
   step_angles)`` ordered by name. A row set that no longer validates raises
   ``InvalidCampaigns``. Enrollment (4.8) reads the LIA it records as the eligibility basis here.
+  Since Story 11.8 a Campaign may hold any number of Variants (retired ones stay as history), at
+  most 2 of them ``active``, and a new dashboard Campaign none. ``campaign_keys()``: every
+  stored Campaign's key, a ``frozenset``, without decoding (the seed sync's managed mode).
 - ``campaign_active(campaign_id) -> bool``: the single answer to "may this Campaign run?"
   (AD-5's ``campaign_active``): ``nextron.domain.campaign.may_run`` on the stored status, the
   stored LIA and the Market's **current** ``country_code``, read live with the Campaign. An
@@ -522,6 +525,11 @@ def _seeded_campaign(stored: StoredCampaign) -> SeededCampaign:
 def campaigns() -> tuple[SeededCampaign, ...]:
     """Every stored Campaign, by key."""
     return tuple(_seeded_campaign(stored) for stored in campaigns_repo.all_campaigns())
+
+
+def campaign_keys() -> frozenset[str]:
+    """Every stored Campaign's key, without decoding (Story 11.8)."""
+    return campaigns_repo.keys()
 
 
 def campaign(campaign_id: str) -> SeededCampaign | None:

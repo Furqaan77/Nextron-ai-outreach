@@ -27,6 +27,10 @@ included.
 - ``live_enrollments_by_version(sequence_id)`` (Story 11.7): ``{sequence_version: live
   Enrollments}`` of the Sequence, for each version that has any (the Sequences page's "n active
   Enrollments keep version k"); ``{}`` for a text that isn't a ULID;
+- ``enrollment_counts(campaign_id)`` (Story 11.8): ``{variant_id: Enrollments}`` of the
+  Campaign, every status counted, for each Variant that has any (``setup``'s Campaign editor
+  freezes an enrolled Variant, and an enrolled Campaign's Segment and Market, with it); ``{}``
+  for a text that isn't a ULID;
 - ``export_pii(contact_id) -> {"enrollments": tuple[dict, ...]}`` (Story 3.15's subject access
   exporter, ``nextron.domain.contact_export``; added at the merge of Story 4.8): every column of
   each of the Contact's Enrollments (Campaign, Variant, Sending Inbox, Sequence, Offer, origin,
@@ -117,6 +121,13 @@ def live_enrollments_by_version(sequence_id: str) -> Mapping[int, int]:
     if not is_ulid(sequence_id):
         return MappingProxyType({})
     return MappingProxyType(enrollments_repo.live_counts_by_version(sequence_id))
+
+
+def enrollment_counts(campaign_id: str) -> Mapping[str, int]:
+    """The number of Enrollments, of any status, of the Campaign per Variant that has any."""
+    if not is_ulid(campaign_id):
+        return MappingProxyType({})
+    return MappingProxyType(enrollments_repo.counts_by_variant(campaign_id))
 
 
 def export_pii(contact_id: str) -> dict[str, tuple[dict[str, object], ...]]:

@@ -21,10 +21,14 @@ appended Step. Anything else in a Step is ignored. The checks, in order:
 3. the rows' shape: the first row must keep stored Step 1 (``{"steps[1]": "Step 1 can't be
    removed"}``), kept rows keep their stored order and come before every appended row, and each
    names a stored Step (``{"steps": "Steps can be removed or appended, never reordered"}``);
-4. the Variant check: a Campaign using this Sequence with a Variant whose ``step_angles`` names a
+4. the Variant check, over the **active** Variants only (Story 11.8: a retired Variant gets no
+   new Enrollment): a Campaign using this Sequence with a Variant whose ``step_angles`` names a
    Step beyond the proposed Step count is ``{"steps": "Campaign <key>'s Variant <name> has an
-   angle note for Step <n>, so the Sequence needs at least <n> Steps"}`` (the first such, by
-   Campaign key then Variant name);
+   angle note for Step <n>, so the Sequence needs at least <n> Steps"}``; then removing any
+   stored Step ``k`` while such a Variant has a note on a Step ``k`` or later (which would move
+   that note onto another Step) is ``{"steps": "Campaign <key>'s Variant <name> has angle notes
+   on Steps after a removed Step; retire it and add a new one before removing Step <k>"}`` (the
+   smallest such ``k``). The first problem, by Campaign key then Variant name;
 5. validation: the editor builds each Step's file form itself, never from the form, for the
    fixed FR-4 fields: Step 1's ``delay_days`` is 0 and it keeps its stored ``subject_rule``; a
    later Step has none; every ``link_rule`` is ``footer_only`` and ``no_price`` and ``no_audit``
@@ -51,6 +55,7 @@ from nextron.db import eventlog
 from nextron.db.repos.setup import sequences as sequences_repo
 from nextron.db.repos.setup.sequences import StoredSequence
 from nextron.db.uow import current, use_case
+from nextron.domain.campaign import VariantStatus
 from nextron.domain.ids import is_ulid
 from nextron.domain.segments import FORM_FIELD
 from nextron.domain.sequences import (
@@ -140,20 +145,36 @@ def _kept(rows: list[Mapping[str, object]], stored: StoredSequence) -> list[int 
     return kept
 
 
-def _check_variants(sequence_id: str, step_count: int) -> None:
-    """Refuse a Step count below a Variant angle note's Step, for the first Campaign (by key)
-    using this Sequence that has one."""
+def _check_variants(sequence_id: str, kept: list[int | None], stored_steps: int) -> None:
+    """Refuse a Step count below an active Variant angle note's Step, then (Story 11.8) the
+    removal of a stored Step at or before an active Variant's note, for the first Campaign (by
+    key) using this Sequence that has one. Retired Variants get no new Enrollment, so they never
+    block."""
+    step_count = len(kept)
+    removed = sorted(set(range(FIRST_STEP, stored_steps + 1)) - {n for n in kept if n is not None})
     for campaign in setup_queries.campaigns():
         if campaign.sequence_id != sequence_id:
             continue
         for variant in campaign.variants:
-            beyond = [note.step for note in variant.step_angles if note.step > step_count]
+            if variant.status != VariantStatus.ACTIVE:
+                continue
+            steps = [note.step for note in variant.step_angles]
+            beyond = [step for step in steps if step > step_count]
             if beyond:
                 step = max(beyond)
                 raise SequenceRefused(
                     {
                         STEPS_FIELD: f"Campaign {campaign.key}'s Variant {variant.name} has an "
                         f"angle note for Step {step}, so the Sequence needs at least {step} Steps"
+                    }
+                )
+            shifted = [number for number in removed if any(step >= number for step in steps)]
+            if shifted:
+                raise SequenceRefused(
+                    {
+                        STEPS_FIELD: f"Campaign {campaign.key}'s Variant {variant.name} has angle "
+                        "notes on Steps after a removed Step; retire it and add a new one before "
+                        f"removing Step {shifted[0]}"
                     }
                 )
 
@@ -233,7 +254,7 @@ class SequenceEditor:
             if based_on != stored.version or isinstance(based_on, bool):
                 raise SequenceRefused({FORM_FIELD: STALE})
             kept = _kept(rows, stored)
-            _check_variants(stored.id, len(rows))
+            _check_variants(stored.id, kept, len(stored.sequence.steps))
             sequence = _validated(_proposed(fields, rows, kept, stored))
             if definition_text(sequence) == definition_text(stored.sequence):
                 return SequenceSaved(stored.id, stored.key, stored.version, False)

@@ -1,0 +1,46 @@
+{#- The Campaigns list and create form (nextron.web.campaign_editor_page, Story 11.8): rendered
+    inside campaign_list.html, and alone as the answer to POST /campaigns/create, swapped in for
+    this whole panel. Stored text is escaped with |plain. -#}
+{%- from "segment_form.html" import text_field, select_field, field_error %}
+<div id="campaign-list-panel">
+{%- if notice %}
+<p class="notice" role="status">{{ notice|plain }}{% if created_id %} <a href="/campaigns/{{ created_id }}">Open it</a>.{% endif %}</p>
+{%- endif %}
+{%- if alert %}
+<p class="notice notice-refused" role="alert">{{ alert|plain }}</p>
+{%- endif %}
+<h2>Campaigns ({{ campaigns|length }})</h2>
+{%- if unavailable %}
+<p class="notice notice-refused" role="alert">{{ unavailable|plain }}</p>
+{%- elif not campaigns %}
+<p>No Campaigns yet. Create one below, or run <code>nextron seed sync</code> to load them.</p>
+{%- else %}
+<table class="campaign-table">
+<thead>
+<tr><th scope="col">Key</th><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Segment</th><th scope="col">Market</th><th scope="col">Active Variants</th></tr>
+</thead>
+<tbody>
+{%- for campaign in campaigns %}
+<tr class="campaign-row-item"><td><a href="/campaigns/{{ campaign.id }}">{{ campaign.key|plain }}</a></td><td>{{ campaign.name|plain }}</td><td>{{ campaign.status|plain }}</td><td>{{ campaign.segment|plain }}</td><td>{{ campaign.market|plain }}</td><td>{{ campaign.active_variants }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+{%- if form %}
+<section class="campaign-create" aria-labelledby="campaign-create-heading">
+<h2 id="campaign-create-heading">Create a Campaign</h2>
+<form method="post" action="/campaigns/create" hx-post="/campaigns/create" hx-target="#campaign-list-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+{{- field_error(form, "form") }}
+{{- text_field(form, "key", "Key", form.values.get("key", ""), "Lowercase letters, digits and underscores, starting with a letter, at most 31 characters. It never changes.") }}
+{{- text_field(form, "name", "Name", form.values.get("name", ""), "At most 100 characters.") }}
+{{- select_field(form, "segment", "Segment", form.options["segment"]) }}
+{{- select_field(form, "market", "Market", form.options["market"]) }}
+{{- select_field(form, "offer", "Offer", form.options["offer"]) }}
+{{- select_field(form, "sequence", "Sequence", form.options["sequence"]) }}
+<p class="hint">One Campaign per Segment and Market. It starts as a draft with no Variant.</p>
+<button type="submit">Create the Campaign</button>
+</form>
+</section>
+{%- endif %}
+</div>

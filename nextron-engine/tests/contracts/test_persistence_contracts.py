@@ -80,7 +80,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0056_11_7_sequence_editing"
+HEAD = "0057_11_8_campaign_editing"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -92,9 +92,11 @@ COMPANY_FACTS_TRIGGERS = frozenset(  # Story 4.3: append-only fact versions
     }
 )
 CAMPAIGNS_TRIGGERS = frozenset(  # Story 4.2: no UK Campaign runs without its LIA (NFR-3)
-    {"trg_campaigns_lia_insert", "trg_campaigns_lia_update"}
+    {"trg_campaigns_lia_insert", "trg_campaigns_lia_update", "trg_campaigns_pair_frozen"}
 )
-VARIANTS_TRIGGERS = frozenset({"trg_variants_at_most_two"})  # Story 4.2: at most 2 Variants
+VARIANTS_TRIGGERS = frozenset(  # Story 4.2: at most 2 Variants; 11.8: active ones, retire final
+    {"trg_variants_at_most_two", "trg_variants_retired_final", "trg_variants_enrolled_frozen"}
+)
 EVIDENCE_TRIGGERS = frozenset(  # Story 2.9: Evidence is immutable
     {"trg_evidence_no_delete", "trg_evidence_immutable"}
 )
@@ -813,19 +815,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0057_next"}], None),
-        ([{"revision": "0057-next"}], "the chain does not load"),
-        ([{"revision": "0057_Next"}], "the id does not match"),
+        ([{"revision": "0058_next"}], None),
+        ([{"revision": "0058-next"}], "the chain does not load"),
+        ([{"revision": "0058_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0058_next"}], "the id starts 0058, but it is revision 57"),
-        ([{"revision": "0057_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0057_next", "file": "0057_other"}], "the id is not its file name"),
-        ([{"revision": "0057_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0057_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0057_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0057_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0059_next"}], "the id starts 0059, but it is revision 58"),
+        ([{"revision": "0058_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0058_next", "file": "0058_other"}], "the id is not its file name"),
+        ([{"revision": "0058_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0058_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0058_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0058_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0057_a"}, {"revision": "0058_b", "down": HEAD}],
+            [{"revision": "0058_a"}, {"revision": "0059_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],

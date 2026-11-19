@@ -3,8 +3,8 @@ probe proving the check catches a violation.
 
 - **One writer of the Offers and Campaigns.** An AST scan of every module under ``nextron/``
   finds the ``offers`` repository's ``insert`` and ``update``, and the ``campaigns`` repository's
-  ``insert``, ``update_config``, ``insert_variant``, ``update_variant``, ``set_status`` and
-  ``set_lia``, used (called or referenced, through any alias of the module: ``import ... as x``,
+  ``insert``, ``update_config``, ``insert_variant``, ``update_variant``, ``set_status``,
+  ``set_lia`` and (Story 11.8) ``update_definition`` and ``set_variant_status``, used (called or referenced, through any alias of the module: ``import ... as x``,
   a plain dotted import, ``from nextron.db.repos.setup import campaigns as x``, a relative
   import, or ``from ...campaigns import set_status as y``) only in ``nextron/app/setup/api.py``.
 - **One writer of a Campaign's status.** ``set_status`` is used only inside ``_move`` of
@@ -40,7 +40,16 @@ REPO_PACKAGE = "nextron.db.repos.setup"
 WRITERS = {
     "offers": frozenset({"insert", "update"}),
     "campaigns": frozenset(
-        {"insert", "update_config", "insert_variant", "update_variant", "set_status", "set_lia"}
+        {
+            "insert",
+            "update_config",
+            "insert_variant",
+            "update_variant",
+            "set_status",
+            "set_lia",
+            "update_definition",  # Story 11.8
+            "set_variant_status",
+        }
     ),
 }
 ALLOWED_WRITER = "app/setup/api.py"
