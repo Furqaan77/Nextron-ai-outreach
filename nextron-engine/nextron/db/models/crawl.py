@@ -48,6 +48,11 @@ postings listed and the hiring Events created by the run's extraction), ``greenh
 ``ashby_events`` (per board source, by ``check_job_boards``) and ``board_errors`` (the boards it
 couldn't read).
 
+``crawl_runs.mode`` (Story 8.7, migration ``0062_8_7_crawl_run_mode``; ``ck_crawl_runs_mode``:
+one of ``nextron.domain.crawl.CrawlMode``, NOT NULL, server default ``initial``, so every run
+stored before it is ``initial``): why the run was made. A ``recheck_jobs`` run fetched no page: it
+holds only the ATS board counts of a scheduled hiring check.
+
 ``page_contact_methods`` (Story 2.6, migration ``0027_2_6_contact_methods``): one row per page
 and contact method detected on it, by signature and source
 (``uq_page_contact_methods_page_id_method_signature_source``): ``page_id``
@@ -75,11 +80,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
-from nextron.domain.crawl import LINK_TAGS, CrawlOutcome, PageKind
+from nextron.domain.crawl import LINK_TAGS, CrawlMode, CrawlOutcome, PageKind
 from nextron.domain.postings import MAX_EXCERPT, MAX_TITLE, PostingSource, PostingStatus
 from nextron.domain.widgets import MAX_MATCHED, ContactMethod, MatchSource
 
@@ -90,6 +96,7 @@ ERROR_CODE_LENGTH: Final = 64  # nextron.domain.errors.CODE_PATTERN
 KIND_LENGTH: Final = 16
 HASH_LENGTH: Final = 64
 TAG_LENGTH: Final = 8
+MODE_LENGTH: Final = 16
 
 OUTCOME_CHECK: Final = "outcome IN ({})".format(
     ",".join(f"'{outcome}'" for outcome in CrawlOutcome)
@@ -97,6 +104,7 @@ OUTCOME_CHECK: Final = "outcome IN ({})".format(
 COUNTS_CHECK: Final = (
     "pages_fetched >= 0 AND pages_skipped_robots >= 0 AND renders >= 0 AND errors >= 0"
 )
+MODE_CHECK: Final = "mode IN ({})".format(",".join(f"'{mode}'" for mode in CrawlMode))
 KIND_CHECK: Final = "kind IN ({})".format(",".join(f"'{kind}'" for kind in PageKind))
 TAG_CHECK: Final = "tag IN ({})".format(",".join(f"'{tag}'" for tag in LINK_TAGS))
 METHOD_LENGTH: Final = 16
@@ -133,6 +141,7 @@ class CrawlRunRecord(Base):
         Index("ix_crawl_runs_lead_id", "lead_id"),
         CheckConstraint(OUTCOME_CHECK, name="outcome"),
         CheckConstraint(COUNTS_CHECK, name="counts"),
+        CheckConstraint(MODE_CHECK, name="mode"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -157,6 +166,10 @@ class CrawlRunRecord(Base):
     ashby_postings: Mapped[int | None] = mapped_column(Integer)
     ashby_events: Mapped[int | None] = mapped_column(Integer)
     board_errors: Mapped[int | None] = mapped_column(Integer)
+    # Story 8.7: why the run was made
+    mode: Mapped[str] = mapped_column(
+        String(MODE_LENGTH), server_default=text(f"'{CrawlMode.INITIAL}'")
+    )
 
 
 class CrawledPageRecord(Base):

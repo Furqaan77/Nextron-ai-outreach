@@ -345,8 +345,9 @@ def test_guarded_health_page_and_second_instance(
     [scheduler_started] = [line for line in lines if line["event"] == "scheduler_started"]
     assert (scheduler_started["logger"], scheduler_started["triggers"]) == (
         "nextron.jobs.scheduler",
-        8,  # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords,
-        # check_domains, recompute_tiers and poll_unsubscribes (Story 3.11)
+        9,  # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords,
+        # check_domains, recompute_tiers, poll_unsubscribes (Story 3.11) and recheck_leads
+        # (Story 8.7)
     )
     # poll_unsubscribes fires at start too; with no Worker host set it makes no request
     skipped = wait_for_log_line(data_dir, "nextron.app.compliance.unsub_poll", "unsub_poll_skipped")
@@ -369,7 +370,7 @@ def test_guarded_health_page_and_second_instance(
     heartbeat = data_dir / "heartbeat"
     assert heartbeat.is_file()
     assert heartbeat.stat().st_mtime >= first_beat.timestamp() - 1
-    assert HEAD == "0061_8_10_discovery_topup"
+    assert HEAD == "0062_8_7_crawl_run_mode"
     # purge_page_text fires at scheduler start (Story 2.5): its tick was enqueued and ran
     purged = wait_for_log_line(data_dir, "nextron.app.research.api", "page_text_purged")
     [purge] = [line for line in purged if line["event"] == "page_text_purged"]

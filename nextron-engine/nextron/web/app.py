@@ -2917,6 +2917,8 @@ def create_app(
             score=score,
             score_segment=scored_segment(found.segment_id, score),
             drafts=lead_drafts(found.id),
+            history=research_queries.evidence_history(found.id),  # Story 8.7
+            last_recheck=research_queries.last_recheck(found.id),
         )
         return page(
             request,

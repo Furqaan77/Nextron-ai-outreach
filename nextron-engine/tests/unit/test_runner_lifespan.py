@@ -251,6 +251,8 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "process_signal_item",  # Story 2.16
         "check_grounding",  # Story 4.14
         "discover_registry",
+        "recheck_leads",  # Story 8.7
+        "recheck_lead",
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):
@@ -1042,8 +1044,8 @@ def test_the_lifespan_starts_the_runner_scheduler_and_heartbeat_and_shutdown_sto
     assert started.bulk_threads == 1  # type: ignore[attr-defined]
     [scheduled] = [r for r in caplog.records if r.getMessage() == "scheduler_started"]
     # backup_db, restore_test, check_recovery, purge_page_text, purge_place_coords,
-    # check_domains, recompute_tiers and poll_unsubscribes
-    assert scheduled.triggers == 8  # type: ignore[attr-defined]
+    # check_domains, recompute_tiers, poll_unsubscribes and recheck_leads (Story 8.7)
+    assert scheduled.triggers == 9  # type: ignore[attr-defined]
     # the writer beat once at startup: the row, then the file
     with units.open(read_only=True):
         row = ops_queries.heartbeat()
@@ -1410,6 +1412,7 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
         "poll_unsubscribes",
         "purge_page_text",
         "purge_place_coords",
+        "recheck_leads",
         "recompute_tiers",
         "restore_test",
     ]
@@ -1430,6 +1433,7 @@ def test_the_scheduler_registers_the_backup_db_cron_trigger(
                 "check_recovery",
                 "purge_page_text",
                 "purge_place_coords",
+                "recheck_leads",
                 "recompute_tiers",
                 "poll_unsubscribes",
             }

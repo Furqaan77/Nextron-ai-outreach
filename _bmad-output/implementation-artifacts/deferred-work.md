@@ -520,3 +520,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-8-10-top-up-discovery-each-weekday-within-quotas.md`
   summary: Remember how far a scheduled Places or Companies House pair got when its run ended `paced` or `target_reached`, so the rotation doesn't search the same first pair from page 1 every weekday.
   evidence: Story 8.10 review pass 1 (blind #3, low; rejected only because Decision 6 counts only `finished` runs). With a regularly exhausted allowance or target, one pair can monopolise the rotation.
+- source_spec: `spec-8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid.md`
+  summary: Subscribe `drafting.flag_stale` (with `domain.grounding.is_stale`) to `EvidenceChanged` so a `ready` Draft citing superseded or retracted Evidence is flagged `stale` in the same transaction and shows the queue badge; an `approved` Draft stays approved.
+  evidence: Story 8.7 overnight decision 1. 8.7 publishes `EvidenceChanged(lead_id, evidence_id)` on every re-check supersede or retract, but `drafting.flag_stale`, `domain.grounding.is_stale` and the queue are owned by Stories 4.20 and 5.1, not built yet. Build the subscriber there and add 8.7's re-check scenario to its tests.
+- source_spec: `spec-8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid.md`
+  summary: Subscribe `approval.return_event_expired` to `EventClosed` so an approved Step 1 citing a posting closed by a re-check returns to the queue flagged "Event expired".
+  evidence: Story 8.7 overnight decision 1. The `RETURN_EVENT_EXPIRED` transition exists in `domain/draft.py:82`, but no subscriber calls it; Story 5.9 owns it. 8.7's jobs-mode re-check publishes `EventClosed` for each delisted posting.
+- source_spec: `spec-8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid.md`
+  summary: Make a rendered (JavaScript) page's unchanged re-crawl count as unchanged. A near-empty page that Story 2.6 rendered stores the rendered text's hash; its next crawl compares the raw fetch's hash with it, so every full re-check of such a page looks changed, skips the unchanged-page confirm and sends the page to the AI again.
+  evidence: Story 8.7 implementation. `WebsiteCrawls._upsert_page` and `_apply_renders` (nextron/app/research/api.py) each compare against the hash the other wrote. Keep the raw fetch's hash in its own column (or compare the render with the previous rendered hash) so an unchanged JavaScript page costs no AI call either.

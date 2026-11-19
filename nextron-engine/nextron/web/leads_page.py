@@ -215,6 +215,16 @@ is "Signal Inbox (manual)") in its Source cell, before the source link.
 Every Lead, Contact, Provenance, Signal and Evidence text renders through ``|plain`` or
 ``safe_link`` inside an element carrying ``hx-disable``.
 
+**Re-checks (Story 8.7).** ``lead_context(..., history=(), last_recheck=None)`` also takes the
+Lead's whole Evidence history (``queries.research.evidence_history``) and its last scheduled
+re-check run (``queries.research.last_recheck``). The header shows "Last re-check:
+<YYYY-MM-DD>" (``recheck_text``), or "Last re-check: never". Below the live Evidence table, each
+superseded row of the history (``superseded_rows``, oldest first) is listed with
+``id="evidence-<id>"``, labeled "superseded", with its type, quote (or what was sought), source
+link and retrieval time, and "replaced by newer Evidence": a link to its replacement's
+``#evidence-<id>`` anchor when that row is on the page (a live row's, or another superseded
+row's when it was superseded in turn), plain text otherwise (a replacement later retracted).
+
 **Drafts (Story 4.12).** ``lead_context`` also takes ``drafts``: one ``DraftSource`` per Draft
 of the Lead's Enrollments (oldest Enrollment first, each by Step), which the route reads: the
 ``DraftView``, its revisions (by ``rev``), the footer snapshot its current revision was composed
@@ -262,6 +272,8 @@ from nextron.app.queries.research import (
     LeadSignalsView,
     SignalStatus,
     StoredContact,
+    StoredCrawlRun,
+    StoredEvidence,
     StoredLegalForm,
     StoredPosting,
     StoredProvenance,
@@ -973,6 +985,55 @@ class EvidenceRow:
 
 
 @dataclass(frozen=True, slots=True)
+class SupersededRow:
+    """One superseded Evidence row as the Lead page lists it (Story 8.7): its type, its quote
+    (or what was sought), its source URL, its retrieval time, its id and its replacement's, and
+    whether the replacement is rendered on the page (``linked``: its anchor exists)."""
+
+    type: str
+    quote: str | None
+    sought: str | None
+    source_url: str | None
+    retrieved: str
+    evidence_id: str
+    replacement_id: str
+    linked: bool = False
+
+
+SUPERSEDED: Final = "superseded"
+RECHECK_LINE: Final = "Last re-check: {date}"
+NEVER_RECHECKED: Final = "never"
+
+
+def superseded_rows(
+    history: Iterable[StoredEvidence], live_ids: Iterable[str] = ()
+) -> tuple[SupersededRow, ...]:
+    """The superseded rows of ``history``, in the order given; each is ``linked`` when its
+    replacement is one of them or one of ``live_ids`` (the live rows the page renders)."""
+    superseded = tuple(row for row in history if row.superseded_by is not None)
+    rendered = frozenset(live_ids) | {row.id for row in superseded}
+    return tuple(
+        SupersededRow(
+            type=EVIDENCE_TYPE_LABELS.get(row.type, row.type),
+            quote=row.quote if row.type == EvidenceType.QUOTE else None,
+            sought=None if row.type == EvidenceType.QUOTE else row.sought,
+            source_url=row.source_url,
+            retrieved=moment(row.retrieved_at),
+            evidence_id=row.id,
+            replacement_id=row.superseded_by,
+            linked=row.superseded_by in rendered,
+        )
+        for row in superseded
+        if row.superseded_by is not None  # narrows the type
+    )
+
+
+def recheck_text(started_at: datetime | None) -> str:
+    """"Last re-check: <date>" for the last re-check run's start, or "Last re-check: never"."""
+    return RECHECK_LINE.format(date=NEVER_RECHECKED if started_at is None else day(started_at))
+
+
+@dataclass(frozen=True, slots=True)
 class PostingRow:
     """One job posting as the Lead page shows it (Story 2.11)."""
 
@@ -1608,6 +1669,8 @@ def lead_context(
     score: StoredScore | None = None,
     drafts: Iterable[DraftSource] = (),
     score_segment: SegmentDef | None = None,
+    history: Iterable[StoredEvidence] = (),
+    last_recheck: StoredCrawlRun | None = None,
 ) -> dict[str, object]:
     """What ``lead.html`` renders: the header, the legal-form section for a GB Lead
     (``legal_form_view``, Story 2.12), the Signals and the live Evidence (in the order given),
@@ -1619,12 +1682,14 @@ def lead_context(
     panel (``score_context``, Story 2.15) of ``score``, labelled from ``score_segment`` (the
     Segment version the score used, Story 11.5) or, when that is ``None``, from the Segment's
     current definition, and the Drafts (Story 4.12), one ``DraftRow`` per ``DraftSource``, in
-    the order given."""
+    the order given; Story 8.7's superseded Evidence of ``history`` and the "Last re-check" line
+    of ``last_recheck``."""
     found = tuple(contacts)
     stored_segments = tuple(segments)
     names = {contact.id: contact.name or contact.email or NO_VALUE for contact in found}
     legal_form_ids = _legal_form_ids(legal_form)
     seeded = _segment_of(lead.segment_id, stored_segments)
+    evidence = tuple(evidence_row(row, names, legal_form_ids) for row in signals.evidence)
     return {
         **score_context(
             lead.id,
@@ -1636,7 +1701,10 @@ def lead_context(
         "lead": lead_header(lead, stage, segment_names(stored_segments), signals.hq_tz),
         "legal_form": legal_form_view(lead, legal_form, signals.evidence),
         "signals": tuple(signal_row(status) for status in signals.signals),
-        "evidence": tuple(evidence_row(row, names, legal_form_ids) for row in signals.evidence),
+        "evidence": evidence,
+        "superseded": superseded_rows(history, (row.evidence_id for row in evidence)),
+        "superseded_label": SUPERSEDED,
+        "last_recheck": recheck_text(None if last_recheck is None else last_recheck.started_at),
         "postings": tuple(posting_row(posting) for posting in postings),
         "drafts": tuple(draft_row(source) for source in drafts),
         **contacts_context(

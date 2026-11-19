@@ -3,6 +3,8 @@
 Import rule: ``nextron.domain`` and ``nextron.db.repos.jobqueue`` only.
 
 - ``job(job_id)``: the ``JobRow`` of the job (every column of its ``jobs`` row), or ``None``;
+- ``has_live_job(job_type, scope)`` (Story 8.7): whether a ``queued`` or ``running`` job of
+  that type has that scope, under any discriminator (a deferred job is ``queued`` again);
 - ``dead_jobs()``: the ``JobRow`` of every ``dead`` job, oldest change first (the ``ops``
   sweep raises a ``job_dead`` alert for each one not yet alerted);
 - ``last_successes()``: each job type's last success (its latest ``done`` change), by type, as
@@ -35,6 +37,11 @@ LAST_ERROR_LEAD: Final = "Last error: "
 def job(job_id: str) -> JobRow | None:
     """The job ``job_id``, or ``None``."""
     return jobs_repo.get(job_id)
+
+
+def has_live_job(job_type: str, scope: str) -> bool:
+    """Whether a live job of ``job_type`` has scope ``scope``, under any discriminator."""
+    return jobs_repo.live_in_scope(job_type, scope)
 
 
 def dead_jobs() -> tuple[JobRow, ...]:

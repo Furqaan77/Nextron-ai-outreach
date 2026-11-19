@@ -584,6 +584,9 @@ def test_the_engine_section_shows_the_empty_sink_allowlist(
         "backup_rotation_days",
         "backup_offpc_dir",
         "crawl_max_pages",
+        "recheck_full_days",  # Story 8.7
+        "recheck_jobs_days",
+        "recheck_daily_limit",
         "ats_hosts",
         "places_discovery_locations",
         "lead_score_fit_weight",

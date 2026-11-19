@@ -148,8 +148,8 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
-            "quota_prospeo_credits, registry_max_pages_per_run, sender_name, sender_signature, "
-            "sender_timezone, "
+            "quota_prospeo_credits, recheck_daily_limit, recheck_full_days, recheck_jobs_days, "
+            "registry_max_pages_per_run, sender_name, sender_signature, sender_timezone, "
             "sink_allowlist, total_daily_ceiling, unsub_active_kid, unsub_worker_host, "
             "us_solicitation_label"
         ),

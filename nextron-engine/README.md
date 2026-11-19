@@ -3514,6 +3514,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0054_2_16_signal_inbox` | `signal_inbox_items` (one item pasted into the Signal Inbox: `url`, stored as a source only and never fetched, `text`, `author`, `company`; status, flag-reason and processed checks; a foreign key to `leads` with no cascade, `ix_signal_inbox_items_lead_id` and `ix_signal_inbox_items_status_submitted_at`; the accepted parse; the pasted text, author, company, parsed author and quote are PII class `redact`) (see [The Signal Inbox](#the-signal-inbox)) | `discovery` |
 | `0060_8_4_registry_discovery` | rebuilds `discovery_runs` (`ck_discovery_runs_source` also `companies_house`; `location` nullable with `ck_discovery_runs_location`; new count `inactive`), adds `leads.website_lookup_at`, rebuilds `provenance_records` (`ck_provenance_records_source_kind` also `registry`) and re-creates its two erasure triggers (see [Companies House discovery](#companies-house-discovery)) | `discovery`, `research` |
 | `0061_8_10_discovery_topup` | rebuilds `discovery_runs` (new nullable `scheduled_for` and `ready_pool`; `ck_discovery_runs_status` also `target_reached`, `paced` and `pool_sufficient`; `ck_discovery_runs_location` relaxed for `pool_sufficient` rows; new `ck_discovery_runs_scheduled_for` and `ck_discovery_runs_ready_pool`) (see [Weekday discovery top-up (Story 8.10)](#weekday-discovery-top-up-story-810)) | `discovery` |
+| `0062_8_7_crawl_run_mode` | rebuilds `crawl_runs` (from its exact table, every row, check, foreign key and index kept) to add `mode` (`initial`, `recheck_full` or `recheck_jobs`, default `initial`) with `ck_crawl_runs_mode` (see [Scheduled re-checks](#scheduled-re-checks)) | `research` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -6200,6 +6201,46 @@ run. "Today" and weekdays follow the Sender time zone.
 requests today: n of allowance allowed" and the Pool sufficient lines; the health panel shows
 the first two under Last successful runs, next to the Discovery group's `discover_places` and
 `discover_registry`. Manual runs keep their old behaviour: no rotation, allowance or target.
+## Scheduled re-checks
+
+Leads outside a Sequence are **re-checked on a schedule** (FR-11, AD-7, AD-10, AD-16; Story 8.7),
+so their Evidence is re-confirmed or superseded and new Events reach selection. The rules are in
+`nextron/domain/recheck.py` (pure); the service is `nextron/app/research/recheck.py`
+(`Rechecks`).
+
+**The daily tick** (`recheck_leads`: bulk only, priority 20, group Re-check; fired every 24 hours
+and at every start) picks the due Leads. A Lead is considered when it has a website, isn't
+merged, isn't Lost, Disqualified or Not Now, has no active or paused Enrollment, its domain isn't
+suppressed (`assert_contactable(NewLeadSubject(domain), email, discovery)`), and its Primary
+Contact (when it has one) is eligible or fails only on `recontact_not_allowed`. It is due a
+**full** re-check when its last full crawl is at least `recheck_full_days` (default 30, 1 to
+3,650) old, or it has none; otherwise a **jobs** re-check when its last hiring check is at least
+`recheck_jobs_days` (default 7, 1 to 3,650) old, or it has none. Due Leads go oldest first (by
+their last crawl run of any mode; never crawled first), up to `recheck_daily_limit` (default 40,
+at most 1,000). A Lead that already has a live (queued, deferred or running) `recheck_lead` job
+of any date, or a live `enrich_lead` job (its first crawl is still to come), isn't picked. Each gets one
+`recheck_lead` job (bulk only, priority 30, group Re-check), keyed `recheck_lead:<lead>:<local
+date in sender_timezone>`, payload `{v, lead_id, mode}`, concurrency key `domain:<website>`.
+
+**The job** checks the AI budget first (blockable: at 100% it is deferred and makes no crawl,
+board or AI call) and re-checks the Lead's eligibility (a Lead that stopped qualifying logs
+`recheck_skipped`). A **full** re-check runs the Epic 2 crawl inline (`crawl_runs.mode =
+recheck_full`): a page whose text hash is unchanged confirms its live website Evidence (only
+`last_confirmed_at` moves; Signal Inbox, CSV and other sources aren't touched), the extraction sends only changed pages to the AI (none: no AI call),
+a changed observation inserts new Evidence and supersedes the old row, a vanished quote is
+retracted, and the chain continues through job boards, legal form, Primary Contact and scoring. A
+**jobs** re-check stores a `recheck_jobs` run (no pages; a retry after a deferral or failure
+reuses the run whose boards weren't checked yet, and such a run counts for neither the order nor
+"Last re-check") and checks the Lead's ATS boards on it:
+postings no longer listed close (`EventClosed`), then legal form, Primary Contact and scoring.
+`recheck_jobs` runs never count as the Lead's latest crawl (its ATS links and extraction keep
+reading the last real crawl).
+
+Evidence is never edited: re-checks only insert, supersede, retract or confirm. When a re-score
+or the daily re-tiering changes a Lead's Tier, an `events` row records it (`tier_b` to `tier_a`,
+cause `lead_rescored` or `lead_retiered`). The Lead page shows "Last re-check: <date>" (or
+"never") and lists superseded Evidence, labeled "superseded", each linked to its replacement
+when the replacement is shown on the page (plain text when it was later retracted).
 
 ## Engine health
 

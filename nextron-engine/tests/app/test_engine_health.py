@@ -357,7 +357,14 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("recompute_tiers", None),
             ),
         ),
-        GroupRuns(JobGroup.RECHECK, (LastRun("recheck_event", None),)),  # Story 2.11
+        GroupRuns(
+            JobGroup.RECHECK,
+            (
+                LastRun("recheck_event", None),  # Story 2.11
+                LastRun("recheck_leads", None),  # Story 8.7
+                LastRun("recheck_lead", None),
+            ),
+        ),
         GroupRuns(JobGroup.SENDING, (LastRun("check_domains", None),)),  # Story 6.5
         GroupRuns(JobGroup.UNSUBSCRIBE_POLL, (LastRun("poll_unsubscribes", None),)),  # 3.11
         GroupRuns(

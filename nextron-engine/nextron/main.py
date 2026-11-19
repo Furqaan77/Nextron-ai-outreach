@@ -259,12 +259,18 @@ left out its handler raising a ``RuntimeError``, and Story 4.14's ``check_ground
 requests of 300 s each), retry limit 3, ``handlers.check_grounding(grounding)``, ``other``;
 never budget-gated) after it, and Story 8.4's ``discover_registry`` (bulk only, priority 30,
 ``max_runtime`` 1 hour, retry limit 2, ``handlers.discover_registry(registry_discovery)``,
-``discovery``) last. ``SignalInbox(clock, meter, llm, discovery, research,
+``discovery``) after it, then Story 8.7's ``recheck_leads`` (the daily tick: bulk only,
+priority 20, 10 minutes, retry limit 2, ``handlers.recheck_leads(rechecks)``, ``recheck``) and
+``recheck_lead`` (bulk only, priority 30, 20 minutes, retry limit 3
+(``handlers.RECHECK_LEAD_RETRIES``), ``handlers.recheck_lead(rechecks)``, ``recheck``; budget
+class blockable) last. ``SignalInbox(clock, meter, llm, discovery, research,
 queue)`` (``nextron.app.discovery.signal_inbox``) runs those jobs, reached through
 ``signal_inbox=lambda: signal_inbox``, and the dashboard gets it (``create_app(...,
-signal_inbox=...)``) for the Signal Inbox page. ``domain_checks``, ``unsubscribes``,
-``place_discovery``, ``grounding`` and ``registry_discovery`` are optional services: each defaults
-to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
+signal_inbox=...)``) for the Signal Inbox page. ``Rechecks(clock, meter, crawls, job_boards,
+queue, compliance)`` (``nextron.app.research.recheck``) runs the re-check jobs, reached through
+``rechecks=lambda: rechecks``, and is kept on ``app.state.rechecks``. ``domain_checks``,
+``unsubscribes``, ``place_discovery``, ``grounding``, ``registry_discovery`` and ``rechecks`` are
+optional services: each defaults to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
 dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
@@ -419,7 +425,10 @@ at_startup=True)``: the PC is not on at fixed times, so it also runs at every st
 fallback=DailyRun(DOMAIN_CHECK_TIME, "UTC"))``, then ``recompute_tiers`` (Story 2.15),
 ``Every(1 day, at_startup=True)``, like ``purge_page_text``, then ``poll_unsubscribes`` (Story
 3.11), an ``Every(unsub_poll_period, at_startup=True)``: ``build_app`` passes
-``poll_period(config.env)``, 5 minutes in ``prod`` and 30 elsewhere.
+``poll_period(config.env)``, 5 minutes in ``prod`` and 30 elsewhere, then ``recheck_leads``
+(Story 8.7), ``Every(RECHECK_LEADS_PERIOD, at_startup=True)`` (24 hours), like
+``purge_place_coords``: its local-date job keys make a second tick the same day a no-op while
+the day's jobs are live.
 ``build_app``
 builds one ``Scheduler(units, queue, triggers)`` (``nextron.jobs.scheduler``), an
 ``AsyncIOScheduler(timezone=UTC)`` whose firings only enqueue.
@@ -911,6 +920,7 @@ from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
+from nextron.app.research.recheck import Rechecks
 from nextron.app.research.verification import EmailVerification
 from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
@@ -1008,6 +1018,7 @@ from nextron.domain.place_discovery import DISCOVER_PLACES_JOB
 from nextron.domain.registry_discovery import DISCOVER_REGISTRY_JOB
 from nextron.domain.places import PURGE_PLACE_COORDS_JOB
 from nextron.domain.postings import CHECK_JOB_BOARDS_JOB, RECHECK_EVENT_JOB
+from nextron.domain.recheck import RECHECK_LEAD_JOB, RECHECK_LEADS_JOB, RECHECK_LEADS_PERIOD
 from nextron.domain.scoring import RECOMPUTE_TIERS_JOB, SCORE_LEAD_JOB
 from nextron.domain.signal_inbox_item import PROCESS_SIGNAL_ITEM_JOB
 from nextron.domain.playbook import (
@@ -1334,8 +1345,8 @@ def build_app(
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
     # erasure_stores, email_finding, email_verification, lead_scores, unsubscribes,
-    # place_discovery, signal_inbox, grounding_checks and registry_discovery are bound just
-    # below
+    # place_discovery, signal_inbox, grounding_checks, registry_discovery and rechecks are bound
+    # just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1360,6 +1371,7 @@ def build_app(
         signal_inbox=lambda: signal_inbox,
         grounding=lambda: grounding_checks,
         registry_discovery=lambda: registry_discovery,
+        rechecks=lambda: rechecks,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1450,6 +1462,8 @@ def build_app(
         clock, codec=TokenCodec(secrets), ledger=LedgerAppender(ledger_file, notify)
     )
     erasures = Erasures(clock, compliance, queue=queue)  # Story 3.13: on the same Compliance
+    # Story 8.7: the scheduled re-check, on the crawl, the boards and the same Compliance
+    rechecks = Rechecks(clock, meter, crawls, job_boards, queue, compliance)
     # Story 4.10: today's capacity and the picks, on the same Compliance; the daily
     # recompute_tiers job also records the day's capacity through it
     selection = Selection(clock, Sequencing(clock), compliance)
@@ -1565,6 +1579,7 @@ def build_app(
     app.state.place_discovery = place_discovery  # Story 8.3
     app.state.registry_discovery = registry_discovery  # Story 8.4
     app.state.discovery_topup = discovery_topup  # Story 8.10
+    app.state.rechecks = rechecks  # Story 8.7
     return app
 
 
@@ -1638,6 +1653,12 @@ def _no_verification() -> handlers.VerifyingEmail:
     raise RuntimeError("no EmailVerification was given to build_job_types")
 
 
+def _no_rechecks() -> handlers.Rechecking:
+    """``build_job_types``' ``rechecks`` when none is given: a ``recheck_leads`` or
+    ``recheck_lead`` job fails."""
+    raise RuntimeError("no Rechecks was given to build_job_types")
+
+
 def _no_signal_inbox() -> handlers.ProcessingSignalItems:
     """``build_job_types``' ``signal_inbox`` when none is given: a ``process_signal_item`` job
     fails."""
@@ -1669,6 +1690,7 @@ def build_job_types(
     signal_inbox: Callable[[], handlers.ProcessingSignalItems] | None = None,
     grounding: Callable[[], handlers.CheckingGrounding] | None = None,
     registry_discovery: Callable[[], handlers.DiscoveringRegistry] | None = None,
+    rechecks: Callable[[], handlers.Rechecking] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``; a type the
@@ -1706,7 +1728,9 @@ def build_job_types(
     ``RuntimeError`` when a job runs), and ``grounding`` the ``drafting`` service's
     ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise),
     and ``registry_discovery`` the ``discovery`` service's ``RegistryDiscovery`` that
-    ``discover_registry`` jobs call (Story 8.4; ``None``: likewise)."""
+    ``discover_registry`` jobs call (Story 8.4; ``None``: likewise), and ``rechecks`` the
+    ``research`` service's ``Rechecks`` that ``recheck_leads`` and ``recheck_lead`` jobs call
+    (Story 8.7; left out, likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     verifying = verification if verification is not None else _no_verification
@@ -1717,6 +1741,7 @@ def build_job_types(
     registry_runs = (
         registry_discovery if registry_discovery is not None else no_registry_discovery
     )
+    rechecking = rechecks if rechecks is not None else _no_rechecks
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -2071,6 +2096,32 @@ def build_job_types(
             budget_class=BudgetClass.BLOCKABLE,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=RECHECK_LEADS_JOB,
+            default_lane=Lane.BULK,  # AD-10: supply work runs on the bulk lane
+            lanes=frozenset({Lane.BULK}),
+            priority=20,
+            max_runtime=timedelta(minutes=10),  # reads and enqueues only
+            retry_limit=2,
+            handler=handlers.recheck_leads(rechecking),
+            group=JobGroup.RECHECK,
+        )
+    )
+    job_types.register_job_type(
+        JobType(
+            name=RECHECK_LEAD_JOB,
+            default_lane=Lane.BULK,  # AD-10: re-checks run on the bulk lane, never essential
+            lanes=frozenset({Lane.BULK}),
+            priority=30,
+            # a full re-check is the enrich_lead crawl, inline: robots.txt and up to 15 pages
+            max_runtime=timedelta(minutes=20),
+            retry_limit=handlers.RECHECK_LEAD_RETRIES,  # the last attempt never fails a site
+            handler=handlers.recheck_lead(rechecking),
+            group=JobGroup.RECHECK,
+            budget_class=BudgetClass.BLOCKABLE,  # Story 8.1: supply work
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -2245,6 +2296,8 @@ def build_triggers(
     # the PC is not on at fixed times: poll at every start too, so requests made while it was
     # off land at once
     triggers.register_trigger(Trigger.POLL_UNSUBSCRIBES, Every(unsub_poll_period, at_startup=True))
+    # Story 8.7: the PC is not on at fixed times: pick the day's re-checks at every start too
+    triggers.register_trigger(Trigger.RECHECK_LEADS, Every(RECHECK_LEADS_PERIOD, at_startup=True))
     triggers.freeze()
     return triggers
 

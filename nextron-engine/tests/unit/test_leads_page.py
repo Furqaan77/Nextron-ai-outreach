@@ -34,6 +34,7 @@ from nextron.app.queries.setup import SeededSegment
 from nextron.app.research.api import Research
 from nextron.app.setup.api import Setup
 from nextron.app.setup.segment_editing import SegmentEditor
+from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import postings as postings_repo
 from nextron.db.repos.research import profile as profile_repo
 from nextron.db.repos.research import signals as signals_repo
@@ -1089,6 +1090,118 @@ def test_superseded_and_retracted_evidence_and_retracted_signals_are_not_shown(
     assert page.find("section", class_="lead-signals").text == "Signals No Signals yet."
     rows = table_rows(page.find("table", class_="evidence-table"))
     assert [row[1] for row in rows[1:]] == ["New quote."]
+
+
+def recheck_run(world: World, lead: str, started_at: datetime, mode: str) -> str:
+    """A crawl run of ``lead`` in ``mode`` (Story 8.7), started at ``started_at``."""
+    return world.transact(
+        lambda: crawl_repo.insert_run(
+            lead_id=lead,
+            site_domain="smith-law.co.uk",
+            final_domain=None,
+            started_at=started_at,
+            ended_at=started_at,
+            outcome="ok",
+            error_code=None,
+            pages_fetched=0,
+            pages_skipped_robots=0,
+            renders=0,
+            errors=0,
+            mode=mode,
+        )
+    )
+
+
+def test_the_header_shows_the_last_re_check_or_never(world: World) -> None:
+    """Story 8.7: the latest recheck_full or recheck_jobs run's date; an initial crawl isn't
+    one, nor is a recheck_jobs run whose boards weren't checked yet."""
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    recheck_run(world, lead, T - timedelta(days=40), "initial")
+
+    never = world.page(f"/leads/{lead}")
+    assert never.find("p", class_="lead-recheck").text == "Last re-check: never"
+
+    recheck_run(world, lead, T - timedelta(days=9), "recheck_full")
+    checked = recheck_run(world, lead, T - timedelta(days=2), "recheck_jobs")
+    world.transact(lambda: crawl_repo.set_posting_counts(checked, {"board_errors": 0}))
+    recheck_run(world, lead, T - timedelta(days=1), "recheck_jobs")  # boards not checked yet
+    recheck_run(world, lead, T - timedelta(days=1), "initial")
+    page = world.page(f"/leads/{lead}")
+
+    header = page.find("header", class_="lead-header")
+    assert "hx-disable" in header.attrs
+    assert header.find("p", class_="lead-recheck").text == "Last re-check: 2026-11-15"
+
+
+def test_superseded_evidence_is_labeled_and_linked_to_its_replacement(world: World) -> None:
+    """Story 8.7: each superseded row of the history, oldest first, with its anchor and a link
+    to its replacement's (a chain links each step)."""
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    nine = evidence_row(
+        world, lead, 1, quote="Smith Law has 9 lawyers.", fact="lawyers_firm_wide", number=9
+    )
+    twelve = evidence_row(
+        world, lead, 2, quote="Smith Law has 12 lawyers.", fact="lawyers_firm_wide", number=12
+    )
+    fifteen = evidence_row(
+        world, lead, 3, quote="Smith Law has 15 lawyers.", fact="lawyers_firm_wide", number=15
+    )
+    world.transact(lambda: signals_repo.supersede_evidence(nine, twelve))
+    world.transact(lambda: signals_repo.supersede_evidence(twelve, fifteen))
+
+    page = world.page(f"/leads/{lead}")
+
+    section = page.find("section", class_="lead-evidence")
+    assert "hx-disable" in section.attrs
+    live = section.find("tr", class_="evidence-row")
+    assert live.attrs["id"] == f"evidence-{fifteen}"
+    listed = section.find("ul", class_="superseded-evidence")
+    items = listed.find_all("li", class_="superseded-row")
+    assert [item.attrs["id"] for item in items] == [f"evidence-{nine}", f"evidence-{twelve}"]
+    assert [item.find("span", class_="evidence-status").text for item in items] == [
+        "superseded",
+        "superseded",
+    ]
+    assert items[0].text == (
+        "superseded Quote: Smith Law has 9 lawyers. https://smith-law.co.uk/team "
+        "(retrieved 2026-11-17 09:00 UTC) replaced by newer Evidence"
+    )
+    replaced = [
+        [a.attrs["href"] for a in item.find_all("a") if a.attrs["href"].startswith("#")]
+        for item in items
+    ]
+    assert replaced == [[f"#evidence-{twelve}"], [f"#evidence-{fifteen}"]]
+
+
+def test_a_replacement_not_on_the_page_is_named_without_a_link(world: World) -> None:
+    """Story 8.7: a replacement later retracted is neither live nor superseded, so it has no
+    anchor on the page; "replaced by newer Evidence" is then plain text."""
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    nine = evidence_row(
+        world, lead, 1, quote="Smith Law has 9 lawyers.", fact="lawyers_firm_wide", number=9
+    )
+    twelve = evidence_row(
+        world, lead, 2, quote="Smith Law has 12 lawyers.", fact="lawyers_firm_wide", number=12
+    )
+    world.transact(lambda: signals_repo.supersede_evidence(nine, twelve))
+    world.transact(lambda: signals_repo.retract_evidence(twelve, T))
+
+    page = world.page(f"/leads/{lead}")
+
+    assert page.find_all("tr", class_="evidence-row") == []
+    (item,) = page.find("ul", class_="superseded-evidence").find_all("li")
+    assert item.attrs["id"] == f"evidence-{nine}"
+    assert item.text.endswith("replaced by newer Evidence")
+    assert [a.attrs["href"] for a in item.find_all("a") if a.attrs["href"].startswith("#")] == []
+
+
+def test_a_lead_with_nothing_superseded_lists_none(world: World) -> None:
+    lead = world.lead("Smith Law", "smith-law.co.uk")
+    evidence_row(world, lead, 1, quote="Smith Law has 9 lawyers.")
+
+    page = world.page(f"/leads/{lead}")
+
+    assert page.find_all("ul", class_="superseded-evidence") == []
 
 
 def test_the_signal_and_evidence_text_is_escaped_inside_hx_disable(world: World) -> None:

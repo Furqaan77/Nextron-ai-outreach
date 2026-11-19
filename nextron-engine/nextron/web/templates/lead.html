@@ -8,9 +8,11 @@
     Contact with its live Eligibility, evaluated on this render and never stored, and its
     recorded bases, then its Market and timezone facts, its Provenance Records and its erase link
     (Story 3.13), or, for an erased Contact, its tombstone line only), then the Job postings
-    section (Story 2.11), then the Data subject requests section (Story 3.15): one "Export data
-    (JSON)" form per Contact, outside any hx-disable so HTMX posts it, then the Drafts section
-    (lead_drafts.html, Story 4.12).
+    section (Story 2.11), with, after the live Evidence, the superseded Evidence (Story 8.7: each
+    labeled "superseded" and linked to its replacement's #evidence-<id> when that row is shown)
+    and, in the header, the "Last re-check" line, then the Data subject requests section (Story
+    3.15): one "Export data (JSON)" form per Contact, outside any hx-disable so HTMX posts it,
+    then the Drafts section (lead_drafts.html, Story 4.12).
     Every Lead, Signal, Evidence, Contact and Provenance text is imported, crawled or extracted:
     it renders only through |plain or safe_link, inside an element carrying hx-disable. The
     legal-form, Signals, Evidence and Job postings sections hold no HTMX action. -#}
@@ -33,6 +35,9 @@
 <dt>Created</dt>
 <dd>{{ lead.created }}</dd>
 </dl>
+{%- if last_recheck %}
+<p class="lead-recheck">{{ last_recheck }}</p>
+{%- endif %}
 </header>
 {% include "lead_tabs.html" %}
 {% include "lead_score.html" %}
@@ -77,6 +82,16 @@
 {%- endfor %}
 </tbody>
 </table>
+{%- endif %}
+{%- if superseded %}
+<h3 id="superseded-heading">Superseded Evidence</h3>
+<ul class="superseded-evidence" aria-labelledby="superseded-heading">
+{%- for row in superseded %}
+<li class="superseded-row" id="evidence-{{ row.evidence_id }}"><span class="evidence-status">{{ superseded_label }}</span> {{ row.type|plain }}:
+{%- if row.quote %} <q>{{ row.quote|plain }}</q>{% elif row.sought %} {{ row.sought|plain }}{% endif %}
+{%- if row.source_url %} {{ safe_link(row.source_url) }}{% endif %} (retrieved {{ row.retrieved }}) {% if row.linked %}<a href="#evidence-{{ row.replacement_id }}">replaced by newer Evidence</a>{% else %}replaced by newer Evidence{% endif %}</li>
+{%- endfor %}
+</ul>
 {%- endif %}
 </section>
 {% include "lead_contacts.html" %}

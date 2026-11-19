@@ -536,6 +536,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "ashby_postings": PiiClass.NONE,
         "ashby_events": PiiClass.NONE,
         "board_errors": PiiClass.NONE,
+        "mode": PiiClass.NONE,  # Story 8.7: a code
     },
     "crawled_pages": {
         "id": PiiClass.NONE,

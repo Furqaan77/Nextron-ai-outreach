@@ -27,7 +27,8 @@ press, blog, insights). A non-``str`` argument raises ``TypeError``.
 
 **Outcomes.** A crawl run ends as one ``CrawlOutcome``: ``ok``, ``unreachable``,
 ``robots_disallowed`` or ``lead_merged``. ``OUTCOME_LABELS`` is how the Lead page (Story 2.4)
-names each; ``unreachable`` is "website unreachable". ``LINK_TAGS`` (``a``, ``iframe``,
+names each; ``unreachable`` is "website unreachable". A run's ``CrawlMode`` (Story 8.7) is
+``initial``, ``recheck_full`` or ``recheck_jobs``. ``LINK_TAGS`` (``a``, ``iframe``,
 ``script``) are the tags a page's links come from, and a crawl stores only pages whose media
 type is in ``HTML_MEDIA_TYPES`` (``text/html``, ``application/xhtml+xml``).
 
@@ -166,6 +167,16 @@ class CrawlOutcome(StrEnum):
     UNREACHABLE = "unreachable"
     ROBOTS_DISALLOWED = "robots_disallowed"
     LEAD_MERGED = "lead_merged"
+
+
+class CrawlMode(StrEnum):
+    """Why a crawl run was made (Story 8.7): a Lead's first crawl or any crawl outside the
+    re-check (``initial``), a scheduled full re-check (``recheck_full``), or a scheduled check of
+    its ATS boards alone (``recheck_jobs``, a run that fetched no page)."""
+
+    INITIAL = "initial"
+    RECHECK_FULL = "recheck_full"
+    RECHECK_JOBS = "recheck_jobs"
 
 
 OUTCOME_LABELS: Final[Mapping[CrawlOutcome, str]] = MappingProxyType(

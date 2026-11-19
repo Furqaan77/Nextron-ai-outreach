@@ -530,6 +530,9 @@ def test_the_declared_keys_in_order() -> None:
         "privacy_notice_url",
         "us_solicitation_label",
         "crawl_max_pages",
+        "recheck_full_days",  # Story 8.7
+        "recheck_jobs_days",
+        "recheck_daily_limit",
         "ats_hosts",
         "places_discovery_locations",
         "unsub_active_kid",
@@ -570,6 +573,9 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.PRIVACY_NOTICE_URL),
         setting(Key.US_SOLICITATION_LABEL),
         setting(Key.CRAWL_MAX_PAGES),
+        setting(Key.RECHECK_FULL_DAYS),
+        setting(Key.RECHECK_JOBS_DAYS),
+        setting(Key.RECHECK_DAILY_LIMIT),
         setting(Key.ATS_HOSTS),
         setting(Key.PLACES_DISCOVERY_LOCATIONS),
         setting(Key.UNSUB_ACTIVE_KID),
@@ -607,6 +613,17 @@ def test_call_outcome_prompt_delay_is_at_most_7_days() -> None:
     with pytest.raises(InvalidSettingValue) as raised:
         parse(found, "P8D")
     assert (raised.value.rule, raised.value.reason) == ("maximum", "must be at most 7 days")
+
+
+@pytest.mark.parametrize("key", [Key.RECHECK_FULL_DAYS, Key.RECHECK_JOBS_DAYS])
+def test_the_re_check_day_counts_are_1_to_3650(key: Key) -> None:
+    """Story 8.7: a huge day count would overflow ``now - timedelta(days=...)`` on every tick."""
+    found = setting(key)
+
+    assert parse(found, "1") == 1 and parse(found, "3650") == 3650
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(found, "3651")
+    assert (raised.value.rule, raised.value.reason) == ("maximum", "must be at most 3650")
 
 
 # Row: Setting (alert_chat_id) -------------------------------------------------------------------
@@ -1363,8 +1380,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
-            "quota_prospeo_credits, registry_max_pages_per_run, sender_name, sender_signature, "
-            "sender_timezone, "
+            "quota_prospeo_credits, recheck_daily_limit, recheck_full_days, recheck_jobs_days, "
+            "registry_max_pages_per_run, sender_name, sender_signature, sender_timezone, "
             "sink_allowlist, total_daily_ceiling, unsub_active_kid, unsub_worker_host, "
             "us_solicitation_label"
         ),

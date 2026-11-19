@@ -115,6 +115,7 @@ ESSENTIAL_SAMPLES: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType(
         "recompute_tiers": {"v": 1},
         "poll_unsubscribes": {"v": 1},  # Story 3.11
         "check_grounding": {"v": 1, "draft_id": DRAFT, "rev": 1},  # Story 4.14
+        "recheck_leads": {"v": 1},  # Story 8.7: the daily tick only reads and enqueues
     }
 )
 
@@ -185,6 +186,7 @@ def test_only_supply_work_is_blockable() -> None:
         "process_signal_item",
         "find_contact_email",
         "verify_contact_email",
+        "recheck_lead",  # Story 8.7
     }
     for name in MUST_BE_ESSENTIAL & {t.name for t in types}:
         assert registry().get(name).budget_class is BudgetClass.ESSENTIAL

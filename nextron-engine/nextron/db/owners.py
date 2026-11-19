@@ -491,6 +491,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "ashby_postings",
             "ashby_events",
             "board_errors",
+            "mode",  # Story 8.7
         ),
     },
     "crawled_pages": {

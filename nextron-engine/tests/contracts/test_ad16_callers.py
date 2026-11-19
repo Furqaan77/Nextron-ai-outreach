@@ -36,6 +36,10 @@ violation.
   with no active tuple: its gate call comes before its one write (the fail-closed result), and
   ``Blocked`` makes no AI call and only records that ``fail`` (an ``UPDATE`` of
   ``grounding_results``).
+  Story 8.7's scheduled re-check (``research.recheck``: ``Rechecks.enqueue_due``, ``refresh``
+  and their ``_skip_reason``) gates each Lead's domain (``NewLeadSubject(web_domain)``, email,
+  discovery): the daily tick before it enqueues the Lead's ``recheck_lead`` job, and the job
+  before its ``recheck_jobs`` run and board check; ``Blocked`` enqueues and writes nothing.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -115,9 +119,11 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.pipeline.channel_permissions import ChannelPermissions
 from nextron.app.queries import drafting as drafting_queries
-from nextron.app.research.api import AddedContact, Research
+from nextron.app.research.api import AddedContact, Research, WebsiteCrawls
 from nextron.app.research.finding import EmailFinding
+from nextron.app.research.job_boards import JobBoards
 from nextron.app.research.people import PeopleExtractions
+from nextron.app.research.recheck import Rechecks
 from nextron.app.research.verification import EmailVerification
 from nextron.app.scoring.selection import Selection
 from nextron.app.sending.api import Sending
@@ -151,6 +157,7 @@ from nextron.domain.enrollment import EnrollmentOrigin, NewEnrollment
 from nextron.domain.markets import validate_markets
 from nextron.domain.offers import validate_offers
 from nextron.domain.place_discovery import DiscoveryLocation, RunStatus
+from nextron.domain.recheck import RecheckMode
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
 from nextron.domain.signal_inbox_item import SubmittedItem
@@ -169,9 +176,11 @@ from tests.fakes.dns import FakeDns
 from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder, ScriptedVerifier
 from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.crawler import ScriptedCrawler
+from tests.fakes.job_board import ScriptedJobBoards
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.places import ScriptedPlaces
 from tests.fakes.registry import ScriptedRegistry
+from tests.fakes.renderer import ScriptedRenderer
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 GUARDED_TABLES: Final = frozenset(
@@ -280,6 +289,12 @@ MANIFEST: Final = (
         ("app/",),
         ANY + r"(?:(?:process|ingest)_signal_item|SignalInbox\._apply_website|"
         r"Research\._inbox_author)",
+    ),
+    # Story 8.7: the daily tick and each Lead's re-check gate the Lead's domain
+    Caller(
+        "research.recheck",
+        ("app/research/",),
+        r"Rechecks\.(?:enqueue_due|refresh|_skip_reason)",
     ),
     Caller("replies.add_contact", ("app/replies/",), ANY + r"\w+", calls="add_contact"),
     Caller(
@@ -1870,8 +1885,61 @@ def _enter_website(world: World, tag: str) -> tuple[Callable[[], object], Expect
     return action, lambda: (_gate(NewLeadSubject(domain)),)
 
 
+def _rechecks() -> Rechecks:
+    """Story 8.7's ``Rechecks`` on fakes: no case here crawls a page or reads a board."""
+    clock = FrozenClock(T0)
+    meter = InMemoryUsageMeter(clock)
+    queue = queue_on(clock)
+    crawler = ScriptedCrawler()
+    crawls = WebsiteCrawls(clock, meter, crawler, ScriptedRenderer(), queue)
+    boards = JobBoards(clock, meter, ScriptedJobBoards(), crawler, queue)
+    return Rechecks(clock, meter, crawls, boards, queue, Compliance(clock))
+
+
+def _recheck_tick(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.7: the daily tick gates a never-crawled Lead's domain, then enqueues its job. The
+    Lead's first ``enrich_lead`` job is marked done: a live one would skip the Lead first."""
+    domain = f"recheck-{tag}.co.uk"
+    world.lead(domain)
+    with world.engine.begin() as connection:
+        connection.exec_driver_sql("UPDATE jobs SET status = 'done' WHERE type = 'enrich_lead'")
+    rechecks = _rechecks()
+
+    def action() -> object:  # as the job runner runs it: the use case in a unit of work
+        with world.units.open():
+            return rechecks.enqueue_due()
+
+    return action, lambda: (_gate(NewLeadSubject(domain)),)
+
+
+def _recheck_refresh(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.7: a ``jobs`` re-check gates the Lead's domain before its run and board check."""
+    domain = f"refresh-{tag}.co.uk"
+    lead_id = world.lead(domain)
+    rechecks = _rechecks()
+
+    def action() -> object:
+        with world.units.open():
+            return rechecks.refresh(lead_id, RecheckMode.JOBS, may_retry=False)
+
+    return action, lambda: (_gate(NewLeadSubject(domain)),)
+
+
+def _nothing_rechecked(world: World) -> None:
+    """A blocked re-check enqueued no job and stored no run; the allowed ones did."""
+    with world.engine.connect() as connection:
+        jobs = connection.exec_driver_sql(
+            "SELECT idempotency_key FROM jobs WHERE type = 'recheck_lead'"
+        ).all()
+        runs = connection.exec_driver_sql("SELECT mode FROM crawl_runs").all()
+    assert len(jobs) == 1 and [tuple(row) for row in runs] in ([], [("recheck_jobs",)])
+
+
 SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
     {
+        "research.recheck": Scenario(
+            (_recheck_tick, _recheck_refresh), after_blocked=_nothing_rechecked
+        ),
         "verify_contact_email": Scenario(
             (_verify,),
             # what a blocked check still writes: the Contact's result, never its class
@@ -2043,6 +2111,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "scoring.pick",  # Story 4.10
         "signal_inbox",  # Story 2.16
         "drafting.grounding_check",  # Story 4.14
+        "research.recheck",  # Story 8.7
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
