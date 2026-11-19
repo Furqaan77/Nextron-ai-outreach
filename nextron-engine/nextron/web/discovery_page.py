@@ -34,13 +34,20 @@ the refusal's message (``role="alert"``), with nothing queued.
 **Recent runs:** the newest 20 runs, each with its source ("Google Places" or "Companies
 House"), Campaign (its name, or "Unknown Campaign"), location and country ("—" and the country
 for a run without a location), status, start time and the counts seen, created, merged,
-suppressed, no own website, Market blocked and inactive.
+suppressed, no own website, Market blocked and inactive. The status is the stored one, Story
+8.10's ``target_reached``, ``paced`` and ``pool_sufficient`` included.
+
+**Today** (Story 8.10, from ``DiscoveryTopUp.today()``, shown above the forms when the app has
+one): "Leads created today: <created> of <target>", "Places requests today: <requests> of
+<allowance> allowed", and for each of today's ``pool_sufficient`` rows "<Campaign name>: Pool
+sufficient: <n> Leads ready" (``today_lines``; the health panel shows the first two).
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
 
+from nextron.app.discovery.topup import DiscoveryToday
 from nextron.app.queries.discovery import StoredRun
 from nextron.app.queries.setup import SeededCampaign
 from nextron.domain.place_discovery import DiscoveryLocation
@@ -94,6 +101,32 @@ class RunRow:
     no_website: int
     market_blocked: int
     inactive: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TodayLines:
+    """Today's scheduled-discovery lines: Leads against the target, Places requests against
+    today's allowance, and each Campaign whose pool was sufficient."""
+
+    created: str
+    places: str
+    pools: tuple[str, ...] = ()
+
+
+def today_lines(today: DiscoveryToday, names: dict[str, str] | None = None) -> TodayLines:
+    """``today`` as the page's lines; ``names`` maps Campaign ids to names."""
+    shown = names or {}
+    return TodayLines(
+        created=f"Leads created today: {today.created} of {today.target}",
+        places=(
+            f"Places requests today: {today.places_requests} of {today.places_allowance} allowed"
+        ),
+        pools=tuple(
+            f"{shown.get(line.campaign_id, UNKNOWN_CAMPAIGN)}: Pool sufficient: "
+            f"{line.ready} Leads ready"
+            for line in today.pools
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,9 +204,11 @@ def panel_context(
     chosen: SubmittedRun | None = None,
     uk_campaigns: tuple[Option, ...] = (),
     chosen_uk_campaign: str = "",
+    today: TodayLines | None = None,
 ) -> dict[str, object]:
     """What ``discovery_panel.html`` renders."""
     return {
+        "today": today,
         "campaigns": campaigns,
         "locations": locations,
         "runs": runs,

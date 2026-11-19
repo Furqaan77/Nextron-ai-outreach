@@ -6,7 +6,9 @@ calls. ``snapshot(now)`` sums the records of ``now``'s UTC calendar month the wa
 ``nextron.db.metering.UsageMeter`` does: one line per provider, operation and SKU (calls,
 failed calls, units), plus the AI call count and spend. ``day_calls(now, provider, operation)``
 (Story 3.12) counts the ``ApiCall`` records of that provider and operation on ``now``'s UTC
-day. It never touches a database.
+day. ``units_since(provider, sku, since)``
+sums the units of the API records of that provider and SKU stamped at or after ``since``. It
+never touches a database.
 """
 
 from dataclasses import dataclass
@@ -72,4 +74,14 @@ class InMemoryUsageMeter:
             and recorded.call.provider == provider
             and recorded.call.operation == operation
             and start <= recorded.at < end
+        )
+
+    def units_since(self, provider: str, sku: str | None, since: datetime) -> int:
+        return sum(
+            recorded.call.units
+            for recorded in self.records
+            if isinstance(recorded.call, ApiCall)
+            and recorded.call.provider == provider
+            and recorded.call.sku == sku
+            and recorded.at >= since
         )

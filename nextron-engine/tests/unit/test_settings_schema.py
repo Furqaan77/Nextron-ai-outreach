@@ -520,6 +520,9 @@ def test_the_declared_keys_in_order() -> None:
         "ai_budget_alert_pct",
         "places_max_pages_per_run",
         "registry_max_pages_per_run",
+        "discovery_pool_days",
+        "discovery_requery_days",
+        "discovery_daily_lead_target",
         "sender_signature",
         "legal_name",
         "postal_address",
@@ -557,6 +560,9 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.AI_BUDGET_ALERT_PCT),
         setting(Key.PLACES_MAX_PAGES_PER_RUN),
         setting(Key.REGISTRY_MAX_PAGES_PER_RUN),
+        setting(Key.DISCOVERY_POOL_DAYS),
+        setting(Key.DISCOVERY_REQUERY_DAYS),
+        setting(Key.DISCOVERY_DAILY_LEAD_TARGET),
         setting(Key.SENDER_SIGNATURE),
         setting(Key.LEGAL_NAME),
         setting(Key.POSTAL_ADDRESS),
@@ -1352,7 +1358,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "ats_hosts, away_periods, backup_offpc_dir, backup_rotation_days, backup_time, "
             "bulk_threads, "
             "call_outcome_prompt_delay, "
-            "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
+            "crawl_max_pages, discovery_daily_lead_target, discovery_pool_days, "
+            "discovery_requery_days, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "

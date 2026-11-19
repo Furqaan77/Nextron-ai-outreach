@@ -61,10 +61,15 @@ current unit of work, read-only ones included.
   then, in ``QUOTAS`` order, one ``HealthIssue(DISCOVERY_STOPPED, <quota name>, "Discovery
   stopped: <label> quota reached")`` per quota that stops ``discovery`` and is ``reached``. A
   quota or budget at 0 (``off``) is never an issue. Pure: it reads nothing.
+- ``created_since(at)`` (Story 8.10): the Leads every discovery run started at or after ``at``
+  created (the sum of ``created``, every source and status).
+- ``pool_rows(scheduled_for)`` (Story 8.10): the ``pool_sufficient`` rows for that local date,
+  oldest first, as ``StoredRun`` rows (``ready_pool`` set).
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
 from math import ceil
 from typing import Final
 
@@ -92,12 +97,14 @@ __all__ = [
     "StoredItem",
     "StoredLead",
     "StoredRun",
+    "created_since",
     "health_issues",
     "lead",
     "lead_by_web_domain",
     "lead_list",
     "export_pii",
     "merged_lead_ids",
+    "pool_rows",
     "recent_runs",
     "signal_item",
     "signal_items",
@@ -305,3 +312,13 @@ def export_pii(
                 }
             )
     return {"signal_inbox_items": tuple(found)}
+
+
+def created_since(at: datetime) -> int:
+    """The Leads every discovery run started at or after ``at`` created."""
+    return runs_repo.created_since(at)
+
+
+def pool_rows(scheduled_for: date) -> tuple[StoredRun, ...]:
+    """The ``pool_sufficient`` rows for ``scheduled_for``, oldest first."""
+    return runs_repo.pool_rows(scheduled_for)

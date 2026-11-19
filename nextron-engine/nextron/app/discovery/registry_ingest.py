@@ -84,18 +84,42 @@ at its start or the run ended ``deferred`` (the handler returns ``DEFERRED``).
    ``failed`` in a transaction of its own and is raised again (a retryable ``AdapterError`` is
    retried by the runner).
 
+**Scheduled runs (Story 8.10).** ``@use_case run_scheduled(campaign_id, scheduled_for) -> bool``
+(a ``discover_registry`` job the weekday top-up queued, ``nextron.app.discovery.topup``)
+searches one registry query and is paced:
+
+1. **Start** (a transaction). The stale-row recovery as above. Then, each logging
+   ``registry_run_skipped`` (``campaign_id``, ``reason``) and returning ``True`` with no row: an
+   unknown Campaign or Segment (``unknown``); ``scheduled_for`` that isn't the Operator's local
+   date now (``not_today``); a Campaign that can't run or whose Market isn't an enabled ``GB``
+   one (``campaign_not_active``); a Companies House run of the Campaign for ``scheduled_for``
+   that already ended ``finished``, ``paced`` or ``target_reached`` (``already_ran``).
+   **Rotation:** the pairs are the Segment's
+   ``registry_searches`` in order, location NULL, each hashed as ``registry_query_hash`` of
+   that single search (its keyword, or none, with every SIC code);
+   ``discovery_topup.next_pair`` picks one against ``runs.last_finished(companies_house,
+   segment)`` and ``discovery_requery_days``; none due logs ``discovery_nothing_due``
+   (``source``, ``campaign_id``) and returns ``True`` with no row. Then the budget pre-check as
+   above, then a ``running`` row with that pair's hash and ``scheduled_for``.
+2. **Pages** as above, for the one search, with ``daily.target_reached`` checked before each
+   page and each hit: reached ends the run ``target_reached``.
+3. **Each hit** as above, except that the website lookup's ``PlaceSearches.page`` is paced
+   (``pace=Pace(<local date>, <zone>)``): ``Paced`` leaves the lookup undecided
+   (``website_lookup_at`` NULL, ``no_website`` counted) and the run goes on.
+
 Logs hold ids, outcomes, codes and counts only: never a company or officer name, a postcode, a
 keyword, a website or anything Places returned.
 """
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Final
 
 from nextron.app.discovery.api import Discovery
+from nextron.app.discovery.daily import DISCOVERY_NOTHING_DUE, sender_timezone, target_reached
 from nextron.app.discovery.place_ingest import own_site
-from nextron.app.discovery.places import REASON_AI_BUDGET, PlaceSearches
+from nextron.app.discovery.places import REASON_AI_BUDGET, Pace, Paced, PlaceSearches
 from nextron.app.jobqueue.api import Enqueued, JobQueue
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import Research
@@ -104,6 +128,7 @@ from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.uow import current, use_case
 from nextron.domain.budget import BudgetClass, allow
 from nextron.domain.contacts import ProvenanceSource
+from nextron.domain.discovery_topup import local_date_of, next_pair
 from nextron.domain.errors import DomainError
 from nextron.domain.job import VERSION_FIELD, Lane
 from nextron.domain.leads import LeadIdentity, LeadSource
@@ -126,7 +151,7 @@ from nextron.domain.registry_discovery import (
     registry_query_hash,
     registry_searches,
 )
-from nextron.domain.segments import SegmentDef
+from nextron.domain.segments import RegistryQueries, SegmentDef
 from nextron.domain.settings_schema import Key
 from nextron.ports.clock import Clock
 from nextron.ports.crawler import CrawlerPort
@@ -154,6 +179,10 @@ WEBSITE_LOOKUP_FAILED: Final = "registry_website_lookup_failed"
 REFUSED_CAMPAIGN: Final = "campaign_not_active"
 REFUSED_NOT_UK: Final = "campaign_not_uk"
 REFUSED_NO_QUERIES: Final = "no_registry_queries"
+# Why a scheduled run was skipped, as logged (Story 8.10; else REFUSED_CAMPAIGN)
+SKIPPED_UNKNOWN: Final = "unknown"
+SKIPPED_NOT_TODAY: Final = "not_today"
+SKIPPED_ALREADY_RAN: Final = "already_ran"
 REFUSAL_MESSAGES: Final = {
     REFUSED_CAMPAIGN: "That Campaign isn't active, so it can't run discovery. Nothing was queued.",
     REFUSED_NOT_UK: (
@@ -189,13 +218,23 @@ class _Deferred(Exception):
 
 @dataclass(frozen=True, slots=True)
 class _Run:
-    """A started run: its row, Campaign, Segment and page cap."""
+    """A started run: its row, Campaign, Segment and page cap; a scheduled run's one search and
+    ``pace`` (Story 8.10), both ``None`` for a manual run."""
 
     run_id: str
     campaign_id: str
     segment_id: str
     segment: SegmentDef
     max_pages: int
+    searches: tuple[tuple[str | None, tuple[str, ...]], ...] | None = None
+    pace: Pace | None = None
+
+
+def single_search_hash(keyword: str | None, sic_codes: tuple[str, ...]) -> str:
+    """The ``query_hash`` of one registry search: ``registry_query_hash`` of that keyword (or
+    none) with its SIC codes (Story 8.10's rotation)."""
+    keywords = () if keyword is None else (keyword,)
+    return registry_query_hash(RegistryQueries(keywords=keywords, sic_codes=sic_codes))
 
 
 def _campaign_country(market_id: str) -> str | None:
@@ -288,7 +327,16 @@ class RegistryDiscovery:
     def run(self, campaign_id: str) -> bool:
         """Run one Companies House discovery; ``False`` when it ended ``deferred``. See the
         module docstring."""
-        started = self._start(campaign_id)
+        return self._run_started(self._start(campaign_id))
+
+    @use_case
+    def run_scheduled(self, campaign_id: str, scheduled_for: date) -> bool:
+        """Run one scheduled Companies House discovery (Story 8.10); ``False`` when it was
+        deferred. See the module docstring."""
+        return self._run_started(self._start_scheduled(campaign_id, scheduled_for))
+
+    def _run_started(self, started: _Run | RunStatus | None) -> bool:
+        """Steps 2 to 4 of a started run; see ``run``."""
         if started is RunStatus.DEFERRED:
             return False
         if not isinstance(started, _Run):
@@ -307,6 +355,81 @@ class RegistryDiscovery:
             raise
         self._end(started.run_id, status)
         return status is not RunStatus.DEFERRED
+
+    def _start_scheduled(self, campaign_id: str, scheduled_for: date) -> _Run | RunStatus | None:
+        """Scheduled step 1: the started run, ``RunStatus.DEFERRED`` (no row) or ``None``."""
+        now = self._clock.now()
+        with current().transaction():
+            stale = runs_repo.fail_running(SOURCE_COMPANIES_HOUSE, now)
+            if stale:
+                log.warning(REGISTRY_RUNS_RECOVERED, extra={"count": stale})
+            campaign = setup_queries.campaign(campaign_id)
+            segment = (
+                None if campaign is None else setup_queries.segment_by_id(campaign.segment_id)
+            )
+            timezone = sender_timezone()
+            today = local_date_of(now, timezone)
+            if campaign is None or segment is None:
+                skipped: str | None = SKIPPED_UNKNOWN
+            elif scheduled_for != today:
+                skipped = SKIPPED_NOT_TODAY
+            elif not _may_run(campaign.id):
+                skipped = REFUSED_CAMPAIGN
+            elif runs_repo.ran_scheduled(SOURCE_COMPANIES_HOUSE, campaign.id, scheduled_for):
+                skipped = SKIPPED_ALREADY_RAN
+            else:
+                skipped = None
+            if skipped is not None or campaign is None or segment is None:
+                log.info(
+                    REGISTRY_RUN_SKIPPED, extra={"campaign_id": campaign_id, "reason": skipped}
+                )
+                return None
+            pairs = {
+                (None, single_search_hash(keyword, codes)): (keyword, codes)
+                for keyword, codes in registry_searches(
+                    segment.definition.discovery_queries.registry
+                )
+            }
+            chosen = next_pair(
+                tuple(pairs),
+                runs_repo.last_finished(SOURCE_COMPANIES_HOUSE, segment.id),
+                now,
+                int(setup_queries.get(Key.DISCOVERY_REQUERY_DAYS)),
+            )
+            if chosen is None:
+                log.info(
+                    DISCOVERY_NOTHING_DUE,
+                    extra={"source": SOURCE_COMPANIES_HOUSE, "campaign_id": campaign.id},
+                )
+                return None
+            if not self._budget_allows():
+                log.info(
+                    REGISTRY_RUN_DEFERRED,
+                    extra={"campaign_id": campaign.id, "reason": REASON_AI_BUDGET},
+                )
+                return RunStatus.DEFERRED
+            run_id = runs_repo.insert(
+                source=SOURCE_COMPANIES_HOUSE,
+                campaign_id=campaign.id,
+                segment_id=segment.id,
+                country_code=GB,
+                location=None,
+                query_hash=chosen[1],
+                status=RunStatus.RUNNING,
+                started_at=now,
+                finished_at=None,
+                scheduled_for=scheduled_for,
+            )
+            max_pages = int(setup_queries.get(Key.REGISTRY_MAX_PAGES_PER_RUN))
+        return _Run(
+            run_id,
+            campaign.id,
+            segment.id,
+            segment.definition,
+            max_pages,
+            (pairs[chosen],),
+            Pace(today, timezone),
+        )
 
     def _start(self, campaign_id: str) -> _Run | RunStatus | None:
         """Step 1: the started run, ``RunStatus.DEFERRED`` when the budget refuses the run
@@ -350,18 +473,30 @@ class RegistryDiscovery:
         return _Run(run_id, campaign.id, segment.id, segment.definition, max_pages)
 
     def _pages(self, run: _Run) -> RunStatus:
-        """Every page of the run, each hit ingested: ``finished`` or ``stopped``; ``_Deferred``
-        when the budget refused a page."""
+        """Every page of the run, each hit ingested: ``finished`` or ``stopped`` (a scheduled
+        run also ``target_reached``, Story 8.10); ``_Deferred`` when the budget refused a
+        page."""
         fetched = 0
-        for keyword, sic_codes in registry_searches(run.segment.discovery_queries.registry):
+        searches = (
+            run.searches
+            if run.searches is not None
+            else registry_searches(run.segment.discovery_queries.registry)
+        )
+        for keyword, sic_codes in searches:
             page = 0
             while fetched < run.max_pages:
                 if not self._may_continue(run):
                     return RunStatus.STOPPED
+                if self._target_reached(run):
+                    return RunStatus.TARGET_REACHED
                 hits = self._registry.search(keyword, sic_codes, page)
                 fetched += 1
                 for hit in hits:
-                    self.ingest_hit(run.run_id, hit.number, run.segment_id, run.segment)
+                    if self._target_reached(run):
+                        return RunStatus.TARGET_REACHED
+                    self.ingest_hit(
+                        run.run_id, hit.number, run.segment_id, run.segment, pace=run.pace
+                    )
                 if len(hits) < PAGE_SIZE:
                     break
                 page += 1
@@ -379,6 +514,13 @@ class RegistryDiscovery:
         if not allowed:
             raise _Deferred
         return True
+
+    def _target_reached(self, run: _Run) -> bool:
+        """Whether a scheduled run must stop for the day's Lead target (never a manual one)."""
+        if run.pace is None:
+            return False
+        with current().transaction():
+            return target_reached(self._clock.now())
 
     def _budget_allows(self) -> bool:
         """The budget's check for the next Companies House call, inside the caller's open
@@ -401,11 +543,17 @@ class RegistryDiscovery:
     # One hit ----------------------------------------------------------------------------------
 
     def ingest_hit(
-        self, run_id: str, number: str, segment_id: str, segment: SegmentDef
+        self,
+        run_id: str,
+        number: str,
+        segment_id: str,
+        segment: SegmentDef,
+        *,
+        pace: Pace | None = None,
     ) -> Outcome | None:
         """Turn the company ``number`` a search found into a Lead, or count why not; the
         outcome (``None``: seen only). Runs inside the run's use case, with no transaction
-        open."""
+        open; ``pace`` paces a scheduled run's website lookup (Story 8.10)."""
         with current().transaction():
             if leads_repo.by_ch_number(number) is not None:
                 runs_repo.count(run_id, Outcome.MERGED)
@@ -418,7 +566,7 @@ class RegistryDiscovery:
             outcome, lead_id = self._decided(profile, segment_id, retrieved_at)
             runs_repo.count(run_id, outcome)
         if outcome is Outcome.CREATED and lead_id is not None and profile is not None:
-            website = self._website(run_id, lead_id, profile)
+            website = self._website(run_id, lead_id, profile, pace)
             officers = self._officers(lead_id, profile.number, segment)
         else:
             website, officers = None, 0
@@ -462,16 +610,20 @@ class RegistryDiscovery:
             )
         return Outcome.CREATED, upserted.lead_id
 
-    def _website(self, run_id: str, lead_id: str, profile: RegistryCompany) -> str:
+    def _website(
+        self, run_id: str, lead_id: str, profile: RegistryCompany, pace: Pace | None = None
+    ) -> str:
         """Step 3g: the created Lead's one website lookup; what it came to."""
         attached = False
         if profile.office_postcode is not None:
             try:
-                page = self._searches.page(profile.name, profile.office_postcode)
+                page = self._searches.page(profile.name, profile.office_postcode, pace=pace)
             except AdapterError as error:
                 log.warning(WEBSITE_LOOKUP_FAILED, extra={"lead_id": lead_id, "code": error.code})
                 page = None
-            if page is None:  # refused or failed: undecided, tried again by no one here
+            except Paced:  # Story 8.10: today's allowance is used; left undecided
+                page = None
+            if page is None:  # refused, paced or failed: undecided, tried again by no one here
                 with current().transaction():
                     runs_repo.add_outcome(run_id, Outcome.NO_WEBSITE)
                 return WEBSITE_UNDECIDED

@@ -80,6 +80,13 @@
 </section>
 <section aria-labelledby="health-runs-heading">
 <h2 id="health-runs-heading">Last successful runs</h2>
+{%- if discovery_today %}
+<h3>Discovery today</h3>
+<ul class="health-discovery-today">
+<li>{{ discovery_today.created }}</li>
+<li>{{ discovery_today.places }}</li>
+</ul>
+{%- endif %}
 {%- for group in groups %}
 <h3>{{ group.label }}</h3>
 <table class="health-table">

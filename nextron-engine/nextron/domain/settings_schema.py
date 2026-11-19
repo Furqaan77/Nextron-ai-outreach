@@ -106,6 +106,13 @@ Dashboard shows "Away until <end date>: no new Sequences are selected"
 **Companies House discovery** (Story 8.4, FR-6): ``registry_max_pages_per_run`` (``integer``,
 Budget and limits, 1 to 10, default 3) caps the Companies House search pages (20 companies
 each) one run fetches, across all its searches.
+
+**The weekday discovery top-up** (Story 8.10, ``nextron.domain.discovery_topup``), each an
+``integer`` in Budget and limits: ``discovery_pool_days`` (1 to 60, default 5: a Campaign whose
+ready Leads cover this many days of its capacity share gets no scheduled discovery),
+``discovery_requery_days`` (1 to 365, default 30: a scheduled search repeats a query and
+location only after this many days) and ``discovery_daily_lead_target`` (0 to 1000, default 60:
+scheduled runs stop once this many Leads were created today; 0 stops scheduled creation).
 """
 
 import re
@@ -131,6 +138,16 @@ from nextron.domain.backup import (
 )
 from nextron.domain.budget import MAX_PERCENT, NEVER_BLOCKED
 from nextron.domain.company_facts import is_link
+from nextron.domain.discovery_topup import (
+    DEFAULT_DAILY_LEAD_TARGET,
+    DEFAULT_POOL_DAYS,
+    DEFAULT_REQUERY_DAYS,
+    MAX_DAILY_LEAD_TARGET,
+    MAX_POOL_DAYS,
+    MAX_REQUERY_DAYS,
+    MIN_POOL_DAYS,
+    MIN_REQUERY_DAYS,
+)
 from nextron.domain.errors import DomainError
 from nextron.domain.fetch_policy import is_denied
 from nextron.domain.identity import IdentityError, url_host
@@ -217,6 +234,9 @@ class Key(StrEnum):
     AI_BUDGET_ALERT_PCT = "ai_budget_alert_pct"
     PLACES_MAX_PAGES_PER_RUN = "places_max_pages_per_run"  # Story 8.3
     REGISTRY_MAX_PAGES_PER_RUN = "registry_max_pages_per_run"  # Story 8.4
+    DISCOVERY_POOL_DAYS = "discovery_pool_days"  # Story 8.10
+    DISCOVERY_REQUERY_DAYS = "discovery_requery_days"  # Story 8.10
+    DISCOVERY_DAILY_LEAD_TARGET = "discovery_daily_lead_target"  # Story 8.10
     # The footer (Story 4.11, FR-23), in footer order.
     SENDER_SIGNATURE = "sender_signature"
     LEGAL_NAME = "legal_name"
@@ -1272,6 +1292,50 @@ SCHEMA: Mapping[str, Setting] = _declare(
             minimum(1, "1"),
             maximum(MAX_REGISTRY_PAGES_PER_RUN, str(MAX_REGISTRY_PAGES_PER_RUN)),
         ),
+    ),
+    # The weekday discovery top-up (Story 8.10): read when the top-up runs and before each
+    # page and candidate of a scheduled run.
+    Setting(
+        key=Key.DISCOVERY_POOL_DAYS,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Ready pool days before discovery pauses",
+        unit=(
+            f"{MIN_POOL_DAYS} to {MAX_POOL_DAYS} days. A Campaign whose ready Leads already "
+            "cover this many days of its daily capacity gets no scheduled discovery that day."
+        ),
+        default=DEFAULT_POOL_DAYS,
+        rules=(
+            minimum(MIN_POOL_DAYS, str(MIN_POOL_DAYS)),
+            maximum(MAX_POOL_DAYS, str(MAX_POOL_DAYS)),
+        ),
+    ),
+    Setting(
+        key=Key.DISCOVERY_REQUERY_DAYS,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="Days before a discovery search repeats",
+        unit=(
+            f"{MIN_REQUERY_DAYS} to {MAX_REQUERY_DAYS} days. Scheduled discovery searches a "
+            "query and location again only after this many days."
+        ),
+        default=DEFAULT_REQUERY_DAYS,
+        rules=(
+            minimum(MIN_REQUERY_DAYS, str(MIN_REQUERY_DAYS)),
+            maximum(MAX_REQUERY_DAYS, str(MAX_REQUERY_DAYS)),
+        ),
+    ),
+    Setting(
+        key=Key.DISCOVERY_DAILY_LEAD_TARGET,
+        type=SettingType.INTEGER,
+        section=Section.BUDGET_AND_LIMITS,
+        label="New Leads per day from scheduled discovery",
+        unit=(
+            f"0 to {MAX_DAILY_LEAD_TARGET}. Scheduled discovery stops for the day once this "
+            "many Leads were created today; 0 stops scheduled discovery creating Leads."
+        ),
+        default=DEFAULT_DAILY_LEAD_TARGET,
+        rules=(minimum(0, "0"), maximum(MAX_DAILY_LEAD_TARGET, str(MAX_DAILY_LEAD_TARGET))),
     ),
     # The footer (Story 4.11, FR-23, CAN-SPAM, PECR, UK GDPR Art. 14), in footer order:
     # nextron.domain.render fills each Market's footer template with these values. The four

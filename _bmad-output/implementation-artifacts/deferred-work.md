@@ -504,3 +504,19 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-8-1-keep-supply-jobs-inside-quotas-and-the-ai-budget.md`
   summary: When the main-only `find_contact_email` (Hunter) and `verify_contact_email` (Prospeo) jobs merge with Story 8.1, give their provider calls the same atomic check as Places: one process-wide lock per provider around the budget/quota check, the request and its usage record, so two bulk threads can't both pass at the quota's last credit.
   evidence: Story 8.1 decision 4. Only Places is serialised here (`nextron.app.discovery.places.PLACES_LOCK`); the Hunter and Prospeo call sites exist only on `main`. `tests/contracts/test_budget_classes.py` already expects both types `blockable` once registered.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-10-top-up-discovery-each-weekday-within-quotas.md`
+  summary: At the merge with Story 8.9, call `DiscoveryTopUp.chain(local_date, selection_status)` inside `daily_selection`'s transaction (statuses `ran`/`away` top up; `weekend`/`no_capacity` don't), so scheduled discovery actually fires.
+  evidence: Story 8.10 decision 1. `daily_selection` doesn't exist on this track; `build_app` builds `DiscoveryTopUp` (`app.state.discovery_topup`) and registers no trigger.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-10-top-up-discovery-each-weekday-within-quotas.md`
+  summary: At the merge with Stories 2.15, 4.8 and 4.10 (Tier, Enrollment, capacity on `main`), implement the `ReadyPool` protocol (`ready_leads(campaign_id)`, `capacity_share(campaign_id, local_date)`) and pass it to `DiscoveryTopUp` in `build_app`; until then a pool is never sufficient.
+  evidence: Story 8.10 decision 1. `nextron.app.discovery.topup.ReadyPool`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-10-top-up-discovery-each-weekday-within-quotas.md`
+  summary: When Story 8.6 builds `discover_aggregator` and `job_aggregator_enabled`, add the aggregator job to `DiscoveryTopUp.chain` (enabled only) with the same date key, rotation, allowance-free pacing and target.
+  evidence: Story 8.10 decision 2.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-10-top-up-discovery-each-weekday-within-quotas.md`
+  summary: Companies House website-lookup retry and officer resume stay open (the 8.4 items above); 8.10's per-keyword rotation only closes "always page 0" in part (each keyword gets its turn, but always from page 0).
+  evidence: Story 8.10 decision 7. A scheduled lookup left undecided by pacing joins the undecided ones the 8.4 retry item covers.
+- source_spec: `_bmad-output/implementation-artifacts/spec-8-10-top-up-discovery-each-weekday-within-quotas.md`
+  summary: Remember how far a scheduled Places or Companies House pair got when its run ended `paced` or `target_reached`, so the rotation doesn't search the same first pair from page 1 every weekday.
+  evidence: Story 8.10 review pass 1 (blind #3, low; rejected only because Decision 6 counts only `finished` runs). With a regularly exhausted allowance or target, one pair can monopolise the rotation.

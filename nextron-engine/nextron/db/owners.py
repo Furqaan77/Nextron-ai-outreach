@@ -402,6 +402,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "no_website",
             "market_blocked",
             "inactive",  # Story 8.4
+            "scheduled_for",  # Story 8.10
+            "ready_pool",  # Story 8.10
         ),
     },
     "domain_checks": {

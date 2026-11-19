@@ -175,7 +175,7 @@ development_status:
   8-7-re-check-leads-on-a-schedule-with-immutable-superseding-evid: backlog
   8-8-re-contact-not-now-leads-on-their-chosen-date: backlog
   8-9-select-the-day-s-new-sequences-automatically-by-tier-and-eve: backlog
-  8-10-top-up-discovery-each-weekday-within-quotas: backlog
+  8-10-top-up-discovery-each-weekday-within-quotas: review
   8-11-restart-a-completed-sequence-only-on-a-new-event-at-least-90: backlog
   8-12-delete-contacts-personal-data-after-the-retention-period: backlog
   epic-8-retrospective: optional

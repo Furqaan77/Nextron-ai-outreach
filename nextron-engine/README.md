@@ -3513,6 +3513,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0053_9_4_call_outcomes` | adds to `call_outcomes`, in place with no check, eleven nullable outcome columns: `outcome`, `qualified`, `reason` and `next_step` (Text, PII class `redact`), `next_step_on`, `audit_proposed`, `audit_price` (micro-dollars), `objections`, `price_reaction`, `recorded_at` and `recorded_by`; every stored booking stays pending | `pipeline` |
 | `0054_2_16_signal_inbox` | `signal_inbox_items` (one item pasted into the Signal Inbox: `url`, stored as a source only and never fetched, `text`, `author`, `company`; status, flag-reason and processed checks; a foreign key to `leads` with no cascade, `ix_signal_inbox_items_lead_id` and `ix_signal_inbox_items_status_submitted_at`; the accepted parse; the pasted text, author, company, parsed author and quote are PII class `redact`) (see [The Signal Inbox](#the-signal-inbox)) | `discovery` |
 | `0060_8_4_registry_discovery` | rebuilds `discovery_runs` (`ck_discovery_runs_source` also `companies_house`; `location` nullable with `ck_discovery_runs_location`; new count `inactive`), adds `leads.website_lookup_at`, rebuilds `provenance_records` (`ck_provenance_records_source_kind` also `registry`) and re-creates its two erasure triggers (see [Companies House discovery](#companies-house-discovery)) | `discovery`, `research` |
+| `0061_8_10_discovery_topup` | rebuilds `discovery_runs` (new nullable `scheduled_for` and `ready_pool`; `ck_discovery_runs_status` also `target_reached`, `paced` and `pool_sufficient`; `ck_discovery_runs_location` relaxed for `pool_sufficient` rows; new `ck_discovery_runs_scheduled_for` and `ck_discovery_runs_ready_pool`) (see [Weekday discovery top-up (Story 8.10)](#weekday-discovery-top-up-story-810)) | `discovery` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -6154,6 +6155,51 @@ another Lead already holds merges the two (the older one is kept), then the craw
 and the job is re-queued an hour later; Story 8.1) and before each search page, and a Companies
 House rate limit (HTTP 429) also ends the run `deferred`: the job is re-queued an hour later and
 the Leads already created stay.
+
+## Weekday discovery top-up (Story 8.10)
+
+**What it does.** After each weekday's automatic selection (Story 8.9's `daily_selection`, not
+built yet), the engine queues one scheduled Places discovery for each active Campaign (when its
+Segment has Places queries and a Places discovery location is set in its Market's country) and,
+for an active UK Campaign, one scheduled Companies House discovery. The jobs are keyed by date,
+so a Campaign's discovery is queued once while that day's job is waiting or running, and a
+scheduled run that finds a run of the same kind for the same Campaign and day already ended
+(`finished`, `paced` or `target_reached`) skips, so a Campaign gets at most one scheduled search
+of each kind a day. Weekends, away days that
+skip selection and days with no capacity queue nothing. Until Story 8.9 is merged nothing
+triggers the top-up, so scheduled discovery does not run yet; the "Run … discovery" forms work
+as before.
+
+**Pool.** When the engine knows a Campaign's ready Leads and its daily capacity share (wired at
+the merge with Stories 2.15, 4.8, 4.10 and 8.9), a Campaign that would get discovery but whose
+ready Leads already cover
+**Ready pool days before discovery pauses** (Budget and limits, default 5) days of its share
+gets no discovery that day. The Discovery page then shows "<Campaign>: Pool sufficient: n Leads
+ready" and the runs table a `pool_sufficient` row.
+
+**Rotation.** A scheduled run searches one pair: one of the Segment's Places queries in one
+location (or one Companies House keyword with all the SIC codes). It takes a pair it has never
+searched first, then the one searched longest ago, and skips any pair searched successfully in
+the last **Days before a discovery search repeats** (default 30). A run cut short (deferred,
+paced, target reached) doesn't count, so its pair comes back first next time. With every pair
+recent, nothing is searched that day.
+
+**Pacing.** Scheduled runs spread the free Places quota over the month: today's allowance is
+what is left of the month's Places Enterprise quota (before today) divided by the weekdays left
+in the month, today included (the month and day follow the Sender time zone). Every Places
+request today counts against it, manual runs and Companies House website lookups included.
+Once it is used, a scheduled Places run ends `paced`, and a scheduled Companies House run
+leaves the new Lead's website lookup undecided (the Lead shows under **Website needed**). The
+quota and AI-budget checks still apply.
+
+**Target.** Scheduled runs stop with `target_reached` once **New Leads per day from scheduled
+discovery** (default 60; 0 stops scheduled creation) Leads were created today by any discovery
+run. "Today" and weekdays follow the Sender time zone.
+
+**Where to look.** The Discovery page shows "Leads created today: n of target", "Places
+requests today: n of allowance allowed" and the Pool sufficient lines; the health panel shows
+the first two under Last successful runs, next to the Discovery group's `discover_places` and
+`discover_registry`. Manual runs keep their old behaviour: no rotation, allowance or target.
 
 ## Engine health
 

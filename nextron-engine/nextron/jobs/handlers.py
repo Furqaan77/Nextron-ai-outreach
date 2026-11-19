@@ -120,6 +120,10 @@ handler runs in.
   ``RegistryDiscovery``) and returns ``DEFERRED`` when it returns ``False`` (the budget refused
   the run before its row was written, or the budget or the register's rate limit deferred the
   run: Story 8.1).
+- **Scheduled discovery (Story 8.10).** A ``discover_places`` or ``discover_registry`` payload
+  holding ``scheduled_for`` (the weekday top-up's ``{v: 1, campaign_id, scheduled_for}``) must
+  hold a ``YYYY-MM-DD`` date there (else ``InvalidJob``) and calls
+  ``run_scheduled(campaign_id, <that date>)`` instead, once; ``False`` returns ``DEFERRED``.
 
 **Budget classes (Story 8.1).** Every handler that may return ``DEFERRED`` belongs to a type
 ``nextron.main.build_job_types`` registers ``blockable`` (``enrich_lead``, ``render_pages``,
@@ -138,12 +142,14 @@ A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the
 """
 
 from collections.abc import Callable
+from datetime import date
 from typing import Final, Protocol
 
 from nextron.domain.ai import Urgency
 from nextron.domain.ai_test_gate import TEST_SET_FIELD, TUPLE_ID_FIELD, set_of
 from nextron.domain.backup import JOB_KINDS, KIND_FIELD, BackupKind
 from nextron.domain.crawl import CHAIN_LANE_FIELD, LEAD_ID_FIELD, RUN_ID_FIELD
+from nextron.domain.discovery_topup import SCHEDULED_FOR_FIELD
 from nextron.domain.domain_auth import SENDING_DOMAIN_ID_FIELD
 from nextron.domain.email_checks import CheckResult
 from nextron.domain.email_finding import EmailSearchOutcome
@@ -151,7 +157,7 @@ from nextron.domain.erasure_receipt import CONTACT_ID_FIELD, EXTERNAL_STORES, ST
 from nextron.domain.grounding_check import DRAFT_ID_FIELD, REV_FIELD
 from nextron.domain.postings import SIGNAL_ID_FIELD
 from nextron.domain.ids import is_ulid
-from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job, Lane
+from nextron.domain.job import DEFERRED, Handler, HandlerResult, InvalidJob, Job, Lane, is_iso_date
 from nextron.domain.place_discovery import (
     CAMPAIGN_ID_FIELD,
     COUNTRY_CODE_FIELD,
@@ -616,8 +622,20 @@ class DiscoveringPlaces(Protocol):
 
     def run(self, campaign_id: str, location_hash: str, country_code: str) -> bool: ...
 
+    def run_scheduled(self, campaign_id: str, scheduled_for: date) -> bool: ...
+
 
 _LOWER_HEX: Final = frozenset("0123456789abcdef")
+
+
+def _scheduled_for(job: Job) -> date | None:
+    """A scheduled discovery job's date (Story 8.10), ``None`` for a manual job's payload."""
+    if SCHEDULED_FOR_FIELD not in job.payload:
+        return None
+    value = job.payload[SCHEDULED_FOR_FIELD]
+    if not (isinstance(value, str) and is_iso_date(value)):
+        raise InvalidJob(f"{job.type}: the {SCHEDULED_FOR_FIELD} field must be a YYYY-MM-DD date")
+    return date.fromisoformat(value)
 
 
 def discover_places(place_discovery: Callable[[], DiscoveringPlaces]) -> Handler:
@@ -626,6 +644,10 @@ def discover_places(place_discovery: Callable[[], DiscoveringPlaces]) -> Handler
 
     def handle_discover_places(job: Job) -> HandlerResult | None:
         campaign_id = _ulid_field(job, CAMPAIGN_ID_FIELD)
+        scheduled_for = _scheduled_for(job)
+        if scheduled_for is not None:
+            found = place_discovery().run_scheduled(campaign_id, scheduled_for)
+            return None if found else DEFERRED
         location = job.payload.get(LOCATION_FIELD)
         if not (
             isinstance(location, str)
@@ -695,6 +717,8 @@ class DiscoveringRegistry(Protocol):
 
     def run(self, campaign_id: str) -> bool: ...
 
+    def run_scheduled(self, campaign_id: str, scheduled_for: date) -> bool: ...
+
 
 def discover_registry(registry_discovery: Callable[[], DiscoveringRegistry]) -> Handler:
     """The ``discover_registry`` job's handler (Story 8.4): run the payload's Campaign's
@@ -702,6 +726,10 @@ def discover_registry(registry_discovery: Callable[[], DiscoveringRegistry]) -> 
 
     def handle_discover_registry(job: Job) -> HandlerResult | None:
         campaign_id = _ulid_field(job, CAMPAIGN_ID_FIELD)
+        scheduled_for = _scheduled_for(job)
+        if scheduled_for is not None:
+            found = registry_discovery().run_scheduled(campaign_id, scheduled_for)
+            return None if found else DEFERRED
         if not registry_discovery().run(campaign_id):
             return DEFERRED
         return None

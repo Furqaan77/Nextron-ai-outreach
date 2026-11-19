@@ -439,3 +439,38 @@ def test_the_snapshot_reads_inside_the_callers_transaction_too(
 def test_the_snapshot_needs_a_unit_of_work(units: UnitOfWorkFactory, clock: FrozenClock) -> None:
     with pytest.raises(UnitOfWorkError):
         UsageMeter(units, clock).snapshot(T)
+
+
+# units_since (Story 8.10) -----------------------------------------------------------------------
+
+
+def test_units_since_sums_one_provider_and_sku_from_since_on(
+    units: UnitOfWorkFactory, clock: FrozenClock
+) -> None:
+    meter = UsageMeter(units, clock)
+    since = T - timedelta(hours=4)
+    tiny = timedelta(microseconds=1)
+    calls: list[tuple[datetime, ApiCall]] = [
+        (since - tiny, ApiCall("places", "text_search", ok=True, sku="enterprise", count=100)),
+        (since, ApiCall("places", "text_search", ok=True, sku="enterprise", count=3)),  # at
+        (since + tiny, ApiCall("places", "text_search", ok=True, sku="enterprise", count=4)),
+        (T, ApiCall("places", "text_search", ok=False, error_code="places_x", sku="enterprise")),
+        (T, ApiCall("places", "text_search", ok=True, sku="pro", count=20)),  # another sku
+        (T, ApiCall("places", "text_search", ok=True, count=7)),  # NULL sku
+        (T, ApiCall("hunter", "find", ok=True)),  # another provider
+    ]
+    for at, call in calls:
+        record_at(meter, clock, at, call)
+
+    with units.open(read_only=True):
+        enterprise = meter.units_since("places", "enterprise", since)
+        pro = meter.units_since("places", "pro", since)
+        no_sku = meter.units_since("places", None, since)
+        earlier = meter.units_since("places", "enterprise", since - tiny)
+        later = meter.units_since("places", "enterprise", T + tiny)
+        none_at_all = meter.units_since("prospeo", None, since)
+
+    assert enterprise == 3 + 4 + 1  # the failed call still counts its unit
+    assert (pro, no_sku) == (20, 7)
+    assert earlier == 100 + 8
+    assert (later, none_at_all) == (0, 0)

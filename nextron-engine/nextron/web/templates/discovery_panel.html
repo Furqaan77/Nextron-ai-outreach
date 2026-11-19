@@ -6,6 +6,16 @@
 {%- if notice %}
 <p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
 {%- endif %}
+{%- if today %}
+<h2>Today</h2>
+<ul class="discovery-today">
+<li>{{ today.created }}</li>
+<li>{{ today.places }}</li>
+{%- for line in today.pools %}
+<li>{{ line }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
 <h2>Run Places discovery</h2>
 {%- if not campaigns %}
 <p class="discovery-empty">No Campaign is active. Activate one on the Settings page to run discovery.</p>

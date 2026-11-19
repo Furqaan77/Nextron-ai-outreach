@@ -447,6 +447,8 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "no_website": PiiClass.NONE,
         "market_blocked": PiiClass.NONE,
         "inactive": PiiClass.NONE,  # Story 8.4
+        "scheduled_for": PiiClass.NONE,  # Story 8.10: a local date
+        "ready_pool": PiiClass.NONE,  # Story 8.10: a count
     },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.

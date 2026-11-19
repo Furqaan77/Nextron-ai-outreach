@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0060_8_4_registry_discovery"
+HEAD = "0061_8_10_discovery_topup"
 
 
 @pytest.fixture
@@ -1682,7 +1682,7 @@ def test_0060_rebuilds_discovery_runs_and_provenance_and_adds_website_lookup_at(
         reader.close()
     assert runs == [(places_run, "places", "Leeds", "finished", 9, 4, 2, 1, 1, 1, 0)]
     assert integrity == [("ok",)]  # the copied row passes the new CHECKs
-    assert run_columns[-1] == "inactive"
+    assert "inactive" in run_columns  # 0040 (Story 8.10) adds two more after it
     assert "ix_discovery_runs_started_at" in run_indexes
     assert lead_columns[-1] == "website_lookup_at"
     assert leads == [(lead, "Acme Law", None)]
@@ -1756,6 +1756,145 @@ def test_0060_rebuilds_discovery_runs_and_provenance_and_adds_website_lookup_at(
         with pytest.raises(sqlite3.IntegrityError, match="tombstone"):
             writer.execute("UPDATE provenance_records SET notes = 'n' WHERE id = ?", (record,))
         writer.execute("UPDATE leads SET website_lookup_at = ? WHERE id = ?", (at, lead))
+        writer.commit()
+    finally:
+        writer.close()
+
+
+def test_0061_rebuilds_discovery_runs_for_the_weekday_top_up(tmp_path: Path) -> None:
+    """0061 (Story 8.10) keeps a Places and a Companies House run stored at 0060 (both new
+    columns NULL), allows the three new statuses, and checks ``scheduled_for``, ``ready_pool``
+    and the location of a ``pool_sufficient`` row."""
+    location = _chain_to(tmp_path, "0060_8_4_registry_discovery")
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0060_8_4_registry_discovery",
+        )
+    at = "2026-11-19T09:00:00.000000Z"
+    segment = "01JD3QZ8X5V9K2M7N4P6R8T0D0"
+    campaign = "01JD3QZ8X5V9K2M7N4P6R8T0D9"
+    market = "01JD3QZ8X5V9K2M7N4P6R8T0E3"
+    offer = "01JD3QZ8X5V9K2M7N4P6R8T0E4"
+    sequence = "01JD3QZ8X5V9K2M7N4P6R8T0E5"
+    places_run = "01JD3QZ8X5V9K2M7N4P6R8T0E2"
+    registry_run = "01JD3QZ8X5V9K2M7N4P6R8T0E6"
+    zeros = "0" * 16
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO markets (id, code, name, enabled, country_code, cctlds, cold_email_allowed, "
+        "free_webmail_blocked, default_timezone, unknown_timezone, english_variant, "
+        "footer_template, privacy_line_required, version, created_at, updated_at) VALUES "
+        f"('{market}', 'uk', 'UK', 1, 'GB', '[]', 1, 1, 'Europe/London', "
+        f"'Europe/London', 'en-GB', 'x', 1, 1, '{at}', '{at}')",
+        "INSERT INTO offers (id, key, name, ladder, version, created_at, updated_at) VALUES "
+        f"('{offer}', 'audit', 'Audit', '[]', 1, '{at}', '{at}')",
+        "INSERT INTO sequences (id, key, name, version, created_at, updated_at) VALUES "
+        f"('{sequence}', 'default', 'Default', 1, '{at}', '{at}')",
+        "INSERT INTO campaigns (id, key, name, segment_id, market_id, offer_id, sequence_id, "
+        "status, version, created_at, updated_at) VALUES "
+        f"('{campaign}', 'ops_uk', 'Ops UK', '{segment}', '{market}', '{offer}', "
+        f"'{sequence}', 'draft', 1, '{at}', '{at}')",
+        "INSERT INTO discovery_runs (id, source, campaign_id, segment_id, country_code, location, "
+        "query_hash, status, started_at, finished_at, seen, created, merged, suppressed, "
+        f"no_website, market_blocked, inactive) VALUES ('{places_run}', 'places', '{campaign}', "
+        f"'{segment}', 'GB', 'Leeds', '{zeros}', 'finished', '{at}', '{at}', 9, 4, 2, 1, 1, 1, 0)",
+        "INSERT INTO discovery_runs (id, source, campaign_id, segment_id, country_code, location, "
+        "query_hash, status, started_at, finished_at, seen, created, merged, suppressed, "
+        f"no_website, market_blocked, inactive) VALUES ('{registry_run}', 'companies_house', "
+        f"'{campaign}', '{segment}', 'GB', NULL, '{zeros}', 'deferred', '{at}', '{at}', "
+        "3, 1, 0, 0, 1, 0, 2)",
+    )
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0060_8_4_registry_discovery", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        runs = reader.execute(
+            "SELECT id, source, location, status, seen, created, inactive, scheduled_for, "
+            "ready_pool FROM discovery_runs ORDER BY id"
+        ).fetchall()
+        integrity = reader.execute("PRAGMA integrity_check").fetchall()
+        columns = [row[1] for row in reader.execute("PRAGMA table_info(discovery_runs)")]
+        indexes = [row[1] for row in reader.execute("PRAGMA index_list(discovery_runs)")]
+    finally:
+        reader.close()
+    assert runs == [
+        (places_run, "places", "Leeds", "finished", 9, 4, 0, None, None),
+        (registry_run, "companies_house", None, "deferred", 3, 1, 2, None, None),
+    ]
+    assert integrity == [("ok",)]
+    assert columns[-2:] == ["scheduled_for", "ready_pool"]
+    assert "ix_discovery_runs_started_at" in indexes
+
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA foreign_keys = OFF")  # only the CHECKs are tested
+        good = {
+            "id": "01JD3QZ8X5V9K2M7N4P6R8T0F0",
+            "source": "places",
+            "campaign_id": campaign,
+            "segment_id": segment,
+            "country_code": "GB",
+            "location": None,
+            "query_hash": zeros,
+            "status": "pool_sufficient",
+            "started_at": at,
+            "finished_at": at,
+            "seen": 0,
+            "created": 0,
+            "merged": 0,
+            "suppressed": 0,
+            "no_website": 0,
+            "market_blocked": 0,
+            "inactive": 0,
+            "scheduled_for": "2026-11-19",
+            "ready_pool": 30,
+        }
+
+        def insert(**changes: object) -> None:
+            row = {**good, **changes}
+            names = ", ".join(row)
+            marks = ", ".join("?" for _ in row)
+            writer.execute(
+                f"INSERT INTO discovery_runs ({names}) VALUES ({marks})",  # noqa: S608
+                tuple(row.values()),
+            )
+
+        bad: list[tuple[str, dict[str, object]]] = [
+            ("status", {"status": "skipped", "location": "Leeds", "ready_pool": None}),
+            ("location", {"location": "Leeds"}),  # a pool_sufficient row records no location
+            ("scheduled_for", {"scheduled_for": None}),  # a pool_sufficient row is for a date
+            ("ready_pool", {"ready_pool": None}),  # and records the pool
+            ("ready_pool", {"ready_pool": -1}),
+            # ready_pool only on pool_sufficient
+            ("ready_pool", {"status": "finished", "location": "Leeds"}),
+            ("ready_pool", {"status": "paced", "location": "Leeds", "scheduled_for": None}),
+            ("location", {"status": "paced", "ready_pool": None}),  # a Places run has a location
+            # a pool_sufficient Companies House row records no location either
+            ("location", {"source": "companies_house", "location": "Leeds"}),
+        ]
+        for number, (check, changes) in enumerate(bad):
+            with pytest.raises(sqlite3.IntegrityError, match=rf"ck_discovery_runs_{check}$"):
+                insert(id=f"01JD3QZ8X5V9K2M7N4P6R8T1{number:02d}", **changes)
+        insert()  # the pool_sufficient row is accepted
+        for number, status in enumerate(("target_reached", "paced", "finished")):
+            insert(
+                id=f"01JD3QZ8X5V9K2M7N4P6R8T2{number:02d}",
+                status=status,
+                location="Leeds",
+                ready_pool=None,
+            )
+        insert(
+            id="01JD3QZ8X5V9K2M7N4P6R8T300",
+            source="companies_house",
+            status="target_reached",
+            ready_pool=None,
+            scheduled_for=None,
+        )
         writer.commit()
     finally:
         writer.close()

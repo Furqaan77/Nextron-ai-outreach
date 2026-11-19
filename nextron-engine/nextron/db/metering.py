@@ -34,6 +34,10 @@ provider, operation and SKU (the row count, the failed count and the sum of unit
 **day_calls(now, provider, operation)** (Story 3.12) is one ``SELECT count(*)`` of the
 ``api_usage`` rows of that provider and operation in ``now``'s UTC calendar day, read the same
 way: the unsubscribe poll's KV list count.
+
+**units_since(provider, sku, since)** (Story 8.10) is the sum of ``units`` of the ``api_usage``
+rows of ``provider`` and ``sku`` (``None``: rows without one) whose ``at`` is at or after
+``since``, read the same way; 0 when there are none.
 """
 
 import contextvars
@@ -211,3 +215,14 @@ class UsageMeter:
             api.provider == provider, api.operation == operation, api.at >= start, api.at < end
         )
         return int(current().session.execute(statement).scalar_one())
+
+    def units_since(self, provider: str, sku: str | None, since: datetime) -> int:
+        """The units of ``provider``'s ``sku`` calls recorded at or after ``since``."""
+        api = ApiUsageRecord
+        same_sku = api.sku.is_(None) if sku is None else api.sku == sku
+        total = current().session.execute(
+            select(func.coalesce(func.sum(api.units), 0)).where(
+                api.provider == provider, same_sku, api.at >= since
+            )
+        ).scalar_one()
+        return int(total)
