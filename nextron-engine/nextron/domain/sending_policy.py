@@ -60,8 +60,28 @@ aware datetime) seen in that zone.
 
 The engine never runs warm-up exchanges: warm-up is done by hand or by an outside tool, and
 this module only records and reads its facts.
+
+**Story 5.11: away dates (FR-31).** The ``away_periods`` setting holds one period per line,
+``YYYY-MM-DD to YYYY-MM-DD`` (start and end, both inclusive), read as calendar days in
+``sender_timezone``. While the Operator is away, ``Sequencing.enroll`` refuses origins
+``selection`` and ``restart`` (``operator_away``); nothing else pauses.
+
+- ``AwayPeriod(start, end)``: one period of plain ``date`` values; ``end`` before ``start``
+  raises ``ValueError``, another type ``TypeError``.
+- ``away_period_dates(line) -> tuple[date, date] | None``: the two dates of a line shaped
+  ``YYYY-MM-DD to YYYY-MM-DD`` (ASCII digits, real calendar dates, spaces or tabs around
+  ``to``, the line stripped), in the order written; otherwise ``None`` (a single date
+  included).
+- ``parse_away_period(line) -> AwayPeriod | None``: that line as a period, or ``None`` when it
+  isn't shaped so or its end is before its start.
+- ``is_away(local_date, periods)``: the single test of an away day: ``local_date`` falls in
+  some period, ends included.
+- ``away_until(local_date, periods) -> date | None``: ``None`` when ``local_date`` isn't away;
+  otherwise the last day of the contiguous away run holding it: overlapping periods and
+  back-to-back ones (the next starts the day after one ends) merge.
 """
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -222,3 +242,78 @@ def step_due_at(
     # fold=0: an ambiguous time is its first occurrence; a time in the spring-forward gap
     # takes the offset before the change, so it lands that many minutes later (forward)
     return wall.replace(tzinfo=zone, fold=0).astimezone(UTC)
+
+
+# Away dates (Story 5.11) ----------------------------------------------------------------------
+
+_ISO_DAY: Final = r"([0-9]{4}-[0-9]{2}-[0-9]{2})"
+_AWAY_LINE: Final = re.compile(_ISO_DAY + r"[ \t]+to[ \t]+" + _ISO_DAY)
+
+
+def _plain_date(value: object, name: str) -> date:
+    if isinstance(value, datetime) or not isinstance(value, date):
+        raise TypeError(f"{name} must be a date")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class AwayPeriod:
+    """Away from ``start`` to ``end``, both inclusive, calendar days in ``sender_timezone``."""
+
+    start: date
+    end: date
+
+    def __post_init__(self) -> None:
+        _plain_date(self.start, "AwayPeriod.start")
+        _plain_date(self.end, "AwayPeriod.end")
+        if self.end < self.start:
+            raise ValueError("AwayPeriod.end must be on or after its start")
+
+
+def away_period_dates(line: str) -> tuple[date, date] | None:
+    """The start and end dates written on ``line``, or ``None``; see the module docstring."""
+    if not isinstance(line, str):
+        raise TypeError("away_period_dates takes a str")
+    found = _AWAY_LINE.fullmatch(line.strip())
+    if found is None:
+        return None
+    try:
+        return date.fromisoformat(found[1]), date.fromisoformat(found[2])
+    except ValueError:  # not a real calendar date, such as 2026-02-30
+        return None
+
+
+def parse_away_period(line: str) -> AwayPeriod | None:
+    """``line`` as an ``AwayPeriod``, or ``None`` when it is malformed or reversed."""
+    dates = away_period_dates(line)
+    if dates is None or dates[1] < dates[0]:
+        return None
+    return AwayPeriod(*dates)
+
+
+def _periods(periods: Iterable[AwayPeriod]) -> list[AwayPeriod]:
+    found = list(periods)
+    if not all(isinstance(period, AwayPeriod) for period in found):
+        raise TypeError("away periods must be AwayPeriod values")
+    return found
+
+
+def is_away(local_date: date, periods: Iterable[AwayPeriod]) -> bool:
+    """Whether ``local_date`` falls in one of ``periods``, ends included."""
+    day = _plain_date(local_date, "local_date")
+    return any(period.start <= day <= period.end for period in _periods(periods))
+
+
+def away_until(local_date: date, periods: Iterable[AwayPeriod]) -> date | None:
+    """The last day of the contiguous away run holding ``local_date``, or ``None``."""
+    day = _plain_date(local_date, "local_date")
+    found = sorted(_periods(periods), key=lambda period: period.start)
+    if not is_away(day, found):
+        return None
+    end = day
+    for period in found:  # by start, so each period that reaches the run extends it
+        if end == date.max:  # nothing can extend it, and end + 1 day would overflow
+            break
+        if period.start <= end + timedelta(days=1):
+            end = max(end, period.end)
+    return end

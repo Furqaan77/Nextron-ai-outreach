@@ -1,12 +1,14 @@
 """The hardened dashboard shell (AD-13): ``/enter``, sessions, the Host check, the security
 headers, ``no-store`` and the base layout, driven through the ASGI interface with fakes. The
-CSRF, ``Origin`` and ``Sec-Fetch-Site`` checks and the read-only GETs are in ``test_csrf.py``."""
+CSRF, ``Origin`` and ``Sec-Fetch-Site`` checks and the read-only GETs are in ``test_csrf.py``.
+The away banner (Story 5.11) is read on real units of work: shown on an away day with the end
+of the merged away run, absent otherwise."""
 
 import asyncio
 import json
 import logging
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import parse_qs
@@ -16,6 +18,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from nextron.app.ops.api import OPEN_CODE_SECRET
+from nextron.db.uow import UnitOfWorkFactory
+from nextron.domain.settings_schema import Key
 from nextron.web import app as web_app
 from nextron.web.app import NAV_SECTIONS, STATIC_DIR
 from nextron.web.guard import CONTENT_SECURITY_POLICY
@@ -23,6 +27,7 @@ from nextron.web.routing import personal_data
 from nextron.web.sessions import SessionStore
 from tests.asgi import DEFAULT_HOST, Reply, request
 from tests.dashboard import Dashboard, body_hx_headers
+from tests.fakes.clock import FrozenClock
 
 SECURITY_HEADERS = {
     b"content-security-policy": (
@@ -771,3 +776,46 @@ def test_the_locked_page_has_no_assets_and_no_data(dashboard: Dashboard) -> None
     assert not page.find("script") and not page.find("link") and not page.find("img")
     assert not page.find("style")
     assert "Run nextron open in a terminal" in " ".join("".join(page.text).split())
+
+
+# Story 5.11: the away banner ------------------------------------------------------------------
+
+AWAY_NOW = datetime(2026, 12, 21, 3, 0, tzinfo=UTC)
+
+
+def banners(dashboard: Dashboard) -> list[str]:
+    page = Page(dashboard.get("/", cookie=dashboard.open_session()).text)
+    assert page.find("main")
+    return [" ".join(text.split()) for text in page.text if "Away until" in text]
+
+
+def away_dashboard(units: UnitOfWorkFactory, *periods: str) -> Dashboard:
+    dashboard = Dashboard(units=units, clock=FrozenClock(AWAY_NOW))
+    with dashboard.units.open():
+        dashboard.setup.set(Key.AWAY_PERIODS, periods)
+    return dashboard
+
+
+def test_an_away_day_shows_the_banner_with_the_merged_end_date(units: UnitOfWorkFactory) -> None:
+    dashboard = away_dashboard(
+        units, "2026-12-21 to 2027-01-04", "2027-01-05 to 2027-01-08", "2027-01-03 to 2027-01-06"
+    )
+
+    assert banners(dashboard) == ["Away until 2027-01-08: no new Sequences are selected"]
+    page = Page(dashboard.get("/", cookie=dashboard.open_session()).text)
+    assert page.find("p", **{"class": "away-banner", "role": "status"})
+
+
+def test_no_banner_outside_an_away_period(units: UnitOfWorkFactory) -> None:
+    assert banners(Dashboard(units=units, clock=FrozenClock(AWAY_NOW))) == []  # none set
+    assert banners(away_dashboard(units, "2027-01-05 to 2027-01-08")) == []
+
+
+def test_the_banner_reads_the_day_in_the_sender_timezone(units: UnitOfWorkFactory) -> None:
+    dashboard = away_dashboard(units, "2026-12-21 to 2027-01-04")
+    assert banners(dashboard) != []  # UTC: already 2026-12-21
+
+    with dashboard.units.open():
+        dashboard.setup.set(Key.SENDER_TIMEZONE, "America/Los_Angeles")
+
+    assert banners(dashboard) == []  # still 2026-12-20 there

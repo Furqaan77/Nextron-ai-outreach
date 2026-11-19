@@ -2471,6 +2471,7 @@ or an `EnrollRefusal(code, reasons, blocks)` that wrote nothing. The checks, in 
 | Code | When |
 |---|---|
 | `blocked` | the contactability gate (`assert_contactable(Contact, email, cold)`) blocks the Contact; `blocks` are its reasons |
+| `operator_away` | origin `selection` or `restart` on an away day (Story 5.11, see [Away dates](#away-dates)) |
 | `campaign_not_active` | `queries.setup.campaign_active` is false (draft, paused, or a UK Campaign without its LIA) |
 | `missing_tz_or_market` | the Contact has no timezone or Market (AD-11) |
 | `not_eligible` | the live Eligibility Decision fails; `reasons` are its reasons (FR-63's `recontact_not_allowed` among them) |
@@ -2514,6 +2515,36 @@ otherwise the loser's Enrollments move to the survivor.
 | `resume` | `paused` | `active` | `resumed` |
 | `stop_<cause>` (`reply`, `manual_reply`, `hard_bounce`, `suppressed`, `operator_stop`, `operator_rejected`, `lead_closed`, `inbox_removed`, `contact_erased`) | `active`, `paused` | `stopped` | the stop cause |
 | `complete` | `active`, `paused` | `completed` | `completed` |
+
+### Away dates
+
+Story 5.11 (FR-31). The `away_periods` setting (Settings page, Sending section, "Away dates",
+blank by default) holds one period per line, `YYYY-MM-DD to YYYY-MM-DD`: the start and end
+dates, both included, as calendar days in `sender_timezone` (UTC while that is unset or
+unreadable). Periods may overlap. A line of another shape, a date that doesn't exist
+(`2026-02-30`) or a single date is refused with rule `away_period`; an end before its start
+with rule `away_order` ("End date must be on or after start date"); nothing is stored.
+
+`domain.sending_policy.is_away(local_date, periods)` is the single test of an away day. On one,
+`enroll` refuses origins `selection` and `restart` with `operator_away` (right after the gate,
+before every other check; nothing written, no Draft requested). `operator_pick`, `referral` and
+`recontact` enroll as usual, and live Enrollments, follow-ups, Replies and sending carry on.
+The Dashboard (`GET /`) shows "Away until <end date>: no new Sequences are selected"
+(`away_banner.html`), the end date being the last day of the contiguous away run holding today
+(overlapping and back-to-back periods merge; `queries.setup.away_until(now)`), as
+`YYYY-MM-DD`; outside a period there is no banner. A stored line that no longer parses is
+ignored (`queries.setup.away_periods()`).
+
+**At merge, for other stories:**
+
+- **4.10** (`Selection.pick`) enrolls with origin `operator_pick`, so away dates never refuse
+  it; `/leads/ready` may include `away_banner.html` (context `away_until`, from
+  `Setup.away_until()` or `queries.setup.away_until(now)`).
+- **5.1** (the Approval Queue) must include `away_banner.html` above its groups, with
+  `away_until` in the context.
+- **8.9** (`select_daily`) should check `queries.setup.away_until(now)` (or `is_away`) first
+  and select nothing that day; its `enroll(..., origin=selection|restart)` calls are refused
+  with `operator_away` anyway.
 
 ## Draft slots and due times
 

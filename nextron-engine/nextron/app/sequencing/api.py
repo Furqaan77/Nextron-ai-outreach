@@ -22,6 +22,10 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
 2. **Refusals**, checked in this order, each an ``EnrollRefusal`` with nothing written:
    ``blocked`` (``compliance_api.assert_contactable(ContactSubject(contact_id), "email",
    "cold")``, looked up at call time, answers ``Blocked``; ``blocks`` are its reasons);
+   ``operator_away`` (Story 5.11, FR-31: origin ``selection`` or ``restart`` while today, in
+   the ``sender_timezone`` (UTC while that is unset or unreadable), is an away day:
+   ``sending_policy.is_away`` over ``queries.setup.away_periods()``; ``operator_pick``,
+   ``referral`` and ``recontact`` are never refused for it, and existing Enrollments carry on);
    ``campaign_not_active`` (``queries.setup.campaign_active``); ``missing_tz_or_market`` (the
    Contact has no ``tz`` or no ``market_id``, AD-11); ``not_eligible``
    (``Compliance(clock).evaluate_eligibility``, with the Contact's Enrollment history; ``reasons``
@@ -167,7 +171,13 @@ from nextron.domain.notifications import (
     SubjectSuppressed,
 )
 from nextron.domain.pipeline_stage import CLOSED_STAGES, PipelineStage
-from nextron.domain.sending_policy import InboxLoad, capacity_forecast, pick_inbox, step_due_at
+from nextron.domain.sending_policy import (
+    InboxLoad,
+    capacity_forecast,
+    is_away,
+    pick_inbox,
+    step_due_at,
+)
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
 from nextron.ports.clock import Clock
 
@@ -182,6 +192,9 @@ ENROLLABLE_STAGES: Final = frozenset(
 )
 CHANNEL: Final = "email"
 PURPOSE: Final = "cold"
+# Story 5.11: the origins away dates pause (the engine's own picks); the Operator's own picks,
+# referrals and recontacts go ahead.
+AWAY_PAUSED_ORIGINS: Final = frozenset({EnrollmentOrigin.SELECTION, EnrollmentOrigin.RESTART})
 
 
 def _origin_of(origin: object) -> EnrollmentOrigin:
@@ -346,6 +359,13 @@ class Sequencing:
         answer = compliance_api.assert_contactable(ContactSubject(contact.id), CHANNEL, PURPOSE)
         if isinstance(answer, Blocked):
             return EnrollRefusal(RefusalCode.BLOCKED, blocks=answer.reasons)
+        # (2) away dates (Story 5.11): only the engine's own picks wait for the Operator; the
+        # day is queries.setup.sender_local_date, the same reading as the Dashboard's banner
+        now = self._clock.now()
+        if chosen_origin in AWAY_PAUSED_ORIGINS and is_away(
+            setup_queries.sender_local_date(now), setup_queries.away_periods()
+        ):
+            return EnrollRefusal(RefusalCode.OPERATOR_AWAY)
         if not setup_queries.campaign_active(campaign.id):
             return EnrollRefusal(RefusalCode.CAMPAIGN_NOT_ACTIVE)
         if contact.tz is None or contact.market_id is None:
@@ -366,7 +386,6 @@ class Sequencing:
         if not inboxes:
             return EnrollRefusal(RefusalCode.NO_SENDING_INBOX)
 
-        now = self._clock.now()
         inbox_id = _picked_inbox(inboxes, now)
         counters_repo.record(campaign.id, variant_id, now)
         enrollment_id = enrollments_repo.insert(

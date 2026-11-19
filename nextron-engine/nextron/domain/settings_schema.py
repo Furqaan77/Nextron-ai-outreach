@@ -82,6 +82,16 @@ reorders a footer line (``tests/contracts/test_footer_contracts.py``).
 ``lead_score_signal_weight``, ``integer`` in Engine, 0 to 100, default 50 each (whole percents:
 50 means 0.5). That they add up to 100 spans two keys, so ``nextron.app.setup.api.Setup``
 checks it (rule ``weights_sum``, ``nextron.domain.scoring.WEIGHTS_SUM_RULE``), not a ``Rule``.
+
+**Away dates** (Story 5.11, FR-31): ``away_periods``, ``list`` in Sending, blank by default.
+One period per line, ``YYYY-MM-DD to YYYY-MM-DD`` (start and end, both inclusive; overlapping
+periods are allowed), calendar days in ``sender_timezone``. ``AWAY_PERIOD_RULE``
+(``away_period``: every line has that shape and real calendar dates,
+``nextron.domain.sending_policy.away_period_dates``) runs before ``AWAY_ORDER_RULE``
+(``away_order``, "End date must be on or after start date"). On an away day
+``Sequencing.enroll`` refuses origins ``selection`` and ``restart`` (``operator_away``) and the
+Dashboard shows "Away until <end date>: no new Sequences are selected"
+(``nextron.app.queries.setup.away_until``).
 """
 
 import re
@@ -114,7 +124,12 @@ from nextron.domain.job import MAX_BULK_THREADS
 from nextron.domain.prices import names_price
 from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
 from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
-from nextron.domain.sending_policy import CEILING_RANGE, DEFAULT_CEILING
+from nextron.domain.sending_policy import (
+    CEILING_RANGE,
+    DEFAULT_CEILING,
+    away_period_dates,
+    parse_away_period,
+)
 from nextron.domain.sink import is_sink_recipient
 from nextron.domain.unsub_requests import MAX_HOST_LENGTH, is_worker_host
 
@@ -192,6 +207,7 @@ class Key(StrEnum):
     LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
+    AWAY_PERIODS = "away_periods"
 
 
 class _Required(Enum):
@@ -906,6 +922,19 @@ def is_ats_host(item: str) -> bool:
         return False
 
 
+# Away dates (Story 5.11, FR-31): the shape first, then the order of each period's two dates.
+AWAY_PERIOD_RULE: Final = Rule(
+    "away_period",
+    "each line must be a start and an end date, such as 2026-12-21 to 2027-01-04, both real "
+    "calendar dates",
+    lambda value: all(away_period_dates(item) is not None for item in value),
+)
+AWAY_ORDER_RULE: Final = Rule(
+    "away_order",
+    "End date must be on or after start date",
+    lambda value: all(parse_away_period(item) is not None for item in value),
+)
+
 ATS_HOST_RULE: Final = Rule(
     "ats_host",
     "each line must be a host name in lowercase ASCII, such as boards.greenhouse.io, that is "
@@ -1359,6 +1388,21 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(max_length(MAX_HOST_LENGTH), WORKER_HOST_RULE),
+    ),
+    # Away dates (Story 5.11, FR-31): while today (in sender_timezone) is in a period, no new
+    # Sequence is selected or restarted; follow-ups, replies and sending carry on.
+    Setting(
+        key=Key.AWAY_PERIODS,
+        type=SettingType.LIST,
+        section=Section.SENDING,
+        label="Away dates",
+        unit=(
+            "Blank by default. One period per line, such as 2026-12-21 to 2027-01-04: the "
+            "start and end dates, both included, in the sender timezone. While you are away no "
+            "new Sequences are selected; follow-ups and replies carry on as usual."
+        ),
+        default=(),
+        rules=(AWAY_PERIOD_RULE, AWAY_ORDER_RULE),
     ),
 )
 

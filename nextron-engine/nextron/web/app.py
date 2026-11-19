@@ -12,7 +12,10 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   Anything else gets 401 with the locked page and no session. Both are
   ``Cache-Control: no-store``, and both are logged (``dashboard_session_opened``, or
   ``dashboard_entry_refused`` with ``reason``), never with the code or the token.
-- ``GET /`` (``home``): the base layout.
+- ``GET /`` (``home``): the Dashboard. While today (in ``sender_timezone``) is an away day
+  (Story 5.11), ``away_banner.html`` shows "Away until <end date>: no new Sequences are
+  selected", the end date being ``Setup.away_until()`` (``queries.setup.away_until`` at the
+  clock's now, in the GET's read-only unit of work) as ``YYYY-MM-DD``; otherwise no banner.
 - ``GET /health`` (``health``): the environment, the engine version and the process uptime in
   whole seconds, and nothing else.
 - ``GET /static/{name}`` (``static``): the vendored HTMX build and ``app.css``, read once when
@@ -654,7 +657,7 @@ def create_app(
     @app.get("/", name="home")
     @personal_data(False)
     def home(request: Request) -> HTMLResponse:
-        return page(request, "home.html")
+        return page(request, "home.html", away_until=setup.away_until())
 
     @app.get("/health", name="health")
     @personal_data(False)

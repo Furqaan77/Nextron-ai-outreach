@@ -1,7 +1,9 @@
 """Build the dashboard with fakes and open a session on it, as ``nextron open`` would.
 
 ``Dashboard`` reads through ``FakeUnits`` unless a test passes real units of work (the
-``units`` fixture); its ``Setup``, ``Campaigns`` (``campaigns``, Story 4.2) and ``CompanyFacts``
+``units`` fixture); its ``Setup`` (``NoDatabaseSetup`` on ``FakeUnits``: the Dashboard's away
+banner, Story 5.11, reads the settings, so there it reads no away day), ``Campaigns``
+(``campaigns``, Story 4.2) and ``CompanyFacts``
 (``facts``, Story 4.3) use the dashboard's frozen clock, and its ``Credentials`` the dashboard's
 in-memory secrets and that clock. ``post``
 sends a POST from the dashboard's own origin by default; ``csrf_token(cookie)`` reads the
@@ -84,6 +86,7 @@ import json
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -240,6 +243,15 @@ def upload(
     return body, [(b"content-type", content_type)]
 
 
+class NoDatabaseSetup(Setup):
+    """``Setup`` for ``FakeUnits``, which hold no database: ``GET /`` (the Dashboard) reads
+    the away dates through ``away_until``, which here finds none. Tests of the away banner use
+    real units of work."""
+
+    def away_until(self) -> date | None:
+        return None
+
+
 def form(**fields: str) -> bytes:
     """An ``application/x-www-form-urlencoded`` body of ``fields``, in order, as a browser
     encodes it."""
@@ -348,7 +360,9 @@ class Dashboard:
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
-        self.setup = Setup(self.clock)
+        self.setup = (
+            NoDatabaseSetup(self.clock) if isinstance(self.units, FakeUnits) else Setup(self.clock)
+        )
         self.campaigns = Campaigns(self.clock)
         self.facts = CompanyFacts(self.clock)
         self.playbook = Playbook(self.clock)

@@ -531,6 +531,7 @@ def test_the_declared_keys_in_order() -> None:
         "lead_score_fit_weight",
         "lead_score_signal_weight",
         "unsub_worker_host",
+        "away_periods",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -561,6 +562,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.LEAD_SCORE_FIT_WEIGHT),
         setting(Key.LEAD_SCORE_SIGNAL_WEIGHT),
         setting(Key.UNSUB_WORKER_HOST),
+        setting(Key.AWAY_PERIODS),
     )
 
 
@@ -1291,9 +1293,9 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
     assert schema_problems(schema) == [
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
-            "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
-            "crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
-            "optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
+            "ats_hosts, away_periods, backup_offpc_dir, backup_rotation_days, backup_time, "
+            "bulk_threads, crawl_max_pages, lead_score_fit_weight, lead_score_signal_weight, "
+            "legal_name, optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
             "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "
             "sink_allowlist, total_daily_ceiling, unsub_active_kid, unsub_worker_host, "
@@ -1360,3 +1362,67 @@ def test_total_daily_ceiling_refuses_anything_outside_0_to_100(text: str, rule: 
     with pytest.raises(InvalidSettingValue) as raised:
         parse(setting(Key.TOTAL_DAILY_CEILING), text)
     assert raised.value.rule == rule
+
+
+# Story 5.11: away dates ------------------------------------------------------------------------
+
+
+def away_refusal(text: str) -> InvalidSettingValue:
+    with pytest.raises(InvalidSettingValue) as raised:
+        parse(setting(Key.AWAY_PERIODS), text)
+    return raised.value
+
+
+def test_away_periods_is_a_blank_list_in_sending() -> None:
+    found = setting(Key.AWAY_PERIODS)
+
+    assert (found.key, found.type, found.section, found.default) == (
+        "away_periods",
+        T.LIST,
+        Section.SENDING,
+        (),
+    )
+    assert [rule.name for rule in found.rules] == ["away_period", "away_order"]
+    assert default_text(found) == ""
+
+
+def test_away_periods_reads_one_period_per_line_and_allows_overlaps() -> None:
+    text = "2026-12-21 to 2027-01-04\n\n 2026-12-25 to 2026-12-25 \n2026-12-30 to 2027-01-10"
+
+    assert parse(setting(Key.AWAY_PERIODS), text) == (
+        "2026-12-21 to 2027-01-04",
+        "2026-12-25 to 2026-12-25",
+        "2026-12-30 to 2027-01-10",
+    )
+
+
+def test_an_end_before_the_start_is_refused_with_the_order_message() -> None:
+    refused = away_refusal("2026-12-21 to 2027-01-04\n2027-01-04 to 2026-12-21")
+
+    assert refused.rule == "away_order"
+    assert refused.reason == "End date must be on or after start date"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "next week",
+        "2026-02-30 to 2026-03-01",
+        "2026-12-21",
+        "2027-01-04 to 2026-12-21\nnext week",  # the shape is checked before the order
+    ],
+)
+def test_a_bad_away_line_is_refused_by_the_shape_rule(text: str) -> None:
+    refused = away_refusal(text)
+
+    assert refused.rule == "away_period"
+    assert "next week" not in str(refused) and "2026-02-30" not in str(refused)
+
+
+def test_encode_checks_the_away_rules_too() -> None:
+    found = setting(Key.AWAY_PERIODS)
+
+    assert encode(found, ("2026-12-21 to 2027-01-04",)) == "2026-12-21 to 2027-01-04"
+    with pytest.raises(InvalidSettingValue) as raised:
+        encode(found, ("2027-01-04 to 2026-12-21",))
+    assert raised.value.rule == "away_order"

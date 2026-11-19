@@ -57,12 +57,21 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   (AD-5's ``campaign_active``): ``nextron.domain.campaign.may_run`` on the stored status, the
   stored LIA and the Market's **current** ``country_code``, read live with the Campaign. An
   unknown id is ``False``.
+- ``away_periods() -> tuple[AwayPeriod, ...]`` (Story 5.11, FR-31): the stored
+  ``away_periods`` lines, each read with ``nextron.domain.sending_policy.parse_away_period``;
+  a stored line that no longer parses is ignored, and without a row there are none.
+  ``sender_local_date(now) -> date``: ``now`` (aware) as a calendar date in
+  ``sender_timezone``, or in UTC while that is unset or unreadable. ``away_until(now) -> date |
+  None``: ``sending_policy.away_until`` of that date over those periods: the last day of the
+  away run holding today, or ``None`` when today isn't away (the Dashboard's banner).
 
 All read through the current unit of work, read-only ones included.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nextron.db.repos.setup import campaigns as campaigns_repo
 from nextron.db.repos.setup import markets as markets_repo
@@ -82,6 +91,8 @@ from nextron.domain.markets import MarketDef
 from nextron.domain.offers import OfferDef
 from nextron.domain.render import FOOTER_SETTING_KEYS, FooterSettings
 from nextron.domain.segments import SegmentDef, segment_from_text
+from nextron.domain.sending_policy import AwayPeriod, parse_away_period
+from nextron.domain.sending_policy import away_until as _away_until
 from nextron.domain.sequences import SequenceDef
 from nextron.domain.settings_schema import (
     REQUIRED,
@@ -149,6 +160,40 @@ def budget_limits() -> Limits:
         ai_budget_micros=get(Key.AI_BUDGET_MONTHLY),
         ai_alert_pct=get(Key.AI_BUDGET_ALERT_PCT),
     )
+
+
+def away_periods() -> tuple[AwayPeriod, ...]:
+    """The stored away periods, in stored order; a line that no longer parses is ignored."""
+    text = settings_repo.stored_text(str(Key.AWAY_PERIODS))
+    if text is None:
+        return ()
+    found = (parse_away_period(line) for line in text.splitlines())
+    return tuple(period for period in found if period is not None)
+
+
+def _sender_zone() -> tzinfo:
+    try:
+        return ZoneInfo(str(get(Key.SENDER_TIMEZONE)))
+    except (SettingNotSet, InvalidSettingValue, ZoneInfoNotFoundError, ValueError, OSError):
+        return UTC
+
+
+def sender_local_date(now: datetime) -> date:
+    """``now`` as a date in ``sender_timezone``, or in UTC while it is unset or unreadable."""
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise TypeError("now must be an aware datetime")
+    return now.astimezone(_sender_zone()).date()
+
+
+def away_until(now: datetime) -> date | None:
+    """The last day of the away run holding ``now``'s date, or ``None`` when not away; with
+    no period stored it is ``None`` without reading ``sender_timezone``."""
+    periods = away_periods()
+    if not periods:
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise TypeError("now must be an aware datetime")
+        return None
+    return _away_until(sender_local_date(now), periods)
 
 
 @dataclass(frozen=True, slots=True)

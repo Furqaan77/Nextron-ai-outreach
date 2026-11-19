@@ -10,9 +10,14 @@ occurrence).
 Story 6.4 (FR-33, FR-34, AD-11): the ramp row of the I/O matrix day by day, a warm level above
 the target, an unrecorded inbox, the ceiling and the tool send figure (never negative), the
 capacity forecast, the local-date day boundary, and the 6.4 acceptance examples (13 days 0, day
-14 the warm level, 30/25/50 gives 25)."""
+14 the warm level, 30/25/50 gives 25).
+
+Story 5.11 (FR-31): ``is_away`` on a period's first and last days and the days around it, a
+one-day period; ``parse_away_period`` and ``away_period_dates`` on good, malformed, unreal and
+reversed lines; ``away_until`` merging overlapping and back-to-back periods."""
 
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -20,13 +25,18 @@ from nextron.domain.sending_policy import (
     DEFAULT_CEILING,
     DEFAULT_RAMP_STEP,
     DEFAULT_RAMP_TARGET,
+    AwayPeriod,
     InboxLoad,
     WarmupPlan,
+    away_period_dates,
+    away_until,
     capacity_forecast,
     cold_cap,
     daily_cap,
     inbox_capacity_forecast,
+    is_away,
     local_date,
+    parse_away_period,
     pick_inbox,
     step_due_at,
     tool_send_figure,
@@ -273,3 +283,129 @@ def test_the_local_date_is_the_calendar_date_in_the_sender_timezone() -> None:
 def test_the_local_date_needs_an_aware_now() -> None:
     with pytest.raises(ValueError, match="aware"):
         local_date(datetime(2026, 11, 14, 23, 30), "UTC")  # noqa: DTZ001 - the naive probe
+
+
+# Story 5.11: away dates --------------------------------------------------------------------------
+
+HOLIDAY = AwayPeriod(date(2026, 12, 21), date(2027, 1, 4))
+
+
+@pytest.mark.parametrize(
+    ("day", "away"),
+    [
+        (date(2026, 12, 20), False),  # the day before
+        (date(2026, 12, 21), True),  # the first day
+        (date(2026, 12, 31), True),
+        (date(2027, 1, 4), True),  # the last day
+        (date(2027, 1, 5), False),  # the day after
+    ],
+)
+def test_a_period_holds_its_first_and_last_days(day: date, away: bool) -> None:
+    assert is_away(day, [HOLIDAY]) is away
+
+
+def test_a_one_day_period_holds_only_its_day() -> None:
+    christmas = [AwayPeriod(date(2026, 12, 25), date(2026, 12, 25))]
+
+    assert is_away(date(2026, 12, 25), christmas)
+    assert not is_away(date(2026, 12, 24), christmas)
+    assert not is_away(date(2026, 12, 26), christmas)
+
+
+def test_no_period_is_never_away() -> None:
+    assert not is_away(date(2026, 12, 25), [])
+    assert away_until(date(2026, 12, 25), []) is None
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("2026-12-21 to 2027-01-04", HOLIDAY),
+        ("  2026-12-21\tto   2027-01-04  ", HOLIDAY),
+        ("2026-12-25 to 2026-12-25", AwayPeriod(date(2026, 12, 25), date(2026, 12, 25))),
+        ("2024-02-29 to 2024-03-01", AwayPeriod(date(2024, 2, 29), date(2024, 3, 1))),
+    ],
+)
+def test_a_good_line_parses(line: str, found: AwayPeriod) -> None:
+    assert parse_away_period(line) == found
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "next week",
+        "2026-12-21",  # a single date isn't accepted
+        "",
+        "2026-02-30 to 2026-03-01",  # not a real date
+        "2026-13-01 to 2026-13-02",
+        "2026-12-21 - 2027-01-04",
+        "2026-12-21 TO 2027-01-04",
+        "2026-12-21to2027-01-04",
+        "2026-12-21 to 2027-01-04 to 2027-01-05",
+        "20261221 to 20270104",
+        "2026-12-1 to 2027-01-04",
+        "\uff12026-12-21 to 2027-01-04",  # a fullwidth digit
+    ],
+)
+def test_a_malformed_line_is_none(line: str) -> None:
+    assert away_period_dates(line) is None
+    assert parse_away_period(line) is None
+
+
+def test_a_reversed_line_has_dates_but_no_period() -> None:
+    assert away_period_dates("2027-01-04 to 2026-12-21") == (date(2027, 1, 4), date(2026, 12, 21))
+    assert parse_away_period("2027-01-04 to 2026-12-21") is None
+
+
+def test_a_period_refuses_a_reversed_range_and_bad_types() -> None:
+    with pytest.raises(ValueError, match="on or after"):
+        AwayPeriod(date(2027, 1, 4), date(2026, 12, 21))
+    with pytest.raises(TypeError):
+        AwayPeriod(datetime(2026, 12, 21, tzinfo=UTC), date(2027, 1, 4))
+    with pytest.raises(TypeError):
+        AwayPeriod("2026-12-21", date(2027, 1, 4))  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        is_away(T0, [HOLIDAY])  # a datetime isn't a calendar date
+    pair: Any = (date(2026, 12, 21), date(2027, 1, 4))  # not an AwayPeriod
+    with pytest.raises(TypeError):
+        is_away(date(2026, 12, 25), [pair])
+    with pytest.raises(TypeError):
+        away_period_dates(None)  # type: ignore[arg-type]
+
+
+def test_away_until_is_the_end_of_the_period_holding_the_day() -> None:
+    assert away_until(date(2026, 12, 21), [HOLIDAY]) == date(2027, 1, 4)
+    assert away_until(date(2027, 1, 4), [HOLIDAY]) == date(2027, 1, 4)
+    assert away_until(date(2026, 12, 20), [HOLIDAY]) is None
+    assert away_until(date(2027, 1, 5), [HOLIDAY]) is None
+
+
+def test_away_until_merges_overlapping_and_back_to_back_periods() -> None:
+    periods = [
+        AwayPeriod(date(2027, 1, 5), date(2027, 1, 10)),  # starts the day after HOLIDAY ends
+        AwayPeriod(date(2027, 1, 8), date(2027, 1, 20)),  # overlaps the one before
+        AwayPeriod(date(2027, 1, 22), date(2027, 1, 30)),  # a gap of one day: not merged
+        HOLIDAY,
+        AwayPeriod(date(2026, 11, 1), date(2026, 11, 5)),  # earlier, apart
+    ]
+
+    assert away_until(date(2026, 12, 21), periods) == date(2027, 1, 20)
+    assert away_until(date(2027, 1, 15), periods) == date(2027, 1, 20)
+    assert away_until(date(2027, 1, 21), periods) is None
+    assert away_until(date(2027, 1, 22), periods) == date(2027, 1, 30)
+    assert away_until(date(2026, 11, 3), periods) == date(2026, 11, 5)
+
+
+def test_a_period_inside_another_never_shortens_the_run() -> None:
+    periods = [HOLIDAY, AwayPeriod(date(2026, 12, 24), date(2026, 12, 26))]
+
+    assert away_until(date(2026, 12, 25), periods) == date(2027, 1, 4)
+
+
+def test_a_period_to_the_last_date_ends_the_run_without_overflow() -> None:
+    periods = [
+        AwayPeriod(date(2026, 12, 21), date.max),
+        AwayPeriod(date(2027, 1, 1), date(2027, 1, 2)),
+    ]
+
+    assert away_until(date(2026, 12, 25), periods) == date.max

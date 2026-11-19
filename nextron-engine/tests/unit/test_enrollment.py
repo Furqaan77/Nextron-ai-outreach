@@ -138,6 +138,7 @@ def test_transition_refuses_what_is_no_status_or_event(bad: object) -> None:
 def test_refusal_codes_are_in_enroll_order() -> None:
     assert [str(code) for code in RefusalCode] == [
         "blocked",
+        "operator_away",
         "campaign_not_active",
         "missing_tz_or_market",
         "not_eligible",
