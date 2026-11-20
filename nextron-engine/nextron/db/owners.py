@@ -429,6 +429,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "updated_at",
             "last_step_sent_at",
             "ended_at",
+            "restart_event_id",  # Story 8.11
         ),
     },
     "variant_counters": {

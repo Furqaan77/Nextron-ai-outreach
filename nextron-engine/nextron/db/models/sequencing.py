@@ -11,7 +11,10 @@ migration ``0038_4_8_enrollments``), owned by ``sequencing`` (``nextron.db.repos
   ``stop_cause`` (``ck_enrollments_stop_cause``; ``ck_enrollments_stopped``: set exactly when
   ``stopped``); ``created_at`` and ``updated_at``; ``last_step_sent_at``; and ``ended_at``
   (``ck_enrollments_ended``: set exactly when ``stopped`` or ``completed``;
-  ``ck_enrollments_ended_after_last_step``: never before ``last_step_sent_at``).
+  ``ck_enrollments_ended_after_last_step``: never before ``last_step_sent_at``); and
+  ``restart_event_id`` (Story 8.11, migration ``0055_8_11_sequence_restart``; a foreign key to
+  ``signals.id``): the new Event a ``restart`` Enrollment was restarted on
+  (``ck_enrollments_restart_event``: set exactly when ``origin`` is ``restart``), bound for good.
   ``uq_enrollments_one_live_per_lead`` (partial, ``status IN ('active','paused')``): at most one
   live Enrollment per Lead. Indexes on ``contact_id`` and ``sending_inbox_id``. Two triggers:
   ``trg_enrollments_bound`` refuses an update of ``id`` or any bound column (``BOUND_COLUMNS``),
@@ -51,6 +54,7 @@ BOUND_COLUMNS: Final = (
     "offer_id",
     "origin",
     "created_at",
+    "restart_event_id",  # Story 8.11
 )
 LIVE_WHERE: Final = "status IN ('active','paused')"
 
@@ -70,6 +74,8 @@ ENDED_AFTER_LAST_STEP_CHECK: Final = (
     "ended_at IS NULL OR last_step_sent_at IS NULL OR ended_at >= last_step_sent_at"
 )
 SEQUENCE_VERSION_CHECK: Final = "sequence_version >= 1"
+# Story 8.11: a restart names its new Event, and only a restart does (FR-63)
+RESTART_EVENT_CHECK: Final = "(origin = 'restart') = (restart_event_id IS NOT NULL)"
 
 
 class EnrollmentRecord(Base):
@@ -94,6 +100,7 @@ class EnrollmentRecord(Base):
         CheckConstraint(ENDED_CHECK, name="ended"),
         CheckConstraint(ENDED_AFTER_LAST_STEP_CHECK, name="ended_after_last_step"),
         CheckConstraint(SEQUENCE_VERSION_CHECK, name="sequence_version"),
+        CheckConstraint(RESTART_EVENT_CHECK, name="restart_event"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -113,6 +120,7 @@ class EnrollmentRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
     last_step_sent_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    restart_event_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("signals.id"))
 
 
 class VariantCounterRecord(Base):

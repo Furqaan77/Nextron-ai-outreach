@@ -8,7 +8,8 @@ Enrollment machine.
 
 There is no setter for a bound column (``contact_id``, ``campaign_id``, ``variant_id``,
 ``sending_inbox_id``, ``sequence_id``, ``sequence_version``, ``offer_id``, ``origin``,
-``created_at``): ``set_status`` writes only the status group, and ``move_lead`` only
+``created_at``, ``restart_event_id``): ``set_status`` writes only the status group, and
+``move_lead`` only
 ``lead_id``. The ``trg_enrollments_bound`` trigger refuses any other update.
 
 - ``StoredEnrollment``: one row;
@@ -20,8 +21,11 @@ There is no setter for a bound column (``contact_id``, ``campaign_id``, ``varian
 - ``live()``: every live row, oldest first;
 - ``ended_with_step(contact_id)``: the Contact's ``stopped`` or ``completed`` rows that sent a
   Step, by ``ended_at``, then ``id``;
+- ``leads_with_completed()`` (Story 8.11): the ids of the Leads with a ``completed`` row that
+  sent a Step, sorted;
 - ``live_counts_by_inbox()``: ``{sending_inbox_id: number of live rows}``;
-- ``insert(...) -> id``: a new row;
+- ``insert(...) -> id``: a new row (``restart_event_id``, Story 8.11, ``None`` unless the
+  origin is ``restart``);
 - ``set_status(enrollment_id, status, pause_cause, stop_cause, ended_at, at)``: the status
   group and ``updated_at``;
 - ``record_step_sent(enrollment_id, sent_at, ended_at, at)`` (Story 4.9): ``last_step_sent_at``,
@@ -70,6 +74,7 @@ class StoredEnrollment:
     updated_at: datetime
     last_step_sent_at: datetime | None
     ended_at: datetime | None
+    restart_event_id: str | None = None  # Story 8.11: set exactly for origin ``restart``
 
 
 _COLUMNS: Final = (
@@ -90,6 +95,7 @@ _COLUMNS: Final = (
     EnrollmentRecord.updated_at,
     EnrollmentRecord.last_step_sent_at,
     EnrollmentRecord.ended_at,
+    EnrollmentRecord.restart_event_id,
 )
 _OLDEST_FIRST: Final = (EnrollmentRecord.created_at, EnrollmentRecord.id)
 
@@ -162,6 +168,20 @@ def ended_with_step(contact_id: str) -> list[StoredEnrollment]:
     return [_stored(row) for row in current().session.execute(statement)]
 
 
+def leads_with_completed() -> list[str]:
+    """The ids of the Leads that have a ``completed`` Enrollment that sent a Step, sorted."""
+    statement = (
+        select(EnrollmentRecord.lead_id)
+        .where(
+            EnrollmentRecord.status == "completed",
+            EnrollmentRecord.last_step_sent_at.is_not(None),
+        )
+        .distinct()
+        .order_by(EnrollmentRecord.lead_id)
+    )
+    return [str(lead_id) for lead_id in current().session.execute(statement).scalars()]
+
+
 def live_counts_by_inbox() -> dict[str, int]:
     """The number of live Enrollments bound to each Sending Inbox that has any."""
     statement = (
@@ -185,6 +205,7 @@ def insert(
     origin: str,
     status: str,
     at: datetime,
+    restart_event_id: str | None = None,
 ) -> str:
     """Store a new Enrollment created at ``at``; return its new ULID."""
     enrollment_id = new_id()
@@ -207,6 +228,7 @@ def insert(
             updated_at=at,
             last_step_sent_at=None,
             ended_at=None,
+            restart_event_id=restart_event_id,
         )
     )
     return enrollment_id

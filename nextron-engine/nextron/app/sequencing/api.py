@@ -10,27 +10,37 @@ same transaction: entity ``enrollments``, at the clock's now, actor ``operator``
 ``operator_pick`` and the stop causes ``operator_stop`` and ``operator_rejected``, otherwise
 ``system:sequencing``.
 
-**``@command enroll(contact_id, campaign_id, origin, steps) -> NewEnrollment | EnrollRefusal``**
-is the only creator of an Enrollment. It runs in the caller's transaction.
+**``@command enroll(contact_id, campaign_id, origin, steps, *, restart_event_id=None) ->
+NewEnrollment | EnrollRefusal``** is the only creator of an Enrollment. It runs in the caller's
+transaction.
 
 1. **Arguments.** ``contact_id`` and ``campaign_id`` must be ``str``, ``origin`` an
    ``EnrollmentOrigin`` value and ``steps`` a non-empty ``tuple`` or ``list`` of ``int`` Step
    numbers (``bool`` refused), strictly ascending, each within the Campaign's Sequence: another
    type raises ``TypeError``, a bad value ``ValueError``. An unknown Contact or Campaign, or a
    Campaign whose Sequence is missing, raises ``LookupError``; a stored Campaign that no longer
-   decodes raises its ``InvalidCampaigns`` (fail closed). Nothing is written.
+   decodes raises its ``InvalidCampaigns`` (fail closed). ``restart_event_id`` (Story 8.11) is
+   given exactly for origin ``restart`` (otherwise ``ValueError``; not a ``str``:
+   ``TypeError``). Nothing is written.
 2. **Refusals**, checked in this order, each an ``EnrollRefusal`` with nothing written:
    ``blocked`` (``compliance_api.assert_contactable(ContactSubject(contact_id), "email",
    "cold")``, looked up at call time, answers ``Blocked``; ``blocks`` are its reasons);
-   ``campaign_not_active`` (``queries.setup.campaign_active``); ``missing_tz_or_market`` (the
-   Contact has no ``tz`` or no ``market_id``, AD-11); ``not_eligible``
-   (``Compliance(clock).evaluate_eligibility``, with the Contact's Enrollment history; ``reasons``
-   are the Decision's; the Decision is never stored); ``campaign_mismatch`` (the Lead's Segment
-   or the Contact's Market isn't the Campaign's); ``lead_already_replied`` (the Lead's stage
-   isn't ``new``, ``queued`` or ``contacted``); ``lead_already_enrolled`` (the Lead has a live
-   Enrollment; ``uq_enrollments_one_live_per_lead`` also refuses a raw duplicate);
-   ``no_active_variant``; ``no_sending_inbox`` (``queries.sending.inboxes_for_binding()`` is
-   empty).
+   ``restart_not_allowed`` (Story 8.11, origin ``restart`` only, straight after the gate:
+   ``queries.sequencing.restart_candidate(lead, now)`` must exist, name ``restart_event_id`` as
+   its Event and the same Contact and Campaign as the completed Enrollment, re-checked here in
+   the caller's transaction; so every restart mismatch, too early or an old Event only
+   included, refuses this code); ``campaign_not_active`` (``queries.setup.campaign_active``);
+   ``missing_tz_or_market`` (the Contact has no ``tz`` or no ``market_id``, AD-11);
+   ``not_eligible`` (``Compliance(clock).evaluate_eligibility(contact, restart=origin is
+   restart)``, with the Contact's Enrollment history; ``reasons`` are the Decision's; the
+   Decision is never stored. For every origin but ``restart`` the Decision also carries
+   ``recontact_not_allowed`` while the Contact's FR-63 history holds a Sequence that ended
+   without a Reply: AD-21 makes a restart after an unanswered Sequence ``origin=restart``
+   only); ``campaign_mismatch`` (the Lead's Segment or the Contact's Market isn't the
+   Campaign's); ``lead_already_replied`` (the Lead's stage isn't ``new``, ``queued`` or
+   ``contacted``); ``lead_already_enrolled`` (the Lead has a live Enrollment;
+   ``uq_enrollments_one_live_per_lead`` also refuses a raw duplicate); ``no_active_variant``;
+   ``no_sending_inbox`` (``queries.sending.inboxes_for_binding()`` is empty).
 3. **Binding.** The Variant is ``next_variant(campaign.variants, last)`` from the Campaign's
    counter (round-robin in name order, skipping inactive Variants). The inbox is
    ``pick_inbox`` over the bindable inboxes, each weighed by ``capacity_forecast(its cold Daily
@@ -45,7 +55,8 @@ is the only creator of an Enrollment. It runs in the caller's transaction.
    registered.
 4. **Writes**, in order: the Campaign's ``variant_counters`` row upserted; the Enrollment
    inserted ``active`` with its ``variant_id``, ``sending_inbox_id``, ``sequence_id``,
-   ``sequence_version``, ``offer_id`` and ``origin`` bound for good, and one ``events`` row
+   ``sequence_version``, ``offer_id``, ``origin`` and ``restart_event_id`` bound for good, and
+   one ``events`` row
    (``None`` to ``active``, cause ``enrolled``, ``cause_ref`` the Campaign);
    ``research.record_eligibility_basis(contact_id, decision, campaign_id, lia_ref, lia_date,
    now)`` with the Campaign's LIA only when ``needs_lia`` of its Market's country, else
@@ -207,6 +218,28 @@ def _checked_steps(steps: object) -> tuple[int, ...]:
     return found
 
 
+def _check_restart_event(origin: EnrollmentOrigin, restart_event_id: object) -> None:
+    """``restart_event_id`` is given exactly for origin ``restart`` (Story 8.11)."""
+    if restart_event_id is not None and not isinstance(restart_event_id, str):
+        raise TypeError("enroll takes the restart Event id as str")
+    if (origin is EnrollmentOrigin.RESTART) != (restart_event_id is not None):
+        raise ValueError("enroll: a restart_event_id is given exactly for origin restart")
+
+
+def _restart_allowed(
+    lead_id: str, contact_id: str, campaign_id: str, event_id: str | None, now: datetime
+) -> bool:
+    """Whether the Lead's completed Sequence restarts now on ``event_id``, for the same Contact
+    and Campaign (``queries.sequencing.restart_candidate``, Story 8.11)."""
+    candidate = sequencing_queries.restart_candidate(lead_id, now)
+    return (
+        candidate is not None
+        and candidate.event_id == event_id
+        and candidate.contact_id == contact_id
+        and candidate.campaign_id == campaign_id
+    )
+
+
 def _stop_cause_of(cause: object) -> StopCause:
     if not isinstance(cause, str):
         raise TypeError(f"stop takes a StopCause, not {type(cause).__name__}")
@@ -311,7 +344,13 @@ class Sequencing:
 
     @command
     def enroll(
-        self, contact_id: str, campaign_id: str, origin: EnrollmentOrigin, steps: Sequence[int]
+        self,
+        contact_id: str,
+        campaign_id: str,
+        origin: EnrollmentOrigin,
+        steps: Sequence[int],
+        *,
+        restart_event_id: str | None = None,
     ) -> NewEnrollment | EnrollRefusal:
         """Enroll the Contact ``contact_id`` in the Campaign ``campaign_id``, or refuse; see the
         module docstring."""
@@ -319,6 +358,7 @@ class Sequencing:
             raise TypeError("enroll takes the Contact and Campaign ids as str")
         chosen_origin = _origin_of(origin)
         chosen_steps = _checked_steps(steps)
+        _check_restart_event(chosen_origin, restart_event_id)
         contact = research_queries.contact(contact_id)
         if contact is None:
             raise LookupError("enroll: the Contact is unknown")
@@ -338,11 +378,20 @@ class Sequencing:
         answer = compliance_api.assert_contactable(ContactSubject(contact.id), CHANNEL, PURPOSE)
         if isinstance(answer, Blocked):
             return EnrollRefusal(RefusalCode.BLOCKED, blocks=answer.reasons)
+        now = self._clock.now()
+        # (2) a restart is checked straight after the gate (Story 8.11)
+        if chosen_origin is EnrollmentOrigin.RESTART and not _restart_allowed(
+            lead.id, contact.id, campaign.id, restart_event_id, now
+        ):
+            return EnrollRefusal(RefusalCode.RESTART_NOT_ALLOWED)
         if not setup_queries.campaign_active(campaign.id):
             return EnrollRefusal(RefusalCode.CAMPAIGN_NOT_ACTIVE)
         if contact.tz is None or contact.market_id is None:
             return EnrollRefusal(RefusalCode.MISSING_TZ_OR_MARKET)
-        decision = Compliance(self._clock).evaluate_eligibility(contact.id)
+        # only a restart re-contacts a Contact whose Sequence ended unanswered (AD-21, FR-63)
+        decision = Compliance(self._clock).evaluate_eligibility(
+            contact.id, restart=chosen_origin is EnrollmentOrigin.RESTART
+        )
         if not decision.eligible:
             return EnrollRefusal(RefusalCode.NOT_ELIGIBLE, reasons=decision.reasons)
         if lead.segment_id != campaign.segment_id or contact.market_id != campaign.market_id:
@@ -358,7 +407,6 @@ class Sequencing:
         if not inboxes:
             return EnrollRefusal(RefusalCode.NO_SENDING_INBOX)
 
-        now = self._clock.now()
         inbox_id = _picked_inbox(inboxes, now)
         counters_repo.record(campaign.id, variant_id, now)
         enrollment_id = enrollments_repo.insert(
@@ -373,6 +421,7 @@ class Sequencing:
             origin=str(chosen_origin),
             status=str(CREATION.to),
             at=now,
+            restart_event_id=restart_event_id,
         )
         eventlog.append(
             entity=ENTITY,

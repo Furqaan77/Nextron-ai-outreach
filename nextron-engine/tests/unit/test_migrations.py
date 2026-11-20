@@ -25,6 +25,7 @@ from nextron.db.migrations import (
     head_revision,
     known_revisions,
 )
+from nextron.db.models.sequencing import BOUND_COLUMNS
 from tests.migration_chains import (
     chain,
     create_table,
@@ -36,7 +37,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0054_2_16_signal_inbox"
+HEAD = "0055_8_11_sequence_restart"
 
 
 @pytest.fixture
@@ -1393,3 +1394,156 @@ def test_0053_adds_the_outcome_columns_in_place_and_keeps_every_booking_pending(
     run_sql(  # any value fits: the code, not a CHECK, keeps the rules
         path, f"UPDATE call_outcomes SET outcome = 'maybe', audit_price = -1 WHERE id = '{booking}'"
     )
+
+
+ENROLLMENT_COLUMNS = (
+    "id, lead_id, contact_id, campaign_id, variant_id, sending_inbox_id, sequence_id, "
+    "sequence_version, offer_id, origin, status, pause_cause, stop_cause, created_at, "
+    "updated_at, last_step_sent_at, ended_at"
+)
+
+
+def test_0055_adds_the_restart_event_in_place_and_keeps_every_enrollment_and_draft(
+    tmp_path: Path,
+) -> None:
+    """An Enrollment and its Draft stored before 0055 (Story 8.11) keep their rows, with no
+    restart Event: ``ALTER TABLE ... ADD COLUMN``, no rebuild, so the foreign keys stay whole,
+    the partial unique index and both triggers stay, and the new CHECK refuses a restart with no
+    Event."""
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0054_2_16_signal_inbox":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0054_2_16_signal_inbox",
+        )
+    at, ended = "2026-11-18T09:00:00.000000Z", "2026-11-20T09:00:00.000000Z"
+    segment, market, offer = (
+        "01JD3QZ8X5V9K2M7N4P6R8T0F0",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F1",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F2",
+    )
+    sequence, campaign, variant = (
+        "01JD3QZ8X5V9K2M7N4P6R8T0F3",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F4",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F5",
+    )
+    domain, inbox, lead, contact = (
+        "01JD3QZ8X5V9K2M7N4P6R8T0F6",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F7",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F8",
+        "01JD3QZ8X5V9K2M7N4P6R8T0F9",
+    )
+    live, done, draft = (
+        "01JD3QZ8X5V9K2M7N4P6R8T0G0",
+        "01JD3QZ8X5V9K2M7N4P6R8T0G1",
+        "01JD3QZ8X5V9K2M7N4P6R8T0G2",
+    )
+    bound = (
+        f"'{lead}', '{contact}', '{campaign}', '{variant}', '{inbox}', '{sequence}', 1, '{offer}'"
+    )
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_ai', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO markets (id, code, name, enabled, country_code, cctlds, cold_email_allowed, "
+        "free_webmail_blocked, default_timezone, unknown_timezone, english_variant, "
+        "footer_template, privacy_line_required, version, created_at, updated_at) "
+        f"VALUES ('{market}', 'us', 'United States', 1, 'US', '[\".com\"]', 1, 1, "
+        f"'America/New_York', 'America/Chicago', 'en-US', 'Footer', 0, 1, '{at}', '{at}')",
+        "INSERT INTO offers (id, key, name, ladder, version, created_at, updated_at) "
+        f"VALUES ('{offer}', 'audit', 'Audit', '[]', 1, '{at}', '{at}')",
+        "INSERT INTO sequences (id, key, name, version, created_at, updated_at) "
+        f"VALUES ('{sequence}', 'cold', 'Cold', 1, '{at}', '{at}')",
+        "INSERT INTO campaigns (id, key, name, segment_id, market_id, offer_id, sequence_id, "
+        "status, version, created_at, updated_at) "
+        f"VALUES ('{campaign}', 'ops_us', 'Ops US', '{segment}', '{market}', '{offer}', "
+        f"'{sequence}', 'draft', 1, '{at}', '{at}')",
+        "INSERT INTO variants (id, campaign_id, name, status, step_angles, created_at, "
+        f"updated_at) VALUES ('{variant}', '{campaign}', 'A', 'active', '{{}}', '{at}', '{at}')",
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{domain}', "
+        f"'nextron-ai.com', '{at}')",
+        "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, status, "
+        f"created_at) VALUES ('{inbox}', 'furqaan@nextron-ai.com', 'Main', '{domain}', "
+        f"'Furqaan Ahmed', 'active', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at, pipeline_stage) "
+        f"VALUES ('{lead}', 'Acme Accounting', 'acme.com', '{segment}', '{at}', 'contacted')",
+        "INSERT INTO contacts (id, lead_id, name, created_at, updated_at) "
+        f"VALUES ('{contact}', '{lead}', 'Jane Doe', '{at}', '{at}')",
+        f"INSERT INTO enrollments ({ENROLLMENT_COLUMNS}) VALUES ('{done}', {bound}, 'selection', "
+        f"'completed', NULL, NULL, '{at}', '{ended}', '{ended}', '{ended}')",
+        f"INSERT INTO enrollments ({ENROLLMENT_COLUMNS}) VALUES ('{live}', {bound}, "
+        f"'operator_pick', 'active', NULL, NULL, '{ended}', '{ended}', NULL, NULL)",
+        f"INSERT INTO drafts ({DRAFT_COLUMNS}) VALUES ('{draft}', 'step', '{live}', 1, 0, NULL, "
+        f"NULL, 0, 0, '{at}', '{at}', 'ready', 0, 0, NULL, NULL)",
+    )
+    enrollments_before = rows_of(path, "enrollments", ENROLLMENT_COLUMNS)
+    drafts_before = draft_rows(path)
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0054_2_16_signal_inbox", HEAD)
+
+    assert rows_of(path, "enrollments", ENROLLMENT_COLUMNS) == enrollments_before
+    assert rows_of(path, "enrollments", "restart_event_id") == [(None,), (None,)]
+    assert draft_rows(path) == drafts_before
+    reader = sqlite3.connect(path)
+    try:
+        violations = reader.execute("PRAGMA foreign_key_check").fetchall()
+        [(index_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'uq_enrollments_one_live_per_lead'"
+        ).fetchall()
+        triggers = dict(
+            reader.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'trigger' AND tbl_name = 'enrollments'"
+            ).fetchall()
+        )
+        keys = reader.execute("PRAGMA foreign_key_list(enrollments)").fetchall()
+    finally:
+        reader.close()
+    assert violations == []
+    assert "WHERE status IN ('active','paused')" in index_sql
+    assert set(triggers) == {"trg_enrollments_bound", "trg_enrollments_erased_insert"}
+    for column in BOUND_COLUMNS:  # 0038's bound columns and restart_event_id, every one
+        assert f"NEW.{column} IS NOT OLD.{column}" in triggers["trg_enrollments_bound"]
+    assert ("signals", "restart_event_id", "id") in {(row[2], row[3], row[4]) for row in keys}
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):  # still one live per Lead
+        run_sql(
+            path,
+            f"INSERT INTO enrollments ({ENROLLMENT_COLUMNS}) VALUES "
+            f"('01JD3QZ8X5V9K2M7N4P6R8T0G3', {bound}, 'selection', 'paused', 'operator', NULL, "
+            f"'{ended}', '{ended}', NULL, NULL)",
+        )
+    with pytest.raises(sqlite3.IntegrityError, match=r"ck_enrollments_restart_event$"):
+        run_sql(
+            path,
+            f"INSERT INTO enrollments ({ENROLLMENT_COLUMNS}) VALUES "
+            f"('01JD3QZ8X5V9K2M7N4P6R8T0G4', {bound}, 'restart', 'completed', NULL, NULL, "
+            f"'{ended}', '{ended}', '{ended}', '{ended}')",
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="bound columns"):
+        run_sql(path, f"UPDATE enrollments SET restart_event_id = '{draft}' WHERE id = '{done}'")
+    # the positive case: a restart row naming a real Signal of the Lead is accepted
+    signal, restarted = "01JD3QZ8X5V9K2M7N4P6R8T0G5", "01JD3QZ8X5V9K2M7N4P6R8T0G6"
+    run_sql(
+        path,
+        "INSERT INTO signals (id, lead_id, signal_type, signal_class, tier, score_only, "
+        f"event_date, first_seen_at, retracted_at) VALUES ('{signal}', '{lead}', 'law_hiring', "
+        f"'event', 1, 0, NULL, '{ended}', NULL)",
+        f"INSERT INTO enrollments ({ENROLLMENT_COLUMNS}, restart_event_id) VALUES "
+        f"('{restarted}', {bound}, 'restart', 'completed', NULL, NULL, '{ended}', '{ended}', "
+        f"'{ended}', '{ended}', '{signal}')",
+    )
+    reader = sqlite3.connect(path)
+    try:
+        stored = reader.execute(
+            "SELECT origin, restart_event_id FROM enrollments WHERE id = ?", (restarted,)
+        ).fetchall()
+        violations = reader.execute("PRAGMA foreign_key_check").fetchall()
+    finally:
+        reader.close()
+    assert stored == [("restart", signal)]
+    assert violations == []

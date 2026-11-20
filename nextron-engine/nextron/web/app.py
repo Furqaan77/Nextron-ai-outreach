@@ -1881,6 +1881,7 @@ def create_app(
                 if market is not None:
                     check = footer_complete(settings, market.definition)
             erased = contact is None or contact.erased_at is not None
+            restart = sequencing_queries.restart_context(enrollment.id)  # Story 8.11
             for draft in drafting_queries.drafts_of(enrollment.id):
                 revisions = drafting_queries.revisions(draft.id)
                 current = next((each for each in revisions if each.rev == draft.current_rev), None)
@@ -1896,6 +1897,7 @@ def create_app(
                         footer,
                         None if erased or contact is None else contact.email,
                         check,
+                        restart,
                     )
                 )
         return tuple(found)

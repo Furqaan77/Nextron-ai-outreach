@@ -2,7 +2,9 @@
     Each Draft of the Lead's Enrollments shows its kind, Step, status and due time, the current
     composed message exactly as the prospect would receive it (plain text, autoescaped through
     |plain), "Sending blocked: footer incomplete (...)" when its Market's footer check fails, the
-    Playbook version and the revision history. A Draft's text is AI-written from crawled data:
+    Playbook version and the revision history; a restart Enrollment's Drafts (Story 8.11) also
+    show "Restart: previous Sequence ended <date> without a Reply" and the earlier Sequence's
+    sent Steps with their dates. A Draft's text is AI-written from crawled data:
     the whole section carries hx-disable and holds no HTMX action. -#}
 <section class="lead-drafts" id="lead-drafts" aria-labelledby="drafts-heading" hx-disable>
 <h2 id="drafts-heading">Drafts</h2>
@@ -20,6 +22,18 @@
 <dt>Playbook version</dt>
 <dd>{{ draft.playbook_version|plain }}</dd>
 </dl>
+{%- if draft.restart %}
+<div class="draft-restart">
+<p class="draft-restart-line">{{ draft.restart.line|plain }}</p>
+{%- if draft.restart.steps %}
+<ul class="draft-restart-steps">
+{%- for step in draft.restart.steps %}
+<li>{{ step|plain }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+</div>
+{%- endif %}
 {%- if draft.blocked %}
 <p class="draft-blocked" role="alert">{{ draft.blocked|plain }}</p>
 {%- endif %}

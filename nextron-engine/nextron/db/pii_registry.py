@@ -458,6 +458,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "updated_at": PiiClass.NONE,
         "last_step_sent_at": PiiClass.NONE,
         "ended_at": PiiClass.NONE,
+        "restart_event_id": PiiClass.NONE,  # Story 8.11
     },
     "variant_counters": {
         "id": PiiClass.NONE,

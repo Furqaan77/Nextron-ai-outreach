@@ -2703,6 +2703,44 @@ from a pick.
 **Signal shortfall.** While capacity remains today, the notification area shows "signal
 shortfall: n", linked to the page.
 
+## Restarting a completed Sequence
+
+Story 8.11 (FR-63). A Sequence that completed without a Reply may restart once, at least 90 days
+after its last Step, on a live Tier 1 or 2 Event first seen after it ended; the new Step 1 cites
+that Event.
+
+- **The rule** (`nextron.domain.restart.restart_event`, pure): the Lead's latest Enrollment is
+  `completed` with no stop cause and sent a Step 90 days or more ago; the Lead is `new`, `queued`
+  or `contacted` (never Not Now, Lost, Disqualified or past Contacted) with no live Enrollment;
+  and it has an unretracted Event of Tier 1 or 2 (not score-only), live, with live Evidence,
+  first seen after the Sequence ended. The newest such Event is the restart Event. A Lead
+  restarts once: once any of its Enrollments was a restart it never restarts again, even when
+  another of its Contacts was enrolled and completed afterwards.
+- **Candidates**: `queries.sequencing.restart_candidates(now)`, and
+  `Selection.restart_candidates()` in the Ready-to-draft order using the Event's age (Story 8.9's
+  daily selection will read it; unscored Leads are left out).
+- **Restarting**: `Selection.restart(lead_id)` enrolls the same Contact in the same Campaign with
+  `enroll(..., origin=restart, restart_event_id=...)`. `enroll` keeps the gate first, then
+  re-checks the rule in the same transaction before anything else, so any mismatch (too early, an
+  old Event only, another Event, Contact or Campaign) refuses `restart_not_allowed`. The Event
+  is stored on `enrollments.restart_event_id` (migration `0055_8_11_sequence_restart`, an
+  in-place `ALTER TABLE ... ADD COLUMN`: set exactly for origin `restart`, never changed). No
+  email is sent or queued.
+- **Eligibility** now receives the Lead's live Tier 1/2 Event first-seen times, so FR-63's
+  `recontact_not_allowed` clears once such an Event appears 90 days after the last Step. Only a
+  restart may use that (AD-21): `Compliance.evaluate_eligibility(contact_id, *, restart=False)`
+  adds `recontact_not_allowed` (once, next to any other failing reason) while the Contact has a
+  Sequence that ended without a Reply, unless `restart=True` or the Contact's own live
+  Enrollment is a restart. Only `enroll` with origin `restart` passes `True`, so for a Contact
+  with a Sequence that ended without a Reply, the Ready list, the Lead page and every other
+  origin (a selection, an Operator pick, a referral, a re-contact) show and get `not_eligible`;
+  once its restart Enrollment is live, the Lead page shows it eligible.
+- **Lead page**: a restart Enrollment's Drafts show "Restart: previous Sequence ended <date>
+  without a Reply" and the earlier Sequence's sent Steps with their dates
+  (`queries.sequencing.restart_context`).
+- **Log**: `Selection.restart` logs `lead_restarted` with `enrolled` (0 or 1) and `reason` (the
+  refusal code, or none).
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.

@@ -135,6 +135,7 @@ ENROLLMENT_COLUMNS = (
     "id", "lead_id", "contact_id", "campaign_id", "variant_id", "sending_inbox_id", "sequence_id",
     "sequence_version", "offer_id", "origin", "status", "pause_cause", "stop_cause", "created_at",
     "updated_at", "last_step_sent_at", "ended_at",
+    "restart_event_id",  # Story 8.11
 )  # fmt: skip
 # Story 4.12 (added at its merge): a Draft with one revision on each Enrollment, written
 # directly; its footer snapshot id is a stand-in
@@ -696,6 +697,7 @@ def test_a_full_export_fills_every_section_and_completes_its_request(world: Worl
         "2026-11-18T09:00:00.000000Z",
     )
     assert enrolled["ended_at"] == "2026-11-18T11:00:00.000000Z"
+    assert enrolled["restart_event_id"] is None  # Story 8.11: not a restart
     # Story 4.12: the revision of her Enrollment's Draft, every column; Bob's isn't hers
     [revision] = file["drafting"]["draft_revisions"]
     assert tuple(revision) == REVISION_COLUMNS

@@ -57,6 +57,7 @@ REASON_TEXTS: Final = {
     "campaign_mismatch": "the Campaign doesn't match the Lead's Segment and Market",
     "lead_already_replied": "the Lead is past Contacted",
     "lead_already_enrolled": "the Lead already has a live Sequence",
+    "restart_not_allowed": "the Lead's Sequence can't restart",
     "no_active_variant": "the Campaign has no active Variant",
     "no_sending_inbox": "no Sending Inbox is connected",
 }

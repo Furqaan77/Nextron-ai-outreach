@@ -216,10 +216,17 @@ inside a caller's transaction and in a read-only unit of work alike. Callers rea
    ``contact_erased``.
 
 **Live Eligibility (FR-18, FR-2, FR-51, FR-63, AD-16, NFR-7, Stories 3.6 and 3.7).**
-``Compliance(clock).evaluate_eligibility(contact_id) -> Decision`` answers whether a stored
-Contact may lawfully receive cold email at the clock's now. It is a plain method, not a
-``@command``: it only reads, so it runs in a read-only unit of work (the Lead page renders it)
-and inside a caller's transaction alike. Every consumer (the Lead page; Enrollment, Story 4.8;
+``Compliance(clock).evaluate_eligibility(contact_id, *, restart=False) -> Decision`` answers
+whether a stored Contact may lawfully receive cold email at the clock's now. ``restart`` is
+true only for ``Sequencing.enroll`` with origin ``restart`` (Story 8.11); every other caller,
+the Ready list and the Lead page included, keeps the default, so they show what a pick gets.
+With the default, a Contact whose Sequence ended without a Reply also gets
+``recontact_not_allowed`` (``domain.restart.without_restart``, AD-21), unless the Lead's live
+Enrollment (``queries.sequencing.live_enrollment``) has origin ``restart`` and belongs to this
+Contact: a live restart is treated as ``restart=True``, so the Lead page and a send gate see
+it eligible.
+It is a plain method, not a ``@command``: it only reads, so it runs in a read-only unit of work
+(the Lead page renders it) and inside a caller's transaction alike. Every consumer (the Lead page; Enrollment, Story 4.8;
 the send gate, 6.9) calls it, and it is the only caller of
 ``nextron.domain.eligibility.evaluate``.
 
@@ -246,11 +253,20 @@ the send gate, 6.9) calls it, and it is the only caller of
 6. **History (FR-63, Story 4.8).** ``history`` is ``queries.sequencing.ended_sequences(
    contact.id)``: the Contact's ended Enrollments that sent a Step, so a Sequence that ended
    without a Reply blocks a re-contact (``recontact_not_allowed``) until FR-63 allows it.
+   **Event times (Story 8.11).** ``events_first_seen`` is
+   ``domain.restart.events_first_seen(queries.research.event_facts(lead.id), now)``: the
+   ``first_seen_at`` of the Lead's live, unretracted Tier 1 or 2 Events (not ``score_only``)
+   that have live Evidence, for every call. An Event first seen after an unanswered Sequence
+   ended, 90 days after its last Step, lets FR-63 pass, but (AD-21) only a restart may then
+   write to the Contact: see step 7.
 7. **The Decision** is ``evaluate(EligibilityContact(...), EligibilityLead(country_code, stage,
-   legal_form=, legal_form_confirmed=), market_rules, clock.now())``. No Event times or
-   re-contact date is read yet (Stories 2.9 and Epic 7 pass them), so ``events_first_seen``
-   is empty and ``recontact_on`` is ``None`` (every ``not_now`` Lead fails with
-   ``not_now_undated``).
+   legal_form=, legal_form_confirmed=, events_first_seen=), market_rules, now)``, ``now`` the
+   clock's, read once. No re-contact date is read yet (Epic 7 passes it), so ``recontact_on``
+   is ``None`` (every ``not_now`` Lead fails with ``not_now_undated``). Unless ``restart`` is
+   true, the Decision then goes through ``domain.restart.without_restart(decision, history)``
+   (the same history as step 6): while the Contact has a Sequence that ended without a Reply
+   it is not eligible, with ``recontact_not_allowed`` among its reasons exactly once, next to
+   any other failing reason. A non-``bool`` ``restart`` raises ``TypeError``.
 
 Nothing is written, cached or logged: each call reads the current facts again, so an edit to a
 Market, a suppression or a stage change shows in the very next Decision.
@@ -317,11 +333,13 @@ from nextron.domain.contactability import (
 )
 from nextron.domain.contacts import provenance_recorded
 from nextron.domain.eligibility import Decision, EligibilityContact, EligibilityLead, evaluate
+from nextron.domain.enrollment import EnrollmentOrigin
 from nextron.domain.erasure_ledger import REAPPLIED, LedgerLine, Suppressed, Voided
 from nextron.domain.ids import is_ulid
 from nextron.domain.legal_form import eligibility_facts
 from nextron.domain.markets import InvalidMarkets, MarketDef
 from nextron.domain.notifications import SubjectSuppressed
+from nextron.domain.restart import events_first_seen, without_restart
 from nextron.domain.suppression_entry import (
     CREATION,
     OPT_OUT_SOURCES,
@@ -898,8 +916,13 @@ class Compliance:
         with current().transaction():
             return self.reverse_optout(entry_id, reason)
 
-    def evaluate_eligibility(self, contact_id: str) -> Decision:
-        """The stored Contact's live cold-email Eligibility; see the module docstring."""
+    def evaluate_eligibility(self, contact_id: str, *, restart: bool = False) -> Decision:
+        """The stored Contact's live cold-email Eligibility; see the module docstring.
+
+        ``restart`` (or the Contact's own live ``restart`` Enrollment) skips AD-21's
+        ``without_restart`` rule."""
+        if not isinstance(restart, bool):
+            raise TypeError("evaluate_eligibility takes restart as a bool")
         contact = research_queries.contact(contact_id)
         if contact is None:
             raise LookupError("evaluate_eligibility: the Contact is unknown")
@@ -911,12 +934,14 @@ class Compliance:
             raise LookupError("evaluate_eligibility: the Contact's Lead is unknown")
         # a global looked up at call time: a fake of compliance_api.assert_contactable sees it
         contactable = assert_contactable(ContactSubject(contact.id), "email", "cold")
+        now = self._clock.now()
         stored = research_queries.legal_form(lead.id)
         legal_form, confirmed = eligibility_facts(
             None if stored is None else stored.legal_form,
             None if stored is None else stored.legal_form_status,
         )
-        return evaluate(
+        history = sequencing_queries.ended_sequences(contact.id)
+        decision = evaluate(
             EligibilityContact(
                 email=contact.email,
                 address_class=contact.address_class,
@@ -928,17 +953,33 @@ class Compliance:
                 provenance_recorded=provenance_recorded(
                     contact.email, research_queries.provenance(contact.id)
                 ),
-                history=sequencing_queries.ended_sequences(contact.id),
+                history=history,
             ),
             EligibilityLead(
                 country_code=lead.country_code,
                 stage=stage,
                 legal_form=legal_form,
                 legal_form_confirmed=confirmed,
+                events_first_seen=events_first_seen(research_queries.event_facts(lead.id), now),
             ),
             _market_rules(),
-            self._clock.now(),
+            now,
         )
+        # AD-21: only a restart re-contacts a Contact whose Sequence ended unanswered (8.11);
+        # the Contact's own live restart Enrollment counts as one (loop 3, I1)
+        if restart or _live_restart_of(lead.id, contact.id):
+            return decision
+        return without_restart(decision, history)
+
+
+def _live_restart_of(lead_id: str, contact_id: str) -> bool:
+    """Whether the Lead's live Enrollment is a ``restart`` one of this Contact (Story 8.11)."""
+    live = sequencing_queries.live_enrollment(lead_id)
+    return (
+        live is not None
+        and live.origin == EnrollmentOrigin.RESTART
+        and live.contact_id == contact_id
+    )
 
 
 # The contactability gate ------------------------------------------------------------------------

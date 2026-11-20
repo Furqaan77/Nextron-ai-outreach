@@ -52,6 +52,24 @@ Lead takes one from what remains. After the loop it records the capacity (as
 before the first ``enroll`` (AD-16: its gate call comes first). No job, AI call or email:
 ``enroll``'s Draft slots only. After the commit it logs ``leads_picked`` (``leads``,
 ``enrolled``, ``refused``).
+
+**Restarts (Story 8.11, FR-63).** ``restart_candidates() -> tuple[RestartRow, ...]`` (a read):
+each ``queries.sequencing.restart_candidates(now)`` Lead as a ``RestartRow(ready, restart)``:
+``ready`` a ``domain.scoring.ReadyCandidate`` of its stored Tier and Lead Score with
+``newest_event_age`` the restart Event's age (``RestartCandidate.event_age``), ``restart`` the
+``RestartCandidate``; in ``ready_order``. A Lead with no stored Tier or Lead Score (or an
+unknown Tier) is left out: it can't be ordered. Story 8.9's ``daily_selection`` reads it and
+counts capacity; nothing here does.
+
+**``@use_case restart(lead_id) -> PickOutcome``** restarts one Lead in one transaction: with no
+``queries.sequencing.restart_candidate(lead_id, now)`` the outcome's reason is
+``restart_not_allowed`` and nothing is written; a Campaign that is gone or whose Sequence is
+missing gives ``no_campaign``; otherwise ``Sequencing.enroll(the completed Enrollment's
+Contact, its Campaign, restart, every Step of the Campaign's Sequence,
+restart_event_id=the restart Event)``, whose refusal gives its ``RefusalCode`` value (``enroll``
+re-checks the restart, after the gate). It writes no ``daily_capacity`` figure (Story 8.9 owns
+that). After the commit it logs ``lead_restarted`` (``enrolled``: 0 or 1; ``reason``: the
+outcome's reason code, or ``None`` when it enrolled; no id or personal data).
 """
 
 import logging
@@ -74,7 +92,7 @@ from nextron.db.repos.scoring import capacity as capacity_repo
 from nextron.db.uow import command, current, use_case
 from nextron.domain.campaign import InvalidCampaigns
 from nextron.domain.eligibility import Decision
-from nextron.domain.enrollment import EnrollmentOrigin, NewEnrollment
+from nextron.domain.enrollment import EnrollmentOrigin, NewEnrollment, RefusalCode
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.scoring import (
     DEFAULT_MIN_LEAD_SCORE,
@@ -94,6 +112,7 @@ from nextron.ports.clock import Clock
 log = logging.getLogger(__name__)
 
 LEADS_PICKED: Final = "leads_picked"
+LEAD_RESTARTED: Final = "lead_restarted"
 
 
 class PickReason(StrEnum):
@@ -136,6 +155,14 @@ class ReadyRow:
     eligibility: Decision
     generic_copy: bool
     below_minimum: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RestartRow:
+    """A restart candidate (Story 8.11), as the selection orders it and as it restarts."""
+
+    ready: ReadyCandidate
+    restart: sequencing_queries.RestartCandidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +391,57 @@ class Selection:
         if isinstance(result, NewEnrollment):
             return PickOutcome(lead_id, result.enrollment_id, None)
         return PickOutcome(lead_id, None, str(result.code))
+
+    def restart_candidates(self) -> tuple[RestartRow, ...]:
+        """The Leads whose completed Sequence may restart now, in ``ready_order``; see the
+        module docstring."""
+        now = self._clock.now()
+        found: dict[str, RestartRow] = {}
+        for candidate in sequencing_queries.restart_candidates(now):
+            stored = scoring_queries.stored(candidate.lead_id)
+            if stored is None or stored.tier is None or stored.lead is None:
+                continue
+            ready = ReadyCandidate(candidate.lead_id, stored.tier, stored.lead, candidate.event_age)
+            found[candidate.lead_id] = RestartRow(ready, candidate)
+        ordered = ready_order(row.ready for row in found.values())
+        return tuple(found[ready.lead_id] for ready in ordered)
+
+    def _restart_one(self, lead_id: str, now: datetime) -> PickOutcome:
+        candidate = sequencing_queries.restart_candidate(lead_id, now)
+        if candidate is None:
+            return PickOutcome(lead_id, None, str(RefusalCode.RESTART_NOT_ALLOWED))
+        try:
+            campaign = setup_queries.campaign(candidate.campaign_id)
+        except InvalidCampaigns:
+            campaign = None
+        steps = () if campaign is None else _steps_of(campaign)
+        if campaign is None or not steps:
+            return PickOutcome(lead_id, None, PickReason.NO_CAMPAIGN)
+        result = self._sequencing.enroll(
+            candidate.contact_id,
+            campaign.id,
+            EnrollmentOrigin.RESTART,
+            steps,
+            restart_event_id=candidate.event_id,
+        )
+        if isinstance(result, NewEnrollment):
+            return PickOutcome(lead_id, result.enrollment_id, None)
+        return PickOutcome(lead_id, None, str(result.code))
+
+    @use_case
+    def restart(self, lead_id: str) -> PickOutcome:
+        """Restart the Lead's completed Sequence on its new Event; see the module docstring."""
+        if not isinstance(lead_id, str):
+            raise TypeError("restart takes the Lead id as str")
+        now = self._clock.now()
+        with current().transaction():
+            outcome = self._restart_one(lead_id, now)
+        reason = None if outcome.reason is None else str(outcome.reason)
+        log.info(
+            LEAD_RESTARTED,
+            extra={"enrolled": int(outcome.enrollment_id is not None), "reason": reason},
+        )
+        return outcome
 
     @use_case
     def pick(self, lead_ids: Sequence[str]) -> tuple[PickOutcome, ...]:

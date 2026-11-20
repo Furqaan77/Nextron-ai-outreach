@@ -67,6 +67,13 @@ Story 2.15 adds ``signal_evidence_ids(lead_id) -> dict[str, tuple[str, ...]]``: 
 Lead's Signals (retracted ones included) that has live Evidence, mapped to the ids of that live
 Evidence, sorted; ``{}`` for an unknown Lead (a text that isn't a ULID included).
 
+Story 8.11 adds ``event_facts(lead_id) -> tuple[nextron.domain.restart.EventFacts, ...]``: each
+of the Lead's Signals that isn't retracted (``signals``' order), with the ids of its live
+Evidence (``signal_evidence_ids``; ``()`` without any); ``()`` for an unknown Lead (a text that
+isn't a ULID included). ``retracted`` is always ``False`` here, because ``signals`` already
+leaves retracted Signals out. ``domain.restart`` decides which are restart Events and which feed
+Eligibility's ``events_first_seen``.
+
 Story 2.10 adds ``no_decision_maker(lead_id)``: ``True`` when the Lead's last Primary Contact
 selection found no decision-maker, ``False`` when it found one, ``None`` before the first
 selection (and for an unknown Lead). A Contact's ``StoredContact`` row carries
@@ -142,6 +149,7 @@ from nextron.domain.contactability import KeyKind, SuppressionKey, is_hash, key_
 from nextron.domain.extraction import ROUTE as SIGNALS_ROUTE
 from nextron.domain.identity import IdentityError
 from nextron.domain.ids import is_ulid
+from nextron.domain.restart import EventFacts
 from nextron.domain.segments import SignalClass
 from nextron.domain.signals import age_days, is_live
 from nextron.domain.widgets import ContactMethods, decode
@@ -396,6 +404,28 @@ def signal_evidence_ids(lead_id: str) -> dict[str, tuple[str, ...]]:
         if link.evidence_id in live:
             grouped.setdefault(link.signal_id, []).append(link.evidence_id)
     return {signal_id: tuple(sorted(ids)) for signal_id, ids in grouped.items()}
+
+
+def event_facts(lead_id: str) -> tuple[EventFacts, ...]:
+    """The Lead's Signals that aren't retracted as ``domain.restart.EventFacts``; see the
+    module docstring. ``retracted`` is always ``False``: ``signals`` already excludes retracted
+    Signals."""
+    if not is_ulid(lead_id):
+        return ()
+    evidence_ids = signal_evidence_ids(lead_id)
+    return tuple(
+        EventFacts(
+            signal_id=signal.id,
+            signal_class=signal.signal_class,
+            tier=signal.tier,
+            score_only=signal.score_only,
+            event_date=signal.event_date,
+            first_seen_at=signal.first_seen_at,
+            retracted=signal.retracted_at is not None,
+            evidence_ids=evidence_ids.get(signal.id, ()),
+        )
+        for signal in signals(lead_id)
+    )
 
 
 def extraction_runs(lead_id: str) -> tuple[StoredExtractionRun, ...]:

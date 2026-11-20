@@ -118,6 +118,7 @@ from nextron.db.migrations import ensure_current
 from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
+from nextron.db.repos.research import signals as signals_repo
 from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.address_class import ASSIGNMENT
@@ -258,6 +259,8 @@ MANIFEST: Final = (
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
     # Story 4.10: the Operator's picks enroll through sequencing.enroll
     Caller("scoring.pick", ("app/scoring/",), r"Selection\.pick"),
+    # Story 8.11: a completed Sequence restarts through sequencing.enroll(origin=restart)
+    Caller("scoring.restart", ("app/scoring/",), r"Selection\.restart"),
     Caller(
         "pipeline.tasks_and_call_sheets",
         ("app/pipeline/",),
@@ -1340,6 +1343,83 @@ def _pick(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     return action, lambda: (gate, gate, gate)
 
 
+def _restart(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 8.11: a Lead whose Sequence completed without a Reply 100 days ago, with a Tier 1
+    Event first seen 5 days ago, restarted through ``Selection.restart``: ``enroll``'s gate
+    calls as for a pick (its own and ``evaluate_eligibility``'s before the first write, then
+    ``request_steps``')."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
+    earlier = FrozenClock(T0 - timedelta(days=130))
+    first = world.transact(
+        lambda: Sequencing(earlier).enroll(
+            contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
+        )
+    )
+    assert isinstance(first, NewEnrollment)
+    ended = (T0 - timedelta(days=100)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    seen = T0 - timedelta(days=5)
+    with world.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE enrollments SET status = 'completed', last_step_sent_at = ?, ended_at = ? "
+            "WHERE id = ?",
+            (ended, ended, first.enrollment_id),
+        )
+
+    def store() -> None:
+        evidence = signals_repo.insert_evidence(
+            lead_id=first.lead_id,
+            evidence_type="quote",
+            quote="We are hiring.",
+            sought=None,
+            number=None,
+            fact=None,
+            value=None,
+            pages_checked=(f"https://firm-{tag}.com/careers",),
+            source="website",
+            source_url=f"https://firm-{tag}.com/careers",
+            retrieved_at=seen,
+            extracted_by="ai:extract_signals@v1",
+            person_contact_id=None,
+            at=seen,
+        )
+        signals_repo.insert_signal(
+            lead_id=first.lead_id,
+            signal_type="law_hiring",
+            signal_class="event",
+            tier=1,
+            score_only=False,
+            event_date=None,
+            first_seen_at=seen,
+            evidence_ids=[evidence],
+        )
+
+    world.transact(store)
+    clock = FrozenClock(T0)
+    selection = Selection(clock, Sequencing(clock), compliance_api.Compliance(clock))
+
+    def action() -> object:  # as a caller runs it: the use case in a unit of work
+        with world.units.open():
+            return selection.restart(first.lead_id)
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate, gate)
+
+
+def _restarted(world: World) -> None:
+    """An allowed restart enrolled its Lead with its Event; the blocked one enrolled nothing."""
+    with world.engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT lead_id, restart_event_id FROM enrollments WHERE origin = 'restart'"
+        ).all()
+        allowed_lead = connection.exec_driver_sql(
+            "SELECT id FROM leads WHERE web_domain = 'firm-0-allowed.com'"
+        ).scalar_one()
+        allowed_signal = connection.exec_driver_sql(
+            "SELECT id FROM signals WHERE lead_id = ?", (allowed_lead,)
+        ).scalar_one()
+    assert [tuple(row) for row in rows] == [(allowed_lead, allowed_signal)]
+
+
 def _picked(world: World) -> None:
     """An allowed pick enrolled its Lead and counted it; the blocked one enrolled nothing."""
     with world.engine.connect() as connection:
@@ -1720,6 +1800,10 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             blocked_writes=frozenset({("INSERT", "daily_capacity"), ("UPDATE", "daily_capacity")}),
             after_blocked=_picked,
         ),
+        # Story 8.11: enroll gates as for a pick; a Blocked restart writes nothing at all
+        "scoring.restart": Scenario(
+            (_restart,), gates_first=False, gates_before_first_write=2, after_blocked=_restarted
+        ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1824,6 +1908,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "verify_contact_email",  # Story 2.14
         "pipeline.channel_permissions",  # Story 10.7
         "scoring.pick",  # Story 4.10
+        "scoring.restart",  # Story 8.11
         "signal_inbox",  # Story 2.16
     }
     finding = {d.qualname for d in found["find_contact_email"]}

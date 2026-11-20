@@ -32,6 +32,7 @@ complete       active, paused    completed  completed
 
 **Refusals.** ``Sequencing.enroll`` answers a refusal with ``EnrollRefusal(code, reasons=(),
 blocks=())``: ``code`` a ``RefusalCode`` (in the order ``enroll`` checks: ``blocked``,
+``restart_not_allowed`` (Story 8.11, origin ``restart`` only, straight after the gate),
 ``campaign_not_active``, ``missing_tz_or_market``, ``not_eligible``, ``campaign_mismatch``,
 ``lead_already_replied``, ``lead_already_enrolled``, ``no_active_variant``,
 ``no_sending_inbox``), ``reasons`` the Eligibility ``Reason``\\s of ``not_eligible`` and
@@ -200,6 +201,7 @@ class RefusalCode(StrEnum):
     """Why ``enroll`` refused, in the order it checks."""
 
     BLOCKED = "blocked"
+    RESTART_NOT_ALLOWED = "restart_not_allowed"  # Story 8.11
     CAMPAIGN_NOT_ACTIVE = "campaign_not_active"
     MISSING_TZ_OR_MARKET = "missing_tz_or_market"
     NOT_ELIGIBLE = "not_eligible"

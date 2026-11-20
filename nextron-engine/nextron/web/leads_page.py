@@ -211,6 +211,11 @@ through ``|plain``), or "No text yet" without a revision; "Sending blocked: foot
 check fails; the current revision's Playbook version (or "—"); and the revision history, one
 ``RevisionRow`` per revision: rev, the origin's label, the time and the first 12 characters of
 its hash. "No Drafts yet." when there are none.
+
+**Restarts (Story 8.11).** A ``DraftSource`` of a ``restart`` Enrollment carries its
+``queries.sequencing.restart_context``; its ``DraftRow.restart`` (``restart_banner``) shows
+"Restart: previous Sequence ended <YYYY-MM-DD> without a Reply" and one "Step <n> sent
+<YYYY-MM-DD>" line per Step the earlier Sequence sent (UTC dates). Any other Draft has none.
 """
 
 import re
@@ -241,6 +246,7 @@ from nextron.app.queries.research import (
     StoredProvenance,
 )
 from nextron.app.queries.scoring import StoredScore
+from nextron.app.queries.sequencing import RestartContext
 from nextron.app.queries.setup import SeededMarket, SeededSegment
 from nextron.domain import render
 from nextron.domain.address_class import AddressClass
@@ -1587,6 +1593,15 @@ class DraftSource:
     footer: render.FooterText | None  # the current revision's footer snapshot
     to_address: str | None  # None for an erased Contact
     footer_check: render.FooterCheck | None  # None when the Market can't be read
+    restart: RestartContext | None = None  # Story 8.11: the Draft's Enrollment is a restart
+
+
+@dataclass(frozen=True, slots=True)
+class RestartBanner:
+    """What a restart Enrollment's Draft shows of the Sequence it restarted (Story 8.11)."""
+
+    line: str
+    steps: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1612,6 +1627,26 @@ class DraftRow:
     blocked: str | None
     playbook_version: str
     revisions: tuple[RevisionRow, ...]
+    restart: RestartBanner | None = None
+
+
+RESTART_LINE: Final = "Restart: previous Sequence ended {date} without a Reply"
+RESTART_STEP: Final = "Step {step} sent {date}"
+
+
+def _day(at: datetime) -> str:
+    return at.astimezone(UTC).date().isoformat()
+
+
+def restart_banner(context: RestartContext) -> RestartBanner:
+    """The restart line and the earlier Sequence's sent Steps with their dates (Story 8.11)."""
+    return RestartBanner(
+        line=RESTART_LINE.format(date=_day(context.ended_at)),
+        steps=tuple(
+            RESTART_STEP.format(step=step.step_no, date=_day(step.sent_at))
+            for step in context.sent_steps
+        ),
+    )
 
 
 def due_text(draft: DraftView) -> str:
@@ -1661,4 +1696,5 @@ def draft_row(source: DraftSource) -> DraftRow:
             else NO_VALUE
         ),
         revisions=tuple(revision_row(revision) for revision in source.revisions),
+        restart=None if source.restart is None else restart_banner(source.restart),
     )

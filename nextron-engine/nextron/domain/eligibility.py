@@ -2,9 +2,14 @@
 3.7). Standard library and ``nextron.domain`` only.
 
 Eligibility answers whether a Contact may lawfully receive cold email **now**. It is computed
-live on every call and never stored: ``compliance.evaluate_eligibility(contact_id)`` gathers the
-facts through the owners' read APIs and calls ``evaluate``, which is pure and is called from
-nowhere else (``tests/contracts/test_eligibility_contracts.py``).
+live on every call and never stored: ``compliance.evaluate_eligibility(contact_id, *,
+restart=False)`` gathers the facts through the owners' read APIs and calls ``evaluate``, which is
+pure and is called from nowhere else (``tests/contracts/test_eligibility_contracts.py``). Since
+Story 8.11 it passes the Lead's live Tier 1/2 Event first-seen times
+(``domain.restart.events_first_seen``) and then applies AD-21: unless ``restart`` is true or the
+Contact's own live Enrollment has origin ``restart``, a Contact whose Sequence ended without a
+Reply also gets ``recontact_not_allowed`` (``domain.restart.without_restart``), so only a restart
+re-contacts it.
 
 **Reasons.** ``ReasonKind`` is a closed ``StrEnum``, in this order: ``no_enabled_market``,
 ``cold_email_not_allowed``, ``uk_legal_form_ineligible``, ``uk_legal_form_unconfirmed``,
@@ -46,7 +51,7 @@ Market.
   legal_form_confirmed=False, events_first_seen=())``: the Lead's country, its
   ``PipelineStage``, the ``date`` a ``not_now`` Lead may be re-contacted, its Companies House
   legal form (a ``[a-z][a-z0-9-]`` code), whether FR-12 Evidence confirms it, and the times its
-  Events were first seen (Story 2.9).
+  Events were first seen (Story 2.9 stores them; Story 8.11 passes the live Tier 1/2 ones).
 - ``market_rules``: ``Mapping[str, MarketDef]``, each stored Market's row id to its current
   definition, or ``None`` when the Markets can't be read.
 

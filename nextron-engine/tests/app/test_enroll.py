@@ -692,7 +692,9 @@ def test_a_gb_basis_records_the_campaigns_lia(
     uk = world.activate(UK_CAMPAIGN, (LIA_REF, LIA_DATE.isoformat()))
     _, contact_id = world.contact("GB")
     # no UK Contact is eligible until the legal form is read (Story 2.12): a stubbed Decision
-    monkeypatch.setattr(Compliance, "evaluate_eligibility", lambda self, _: UK_DECISION)
+    monkeypatch.setattr(
+        Compliance, "evaluate_eligibility", lambda self, _, *, restart=False: UK_DECISION
+    )
 
     found = world.enroll(contact_id, uk)
 
@@ -728,6 +730,7 @@ def test_a_real_uk_contact_is_not_eligible_yet(world: World) -> None:
         ("origin", "referral"),
         ("created_at", "2026-11-19T09:00:00.000000Z"),
         ("id", "01JD3QZ8X5V9K2M7N4P6R8T0AB"),
+        ("restart_event_id", "01JD3QZ8X5V9K2M7N4P6R8T0AB"),  # Story 8.11
     ],
 )
 def test_the_trigger_refuses_a_change_to_a_bound_column(
@@ -755,6 +758,7 @@ def test_the_trigger_refuses_a_change_to_a_bound_column(
         ("stop_cause = 'reply'", "ck_enrollments_stopped"),
         ("status = 'completed'", "ck_enrollments_ended"),
         ("sequence_version = 0", "ck_enrollments_sequence_version"),
+        ("origin = 'restart'", "ck_enrollments_restart_event"),  # Story 8.11
     ],
 )
 def test_the_checks_refuse_a_bad_row(world: World, assignments: str, constraint: str) -> None:
@@ -785,6 +789,7 @@ def test_the_repository_has_no_setter_for_a_bound_column() -> None:
         "for_contact",  # Story 4.12
         "live",
         "ended_with_step",
+        "leads_with_completed",  # Story 8.11
         "live_counts_by_inbox",
         "insert",
         "set_status",
