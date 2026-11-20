@@ -1,0 +1,146 @@
+# Segment fallback copy (FR-22): the text a hand-picked Tier C Lead's Step Drafts are filled from.
+# A Tier C Lead has no live Tier 1 or Tier 2 Event, so there is no Signal to cite and no AI call is
+# made: code fills one of these templates and flags the Draft "generic" for closer review.
+#
+# One template per Segment, Step and English variant (en_us for the US Market, en_gb for the UK).
+# Step 1 has a subject; Steps 2 to 4 have none and reuse the filled Step 1 subject of the same
+# Segment and variant (the thread's subject). The body is a list of paragraphs, joined with a
+# blank line.
+#
+# Placeholders are exactly {first_name} (the first word of the Contact's name), {company} (the
+# Lead's name), {role} (the Contact's role) and {fact:<fact_id>} (the wording of an Approved
+# Company Fact from company_facts.yaml). Any other {...}, or a stray { or }, fails the sync. A
+# fact must be allowed for the template's Segment and every Market that uses its English variant.
+# A Draft whose Contact lacks a value a template uses is not drafted.
+#
+# The copy obeys the Step briefs in sequences.yaml: Step 1 under 80 words with a subject under 7
+# words and one relevance question; Steps 2 and 3 at most 70 words; Step 4 at most 50; no link,
+# price or audit in any Step; and no fact repeated across one Segment's Steps. The grounding rules
+# check every filled Draft again.
+#
+# `nextron seed sync` loads this file into the database together with the other seed files
+# (AD-12). This file is the whole set: a template added here is created, a changed one updated,
+# and one removed from here is deleted. The engine must have been started once (nextron serve).
+#
+# This file is written in a strict subset of YAML (nextron/domain/seed_yaml.py). Each paragraph is
+# quoted, since a value that starts with { must be.
+
+fallback_templates:
+  # Law firms: private AI -------------------------------------------------------------------
+  - segment: law_private_ai
+    step: 1
+    english_variant: en_us
+    subject: 'Client data and AI tools'
+    body:
+      - 'Hi {first_name},'
+      - 'Many firms want AI help with research and drafting, but cannot send client information to public tools.'
+      - 'Recent work: {fact:legal_ai}'
+      - 'Would a private setup be worth a look at {company}?'
+  - segment: law_private_ai
+    step: 2
+    english_variant: en_us
+    body:
+      - 'Hi {first_name},'
+      - 'A different angle: {fact:aba_formal_opinion_512}'
+      - 'For intake and document work, that makes where the AI runs part of the decision. Is it on the agenda at {company}?'
+  - segment: law_private_ai
+    step: 3
+    english_variant: en_us
+    body:
+      - 'Hi {first_name},'
+      - 'One more example of our work: {fact:mp_online_digital}'
+      - 'If useful, I can send a short note by reply on how a private setup could work for a firm like {company}.'
+  - segment: law_private_ai
+    step: 4
+    english_variant: en_us
+    body:
+      - 'Hi {first_name},'
+      - 'The timing may not be right, and that is fine. Should I close the loop for now? If private AI comes up later at {company}, the door stays open.'
+  - segment: law_private_ai
+    step: 1
+    english_variant: en_gb
+    subject: 'Client data and AI tools'
+    body:
+      - 'Hi {first_name},'
+      - 'Many firms want AI help with research and drafting, but cannot send client information to public tools.'
+      - 'Recent work: {fact:legal_ai}'
+      - 'Would a private set-up be worth a look at {company}?'
+  - segment: law_private_ai
+    step: 2
+    english_variant: en_gb
+    body:
+      - 'Hi {first_name},'
+      - 'A different angle: {fact:sra_ai_notice}'
+      - 'For intake and document work, that makes where the AI runs part of the decision. Is it on the agenda at {company}?'
+  - segment: law_private_ai
+    step: 3
+    english_variant: en_gb
+    body:
+      - 'Hi {first_name},'
+      - 'One more example of our work: {fact:mp_online_digital}'
+      - 'If useful, I can send a short note by reply on how a private set-up could work for a firm like {company}.'
+  - segment: law_private_ai
+    step: 4
+    english_variant: en_gb
+    body:
+      - 'Hi {first_name},'
+      - 'The timing may not be right, and that is fine. Shall I close the loop for now? If private AI comes up later at {company}, the door stays open.'
+  # Operations automation -------------------------------------------------------------------
+  - segment: ops_automation
+    step: 1
+    english_variant: en_us
+    subject: 'Manual work and automation'
+    body:
+      - 'Hi {first_name},'
+      - 'Growing teams often lose hours to copying data between tools, chasing orders and rebuilding reports by hand.'
+      - 'Recent work: {fact:wish_wheels}'
+      - 'Would automating some of that be worth a look at {company}?'
+  - segment: ops_automation
+    step: 2
+    english_variant: en_us
+    body:
+      - 'Hi {first_name},'
+      - 'A bit about who we are: {fact:nextron_team}'
+      - 'Is joining up the tools your team already uses on the list at {company} this year?'
+  - segment: ops_automation
+    step: 3
+    english_variant: en_us
+    body:
+      - 'Hi {first_name},'
+      - 'One more example of our work: {fact:mp_online_digital}'
+      - 'If useful, I can send a short note by reply on what a first automation could look like at {company}.'
+  - segment: ops_automation
+    step: 4
+    english_variant: en_us
+    body:
+      - 'Hi {first_name},'
+      - 'The timing may not be right, and that is fine. Should I close the loop for now? If automation comes up later at {company}, the door stays open.'
+  - segment: ops_automation
+    step: 1
+    english_variant: en_gb
+    subject: 'Manual work and automation'
+    body:
+      - 'Hi {first_name},'
+      - 'Growing teams often lose hours to copying data between tools, chasing orders and rebuilding reports by hand.'
+      - 'Recent work: {fact:wish_wheels}'
+      - 'Would automating some of that be worth a look at {company}?'
+  - segment: ops_automation
+    step: 2
+    english_variant: en_gb
+    body:
+      - 'Hi {first_name},'
+      - 'A bit about who we are: {fact:nextron_team}'
+      - 'Is joining up the tools your team already uses on the list at {company} this year?'
+  - segment: ops_automation
+    step: 3
+    english_variant: en_gb
+    body:
+      - 'Hi {first_name},'
+      - 'One more example of our work: {fact:mp_online_digital}'
+      - 'If useful, I can send a short note by reply on what a first automation could look like at {company}.'
+  - segment: ops_automation
+    step: 4
+    english_variant: en_gb
+    body:
+      - 'Hi {first_name},'
+      - 'The timing may not be right, and that is fine. Shall I close the loop for now? If automation comes up later at {company}, the door stays open.'

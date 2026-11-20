@@ -426,6 +426,31 @@ over a revoke. When both are taken, the store lock comes first.
 Its log records carry only ``grant``, ``reason`` and ``code``: never a token, the client
 secret, a code, the verifier, the state, a URL, a path or an account address.
 
+**Segment fallback templates (FR-22, AD-12, Story 4.19).** ``check_seed`` also takes the
+templates of ``seed/fallback_templates.yaml`` (``nextron.domain.fallback_copy.FallbackTemplate``
+values; default none) and, before any transaction, refuses an item that isn't one
+(``TypeError``) or a repeated natural key (``ValueError``), then raises
+``InvalidFallbackTemplates`` for the first template, in file order, whose ``segment`` isn't one
+of the checked Segment keys (``CheckedSeed.segment_keys``: the stored ones in Story 11.5's
+managed mode) or whose ``english_variant`` no Market of this sync uses. ``CheckedSeed`` carries
+them as ``fallback_templates``.
+
+``@command sync_fallback_templates(checked, now) -> FallbackTemplateSync`` runs in the caller's
+transaction after the Segments, Markets and Approved Company Facts are synced (``Seeds`` calls
+it last). It first checks every ``{fact:<fact_id>}`` of each template, in file order (the
+subject, then the body): the fact must be a stored current fact allowed
+(``queries.playbook.allowed_facts``) for the template's Segment and **every** Market of this
+sync whose ``english_variant`` is the template's; else ``InvalidFallbackTemplates`` on
+``fallback_templates[<segment>/<step>/<variant>].subject`` or ``.body`` naming the fact and the
+Market, and nothing is written (the caller's transaction rolls back). Then the file is the whole
+set, by natural key (Segment, Step, English variant): a new key is inserted, a key whose subject
+or body differs is updated, an unchanged one is left, and a stored row the file leaves out is
+deleted. No ``events`` row is written (templates have no version). It returns
+``FallbackTemplateSync(created, changed, unchanged, removed)``, each a tuple of
+``<segment>/<step>/<variant>`` in file order (``removed`` by Segment key, Step and variant), and
+``log_fallback_template_sync`` logs ``fallback_templates_synced`` with the four ``*_count``
+fields.
+
 **Erasure (Story 3.13).** ``ERASURE`` declares ``settings`` ``not_held``: it holds Nextron's own
 settings, never a Contact's data. The module-level ``@command erase_pii(n: ContactErased)`` is
 setup's ``ContactErased`` subscriber (``nextron.main.build_subscribers``); it writes nothing.
@@ -448,10 +473,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nextron.app.queries import compliance as compliance_queries
 from nextron.app.queries import ops as ops_queries
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
 from nextron.db.repos.setup import campaigns as campaigns_repo
+from nextron.db.repos.setup import fallback_templates as fallback_templates_repo
 from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import offers as offers_repo
 from nextron.db.repos.setup import segments as segments_repo
@@ -513,6 +540,12 @@ from nextron.domain.credentials import (
     unsub_key,
 )
 from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.fallback_copy import (
+    FallbackTemplate,
+    InvalidFallbackTemplates,
+    fact_ids,
+    template_path,
+)
 from nextron.domain.ids import is_ulid
 from nextron.domain.google_oauth import (
     CLIENT_META_NAME,
@@ -641,6 +674,9 @@ SEQUENCES_ENTITY: Final = "sequences"
 OFFERS_SYNCED: Final = "offers_synced"
 OFFERS_ENTITY: Final = "offers"
 CAMPAIGNS_SYNCED: Final = "campaigns_synced"
+FALLBACK_TEMPLATES_SYNCED: Final = "fallback_templates_synced"
+NO_SUCH_SEGMENT: Final = "isn't the key of a Segment"
+NO_MARKET_VARIANT: Final = "no Market in seed/markets.yaml uses this English variant"
 CAMPAIGNS_ENTITY: Final = "campaigns"
 SEED_SYNC_CAUSE: Final = "seed_sync"
 SEED_ACTOR: Final = "seed"
@@ -803,6 +839,17 @@ class CampaignSync:
 
 
 @dataclass(frozen=True, slots=True)
+class FallbackTemplateSync:
+    """What ``sync_fallback_templates`` did (Story 4.19): each a tuple of
+    ``<segment>/<step>/<variant>``."""
+
+    created: tuple[str, ...] = ()
+    changed: tuple[str, ...] = ()
+    unchanged: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SetupSeedSync:
     """What ``seed_sync`` did: the Segments' sync, then the Markets', the Sequences', the
     Offers' and the Campaigns'."""
@@ -828,6 +875,7 @@ class CheckedSeed:
     stored_segment_keys: frozenset[str] | None = None
     stored_sequence_steps: Mapping[str, int] | None = None
     campaigns_managed: bool = False
+    fallback_templates: tuple[FallbackTemplate, ...] = ()
 
     @property
     def segment_keys(self) -> frozenset[str]:
@@ -852,6 +900,7 @@ def check_seed(
     stored_segment_keys: Collection[str] | None = None,
     stored_sequence_steps: Mapping[str, int] | None = None,
     campaigns_managed: bool = False,
+    fallback_templates: Sequence[FallbackTemplate] = (),
 ) -> CheckedSeed:
     """Every check of the seed's five syncs that needs no database; see the module
     docstring."""
@@ -879,6 +928,7 @@ def check_seed(
         ),
         check_references=not campaigns_managed,
     )
+    chosen_templates = _fallback_inputs(fallback_templates, segment_keys, chosen_markets)
     return CheckedSeed(
         chosen_segments,
         texts,
@@ -889,6 +939,7 @@ def check_seed(
         stored_keys,
         stored_steps,
         bool(campaigns_managed),
+        chosen_templates,
     )
 
 
@@ -918,6 +969,73 @@ def log_seed_sync(result: SetupSeedSync) -> None:
         managed=result.campaigns.managed,
         differences_count=len(result.campaigns.differences),
     )
+
+
+def log_fallback_template_sync(result: FallbackTemplateSync) -> None:
+    """Log ``fallback_templates_synced`` with its four counts (Story 4.19)."""
+    log.info(
+        FALLBACK_TEMPLATES_SYNCED,
+        extra={
+            "created_count": len(result.created),
+            "changed_count": len(result.changed),
+            "unchanged_count": len(result.unchanged),
+            "removed_count": len(result.removed),
+        },
+    )
+
+
+def _fallback_inputs(
+    templates: Sequence[FallbackTemplate],
+    segment_keys: Collection[str],
+    markets: Sequence[MarketDef],
+) -> tuple[FallbackTemplate, ...]:
+    """``check_seed``'s fallback template checks before any transaction; see the module
+    docstring."""
+    chosen = tuple(templates)
+    for template in chosen:
+        if not isinstance(template, FallbackTemplate):
+            raise TypeError(f"sync_seed takes FallbackTemplates, not {type(template).__name__}")
+    counts = Counter(template.natural_key for template in chosen)
+    repeated = sorted("/".join(map(str, key)) for key, count in counts.items() if count > 1)
+    if repeated:
+        raise ValueError(
+            f"sync_seed got a fallback template more than once: {', '.join(repeated)}"
+        )
+    variants = {str(market.english_variant) for market in markets}
+    for template in chosen:
+        if template.segment not in segment_keys:
+            raise InvalidFallbackTemplates(template_path(template, "segment"), NO_SUCH_SEGMENT)
+        if str(template.english_variant) not in variants:
+            raise InvalidFallbackTemplates(
+                template_path(template, "english_variant"), NO_MARKET_VARIANT
+            )
+    return chosen
+
+
+def _template_key(segment: str, step: int, variant: str) -> str:
+    return f"{segment}/{step}/{variant}"
+
+
+def _check_template_facts(
+    template: FallbackTemplate, segment_id: str, markets: Sequence[tuple[str, str]]
+) -> None:
+    """Every fact the template names must be allowed for its Segment and each of ``markets``
+    (``(code, row id)``); else ``InvalidFallbackTemplates``."""
+    allowed = {
+        code: frozenset(
+            found.fact_id for found in playbook_queries.allowed_facts(segment_id, market_id)
+        )
+        for code, market_id in markets
+    }
+    for name, text in (("subject", template.subject), ("body", template.body)):
+        for fact_id in fact_ids(text):
+            for code, _ in markets:
+                if fact_id not in allowed[code]:
+                    raise InvalidFallbackTemplates(
+                        template_path(template, name),
+                        f"{{fact:{fact_id}}} isn't an Approved Company Fact allowed for this "
+                        f"Segment and the Market {code}",
+                    )
 
 
 def _log_changed(keys: list[str]) -> None:
@@ -1097,6 +1215,68 @@ class Setup:
         campaign_result = _sync_campaigns(checked.campaigns, now, managed=managed)
         return SetupSeedSync(
             segment_result, market_result, sequence_result, offer_result, campaign_result
+        )
+
+    @command
+    def sync_fallback_templates(self, checked: CheckedSeed, now: datetime) -> FallbackTemplateSync:
+        """Check the templates' facts, then make ``fallback_templates`` the file's set, in the
+        caller's transaction; see the module docstring."""
+        if not isinstance(checked, CheckedSeed):
+            raise TypeError(
+                f"sync_fallback_templates takes a CheckedSeed, not {type(checked).__name__}"
+            )
+        segment_ids = {stored.key: stored.id for stored in segments_repo.all_segments()}
+        segment_keys = {segment_id: key for key, segment_id in segment_ids.items()}
+        market_ids = {stored.code: stored.id for stored in markets_repo.all_markets()}
+        for template in checked.fallback_templates:
+            segment_id = segment_ids.get(template.segment)
+            if segment_id is None:  # check_seed checked the keys; kept fail-closed
+                raise InvalidFallbackTemplates(template_path(template, "segment"), NO_SUCH_SEGMENT)
+            served = [
+                (market.code, market_ids[market.code])
+                for market in checked.markets
+                if market.english_variant == template.english_variant
+                and market.code in market_ids
+            ]
+            if not served:
+                raise InvalidFallbackTemplates(
+                    template_path(template, "english_variant"), NO_MARKET_VARIANT
+                )
+            _check_template_facts(template, segment_id, served)
+        stored = {
+            (row.segment_id, row.step, row.english_variant): row
+            for row in fallback_templates_repo.all_templates()
+        }
+        created: list[str] = []
+        changed: list[str] = []
+        unchanged: list[str] = []
+        kept: set[tuple[str, int, str]] = set()
+        for template in checked.fallback_templates:
+            variant = str(template.english_variant)
+            natural = (segment_ids[template.segment], template.step, variant)
+            kept.add(natural)
+            key = _template_key(template.segment, template.step, variant)
+            row = stored.get(natural)
+            if row is None:
+                fallback_templates_repo.insert(
+                    natural[0], template.step, variant, template.subject, template.body, now
+                )
+                created.append(key)
+            elif (row.subject, row.body) != (template.subject, template.body):
+                fallback_templates_repo.update(row.id, template.subject, template.body, now)
+                changed.append(key)
+            else:
+                unchanged.append(key)
+        removed: list[tuple[str, int, str]] = []
+        for natural, row in stored.items():
+            if natural not in kept:
+                fallback_templates_repo.delete(row.id)
+                removed.append((segment_keys.get(row.segment_id, row.segment_id), *natural[1:]))
+        return FallbackTemplateSync(
+            tuple(created),
+            tuple(changed),
+            tuple(unchanged),
+            tuple(_template_key(*natural) for natural in sorted(removed)),
         )
 
 

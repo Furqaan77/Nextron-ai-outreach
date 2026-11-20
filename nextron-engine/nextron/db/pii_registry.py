@@ -360,6 +360,17 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "created_at": PiiClass.NONE,
         "updated_at": PiiClass.NONE,
     },
+    # Story 4.19. A fallback template is Nextron's own copy with placeholders, never a person.
+    "fallback_templates": {
+        "id": PiiClass.NONE,
+        "segment_id": PiiClass.NONE,
+        "step": PiiClass.NONE,
+        "english_variant": PiiClass.NONE,
+        "subject": PiiClass.NONE,
+        "body": PiiClass.NONE,
+        "created_at": PiiClass.NONE,
+        "updated_at": PiiClass.NONE,
+    },
     "campaigns": {
         "id": PiiClass.NONE,
         "key": PiiClass.NONE,
@@ -728,6 +739,7 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "served_model": PiiClass.NONE,
         "checked_at": PiiClass.NONE,
         "ai_checked_at": PiiClass.NONE,  # Story 4.14
+        "waived_rules": PiiClass.NONE,  # Story 4.19: rule ids
     },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.

@@ -9,9 +9,11 @@ the running use case's transaction. It checks nothing; ``nextron.app.drafting`` 
   row, ``flags`` decoded from its JSON array of ``{rule, span, explanation, source}`` objects
   (``rule`` is the flag's code; ``source`` ``rules`` or ``ai``, Story 4.14; a flag stored
   without one reads as ``rules``);
-- ``NewGroundingResult(draft_id, rev, status, flags, rules_version)`` and ``insert(result, at)
-  -> id``: one new row checked at ``at`` (``route_tuple_id``, ``served_model`` and
-  ``ai_checked_at`` NULL until the AI check, Story 4.14); its new ULID;
+- ``NewGroundingResult(draft_id, rev, status, flags, rules_version, waived_rules=())`` and
+  ``insert(result, at) -> id``: one new row checked at ``at`` (``route_tuple_id``,
+  ``served_model`` and ``ai_checked_at`` NULL until the AI check, Story 4.14; ``waived_rules``,
+  Story 4.19, the rules a generic revision waived, stored as a JSON array of rule ids); its new
+  ULID. ``StoredGroundingResult.waived_rules`` reads it back as a tuple;
 - ``record_ai_result(draft_id, rev, *, status, flags, route_tuple_id, served_model, at) ->
   bool`` (Story 4.14): the AI check's result for that revision: status, flags, tuple, served
   model and ``ai_checked_at`` = ``at``, set only while ``ai_checked_at`` is NULL (one
@@ -67,6 +69,7 @@ class NewGroundingResult:
     status: str
     flags: tuple[StoredFlag, ...]
     rules_version: int
+    waived_rules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,7 @@ class StoredGroundingResult:
     served_model: str | None
     checked_at: datetime
     ai_checked_at: datetime | None
+    waived_rules: tuple[str, ...] = ()
 
 
 _COLUMNS: Final = (
@@ -96,6 +100,7 @@ _COLUMNS: Final = (
     GroundingResultRecord.served_model,
     GroundingResultRecord.checked_at,
     GroundingResultRecord.ai_checked_at,
+    GroundingResultRecord.waived_rules,
 )
 
 
@@ -137,6 +142,7 @@ def _stored(row: Row[Any]) -> StoredGroundingResult:
         served_model=row.served_model,
         checked_at=row.checked_at,
         ai_checked_at=row.ai_checked_at,
+        waived_rules=tuple(str(rule) for rule in json.loads(row.waived_rules)),
     )
 
 
@@ -155,6 +161,7 @@ def insert(result: NewGroundingResult, at: datetime) -> str:
             served_model=None,
             checked_at=at,
             ai_checked_at=None,
+            waived_rules=json.dumps(list(result.waived_rules)),
         )
     )
     return result_id

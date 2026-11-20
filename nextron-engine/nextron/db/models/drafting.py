@@ -60,7 +60,10 @@ span into ``[erased]`` and keeps the rule, explanation and status. The rest hold
 data. Story 4.14 (migration ``0059_4_14_ai_grounding``) adds the nullable ``ai_checked_at``
 (when the AI check's result was recorded; PII class ``none``), gives each flag a ``source``
 (``rules`` or ``ai``), and ``ck_grounding_results_pass``: a ``pass`` row has a
-``route_tuple_id``, a ``served_model`` and an ``ai_checked_at``.
+``route_tuple_id``, a ``served_model`` and an ``ai_checked_at``. Story 4.19 (migration
+``0066_4_19_fallback_templates``) adds ``waived_rules`` (a JSON array of rule ids, server
+default ``'[]'``, ``ck_grounding_results_waived_rules``; PII class ``none``): the rules a
+generic (Segment fallback template) revision waived, ``signal_count`` on Step 1.
 
 Story 4.15 (migration ``0064_4_15_draft_failed``) adds two nullable columns to the ``drafts``
 content group: ``draft_failed_at`` (when the last drafting attempt stored no revision) and
@@ -266,6 +269,8 @@ GROUNDING_PASS_CHECK: Final = (
     "status != 'pass' OR (route_tuple_id IS NOT NULL AND served_model IS NOT NULL AND "
     "ai_checked_at IS NOT NULL)"
 )
+# Story 4.19: the rules a generic revision waived, a JSON array of rule ids
+WAIVED_RULES_CHECK: Final = "json_valid(waived_rules) AND json_type(waived_rules) = 'array'"
 
 
 class GroundingResultRecord(Base):
@@ -282,6 +287,7 @@ class GroundingResultRecord(Base):
         CheckConstraint(GROUNDING_FAIL_CHECK, name="fail"),
         CheckConstraint(RULES_VERSION_CHECK, name="rules_version"),
         CheckConstraint(GROUNDING_PASS_CHECK, name="pass"),
+        CheckConstraint(WAIVED_RULES_CHECK, name="waived_rules"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -294,3 +300,4 @@ class GroundingResultRecord(Base):
     served_model: Mapped[str | None] = mapped_column(String(SERVED_MODEL_LENGTH))
     checked_at: Mapped[datetime] = mapped_column(UtcDateTime)
     ai_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    waived_rules: Mapped[str] = mapped_column(Text, server_default=text("'[]'"))

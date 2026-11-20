@@ -17,6 +17,12 @@ open, then the apply transaction (AD-2). ``enrollment_id`` must be a ``str`` and
    slot, ``ready`` to ``drafting_blocked``, cause the first reason code, ``cause_ref`` the
    Enrollment, actor ``system:drafting``) and ``blocked`` (decision 6: no ``draft_failed_at``;
    the suppression path stops the Enrollment).
+2a. **Generic copy** (Story 4.19, FR-22): when ``fallback.generic_copy(enrollment, now)`` (the
+   Lead is Tier C at the clock's now), ``fallback.write_generic(draft, enrollment, contact, now,
+   urgency, queue=queue)`` fills the Segment's fallback template and stores revision 1 (origin
+   ``generated``, no Evidence or Signal, ``drafts.generic`` set) in this prepare transaction;
+   its outcome (``drafted``, ``failed`` with ``not_composable``, or ``blocked``) is returned.
+   No ``llm.run`` call is made and no active ``draft_sequence`` tuple is needed.
 3. **The route.** No active ``draft_sequence`` tuple (``queries.playbook.active_tuple`` and
    ``active_tuple_id``): ``draft_failed`` with ``no_route`` and no call. A context that can't be
    read (the Enrollment's Campaign, Sequence, Segment or Market gone, its Sequence's stored
@@ -44,7 +50,7 @@ open, then the apply transaction (AD-2). ``enrollment_id`` must be a ``str`` and
    Otherwise ``Drafting._append(draft, subject, body, GENERATED, Traceability(the Evidence ids
    and ``(fact_id, version)`` pairs the claims cite, in first-appearance order; the cited
    Signal; the serving tuple id; its Playbook SHA-256 and version; its prompt version), now,
-   claims=the claims, urgency=urgency)``, which stores revision 1 with its grounding result and
+   claims=the claims, urgency=urgency, generic=False)``, which stores revision 1 with its grounding result and
    enqueues its ``check_grounding`` job in this unit. A ``ValueError``, ``LookupError`` or
    ``InvalidMarkets`` from it is ``draft_failed`` with ``not_composable``. Success clears
    ``draft_failed_at`` and ``draft_failed_reason`` (``drafted``).
@@ -63,6 +69,7 @@ from typing import Final
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.drafting.api import ACTOR, ENTITY, Drafting, Traceability, _check_text
+from nextron.app.drafting.fallback import generic_copy, write_generic
 from nextron.app.drafting.grounding import _evidence_text
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import drafting as drafting_queries
@@ -186,7 +193,7 @@ class StepDrafts:
         check_urgency(urgency)
         uow = current()
         with uow.transaction():
-            prepared = self._prepare(enrollment_id, step)
+            prepared = self._prepare(enrollment_id, step, urgency)
         if not isinstance(prepared, _Call):
             return prepared
         result = self._llm.run(
@@ -206,7 +213,9 @@ class StepDrafts:
         log.info(STEP_DRAFT_FAILED, extra={"draft_id": draft_id, "reason": reason.value})
         return StepDraftOutcome.FAILED
 
-    def _prepare(self, enrollment_id: str, step: int) -> _Call | StepDraftOutcome:
+    def _prepare(
+        self, enrollment_id: str, step: int, urgency: Urgency
+    ) -> _Call | StepDraftOutcome:
         if step != FIRST_STEP:
             return self._skip(enrollment_id, "unsupported_step")
         enrollment = sequencing_queries.enrollment(enrollment_id)
@@ -234,6 +243,10 @@ class StepDrafts:
             )
             log.info(STEP_DRAFT_BLOCKED, extra={"draft_id": draft.id})
             return StepDraftOutcome.BLOCKED
+        now = self._clock.now()
+        if generic_copy(enrollment, now):  # Story 4.19: Tier C, no Signal to cite, no AI call
+            outcome = write_generic(draft, enrollment, contact, now, urgency, queue=self._queue)
+            return StepDraftOutcome(outcome.value)
         route_tuple = playbook_queries.active_tuple(DRAFT_SEQUENCE_ROUTE)
         tuple_id = playbook_queries.active_tuple_id(DRAFT_SEQUENCE_ROUTE)
         if route_tuple is None or tuple_id is None:
@@ -246,7 +259,6 @@ class StepDrafts:
         evidence = research_queries.evidence(lead_id)
         linked = research_queries.signal_evidence_ids(lead_id)
         signals = research_queries.signals(lead_id)
-        now = self._clock.now()
         live_events = frozenset(
             signal.id
             for signal in signals
@@ -386,6 +398,7 @@ class StepDrafts:
                 now,
                 claims=claims_of(proposal),
                 urgency=urgency,
+                generic=False,
             )
         except (ValueError, LookupError, InvalidMarkets):  # raised before any write
             return self._fail(draft.id, DraftFailure.NOT_COMPOSABLE)

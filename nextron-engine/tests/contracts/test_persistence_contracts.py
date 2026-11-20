@@ -80,7 +80,7 @@ SQLITE_ROOTS = frozenset({"sqlite3", "_sqlite3"})
 REGISTRY = ("nextron/main.py", "build_subscribers")
 REVISION_ID = re.compile(r"\d{4}_[a-z0-9_]+")  # matched with fullmatch
 MAX_REVISION_LENGTH = 31
-HEAD = "0065_4_16_draft_when_ready"
+HEAD = "0066_4_19_fallback_templates"
 EVENTS_TRIGGERS = frozenset(
     {"trg_events_no_update", "trg_events_no_delete", "trg_events_no_id_reuse"}
 )
@@ -815,19 +815,19 @@ def probe_chain(tmp_path: Path, *revisions: dict[str, object]) -> Path:
 @pytest.mark.parametrize(
     ("revisions", "problem"),
     [
-        ([{"revision": "0066_next"}], None),
-        ([{"revision": "0066-next"}], "the chain does not load"),
-        ([{"revision": "0066_Next"}], "the id does not match"),
+        ([{"revision": "0067_next"}], None),
+        ([{"revision": "0067-next"}], "the chain does not load"),
+        ([{"revision": "0067_Next"}], "the id does not match"),
         ([{"revision": "3_next"}], "the id does not match"),
-        ([{"revision": "0067_next"}], "the id starts 0067, but it is revision 66"),
-        ([{"revision": "0066_" + "x" * 27}], "at most 31"),
-        ([{"revision": "0066_next", "file": "0066_other"}], "the id is not its file name"),
-        ([{"revision": "0066_next", "labels": ("side",)}], "has branch labels"),
-        ([{"revision": "0066_next", "depends": HEAD}], "has dependencies"),
-        ([{"revision": "0066_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
-        ([{"revision": "0066_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
+        ([{"revision": "0068_next"}], "the id starts 0068, but it is revision 67"),
+        ([{"revision": "0067_" + "x" * 27}], "at most 31"),
+        ([{"revision": "0067_next", "file": "0067_other"}], "the id is not its file name"),
+        ([{"revision": "0067_next", "labels": ("side",)}], "has branch labels"),
+        ([{"revision": "0067_next", "depends": HEAD}], "has dependencies"),
+        ([{"revision": "0067_next", "downgrade": "pass"}], "does not raise NotImplementedError"),
+        ([{"revision": "0067_next", "downgrade": "raise RuntimeError"}], "raises RuntimeError"),
         (
-            [{"revision": "0066_a"}, {"revision": "0067_b", "down": HEAD}],
+            [{"revision": "0067_a"}, {"revision": "0068_b", "down": HEAD}],
             "the chain has 2 heads",
         ),
     ],

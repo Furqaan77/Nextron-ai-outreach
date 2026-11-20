@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0065_4_16_draft_when_ready"
+HEAD = "0066_4_19_fallback_templates"
 
 
 @pytest.fixture

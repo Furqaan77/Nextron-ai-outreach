@@ -517,3 +517,48 @@ def test_check_refuses_wrong_inputs() -> None:
         check(revision(), brief(1), object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Step"):
         check(revision(), brief(2), context(1))
+
+
+# Story 4.19: a generic revision's waiver ---------------------------------------------------------
+
+GENERIC = frozenset({"signal_count"})
+
+
+def test_a_generic_step_1_waives_signal_count_and_records_it() -> None:
+    found = run(revision(cited=None, claims=(FACT_CLAIM,)), waived_rules=GENERIC)
+
+    assert found.flags == () and found.waived == ("signal_count",)
+    assert found.rules_version == RULES_VERSION == 2
+
+
+def test_the_waiver_is_recorded_for_a_step_1_edit_with_no_claims() -> None:
+    found = run(text_only(), waived_rules=GENERIC)
+
+    assert found.flags == () and found.waived == ("signal_count",)
+
+
+def test_every_other_rule_still_runs_on_a_generic_revision() -> None:
+    body = CLEAN_BODY + " Is that useful? See https://evil.example.net"
+    outside = Claim("We built an AI legal assistant platform", None, ("other", 1))
+
+    found = run(revision(body=body, cited=None, claims=(outside,)), waived_rules=GENERIC)
+
+    assert "signal_count" not in rules(found)
+    assert {"link_in_step1", "multiple_ctas", "citation_outside_set"} <= set(rules(found))
+
+
+def test_a_waiver_on_a_follow_up_waives_nothing_that_applied() -> None:
+    found = run(revision(cited=None, claims=(FACT_CLAIM,)), step=2, waived_rules=GENERIC)
+
+    assert found.waived == ()
+
+
+def test_without_the_waiver_the_same_revision_flags_signal_count() -> None:
+    found = run(revision(cited=None, claims=(FACT_CLAIM,)))
+
+    assert rules(found) == ["signal_count"] and found.waived == ()
+
+
+def test_only_signal_count_can_be_waived() -> None:
+    with pytest.raises(ValueError, match="only signal_count"):
+        run(revision(), waived_rules=frozenset({"word_limit"}))

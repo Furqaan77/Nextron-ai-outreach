@@ -125,6 +125,14 @@ owner's command in one transaction (decision 1).
   (``TypeError``, ``ValueError``, ``InvalidSegments``, ``InvalidMarkets``,
   ``InvalidSequences``, ``InvalidOffers``, ``InvalidCampaigns`` or ``InvalidCompanyFacts``) and
   the transaction rolls back.
+- Story 4.19 adds a seventh argument, ``fallback_templates`` (the Segment fallback templates,
+  ``nextron.domain.fallback_copy.FallbackTemplate`` values; default none): ``check_seed`` checks
+  their Segment keys and English variants with the rest, and after
+  ``CompanyFacts(clock).seed_facts(...)``, in the same transaction,
+  ``Setup(clock).sync_fallback_templates(checked, now)`` checks each template's facts through
+  ``queries.playbook.allowed_facts`` and makes ``fallback_templates`` the file's set (an
+  ``InvalidFallbackTemplates`` rolls everything back). ``SeedSync.fallback_templates`` is its
+  ``FallbackTemplateSync``, logged after the facts' sync.
 
 **Backups (Story 1.16; AD-2, AD-20, FR-58, OP-5, OP-6, NFR-16).** Every copy is made with
 SQLite's backup API (``nextron.db.repos.ops.snapshot``), verified and recorded in ``backups``,
@@ -389,12 +397,14 @@ from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.compliance import UnsubPollStatus
 from nextron.app.setup.api import (
     CampaignSync,
+    FallbackTemplateSync,
     MarketSync,
     OfferSync,
     SegmentSync,
     SequenceSync,
     Setup,
     check_seed,
+    log_fallback_template_sync,
     log_seed_sync,
 )
 from nextron.db.repos.ops import backups as backups_repo
@@ -434,6 +444,7 @@ from nextron.domain.backup import (
 from nextron.domain.budget import Assessment, Threshold, assess, budget_issues, thresholds
 from nextron.domain.campaign import CampaignDef
 from nextron.domain.company_facts import SeedFact
+from nextron.domain.fallback_copy import FallbackTemplate
 from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.health import (
     GroupRuns,
@@ -655,6 +666,7 @@ class SeedSync:
     company_facts: CompanyFactSync
     offers: OfferSync
     campaigns: CampaignSync
+    fallback_templates: FallbackTemplateSync = FallbackTemplateSync()  # Story 4.19
 
 
 class Seeds:
@@ -673,9 +685,10 @@ class Seeds:
         company_facts: Sequence[SeedFact],
         offers: Sequence[OfferDef],
         campaigns: Sequence[CampaignDef],
+        fallback_templates: Sequence[FallbackTemplate] = (),
     ) -> SeedSync:
-        """Load the Segments, Markets, Sequences, Approved Company Facts, Offers and Campaigns
-        in one transaction."""
+        """Load the Segments, Markets, Sequences, Approved Company Facts, Offers, Campaigns and
+        (Story 4.19) Segment fallback templates in one transaction."""
         now = self._clock.now()
         with current().transaction():
             stored_keys = setup_queries.segment_keys()  # Story 11.5: managed once any exists
@@ -690,14 +703,17 @@ class Seeds:
                 stored_segment_keys=stored_keys if stored_keys else None,
                 stored_sequence_steps=stored_steps if stored_steps else None,
                 campaigns_managed=managed,
+                fallback_templates=fallback_templates,
             )
             checked_facts = check_seed_facts(
                 company_facts, checked.segment_keys, checked.market_countries, latest_allowed(now)
             )
             setup_result = Setup(self._clock).seed_sync(checked, now)
             fact_result = CompanyFacts(self._clock).seed_facts(checked_facts, now)
+            template_result = Setup(self._clock).sync_fallback_templates(checked, now)
         log_seed_sync(setup_result)
         log_fact_sync(fact_result)
+        log_fallback_template_sync(template_result)
         return SeedSync(
             setup_result.segments,
             setup_result.markets,
@@ -705,6 +721,7 @@ class Seeds:
             fact_result,
             setup_result.offers,
             setup_result.campaigns,
+            template_result,
         )
 
 

@@ -76,6 +76,7 @@ from nextron.db.models.sending import DomainCheckRecord, SendingDomainRecord, Se
 from nextron.db.models.sequencing import EnrollmentRecord, VariantCounterRecord
 from nextron.db.models.setup import (
     CampaignRecord,
+    FallbackTemplateRecord,
     MarketRecord,
     OfferRecord,
     SegmentRecord,
@@ -124,6 +125,7 @@ __all__ = [
     "EventRecord",
     "EvidenceRecord",
     "ExtractionRunRecord",
+    "FallbackTemplateRecord",
     "FooterSnapshotRecord",
     "HeartbeatRecord",
     "JobPostingRecord",

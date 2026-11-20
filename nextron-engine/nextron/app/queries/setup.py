@@ -85,6 +85,9 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.setup`` only.
   ``sender_timezone``, or in UTC while that is unset or unreadable. ``away_until(now) -> date |
   None``: ``sending_policy.away_until`` of that date over those periods: the last day of the
   away run holding today, or ``None`` when today isn't away (the Dashboard's banner).
+- ``fallback_template(segment_id, step, english_variant) -> StoredFallbackTemplate | None``
+  (Story 4.19, FR-22): the Segment fallback template of that Segment (row id), Step and English
+  variant (``en_us`` or ``en_gb``), or ``None`` (also for a ``segment_id`` that isn't a ULID).
 
 All read through the current unit of work, read-only ones included.
 """
@@ -96,12 +99,14 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nextron.db.repos.setup import campaigns as campaigns_repo
+from nextron.db.repos.setup import fallback_templates as fallback_templates_repo
 from nextron.db.repos.setup import markets as markets_repo
 from nextron.db.repos.setup import offers as offers_repo
 from nextron.db.repos.setup import segments as segments_repo
 from nextron.db.repos.setup import sequences as sequences_repo
 from nextron.db.repos.setup import settings as settings_repo
 from nextron.db.repos.setup.campaigns import StoredCampaign
+from nextron.db.repos.setup.fallback_templates import StoredFallbackTemplate
 from nextron.db.repos.setup.markets import StoredMarket
 from nextron.db.repos.setup.offers import StoredOffer
 from nextron.db.repos.setup.segments import StoredSegment, StoredSegmentVersion
@@ -538,6 +543,16 @@ def campaign(campaign_id: str) -> SeededCampaign | None:
         return None
     stored = campaigns_repo.by_id(campaign_id)
     return None if stored is None else _seeded_campaign(stored)
+
+
+def fallback_template(
+    segment_id: str, step: int, english_variant: str
+) -> StoredFallbackTemplate | None:
+    """The Segment fallback template of that Segment, Step and English variant, or ``None``
+    (Story 4.19)."""
+    if not is_ulid(segment_id) or isinstance(step, bool) or not isinstance(step, int):
+        return None
+    return fallback_templates_repo.find(segment_id, step, str(english_variant))
 
 
 def campaign_active(campaign_id: str) -> bool:

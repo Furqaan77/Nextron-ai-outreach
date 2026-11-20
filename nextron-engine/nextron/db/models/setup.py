@@ -91,6 +91,16 @@ table in batch mode must create its triggers again.
 Every column of the three tables but ``lia_ref`` and ``lia_date`` is NOT NULL. Offers,
 Campaigns and Variants hold configuration, and the LIA reference is the Operator's own record
 name, never a person, so no column is personal data.
+
+``fallback_templates`` (FR-22, Story 4.19, migration ``0066_4_19_fallback_templates``) holds one
+row per Segment fallback template, written only by ``nextron.db.repos.setup.fallback_templates``:
+its ``segment_id`` (a foreign key to ``segments``, no cascade), its ``step``
+(``ck_fallback_templates_step``: 1 to 6), its ``english_variant``
+(``ck_fallback_templates_english_variant``: ``en_us`` or ``en_gb``), unique together
+(``uq_fallback_templates_segment_id_step_english_variant``), its ``subject`` (set exactly on
+Step 1, ``ck_fallback_templates_subject``), its ``body`` (the paragraphs joined with a blank
+line), ``created_at`` and ``updated_at``. The text is Nextron's own copy with placeholders,
+never a person, so no column is personal data.
 """
 
 from datetime import date, datetime
@@ -137,6 +147,10 @@ CAMPAIGN_LIA_CHECK: Final = (
 VARIANT_STATUS_CHECK: Final = "status IN ('active', 'inactive')"
 SEGMENT_VERSION_ACTOR_LENGTH: Final = 8  # seed, operator
 SEGMENT_VERSION_ACTOR_CHECK: Final = "actor IN ('seed', 'operator')"
+# Story 4.19: the fallback templates
+FALLBACK_STEP_CHECK: Final = "step BETWEEN 1 AND 6"
+FALLBACK_VARIANT_CHECK: Final = "english_variant IN ('en_us', 'en_gb')"
+FALLBACK_SUBJECT_CHECK: Final = "(step = 1) = (subject IS NOT NULL)"
 
 
 class SettingRecord(Base):
@@ -271,6 +285,27 @@ class SequenceVersionRecord(Base):
     definition: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     actor: Mapped[str] = mapped_column(String(SEQUENCE_VERSION_ACTOR_LENGTH))
+
+
+class FallbackTemplateRecord(Base):
+    """One Segment fallback template (Story 4.19)."""
+
+    __tablename__ = "fallback_templates"
+    __table_args__ = (
+        UniqueConstraint("segment_id", "step", "english_variant"),
+        CheckConstraint(FALLBACK_STEP_CHECK, name="step"),
+        CheckConstraint(FALLBACK_VARIANT_CHECK, name="english_variant"),
+        CheckConstraint(FALLBACK_SUBJECT_CHECK, name="subject"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    segment_id: Mapped[str] = mapped_column(Ulid, ForeignKey("segments.id"))
+    step: Mapped[int] = mapped_column(Integer)
+    english_variant: Mapped[str] = mapped_column(String(ENGLISH_VARIANT_LENGTH))
+    subject: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
 
 
 class OfferRecord(Base):

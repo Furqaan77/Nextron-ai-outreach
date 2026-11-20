@@ -2,7 +2,7 @@
 definition of what code checks in every Draft revision before any AI judgement. Standard
 library only, plus ``nextron.domain``.
 
-``check(revision, brief, context) -> RulesResult(flags, rules_version)`` is pure. Any flag makes
+``check(revision, brief, context) -> RulesResult(flags, rules_version, waived)`` is pure. Any flag makes
 the revision's grounding ``fail``; with none it stays ``pending`` until the AI check (Story 4.14)
 decides (``RulesResult.status``). Rules-only results are never ``pass`` (fail closed).
 
@@ -22,14 +22,19 @@ decides (``RulesResult.status``). Rules-only results are never ``pass`` (fail cl
   score_only, evidence_ids)``); the strongest live Event's id, computed by the caller with
   ``nextron.domain.signals.strongest_event`` (``None`` when there is none); the ``(fact_id,
   version)`` pairs allowed for the Draft's Segment and Market; and the earlier Steps' current
-  revisions (``EarlierStep(step, fact_ids, cited_signal_id)``).
+  revisions (``EarlierStep(step, fact_ids, cited_signal_id)``). ``waived_rules`` (Story 4.19,
+  default empty) holds the rules a generic revision (filled from a Segment fallback template,
+  FR-22) waives: only ``WAIVABLE_RULES`` (``signal_count``), else ``ValueError``.
 
 **Output.** ``Flag(rule, span, explanation)``: ``rule`` one of ``RULE_IDS``; ``span`` a substring
 of the subject or body that the rule matched (``""`` for a rule about the whole revision, or a
 claim whose text is in neither); ``explanation`` at most ``MAX_EXPLANATION`` (200) characters,
 written by code and never quoting Draft text. Flags come in rule-id order (``RULE_IDS``), then
 by position: whole-revision flags first, then the subject, then the body, each by offset.
-``RULES_VERSION`` is bumped whenever any rule or list here changes.
+``RULES_VERSION`` is bumped whenever any rule or list here changes (2 since Story 4.19's
+waiver). ``RulesResult.waived`` lists, in ``RULE_IDS`` order, the waived rules that apply to the
+revision's Step whether or not it has claims (``signal_count`` on Step 1), so an Operator edit
+of a generic Step 1 records the waiver too; a waived rule never flags.
 
 **Text** (the definitions every rule shares):
 
@@ -74,7 +79,7 @@ only when ``claims`` is not ``None``.
     sentences that hold one.
 11. ``signal_count``: on Step 1, the Signals cited are not exactly one: the cited Signal, plus
     the Signals whose Evidence a claim cites when that Evidence isn't the cited Signal's (span
-    ``""``).
+    ``""``). Waived for a generic revision (``waived_rules``), which cites no Signal by design.
 12. ``wrong_signal``: on Step 1, a cited Signal that isn't ``strongest_event_id``, or, with no
     cited Signal, the one Signal the claims cite when it isn't (span ``""``).
 13. ``score_only_cited``: each claim citing Evidence of a score-only Signal, and a score-only
@@ -116,7 +121,9 @@ RULE_IDS: Final = (
 )
 TEXT_RULES: Final = RULE_IDS[:8]
 CLAIM_RULES: Final = RULE_IDS[8:]
-RULES_VERSION: Final = 1
+RULES_VERSION: Final = 2  # Story 4.19: the generic waiver of signal_count
+SIGNAL_COUNT: Final = "signal_count"
+WAIVABLE_RULES: Final = frozenset({SIGNAL_COUNT})
 MAX_EXPLANATION: Final = 200
 FIRST_STEP: Final = 1
 ABSENCE: Final = "absence"
@@ -233,6 +240,7 @@ class RulesContext:
     strongest_event_id: str | None
     allowed_facts: frozenset[tuple[str, int]]
     earlier_steps: tuple[EarlierStep, ...]
+    waived_rules: frozenset[str] = frozenset()  # Story 4.19: a generic revision's waiver
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +264,7 @@ class RulesResult:
 
     flags: tuple[Flag, ...]
     rules_version: int
+    waived: tuple[str, ...] = ()  # Story 4.19: the waived rules that applied
 
     @property
     def status(self) -> GroundingStatus:
@@ -429,9 +438,9 @@ class _Flags:
                     return
         self.whole(rule, explanation)
 
-    def result(self) -> RulesResult:
+    def result(self, waived: tuple[str, ...] = ()) -> RulesResult:
         ordered = sorted(self._found, key=lambda entry: entry[:4])
-        return RulesResult(tuple(entry[4] for entry in ordered), RULES_VERSION)
+        return RulesResult(tuple(entry[4] for entry in ordered), RULES_VERSION, waived)
 
 
 def _texts(revision: RevisionInput) -> tuple[tuple[int, str], ...]:
@@ -638,7 +647,7 @@ def _signals(
             owners = _owners(context, claim.evidence_id)
             if cited not in owners:
                 signals.update(owners)
-        if len(signals) != 1:
+        if len(signals) != 1 and SIGNAL_COUNT not in context.waived_rules:
             flags.whole(
                 "signal_count",
                 f"Step 1 cites exactly one Signal; this revision cites {len(signals)}.",
@@ -730,6 +739,9 @@ def check(revision: RevisionInput, brief: StepBrief, context: RulesContext) -> R
         raise TypeError("check takes a RulesContext")
     if brief.step != context.step:
         raise ValueError("the brief is not this Step's")
+    unknown = set(context.waived_rules) - WAIVABLE_RULES
+    if unknown:
+        raise ValueError("only signal_count can be waived")
     flags = _Flags(revision)
     _word_limit(revision, brief, flags)
     _subject_rule(revision, brief, context, flags)
@@ -742,4 +754,7 @@ def check(revision: RevisionInput, brief: StepBrief, context: RulesContext) -> R
         _citations(revision, claims, context, flags)
         _signals(revision, claims, context, flags)
         _repeated_angle(revision, claims, context, flags)
-    return flags.result()
+    applies = {SIGNAL_COUNT: context.step == FIRST_STEP}
+    return flags.result(
+        tuple(rule for rule in RULE_IDS if rule in context.waived_rules and applies.get(rule))
+    )

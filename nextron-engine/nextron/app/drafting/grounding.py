@@ -32,7 +32,9 @@ transaction (AD-2):
    already tombstoned, rules flags and ``checker_unavailable`` (``UNAVAILABLE_NOT_CONTACTABLE``),
    and no AI flag. An ``LlmOk`` answer is read by ``grounding_check.read_answer``; its claims
    re-run ``domain.grounding_rules.check`` with the same context ``Drafting`` builds
-   (``api._grounding``, at the clock's now), so text rules and citation rules both apply. The
+   (``api._grounding``, at the clock's now, with the stored row's ``waived_rules``, Story 4.19,
+   so a generic revision keeps its ``signal_count`` waiver), so text rules and citation rules
+   both apply. The
    rules flags are that run's, then any flag stored by ``_append`` whose (code, span) it doesn't
    repeat (so a generated revision's own claim flags are never lost), then the AI flags
    (``grounding_check.combine``): ``pass`` only with no flag at all. A context that can no
@@ -363,7 +365,7 @@ class GroundingChecks:
             status, flags = combine(stored, (unavailable(reason),), checked=False)
         else:
             read = read_answer(answer.result.parsed, call.subject, call.body)
-            rules = self._rules(draft_id, rev, read.claims, now)
+            rules = self._rules(draft_id, rev, read.claims, now, frozenset(row.waived_rules))
             if rules is None:
                 status, flags = combine(
                     stored, (*read.flags, unavailable(UNAVAILABLE_FAILED)), checked=False
@@ -378,9 +380,14 @@ class GroundingChecks:
 
     @staticmethod
     def _rules(
-        draft_id: str, rev: int, claims: tuple[Claim, ...], now: datetime
+        draft_id: str,
+        rev: int,
+        claims: tuple[Claim, ...],
+        now: datetime,
+        waived_rules: frozenset[str] = frozenset(),
     ) -> tuple[CheckedFlag, ...] | None:
-        """The rules re-run with the AI's claims, or ``None`` when the context is gone."""
+        """The rules re-run with the AI's claims (and the stored waiver), or ``None`` when the
+        context is gone."""
         draft = drafting_queries.draft(draft_id)
         revision = None if draft is None else drafting_queries.revision(draft_id, rev)
         enrollment = (
@@ -403,6 +410,7 @@ class GroundingChecks:
                     fact_versions=revision.fact_versions,
                 ),
                 now,
+                waived_rules,
             )
         except LookupError:
             return None

@@ -28,6 +28,8 @@ writes them (AD-3), and ``insert_slots`` leaves them to their server defaults (`
   ``draft_failed_reason`` = ``reason`` and ``updated_at``; whether a row changed;
 - ``clear_draft_failed(draft_id, at) -> bool`` (Story 4.15): both back to NULL (and
   ``updated_at``) on a Draft that has them set; whether a row changed.
+- ``set_generic(draft_id, generic, at) -> bool`` (Story 4.19): ``generic`` and ``updated_at``
+  when the flag differs; whether a row changed.
 """
 
 from collections.abc import Sequence
@@ -209,6 +211,17 @@ def mark_draft_failed(draft_id: str, reason: str, at: datetime) -> bool:
         update_rows(DraftRecord)
         .where(DraftRecord.id == draft_id)
         .values(draft_failed_at=at, draft_failed_reason=reason, updated_at=at)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+
+def set_generic(draft_id: str, generic: bool, at: datetime) -> bool:
+    """Set the Draft's ``generic`` flag (Story 4.19), at ``at``, when it differs; whether a row
+    changed."""
+    result = current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id, DraftRecord.generic.is_not(bool(generic)))
+        .values(generic=bool(generic), updated_at=at)
     )
     return int(result.rowcount) == 1  # type: ignore[attr-defined]
 

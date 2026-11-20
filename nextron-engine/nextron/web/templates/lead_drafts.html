@@ -5,7 +5,8 @@
     Playbook version, the current revision's grounding badge (pass, fail or pending; Story 4.14)
     with each flag of a fail (its code, its span in <mark>, autoescaped, and its explanation) and
     the revision history, and "Drafting failed: <reason>. Regenerate to retry." for a Draft whose
-    drafting stored no revision (Story 4.15). A Draft's text is AI-written from crawled data:
+    drafting stored no revision (Story 4.15), and a "generic" badge for a Draft filled from its
+    Segment's fallback template (Story 4.19). A Draft's text is AI-written from crawled data:
     the whole section carries hx-disable and holds no HTMX action. -#}
 <section class="lead-drafts" id="lead-drafts" aria-labelledby="drafts-heading" hx-disable>
 <h2 id="drafts-heading">Drafts</h2>
@@ -14,7 +15,7 @@
 {%- else %}
 {%- for draft in drafts %}
 <article class="draft" data-draft="{{ draft.draft_id|plain }}">
-<h3>{{ draft.kind|plain }}{% if draft.step %}: {{ draft.step|plain }}{% endif %}</h3>
+<h3>{{ draft.kind|plain }}{% if draft.step %}: {{ draft.step|plain }}{% endif %}{% if draft.generic %} <span class="badge-generic">generic</span>{% endif %}</h3>
 <dl class="draft-facts">
 <dt>Status</dt>
 <dd>{{ draft.status|plain }}</dd>

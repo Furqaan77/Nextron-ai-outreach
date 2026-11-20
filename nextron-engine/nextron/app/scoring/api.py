@@ -110,26 +110,9 @@ class RescoreOutcome:
 
 
 def scoring_signals(lead_id: str) -> tuple[ScoringSignal, ...]:
-    """The Lead's current Signals as the domain scores them; see the module docstring."""
-    evidence_ids = research_queries.signal_evidence_ids(lead_id)
-    open_events: dict[str, bool] = {}
-    for posting in research_queries.job_postings(lead_id):
-        if posting.signal_id is not None:
-            held = open_events.get(posting.signal_id, False)
-            open_events[posting.signal_id] = held or posting.live
-    return tuple(
-        ScoringSignal(
-            signal_id=signal.id,
-            signal_type=signal.signal_type,
-            signal_class=signal.signal_class,
-            tier=signal.tier,
-            event_date=signal.event_date,
-            first_seen_at=signal.first_seen_at,
-            evidence_ids=evidence_ids.get(signal.id, ()),
-            open=open_events.get(signal.id, True),
-        )
-        for signal in research_queries.signals(lead_id)
-    )
+    """The Lead's current Signals as the domain scores them; see the module docstring. One
+    definition: ``queries.research.scoring_signals`` (Story 4.19)."""
+    return research_queries.scoring_signals(lead_id)
 
 
 def size_evidence(lead_id: str) -> tuple[SizeEvidence, ...]:

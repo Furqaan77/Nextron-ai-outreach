@@ -827,6 +827,17 @@ the ``segments``, ``markets``, ``sequences``, ``step_briefs``, ``company_facts``
    and seed/offers.yaml ignored``, then a line per difference like the Segments'. The seed
    never sets a Campaign's status or LIA.
 
+**Story 4.19** adds a seventh file, ``fallback_templates.yaml`` in the same folder (label
+``seed/fallback_templates.yaml``), required like the others: read and validated after
+``campaigns.yaml`` (``nextron.domain.fallback_copy.validate_fallback_templates``) and passed to
+``Seeds.sync_seed`` as its ``fallback_templates``. An ``InvalidFallbackTemplates``, from the file
+or from the sync (a Segment key that isn't stored or synced, an English variant no Market uses,
+or a fact not allowed for the Segment and every Market of its variant), prints
+``seed/fallback_templates.yaml: <message>`` and exits 1 with nothing changed. The summary ends
+with ``fallback_templates: <c> created, <n> changed, <u> unchanged, <r> removed`` and a line
+``  <segment>/<step>/<variant>: removed, not in seed/fallback_templates.yaml`` per removed
+template.
+
 It takes no lock, configures no logging, reads no Credential Manager entry and builds no app,
 runner or scheduler; the engine is disposed in a ``finally``. A sync never re-scores a Lead.
 
@@ -958,6 +969,7 @@ from nextron.app.setup.api import (
     Campaigns,
     CampaignSync,
     Credentials,
+    FallbackTemplateSync,
     GoogleAccess,
     MarketSync,
     OfferDifference,
@@ -1008,6 +1020,7 @@ from nextron.domain.ai_test_sets import set_case
 from nextron.domain.budget import AiCall, ApiCall, BudgetClass, Usage, month_of
 from nextron.domain.campaign import InvalidCampaigns, validate_campaigns
 from nextron.domain.company_facts import InvalidCompanyFacts, validate_company_facts
+from nextron.domain.fallback_copy import InvalidFallbackTemplates, validate_fallback_templates
 from nextron.domain.contact_market import RESOLVE_CONTACT_MARKETS_JOB
 from nextron.domain.crawl import (
     CANONICALIZE_LEAD_JOB,
@@ -1198,6 +1211,8 @@ OFFERS_FILE_NAME: Final = "offers.yaml"
 OFFERS_FILE_LABEL: Final = "seed/offers.yaml"
 CAMPAIGNS_FILE_NAME: Final = "campaigns.yaml"
 CAMPAIGNS_FILE_LABEL: Final = "seed/campaigns.yaml"
+FALLBACK_TEMPLATES_FILE_NAME: Final = "fallback_templates.yaml"  # Story 4.19: the seventh
+FALLBACK_TEMPLATES_FILE_LABEL: Final = "seed/fallback_templates.yaml"
 MAX_SEED_FILE_BYTES: Final = 1024 * 1024
 AI_SETS_DIR: Final = ENGINE_ROOT / "tests" / "ai_sets"  # Story 4.5: the AI Test Set cases
 CASE_FOLDERS: Final = (  # Story 4.6: each set's folder, in load order
@@ -3600,6 +3615,19 @@ def _facts_block(result: CompanyFactSync) -> list[str]:
     return lines
 
 
+def _fallback_templates_block(result: FallbackTemplateSync) -> list[str]:
+    """The Segment fallback templates' summary lines (Story 4.19): the counts, then a line per
+    removed template."""
+    lines = [
+        f"fallback_templates: {len(result.created)} created, {len(result.changed)} changed, "
+        f"{len(result.unchanged)} unchanged, {len(result.removed)} removed"
+    ]
+    lines += [
+        f"  {key}: removed, not in {FALLBACK_TEMPLATES_FILE_LABEL}" for key in result.removed
+    ]
+    return lines
+
+
 def format_seed_sync(result: SeedSync) -> str:
     """``seed sync``'s summary: the Segments' block, then the Markets', the Sequences', the
     Approved Company Facts', the Offers' and the Campaigns'."""
@@ -3609,6 +3637,7 @@ def format_seed_sync(result: SeedSync) -> str:
     lines += _facts_block(result.company_facts)
     lines += _offers_block(result.offers)
     lines += _campaigns_block(result.campaigns)
+    lines += _fallback_templates_block(result.fallback_templates)
     return "\n".join(lines)
 
 
@@ -3629,6 +3658,7 @@ def _load_seed[T](folder: Path, name: str, label: str, validate: Callable[[objec
         InvalidCompanyFacts,
         InvalidOffers,
         InvalidCampaigns,
+        InvalidFallbackTemplates,
     ) as exc:
         raise _SeedFileProblem(f"{label}: {exc.message}") from None
 
@@ -3668,6 +3698,12 @@ def seed_sync(
         campaigns = _load_seed(
             folder, CAMPAIGNS_FILE_NAME, CAMPAIGNS_FILE_LABEL, validate_campaigns
         )
+        fallback_templates = _load_seed(
+            folder,
+            FALLBACK_TEMPLATES_FILE_NAME,
+            FALLBACK_TEMPLATES_FILE_LABEL,
+            validate_fallback_templates,
+        )
     except _SeedFileProblem as exc:
         print(exc, file=err)
         return EXIT_SEED_FAILED
@@ -3681,7 +3717,7 @@ def seed_sync(
         units = connect_database(config)
         with units.open():
             result = seeds.sync_seed(
-                segments, markets, sequences, company_facts, offers, campaigns
+                segments, markets, sequences, company_facts, offers, campaigns, fallback_templates
             )
     except InvalidSegments as exc:  # a key a stored Segment left out of the file still uses
         print(f"{SEGMENTS_FILE_LABEL}: {exc.message}", file=err)
@@ -3700,6 +3736,9 @@ def seed_sync(
         return EXIT_SEED_FAILED
     except InvalidCampaigns as exc:  # a reference, the floor, a stored Campaign's rules
         print(f"{CAMPAIGNS_FILE_LABEL}: {exc.message}", file=err)
+        return EXIT_SEED_FAILED
+    except InvalidFallbackTemplates as exc:  # Story 4.19: a Segment, variant or fact
+        print(f"{FALLBACK_TEMPLATES_FILE_LABEL}: {exc.message}", file=err)
         return EXIT_SEED_FAILED
     except Exception as exc:  # noqa: BLE001 - the transaction rolled back
         print(_seed_failed(exc), file=err)

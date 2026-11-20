@@ -267,6 +267,11 @@ no live Sequence.", role ``alert``) when nothing was live, after the first click
 revision shows "Drafting failed: <reason text>. Regenerate to retry." (``draft_failed``;
 ``nextron.domain.step_drafting.failure_text`` of its ``draft_failed_reason``, autoescaped
 through ``|plain``); with a revision, or no failure, it shows nothing.
+
+**Generic copy (Story 4.19, FR-22).** A Draft whose ``drafts.generic`` is set (filled from its
+Segment's fallback template for a Tier C Lead, with no AI call) shows a "generic" badge
+(``<span class="badge-generic">generic</span>``) beside its heading, so the Operator reviews it
+more closely (``DraftRow.generic``).
 """
 
 import re
@@ -1840,6 +1845,7 @@ class DraftRow:
     grounding: str = PENDING_GROUNDING  # pass, fail or pending (Story 4.14)
     grounding_flags: tuple[GroundingFlagRow, ...] = ()
     draft_failed: str | None = None  # Story 4.15: the drafting failure notice
+    generic: bool = False  # Story 4.19: filled from the Segment's fallback template
 
 
 def draft_failed_notice(draft: DraftView, current: RevisionView | None) -> str | None:
@@ -1915,6 +1921,7 @@ def draft_row(source: DraftSource) -> DraftRow:
         grounding=grounding,
         grounding_flags=flags,
         draft_failed=draft_failed_notice(draft, current),
+        generic=draft.generic,
     )
 
 

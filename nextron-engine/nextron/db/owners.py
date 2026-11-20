@@ -316,6 +316,19 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "offers": {
         "setup": ("id", "key", "name", "ladder", "version", "created_at", "updated_at"),
     },
+    # Story 4.19: the Segment fallback templates (FR-22)
+    "fallback_templates": {
+        "setup": (
+            "id",
+            "segment_id",
+            "step",
+            "english_variant",
+            "subject",
+            "body",
+            "created_at",
+            "updated_at",
+        ),
+    },
     "campaigns": {
         "setup": (
             "id",
@@ -679,6 +692,7 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "served_model",
             "checked_at",
             "ai_checked_at",  # Story 4.14
+            "waived_rules",  # Story 4.19
         ),
     },
     "unsub_tokens": {

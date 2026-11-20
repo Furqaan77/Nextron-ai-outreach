@@ -94,6 +94,15 @@ unit:
    ``recompose_ready`` ``bulk``; a generated revision passes its caller's (Step 1: ``soon``).
    ``_append`` refuses with ``RuntimeError`` before any write when the ``Drafting`` was built
    without a ``queue``. ``GroundingChecks`` (``nextron.app.drafting.grounding``) runs the job.
+7. **Generic** (Story 4.19, FR-22): ``_append`` takes ``generic: bool | None = None``. ``True``
+   (a revision filled from a Segment fallback template, ``nextron.app.drafting.fallback``) and
+   ``False`` (a route-made revision) set ``drafts.generic`` when it differs
+   (``drafts_repo.set_generic``); ``None`` keeps the Draft's flag, except that an origin
+   ``regenerated`` with a ``route_tuple_id`` resolves to ``False`` (a route-made regenerate
+   clears it). The resolved flag also decides the rules' waiver: a generic revision's
+   ``RulesContext.waived_rules`` is ``{"signal_count"}`` (``_grounding``'s ``waived_rules``),
+   and the ``grounding_results`` row stores ``RulesResult.waived`` as ``waived_rules``. So
+   ``revise`` and ``recompose_ready`` keep both the flag and the waiver.
 
 **``@command revise(draft_id, subject, body) -> int``** (the Operator's edit; Epic 5 calls it
 through ``approval``). ``draft_id``, ``subject`` and ``body`` must be ``str`` (``TypeError``).
@@ -165,6 +174,7 @@ from nextron.domain.grounding_check import (
     FlagSource,
 )
 from nextron.domain.grounding_rules import (
+    SIGNAL_COUNT,
     Claim,
     EarlierStep,
     LeadSignal,
@@ -269,6 +279,7 @@ class _Prepared:
     footer_text: str
     text_hash: str
     grounding: RulesResult
+    generic: bool = False  # Story 4.19: the resolved flag the rules ran with
 
 
 def _earlier_steps(draft: DraftView, enrollment_id: str) -> tuple[EarlierStep, ...]:
@@ -294,11 +305,32 @@ def _earlier_steps(draft: DraftView, enrollment_id: str) -> tuple[EarlierStep, .
     return tuple(earlier)
 
 
+def generic_waiver(generic: bool) -> frozenset[str]:
+    """The rules a revision waives: ``signal_count`` for a generic one (Story 4.19)."""
+    return frozenset({SIGNAL_COUNT}) if generic else frozenset()
+
+
+def _resolved_generic(
+    draft: DraftView, origin: RevisionOrigin, traceability: Traceability, generic: bool | None
+) -> bool:
+    """Whether the new revision is generic; see the module docstring (Story 4.19)."""
+    if generic is not None:
+        return bool(generic)
+    if origin is RevisionOrigin.REGENERATED and traceability.route_tuple_id is not None:
+        return False
+    return draft.generic
+
+
 def _grounding(
-    draft: DraftView, enrollment: StoredEnrollment, revision: RevisionInput, now: datetime
+    draft: DraftView,
+    enrollment: StoredEnrollment,
+    revision: RevisionInput,
+    now: datetime,
+    waived_rules: frozenset[str] = frozenset(),
 ) -> RulesResult:
     """The deterministic grounding rules over ``revision`` (Story 4.13); ``LookupError`` when
-    the context can't be built. See the module docstring."""
+    the context can't be built. ``waived_rules`` (Story 4.19) is a generic revision's waiver.
+    See the module docstring."""
     campaign = setup_queries.campaign(enrollment.campaign_id)
     if campaign is None:
         raise LookupError("the Draft's Campaign is unknown")
@@ -356,6 +388,7 @@ def _grounding(
             for found in playbook_queries.allowed_facts(campaign.segment_id, campaign.market_id)
         ),
         earlier_steps=_earlier_steps(draft, enrollment.id),
+        waived_rules=frozenset(waived_rules),
     )
     return check_grounding(revision, steps[draft.step_no - 1], context)
 
@@ -367,8 +400,10 @@ def _prepare(
     traceability: Traceability,
     now: datetime,
     claims: tuple[Claim, ...] | None = None,
+    generic: bool = False,
 ) -> _Prepared:
-    """``_append``'s checks and computation, before any write; see the module docstring."""
+    """``_append``'s checks and computation, before any write; ``generic`` (Story 4.19) is the
+    resolved flag of the new revision. See the module docstring."""
     _check_text(subject, body)
     if draft.enrollment_id is None:
         raise LookupError("the Draft has no Enrollment")
@@ -410,8 +445,9 @@ def _prepare(
             fact_versions=traceability.fact_versions,
         ),
         now,
+        generic_waiver(generic),
     )
-    return _Prepared(market.id, footer_text, digest, grounding)
+    return _Prepared(market.id, footer_text, digest, grounding, generic)
 
 
 def _checked_steps(steps: object) -> tuple[int, ...]:
@@ -559,17 +595,20 @@ class Drafting:
         claims: tuple[Claim, ...] | None = None,
         *,
         urgency: Urgency,
+        generic: bool | None = None,
     ) -> int:
         """Append a revision of ``draft`` and its grounding result, point the Draft at it and
         enqueue its AI check at ``urgency``; its ``rev``. ``prepared`` is ``_prepare``'s result
         for this text when the caller already has it; ``claims`` are the drafting output's
-        claims (``None`` without a claims array). See the module docstring."""
+        claims (``None`` without a claims array); ``generic`` (Story 4.19) as in the module
+        docstring. See the module docstring."""
         check_urgency(urgency)
         queue = self._queue
         if queue is None:
             raise RuntimeError("this Drafting was built without a job queue")
-        if prepared is None:
-            prepared = _prepare(draft, subject, body, traceability, at, claims)
+        resolved = _resolved_generic(draft, origin, traceability, generic)
+        if prepared is None or prepared.generic != resolved:
+            prepared = _prepare(draft, subject, body, traceability, at, claims, resolved)
         snapshot_id = footer_snapshots_repo.ensure(prepared.market_id, prepared.footer_text, at)
         rev = (draft.current_rev or 0) + 1
         revisions_repo.insert(
@@ -603,10 +642,13 @@ class Drafting:
                     for flag in grounding.flags
                 ),
                 rules_version=grounding.rules_version,
+                waived_rules=grounding.waived,
             ),
             at,
         )
         drafts_repo.set_current_rev(draft.id, rev, at)
+        if resolved != draft.generic:
+            drafts_repo.set_generic(draft.id, resolved, at)
         queue.enqueue(
             CHECK_GROUNDING_JOB,
             scope=draft.id,
@@ -660,7 +702,12 @@ class Drafting:
                 continue
             try:
                 prepared = _prepare(
-                    draft, previous.subject, previous.body, _copied(previous), now
+                    draft,
+                    previous.subject,
+                    previous.body,
+                    _copied(previous),
+                    now,
+                    generic=draft.generic,
                 )
             except (ValueError, LookupError, InvalidMarkets) as error:  # before any write
                 log.warning(
