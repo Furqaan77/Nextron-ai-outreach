@@ -238,6 +238,7 @@ FILES = [
     "nextron/db/alembic/versions/0062_8_7_crawl_run_mode.py",
     "nextron/db/alembic/versions/0063_6_11_inbox_pacing.py",
     "nextron/db/alembic/versions/0064_4_15_draft_failed.py",
+    "nextron/db/alembic/versions/0065_4_16_draft_when_ready.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",

@@ -14,9 +14,12 @@ three routes, which stay thin.
   (``REPROCESS_NOTICES``).
 
 **The form** (``method="post"``, ``hx-post``, ``{{ csrf_field() }}``) has ``FORM_SLOTS`` (5)
-fieldsets of ``url_<n>``, ``text_<n>``, ``author_<n>`` and ``company_<n>``. ``submitted_rows``
-allows only those fields and ``csrf_token``, each at most once (``MalformedForm`` otherwise);
-a refused submission (``ItemsRefused``) shows each reason by its field, with what was typed
+fieldsets of ``url_<n>``, ``text_<n>``, ``author_<n>`` and ``company_<n>``, and (Story 4.16)
+one "Draft Step 1 when ready" checkbox (``draft_when_ready``, value ``on``, ticked by default)
+for the whole submission. ``submitted_rows`` allows only those fields and ``csrf_token``, each
+at most once (``MalformedForm`` otherwise); ``submitted_draft_when_ready`` reads the checkbox:
+absent is off, ``on`` is on, any other value is ``MalformedForm``. A refused submission
+(``ItemsRefused``) shows each reason by its field, with what was typed (the checkbox included)
 kept, and stores nothing.
 
 **The list** shows the newest items (``queries.discovery.signal_items``): status, submission
@@ -36,6 +39,8 @@ from nextron.app.discovery.signal_inbox import ReprocessChoice, ReprocessOutcome
 from nextron.app.queries.discovery import StoredItem
 from nextron.app.queries.setup import SeededSegment
 from nextron.domain.signal_inbox_item import (
+    DRAFT_FIELD,
+    DRAFT_ON,
     FIELDS,
     FLAG_LABELS,
     FORM_SLOTS,
@@ -54,7 +59,8 @@ LEAD_FIELD: Final = "lead"
 WEBSITE_FIELD: Final = "website"
 SEGMENT_FIELD: Final = "segment"
 SUBMIT_FIELDS: Final = frozenset(
-    f"{name}_{number}" for name in FIELDS for number in range(1, FORM_SLOTS + 1)
+    {f"{name}_{number}" for name in FIELDS for number in range(1, FORM_SLOTS + 1)}
+    | {DRAFT_FIELD}
 )
 REPROCESS_FIELDS: Final = frozenset({LEAD_FIELD, WEBSITE_FIELD, SEGMENT_FIELD})
 STATUS_LABELS: Final = {
@@ -132,6 +138,19 @@ def submitted_rows(fields: FormFields) -> list[dict[str, str]]:
     ]
 
 
+def submitted_draft_when_ready(fields: FormFields) -> bool:
+    """The submission's "Draft Step 1 when ready" checkbox: absent is off, ``on`` is on;
+    ``MalformedForm`` for any other value or one given twice."""
+    values = fields.get(DRAFT_FIELD)
+    if values is None:
+        return False
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    if values[0] != DRAFT_ON:
+        raise MalformedForm(WRONG_FIELDS)
+    return True
+
+
 def submitted_reprocess(fields: FormFields) -> ReprocessChoice:
     """The reprocess form's three fields, each once; ``MalformedForm`` otherwise."""
     if set(fields) - {CSRF_FIELD} != REPROCESS_FIELDS:
@@ -176,12 +195,15 @@ def panel_context(
     rows: list[dict[str, str]] | None = None,
     errors: Mapping[str, str] | None = None,
     notice: Notice | None = None,
+    draft_when_ready: bool = True,
 ) -> dict[str, object]:
     """What ``signal_inbox_panel.html`` renders: the form's fieldsets as typed (blank by
-    default), each field's error, the notice, the items and the Segment choices."""
+    default), the "Draft Step 1 when ready" checkbox (ticked by default), each field's error,
+    the notice, the items and the Segment choices."""
     typed = rows if rows is not None else [dict.fromkeys(FIELDS, "") for _ in range(FORM_SLOTS)]
     return {
         "slots": [(number, row) for number, row in enumerate(typed, start=1)],
+        "draft_when_ready": draft_when_ready,
         "errors": dict(errors or {}),
         "notice": notice,
         "items": [item_row(item) for item in items],

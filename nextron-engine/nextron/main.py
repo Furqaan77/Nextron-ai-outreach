@@ -324,7 +324,10 @@ compliance)`` (``nextron.app.scoring.selection``, on the dashboard's one ``Compl
 the "Ready to draft" page (``GET /leads/ready``, ``POST /leads/ready/pick``) its list, today's
 capacity and the picks, and the notification area its "signal shortfall" line
 (``create_app(..., selection=...)``); ``LeadScores(..., selection=selection)`` records the day's
-capacity after each daily ``recompute_tiers`` run.
+capacity after each daily ``recompute_tiers`` run. Story 4.16: ``LeadScores(...,
+selection=selection, discovery=discovery)`` picks a scored Signal Inbox Lead whose items say
+"Draft Step 1 when ready" and records the outcome on them, and the notification area lists the
+recent refusals (``Selection.signal_inbox_refusals``).
 
 **Hiring Signals and job postings (Story 2.11).** ``JobBoards(clock, meter, boards, crawler,
 queue)`` (``nextron.app.research.job_boards``) runs the ``check_job_boards`` jobs (after the
@@ -1491,8 +1494,14 @@ def build_app(
     # Story 4.15: enroll enqueues Step 1's draft_step job, so the Sequencing has the queue
     sequencing = Sequencing(clock, queue)
     selection = Selection(clock, sequencing, compliance)
+    # Story 4.16: score_lead picks a "Draft Step 1 when ready" Signal Inbox Lead through the
+    # selection and records the outcome on its items through discovery
     lead_scores = LeadScores(
-        clock, Scoring(clock, Pipeline(clock), research), queue, selection=selection
+        clock,
+        Scoring(clock, Pipeline(clock), research),
+        queue,
+        selection=selection,
+        discovery=discovery,
     )
     erasure_ledger = ErasureLedger(clock, ledger_file, compliance, erasures)
     recovery_runner = RecoveryRunner(

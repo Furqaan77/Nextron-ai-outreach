@@ -1,21 +1,26 @@
 """Story 4.10's "Ready to draft" page (``GET /leads/ready``, ``POST /leads/ready/pick``) and the
-notification area's signal shortfall line, through ``Dashboard(units=...)`` on the world of
-``tests.app.test_enroll``: the header texts, the rows and badges, the pick form, the result
-table, the 400s of a malformed form, the Leads list's link and the area line."""
+notification area's signal shortfall line (and Story 4.16's "not drafted" lines), through
+``Dashboard(units=...)`` on the world of ``tests.app.test_enroll``: the header texts, the rows
+and badges, the pick form, the result table, the 400s of a malformed form, the Leads list's link
+and the area line."""
 
+from html import escape
 from urllib.parse import urlencode
 
 import pytest
 from sqlalchemy import Engine
 
+from nextron.db.models.base import new_id
 from nextron.domain.scoring import Tier
 from nextron.web.ready_page import NO_CAPACITY
-from tests.app.test_enroll import World, build_world
+from tests.app.test_enroll import T0, World, build_world, stamp
 from tests.app.test_selection import scored, warm
+from tests.app.test_signal_inbox_drafting import inbox_item
 from tests.asgi import Reply
 from tests.dashboard import FORM, Dashboard
 
 UNKNOWN = "01JD3QZ8X5V9K2M7N4P6R8T0AA"
+HOSTILE_NAME = "<script>alert(1)</script> & Co"
 
 
 class Page:
@@ -129,3 +134,44 @@ def test_the_area_shows_the_signal_shortfall_while_capacity_remains(page: Page) 
     area = page.get("/notifications").text
 
     assert '<a href="/leads/ready">signal shortfall: 7</a>' in area
+
+
+def test_the_area_tells_mac_a_signal_inbox_lead_was_not_drafted(page: Page) -> None:
+    """Story 4.16: a Signal Inbox Lead refused at scoring shows "not drafted" (its name
+    escaped, inside hx-disable), and is first on the list with its badge, until it is picked."""
+    world = page.world
+    lead_id, _ = scored(world, Tier.B, 60)
+    world.sql("UPDATE leads SET name = ? WHERE id = ?", (HOSTILE_NAME, lead_id))
+    inbox_item(world, lead_id)
+    with world.units.open():
+        page.dashboard.lead_scores.score_lead(lead_id)  # no warm inbox: over capacity
+
+    area = page.get("/notifications").text
+
+    assert '<ul class="signal-not-drafted" hx-disable>' in area
+    line = f"Signal Inbox Lead {escape(HOSTILE_NAME)} not drafted: no capacity left today"
+    assert f'<li><a href="/leads/{lead_id}">{line}</a></li>' in area
+    assert "<script>" not in area
+    assert "Signal Inbox: not drafted" in page.get("/leads/ready").text
+
+    warm(world, 30)
+    assert page.pick(picks(lead_id)).status == 200
+
+    assert "not drafted" not in page.get("/notifications").text
+    assert "Signal Inbox: not drafted" not in page.get("/leads/ready").text
+
+
+def test_the_area_shows_at_most_ten_not_drafted_lines(page: Page) -> None:
+    world = page.world
+    for _ in range(11):
+        lead_id, _contact = scored(world, Tier.B, 60)
+        world.sql(
+            "INSERT INTO signal_inbox_items (id, url, text, status, submitted_at, processed_at, "
+            "lead_id, draft_when_ready, draft_outcome, draft_decided_at) VALUES (?, "
+            "'https://post.example/1', 'Text', 'processed', ?, ?, ?, 1, 'disqualified', ?)",
+            (new_id(), stamp(T0), stamp(T0), lead_id, stamp(T0)),
+        )
+
+    area = page.get("/notifications").text
+
+    assert area.count("not drafted: Lead disqualified") == 10

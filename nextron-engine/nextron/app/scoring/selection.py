@@ -53,6 +53,20 @@ Lead takes one from what remains. After the loop it records the capacity (as
 before the first ``enroll`` (AD-16: its gate call comes first). No job, AI call or email:
 ``enroll``'s Draft slots only. After the commit it logs ``leads_picked`` (``leads``,
 ``enrolled``, ``refused``).
+
+**``@command pick_one(lead_id) -> PickOutcome``** (Story 4.16: a Signal Inbox Lead scored with
+"Draft Step 1 when ready") joins the caller's transaction and does exactly what ``pick`` does
+for that one Lead: today's live remaining capacity, the same reasons, Campaign and
+``operator_pick`` origin (``enroll`` enqueues Step 1's ``draft_step`` job at ``soon``), the
+capacity recorded and ``picked`` raised on an enrollment. It logs nothing, since it runs inside
+the caller's transaction: ``LeadScores.score_lead`` logs ``signal_inbox_pick`` (``lead_id``,
+``enrolled``, ``reason``) after its unit commits. ``lead_id`` that isn't a ``str`` raises
+``TypeError``.
+
+**``signal_inbox_refusals(now) -> tuple[SignalInboxRefusal, ...]``** (Story 4.16, a read):
+``queries.discovery.signal_inbox_refusals(now - REFUSAL_WINDOW)`` without the Leads that have a
+live Enrollment: the Signal Inbox Leads not drafted in the last 7 days, newest first.
+``ready_list`` marks them ``signal_inbox_refused`` and so lists them first.
 """
 
 import logging
@@ -89,6 +103,7 @@ from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_policy import new_sequence_capacity
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettingValue, Key, SettingNotSet
+from nextron.domain.signal_inbox_item import REFUSAL_WINDOW
 from nextron.domain.signals import age_days
 from nextron.ports.clock import Clock
 
@@ -137,6 +152,7 @@ class ReadyRow:
     eligibility: Decision
     generic_copy: bool
     below_minimum: bool
+    signal_inbox_refused: bool = False  # Story 4.16: listed first, with a badge
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,9 +321,21 @@ class Selection:
         docstring."""
         return self._record(self._clock.now())
 
+    def signal_inbox_refusals(
+        self, now: datetime
+    ) -> tuple[discovery_queries.SignalInboxRefusal, ...]:
+        """The Signal Inbox Leads not drafted in the last 7 days that still have no live
+        Enrollment, newest first; see the module docstring."""
+        return tuple(
+            refusal
+            for refusal in discovery_queries.signal_inbox_refusals(now - REFUSAL_WINDOW)
+            if sequencing_queries.live_enrollment(refusal.lead_id) is None
+        )
+
     def ready_list(self) -> tuple[ReadyRow, ...]:
         """The "Ready to draft" list, in its order; see the module docstring."""
         now = self._clock.now()
+        refused = {refusal.lead_id for refusal in self.signal_inbox_refusals(now)}
         minimum = _min_lead_score()
         segments = _segment_names()
         markets = _market_names()
@@ -325,7 +353,9 @@ class Selection:
                 continue
             if sequencing_queries.live_enrollment(lead_id) is not None:
                 continue
-            candidate = ReadyCandidate(lead_id, tier, score, _newest_event_age(lead_id, now))
+            candidate = ReadyCandidate(
+                lead_id, tier, score, _newest_event_age(lead_id, now), lead_id in refused
+            )
             found[lead_id] = (candidate, lead, contact)
         rows = []
         for candidate in ready_order(entry[0] for entry in found.values()):
@@ -342,6 +372,7 @@ class Selection:
                     eligibility=self._compliance.evaluate_eligibility(contact.id),
                     generic_copy=candidate.tier is Tier.C,
                     below_minimum=below_minimum(candidate.lead_score, minimum),
+                    signal_inbox_refused=candidate.signal_inbox_refused,
                 )
             )
         return tuple(rows)
@@ -366,24 +397,40 @@ class Selection:
             return PickOutcome(lead_id, result.enrollment_id, None)
         return PickOutcome(lead_id, None, str(result.code))
 
+    def _picks(self, chosen: tuple[str, ...], now: datetime) -> tuple[PickOutcome, ...]:
+        """Enroll ``chosen`` in order within today's remaining capacity, then record the
+        capacity and the picks; inside the caller's transaction."""
+        outcomes: list[PickOutcome] = []
+        remaining = self._figures(now).remaining
+        for lead_id in chosen:
+            outcome = self._pick_one(lead_id, remaining)
+            if outcome.enrollment_id is not None:
+                remaining -= 1
+            outcomes.append(outcome)
+        enrolled = sum(1 for outcome in outcomes if outcome.enrollment_id is not None)
+        figures = self._record(now)
+        if enrolled:
+            capacity_repo.add_picked(figures.local_date, enrolled)
+        return tuple(outcomes)
+
+    @command
+    def pick_one(self, lead_id: str) -> PickOutcome:
+        """Pick one Signal Inbox Lead as ``pick`` would, in the caller's transaction; see the
+        module docstring."""
+        if not isinstance(lead_id, str):
+            raise TypeError(f"pick_one takes a Lead id as a str, not {type(lead_id).__name__}")
+        [outcome] = self._picks((lead_id,), self._clock.now())
+        return outcome
+
     @use_case
     def pick(self, lead_ids: Sequence[str]) -> tuple[PickOutcome, ...]:
         """Enroll the picked Leads up to today's remaining capacity; see the module
         docstring."""
         chosen = _checked_ids(lead_ids)
         now = self._clock.now()
-        outcomes: list[PickOutcome] = []
         with current().transaction():
-            remaining = self._figures(now).remaining
-            for lead_id in chosen:
-                outcome = self._pick_one(lead_id, remaining)
-                if outcome.enrollment_id is not None:
-                    remaining -= 1
-                outcomes.append(outcome)
-            enrolled = sum(1 for outcome in outcomes if outcome.enrollment_id is not None)
-            figures = self._record(now)
-            if enrolled:
-                capacity_repo.add_picked(figures.local_date, enrolled)
+            outcomes = self._picks(chosen, now)
+        enrolled = sum(1 for outcome in outcomes if outcome.enrollment_id is not None)
         log.info(
             LEADS_PICKED,
             extra={
@@ -392,4 +439,4 @@ class Selection:
                 "refused": len(outcomes) - enrolled,
             },
         )
-        return tuple(outcomes)
+        return outcomes

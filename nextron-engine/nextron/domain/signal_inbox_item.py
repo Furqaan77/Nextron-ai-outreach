@@ -63,6 +63,15 @@ without a Segment, else ``None``. A malformed answer (a field of the wrong type)
 **The Lead's name (Decision 7).** ``lead_name(company, domain)`` is the company field when it
 is set and isn't a URL or domain (``registrable_domain`` refuses it), else ``domain``.
 
+**Draft when ready (Story 4.16).** One "Draft Step 1 when ready" checkbox per submission
+(``DRAFT_FIELD``, value ``DRAFT_ON``) sets ``SubmittedItem.draft_when_ready`` on every item of
+that submission (``check_items(rows, draft_when_ready=...)``). When ``score_lead`` scores the
+item's Lead, the item is decided once: its ``draft_outcome`` is ``DRAFT_ENROLLED``,
+``DRAFT_DISQUALIFIED`` or the pick's refusal code (``is_draft_outcome``: a lowercase
+``snake_case`` code of at most ``MAX_DRAFT_OUTCOME`` (32) characters). A refusal decided within
+``REFUSAL_WINDOW`` (7 days) shows in the notification area (at most ``REFUSALS_SHOWN``, 10) and
+puts the Lead first on "Ready to draft" while it is unmerged and has no live Enrollment.
+
 **The job (Decision 11).** ``process_signal_item`` (``PROCESS_SIGNAL_ITEM_JOB``): scope the
 item, discriminator ``tick``, payload ``{"v": 1, "item_id": ...}`` (``ITEM_ID_FIELD``).
 """
@@ -72,7 +81,7 @@ import unicodedata
 import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
@@ -108,6 +117,14 @@ MAX_AUTHOR: Final = 200
 MAX_COMPANY: Final = 200
 MAX_PERSON_FIELD: Final = 200
 FIELDS: Final = ("url", "text", "author", "company")
+DRAFT_FIELD: Final = "draft_when_ready"  # Story 4.16: one checkbox per submission
+DRAFT_ON: Final = "on"
+DRAFT_ENROLLED: Final = "enrolled"
+DRAFT_DISQUALIFIED: Final = "disqualified"
+MAX_DRAFT_OUTCOME: Final = 32
+REFUSAL_WINDOW: Final = timedelta(days=7)
+REFUSALS_SHOWN: Final = 10
+_DRAFT_OUTCOME: Final = re.compile(r"[a-z][a-z0-9_]*")
 NEVER_FETCHED_NOTE: Final = "stored as a source only; never fetched"
 
 URL_REQUIRED: Final = "Enter the item's URL."
@@ -202,6 +219,16 @@ class SubmittedItem:
     text: str
     author: str | None = None
     company: str | None = None
+    draft_when_ready: bool = False  # Story 4.16
+
+
+def is_draft_outcome(code: object) -> bool:
+    """Whether ``code`` can be stored as an item's ``draft_outcome``."""
+    return (
+        isinstance(code, str)
+        and len(code) <= MAX_DRAFT_OUTCOME
+        and _DRAFT_OUTCOME.fullmatch(code) is not None
+    )
 
 
 class ItemsRefused(DomainError):
@@ -235,9 +262,13 @@ def _url_error(url: str) -> str | None:
     return None
 
 
-def check_items(rows: Sequence[Mapping[str, str]]) -> tuple[SubmittedItem, ...]:
-    """The items of the form's fieldsets; ``ItemsRefused`` when any is invalid. See the module
-    docstring."""
+def check_items(
+    rows: Sequence[Mapping[str, str]], *, draft_when_ready: bool = False
+) -> tuple[SubmittedItem, ...]:
+    """The items of the form's fieldsets, each with the submission's ``draft_when_ready``;
+    ``ItemsRefused`` when any is invalid. See the module docstring."""
+    if not isinstance(draft_when_ready, bool):
+        raise TypeError("draft_when_ready must be a bool")
     if len(rows) > FORM_SLOTS:
         raise ValueError(f"the form has at most {FORM_SLOTS} items")
     items: list[SubmittedItem] = []
@@ -269,7 +300,7 @@ def check_items(rows: Sequence[Mapping[str, str]]) -> tuple[SubmittedItem, ...]:
             found["company"] = COMPANY_INVALID
         errors.update({f"{name}_{number}": reason for name, reason in found.items()})
         if not found:
-            items.append(SubmittedItem(url, text, author, company))
+            items.append(SubmittedItem(url, text, author, company, draft_when_ready))
     if errors:
         raise ItemsRefused(errors)
     if not items:

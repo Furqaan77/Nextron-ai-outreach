@@ -4,12 +4,16 @@
     recovery banner, linked to the health panel; every page loads the area, so every page shows
     it. Then comes the engine health error count, linked to the health panel, when there are
     errors, then (Story 4.10) "signal shortfall: <n>" while today's remaining new-Sequence
-    capacity is above 0, linked to the "Ready to draft" page. Then (Story 9.4) one "Call Outcome
-    due: <Lead name>" line per due booking, worked out at render time and linked to the Lead's
-    Call Outcome form; the Lead's name is imported text, so it renders through |plain inside
-    hx-disable. It renders nothing at all when recovery mode is off, no notification is
-    undismissed, no error needs attention, there is no shortfall and no Call Outcome is due, so
-    the list stays empty and takes no space. -#}
+    capacity is above 0, linked to the "Ready to draft" page. Then (Story 4.16) one "Signal Inbox
+    Lead <name> not drafted: <reason>" line per recent refusal (at most 10, newest first), worked
+    out at render time from the items' stored outcomes and linked to the Lead's page
+    (/leads/<lead_id>: a disqualified Lead, or one with no Primary Contact, isn't on the "Ready to
+    draft" page); the name is imported text, so it renders through |plain inside hx-disable. Then
+    (Story 9.4) one "Call Outcome due: <Lead name>" line per due booking, worked out at render time and
+    linked to the Lead's Call Outcome form; the Lead's name is imported text, so it renders
+    through |plain inside hx-disable. It renders nothing at all when recovery mode is off, no
+    notification is undismissed, no error needs attention, there is no shortfall, no Signal
+    Inbox refusal and no Call Outcome is due, so the list stays empty and takes no space. -#}
 {%- if recovery -%}
 <p class="recovery-banner" role="alert"><a href="/health/panel">{{ RECOVERY_BANNER }}</a></p>
 {%- endif -%}
@@ -18,6 +22,13 @@
 {%- endif -%}
 {%- if shortfall_text -%}
 <p class="signal-shortfall"><a href="/leads/ready">{{ shortfall_text }}</a></p>
+{%- endif -%}
+{%- if not_drafted_items -%}
+<ul class="signal-not-drafted" hx-disable>
+{%- for line in not_drafted_items %}
+<li><a href="{{ line.href }}">{{ line.text|plain }}</a></li>
+{%- endfor %}
+</ul>
 {%- endif -%}
 {%- if due_items -%}
 <ul class="outcome-due" hx-disable>

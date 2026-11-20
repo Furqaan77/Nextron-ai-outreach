@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0064_4_15_draft_failed"
+HEAD = "0065_4_16_draft_when_ready"
 
 
 @pytest.fixture
@@ -2083,4 +2083,89 @@ def test_0064_keeps_every_draft_and_adds_the_failure_columns(tmp_path: Path) -> 
         path,
         f"UPDATE drafts SET draft_failed_at = '{at}', draft_failed_reason = 'refused' "
         f"WHERE id = '{REPLY_DRAFT}'",
+    )
+
+
+def test_0065_keeps_every_signal_inbox_item_and_adds_the_draft_columns(tmp_path: Path) -> None:
+    """0065 (Story 4.16) rebuilds ``signal_inbox_items`` with ``draft_when_ready`` (every
+    existing item ``false``), ``draft_outcome`` and ``draft_decided_at`` (both NULL or both
+    set), every row, check, index and foreign key kept."""
+    location = _chain_to(tmp_path, "0064_4_15_draft_failed")
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0064_4_15_draft_failed",
+        )
+    at = "2026-11-18T09:00:00.000000Z"
+    segment, lead = "01JD3QZ8X5V9K2M7N4P6R8T0F0", "01JD3QZ8X5V9K2M7N4P6R8T0F1"
+    processed, flagged = "01JD3QZ8X5V9K2M7N4P6R8T0F2", "01JD3QZ8X5V9K2M7N4P6R8T0F3"
+    columns = (
+        "id, url, text, author, company, status, flag_reason, submitted_at, processed_at, "
+        "lead_id, parsed_segment, parsed_signal_type, parsed_website, parsed_author_name, "
+        "parsed_author_role, parsed_event_date, parsed_quote, extracted_by"
+    )
+    run_sql(
+        path,
+        "INSERT INTO segments (id, key, definition, version, created_at, updated_at) "
+        f"VALUES ('{segment}', 'ops_automation', '{{}}', 1, '{at}', '{at}')",
+        "INSERT INTO leads (id, name, web_domain, segment_id, created_at) "
+        f"VALUES ('{lead}', 'Northgate', 'northgate.com', '{segment}', '{at}')",
+        f"INSERT INTO signal_inbox_items ({columns}) VALUES ('{processed}', "
+        "'https://post.example/1', 'We rekey orders.', 'Dana', 'Northgate', 'processed', NULL, "
+        f"'{at}', '{at}', '{lead}', 'ops_automation', 'ops_rekeying_post', 'northgate.com', "
+        "'Dana Cole', 'COO', '2026-11-17', 'We rekey orders.', 'ai:signal_inbox_parse@v1')",
+        f"INSERT INTO signal_inbox_items ({columns}) VALUES ('{flagged}', "
+        "'https://post.example/2', 'Text', NULL, NULL, 'flagged', 'segment_unknown', "
+        f"'{at}', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+    )
+    reader = sqlite3.connect(path)
+    try:
+        before = reader.execute(f"SELECT {columns} FROM signal_inbox_items ORDER BY id").fetchall()
+    finally:
+        reader.close()
+
+    with engine_on(path) as engine:  # the post-upgrade foreign key check passes
+        assert ensure_current(engine) == ("0064_4_15_draft_failed", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        after = reader.execute(f"SELECT {columns} FROM signal_inbox_items ORDER BY id").fetchall()
+        drafts = reader.execute(
+            "SELECT draft_when_ready, draft_outcome, draft_decided_at FROM signal_inbox_items "
+            "ORDER BY id"
+        ).fetchall()
+        [(table_sql,)] = reader.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'signal_inbox_items'"
+        ).fetchall()
+        indexes = {
+            row[1] for row in reader.execute("PRAGMA index_list(signal_inbox_items)").fetchall()
+        }
+        keys = reader.execute("PRAGMA foreign_key_list(signal_inbox_items)").fetchall()
+    finally:
+        reader.close()
+    assert after == before  # every row and column unchanged
+    assert drafts == [(0, None, None), (0, None, None)]
+    for check in ("status", "flag_reason", "processed", "draft_decided"):
+        assert f"ck_signal_inbox_items_{check}" in table_sql
+    assert {
+        "ix_signal_inbox_items_status_submitted_at",
+        "ix_signal_inbox_items_lead_id",
+    } <= indexes
+    assert [(row[2], row[3], row[4]) for row in keys] == [("leads", "lead_id", "id")]
+    for assignments in (
+        "draft_outcome = 'enrolled'",
+        f"draft_decided_at = '{at}'",
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=r"ck_signal_inbox_items_draft_decided$"):
+            run_sql(path, f"UPDATE signal_inbox_items SET {assignments} WHERE id = '{processed}'")
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+        run_sql(
+            path,
+            f"UPDATE signal_inbox_items SET draft_when_ready = NULL WHERE id = '{processed}'",
+        )
+    run_sql(
+        path,
+        "UPDATE signal_inbox_items SET draft_when_ready = 1, draft_outcome = 'over_capacity', "
+        f"draft_decided_at = '{at}' WHERE id = '{processed}'",
     )

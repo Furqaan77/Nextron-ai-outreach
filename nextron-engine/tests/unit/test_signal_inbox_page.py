@@ -312,3 +312,84 @@ def test_a_malformed_reprocess_is_refused(
     reply = post(dashboard, session, path, **fields)
 
     assert reply.status == 400
+
+
+# Story 4.16: the "Draft Step 1 when ready" checkbox ---------------------------------------------
+
+
+def test_the_draft_when_ready_box_is_ticked_by_default(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    parsed = Parsed(dashboard.get(PAGE, cookie=session[0]).text)
+
+    box = parsed.fields["draft_when_ready"]
+    assert (box["type"], box["value"]) == ("checkbox", "on")
+    assert "checked" in box
+    assert "Draft Step 1 when ready" in parsed.text()
+
+
+@pytest.mark.parametrize(("ticked", "stored"), [(True, 1), (False, 0)])
+def test_the_box_applies_to_every_item_of_the_submission(
+    dashboard: Dashboard,
+    session: tuple[bytes, str],
+    db_engine: Engine,
+    ticked: bool,
+    stored: int,
+) -> None:
+    box = {"draft_when_ready": "on"} if ticked else {}
+    reply = post(
+        dashboard,
+        session,
+        url_1=POST_URL,
+        text_1="We rekey orders.",
+        url_2=f"https://{SITE}/news",
+        text_2="We opened a new warehouse.",
+        **box,
+    )
+
+    assert reply.status == 200
+    assert sql(
+        db_engine,
+        "SELECT draft_when_ready, draft_outcome, draft_decided_at FROM signal_inbox_items",
+    ) == [(stored, None, None), (stored, None, None)]
+    assert "checked" in Parsed(reply.text).fields["draft_when_ready"]  # a fresh form: ticked
+
+
+@pytest.mark.parametrize("ticked", [True, False])
+def test_a_refused_submission_keeps_the_box_as_it_was(
+    dashboard: Dashboard, session: tuple[bytes, str], db_engine: Engine, ticked: bool
+) -> None:
+    box = {"draft_when_ready": "on"} if ticked else {}
+    reply = post(dashboard, session, url_1="not a url", text_1="Text", **box)
+
+    assert reply.status == 200
+    assert ("checked" in Parsed(reply.text).fields["draft_when_ready"]) is ticked
+    assert sql(db_engine, "SELECT COUNT(*) FROM signal_inbox_items") == [(0,)]
+
+
+@pytest.mark.parametrize("value", ["yes", "", "ON"])
+def test_any_other_box_value_is_malformed(
+    dashboard: Dashboard, session: tuple[bytes, str], db_engine: Engine, value: str
+) -> None:
+    reply = post(dashboard, session, url_1=POST_URL, text_1="x", draft_when_ready=value)
+
+    assert reply.status == 400
+    assert reply.text == MALFORMED_FORM
+    assert sql(db_engine, "SELECT COUNT(*) FROM signal_inbox_items") == [(0,)]
+
+
+def test_the_box_given_twice_is_malformed(
+    dashboard: Dashboard, session: tuple[bytes, str], db_engine: Engine
+) -> None:
+    cookie, token = session
+    reply = dashboard.post(
+        PAGE,
+        cookie=cookie,
+        token=token,
+        headers=[(b"content-type", FORM)],
+        body=form(csrf_token=token, url_1=POST_URL, text_1="x", draft_when_ready="on")
+        + b"&draft_when_ready=on",
+    )
+
+    assert reply.status == 400
+    assert sql(db_engine, "SELECT COUNT(*) FROM signal_inbox_items") == [(0,)]

@@ -566,3 +566,16 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
   summary: Decide whether responsive Drafts (reply, rebook, channel) in the queue are checked with cold-email Eligibility (Not Now, FR-63 re-contact, Market cold rules) or only with `assert_contactable` for a reply purpose; today `due_queue` applies `Compliance.evaluate_eligibility` (cold) to every Draft, so a Reply to a Lead marked Not Now would be held back.
   evidence: Review pass 1 of Story 5.1 (VG other, unverified medium). No reply Draft exists before Epic 7; the Epic 7 story that writes reply Drafts should settle it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-16-draft-signal-inbox-leads-within-15-minutes.md`
+  summary: (HIGH) A Lead created only from a Signal Inbox post has no country, so its Contact has no Market and `enroll` refuses `missing_tz_or_market`; a post-only Lead is never auto-drafted (only Leads already known with a country are).
+  evidence: `SignalInbox._apply_website` creates the Lead without `country_code` (Story 2.16); the 4.16 speed test has to pre-import a US Lead. A follow-up story must decide how a post-created Lead gets its country/Market (e.g. from the Campaign's Market, the TLD, or an Operator field on the form).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-16-draft-signal-inbox-leads-within-15-minutes.md`
+  summary: A `draft_when_ready` item whose research chain stops before `score_lead` (dead/failed job, Lead without website on reprocess) stays undecided forever, with no Draft and no "not drafted" line.
+  evidence: The only decision point is `LeadScores.score_lead`; nothing sweeps undecided items (a sweep recording e.g. `not_scored` after N minutes would close it).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-16-draft-signal-inbox-leads-within-15-minutes.md`
+  summary: An undecided `draft_when_ready` item (left by a SKIPPED score) can auto-enroll its Lead much later when the Lead is re-scored or reopened.
+  evidence: `undecided_draft_items` has no age limit; consider deciding only items submitted within a window (e.g. 24 h or `REFUSAL_WINDOW`) and expiring older ones.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-16-draft-signal-inbox-leads-within-15-minutes.md`
+  summary: (low) A refused Signal Inbox Lead later hand-enrolled whose Enrollment ends within 7 days reappears as "not drafted" in the notification area and at the top of Ready to draft.
+  evidence: `Selection.signal_inbox_refusals` excludes only Leads with a live Enrollment; excluding Leads with any Enrollment created after `draft_decided_at` would fix it.

@@ -141,7 +141,16 @@ through ``upsert_lead`` (source ``places``) and ``record_place_coords``.
   (entity ``signal_inbox_items``, cause ``submitted``, actor ``operator``), and its
   ``process_signal_item`` job is enqueued on the interactive lane (scope the item,
   discriminator ``tick``, payload ``{v: 1, item_id}``), all in the caller's transaction; the
-  ids, in order. A non-``SubmittedItem`` raises ``TypeError``, no item ``ValueError``.
+  ids, in order. A non-``SubmittedItem`` raises ``TypeError``, no item ``ValueError``. Story
+  4.16: each item stores its ``draft_when_ready``.
+- ``@command record_draft_outcome(lead_id, outcome) -> int`` (Story 4.16, called by
+  ``LeadScores.score_lead`` in its scoring transaction): every ``processed`` item of the Lead
+  with ``draft_when_ready`` and no decision yet gets ``draft_outcome`` = ``outcome`` and
+  ``draft_decided_at`` = now, with one ``events`` row each (entity ``signal_inbox_items``, status
+  ``processed`` to ``processed``, cause the outcome, ``cause_ref`` the Lead, actor
+  ``system:discovery``); how many items. An outcome that isn't a code of at most 32 characters
+  (``is_draft_outcome``) raises ``ValueError``; an unknown Lead or one with no such item is a
+  no-op (0).
 - ``@command enqueue_enrich(lead_id, *, lane) -> bool``: the Lead's ``enrich_lead`` job (the
   CSV import's keys) on ``lane``; ``False`` (nothing enqueued) for an unknown Lead or one
   without a website.
@@ -280,12 +289,17 @@ from nextron.domain.legal_form import COMPANY_NUMBER_PATTERN
 from nextron.domain.notifications import ContactErased, LeadsMerged
 from nextron.domain.places import coords_cutoff
 from nextron.domain.signal_inbox_item import (
+    ACTOR as ITEM_ACTOR,
+)
+from nextron.domain.signal_inbox_item import (
     CREATION,
     ENTITY,
     ITEM_ID_FIELD,
     OPERATOR,
     PROCESS_SIGNAL_ITEM_JOB,
+    ItemStatus,
     SubmittedItem,
+    is_draft_outcome,
 )
 from nextron.domain.signal_inbox_item import PAYLOAD_VERSION as ITEM_PAYLOAD_VERSION
 from nextron.ports.clock import Clock
@@ -536,6 +550,7 @@ class Discovery:
                 company=item.company,
                 status=str(CREATION.to),
                 submitted_at=now,
+                draft_when_ready=item.draft_when_ready,
             )
             eventlog.append(
                 entity=ENTITY,
@@ -556,6 +571,33 @@ class Discovery:
             )
             ids.append(item_id)
         return tuple(ids)
+
+    @command
+    def record_draft_outcome(self, lead_id: str, outcome: str) -> int:
+        """Record the drafting decision on the Lead's undecided ``draft_when_ready`` items, in
+        the caller's transaction; how many items (Story 4.16)."""
+        if not is_draft_outcome(outcome):
+            raise ValueError("a draft outcome is a lowercase code of at most 32 characters")
+        if not isinstance(lead_id, str) or not is_ulid(lead_id):
+            return 0
+        item_ids = signal_inbox_repo.undecided_draft_items(lead_id)
+        if not item_ids:
+            return 0
+        now = self._clock.now()
+        signal_inbox_repo.record_draft_outcome(item_ids, outcome, now)
+        processed = str(ItemStatus.PROCESSED)
+        for item_id in item_ids:
+            eventlog.append(
+                entity=ENTITY,
+                entity_id=item_id,
+                from_status=processed,
+                to_status=processed,
+                cause=outcome,
+                cause_ref=lead_id,
+                actor=ITEM_ACTOR,
+                at=now,
+            )
+        return len(item_ids)
 
     @use_case
     def canonicalize_lead(self, lead_id: str, run_id: str) -> str:

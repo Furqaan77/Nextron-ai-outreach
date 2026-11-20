@@ -488,16 +488,17 @@ class Dashboard:
         # Story 4.15: enroll enqueues Step 1's draft_step job, so the Sequencing has the queue
         self.sequencing = Sequencing(self.clock, self.queue)
         self.selection = Selection(self.clock, self.sequencing, self.compliance)
-        self.lead_scores = LeadScores(
+        self.discovery = Discovery(self.clock, Pipeline(self.clock), self.queue)
+        self.lead_scores = LeadScores(  # Story 4.16: draft when ready, as main.py wires it
             self.clock,
             Scoring(self.clock, Pipeline(self.clock), self.research),
             self.queue,
             selection=self.selection,
+            discovery=self.discovery,
         )
         self.segment_editor = SegmentEditor(self.clock)
         self.sequence_editor = SequenceEditor(self.clock)
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
-        self.discovery = Discovery(self.clock, Pipeline(self.clock), self.queue)
         self.lead_imports = LeadImports(
             self.clock, self.discovery, self.research, self.email_syntax, self.queue
         )

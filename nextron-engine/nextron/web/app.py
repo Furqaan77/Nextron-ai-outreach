@@ -546,7 +546,7 @@ from nextron.domain.render import footer_complete
 from nextron.domain.segments import InvalidSegments, SegmentDef, SegmentRefused
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences, SequenceRefused
-from nextron.domain.signal_inbox_item import ItemsRefused, check_items
+from nextron.domain.signal_inbox_item import REFUSALS_SHOWN, ItemsRefused, check_items
 from nextron.domain.settings_schema import InvalidSettings, Key
 from nextron.domain.suppression_list import (
     ADDED,
@@ -708,10 +708,12 @@ def area_context(
     recovery: bool = False,
     shortfall: int = 0,
     due: Iterable[pipeline_rows.DueItem] = (),
+    not_drafted: Iterable[ready_rows.NotDraftedItem] = (),
 ) -> dict[str, object]:
     """What ``notifications.html`` renders: the recovery banner while ``recovery`` mode is on,
-    the engine health line, the signal shortfall line (today's remaining capacity), the Call
-    Outcome due lines (Story 9.4), the count, the listed items and how many more."""
+    the engine health line, the signal shortfall line (today's remaining capacity), the Signal
+    Inbox "not drafted" lines (Story 4.16), the Call Outcome due lines (Story 9.4), the count,
+    the listed items and how many more."""
     items = [
         NotificationItem(row.id, row.text, f"{row.created_at:{TIME_FORMAT}}")
         for row in found.newest
@@ -721,6 +723,7 @@ def area_context(
         "RECOVERY_BANNER": RECOVERY_BANNER,
         "health_text": health_count_text(errors),
         "shortfall_text": shortfall_text(shortfall),
+        "not_drafted_items": list(not_drafted),
         "due_items": list(due),
         "count": found.count,
         "items": items,
@@ -1963,12 +1966,17 @@ def create_app(
     def notification_list(request: Request) -> HTMLResponse:
         found = notify_queries.open_notifications(AREA_LIMIT)
         due = pipeline.call_outcomes_due()  # Story 9.4: worked out now, never stored
+        # Story 4.16: computed from the items' stored outcomes, never a stored notification
+        refusals = selection.signal_inbox_refusals(now())[:REFUSALS_SHOWN]
         context = area_context(
             found,
             errors=engine_health.issue_count(),
             recovery=ops_queries.recovery_mode(),
             shortfall=selection.today().remaining,
             due=pipeline_rows.due_items((each.lead_id, each.lead_name) for each in due),
+            not_drafted=ready_rows.not_drafted_items(
+                (each.lead_id, each.lead_name, each.outcome) for each in refusals
+            ),
         )
         return page(request, NOTIFICATIONS_TEMPLATE, **context)
 
@@ -2119,13 +2127,18 @@ def create_app(
         request: Request, fields: Annotated[FormFields, Depends(form_fields)]
     ) -> HTMLResponse:
         rows = inbox_page_rows.submitted_rows(fields)
+        draft_when_ready = inbox_page_rows.submitted_draft_when_ready(fields)  # Story 4.16
         try:
-            items = check_items(rows)
+            items = check_items(rows, draft_when_ready=draft_when_ready)
         except ItemsRefused as refused:
             # 200, so HTMX swaps the panel in; nothing was stored, and the typed values stay
             with units.open(read_only=True):
                 return signal_inbox_answer(
-                    request, inbox_page_rows.PANEL_TEMPLATE, rows=rows, errors=refused.errors
+                    request,
+                    inbox_page_rows.PANEL_TEMPLATE,
+                    rows=rows,
+                    errors=refused.errors,
+                    draft_when_ready=draft_when_ready,
                 )
         with units.open():
             signal_inbox.submit(items)

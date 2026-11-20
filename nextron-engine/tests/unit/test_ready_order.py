@@ -1,6 +1,7 @@
 """Story 4.10's "Ready to draft" order and badge (``nextron.domain.scoring``): Tier A by newest
 live Event first (a tie, then a Tier A Lead without one, by the higher Lead Score), then Tier B
-and Tier C by Lead Score, the Lead id last; ``below_minimum``; and the argument checks."""
+and Tier C by Lead Score, the Lead id last; Story 4.16's Signal Inbox refusals first, in the
+same order among themselves; ``below_minimum``; and the argument checks."""
 
 import pytest
 
@@ -49,6 +50,20 @@ def test_equal_scores_in_tier_b_and_c_go_by_id() -> None:
     assert ids(found) == ["a", "z", "b", "y"]
 
 
+def test_signal_inbox_refusals_come_first_in_the_usual_order() -> None:
+    found = ready_order(
+        [
+            ReadyCandidate("a-new", Tier.A, 10, 2),
+            ReadyCandidate("c-refused", Tier.C, 20, None, True),
+            ReadyCandidate("b-high", Tier.B, 80, None),
+            ReadyCandidate("a-refused", Tier.A, 30, 9, True),
+            ReadyCandidate("b-refused", Tier.B, 90, None, True),
+        ]
+    )
+    assert ids(found) == ["a-refused", "b-refused", "c-refused", "a-new", "b-high"]
+    assert ReadyCandidate("x", Tier.A, 1, None).signal_inbox_refused is False
+
+
 def test_the_order_is_a_tuple_and_empty_gives_empty() -> None:
     assert ready_order([]) == ()
 
@@ -60,6 +75,7 @@ def test_the_order_is_a_tuple_and_empty_gives_empty() -> None:
         ReadyCandidate(1, Tier.A, 50, None),  # type: ignore[arg-type]
         ReadyCandidate("a", Tier.A, True, None),  # type: ignore[arg-type]
         ReadyCandidate("a", Tier.A, 50, 1.5),  # type: ignore[arg-type]
+        ReadyCandidate("a", Tier.A, 50, None, 1),  # type: ignore[arg-type]
     ],
 )
 def test_a_bad_candidate_is_refused(candidate: ReadyCandidate) -> None:

@@ -25,7 +25,10 @@ violation.
   ``Blocked`` adds no row. ``scoring.pick`` (Story 4.10: ``Selection.pick``) picks an eligible
   US Lead whose Contact is its Primary, with one warmed-up active inbox: ``enroll``'s three gate
   calls, the first two before the first write; ``Blocked`` adds only the day's
-  ``daily_capacity`` row (or updates it) and no Enrollment. Story 10.7's
+  ``daily_capacity`` row (or updates it) and no Enrollment. ``scoring.signal_inbox_pick``
+  (Story 4.16: ``Selection.pick_one``, which ``score_lead`` calls for a "Draft Step 1 when
+  ready" Signal Inbox Lead) runs the same case for that one Lead inside a caller's transaction,
+  with the same expectations. Story 10.7's
   ``pipeline.channel_permissions`` (``ChannelPermissions.record`` and ``update_inbound``) gates
   the Contact on ``whatsapp`` or ``instagram`` for ``follow_up`` before any write; Blocked, it
   stores nothing, not even the Evidence. The Signal Inbox (Story 2.16:
@@ -324,6 +327,8 @@ MANIFEST: Final = (
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
     # Story 4.10: the Operator's picks enroll through sequencing.enroll
     Caller("scoring.pick", ("app/scoring/",), r"Selection\.pick"),
+    # Story 4.16: a "Draft Step 1 when ready" Signal Inbox Lead, picked inside score_lead
+    Caller("scoring.signal_inbox_pick", ("app/scoring/",), r"Selection\.pick_one"),
     Caller(
         "pipeline.tasks_and_call_sheets",
         ("app/pipeline/",),
@@ -1499,6 +1504,29 @@ def _pick(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     return action, lambda: (gate, gate, gate)
 
 
+def _signal_inbox_pick(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.16: ``Selection.pick_one`` (inside ``score_lead``'s transaction) picks one
+    eligible Signal Inbox Lead exactly as ``pick`` does: ``enroll``'s three gate calls, the
+    first two before the first write, and the ``daily_capacity`` row after them."""
+    lead_id = _pickable(world, tag)
+    clock = FrozenClock(T0)
+    selection = Selection(
+        clock, Sequencing(clock, queue_on(clock)), compliance_api.Compliance(clock)
+    )
+    with world.engine.connect() as connection:
+        contact_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM contacts WHERE lead_id = ?", (lead_id,)
+            ).scalar_one()
+        )
+
+    def action() -> object:  # as score_lead runs it: a command in the caller's transaction
+        return world.transact(lambda: selection.pick_one(lead_id))
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate, gate)
+
+
 def _picked(world: World) -> None:
     """An allowed pick enrolled its Lead and counted it; the blocked one enrolled nothing."""
     with world.engine.connect() as connection:
@@ -2083,6 +2111,15 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             blocked_writes=frozenset({("INSERT", "daily_capacity"), ("UPDATE", "daily_capacity")}),
             after_blocked=_picked,
         ),
+        # Story 4.16: as scoring.pick, for the one Lead score_lead picks
+        "scoring.signal_inbox_pick": Scenario(
+            (_signal_inbox_pick,),
+            gates_first=False,
+            gates_before_first_write=2,
+            blocked_rows={"daily_capacity": 1},
+            blocked_writes=frozenset({("INSERT", "daily_capacity"), ("UPDATE", "daily_capacity")}),
+            after_blocked=_picked,
+        ),
         # Story 4.14: Blocked makes no AI call; it records only the fail-closed result
         "drafting.grounding_check": Scenario(
             (_grounding_check,),
@@ -2207,6 +2244,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "verify_contact_email",  # Story 2.14
         "pipeline.channel_permissions",  # Story 10.7
         "scoring.pick",  # Story 4.10
+        "scoring.signal_inbox_pick",  # Story 4.16
         "signal_inbox",  # Story 2.16
         "drafting.grounding_check",  # Story 4.14
         "research.recheck",  # Story 8.7

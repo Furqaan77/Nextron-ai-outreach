@@ -44,6 +44,12 @@ current unit of work, read-only ones included.
 - ``signal_item(item_id)`` (Story 2.16): the Signal Inbox item as a ``StoredItem``, or ``None``
   (a text that isn't a ULID included); ``signal_items(limit=SIGNAL_ITEMS_SHOWN)``: the newest
   items, newest first (by ``submitted_at``, then ``id``), at most ``limit`` (100 by default).
+- ``undecided_draft_items(lead_id)`` (Story 4.16): the ids of the Lead's ``processed`` Signal
+  Inbox items with ``draft_when_ready`` that no drafting decision has been recorded for, by id;
+  ``()`` for a text that isn't a ULID. ``signal_inbox_refusals(since)``: one
+  ``SignalInboxRefusal(lead_id, lead_name, outcome, decided_at)`` per unmerged Lead with an item
+  decided at or after ``since`` whose ``draft_outcome`` isn't ``enrolled``: its newest such
+  item's outcome; newest first (by decision time, then item id).
 - ``contact_items(lead_id, name, emails)`` (Story 2.16): every column of each Signal Inbox
   item that may hold the Contact's data: each item of the Contact's Lead and of the Leads
   merged into it, and each item with no Lead (``pending`` or ``flagged``) that mentions the
@@ -81,12 +87,14 @@ from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.repos.discovery import signal_inbox as signal_inbox_repo
 from nextron.db.repos.discovery.leads import ListedLead, StoredLead
 from nextron.db.repos.discovery.runs import StoredRun
+from nextron.db.repos.discovery.signal_inbox import Refusal as SignalInboxRefusal
 from nextron.db.repos.discovery.signal_inbox import StoredItem
 from nextron.domain.contact_export import MentionTerm, excerpts, mention_terms, mentions
 from nextron.domain.budget import AI_BUDGET_SUBJECT, AiState, Assessment, QuotaState
 from nextron.domain.health import HealthIssue
 from nextron.domain.ids import is_ulid
 from nextron.domain.pipeline_stage import PipelineStage
+from nextron.domain.signal_inbox_item import DRAFT_ENROLLED
 
 __all__ = [
     "DISCOVERY_STOPPED",
@@ -97,6 +105,7 @@ __all__ = [
     "SORT_TIER",
     "LeadListPage",
     "ListedLead",
+    "SignalInboxRefusal",
     "StoredItem",
     "StoredLead",
     "StoredRun",
@@ -110,9 +119,11 @@ __all__ = [
     "pool_rows",
     "recent_runs",
     "recheck_pool",
+    "signal_inbox_refusals",
     "signal_item",
     "signal_items",
     "survivor_of",
+    "undecided_draft_items",
 ]
 
 SIGNAL_ITEMS_SHOWN: Final = 100
@@ -253,6 +264,22 @@ def signal_item(item_id: str) -> StoredItem | None:
 def signal_items(limit: int = SIGNAL_ITEMS_SHOWN) -> tuple[StoredItem, ...]:
     """The newest Signal Inbox items, newest first."""
     return signal_inbox_repo.items(limit)
+
+
+def undecided_draft_items(lead_id: str) -> tuple[str, ...]:
+    """The Lead's Signal Inbox items waiting for a drafting decision (Story 4.16)."""
+    if not isinstance(lead_id, str) or not is_ulid(lead_id):
+        return ()
+    return signal_inbox_repo.undecided_draft_items(lead_id)
+
+
+def signal_inbox_refusals(since: datetime) -> tuple[SignalInboxRefusal, ...]:
+    """The unmerged Leads with a Signal Inbox item not drafted since ``since``, one each (its
+    newest refusal), newest first (Story 4.16)."""
+    found: dict[str, SignalInboxRefusal] = {}
+    for refusal in signal_inbox_repo.refusals(since, DRAFT_ENROLLED):
+        found.setdefault(refusal.lead_id, refusal)  # newest first: the first is the latest
+    return tuple(found.values())
 
 
 _ITEM_TEXT = "text"

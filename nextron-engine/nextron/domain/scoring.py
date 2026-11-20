@@ -699,13 +699,15 @@ def evidence_from_text(text: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ReadyCandidate:
-    """A Lead the "Ready to draft" list may show: its Tier, its Lead Score and the age in days
-    of its newest live Event (``None`` without one)."""
+    """A Lead the "Ready to draft" list may show: its Tier, its Lead Score, the age in days
+    of its newest live Event (``None`` without one) and whether a Signal Inbox item of it was
+    recently not drafted (Story 4.16)."""
 
     lead_id: str
     tier: Tier
     lead_score: int
     newest_event_age: int | None
+    signal_inbox_refused: bool = False
 
 
 _TIER_RANK: Final[Mapping[Tier, int]] = {Tier.A: 0, Tier.B: 1, Tier.C: 2}
@@ -716,19 +718,23 @@ def _ready_key(candidate: ReadyCandidate) -> tuple[Any, ...]:
         raise TypeError("ready_order takes ReadyCandidate values")
     if not isinstance(candidate.lead_id, str):
         raise TypeError("ReadyCandidate.lead_id must be a str")
+    if not isinstance(candidate.signal_inbox_refused, bool):
+        raise TypeError("ReadyCandidate.signal_inbox_refused must be a bool")
     tier_value = Tier(candidate.tier)
     score_value = _int("lead_score", candidate.lead_score)
     age = candidate.newest_event_age
+    first = not candidate.signal_inbox_refused  # Story 4.16: refused Leads come first
     if tier_value is Tier.A:
         if age is not None:
             _int("newest_event_age", age)
         no_event = age is None
-        return (_TIER_RANK[tier_value], no_event, age or 0, -score_value, candidate.lead_id)
-    return (_TIER_RANK[tier_value], False, 0, -score_value, candidate.lead_id)
+        return (first, _TIER_RANK[tier_value], no_event, age or 0, -score_value, candidate.lead_id)
+    return (first, _TIER_RANK[tier_value], False, 0, -score_value, candidate.lead_id)
 
 
 def ready_order(candidates: Iterable[ReadyCandidate]) -> tuple[ReadyCandidate, ...]:
-    """The "Ready to draft" order: Tier A by newest live Event first (smallest age; a Lead with
+    """The "Ready to draft" order: Story 4.16's ``signal_inbox_refused`` Leads first, then the
+    rest, each part in this order: Tier A by newest live Event first (smallest age; a Lead with
     none after those with one; a tie to the higher Lead Score), then Tier B and then Tier C by
     Lead Score (highest first); the final tie-break is the Lead id."""
     return tuple(sorted(candidates, key=_ready_key))

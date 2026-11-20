@@ -36,6 +36,10 @@
 {%- endfor %}
 </fieldset>
 {%- endfor %}
+<div class="field">
+<label><input type="checkbox" id="signal-draft-when-ready" name="draft_when_ready" value="on" aria-describedby="hint-draft-when-ready"{% if draft_when_ready %} checked{% endif %}> Draft Step 1 when ready</label>
+<p class="hint" id="hint-draft-when-ready">For every item of this submission: once its Lead is researched and scored, pick it and draft Step 1 when capacity, a Campaign and Eligibility allow. Untick to research and score only.</p>
+</div>
 <button type="submit">Submit items</button>
 </form>
 <h2>Items</h2>

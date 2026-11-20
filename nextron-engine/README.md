@@ -3680,6 +3680,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0062_8_7_crawl_run_mode` | rebuilds `crawl_runs` (from its exact table, every row, check, foreign key and index kept) to add `mode` (`initial`, `recheck_full` or `recheck_jobs`, default `initial`) with `ck_crawl_runs_mode` (see [Scheduled re-checks](#scheduled-re-checks)) | `research` |
 | `0063_6_11_inbox_pacing` | adds the nullable `sending_inboxes.next_send_at` and `last_sent_at` in place (no rebuild; every row, check and index kept) for cold-send pacing | `sending` |
 | `0064_4_15_draft_failed` | rebuilds `drafts` (from its exact table, every row, check, index and foreign key kept) to add the nullable `draft_failed_at` and `draft_failed_reason` with `ck_drafts_draft_failed` | `drafting` |
+| `0065_4_16_draft_when_ready` | rebuilds `signal_inbox_items` (from its exact table, every row, check, index and foreign key kept) to add `draft_when_ready` (NOT NULL, existing rows `false`), `draft_outcome` and `draft_decided_at` with `ck_signal_inbox_items_draft_decided` (both NULL or both set) | `discovery` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the
@@ -6281,6 +6282,47 @@ item of the Contact's Lead (and of Leads merged into it), and every item with no
 websites; a subject access export lists those items that mention the Contact (their text as
 excerpts). Discovery's erasure hook runs second, after compliance's, so it can match the
 Contact's name and addresses before research tombstones them.
+
+## Signal Inbox Leads drafted within 15 minutes (Story 4.16)
+
+A fresh post Mac pastes into the Signal Inbox becomes a grounded Step 1 Draft within 15
+minutes, with no hand-picking (FR-8, FR-19, AD-8, AD-10, AD-21, NFR-30).
+
+**The checkbox.** The Signal Inbox form has one "Draft Step 1 when ready" checkbox (ticked by
+default) for the whole submission; every item of that submission stores it
+(`signal_inbox_items.draft_when_ready`, migration `0065_4_16_draft_when_ready`). Unticked (the
+field absent) means research and scoring only; any value other than `on` is a malformed form
+(400). Items stored before this story are `false`, so they never trigger drafting. A reprocess
+keeps the item's value.
+
+**The trigger.** `LeadScores.score_lead` (the end of the interactive research chain), in the same
+transaction as the score: when the Lead has `processed` items with the box ticked and no decision
+yet, a `scored` Lead is picked by `Selection.pick_one` (exactly what the "Ready to draft" pick
+does for one Lead: today's live capacity, the same reasons and Campaign, origin `operator_pick`,
+the AD-16 gate inside `enroll`, whose Step 1 `draft_step` job runs on the interactive lane at
+urgency `soon`), and `Discovery.record_draft_outcome` stores the outcome on those items
+(`draft_outcome`: `enrolled`, the pick's reason, or `blocked` for a suppressed Contact;
+`draft_decided_at`; one `events` row each, IDs and codes only). A `disqualified` Lead records
+`disqualified` without a pick; a skipped score (an unknown, merged or closed Lead) decides
+nothing. Items a merge moves to the survivor stay undecided until the survivor is next scored
+(nothing re-scores it on merge). Each item is decided once: a later rescore never picks again.
+The score, the Enrollment, its job and the outcome commit together. After that commit, when a
+pick ran, `score_lead` logs `signal_inbox_pick` (`lead_id`, `enrolled`, `reason`).
+
+**When it isn't drafted.** The notification area shows "Signal Inbox Lead <name> not drafted:
+<reason>" (the "Ready to draft" reason texts; `disqualified` reads "Lead disqualified"), at most
+10, newest first, each linked to its Lead's page (a disqualified Lead, or one with no Primary
+Contact, isn't on "Ready to draft"). The line is computed from the items' stored
+outcomes, never stored as a notification (no Lead name is copied into `notifications`). The same
+Leads come first on "Ready to draft", with a "Signal Inbox: not drafted" badge. Both disappear
+once the Lead is enrolled (picked by hand) or merged, or 7 days after the decision.
+
+**Known limit.** A Lead created from a post has no country, so its author's Contact gets no
+Market and `enroll` refuses it as "the Contact has no timezone or Market"; it is then shown as
+not drafted. A post about an organization that is already a Lead with a country (for example from
+a CSV import) is drafted in time. The speed test (`tests/app/test_signal_inbox_speed.py`) shows
+the whole chain, from submission to revision 1 and its passing grounding result, in under 15
+minutes at a simulated 60 s per job, every job on the way on the interactive lane.
 
 ## Companies House discovery
 

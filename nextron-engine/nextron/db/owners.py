@@ -549,6 +549,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "parsed_event_date",
             "parsed_quote",
             "extracted_by",
+            "draft_when_ready",  # Story 4.16
+            "draft_outcome",
+            "draft_decided_at",
         ),
     },
     "job_postings": {  # Story 2.11

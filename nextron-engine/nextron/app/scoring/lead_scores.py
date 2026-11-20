@@ -3,7 +3,7 @@ service, the sole writer of the score group of ``leads``. ``nextron.app.scoring.
 docstring holds the rules. No log line or job payload holds a name, a quote or a URL: IDs, codes
 and counts only.
 
-**``LeadScores(clock, scoring, queue, *, selection=None)``.**
+**``LeadScores(clock, scoring, queue, *, selection=None, discovery=None)``.**
 
 - ``@use_case score_lead(lead_id, *, use_current=False) -> RescoreOutcome`` (the ``score_lead``
   job, the end of the research chain): ``scoring.rescore(lead_id, use_current=...)`` in one
@@ -11,6 +11,20 @@ and counts only.
   definition; any other keeps the Lead's stored version). After the commit it logs
   ``lead_scored`` (``lead_id``, ``lead_score``, ``factors``), ``lead_disqualified``
   (``lead_id``, ``evidence_id``) or ``score_skipped`` (``lead_id``, ``reason``).
+
+  **Draft when ready (Story 4.16).** Built with both a ``selection`` and a ``discovery`` (any
+  object with ``record_draft_outcome(lead_id, outcome)``, ``DraftOutcomes``: scoring can't
+  import its sibling ``discovery``, so ``main.py`` hands it in), and only then, the same
+  transaction goes on when the Lead has ``processed`` Signal Inbox items with
+  ``draft_when_ready`` and no decision yet (``queries.discovery.undecided_draft_items``):
+  ``SCORED`` calls ``selection.pick_one(lead_id)`` and records ``enrolled`` or the pick's reason
+  on those items; ``DISQUALIFIED`` records ``disqualified`` with no pick; ``SKIPPED`` does
+  nothing (the items stay undecided until the Lead is next scored; items a merge moves to the
+  survivor likewise stay undecided until the survivor is next scored, since nothing re-scores it
+  on merge). An item is decided once, so a later rescore never picks again. The Enrollment, its
+  ``draft_step`` job and the items' outcome commit with the score, or not at all. After the
+  commit, and only when a pick happened, it logs ``signal_inbox_pick`` (``lead_id``,
+  ``enrolled``, ``reason``).
 - ``@use_case recompute_tiers() -> int`` (the daily ``recompute_tiers`` trigger's job): reads
   ``queries.scoring.retier_candidates()`` in one transaction, then calls
   ``scoring.retier(lead_id)`` for each in a transaction of its own, so one Lead's work never
@@ -46,20 +60,21 @@ re-check closes or reopens a posting, because it can't import this module.
 
 import logging
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol
 
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import scoring as scoring_queries
 from nextron.app.scoring.api import RescoreOutcome, RescoreResult, Scoring
-from nextron.app.scoring.selection import Selection
+from nextron.app.scoring.selection import PickOutcome, Selection
 from nextron.db.uow import current, use_case
 from nextron.domain.crawl import LEAD_ID_FIELD, PAYLOAD_VERSION
 from nextron.domain.ids import is_ulid
 from nextron.domain.job import CURRENT, TICK, VERSION_FIELD, Lane
 from nextron.domain.pipeline_stage import CLOSED_STAGES
 from nextron.domain.scoring import SCORE_LEAD_JOB, USE_CURRENT_FIELD
+from nextron.domain.signal_inbox_item import DRAFT_DISQUALIFIED, DRAFT_ENROLLED
 from nextron.ports.clock import Clock
 
 log = logging.getLogger(__name__)
@@ -69,6 +84,7 @@ LEAD_DISQUALIFIED: Final = "lead_disqualified"
 SCORE_SKIPPED: Final = "score_skipped"
 TIERS_RECOMPUTED: Final = "tiers_recomputed"
 SEGMENT_RESCORE_REQUESTED: Final = "segment_rescore_requested"
+SIGNAL_INBOX_PICK: Final = "signal_inbox_pick"
 
 
 class RescoreRequest(StrEnum):
@@ -97,6 +113,12 @@ def enqueue_score_lead(
     )
 
 
+class DraftOutcomes(Protocol):
+    """Where a Signal Inbox Lead's drafting decision is recorded (``Discovery``, Story 4.16)."""
+
+    def record_draft_outcome(self, lead_id: str, outcome: str) -> int: ...
+
+
 class LeadScores:
     """The scoring jobs and the Lead page's "Re-score"; see the module docstring."""
 
@@ -107,17 +129,30 @@ class LeadScores:
         queue: JobQueue,
         *,
         selection: Selection | None = None,
+        discovery: DraftOutcomes | None = None,
     ) -> None:
         self._clock = clock
         self._scoring = scoring
         self._queue = queue
         self._selection = selection
+        self._discovery = discovery
 
     @use_case
     def score_lead(self, lead_id: str, *, use_current: bool = False) -> RescoreOutcome:
-        """Score the Lead; see the module docstring."""
+        """Score the Lead, then draft a waiting Signal Inbox Lead; see the module
+        docstring."""
         with current().transaction():
             outcome = self._scoring.rescore(lead_id, use_current=use_current)
+            picked = self._draft_when_ready(lead_id, outcome.result)
+        if picked is not None:
+            log.info(
+                SIGNAL_INBOX_PICK,
+                extra={
+                    "lead_id": lead_id,
+                    "enrolled": picked.enrollment_id is not None,
+                    "reason": None if picked.reason is None else str(picked.reason),
+                },
+            )
         if outcome.result is RescoreResult.SCORED:
             log.info(
                 LEAD_SCORED,
@@ -135,6 +170,22 @@ class LeadScores:
         else:
             log.info(SCORE_SKIPPED, extra={"lead_id": lead_id, "reason": outcome.reason})
         return outcome
+
+    def _draft_when_ready(self, lead_id: str, result: RescoreResult) -> PickOutcome | None:
+        """Story 4.16's hook, inside ``score_lead``'s transaction; the pick, if one ran."""
+        if self._selection is None or self._discovery is None:
+            return None
+        if result is RescoreResult.SKIPPED:
+            return None
+        if not discovery_queries.undecided_draft_items(lead_id):
+            return None
+        if result is RescoreResult.DISQUALIFIED:
+            self._discovery.record_draft_outcome(lead_id, DRAFT_DISQUALIFIED)
+            return None
+        picked = self._selection.pick_one(lead_id)
+        decided = DRAFT_ENROLLED if picked.enrollment_id is not None else str(picked.reason)
+        self._discovery.record_draft_outcome(lead_id, decided)
+        return picked
 
     @use_case
     def recompute_tiers(self) -> int:

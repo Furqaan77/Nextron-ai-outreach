@@ -5,7 +5,8 @@ Every function runs one explicit Core statement through the current unit of work
 the running use case's transaction. It checks nothing; ``nextron.app.discovery`` does.
 
 - ``StoredItem``: one row;
-- ``insert(url, text, author, company, status, submitted_at) -> id``: a new row;
+- ``insert(url, text, author, company, status, submitted_at, draft_when_ready=False) -> id``: a
+  new row;
 - ``get(item_id)``: the row, or ``None``;
 - ``items(limit)``: the newest ``limit`` rows (``submitted_at DESC, id DESC``);
 - ``set_parse(item_id, parse)``: writes the accepted parse's columns and ``extracted_by``;
@@ -16,6 +17,14 @@ the running use case's transaction. It checks nothing; ``nextron.app.discovery``
   subject access export, Story 3.15's rules);
 - ``unlinked()``: every column of each item with no Lead (``pending`` or ``flagged``), as a
   mapping, by id;
+- ``undecided_draft_items(lead_id)`` (Story 4.16): the ids of the Lead's ``processed`` items
+  with ``draft_when_ready`` and no ``draft_decided_at``, by id;
+- ``record_draft_outcome(item_ids, outcome, at)``: sets those items' ``draft_outcome`` and
+  ``draft_decided_at``, only on the ones still undecided, ``processed`` and ``draft_when_ready``
+  (an item is decided once);
+- ``refusals(since)``: ``(lead_id, Lead name, outcome, decided_at)`` of each item whose
+  ``draft_outcome`` is set and isn't ``enrolled``, decided at or after ``since``, whose Lead
+  isn't merged, newest first (by ``draft_decided_at``, then the item id, descending);
 - ``tombstone(item_ids) -> int`` (the erasure hook, Story 3.13's rules): each of those items
   gets ``nextron.db.erasure.tombstoned`` (its ``redact`` columns become ``[erased]``; a NULL
   stays NULL); how many items.
@@ -32,8 +41,9 @@ from sqlalchemy import update as update_rows
 
 from nextron.db.erasure import tombstoned
 from nextron.db.models.base import new_id
-from nextron.db.models.leads import SignalInboxItemRecord
+from nextron.db.models.leads import LeadRecord, SignalInboxItemRecord
 from nextron.db.uow import current
+from nextron.domain.signal_inbox_item import ItemStatus
 
 _R = SignalInboxItemRecord
 TABLE: Final = "signal_inbox_items"
@@ -61,6 +71,20 @@ class StoredItem:
     parsed_event_date: date | None
     parsed_quote: str | None
     extracted_by: str | None
+    draft_when_ready: bool
+    draft_outcome: str | None
+    draft_decided_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class Refusal:
+    """One item decided without an Enrollment (Story 4.16): its Lead, the Lead's name, the
+    outcome and when."""
+
+    lead_id: str
+    lead_name: str
+    outcome: str
+    decided_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +120,9 @@ _COLUMNS = (
     _R.parsed_event_date,
     _R.parsed_quote,
     _R.extracted_by,
+    _R.draft_when_ready,
+    _R.draft_outcome,
+    _R.draft_decided_at,
 )
 
 
@@ -111,6 +138,7 @@ def insert(
     company: str | None,
     status: str,
     submitted_at: datetime,
+    draft_when_ready: bool = False,
 ) -> str:
     """Store a new item; its new ULID."""
     item_id = new_id()
@@ -126,6 +154,7 @@ def insert(
             submitted_at=submitted_at,
             processed_at=None,
             lead_id=None,
+            draft_when_ready=draft_when_ready,
         )
     )
     return item_id
@@ -187,6 +216,57 @@ def reparent(loser_id: str, survivor_id: str) -> int:
         update_rows(_R).where(_R.lead_id == loser_id).values(lead_id=survivor_id)
     )
     return int(getattr(result, "rowcount", 0) or 0)
+
+
+def undecided_draft_items(lead_id: str) -> tuple[str, ...]:
+    """The ids of the Lead's processed items waiting for a drafting decision, by id."""
+    rows = current().session.execute(
+        select(_R.id)
+        .where(
+            _R.lead_id == lead_id,
+            _R.status == ItemStatus.PROCESSED,
+            _R.draft_when_ready.is_(True),
+            _R.draft_decided_at.is_(None),
+        )
+        .order_by(_R.id)
+    )
+    return tuple(str(row[0]) for row in rows)
+
+
+def record_draft_outcome(item_ids: Collection[str], outcome: str, at: datetime) -> int:
+    """Store the drafting decision on the undecided items among ``item_ids``; how many rows
+    changed."""
+    wanted = sorted(set(item_ids))
+    if not wanted:
+        return 0
+    result = current().session.execute(
+        update_rows(_R)
+        .where(
+            _R.id.in_(wanted),
+            _R.draft_decided_at.is_(None),
+            _R.draft_when_ready.is_(True),
+            _R.status == ItemStatus.PROCESSED,
+        )
+        .values(draft_outcome=outcome, draft_decided_at=at)
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+def refusals(since: datetime, enrolled: str) -> tuple[Refusal, ...]:
+    """Each item decided at or after ``since`` with an outcome other than ``enrolled``, whose
+    Lead isn't merged, newest first."""
+    rows = current().session.execute(
+        select(_R.lead_id, LeadRecord.name, _R.draft_outcome, _R.draft_decided_at)
+        .join(LeadRecord, LeadRecord.id == _R.lead_id)
+        .where(
+            _R.draft_outcome.is_not(None),
+            _R.draft_outcome != enrolled,
+            _R.draft_decided_at >= since,
+            LeadRecord.merged_into.is_(None),
+        )
+        .order_by(_R.draft_decided_at.desc(), _R.id.desc())
+    )
+    return tuple(Refusal(str(row[0]), str(row[1]), str(row[2]), row[3]) for row in rows)
 
 
 def of_leads(lead_ids: Collection[str]) -> tuple[dict[str, object], ...]:

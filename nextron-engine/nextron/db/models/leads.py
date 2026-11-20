@@ -68,6 +68,12 @@ the item is processed (``ck_signal_inbox_items_processed``); the accepted parse,
 (300) and ``extracted_by`` (the parse's actor). Indexed by ``(status, submitted_at)`` and by
 ``lead_id``. The pasted text, author, company, the parsed author and the quote are personal
 data (``redact``).
+
+Story 4.16 (migration ``0065_4_16_draft_when_ready``) adds ``draft_when_ready`` (Boolean, server
+default 0: the submission's "Draft Step 1 when ready" checkbox), ``draft_outcome`` (at most 32
+characters: ``enrolled``, ``disqualified``, a ``PickReason`` or a ``RefusalCode`` value) and
+``draft_decided_at``, all PII class ``none``; ``ck_signal_inbox_items_draft_decided``: the
+outcome and its time are both NULL or both set.
 """
 
 from datetime import date, datetime
@@ -90,7 +96,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
 from nextron.domain.pipeline_stage import PipelineStage
-from nextron.domain.signal_inbox_item import FlagReason, ItemStatus
+from nextron.domain.signal_inbox_item import MAX_DRAFT_OUTCOME, FlagReason, ItemStatus
 
 NAME_LENGTH: Final = 200  # nextron.domain.leads.MAX_NAME_LENGTH
 WEB_DOMAIN_LENGTH: Final = 253  # nextron.domain.identity.MAX_DOMAIN_LENGTH
@@ -135,6 +141,9 @@ PROCESSED_CHECK: Final = (
     f"(status = '{ItemStatus.PROCESSED}' AND processed_at IS NOT NULL AND lead_id IS NOT NULL)"
     f" OR (status <> '{ItemStatus.PROCESSED}' AND processed_at IS NULL AND lead_id IS NULL)"
 )
+DRAFT_OUTCOME_LENGTH: Final = MAX_DRAFT_OUTCOME
+DRAFT_DECIDED_CHECK: Final = "(draft_outcome IS NULL) = (draft_decided_at IS NULL)"
+FALSE_DEFAULT: Final = text("0")  # a module name: the item's ``text`` column hides ``text``
 
 
 class LeadRecord(Base):
@@ -200,6 +209,7 @@ class SignalInboxItemRecord(Base):
         CheckConstraint(ITEM_STATUS_CHECK, name="status"),
         CheckConstraint(FLAG_REASON_CHECK, name="flag_reason"),
         CheckConstraint(PROCESSED_CHECK, name="processed"),
+        CheckConstraint(DRAFT_DECIDED_CHECK, name="draft_decided"),
     )
 
     id: Mapped[str] = ulid_pk()
@@ -220,3 +230,7 @@ class SignalInboxItemRecord(Base):
     parsed_event_date: Mapped[date | None] = mapped_column(Date)
     parsed_quote: Mapped[str | None] = mapped_column(String(QUOTE_LENGTH))
     extracted_by: Mapped[str | None] = mapped_column(String(ACTOR_LENGTH))
+    # Story 4.16 (migration 0065): draft Step 1 when the Lead is ready
+    draft_when_ready: Mapped[bool] = mapped_column(Boolean, server_default=FALSE_DEFAULT)
+    draft_outcome: Mapped[str | None] = mapped_column(String(DRAFT_OUTCOME_LENGTH))
+    draft_decided_at: Mapped[datetime | None] = mapped_column(UtcDateTime)

@@ -593,6 +593,9 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "parsed_event_date": PiiClass.NONE,
         "parsed_quote": PiiClass.REDACT,
         "extracted_by": PiiClass.NONE,
+        "draft_when_ready": PiiClass.NONE,  # Story 4.16: the checkbox and its outcome code
+        "draft_outcome": PiiClass.NONE,
+        "draft_decided_at": PiiClass.NONE,
     },
     "job_postings": {
         "id": PiiClass.NONE,
