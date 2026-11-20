@@ -1031,3 +1031,62 @@ button.secondary {
 .history-empty {
   color: var(--muted);
 }
+
+/* Story 5.3: the Approval Queue card's badge row, its failing grounding (a red card, the failing
+   spans marked), the blocked Approve notices and the Evidence, facts and earlier Steps. */
+.queue-badges {
+  margin: 0.25rem 0 0.75rem;
+}
+
+.queue-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8125rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--band);
+}
+
+.queue-badge.grounding-fail {
+  color: var(--paper);
+  background: var(--refused);
+  border-color: var(--refused);
+}
+
+.queue-card.grounding-fail {
+  border-left: 4px solid var(--refused);
+  padding-left: 0.75rem;
+}
+
+.queue-card.grounding-fail mark {
+  background: var(--band);
+  color: var(--refused);
+}
+
+.queue-approve-notice {
+  margin: 0.25rem 0;
+  color: var(--refused);
+}
+
+.queue-evidence li,
+.queue-facts li {
+  margin-bottom: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.evidence-type,
+.fact-id {
+  font-weight: 600;
+}
+
+.evidence-ai,
+.evidence-state,
+.fact-state {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.earlier-step-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

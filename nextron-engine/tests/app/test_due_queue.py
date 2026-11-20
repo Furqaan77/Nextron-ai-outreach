@@ -584,13 +584,16 @@ def test_the_page_shows_headers_one_card_and_held_back(world: World) -> None:
     assert card.find("h2").text == "<b>Bold</b> & Co"
     assert not card.find_all("b")
     assert all(page.disabled("<b>Bold</b>"))
-    assert page.find("a", class_="queue-next").attrs["href"] == "/queue?card=2"
+    assert page.find("a", class_="queue-next").attrs["href"] == f"/queue?draft={second}"
     assert not page.find_all("a", class_="queue-previous")
     held = page.find("section", class_="queue-held-back")
     assert "hx-disable" in held.attrs
     [row] = held.find_all("li", class_="held-back-row")
     assert row.find("span", class_="held-back-name").text == "Held Firm"
-    assert not page.find_all("form") and not page.find_all("button")
+    assert not page.find_all("form")
+    # Story 5.3: no grounding result yet, so only a disabled Approve button renders
+    [button] = page.find_all("button")
+    assert "disabled" in button.attrs and "queue-approve" in str(button.attrs["class"]).split()
     assert ("/queue", "Queue") in [
         (node.attrs.get("href"), node.text)
         for node in page.find("header", class_="site-header").find_all("a")
@@ -626,7 +629,8 @@ def test_the_last_card_links_back_only(world: World) -> None:
 
     page = queue_page_of(dashboard, cookie, b"card=2")
 
-    assert page.find("a", class_="queue-previous").attrs["href"] == "/queue?card=1"
+    first_shown = min(rows)[1]
+    assert page.find("a", class_="queue-previous").attrs["href"] == f"/queue?draft={first_shown}"
     assert not page.find_all("a", class_="queue-next")
     assert page.find("article", class_="queue-card").attrs["data-draft"] == last
     assert page.find("section", class_="queue-held-back").find("p").text == "Nothing held back."

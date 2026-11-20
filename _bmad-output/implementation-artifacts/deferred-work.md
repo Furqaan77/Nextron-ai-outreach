@@ -597,3 +597,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-2-hold-each-approved-draft-as-exactly-one-queued-outboundmessage.md`
   summary: Story 5.4's cascade (`approval.cancel_pending` on stop, suppression and erasure) must cancel each `queued` OutboundMessage of the stopped Enrollments through `sending.cancel` and move the Draft to `cancelled`; until then an erased or suppressed Contact's `queued` OM stays `queued` (an erased one with `to_address` `[erased]`).
   evidence: Review pass 1 of Story 5.2 (EC5, BH4, medium; overnight decision 7). `sending.erase_pii` only tombstones; no `sending` subscriber cancels. Nothing sends before 6.10, and 6.9's `contactable` predicate blocks such an OM.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-3-show-the-evidence-facts-and-grounding-result-behind-every-card.md`
+  summary: Decide whether a follow-up card's Earlier Steps should also list the Enrollment's OMs at `unknown` (and `sending`), labelled "send unconfirmed", since the prospect may have received them; today only `sent` OMs are listed, as the 5.3 AC says.
+  evidence: Review pass 1 of Story 5.3 (BH3, EC2, medium). `outbound_messages.sent_of_enrollment` filters `status = 'sent'`. Nothing sends before Epic 6; Story 6.10 (unknown outcomes) should settle it.

@@ -45,6 +45,36 @@ the Drafts due for review:
   ``None``. **A fail-closed seam (Story 6.9):** it answers ``None`` for every Draft until Story
   5.4 stores approvals, so the send gate's ``approval_live`` and ``hash_matches`` fail and no
   message can be sent.
+
+**Binding and flags (Story 5.3, AD-6).** A card also holds ``enrollment_id`` (the Draft's),
+``inbox_id`` (its Enrollment's bound ``sending_inbox_id``, ``None`` without an Enrollment),
+``generic`` and ``stale`` (the Draft's columns), ``grounding_status``: the current revision's
+``GroundingStatus`` (``pending`` when it has no grounding row), and ``shown_hash``:
+``render.text_hash(message.to_address, inbox_id, message.subject, message.body)`` of exactly the
+composed message shown (the inputs ``Sending.enqueue`` hashes), or ``""`` when the Draft can't be
+bound: no composed message, an empty To address, no Enrollment, or a kind ``enqueue`` doesn't
+take (it takes only ``step`` and ``recontact``, ``BINDABLE_KINDS``).
+
+**A card's details (Story 5.3).** ``card_details(card) -> CardDetails`` reads, for one card only
+(the page calls it for the focused card), what lies behind the message, from the revision
+``card.rev``:
+
+- ``evidence``: one ``CardEvidence`` per id of the revision's ``evidence_ids``, in order, from
+  ``queries.research.evidence_history(lead_id)`` (superseded and retracted rows included, with
+  ``state`` ``superseded`` or ``retracted``, retracted winning); an id not found gives a row
+  with ``found`` false;
+- ``facts``: one ``CardFact`` per ``(fact_id, version)`` of the revision's ``fact_versions``,
+  that version from ``queries.playbook.fact`` (``retracted`` when the version is); a fact or
+  version not found, or a fact that no longer decodes, gives a row with ``found`` false;
+- ``playbook_version``: the revision's (``None`` when unrecorded);
+- ``earlier_steps``: for a ``step`` Draft with ``step_no`` above 1 and an Enrollment
+  (``has_earlier_steps(card)``, which the page also uses), the
+  Enrollment's ``sent`` OutboundMessages with a lower ``step_no``, by ``step_no``
+  (``EarlierStep(step_no, subject, body, sent_at)``); else ``()``;
+- ``grounding``: ``queries.drafting.grounding_result(draft_id, rev)`` (``None`` without one);
+- ``revision``: the ``RevisionView`` itself.
+
+A card without a revision gets empty details.
 """
 
 from collections.abc import Callable
@@ -54,13 +84,18 @@ from typing import Final
 
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import drafting as drafting_queries
+from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import scoring as scoring_queries
+from nextron.app.queries import sending as sending_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.approval import drafts as drafts_repo
 from nextron.domain import render
+from nextron.domain.company_facts import InvalidCompanyFacts
 from nextron.domain.draft import RESPONSIVE_KINDS, DraftKind
 from nextron.domain.eligibility import Decision
+from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.markets import InvalidMarkets
 from nextron.domain.scoring import Tier
 from nextron.domain.segments import InvalidSegments, SignalClass
@@ -68,6 +103,11 @@ from nextron.domain.signals import age_days, is_live
 
 HORIZON: Final = timedelta(hours=24)
 FIRST_STEP: Final = 1
+BINDABLE_KINDS: Final = (DraftKind.STEP, DraftKind.RECONTACT)  # what Sending.enqueue takes
+
+EVIDENCE_LIVE: Final = "live"
+EVIDENCE_SUPERSEDED: Final = "superseded"
+EVIDENCE_RETRACTED: Final = "retracted"
 
 GROUP_REPLIES: Final = "replies"
 GROUP_TIER_A: Final = "tier_a_step_1"
@@ -119,6 +159,66 @@ class QueueCard:
     address_class: str | None = None
     message: render.Composed | None = None
     blocked: str | None = None
+    enrollment_id: str | None = None
+    inbox_id: str | None = None
+    shown_hash: str = ""
+    generic: bool = False
+    stale: bool = False
+    grounding_status: GroundingStatus = GroundingStatus.PENDING
+
+
+@dataclass(frozen=True, slots=True)
+class CardEvidence:
+    """One Evidence id a revision cites; ``found`` false when no row of the Lead has it."""
+
+    id: str
+    found: bool
+    type: str | None = None
+    quote: str | None = field(default=None, repr=False)
+    fact: str | None = None
+    value: str | None = field(default=None, repr=False)
+    sought: str | None = None
+    number: int | None = None
+    pages_checked: tuple[str, ...] = ()
+    source_url: str | None = None
+    retrieved_at: datetime | None = None
+    ai_extracted: bool = False
+    state: str = EVIDENCE_LIVE
+
+
+@dataclass(frozen=True, slots=True)
+class CardFact:
+    """One ``(fact_id, version)`` a revision relies on; ``found`` false when it is unknown."""
+
+    fact_id: str
+    version: int
+    found: bool
+    type: str | None = None
+    wording: str | None = None
+    source_url: str | None = None
+    retracted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EarlierStep:
+    """One earlier Step already sent on the card's Enrollment."""
+
+    step_no: int | None
+    subject: str = field(repr=False)
+    body: str = field(repr=False)
+    sent_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class CardDetails:
+    """What lies behind one card's message; see the module docstring."""
+
+    evidence: tuple[CardEvidence, ...] = ()
+    facts: tuple[CardFact, ...] = ()
+    playbook_version: str | None = None
+    earlier_steps: tuple[EarlierStep, ...] = ()
+    grounding: drafting_queries.GroundingResultView | None = None
+    revision: drafting_queries.RevisionView | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +279,7 @@ class _Reader:
     segments: dict[str, str | None] = field(default_factory=dict)
     markets: dict[str, setup_queries.SeededMarket | None] = field(default_factory=dict)
     event_ages: dict[str, int | None] = field(default_factory=dict)
+    inboxes: dict[str, str | None] = field(default_factory=dict)
 
     def decision(self, contact_id: str) -> Decision | str:
         """The Contact's live Decision, or the held-back reason code when the call raised:
@@ -224,6 +325,13 @@ class _Reader:
                 self.markets[market_id] = None
         return self.markets[market_id]
 
+    def inbox_of(self, enrollment_id: str) -> str | None:
+        """The Enrollment's bound Sending Inbox id, or ``None`` when it is unknown."""
+        if enrollment_id not in self.inboxes:
+            found = sequencing_queries.enrollment(enrollment_id)
+            self.inboxes[enrollment_id] = None if found is None else found.sending_inbox_id
+        return self.inboxes[enrollment_id]
+
     def newest_live_event_age(self, lead_id: str) -> int | None:
         """The age in days of the Lead's newest live Event, or ``None`` without one."""
         if lead_id not in self.event_ages:
@@ -245,6 +353,7 @@ class _Reader:
 def _card(
     reader: _Reader, candidate: drafts_repo.QueueCandidate, draft: drafting_queries.DraftView
 ) -> QueueCard:
+    grounding = _grounding_status(draft)
     bare = QueueCard(
         draft_id=draft.id,
         kind=draft.kind,
@@ -252,6 +361,10 @@ def _card(
         rev=draft.current_rev,
         due_at=draft.due_at,
         created_at=draft.created_at,
+        enrollment_id=draft.enrollment_id,
+        generic=draft.generic,
+        stale=draft.stale,
+        grounding_status=grounding,
     )
     lead_id, contact_id = candidate.lead_id, candidate.contact_id
     if lead_id is None or contact_id is None:
@@ -274,6 +387,7 @@ def _card(
         check = render.footer_complete(reader.settings, market.definition)
         if not check.complete:
             blocked = render.incomplete_notice(check)
+    inbox_id = None if draft.enrollment_id is None else reader.inbox_of(draft.enrollment_id)
     return QueueCard(
         draft_id=draft.id,
         kind=draft.kind,
@@ -293,6 +407,130 @@ def _card(
         address_class=None if contact is None else contact.address_class,
         message=message,
         blocked=blocked,
+        enrollment_id=draft.enrollment_id,
+        inbox_id=inbox_id,
+        shown_hash=_shown_hash(draft.kind, message, inbox_id),
+        generic=draft.generic,
+        stale=draft.stale,
+        grounding_status=grounding,
+    )
+
+
+def _grounding_status(draft: drafting_queries.DraftView) -> GroundingStatus:
+    """The current revision's grounding status; ``pending`` without a result for it."""
+    if draft.current_rev is None:
+        return GroundingStatus.PENDING
+    result = drafting_queries.grounding_result(draft.id, draft.current_rev)
+    if result is None:
+        return GroundingStatus.PENDING
+    return result.status
+
+
+def _shown_hash(kind: DraftKind, message: render.Composed | None, inbox_id: str | None) -> str:
+    """The ``text_hash`` of the message shown, or ``""`` when it can't be bound."""
+    if kind not in BINDABLE_KINDS or message is None or not inbox_id:
+        return ""
+    if not message.to_address:  # enqueue refuses a Contact without an address
+        return ""
+    return render.text_hash(message.to_address, inbox_id, message.subject, message.body)
+
+
+def _evidence_row(
+    evidence_id: str, stored: research_queries.StoredEvidence | None
+) -> CardEvidence:
+    if stored is None:
+        return CardEvidence(id=evidence_id, found=False)
+    if stored.retracted_at is not None:
+        state = EVIDENCE_RETRACTED
+    elif stored.superseded_by is not None:
+        state = EVIDENCE_SUPERSEDED
+    else:
+        state = EVIDENCE_LIVE
+    return CardEvidence(
+        id=evidence_id,
+        found=True,
+        type=stored.type,
+        quote=stored.quote,
+        fact=stored.fact,
+        value=stored.value,
+        sought=stored.sought,
+        number=stored.number,
+        pages_checked=tuple(stored.pages_checked),
+        source_url=stored.source_url,
+        retrieved_at=stored.retrieved_at,
+        ai_extracted=stored.extracted_by.startswith("ai:"),
+        state=state,
+    )
+
+
+def _fact_row(fact_id: str, version: int) -> CardFact:
+    try:
+        history = playbook_queries.fact(fact_id)
+    except InvalidCompanyFacts:  # a stored fact that no longer decodes reads as not found
+        history = None
+    found = (
+        None
+        if history is None
+        else next((each for each in history.versions if each.version == version), None)
+    )
+    if found is None:
+        return CardFact(fact_id=fact_id, version=version, found=False)
+    return CardFact(
+        fact_id=fact_id,
+        version=version,
+        found=True,
+        type=str(found.content.type),
+        wording=found.content.wording,
+        source_url=found.content.source_url,
+        retracted=found.retracted_at is not None,
+    )
+
+
+def has_earlier_steps(card: QueueCard) -> bool:
+    """Whether ``card`` can have earlier Steps: a ``step`` Draft with ``step_no`` above 1 and an
+    Enrollment."""
+    return (
+        card.kind == DraftKind.STEP
+        and card.step_no is not None
+        and card.step_no > FIRST_STEP
+        and card.enrollment_id is not None
+    )
+
+
+def _earlier_steps(card: QueueCard) -> tuple[EarlierStep, ...]:
+    if not has_earlier_steps(card) or card.step_no is None or card.enrollment_id is None:
+        return ()
+    step_no = card.step_no
+    return tuple(
+        EarlierStep(
+            step_no=sent.step_no, subject=sent.subject, body=sent.body, sent_at=sent.sent_at
+        )
+        for sent in sending_queries.sent_of_enrollment(card.enrollment_id)
+        if sent.step_no is not None and sent.step_no < step_no
+    )
+
+
+def card_details(card: QueueCard) -> CardDetails:
+    """The Evidence, facts, Playbook version, earlier Steps and grounding result behind
+    ``card``'s revision; see the module docstring."""
+    revision = None if card.rev is None else drafting_queries.revision(card.draft_id, card.rev)
+    if revision is None:
+        return CardDetails()
+    history = (
+        {}
+        if card.lead_id is None or not revision.evidence_ids
+        else {each.id: each for each in research_queries.evidence_history(card.lead_id)}
+    )
+    return CardDetails(
+        evidence=tuple(
+            _evidence_row(evidence_id, history.get(evidence_id))
+            for evidence_id in revision.evidence_ids
+        ),
+        facts=tuple(_fact_row(fact_id, version) for fact_id, version in revision.fact_versions),
+        playbook_version=revision.playbook_version,
+        earlier_steps=_earlier_steps(card),
+        grounding=drafting_queries.grounding_result(card.draft_id, revision.rev),
+        revision=revision,
     )
 
 

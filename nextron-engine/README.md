@@ -3150,6 +3150,75 @@ session has been open ("Session time: 0h 12m", since `nextron open`).
 **Empty.** "Queue clear", then the next due time in the Sender's timezone, or "Nothing
 scheduled" when no `ready` Draft has one.
 
+### Why each card can be trusted (Story 5.3)
+
+Story 5.3 (FR-26, AD-6, AD-7, AD-13) shows, on the focused card, what lies behind the message.
+Each card's grounding status and its Enrollment's Sending Inbox are read for the whole queue;
+the Evidence, facts, earlier Steps and grounding flags are read for the focused card only.
+
+- **Badges.** One row under the Lead's name: the grounding result (`pass`, `fail` or
+  `pending`), then `generic` and `stale` when those Draft flags are set.
+- **Grounding.** A `fail` card has a red left border, lists each failing claim (its rule code, the
+  flagged words and the explanation), and highlights the first place each flagged phrase
+  appears in the Subject, else in the body. A revision with no grounding result yet counts as
+  `pending`: "Grounding check pending".
+- **Approve.** When the grounding is `fail` or `pending`, or the card can't be bound (below), a
+  greyed-out **Approve** button shows with the reason ("Edit this Draft to remove the failing
+  claims before approving", "Grounding check pending", "This Draft can't be approved yet"). A
+  card that passed shows no Approve control yet: Story 5.4 adds it.
+- **Evidence.** Each Evidence item the revision cites, in order: Quote (with its "fact: value"
+  when it has one), Absence (what was sought and each page checked) or Count (the number and
+  what was counted); its source (a link only for `http`/`https` addresses, "—" without one);
+  when it was retrieved; "AI-extracted" when an AI extraction found it; and "superseded" or
+  "retracted" for an item that has since changed. A cited id with no row: "Evidence not found".
+- **Approved Company Facts.** Each fact version the revision relies on, with that version's
+  wording (even when a newer version exists), type and source, "retracted" when it was; "Fact
+  not found" when missing; plus the Playbook version ("—" when unrecorded).
+- **Earlier Steps.** On a follow-up, each earlier Step already sent on the Enrollment: Step
+  number, subject and send date (Sender's timezone), with the body behind an expandable
+  section (Tab to it, then Enter or Space). "No earlier Step sent yet" when there are none.
+- **Binding.** Each card carries hidden `rev` and `shown_hash` fields: the hash of exactly the
+  To, Subject and body shown plus the Enrollment's Sending Inbox, the same hash
+  `Sending.enqueue` checks. A Reply/Rebook/channel Draft, or a Contact with no address, gets no
+  hash, so it can't be approved.
+- **Stable links.** Previous and Next now link by Draft (`/queue?draft=<id>`), so the target
+  doesn't shift when the queue changes; an unknown id falls back to `?card=k`.
+
+### Approved messages wait as OutboundMessages (Story 5.2)
+
+Story 5.2 (FR-26, AD-4, AD-6, AD-16, AD-17) adds the place an approved message waits for
+delivery: the `outbound_messages` table (migration `0066_5_2_outbound_messages`), owned by
+`sending`. Nothing in the dashboard changes yet: Story 5.4's **Approve** is what creates them,
+and nothing here sends anything.
+
+**One message per approval.** `Sending.enqueue(draft, approval)` runs inside the approval's
+own transaction. It copies the exact approved message into one `queued` OutboundMessage: the
+recipient, the Enrollment's Sending Inbox, the subject and the body with its signature and
+footer, the approval's hash and a fresh unsubscribe token. It also keeps a snapshot for
+analytics: the Lead's Tier and Lead Score (empty while unscored), the Variant, Segment, Market
+and Step number. Delivery (Epic 6) will read this copy, never the Draft.
+
+**When it refuses.** Nothing is written at all when:
+
+- the Draft is a Reply, Rebook or channel Draft, or has no Enrollment;
+- the Draft isn't approved, or the approval was for another revision;
+- the Draft already has a message waiting (cancel it first);
+- the Contact may no longer be emailed (suppressed, erased, the Lead closed);
+- the message composed now differs from what was approved (for example, the Contact's email
+  changed after approval).
+
+The database also refuses a second waiting message for one Draft, deleting a message, and any
+change to its copy or snapshot.
+
+**Cancelling.** `Sending.cancel(om_id)` (used by Story 5.4's un-approve) cancels a `queued`
+message; a cancelled one stays as a record, and the Draft can then be approved again. A message
+already being sent, sent, or in doubt (`unknown`) can't be cancelled: "already sending".
+
+**Erasure and export.** Erasing a Contact replaces the recipient, subject, body and token of
+each of their messages with `[erased]`; the ids, statuses, times, hash and snapshot stay. The
+subject access export lists their messages under `sending.outbound_messages`, without the
+unsubscribe token. A Lead merge moves the messages to the surviving Lead.
+
 ## Bulk AI work through Message Batches
 
 Story 4.17 (AD-8, AD-18, FR-57) sends the scheduled enrichment AI work as Claude Message
@@ -3269,41 +3338,6 @@ or 4 alone do nothing.
 **Where it lives.** `nextron.app.drafting.batches.DraftingBatches` (the drafting owner, beside
 `ResearchBatches`), the follow-up builder and checks in `nextron.app.drafting.generation` and
 `nextron.domain.step_drafting`. No migration.
-
-### Approved messages wait as OutboundMessages (Story 5.2)
-
-Story 5.2 (FR-26, AD-4, AD-6, AD-16, AD-17) adds the place an approved message waits for
-delivery: the `outbound_messages` table (migration `0066_5_2_outbound_messages`), owned by
-`sending`. Nothing in the dashboard changes yet: Story 5.4's **Approve** is what creates them,
-and nothing here sends anything.
-
-**One message per approval.** `Sending.enqueue(draft, approval)` runs inside the approval's
-own transaction. It copies the exact approved message into one `queued` OutboundMessage: the
-recipient, the Enrollment's Sending Inbox, the subject and the body with its signature and
-footer, the approval's hash and a fresh unsubscribe token. It also keeps a snapshot for
-analytics: the Lead's Tier and Lead Score (empty while unscored), the Variant, Segment, Market
-and Step number. Delivery (Epic 6) will read this copy, never the Draft.
-
-**When it refuses.** Nothing is written at all when:
-
-- the Draft is a Reply, Rebook or channel Draft, or has no Enrollment;
-- the Draft isn't approved, or the approval was for another revision;
-- the Draft already has a message waiting (cancel it first);
-- the Contact may no longer be emailed (suppressed, erased, the Lead closed);
-- the message composed now differs from what was approved (for example, the Contact's email
-  changed after approval).
-
-The database also refuses a second waiting message for one Draft, deleting a message, and any
-change to its copy or snapshot.
-
-**Cancelling.** `Sending.cancel(om_id)` (used by Story 5.4's un-approve) cancels a `queued`
-message; a cancelled one stays as a record, and the Draft can then be approved again. A message
-already being sent, sent, or in doubt (`unknown`) can't be cancelled: "already sending".
-
-**Erasure and export.** Erasing a Contact replaces the recipient, subject, body and token of
-each of their messages with `[erased]`; the ids, statuses, times, hash and snapshot stay. The
-subject access export lists their messages under `sending.outbound_messages`, without the
-unsubscribe token. A Lead merge moves the messages to the surviving Lead.
 
 ## Leads list and Lead page
 
