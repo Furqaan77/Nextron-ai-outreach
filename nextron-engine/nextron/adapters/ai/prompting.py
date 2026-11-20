@@ -53,6 +53,13 @@ keyword arguments for ``messages.create``, and nothing else:
 It never sets ``thinking``, ``temperature``, ``top_p``, ``top_k``, ``tools``, ``tool_choice``,
 ``stop_sequences`` or ``betas``, never sets ``fallbacks`` except as above, and never adds an
 assistant prefill. A batch request (Story 4.17) never goes through the fallback keys.
+
+**``build_batch_params(route_tuple, candidate, blocks, *, framing=None)``** (Story 4.17, AD-8)
+is the ``params`` of one Message Batch item: exactly ``build_request``'s keys at the
+candidate's ``max_tokens``, except that the cached prefix's last block carries
+``cache_control`` ``{"type": "ephemeral", "ttl": "1h"}`` (a batch may take longer than the
+5-minute cache) and it **never** carries ``extra_headers``, ``extra_body`` or ``fallbacks``,
+whatever ``server_fallbacks`` says: the Batches API rejects a request with ``fallbacks``.
 """
 
 import re
@@ -72,6 +79,8 @@ FULLWIDTH_CAPITAL_A: Final = 0xFF21
 FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
 FALLBACK_HEADERS: Final = {"anthropic-beta": FALLBACK_BETA}
 FALLBACK_BODY: Final = {"fallbacks": "default"}
+CACHE_CONTROL: Final = {"type": "ephemeral"}
+BATCH_CACHE_CONTROL: Final = {"type": "ephemeral", "ttl": "1h"}  # Story 4.17: batch prefixes
 
 
 def _letter(letter: str) -> str:
@@ -117,15 +126,15 @@ def _note(note: str) -> str:
     return f"<campaign_note>\n{escape(note)}\n</campaign_note>\n\n" if note.strip() else ""
 
 
-def build_request(
+def _params(
     route_tuple: RouteTuple,
     candidate: Candidate,
     blocks: Sequence[UntrustedBlock],
     max_tokens: int,
-    *,
-    framing: Framing | None = None,
+    framing: Framing | None,
+    cache_control: dict[str, str],
 ) -> dict[str, Any]:
-    """The keyword arguments for ``messages.create``; see the module docstring."""
+    """The request keys a direct call and a batch item share."""
     check_framing(framing)
     texts = [route_tuple.system_prompt]
     if framing is not None and framing.brief.strip():
@@ -135,11 +144,11 @@ def build_request(
     if framing is not None and framing.facts.strip():
         texts.append(framing.facts)
     system: list[dict[str, Any]] = [{"type": "text", "text": text} for text in texts]
-    system[-1]["cache_control"] = {"type": "ephemeral"}  # the cached prefix ends here
+    system[-1]["cache_control"] = dict(cache_control)  # the cached prefix ends here
     content = user_turn(blocks)
     if framing is not None:
         content = _note(framing.note) + content
-    request: dict[str, Any] = {
+    return {
         "model": route_tuple.model,
         "max_tokens": max_tokens,
         "system": system,
@@ -149,7 +158,33 @@ def build_request(
             "format": {"type": "json_schema", "schema": wire_schema(candidate.output_schema)},
         },
     }
+
+
+def build_request(
+    route_tuple: RouteTuple,
+    candidate: Candidate,
+    blocks: Sequence[UntrustedBlock],
+    max_tokens: int,
+    *,
+    framing: Framing | None = None,
+) -> dict[str, Any]:
+    """The keyword arguments for ``messages.create``; see the module docstring."""
+    request = _params(route_tuple, candidate, blocks, max_tokens, framing, CACHE_CONTROL)
     if candidate.server_fallbacks:  # AD-8: an Opus direct call carries the refusal fallbacks
         request["extra_headers"] = dict(FALLBACK_HEADERS)
         request["extra_body"] = dict(FALLBACK_BODY)
     return request
+
+
+def build_batch_params(
+    route_tuple: RouteTuple,
+    candidate: Candidate,
+    blocks: Sequence[UntrustedBlock],
+    *,
+    framing: Framing | None = None,
+) -> dict[str, Any]:
+    """The ``params`` of one Message Batch item (Story 4.17): never any fallback keys; see the
+    module docstring."""
+    return _params(
+        route_tuple, candidate, blocks, candidate.max_tokens, framing, BATCH_CACHE_CONTROL
+    )

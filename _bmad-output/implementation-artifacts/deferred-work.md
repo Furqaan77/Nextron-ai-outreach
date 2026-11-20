@@ -566,3 +566,13 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time.md`
   summary: Decide whether responsive Drafts (reply, rebook, channel) in the queue are checked with cold-email Eligibility (Not Now, FR-63 re-contact, Market cold rules) or only with `assert_contactable` for a reply purpose; today `due_queue` applies `Compliance.evaluate_eligibility` (cold) to every Draft, so a Reply to a Lead marked Not Now would be held back.
   evidence: Review pass 1 of Story 5.1 (VG other, unverified medium). No reply Draft exists before Epic 7; the Epic 7 story that writes reply Drafts should settle it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
+  summary: Make the bulk AI submit count the cost of in-flight batches (or cap items by the remaining budget) so one daily batch can't overshoot the monthly AI budget.
+  evidence: Review pass 1 of Story 4.17 (BH6, EC6). `submit_bulk` checks `domain.budget.allow` once per route, and batch spend reaches `ai_usage` only when results arrive.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
+  summary: Surface stuck AI batches (submitted over 24 h, items pending for days, a missing tuple) on the health panel, and add retention for deleted `ai_batches` rows and settled `ai_batch_items`.
+  evidence: Review pass 1 of Story 4.17 (BH8, BH9). Today these produce log lines only, and both tables grow without bound.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
+  summary: When an `extract_people` batch item goes `stale` with no newer item or run for the Lead, re-run it directly or enqueue the chain's next stage, so the Lead's research chain doesn't wait for its next crawl.
+  evidence: Review pass 1 of Story 4.17 (BH10; decision 8). A stale item writes and enqueues nothing.

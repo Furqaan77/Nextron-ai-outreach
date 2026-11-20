@@ -544,6 +544,7 @@ def test_the_declared_keys_in_order() -> None:
         "min_lead_score",
         "call_outcome_prompt_delay",  # Story 9.4
         "away_periods",
+        "bulk_ai_submit_at",  # Story 4.17
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -587,6 +588,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.MIN_LEAD_SCORE),
         setting(Key.CALL_OUTCOME_PROMPT_DELAY),
         setting(Key.AWAY_PERIODS),
+        setting(Key.BULK_AI_SUBMIT_AT),
     )
 
 
@@ -1373,7 +1375,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, away_periods, backup_offpc_dir, backup_rotation_days, backup_time, "
-            "bulk_threads, "
+            "bulk_ai_submit_at, bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, discovery_daily_lead_target, discovery_pool_days, "
             "discovery_requery_days, lead_score_fit_weight, lead_score_signal_weight, legal_name, "

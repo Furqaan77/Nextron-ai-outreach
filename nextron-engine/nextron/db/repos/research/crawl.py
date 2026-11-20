@@ -10,9 +10,12 @@ the running use case's transaction. It stores and returns what it is given and c
   and ``StoredAtsLink``: one row of each table.
 - ``insert_run(...) -> id``; ``run(run_id)``; ``latest_run(lead_id)``: the Lead's run started
   last (then the greatest id), or ``None``; ``run_count(lead_id)``: how many runs the Lead
-  holds (Story 2.9: the revision of its ``extract_lead`` job). Since Story 8.7 both ignore
-  ``recheck_jobs`` runs (``mode``), which fetch no page: ATS links and extraction keep reading
-  the last real crawl, and ``latest_run`` is the Lead's last full crawl.
+  holds (Story 2.9: the revision of its ``extract_lead`` job); ``run_ordinal(lead_id, run_id)``:
+  that run's place among the Lead's runs (1 for its first; by ``started_at``, then id), or
+  ``None`` when the Lead holds no such run (Story 4.17: the revision of a batch item). Since
+  Story 8.7 ``latest_run`` and ``run_count`` ignore ``recheck_jobs`` runs (``mode``), which
+  fetch no page: ATS links and extraction keep reading the last real crawl, and ``latest_run``
+  is the Lead's last full crawl.
 - ``page(lead_id, url)``; ``pages(lead_id)``, by URL; ``insert_page(...) -> id``;
   ``update_page(page_id, ...)``: a new fetch of a stored page.
 - ``ats_link(lead_id, url)``; ``ats_links(lead_id)``, by URL; ``insert_ats_link(...) -> id``;
@@ -415,6 +418,31 @@ def run_count(lead_id: str) -> int:
         .where(CrawlRunRecord.lead_id == lead_id, _FETCHED)
     )
     return int(current().session.execute(statement).scalar_one())
+
+
+def run_ordinal(lead_id: str, run_id: str) -> int | None:
+    """The run's place among the Lead's crawl runs (1 for the first; by ``started_at``, then
+    ``id``), or ``None`` when the Lead holds no run ``run_id``."""
+    session = current().session
+    started_at = session.execute(
+        select(CrawlRunRecord.started_at).where(
+            CrawlRunRecord.id == run_id, CrawlRunRecord.lead_id == lead_id
+        )
+    ).scalar_one_or_none()
+    if started_at is None:
+        return None
+    statement = (
+        select(func.count())
+        .select_from(CrawlRunRecord)
+        .where(
+            CrawlRunRecord.lead_id == lead_id,
+            or_(
+                CrawlRunRecord.started_at < started_at,
+                (CrawlRunRecord.started_at == started_at) & (CrawlRunRecord.id <= run_id),
+            ),
+        )
+    )
+    return int(session.execute(statement).scalar_one())
 
 
 # Pages ----------------------------------------------------------------------------------------

@@ -252,8 +252,10 @@ class World:
         *script: LlmResult | AdapterError,
         llm: Any = None,
         people: Sequence[LlmResult | AdapterError] = (NO_PEOPLE,),
-        lane: Lane | None = None,
+        lane: Lane | None = Lane.INTERACTIVE,
     ) -> bool:
+        """Run ``extract_lead`` on ``lane``: the interactive lane by default, so both steps
+        call directly at ``soon`` (Story 4.17: on the bulk lane they queue batch items)."""
         scripted = ScriptedLlm(*script)
         extractions = self.extractions(scripted if llm is None else llm, people)
         try:
@@ -408,10 +410,11 @@ def test_the_first_extraction_sends_every_page_and_stores_what_validates(world: 
 
     assert world.extract(lead, run_id, first_answer(pages)) is True
 
-    # the call: the active tuple, bulk, the catalogue first, then every page by kind, then URL
+    # the call: the active tuple, soon (the interactive lane; Story 4.17), the catalogue first,
+    # then every page by kind, then URL
     [(route_tuple, blocks, urgency)] = world.calls
     assert (route_tuple.route, route_tuple.actor) == ("extract_signals", ACTOR)
-    assert urgency is Urgency.BULK
+    assert urgency is Urgency.SOON
     [law] = [
         segment
         for segment in validate_segments(seed_yaml.parse(SEGMENTS.read_text(encoding="utf-8")))
@@ -1144,7 +1147,10 @@ def test_the_extract_lead_job_runs_the_extraction(world: World) -> None:
         scores=no_jobs,
     ).get("extract_lead").handler
     [(_, _, payload, _)] = world.jobs("extract_lead")
-    job = Job("01JD0000000000000000000099", "extract_lead", Lane.BULK, json.loads(payload), 1)
+    # the interactive lane calls directly (Story 4.17: the bulk lane queues batch items)
+    job = Job(
+        "01JD0000000000000000000099", "extract_lead", Lane.INTERACTIVE, json.loads(payload), 1
+    )
 
     with world.units.open():
         assert handler(job) is None

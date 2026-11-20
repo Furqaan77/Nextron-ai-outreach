@@ -15,7 +15,8 @@ status change follows the Job machine (``nextron.domain.job.transition``) and ap
   caller's transaction. A live job with the same key gives ``Enqueued(<its id>, False)`` and
   writes nothing; otherwise the job is inserted ``queued`` with no attempts, the type's
   priority, the lane (the type's default unless given) and ``run_after`` (now unless given),
-  with its creation event.
+  with its creation event. Without a ``concurrency_key`` the job takes its type's
+  ``JobType.concurrency_key`` (Story 4.17), if it has one.
 - ``@use_case enqueue_tick(job_type) -> Enqueued``: a periodic trigger's firing
   (``nextron.jobs.scheduler``). In one transaction it calls ``enqueue(job_type,
   scope="global", discriminator="tick", payload={"v": 1})``, with the type's default lane and
@@ -293,7 +294,9 @@ class JobQueue:
             raise InvalidJob(f"job type {found.name} does not run on that lane")
         key = idempotency_key(found.name, scope, discriminator)
         text = encode_payload(payload)
-        if concurrency_key is not None and not is_concurrency_key(concurrency_key):
+        if concurrency_key is None:
+            concurrency_key = found.concurrency_key  # Story 4.17: the type's own key, if any
+        elif not is_concurrency_key(concurrency_key):
             raise InvalidJob("the concurrency key must be inbox:<ULID> or domain:<name>")
         if run_after is not None and not (
             isinstance(run_after, datetime) and run_after.utcoffset() is not None

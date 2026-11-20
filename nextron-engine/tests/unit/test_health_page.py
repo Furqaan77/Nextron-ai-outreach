@@ -329,6 +329,8 @@ NEVER_RUN = [
         ["erase_external", "never"],  # Story 3.14
         ["check_grounding", "never"],  # Story 4.14, group Other
         ["draft_step", "never"],  # Story 4.15, group Other
+        ["submit_bulk_ai", "never"],  # Story 4.17, group Other
+        ["poll_ai_batches", "never"],  # Story 4.17, group Other
     ],
 ]
 
@@ -470,6 +472,8 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
             ["erase_external", "never"],
             ["check_grounding", "never"],
             ["draft_step", "never"],
+            ["submit_bulk_ai", "never"],
+            ["poll_ai_batches", "never"],
         ],
     ]
     backup_form, restore_form, (attrs, inputs) = panel.forms

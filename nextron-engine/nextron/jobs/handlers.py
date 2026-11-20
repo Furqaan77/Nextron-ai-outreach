@@ -46,8 +46,9 @@ handler runs in.
 - ``render_pages(crawls)`` (Story 2.6): calls ``crawls().render_pages(lead_id, run_id)`` once
   and returns ``DEFERRED`` when it returns ``False`` (the budget refused the renders).
 - ``extract_lead(extractions)`` (Story 2.9): calls ``extractions().extract_lead(lead_id,
-  run_id)`` once (the research service's ``SignalExtractions``) and returns ``DEFERRED`` when it
-  returns ``False`` (the budget refused the call). A retryable ``AdapterError`` it raises is
+  run_id, lane=job.lane)`` once (the research service's ``SignalExtractions``; Story 4.17: the
+  lane sets the urgency, ``bulk`` queuing a Message Batch item) and returns ``DEFERRED`` when
+  it returns ``False`` (the budget refused the call). A retryable ``AdapterError`` it raises is
   retried by the runner; any other error fails the job.
 - ``select_primary_contact(primary)`` (Story 2.10): calls
   ``primary().select_primary_contact(lead_id)`` once (the research service's
@@ -141,6 +142,11 @@ handler runs in.
   returns ``False`` (the budget refused the re-check). ``may_retry`` matters only in mode
   ``full``: the crawl's last allowed attempt completes instead of failing on a flaky site. In
   mode ``jobs`` it is moot, since ``check_boards`` never raises for a board error (it counts it).
+- ``submit_bulk_ai(owners)`` and ``poll_ai_batches(owners)`` (Story 4.17): ``owners`` returns
+  each registered batch owner (``nextron.main`` passes ``lambda: (research_batches,)``, the
+  ``research`` service's ``ResearchBatches``). The payload is a trigger's tick. The handler
+  calls each owner's ``submit_bulk()`` (or ``poll()``) once, in order, and returns ``None``; a
+  budget refusal leaves the work queued for the next day, so neither is ever ``DEFERRED``.
 
 **Budget classes (Story 8.1).** Every handler that may return ``DEFERRED`` belongs to a type
 ``nextron.main.build_job_types`` registers ``blockable`` (``enrich_lead``, ``render_pages``,
@@ -159,7 +165,7 @@ it passes its payload's optional ``chain_lane`` (``CHAIN_LANE_FIELD``; a lane na
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date
 from typing import Final, Protocol
 
@@ -815,3 +821,33 @@ def draft_step(step_drafts: Callable[[], DraftingSteps]) -> Handler:
         step_drafts().draft(enrollment_id, step, urgency)
 
     return handle_draft_step
+
+
+class BatchingAi(Protocol):
+    """What ``submit_bulk_ai`` and ``poll_ai_batches`` need of a batch owner (Story 4.17: the
+    ``research`` service's ``ResearchBatches``)."""
+
+    def submit_bulk(self) -> int: ...
+
+    def poll(self) -> int: ...
+
+
+def submit_bulk_ai(owners: Callable[[], Sequence[BatchingAi]]) -> Handler:
+    """The ``submit_bulk_ai`` job's handler: each batch owner's queued bulk AI work out as
+    Message Batches."""
+
+    def handle_submit_bulk_ai(job: Job) -> None:
+        for owner in owners():
+            owner.submit_bulk()
+
+    return handle_submit_bulk_ai
+
+
+def poll_ai_batches(owners: Callable[[], Sequence[BatchingAi]]) -> Handler:
+    """The ``poll_ai_batches`` job's handler: each batch owner's ended batches settled."""
+
+    def handle_poll_ai_batches(job: Job) -> None:
+        for owner in owners():
+            owner.poll()
+
+    return handle_poll_ai_batches

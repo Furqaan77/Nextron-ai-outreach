@@ -50,7 +50,9 @@ that keeps the Lead's stored version), a real ``YYYY-MM-DD`` date, a revision fr
 lowercase hex characters (Story 8.3's ``discover_places:<campaign id>:<location hash>``), all
 as text.
 ``is_concurrency_key(value)`` accepts ``inbox:<ULID>`` and ``domain:<name>``, where the name is
-at most 253 characters of ``[a-z0-9-]`` labels joined by dots, with at least one dot.
+at most 253 characters of ``[a-z0-9-]`` labels joined by dots, with at least one dot, and the
+global keys in ``GLOBAL_CONCURRENCY_KEYS`` (Story 4.17: ``ai_batches``, which a job type names
+as its ``concurrency_key`` so its jobs never run at once).
 
 **Payloads** hold IDs and scalars, never personal data, secrets or free text.
 ``encode_payload(payload)`` returns compact JSON with sorted keys; ``decode_payload(text)``
@@ -63,22 +65,24 @@ UTC time ``YYYY-MM-DDTHH:MM:SS[.ffffff]Z``, or a token fullmatching ``[a-z0-9_:.
 refusal's reason names the field, never its value.
 
 **Job types.** ``JobType(name, default_lane, lanes, priority, max_runtime, retry_limit, handler,
-group=JobGroup.OTHER, budget_class=BudgetClass.ESSENTIAL)`` is checked when it is built
-(``TypeError`` or ``ValueError``): ``name`` a ``verb_noun`` name of at most 48 characters;
-``lanes`` a non-empty ``frozenset`` of ``Lane`` holding ``default_lane``; ``priority`` an int
-from 0 to 100 (higher runs first); ``max_runtime`` a ``timedelta`` of whole seconds from 1 s to
-24 h; ``retry_limit`` an int from 0 to 20; ``handler`` callable; ``group`` a ``JobGroup``, the
+group=JobGroup.OTHER, budget_class=BudgetClass.ESSENTIAL, concurrency_key=None)`` is checked when
+it is built (``TypeError`` or ``ValueError``): ``name`` a ``verb_noun`` name of at most 48
+characters; ``lanes`` a non-empty ``frozenset`` of ``Lane`` holding ``default_lane``; ``priority``
+an int from 0 to 100 (higher runs first); ``max_runtime`` a ``timedelta`` of whole seconds from
+1 s to 24 h; ``retry_limit`` an int from 0 to 20; ``handler`` callable; ``group`` a ``JobGroup``, the
 health panel's group for the type (``discovery`` "Discovery", ``enrichment`` "Enrichment",
 ``recheck`` "Re-check", ``sending`` "Sending", ``reply_check`` "Reply check",
 ``unsubscribe_poll`` "Unsubscribe Endpoint poll", ``backup`` "Backup" or ``other`` "Other";
 ``JobGroup.label`` is the heading); ``budget_class`` a ``BudgetClass``
 (``nextron.domain.budget_class``), ``essential`` when left out: ``blockable`` work is what the
 budget and the quotas may stop, and only the discovery, enrichment and re-check types (plus
-``run_ai_test_sets``) are blockable (``tests/contracts/test_budget_classes.py``). Every
-registration names its group (``tests/contracts/test_health_contracts.py``). A ``bool`` is
-refused wherever an int is expected. ``JobTypes`` is the registry: ``register_job_type`` until
-``freeze()``, then ``get(name)`` (raising ``UnknownJobType``) and ``names()``. Only
-``nextron.main.build_job_types`` builds one.
+``run_ai_test_sets``) are blockable (``tests/contracts/test_budget_classes.py``);
+``concurrency_key`` ``None`` or a concurrency key every job of the type is enqueued with unless
+the caller names another (Story 4.17). Every registration names its group
+(``tests/contracts/test_health_contracts.py``). A ``bool`` is refused wherever an int is
+expected. ``JobTypes`` is the registry: ``register_job_type`` until ``freeze()``, then
+``get(name)`` (raising ``UnknownJobType``) and ``names()``. Only ``nextron.main.build_job_types``
+builds one.
 
 A handler receives a ``Job(id, type, lane, payload, attempts)``, calls one use case and returns
 ``None``, or ``DEFERRED`` when the use case was refused by the budget (``Handler``).
@@ -130,6 +134,7 @@ TICK: Final = "tick"
 CURRENT: Final = "current"  # Story 11.5: score_lead with the current Segment definition
 INBOX_PREFIX: Final = "inbox:"
 DOMAIN_PREFIX: Final = "domain:"
+GLOBAL_CONCURRENCY_KEYS: Final = frozenset({"ai_batches"})  # Story 4.17: a job type's own key
 MAX_DOMAIN_NAME: Final = 253
 
 # Each matched with fullmatch.
@@ -403,6 +408,8 @@ def is_concurrency_key(value: object) -> bool:
     """Whether ``value`` is ``inbox:<ULID>`` or ``domain:<name>``."""
     if not isinstance(value, str):
         return False
+    if value in GLOBAL_CONCURRENCY_KEYS:
+        return True
     if value.startswith(INBOX_PREFIX):
         return is_ulid(value.removeprefix(INBOX_PREFIX))
     if value.startswith(DOMAIN_PREFIX):
@@ -551,6 +558,7 @@ class JobType:
     handler: Handler
     group: JobGroup = JobGroup.OTHER
     budget_class: BudgetClass = BudgetClass.ESSENTIAL
+    concurrency_key: str | None = None  # Story 4.17: every job of the type holds this key
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
@@ -586,6 +594,8 @@ class JobType:
             raise TypeError(f"job type {self.name}: group must be a JobGroup")
         if not isinstance(self.budget_class, BudgetClass):
             raise TypeError(f"job type {self.name}: budget_class must be a BudgetClass")
+        if self.concurrency_key is not None and not is_concurrency_key(self.concurrency_key):
+            raise ValueError(f"job type {self.name}: concurrency_key must be a concurrency key")
 
 
 class JobTypes:

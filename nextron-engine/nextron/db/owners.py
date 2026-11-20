@@ -10,8 +10,9 @@ run ``uv run python scripts/gen_owner_contracts.py``; a contract test fails unti
 
 ``TABLES`` maps each table to its writers, column by column: ``table -> {writer: (columns...)}``.
 A writer is an owner in ``OWNERS`` or a shared database module in ``SHARED_WRITERS``, which
-writes on behalf of every owner: ``db.eventlog`` (the ``events`` log) and ``db.metering`` (the
-usage tables, through ``UsageMeterPort``). Every
+writes on behalf of every owner: ``db.eventlog`` (the ``events`` log), ``db.metering`` (the
+usage tables, through ``UsageMeterPort``) and ``db.ai_batches`` (Story 4.17: the Message Batch
+tables, each row only for the owner its ``owner`` column names). Every
 column of ``nextron.db.models.Base.metadata`` belongs to exactly one writer, and nothing else is
 listed; ``tests/contracts/test_persistence_contracts.py`` fails on any unmapped, doubly mapped or
 stale column. A story that adds a table or column adds it here (and to ``pii_registry.py``) in
@@ -40,7 +41,7 @@ OWNERS: Final[tuple[str, ...]] = (
 )
 
 # Database modules that write a table on behalf of every owner.
-SHARED_WRITERS: Final[tuple[str, ...]] = ("db.eventlog", "db.metering")
+SHARED_WRITERS: Final[tuple[str, ...]] = ("db.eventlog", "db.metering", "db.ai_batches")
 
 TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     "events": {
@@ -908,6 +909,35 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "refused",
             "error_code",
             "at",
+        ),
+    },
+    "ai_batches": {
+        "db.ai_batches": (
+            "id",
+            "owner",
+            "provider_batch_id",
+            "route",
+            "route_tuple_key",
+            "status",
+            "submitted_at",
+            "ended_at",
+            "deleted_at",
+        ),
+    },
+    "ai_batch_items": {
+        "db.ai_batches": (
+            "id",
+            "owner",
+            "batch_row_id",
+            "route",
+            "custom_id",
+            "target_id",
+            "rev",
+            "context_id",
+            "fingerprint",
+            "status",
+            "created_at",
+            "updated_at",
         ),
     },
 }

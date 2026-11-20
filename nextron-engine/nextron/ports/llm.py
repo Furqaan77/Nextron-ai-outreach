@@ -32,13 +32,49 @@ tuple's model when no response came back) and ``usage``, both keyword-only:
   ``AdapterError(True, ...)`` instead. The field exists for later adapters.
 
 ``LlmResult`` is their union. No result, and no ``repr``, carries prompt or response text.
+
+**Message Batches (Story 4.17, AD-8).** None of these waits: each is one request (plus the
+results stream for an ended batch). A retryable failure (HTTP 429, a 5xx, no connection) raises
+``AdapterError(True, "llm_unavailable")``, any other 4xx ``AdapterError(False,
+"llm_rejected")``.
+
+- ``BatchRequest(custom_id, inputs, framing=None)``: one item, frozen. ``custom_id`` must
+  fullmatch ``nextron.domain.ai_batch.CUSTOM_ID_PATTERN`` (the domain's ``custom_id`` builds it),
+  ``inputs`` is stored as a tuple of ``UntrustedBlock`` (never in the ``repr``) and ``framing``
+  is a ``Framing`` or ``None``; else ``TypeError`` or ``ValueError``.
+- ``submit_batch(route_tuple, items) -> str``: the provider's batch id. The caller checks are
+  ``run``'s (an unknown tuple raises ``AdapterError(False, "llm_unknown_route")``), plus: the
+  route must be batchable, ``items`` a non-empty sequence of ``BatchRequest`` whose
+  ``custom_id`` never repeats, each item's blocks of exactly one subject (``ValueError``).
+- ``fetch_batch(batch_id, route_tuple) -> BatchInProgress | BatchEnded``: ``route_tuple`` is the
+  tuple the batch was submitted with (its results are validated against its route's schema and
+  metered as it; an unknown tuple is ``llm_unknown_route``). ``BatchEnded.results`` maps each
+  ``custom_id`` the provider answered to a ``BatchItemResult``: ``BatchSucceeded(result)``,
+  ``result`` an ``LlmOk``, ``LlmRefused``, ``LlmTruncated`` or ``LlmInvalid`` (read by ``run``'s
+  outcome rules, never retried), or ``BatchLost(kind)``, ``kind`` a ``BatchLostKind``
+  (``errored``, ``canceled`` or ``expired``). An item the provider didn't answer is absent.
+- ``delete_batch(batch_id) -> None``: a batch already gone (HTTP 404) counts as deleted.
+
+``fetch_batch`` and ``delete_batch`` take an id that fullmatches ``BATCH_ID_PATTERN``
+(``check_batch_id``: ``TypeError`` or ``ValueError`` before any request).
 """
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field, fields
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Final, Protocol, runtime_checkable
 
-from nextron.domain.ai import Framing, RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.ai import (
+    Framing,
+    RouteTuple,
+    UntrustedBlock,
+    Urgency,
+    check_blocks,
+    check_framing,
+)
+from nextron.domain.ai_batch import CUSTOM_ID_PATTERN
 from nextron.domain.budget import CODE_PATTERN, MODEL_PATTERN
 
 MIN_STATUS: Final = 100
@@ -163,6 +199,121 @@ class LlmFailed:
 
 
 LlmResult = LlmOk | LlmRefused | LlmTruncated | LlmInvalid | LlmFailed
+BatchAnswer = LlmOk | LlmRefused | LlmTruncated | LlmInvalid  # a succeeded item's result
+
+
+# Message Batches (Story 4.17) -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRequest:
+    """One item of a Message Batch: its ``custom_id``, its one subject's blocks and framing."""
+
+    custom_id: str
+    inputs: tuple[UntrustedBlock, ...] = field(repr=False)
+    framing: Framing | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.custom_id, str):
+            raise TypeError("custom_id must be a str")
+        if CUSTOM_ID_PATTERN.fullmatch(self.custom_id) is None:
+            raise ValueError(f"custom_id must match {CUSTOM_ID_PATTERN.pattern}")
+        if isinstance(self.inputs, str | bytes) or not isinstance(self.inputs, Sequence):
+            raise TypeError("inputs must be a sequence of UntrustedBlock")
+        object.__setattr__(self, "inputs", tuple(self.inputs))
+        check_blocks(self.inputs)
+        check_framing(self.framing)
+
+
+class BatchLostKind(StrEnum):
+    """Why a batch item has no answer."""
+
+    ERRORED = "errored"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSucceeded:
+    """A batch item the model answered."""
+
+    result: BatchAnswer
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, LlmOk | LlmRefused | LlmTruncated | LlmInvalid):
+            raise TypeError("result must be an LlmOk, LlmRefused, LlmTruncated or LlmInvalid")
+
+
+@dataclass(frozen=True, slots=True)
+class BatchLost:
+    """A batch item with no answer: it errored, was canceled or expired."""
+
+    kind: BatchLostKind
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, BatchLostKind):
+            raise TypeError("kind must be a BatchLostKind")
+
+
+BatchItemResult = BatchSucceeded | BatchLost
+
+
+@dataclass(frozen=True, slots=True)
+class BatchInProgress:
+    """A batch still being processed."""
+
+
+@dataclass(frozen=True, slots=True)
+class BatchEnded:
+    """An ended batch: each answered item's result, by ``custom_id``."""
+
+    results: Mapping[str, BatchItemResult]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.results, Mapping):
+            raise TypeError("results must be a mapping")
+        for key, value in self.results.items():
+            if not isinstance(key, str) or CUSTOM_ID_PATTERN.fullmatch(key) is None:
+                raise ValueError(f"each custom_id must match {CUSTOM_ID_PATTERN.pattern}")
+            if not isinstance(value, BatchSucceeded | BatchLost):
+                raise TypeError("each result must be a BatchSucceeded or a BatchLost")
+        object.__setattr__(self, "results", MappingProxyType(dict(self.results)))
+
+
+BatchState = BatchInProgress | BatchEnded
+BATCH_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def check_batch_id(batch_id: object) -> str:
+    """``batch_id``, or ``TypeError`` / ``ValueError`` unless it fullmatches
+    ``BATCH_ID_PATTERN`` (the provider's ids, such as ``msgbatch_...``)."""
+    if not isinstance(batch_id, str):
+        raise TypeError("batch_id must be a str")
+    if BATCH_ID_PATTERN.fullmatch(batch_id) is None:
+        raise ValueError(f"batch_id must match {BATCH_ID_PATTERN.pattern}")
+    return batch_id
+
+
+def check_batchable(batchable: bool) -> None:
+    """``ValueError`` unless the route candidate is batchable (a caller's bug, Story 4.17)."""
+    if batchable is not True:
+        raise ValueError("the route is not batchable")
+
+
+def check_batch_items(items: Sequence[BatchRequest]) -> tuple[BatchRequest, ...]:
+    """``items`` as a tuple, or ``TypeError`` / ``ValueError``: a non-empty sequence of
+    ``BatchRequest`` whose ``custom_id`` never repeats (each already holds one subject)."""
+    if isinstance(items, str | bytes) or not isinstance(items, Sequence):
+        raise TypeError("items must be a sequence of BatchRequest")
+    found = tuple(items)
+    if not all(isinstance(item, BatchRequest) for item in found):
+        raise TypeError("items must be a sequence of BatchRequest")
+    if not found:
+        raise ValueError("a batch must hold at least one item")
+    ids = [item.custom_id for item in found]
+    if len(set(ids)) != len(ids):
+        raise ValueError("a batch must not repeat a custom_id")
+    return found
 
 
 @runtime_checkable
@@ -178,4 +329,19 @@ class LlmPort(Protocol):
         framing: Framing | None = None,
     ) -> LlmResult:
         """Make the call and return its one result; see the module docstring."""
+        ...
+
+    def submit_batch(self, route_tuple: RouteTuple, items: Sequence[BatchRequest]) -> str:
+        """Submit one Message Batch; the provider's batch id (Story 4.17)."""
+        ...
+
+    def fetch_batch(
+        self, batch_id: str, route_tuple: RouteTuple, *, metered: bool = True
+    ) -> BatchState:
+        """The batch's state, and every item's result once it ended (Story 4.17); with
+        ``metered=False`` (a re-fetch of a batch already seen ended) no usage is recorded."""
+        ...
+
+    def delete_batch(self, batch_id: str) -> None:
+        """Delete the batch; one already gone counts as deleted (Story 4.17)."""
         ...

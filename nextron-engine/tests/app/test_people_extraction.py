@@ -25,12 +25,14 @@ from sqlalchemy import Engine
 from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.legal_form import LegalFormChecks
 from nextron.app.queries import research as research_queries
+from nextron.app.research.batches import ResearchBatches
 from nextron.app.research.extraction import SignalExtractions
 from nextron.app.research.job_boards import JobBoards
 from nextron.app.research import people as people_module
 from nextron.app.research.people import PeopleExtractions, PrimaryContacts
 from nextron.db.repos.research import signals as signals_repo
 from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency
+from nextron.domain.job import Lane
 from nextron.domain.budget import AiCall
 from nextron.domain.contactability import ContactSubject, SuppressionScope
 from nextron.domain.contacts import ContactCandidate, ProvenanceSource, provenance_recorded
@@ -39,7 +41,7 @@ from nextron.domain.job import Lane
 from nextron.domain.notifications import ContactErased, EvidenceChanged
 from nextron.domain.suppression_entry import SuppressionSource
 from nextron.ports.errors import AdapterError
-from nextron.ports.llm import LlmFailed, LlmOk, LlmRefused, LlmResult, LlmUsage
+from nextron.ports.llm import BatchSucceeded, LlmFailed, LlmOk, LlmRefused, LlmResult, LlmUsage
 from tests.app.test_signal_extraction import (
     ABOUT,
     HAIKU,
@@ -149,12 +151,13 @@ def test_a_law_leads_decision_maker_becomes_a_contact_with_evidence_and_a_lawyer
 
     assert world.extract(lead, run_id, ok(), people=[law_people(pages)]) is True
 
-    # the call: the active extract_people tuple, bulk, the team then the about page
+    # the call: the active extract_people tuple, soon (the interactive lane; Story 4.17), the
+    # team then the about page
     [(route_tuple, blocks, urgency)] = world.people_calls
     assert (route_tuple.route, route_tuple.actor, urgency) == (
         "extract_people",
         PEOPLE_ACTOR,
-        Urgency.BULK,
+        Urgency.SOON,
     )
     assert [(b.subject, b.source, b.block_id) for b in blocks] == [
         (f"lead:{lead}", "website", pages[TEAM]),
@@ -248,7 +251,7 @@ def test_a_law_leads_decision_maker_becomes_a_contact_with_evidence_and_a_lawyer
         f"check_job_boards:{lead}:tick",
         f"domain:{SITE}",
         {"v": 1, "lead_id": lead, "run_id": run_id},
-        "bulk",
+        "interactive",  # the lane extract_lead ran on (Story 2.16; Story 4.17's default)
     )
     assert world.jobs("select_primary_contact") == []
     # nobody in another role is stored as a Contact
@@ -868,7 +871,7 @@ def test_a_lead_merged_during_the_people_call_records_lead_merged(world: World) 
     )
 
     with world.units.open():
-        assert extractions.extract_lead(lead, run_id) is True
+        assert extractions.extract_lead(lead, run_id, lane=Lane.INTERACTIVE) is True
 
     assert people_runs(world, lead) == [("lead_merged", None, PEOPLE_ACTOR, 2, 0, 0, 0)]
     assert world.sql("SELECT COUNT(*) FROM contacts") == [(0,)]
@@ -1050,8 +1053,38 @@ def test_the_people_step_enqueues_the_next_stage_on_the_jobs_lane(
 
     script = () if path == "no_activation" else (ok(),)
 
-    assert world.extract(lead, run_id, *script, people=answers, lane=lane) is True
+    if lane is Lane.BULK:  # Story 4.17: the bulk lane queues batch items and calls nothing
+        assert world.extract(lead, run_id, lane=lane) is True
+        assert next_jobs(world) == []
+        settle_through_batches(world, answers)
+    else:
+        assert world.extract(lead, run_id, *script, people=answers, lane=lane) is True
 
     assert people_runs(world, lead)[-1][0] == path
     [(_, _, _, queued_lane)] = next_jobs(world)
     assert queued_lane == str(lane)
+
+
+def settle_through_batches(world: World, answers: Sequence[LlmResult]) -> None:
+    """The daily submit an hour later, then (when a batch was sent) the poll: the people item
+    answers ``answers[0]`` (the Signals item ``ok()``), and a refused one is re-run directly
+    with the same answer (Story 4.17). The run the people item records enqueues the chain's
+    next stage on the job's default lane."""
+    llm = ScriptedLlm(*answers)
+    people = PeopleExtractions(world.clock, world.meter, llm, world.research, world.queue)
+    extractions = SignalExtractions(world.clock, world.meter, llm, world.research, people)
+    batches = ResearchBatches(world.clock, world.meter, llm, extractions, people)
+    world.clock.advance(timedelta(hours=1))
+    with world.units.open():
+        batches.submit_bulk()
+    sent = world.sql(
+        "SELECT i.route, i.custom_id, b.provider_batch_id FROM ai_batch_items i "
+        "JOIN ai_batches b ON b.id = i.batch_row_id WHERE i.status = 'submitted'"
+    )
+    if not sent:
+        return
+    for route, custom, batch_id in sent:
+        answer = ok() if route == "extract_signals" else answers[0]
+        llm.end_batch(batch_id, {custom: BatchSucceeded(answer)})
+    with world.units.open():
+        batches.poll()

@@ -429,6 +429,27 @@ def test_a_tick_is_absorbed_while_its_job_is_queued_or_running_and_not_after(
     assert job_ids(db_engine) == {first.job_id, later.job_id}
 
 
+def test_a_tick_of_a_type_with_its_own_concurrency_key_stores_that_key(
+    units: UnitOfWorkFactory, clock: FrozenClock
+) -> None:
+    """Story 4.17: a type-level ``concurrency_key`` (``ai_batches``) reaches the tick's row."""
+    batched = JobType(
+        "poll_ai_batches",
+        Lane.BULK,
+        frozenset({Lane.BULK}),
+        50,
+        timedelta(minutes=5),
+        3,
+        noop,
+        concurrency_key="ai_batches",
+    )
+    queue = JobQueue(clock, registry(batched))
+
+    created = tick(units, queue, "poll_ai_batches")
+
+    assert row(units, created.job_id).concurrency_key == "ai_batches"
+
+
 def test_a_tick_of_an_unregistered_type_raises_and_writes_nothing(
     units: UnitOfWorkFactory, queue: JobQueue, db_engine: Engine
 ) -> None:

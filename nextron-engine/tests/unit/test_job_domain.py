@@ -319,6 +319,7 @@ def test_a_key_of_the_wrong_shape_is_refused(
         "domain:a.b",
         "domain:mail-1.example.co.uk",
         "domain:" + "a" * 249 + ".com",  # a 253-character name
+        "ai_batches",  # Story 4.17: the Message Batch jobs' shared key
     ],
 )
 def test_a_concurrency_key_is_an_inbox_or_a_domain(value: str) -> None:

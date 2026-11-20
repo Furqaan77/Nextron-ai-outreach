@@ -418,6 +418,10 @@ reuses ``WebsiteCrawls.crawl_lead`` and ``JobBoards.check_boards`` inline.
 ``extract_signals`` route, validated and reconciled into ``evidence``, ``signals`` and
 ``signal_evidence``, and the Lead's ``hq_tz``), and ``LeadSignals`` serves the Lead page's
 Signals and Evidence sections.
+
+**Message Batches (Story 4.17)** live in ``nextron.app.research.batches``: ``ResearchBatches``
+sends the bulk extraction items as one batch per route (``submit_bulk_ai``) and settles them
+when the batch ends (``poll_ai_batches``); research writes only its own ``ai_batches`` rows.
 """
 
 import logging

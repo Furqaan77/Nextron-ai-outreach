@@ -3149,6 +3149,57 @@ session has been open ("Session time: 0h 12m", since `nextron open`).
 **Empty.** "Queue clear", then the next due time in the Sender's timezone, or "Nothing
 scheduled" when no `ready` Draft has one.
 
+## Bulk AI work through Message Batches
+
+Story 4.17 (AD-8, AD-18, FR-57) sends the scheduled enrichment AI work as Claude Message
+Batches, at half the price of direct calls. Nothing waits on a batch: work is queued, sent once a
+day and settled when the batch ends.
+
+**What is batched.** An `extract_lead` job on the bulk lane (every crawl's) no longer calls
+Claude: after its budget check, each step (`extract_signals`, then `extract_people`) queues one
+`pending` item in `ai_batch_items` (owner `research`, the Lead, and as its revision the crawl
+run's place among the Lead's crawl runs, so two crawls whose jobs run late still queue one item
+each). On the interactive lane (the Signal Inbox chain) both steps still call directly, at
+`soon`. Drafting is not batched yet (Story 4.18).
+
+**The daily submit.** `submit_bulk_ai` runs at the **Bulk AI submit time** setting (Engine
+section, default 14:00 in the sender's timezone; a time missed while the engine was off is made
+up when it next starts). For each route it checks the AI budget first (at 100 % every item stays
+`pending`), keeps only each Lead's newest item (older ones become `stale`), rebuilds each
+request from the Lead's pages now, and sends one batch per route. A Lead with nothing new
+records its `no_pages` run and its item becomes `stale`. Each item stores a fingerprint: the
+route tuple's key and each page sent with its content hash (never any text). Batch requests
+never carry the refusal `fallbacks`, and their cached prefix uses the 1-hour cache.
+
+**Settling.** `poll_ai_batches` runs every 15 minutes and at every start. For an ended batch,
+each item is settled once:
+
+- a valid answer is applied as a direct call's would be (`applied`), but only while the Lead
+  isn't merged, no newer run of that step has finished, every page sent still has the same
+  content hash, the route tuple is unchanged and the Lead's domain may still be contacted;
+  otherwise nothing is written (`stale`);
+- an invalid answer records the `invalid` run (`failed`);
+- a refused, truncated, errored, canceled, expired or missing item is re-run directly at
+  `soon` (`rerun`; `failed` when the budget refuses the re-run or the API rejects it). An
+  unreachable API leaves the item to the job's retry.
+
+A batch Anthropic no longer has (HTTP 404, its results expired) counts as ended with no
+results, so its items are re-run. A batch whose route tuple no longer builds has its open items
+`failed` and is marked deleted locally, with no call to Anthropic (`ai_batch_tuple_missing`). A
+batch that fails with a non-retryable error is logged (`ai_batch_poll_failed`) and the poll
+moves on to the next one.
+
+Once every item is settled the batch is deleted at Anthropic (`deleted_at`). Each result is
+metered once in `ai_usage` with `batch` set and the cost at the batch rate (every rate halved,
+rounded up); an errored item records a zero-token row with `llm_batch_errored`. A re-poll of a
+batch already ended (an item left open by a retryable re-run error) meters nothing again.
+
+**Where it lives.** `nextron.app.research.batches.ResearchBatches` (the research owner),
+`nextron.db.ai_batches` (the shared writer of `ai_batches` and `ai_batch_items`, migration
+`0065_4_17_ai_batches`; each service writes only its own rows, held by
+`tests/contracts/test_ai_batch_owners.py`) and `ClaudeGateway.submit_batch` / `fetch_batch` /
+`delete_batch`. Both jobs run on the bulk lane, one at a time (concurrency key `ai_batches`).
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
@@ -3680,6 +3731,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0062_8_7_crawl_run_mode` | rebuilds `crawl_runs` (from its exact table, every row, check, foreign key and index kept) to add `mode` (`initial`, `recheck_full` or `recheck_jobs`, default `initial`) with `ck_crawl_runs_mode` (see [Scheduled re-checks](#scheduled-re-checks)) | `research` |
 | `0063_6_11_inbox_pacing` | adds the nullable `sending_inboxes.next_send_at` and `last_sent_at` in place (no rebuild; every row, check and index kept) for cold-send pacing | `sending` |
 | `0064_4_15_draft_failed` | rebuilds `drafts` (from its exact table, every row, check, index and foreign key kept) to add the nullable `draft_failed_at` and `draft_failed_reason` with `ck_drafts_draft_failed` | `drafting` |
+| `0065_4_17_ai_batches` | creates `ai_batches` and `ai_batch_items` (the Message Batch tables, shared by row owner `drafting` or `research`; no personal data) | `research`, `drafting` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

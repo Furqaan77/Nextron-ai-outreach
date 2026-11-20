@@ -118,6 +118,8 @@ ESSENTIAL_SAMPLES: Final[Mapping[str, Mapping[str, object]]] = MappingProxyType(
         "check_grounding": {"v": 1, "draft_id": DRAFT, "rev": 1},  # Story 4.14
         "recheck_leads": {"v": 1},  # Story 8.7: the daily tick only reads and enqueues
         "draft_step": {"v": 1, "enrollment_id": ENROLLMENT, "step": 1},  # Story 4.15
+        "submit_bulk_ai": {"v": 1},  # Story 4.17: the daily batch submit
+        "poll_ai_batches": {"v": 1},  # Story 4.17: settles ended batches
     }
 )
 

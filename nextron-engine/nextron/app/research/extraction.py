@@ -10,8 +10,20 @@ or a URL: IDs, codes and counts only.
 
 **``SignalExtractions(clock, meter, llm, research, people)``** runs the ``extract_lead`` jobs
 that ``WebsiteCrawls`` enqueues after a crawl stored pages. ``@use_case extract_lead(lead_id,
-run_id) -> bool`` (``run_id`` is the crawl run that queued it) has three phases, then the people
-step (below):
+run_id, *, lane=None) -> bool`` (``run_id`` is the crawl run that queued it, ``lane`` the lane
+the job ran on) has three phases, then the people step (below). Its urgency is
+``nextron.domain.ai.chain_urgency(lane)`` (Story 4.17): ``soon`` on the interactive lane, else
+``bulk``.
+
+**At ``bulk`` (Story 4.17, AD-8)** phase 1, after its budget check and its unknown or merged
+Lead skip, queues one ``pending`` batch item instead (``nextron.db.ai_batches.queue_item``:
+owner ``research``, route ``extract_signals``, target the Lead, ``rev`` the crawl run's ordinal
+among the Lead's crawl runs, ``context_id`` the crawl run), logs ``extraction_queued``
+(``lead_id``, ``route``, ``queued``: ``False`` when an item of that revision was queued
+already) and goes on to the people step; phases 2 and 3 run later, through
+``nextron.app.research.batches.
+ResearchBatches`` and the methods below. At ``soon`` (and ``interactive``) the call is direct,
+as below.
 
 1. **First transaction.** When ``nextron.domain.budget.allow(BUDGET_CLASS,
    meter.snapshot(now), queries.setup.budget_limits())`` refuses, it returns ``False`` (the job
@@ -27,8 +39,7 @@ step (below):
    blocks are the ``signal_types`` block (``signal_catalogue([segment])``, block id and source
    ``signal_types``) and one ``website`` block per page (block id: the page's id), all of
    subject ``lead:<id>``. The full stored text of each page sent is kept for phase 3.
-2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, chain_urgency(lane))``
-   (``nextron.domain.ai``: ``bulk``, or ``soon`` for a job on the interactive lane, Story 2.16). An
+2. **The call**, with no transaction open: ``llm.run(tuple_, blocks, urgency)``. An
    ``AdapterError`` records a ``failed`` run with its code (in a transaction of its own) and is
    raised again, so the runner retries only a retryable one. ``LlmRefused`` (``error_code``: its
    category), ``LlmTruncated``, ``LlmInvalid`` and ``LlmFailed`` (its code) record that outcome
@@ -89,7 +100,30 @@ raise, ``extract_lead`` then returns ``people.extract(lead_id, run_id, lane=lane
 
 An extraction run records ``route`` (``ROUTE``), ``actor`` (the tuple's, ``None`` without one),
 ``crawl_run_id`` (``run_id`` when such a crawl run exists, else ``None``), ``pages_sent``,
-``pages_truncated`` (pages cut by the budget), ``started_at`` (phase 1's now) and ``ended_at``.
+``pages_truncated`` (pages cut by the budget), ``started_at`` (phase 1's now; for a batch
+result, when its batch was submitted) and ``ended_at``.
+
+**The batch steps (Story 4.17).** ``ResearchBatches`` calls, each inside its own unit of work:
+
+- ``batch_request(item, started_at) -> BatchPlan | RecordedRun | None`` (in a transaction, at
+  submit): the request rebuilt now by phase 1 (``custom_id`` the item's, the blocks phase 1
+  builds) and its ``Fingerprint`` (the tuple's key and each page sent with its
+  ``content_hash``); a ``RecordedRun`` when phase 1 recorded ``no_activation`` or ``no_pages``;
+  ``None`` for an unknown or merged Lead.
+- ``apply_extract_signals_result(item, parsed, submitted_at) -> Settled`` (in a transaction):
+  ``applied`` after phase 3 (its run started at ``submitted_at``) only when the Lead isn't
+  merged, no ``ok`` ``extract_signals`` run of the Lead started after ``submitted_at``, every
+  fingerprinted page is still stored with the same ``content_hash`` and text, the active tuple's
+  key is the fingerprint's, and ``compliance.assert_contactable(NewLeadSubject(web_domain),
+  email, cold)`` allows the Lead; otherwise ``stale`` and nothing written.
+- ``record_invalid(item, submitted_at) -> Settled`` (in a transaction): the ``invalid`` run, as
+  the direct path records it (``failed``).
+- ``rerun(item) -> bool``: the step run directly at ``soon`` (phases 1 to 3, its own budget
+  check; no people step: that is an item of its own); ``False`` when the budget refused it. An
+  ``AdapterError`` propagates.
+
+``Settled(status, log)`` is an item's terminal status and what to log once its transaction
+commits.
 
 **``LeadSignals(clock)``** serves the Lead page: ``view(lead_id) -> LeadSignalsView`` reads the
 clock once and returns ``queries.research.lead_signals`` at that time, with each Signal type's
@@ -98,18 +132,21 @@ current unit of work, so the dashboard's read-only one serves it.
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from enum import Enum
 from typing import Any, Final, Protocol
 
+from nextron.app.compliance import api as compliance_api
 from nextron.app.queries import discovery as discovery_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research import postings
 from nextron.app.research.api import Research
-from nextron.db import eventlog
+from nextron.db import ai_batches, eventlog
+from nextron.db.ai_batches import StoredItem
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
 from nextron.db.repos.research import profile as profile_repo
@@ -117,8 +154,10 @@ from nextron.db.repos.research import signals as signals_repo
 from nextron.db.repos.research.crawl import StoredPage
 from nextron.db.repos.research.signals import StoredEvidence
 from nextron.db.uow import current, use_case
-from nextron.domain.ai import RouteTuple, UntrustedBlock, chain_urgency
+from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency, chain_urgency
+from nextron.domain.ai_batch import BatchOwner, Fingerprint, ItemStatus
 from nextron.domain.budget import allow
+from nextron.domain.contactability import Allowed, Channel, NewLeadSubject, Purpose
 from nextron.domain.crawl import PageKind
 from nextron.domain.extraction import (
     BUDGET_CLASS,
@@ -148,7 +187,15 @@ from nextron.domain.postings import PostingSource, validate_postings
 from nextron.domain.segments import EvidenceType, SegmentDef, SignalClass, signal_catalogue
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
-from nextron.ports.llm import LlmFailed, LlmOk, LlmPort, LlmRefused, LlmResult, LlmTruncated
+from nextron.ports.llm import (
+    BatchRequest,
+    LlmFailed,
+    LlmOk,
+    LlmPort,
+    LlmRefused,
+    LlmResult,
+    LlmTruncated,
+)
 from nextron.ports.usage_meter import UsageMeterPort
 
 log = logging.getLogger(__name__)
@@ -159,6 +206,7 @@ EXTRACTION_FINISHED: Final = "extraction_finished"
 SIGNALS_EXTRACTED: Final = "signals_extracted"
 UNKNOWN_LEAD: Final = "unknown_lead"
 MERGED_LEAD: Final = "merged_lead"
+EXTRACTION_QUEUED: Final = "extraction_queued"
 KIND_ORDER: Final = {str(kind): index for index, kind in enumerate(PageKind)}
 
 
@@ -166,6 +214,80 @@ class PeopleStep(Protocol):
     """What ``extract_lead`` needs of the people step (Story 2.10)."""
 
     def extract(self, lead_id: str, run_id: str, *, lane: Lane | None = None) -> bool: ...
+
+
+class Step(Enum):
+    """How one research step ended, for what comes after it."""
+
+    DEFERRED = "deferred"  # the budget refused it: the job is deferred
+    STOPPED = "stopped"  # an unknown or merged Lead: nothing comes after it
+    DONE = "done"  # recorded, queued or applied: the chain goes on
+
+
+@dataclass(frozen=True, slots=True)
+class Settled:
+    """A batch item's terminal status, and what to log once its transaction commits."""
+
+    status: ItemStatus
+    log: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchPlan:
+    """A batch item's request, rebuilt at submit, its tuple and its fingerprint."""
+
+    route_tuple: RouteTuple
+    request: BatchRequest
+    fingerprint: Fingerprint
+
+
+def queue_item(route: str, lead_id: str, run_id: str, at: datetime) -> str | None:
+    """Queue a ``pending`` research batch item of ``route`` for the Lead (Story 4.17), in the
+    caller's transaction: ``rev`` the crawl run's ordinal among the Lead's crawl runs (the
+    Lead's run count when the run isn't found), ``context_id`` the crawl run."""
+    ordinal = crawl_repo.run_ordinal(lead_id, run_id) if is_ulid(run_id) else None
+    return ai_batches.queue_item(
+        BatchOwner.RESEARCH,
+        route=route,
+        target_id=lead_id,
+        rev=ordinal if ordinal is not None else crawl_repo.run_count(lead_id),
+        context_id=run_id if is_ulid(run_id) else None,
+        at=at,
+    )
+
+
+def log_queued(lead_id: str, route: str, item_id: str | None) -> None:
+    log.info(
+        EXTRACTION_QUEUED,
+        extra={"lead_id": lead_id, "route": route, "queued": item_id is not None},
+    )
+
+
+def still_contactable(lead: Any) -> bool:
+    """Whether the Lead's domain gate allows it (Story 4.17: a batch result's re-check)."""
+    answer = compliance_api.assert_contactable(
+        NewLeadSubject(lead.web_domain), Channel.EMAIL, Purpose.COLD
+    )
+    return isinstance(answer, Allowed)
+
+
+def restore_pages(
+    lead_id: str, fingerprint: Fingerprint, *, strict: bool = True
+) -> list[StoredPage] | None:
+    """The fingerprint's pages as stored now, in ``page_order``; ``None`` when one is gone, has
+    no text or (``strict``) another ``content_hash``."""
+    stored = {page.id: page for page in crawl_repo.pages(lead_id)}
+    pages: list[StoredPage] = []
+    for page_id, content_hash in fingerprint.inputs:
+        page = stored.get(page_id)
+        if page is None or not page.text or (strict and page.content_hash != content_hash):
+            return None
+        pages.append(page)
+    return sorted(pages, key=page_order)
+
+
+def fingerprint_of(route_tuple: RouteTuple, pages: Sequence[StoredPage]) -> Fingerprint:
+    return Fingerprint(route_tuple.key, tuple((page.id, page.content_hash) for page in pages))
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +303,7 @@ class _Call:
     blocks: tuple[UntrustedBlock, ...] = field(repr=False)
     pages_truncated: int
     careers_ids: tuple[str, ...] = ()  # the careers pages sent, in send order (Story 2.11)
+    stored: tuple[StoredPage, ...] = field(default=(), repr=False)  # Story 4.17: fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,29 +382,46 @@ class SignalExtractions:
         the module docstring. ``False`` when a budget check refused the work. ``lane`` is the
         lane the job ran on (Story 2.16): the call's urgency is ``chain_urgency(lane)`` and the
         people step enqueues the chain's next stage on it."""
+        step = self.signals_step(lead_id, run_id, chain_urgency(lane))
+        if step is Step.DEFERRED:
+            return False
+        if step is Step.STOPPED:
+            return True
+        return self._people.extract(lead_id, run_id, lane=lane)
+
+    def signals_step(self, lead_id: str, run_id: str, urgency: Urgency) -> Step:
+        """The Signals phases at ``urgency``, inside the caller's unit of work: at ``bulk`` a
+        queued batch item, else the direct call; see the module docstring."""
         uow = current()
         started_at = self._clock.now()
         skipped: str | None = None
         call: _Call | RecordedRun | None = None
+        queued: tuple[str | None] | None = None
         with uow.transaction():
             limits = setup_queries.budget_limits()
             if not allow(BUDGET_CLASS, self._meter.snapshot(started_at), limits):
-                return False
+                return Step.DEFERRED
             lead = discovery_queries.lead(lead_id)
             if lead is None:
                 skipped = UNKNOWN_LEAD
             elif lead.merged_into is not None:
                 skipped = MERGED_LEAD
+            elif urgency is Urgency.BULK:  # Story 4.17: the daily batch makes the call
+                queued = (queue_item(ROUTE, lead.id, run_id, started_at),)
             else:
                 call = self._prepare(lead.id, lead.segment_id, run_id, started_at)
-        if call is None:  # an unknown or merged Lead
+        if skipped is not None:  # an unknown or merged Lead
             log.info(EXTRACTION_SKIPPED, extra={"lead_id": lead_id, "reason": skipped})
-            return True
+            return Step.STOPPED
+        if queued is not None:
+            log_queued(lead_id, ROUTE, queued[0])
+            return Step.DONE
+        assert call is not None
         if isinstance(call, RecordedRun):  # phase 1 recorded its run
             call.log()
-            return self._people.extract(lead_id, run_id, lane=lane)
+            return Step.DONE
         try:
-            result = self._llm.run(call.route_tuple, call.blocks, chain_urgency(lane))
+            result = self._llm.run(call.route_tuple, call.blocks, urgency)
         except AdapterError as error:
             with uow.transaction():
                 recorded = self._finished(call, ExtractionOutcome.FAILED, error.code)
@@ -292,12 +432,16 @@ class SignalExtractions:
             with uow.transaction():
                 recorded = self._finished(call, outcome, code)
             recorded.log()
-            return self._people.extract(lead_id, run_id, lane=lane)
+            return Step.DONE
         with uow.transaction():
             applied = self._apply(call, result.parsed)
         if applied.merged is not None:
             applied.merged.log()
-            return True  # a merged Lead's people are its survivor's
+            return Step.STOPPED  # a merged Lead's people are its survivor's
+        self._log_extracted(call, applied)
+        return Step.DONE
+
+    def _log_extracted(self, call: "_Call", applied: "_Applied") -> None:
         log.info(
             SIGNALS_EXTRACTED,
             extra={
@@ -316,7 +460,98 @@ class SignalExtractions:
                 "hq_changed": applied.hq_changed,
             },
         )
-        return self._people.extract(lead_id, run_id, lane=lane)
+
+    # The batch steps (Story 4.17) -----------------------------------------------------------------
+
+    def batch_request(
+        self, item: StoredItem, started_at: datetime
+    ) -> BatchPlan | RecordedRun | None:
+        """The item's request rebuilt now, in the caller's transaction; see the module
+        docstring."""
+        lead = discovery_queries.lead(item.target_id)
+        if lead is None or lead.merged_into is not None:
+            return None
+        call = self._prepare(lead.id, lead.segment_id, item.context_id or "", started_at)
+        if isinstance(call, RecordedRun):
+            return call
+        return BatchPlan(
+            call.route_tuple,
+            BatchRequest(item.custom_id, call.blocks),
+            fingerprint_of(call.route_tuple, call.stored),
+        )
+
+    def apply_extract_signals_result(
+        self, item: StoredItem, parsed: Mapping[str, Any], submitted_at: datetime
+    ) -> Settled:
+        """Apply a batch result after the re-checks, in the caller's transaction; see the
+        module docstring."""
+        lead = discovery_queries.lead(item.target_id)
+        if lead is None or lead.merged_into is not None or item.fingerprint is None:
+            return Settled(ItemStatus.STALE)
+        last = signals_repo.last_ok_run(lead.id, ROUTE)
+        if last is not None and last.started_at > submitted_at:
+            return Settled(ItemStatus.STALE)  # a newer run already holds the Lead's Signals
+        call = self._restore(lead.id, lead.segment_id, item, submitted_at, strict=True)
+        if call is None or not still_contactable(lead):
+            return Settled(ItemStatus.STALE)
+        applied = self._apply(call, parsed)
+        return Settled(ItemStatus.APPLIED, lambda: self._log_extracted(call, applied))
+
+    def record_invalid(self, item: StoredItem, submitted_at: datetime) -> Settled:
+        """Record an invalid batch result's run, in the caller's transaction (``failed``)."""
+        lead = discovery_queries.lead(item.target_id)
+        if lead is None or item.fingerprint is None:
+            return Settled(ItemStatus.FAILED)
+        call = self._restore(lead.id, lead.segment_id, item, submitted_at, strict=False)
+        outcome = ExtractionOutcome.INVALID
+        if call is not None:
+            recorded = self._finished(call, outcome, None)
+        else:  # the pages or the tuple changed: the run still counts what was sent
+            fingerprint = Fingerprint.decode(item.fingerprint)
+            version = fingerprint.prompt_version
+            run = self._record(
+                lead.id,
+                self._crawl_run(item.context_id),
+                outcome,
+                actor=None if version is None else f"ai:{ROUTE}@{version}",
+                started_at=submitted_at,
+                pages_sent=len(fingerprint.inputs),
+            )
+            recorded = RecordedRun(lead.id, run, outcome, None)
+        return Settled(ItemStatus.FAILED, recorded.log)
+
+    def rerun(self, item: StoredItem) -> bool:
+        """Run the step directly at ``soon``; ``False`` when the budget refused it."""
+        return self.signals_step(item.target_id, item.context_id or "", Urgency.SOON) is not (
+            Step.DEFERRED
+        )
+
+    def _restore(
+        self,
+        lead_id: str,
+        segment_id: str,
+        item: StoredItem,
+        started_at: datetime,
+        *,
+        strict: bool,
+    ) -> "_Call | None":
+        """The call the item's fingerprint names, as stored now; ``None`` when it can't be
+        (``strict``: the tuple or a page changed)."""
+        fingerprint = Fingerprint.decode(item.fingerprint or "")
+        route_tuple = playbook_queries.active_tuple(ROUTE)
+        if route_tuple is None or route_tuple.key != fingerprint.route_tuple_key:
+            return None
+        pages = restore_pages(lead_id, fingerprint, strict=strict)
+        seeded = setup_queries.segment_by_id(segment_id)
+        if not pages or seeded is None:
+            return None
+        return self._call(
+            lead_id, self._crawl_run(item.context_id), started_at, route_tuple, seeded, pages
+        )
+
+    @staticmethod
+    def _crawl_run(run_id: str | None) -> str | None:
+        return run_id if is_ulid(run_id) and crawl_repo.run(str(run_id)) is not None else None
 
     # Phase 1 ------------------------------------------------------------------------------------
 
@@ -348,6 +583,18 @@ class SignalExtractions:
                 lead_id, crawl_run_id, outcome, actor=route_tuple.actor, started_at=started_at
             )
             return RecordedRun(lead_id, run, outcome, None)
+        return self._call(lead_id, crawl_run_id, started_at, route_tuple, seeded, pages)
+
+    @staticmethod
+    def _call(
+        lead_id: str,
+        crawl_run_id: str | None,
+        started_at: datetime,
+        route_tuple: RouteTuple,
+        seeded: Any,
+        pages: Sequence[StoredPage],
+    ) -> "_Call":
+        """The call on ``pages`` (in ``page_order``), each cut by the page budget."""
         full = [page.text or "" for page in pages]
         cut = allot(full, PAGE_TEXT_BUDGET)
         subject = f"lead:{lead_id}"
@@ -378,6 +625,7 @@ class SignalExtractions:
                 len(short) < len(text) for short, text in zip(cut, full, strict=True)
             ),
             careers_ids=tuple(page.id for page in pages if page.kind == PageKind.CAREERS),
+            stored=tuple(pages),
         )
 
     # Runs ---------------------------------------------------------------------------------------

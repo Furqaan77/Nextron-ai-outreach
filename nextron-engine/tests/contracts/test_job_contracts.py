@@ -14,13 +14,14 @@
   ``score_lead`` and ``recompute_tiers``, Story 2.15, ``poll_unsubscribes``, Story 3.11,
   ``discover_places``, Story 8.3, ``process_signal_item``, Story 2.16, ``check_grounding``,
   Story 4.14, ``recheck_leads`` and ``recheck_lead``, Story 8.7, and ``draft_step``, Story
-  4.15, with their settings);
+  4.15, and ``submit_bulk_ai`` and ``poll_ai_batches``, Story 4.17, with their settings);
   the triggers are exactly ``backup_db``'s and ``restore_test``'s daily schedules,
   ``check_recovery``'s ``Every`` with ``active``, ``purge_page_text``'s and
   ``purge_place_coords``'s daily ``Every`` at startup, ``check_domains``'s daily schedule,
   ``recompute_tiers``' daily ``Every`` at startup, ``poll_unsubscribes``' ``Every`` at startup
-  (5 minutes in ``prod``, 30 elsewhere) and ``recheck_leads``' 24-hour ``Every`` at startup
-  (Story 8.7): the one-off ``resolve_contact_markets`` has no trigger.
+  (5 minutes in ``prod``, 30 elsewhere), ``recheck_leads``' 24-hour ``Every`` at startup
+  (Story 8.7), then ``poll_ai_batches``' 15-minute ``Every`` at startup and ``submit_bulk_ai``'s
+  daily schedule (Story 4.17): the one-off ``resolve_contact_markets`` has no trigger.
 - **The jobs modules' imports.** Every module under ``nextron/jobs``, nested packages and
   ``__init__.py`` files included, has a rule in ``JOBS_IMPORTS`` (a new module fails until it
   gets one) and imports only the modules its rule allows, and the standard library: nothing
@@ -577,6 +578,23 @@ class RecordingStepDrafts:
         self.drafts.append((enrollment_id, step, urgency))
 
 
+class RecordingBatchOwner:
+    """Stands in for a batch owner (Story 4.17: the ``research`` service's
+    ``ResearchBatches``)."""
+
+    def __init__(self) -> None:
+        self.submits = 0
+        self.polls = 0
+
+    def submit_bulk(self) -> int:
+        self.submits += 1
+        return 0
+
+    def poll(self) -> int:
+        self.polls += 1
+        return 0
+
+
 def registry(**overrides: object) -> JobTypes:
     """``main.build_job_types`` with recording services, each overridable."""
     services: dict[str, object] = {
@@ -602,6 +620,7 @@ def registry(**overrides: object) -> JobTypes:
         "grounding": RecordingGrounding,
         "rechecks": RecordingRechecks,
         "step_drafts": RecordingStepDrafts,
+        "ai_batches": lambda: (RecordingBatchOwner(),),
     }
     services.update(overrides)
     return main.build_job_types(**services)  # type: ignore[arg-type]
@@ -699,6 +718,8 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "recheck_leads",  # Story 8.7
         "recheck_lead",
         "draft_step",  # Story 4.15
+        "submit_bulk_ai",  # Story 4.17
+        "poll_ai_batches",  # Story 4.17
     )
     for name in ("discover_places", "discover_registry"):  # Stories 8.3 and 8.4
         discover = job_types.get(name)
@@ -1194,6 +1215,16 @@ def test_extract_lead_calls_its_service_once_and_is_deferred_when_the_budget_ref
     assert registry(extractions=lambda: extractions).get("extract_lead").handler(job) is None
     assert registry(extractions=lambda: refused).get("extract_lead").handler(job) is DEFERRED
     assert (extractions.calls, refused.calls) == ([(LEAD, RUN)], [(LEAD, RUN)])
+    assert extractions.lanes == [Lane.BULK]  # Story 4.17: the job's lane sets the urgency
+
+
+def test_extract_lead_passes_the_interactive_lane_on() -> None:
+    extractions = RecordingExtractions()
+    handler = registry(extractions=lambda: extractions).get("extract_lead").handler
+
+    handler(Job(RUN, "extract_lead", Lane.INTERACTIVE, {"v": 1, "lead_id": LEAD, "run_id": RUN}, 1))
+
+    assert extractions.lanes == [Lane.INTERACTIVE]
 
 
 @pytest.mark.parametrize(
@@ -1549,7 +1580,9 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
 
     assert isinstance(triggers, Triggers)
     assert triggers.frozen
-    [spec, restore, recovery, purge, coords, domains, tiers, unsub, rechecks] = triggers.specs()
+    [spec, restore, recovery, purge, coords, domains, tiers, unsub, rechecks, polls, submits] = (
+        triggers.specs()
+    )
     assert (spec.trigger, spec.job_type) == (Trigger.BACKUP_DB, "backup_db")
     assert spec.schedule == DailyAt(schedule, fallback=DailyRun(time(10, 0), "UTC"))
     assert spec.schedule.grace == timedelta(hours=24)
@@ -1571,6 +1604,13 @@ def test_build_triggers_registers_backup_restore_recovery_purge_then_domains() -
     assert unsub.schedule == Every(timedelta(minutes=30), at_startup=True)  # the default
     assert (rechecks.trigger, rechecks.job_type) == (Trigger.RECHECK_LEADS, "recheck_leads")
     assert rechecks.schedule == Every(timedelta(hours=24), at_startup=True)  # Story 8.7
+    # Story 4.17: an ended batch settles within 15 minutes; the daily submit at its setting
+    assert (polls.trigger, polls.job_type) == (Trigger.POLL_AI_BATCHES, "poll_ai_batches")
+    assert polls.schedule == Every(timedelta(minutes=15), at_startup=True)
+    assert (submits.trigger, submits.job_type) == (Trigger.SUBMIT_BULK_AI, "submit_bulk_ai")
+    assert isinstance(submits.schedule, DailyAt)
+    assert submits.schedule.fallback == DailyRun(time(14, 0), "UTC")
+    assert submits.schedule.when() == DailyRun(time(14, 0), "UTC")  # none given: the fallback
     built_again = main.build_triggers(
         job_types,
         backup_schedule=schedule,
@@ -2354,3 +2394,48 @@ def test_a_registry_built_without_step_drafts_fails_a_draft_step_job() -> None:
         handler(
             Job(RUN, "draft_step", Lane.INTERACTIVE, {"v": 1, "enrollment_id": LEAD, "step": 1}, 1)
         )
+
+
+# Story 4.17: submit_bulk_ai and poll_ai_batches ---------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["submit_bulk_ai", "poll_ai_batches"])
+def test_build_job_types_registers_the_batch_jobs_as_specified(name: str) -> None:
+    """Bulk only, priority 30, retry limit 3, group Other, one at a time (``ai_batches``)."""
+    found = registry().get(name)
+
+    assert (
+        found.default_lane,
+        found.lanes,
+        found.priority,
+        found.retry_limit,
+        found.group,
+        found.concurrency_key,
+    ) == (Lane.BULK, frozenset({Lane.BULK}), 30, 3, JobGroup.OTHER, "ai_batches")
+    assert found.max_runtime == (
+        timedelta(minutes=30) if name == "submit_bulk_ai" else timedelta(hours=2)
+    )
+
+
+def test_the_batch_jobs_call_every_batch_owner_once() -> None:
+    owners = (RecordingBatchOwner(), RecordingBatchOwner())
+    job_types = registry(ai_batches=lambda: owners)
+
+    assert job_types.get("submit_bulk_ai").handler(
+        Job(RUN, "submit_bulk_ai", Lane.BULK, {"v": 1}, 1)
+    ) is None
+    assert job_types.get("poll_ai_batches").handler(
+        Job(RUN, "poll_ai_batches", Lane.BULK, {"v": 1}, 1)
+    ) is None
+
+    assert [(owner.submits, owner.polls) for owner in owners] == [(1, 1), (1, 1)]
+
+
+def test_a_registry_built_without_ai_batches_fails_the_batch_jobs() -> None:
+    services = _services()
+    services.pop("ai_batches", None)
+    job_types = main.build_job_types(**services)  # type: ignore[arg-type]
+
+    for name in ("submit_bulk_ai", "poll_ai_batches"):
+        with pytest.raises(RuntimeError, match="without ai_batches"):
+            job_types.get(name).handler(Job(RUN, name, Lane.BULK, {"v": 1}, 1))

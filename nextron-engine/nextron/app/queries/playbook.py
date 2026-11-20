@@ -19,6 +19,8 @@ current unit of work, read-only ones included.
 
 The Sales Playbook and the candidate tuples (FR-71, AD-8, NFR-25, Story 4.4):
 
+- ``tuple_by_key(route, key) -> RouteTuple | None`` (Story 4.17): the route's tuple whose
+  ``RouteTuple.key`` is ``key``: the active one, else a stored tuple row's; ``None`` for none.
 - ``route_tuples() -> tuple[RouteTuples, ...]``: by route name, every route with a tuple row
   (``ai_route_tuples``) or an active activation. ``active`` is an ``ActiveTuple`` (the
   activation's model, effort, prompt and schema versions, its ``PlaybookRef`` or ``None``,
@@ -219,6 +221,26 @@ def tuple_of(tuple_id: str) -> RouteTuple | None:
         return None
     row = tuples_repo.get(tuple_id)
     return None if row is None else _built(row, "tuple")
+
+
+def tuple_by_key(route: str, key: str) -> RouteTuple | None:
+    """The ``RouteTuple`` of ``route`` whose ``key`` is ``key`` (Story 4.17: a Message Batch's
+    tuple, by the key its row stores): the active tuple when its key matches, else the newest
+    stored tuple row that builds with that key, else ``None``. A row whose snapshot is missing
+    or doesn't match is passed over."""
+    if not isinstance(route, str) or not isinstance(key, str):
+        raise TypeError("route and key must be str")
+    active = active_tuple(route)
+    if active is not None and active.key == key:
+        return active
+    for row in _rows_by_route().get(route, []):
+        try:
+            built = _built(row, "tuple")
+        except ValueError:
+            continue
+        if built.key == key:
+            return built
+    return None
 
 
 def _built(row: StoredActivation | StoredTuple, what: str) -> RouteTuple:

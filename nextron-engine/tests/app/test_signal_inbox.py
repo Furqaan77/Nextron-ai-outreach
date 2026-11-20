@@ -23,6 +23,7 @@ from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.playbook.api import Playbook
 from nextron.app.research.api import Research, WebsiteCrawls
+from nextron.app.research.batches import ResearchBatches
 from nextron.app.research.extraction import SignalExtractions
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.job_boards import JobBoards
@@ -41,7 +42,15 @@ from nextron.domain.segments import validate_segments
 from nextron.domain.signal_inbox_item import SubmittedItem
 from nextron.jobs import handlers
 from nextron.ports.errors import AdapterError
-from nextron.ports.llm import LlmInvalid, LlmOk, LlmRefused, LlmResult, LlmTruncated, LlmUsage
+from nextron.ports.llm import (
+    BatchSucceeded,
+    LlmInvalid,
+    LlmOk,
+    LlmRefused,
+    LlmResult,
+    LlmTruncated,
+    LlmUsage,
+)
 from tests.app.test_signal_extraction import HAIKU, MARKETS, PLAYBOOK, SEGMENTS
 from tests.fakes.clock import FrozenClock
 from tests.fakes.crawler import ScriptedCrawler, html_page, robots_txt
@@ -110,6 +119,7 @@ class World:
     discovery: Discovery = field(init=False)
     research: Research = field(init=False)
     inbox: SignalInbox = field(init=False)
+    batches: ResearchBatches = field(init=False)  # Story 4.17: the bulk lane's AI work
     ran: list[tuple[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -131,6 +141,7 @@ class World:
             scores=lambda: scores,
             finding=lambda: finding,
             signal_inbox=lambda: self.inbox,
+            ai_batches=lambda: (self.batches,),
         )
         self.queue = queue = JobQueue(clock, self.job_types)
         self.discovery = Discovery(clock, Pipeline(clock), queue)
@@ -138,6 +149,7 @@ class World:
         crawls = WebsiteCrawls(clock, meter, self.crawler, self.renderer, queue)
         people = PeopleExtractions(clock, meter, llm, research, queue)
         extractions = SignalExtractions(clock, meter, llm, research, people)
+        self.batches = ResearchBatches(clock, meter, llm, extractions, people)
         primary = PrimaryContacts(clock, research, queue)
         boards = JobBoards(clock, meter, ScriptedJobBoards(), self.crawler, queue)
         legal_forms = LegalFormChecks(
@@ -762,6 +774,21 @@ def test_a_csv_chain_stays_on_the_bulk_lane_at_urgency_bulk(db_engine: Engine) -
 
     ran = world.run_jobs()
 
+    # Story 4.17: on the bulk lane extract_lead queues both steps' items and calls nothing; the
+    # daily submit sends them as Message Batches and the poll applies the ended results
+    assert [kind for kind, _ in ran] == ["enrich_lead", "render_pages", "extract_lead"]
+    assert world.llm.calls == []
+    with world.units.open():
+        assert world.batches.submit_bulk() == 2
+    custom = dict(world.sql("SELECT route, custom_id FROM ai_batch_items"))
+    world.llm.end_batch(
+        "msgbatch_fake_1", {custom["extract_signals"]: BatchSucceeded(NO_SIGNALS)}
+    )
+    world.llm.end_batch("msgbatch_fake_2", {custom["extract_people"]: BatchSucceeded(NO_PEOPLE)})
+    with world.units.open():
+        assert world.batches.poll() == 2
+    ran += world.run_jobs()
+
     assert [kind for kind, _ in ran] == [
         "enrich_lead",
         "render_pages",
@@ -772,7 +799,7 @@ def test_a_csv_chain_stays_on_the_bulk_lane_at_urgency_bulk(db_engine: Engine) -
         "score_lead",
     ]
     assert {lane for _, lane in ran} == {"bulk"}
-    assert {urgency for _, _, urgency in world.llm.calls} == {Urgency.BULK}
+    assert world.llm.calls == []  # no direct call: both steps went through the batches
     assert all("chain_lane" not in payload for _, _, payload in world.jobs())
 
 

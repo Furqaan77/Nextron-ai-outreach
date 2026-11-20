@@ -141,7 +141,7 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, away_periods, backup_offpc_dir, backup_rotation_days, backup_time, "
-            "bulk_threads, "
+            "bulk_ai_submit_at, bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, discovery_daily_lead_target, discovery_pool_days, "
             "discovery_requery_days, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
