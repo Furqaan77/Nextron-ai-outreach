@@ -9,7 +9,7 @@ The build runs as parallel tracks. Each track has its own git worktree and branc
   - **One exception:** you may write your scratch files under `e:\Nextron AI outreach\_handoff\scratch\<track label>\`, and `suite_lock.py` creates its lock folder in `_handoff`. Git ignores `_handoff`. Never touch anything else in that checkout.
 - Use absolute paths, and start every shell command with `cd "<your worktree>"` or `cd "<your worktree>/nextron-engine"`.
 - The `.venv` is synced. Run `uv sync --frozen` if `uv.lock` changed.
-- **Model and effort (user's instruction, 2026-11-18):** start every subagent with the Agent tool parameters `model: "opus"` and `effort: "medium"` (Opus 5.5, medium effort). This includes implementers, reviewers and patchers, and every subagent the bmad-build workflow starts.
+- **Model and effort (user's instruction, 2026-11-18):** start every subagent with the Agent tool parameters `model: "opus"` and `effort: "max"` (Opus 5.5, max effort). This includes implementers, reviewers and patchers, and every subagent the bmad-build workflow starts.
 - Every subagent you start (implementer, reviewers, patcher) must get this rules file's path at the top of its prompt, along with your worktree path.
 - When `bmad-build` tells you to run `render_skill.py`, set `{project-root}` to your worktree. Every `{project-root}` path means your worktree.
 - Read `<worktree>\CLAUDE.md` and `<worktree>\HANDOFF.md` §3–§4 first.
@@ -22,7 +22,7 @@ The build runs as parallel tracks. Each track has its own git worktree and branc
   - "Governing architecture: _bmad-output/planning-artifacts/architecture/architecture-nextron-outreach-engine-2026-11-14/ARCHITECTURE-SPINE.md."
   - "The user prefers no checkpoint pauses."
 - Follow workflow steps 1–5 exactly, including the three-reviewer review (blind hunter, edge-case hunter, verification gap), triage, patching and re-verification.
-- **Dispatch patch work as a NEW Agent call** (model opus, effort medium) with the triage rows and the context it needs. Don't SendMessage the old implementer: an orchestrator waiting on a messaged agent gets forced to hand back early, and the result goes astray. You may also apply small patches yourself.
+- **Dispatch patch work as a NEW Agent call** (model opus, effort max) with the triage rows and the context it needs. Don't SendMessage the old implementer: an orchestrator waiting on a messaged agent gets forced to hand back early, and the result goes astray. You may also apply small patches yourself.
 - Write the complete Review Triage Log into the spec as soon as triage is decided, before dispatching any patch work.
 - Read only the specs you need for continuity: the ones named in your prompt, plus `deferred-work.md`.
 - Keep your own context lean. Use targeted reads and greps rather than whole large files.

@@ -1,4 +1,4 @@
 - [Outreach engine constraints](outreach-engine-constraints.md) — Nextron AI lead-gen engine: scope, budget, models, local Windows PC, every email approved; BMAD planning complete (146 stories), build in progress
 - [Autonomous build mode](autonomous-build-mode.md) — build unattended until told to stop; PAUSED 2026-11-20 for the move to a new PC; no pushing
-- [Agent model and effort](agent-model-effort.md) — run every build agent and subagent as Opus 5.5 at medium effort
+- [Agent model and effort](agent-model-effort.md) — run every build agent and subagent as Opus 5.5 at max effort
 - [Build checkpoint](build-checkpoint.md) — PAUSED 2026-11-20 for move to a new PC; state in _handoff/CHECKPOINT.md

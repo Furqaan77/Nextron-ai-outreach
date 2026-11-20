@@ -107,7 +107,7 @@ The user asked for "even faster" and chose a third track plus faster tests. The 
   - C: `e:\Nextron-track3` `track-c4`, Story 4.12 (built on 4.9).
   - D: `e:\Nextron-track4` `track-d4`, Story 3.11.
   - E: `e:\Nextron-track5` `track-e6`, Story 9.7.
-- Since the user asked on 2026-11-18, every agent runs with model opus and effort medium (see [[agent-model-effort]]).
+- Since the user asked on 2026-11-18, every agent runs with model opus and effort max (see [[agent-model-effort]]).
 - Spikes 3.9, 6.1 and 4.21 need Mac's real accounts and are skipped.
 - Next after the merges: 2.14 (needs 2.13), 2.16 (needs 2.15), 3.12 (needs 3.11), 4.10, the 9.7 campaign filter and lead_score sort.
 - **2026-11-18 overload:** Claude Code crashed (0xC0000409) and Windows ran out of resources (WinError 1450); the full suite took about 28 min. Track C is paused, so 4 tracks are running, and targeted runs are capped at `-n 2` (track-rules §4a). Track C's next story is 4.13, on top of 4.12 `01e0ac5`.

@@ -102,7 +102,7 @@ Progress is tracked in `_bmad-output/implementation-artifacts/sprint-status.yaml
 
 **How Mac likes to work:**
 - Plain English, short answers, fast paths, few checkpoint pauses.
-- Mac asked for **every agent and subagent to run as Opus 5.5 at medium effort**: Agent tool parameters `model: "opus"`, `effort: "medium"`.
+- Mac asked for **every agent and subagent to run as Opus 5.5 at max effort**: Agent tool parameters `model: "opus"`, `effort: "max"`.
 - For a genuine intent gap in a story, choose the conservative, compliance-safe option and record it in the spec under "Decisions made overnight (pending user review)". Don't stop to ask.
 
 ---

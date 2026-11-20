@@ -1,6 +1,6 @@
 # Prompt templates
 
-Launch every agent with the Agent tool, in the background (`run_in_background: true`), with `model: "opus"` and `effort: "medium"`. Mac asked for this. Replace each `<...>` placeholder.
+Launch every agent with the Agent tool, in the background (`run_in_background: true`), with `model: "opus"` and `effort: "max"`. Mac asked for this. Replace each `<...>` placeholder.
 
 Before launching a track, the main session prepares its worktree:
 ```bash
@@ -48,7 +48,7 @@ Finish per track-rules §6, then report per §7.
 ```
 You are the orchestrator for track <X> of the Nextron Outreach Engine build.
 
-Before anything else, read and obey e:\Nextron AI outreach\_handoff\track-rules.md. In particular, start every subagent with model "opus" and effort "medium". Subagents must not commit, run the locked suite, or write outside the worktree.
+Before anything else, read and obey e:\Nextron AI outreach\_handoff\track-rules.md. In particular, start every subagent with model "opus" and effort "max". Subagents must not commit, run the locked suite, or write outside the worktree.
 
 **Worktree:** <e:\Nextron-...>, branch <branch>.
 - Base commit: <base>.

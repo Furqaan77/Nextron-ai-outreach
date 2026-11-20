@@ -1,6 +1,6 @@
 ---
 name: agent-model-effort
-description: Mac wants every build agent and subagent run as Opus 5.5 at medium effort
+description: Mac wants every build agent and subagent run as Opus 5.5 at max effort
 metadata:
   node_type: memory
   type: feedback
@@ -12,4 +12,6 @@ On 2026-11-18 Mac said: "from now please make it with opus 5.5 Medium."
 
 **Why:** Mac's preferred balance of build speed against quality.
 
-**How to apply:** start every Agent call (track orchestrators, merge agents, and the implementers, reviewers and patchers they start) with `model: "opus"` and `effort: "medium"`. The scratchpad `track-rules.md` §1 tells orchestrators to do the same. See [[autonomous-build-mode]].
+**How to apply:** start every Agent call (track orchestrators, merge agents, and the implementers, reviewers and patchers they start) with `model: "opus"` and `effort: "max"`. The scratchpad `track-rules.md` §1 tells orchestrators to do the same. See [[autonomous-build-mode]].
+
+**Changed on 2026-11-20:** Mac said "i will run it on max not medium". From the new PC on, every agent and subagent uses `effort: "max"`.
