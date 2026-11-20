@@ -23,6 +23,10 @@ Nothing here holds text: ids, codes, hashes and times only.
 - ``settle(owner, item_id, status, at) -> bool``: a ``pending`` or ``submitted`` item moved to
   a terminal ``ItemStatus``; ``False`` (nothing written) when it was terminal already, so a
   re-poll never settles an item twice.
+- ``next_rev(owner, route, target_id) -> int``: one more than the highest ``rev`` the owner
+  holds for that route and target (any status), or 1 (Story 4.18).
+- ``open_items(owner, route)``: the route's ``pending`` and ``submitted`` items, oldest first
+  (Story 4.18).
 - ``open_batches(owner)``: the batches not yet deleted, oldest first; ``item(owner,
   item_id)``: one item, or ``None``; ``items_of(owner, batch_row_id)``: a batch's items, by
   ``id``.
@@ -165,6 +169,31 @@ def pending(owner: BatchOwner, route: str) -> tuple[StoredItem, ...]:
             AiBatchItemRecord.owner == _owner(owner),
             AiBatchItemRecord.route == route,
             AiBatchItemRecord.status == str(ItemStatus.PENDING),
+        )
+        .order_by(AiBatchItemRecord.created_at, AiBatchItemRecord.id)
+    )
+    return tuple(StoredItem(*row) for row in current().session.execute(statement))
+
+
+def next_rev(owner: BatchOwner, route: str, target_id: str) -> int:
+    """One more than the highest ``rev`` the owner holds for ``(route, target_id)``, or 1."""
+    statement = select(func.max(AiBatchItemRecord.rev)).where(
+        AiBatchItemRecord.owner == _owner(owner),
+        AiBatchItemRecord.route == route,
+        AiBatchItemRecord.target_id == target_id,
+    )
+    found = current().session.execute(statement).scalar_one()
+    return 1 if found is None else int(found) + 1
+
+
+def open_items(owner: BatchOwner, route: str) -> tuple[StoredItem, ...]:
+    """The route's ``pending`` and ``submitted`` items, oldest first."""
+    statement = (
+        select(*_ITEM_COLUMNS)
+        .where(
+            AiBatchItemRecord.owner == _owner(owner),
+            AiBatchItemRecord.route == route,
+            AiBatchItemRecord.status.in_(OPEN_ITEM),
         )
         .order_by(AiBatchItemRecord.created_at, AiBatchItemRecord.id)
     )

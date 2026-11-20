@@ -121,7 +121,9 @@ handler runs in.
   ``enrollment_id`` must be a ULID and its ``step`` a positive ``int`` (not a ``bool``), else
   ``InvalidJob``; it calls ``step_drafts().draft(enrollment_id, step, urgency)`` once, with
   ``urgency`` ``Urgency.BULK`` on the bulk lane and ``Urgency.SOON`` on the interactive lane
-  (Step 1 is due at once), and returns ``None``. It is never budget-gated
+  (Step 1 is due at once; Story 4.18's direct follow-up job ``draft_step:<enrollment>:2``,
+  payload ``step`` 2, runs on the interactive lane and drafts Steps 2 to 4 together), and
+  returns ``None``. It is never budget-gated
   (``draft_sequence`` is ``essential``); a retryable ``AdapterError`` (the API unavailable)
   propagates, so the runner retries it with nothing stored.
 - ``discover_registry(registry_discovery)`` (Story 8.4): calls
@@ -143,10 +145,12 @@ handler runs in.
   ``full``: the crawl's last allowed attempt completes instead of failing on a flaky site. In
   mode ``jobs`` it is moot, since ``check_boards`` never raises for a board error (it counts it).
 - ``submit_bulk_ai(owners)`` and ``poll_ai_batches(owners)`` (Story 4.17): ``owners`` returns
-  each registered batch owner (``nextron.main`` passes ``lambda: (research_batches,)``, the
-  ``research`` service's ``ResearchBatches``). The payload is a trigger's tick. The handler
-  calls each owner's ``submit_bulk()`` (or ``poll()``) once, in order, and returns ``None``; a
-  budget refusal leaves the work queued for the next day, so neither is ever ``DEFERRED``.
+  each registered batch owner (Story 4.18: ``nextron.main`` passes one ``BatchJobs`` over the
+  ``research`` service's ``ResearchBatches`` and the ``drafting`` service's
+  ``DraftingBatches``, so each job calls one use case). The payload is a trigger's tick. The
+  handler calls each owner's ``submit_bulk()`` (or ``poll()``) once, in order, and returns
+  ``None``; a budget refusal leaves the work queued for the next day, so neither is ever
+  ``DEFERRED``.
 
 **Budget classes (Story 8.1).** Every handler that may return ``DEFERRED`` belongs to a type
 ``nextron.main.build_job_types`` registers ``blockable`` (``enrich_lead``, ``render_pages``,
@@ -825,7 +829,8 @@ def draft_step(step_drafts: Callable[[], DraftingSteps]) -> Handler:
 
 class BatchingAi(Protocol):
     """What ``submit_bulk_ai`` and ``poll_ai_batches`` need of a batch owner (Story 4.17: the
-    ``research`` service's ``ResearchBatches``)."""
+    ``research`` service's ``ResearchBatches``; Story 4.18: the ``drafting`` service's
+    ``DraftingBatches``)."""
 
     def submit_bulk(self) -> int: ...
 

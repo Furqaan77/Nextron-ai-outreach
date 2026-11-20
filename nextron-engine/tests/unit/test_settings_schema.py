@@ -545,6 +545,7 @@ def test_the_declared_keys_in_order() -> None:
         "call_outcome_prompt_delay",  # Story 9.4
         "away_periods",
         "bulk_ai_submit_at",  # Story 4.17
+        "draft_deadline",  # Story 4.18
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -589,6 +590,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.CALL_OUTCOME_PROMPT_DELAY),
         setting(Key.AWAY_PERIODS),
         setting(Key.BULK_AI_SUBMIT_AT),
+        setting(Key.DRAFT_DEADLINE),
     )
 
 
@@ -1378,7 +1380,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "bulk_ai_submit_at, bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, discovery_daily_lead_target, discovery_pool_days, "
-            "discovery_requery_days, lead_score_fit_weight, lead_score_signal_weight, legal_name, "
+            "discovery_requery_days, draft_deadline, lead_score_fit_weight, "
+            "lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "

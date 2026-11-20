@@ -21,9 +21,11 @@ Market's English variant by code, and the active ``grounding_check`` tuple (``No
 one). A case whose brief or Market variant is missing is flagged ``no_brief`` with no call.
 Per case:
 
-1. ``draft_flags(case, result, brief, segments) -> DraftScore``: a result that isn't ``LlmOk``
-   (its type name) is one flag and no proposal. Otherwise the proposal is read
-   (``read_proposal``) and validated (``validate_proposal``, against the case's Evidence ids,
+1. ``draft_flags(case, result, brief, segments, schema_version=1) -> DraftScore``: a result
+   that isn't ``LlmOk`` (its type name) is one flag and no proposal. Otherwise the proposal is
+   read by the tuple's schema version (``read_step_1``, Story 4.18: schema 2 needs exactly one
+   ``steps`` entry, Step 1; else one flag and no proposal) and validated
+   (``validate_proposal``, against the case's Evidence ids,
    its facts and its Events: a Signal of the Segment's ``event`` class with Tier 1 or 2 and an
    ``observed_on``); an invalid proposal is one flag. Then ``grounding_rules.check`` runs over
    it with the Step 1 brief and a context built from the case: no contact details; each
@@ -67,7 +69,7 @@ from nextron.domain.step_drafting import (
     claims_of,
     framing,
     input_blocks,
-    read_proposal,
+    read_step_1,
     validate_proposal,
 )
 
@@ -206,11 +208,14 @@ def draft_flags(
     result: Mapping[str, Any] | str,
     brief: StepBrief,
     segments: Sequence[SegmentDef],
+    schema_version: int = 1,
 ) -> DraftScore:
     """The draft call's flags and checked proposal; see the module docstring."""
     if not isinstance(result, Mapping):
         return DraftScore((NO_ANSWER,), None)
-    proposal = read_proposal(result)
+    proposal = read_step_1(result, schema_version)
+    if proposal is None:  # a schema-2 answer that isn't exactly Step 1 (Story 4.18)
+        return DraftScore((INVALID_PROPOSAL,), None)
     valid = validate_proposal(
         proposal,
         evidence_ids=frozenset(str(row["id"]) for row in case.input["evidence"]),

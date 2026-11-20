@@ -35,7 +35,7 @@ from nextron.app.queries import research as research_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.playbook import test_runs as runs_repo
 from nextron.db.repos.research import signals as signals_repo
-from nextron.domain.ai import Urgency
+from nextron.domain.ai import RouteSpec, Urgency
 from nextron.domain.ai_test_gate import ROUTE_SETS
 from nextron.domain.budget import AiCall, allow
 from nextron.domain.campaign import StepAngleNote
@@ -69,10 +69,29 @@ SUBJECT: Final = "your intake coordinator role"
 FAILED: Final = "SELECT draft_failed_at, draft_failed_reason, current_rev FROM drafts WHERE id = ?"
 
 
-def activate(world: World, *routes_: str) -> dict[str, str]:
-    """Sync the shipped prompts under ``PLAYBOOK`` and activate each of ``routes_`` through a
-    stored passing run on its set; each route's tuple id."""
+def pinned(defaults: Any, version: str) -> tuple[Any, ...]:
+    """``defaults`` with ``draft_sequence``'s spec at its candidate of prompt ``version`` (Story
+    4.18: v2 is the default; these Step 1 tests run the shipped v1 unless they ask for v2)."""
+    [candidate] = [
+        found for found in routes.candidates("draft_sequence") if found.prompt_version == version
+    ]
+    spec = RouteSpec(
+        candidate.name,
+        candidate.model,
+        candidate.effort,
+        candidate.prompt_version,
+        candidate.output_schema.version,
+        candidate.uses_playbook,
+    )
+    return tuple(spec if each.route == "draft_sequence" else each for each in defaults)
+
+
+def activate(world: World, *routes_: str, version: str = "v1") -> dict[str, str]:
+    """Sync the shipped prompts under ``PLAYBOOK`` (``draft_sequence`` at its prompt
+    ``version``) and activate each of ``routes_`` through a stored passing run on its set; each
+    route's tuple id."""
     files, defaults = main.load_prompts()
+    defaults = pinned(defaults, version)
     with world.units.open():
         Playbook(world.clock).sync_prompts(files, defaults, PLAYBOOK)
     found: dict[str, str] = {}
@@ -497,15 +516,8 @@ def test_a_context_that_cant_be_read_fails_not_composable_with_no_call(
 ) -> None:
     activate(world, "draft_sequence")
     _, _, enrollment_id, draft_id, _, _ = step_1(world)
-    if gone == "sequence_version":  # the stored Sequence moved on since the enrollment
-        stored = setup_queries.sequence_by_id
-
-        def newer(sequence_id: str) -> Any:
-            found = stored(sequence_id)
-            assert found is not None
-            return dataclasses.replace(found, version=found.version + 1)
-
-        monkeypatch.setattr(setup_queries, "sequence_by_id", newer)
+    if gone == "sequence_version":  # the bound Sequence version isn't stored (Story 11.7)
+        monkeypatch.setattr(setup_queries, "sequence_version", lambda _id: None)
     else:
         monkeypatch.setattr(setup_queries, "segment_by_id", lambda _id: None)
     llm = ScriptedLlm()
@@ -541,7 +553,7 @@ def test_the_variant_note_and_the_segment_market_angle_reach_the_framing(
 ) -> None:
     activate(world, "draft_sequence")
     _, _, enrollment_id, _, event, quote = step_1(world)
-    campaign_of, sequence_of = setup_queries.campaign, setup_queries.sequence_by_id
+    campaign_of, sequence_of = setup_queries.campaign, setup_queries.sequence_version
     [(campaign_id,)] = world.sql(
         "SELECT campaign_id FROM enrollments WHERE id = ?", (enrollment_id,)
     )
@@ -559,8 +571,8 @@ def test_the_variant_note_and_the_segment_market_angle_reach_the_framing(
         variants = tuple(dataclasses.replace(v, step_angles=note) for v in found.variants)
         return dataclasses.replace(found, variants=variants)
 
-    def sequence(sequence_id: str) -> Any:
-        found = sequence_of(sequence_id)
+    def sequence(version_id: str) -> Any:  # the bound version (Story 11.7)
+        found = sequence_of(version_id)
         assert found is not None
         steps = found.definition.steps
         first = dataclasses.replace(steps[0], segment_angles=(angle,))
@@ -568,7 +580,7 @@ def test_the_variant_note_and_the_segment_market_angle_reach_the_framing(
         return dataclasses.replace(found, definition=definition)
 
     monkeypatch.setattr(setup_queries, "campaign", campaign)
-    monkeypatch.setattr(setup_queries, "sequence_by_id", sequence)
+    monkeypatch.setattr(setup_queries, "sequence_version", sequence)
     llm = ScriptedLlm(ok(answer(event, quote)))
 
     assert draft(world, llm, enrollment_id) is StepDraftOutcome.DRAFTED
@@ -714,3 +726,39 @@ def test_build_app_wires_step_drafts(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert drafts._queue is not None  # noqa: SLF001
     [given] = registries
     assert given["step_drafts"]() is drafts
+    # Story 4.18: one BatchJobs over both batch owners, research then drafting
+    from nextron.app.drafting.batches import DraftingBatches  # noqa: PLC0415
+    from nextron.app.research.batches import ResearchBatches  # noqa: PLC0415
+
+    [jobs] = given["ai_batches"]()
+    assert isinstance(jobs, main.BatchJobs)
+    research, drafting = jobs._owners  # noqa: SLF001
+    assert isinstance(research, ResearchBatches)
+    assert isinstance(drafting, DraftingBatches)
+    assert drafting._follow_ups is drafts  # noqa: SLF001
+    assert drafting._llm is grounding._llm  # noqa: SLF001
+
+
+def test_batch_jobs_runs_every_owner_once_in_order_and_sums(world: World) -> None:
+    calls: list[str] = []
+
+    class Owner:
+        def __init__(self, name: str, submitted: int, polled: int) -> None:
+            self.name, self.submitted, self.polled = name, submitted, polled
+
+        def submit_queued(self) -> int:
+            calls.append(f"{self.name}.submit")
+            return self.submitted
+
+        def poll_open(self) -> int:
+            calls.append(f"{self.name}.poll")
+            return self.polled
+
+    jobs = main.BatchJobs((Owner("research", 1, 3), Owner("drafting", 2, 4)))
+
+    with world.units.open():
+        assert jobs.submit_bulk() == 3
+    with world.units.open():
+        assert jobs.poll() == 7
+
+    assert calls == ["research.submit", "drafting.submit", "research.poll", "drafting.poll"]

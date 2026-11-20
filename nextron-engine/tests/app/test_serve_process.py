@@ -391,7 +391,7 @@ def test_guarded_health_page_and_second_instance(
     # the prompts were pinned before the engine started (Story 2.8): one snapshot and one
     # bootstrap activation, by seed and with no test run, per extraction route (Story 4.14: the
     # two grounding prompts are stored but serve only after their gate)
-    assert prompt_counts(data_dir / "nextron.db") == (6, 3, 3)  # Story 4.15: draft_sequence
+    assert prompt_counts(data_dir / "nextron.db") == (7, 3, 3)  # 4.15: draft_sequence; 4.18: v2
     # Story 4.4: one Sales Playbook snapshot, one candidate tuple per route (none with a
     # Playbook) and one startup check; no route is activated with a Playbook, and every
     # activation is a bootstrap one
@@ -399,7 +399,7 @@ def test_guarded_health_page_and_second_instance(
     # (Story 4.15: and the draft_sequence tuple, likewise)
     assert playbook_counts(data_dir / "nextron.db") == (1, 6, 3, 1, 0)
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
-    assert (synced["stored_count"], synced["activated_count"]) == (6, 3)
+    assert (synced["stored_count"], synced["activated_count"]) == (7, 3)
     assert lines.index(synced) < lines.index(started)
     # Story 4.5: the 11 extraction fixtures were stored before the engine started, and the
     # lifespan queued one run_ai_test_sets job per extraction tuple, keyed by tuple and set.

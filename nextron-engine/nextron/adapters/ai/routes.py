@@ -25,6 +25,12 @@ refusal fallbacks on every direct request of the candidate.
   ``v1``, ``DraftSequenceV1`` (schema 1), batchable, ``max_tokens`` 8,000 capped at 16,000,
   ``essential``, ``uses_playbook``, ``server_fallbacks``. It writes a Step 1 Draft; like the
   grounding routes it is never bootstrap-activated (Story 4.5's gate only).
+- ``draft_sequence`` **v2** (Story 4.18), its default since, first in ``CANDIDATES``: the same
+  model, effort, batchable, ``max_tokens``, budget class, Playbook and fallbacks as v1, prompt
+  ``v2``, ``DraftSequenceV2`` (schema 2): ``steps`` (each ``step``, ``subject``, ``body``,
+  ``claims`` as v1's, ``angle_fact_id`` and ``angle_fact_version``), ``cited_signal_id`` and
+  ``explanation``. One prompt serves Step 1 alone and the follow-ups 2 to 4; the framing's Step
+  brief names the Steps to write. v1 stays, unchanged (a shipped candidate never changes).
 
 **``CANDIDATES``**, by route. The first candidate of each route is its default. Only the Opus
 routes (``grounding_check_fallback``, ``draft_sequence``) carry server-side ``fallbacks``: Haiku
@@ -82,6 +88,7 @@ from typing import Final
 
 from nextron.adapters.ai.schemas import (
     DRAFT_SEQUENCE_V1,
+    DRAFT_SEQUENCE_V2,
     EXTRACT_PEOPLE_V1,
     EXTRACT_SIGNALS_V1,
     GROUNDING_CHECK_V1,
@@ -200,7 +207,20 @@ CANDIDATES: Final[Mapping[str, tuple[Candidate, ...]]] = MappingProxyType(
             ),
         ),
         "draft_sequence": (
-            Candidate(
+            Candidate(  # Story 4.18: the default; Step 1 alone, or the follow-ups 2 to 4
+                name="draft_sequence",
+                model=OPUS,
+                effort=Effort.MEDIUM,
+                prompt_version="v2",
+                output_schema=DRAFT_SEQUENCE_V2,
+                batchable=True,
+                max_tokens=8_000,
+                max_tokens_cap=16_000,
+                budget_class=BudgetClass.ESSENTIAL,
+                uses_playbook=True,
+                server_fallbacks=True,
+            ),
+            Candidate(  # Story 4.15: shipped, kept unchanged
                 name="draft_sequence",
                 model=OPUS,
                 effort=Effort.MEDIUM,

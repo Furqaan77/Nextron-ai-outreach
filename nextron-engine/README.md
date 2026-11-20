@@ -3086,7 +3086,8 @@ text waits for its grounding check and your approval.
 (interactive lane, priority 40; a bulk request for Step 1 uses the bulk lane and drafts at
 `bulk`). The job never asks the AI budget (`draft_sequence` is
 `essential`, so drafting still runs when the AI spend is at 100 %). An unreachable API is retried
-by the runner with nothing stored. Steps 2 to 4 are drafted later (Story 4.18).
+by the runner with nothing stored. Steps 2 to 4 are drafted in the afternoon batch (Story 4.18,
+below).
 
 **The route.** `draft_sequence` runs on `claude-opus-5-5` (effort `medium`) under the pinned
 Sales Playbook, with the server-side refusal fallbacks on its direct requests. It is never
@@ -3160,7 +3161,7 @@ Claude: after its budget check, each step (`extract_signals`, then `extract_peop
 `pending` item in `ai_batch_items` (owner `research`, the Lead, and as its revision the crawl
 run's place among the Lead's crawl runs, so two crawls whose jobs run late still queue one item
 each). On the interactive lane (the Signal Inbox chain) both steps still call directly, at
-`soon`. Drafting is not batched yet (Story 4.18).
+`soon`. The follow-up Steps 2 to 4 are batched too (Story 4.18, next section).
 
 **The daily submit.** `submit_bulk_ai` runs at the **Bulk AI submit time** setting (Engine
 section, default 14:00 in the sender's timezone; a time missed while the engine was off is made
@@ -3199,6 +3200,75 @@ batch already ended (an item left open by a retryable re-run error) meters nothi
 `0065_4_17_ai_batches`; each service writes only its own rows, held by
 `tests/contracts/test_ai_batch_owners.py`) and `ClaudeGateway.submit_batch` / `fetch_batch` /
 `delete_batch`. Both jobs run on the bulk lane, one at a time (concurrency key `ai_batches`).
+
+## Drafting the follow-ups (Steps 2 to 4)
+
+Story 4.18 (AD-8, AD-10, AD-16, AD-18) writes each Enrollment's Steps 2, 3 and 4 together, in
+the afternoon Message Batch, so they are ready before they fall due. Nothing is sent: each
+follow-up waits for its grounding check and your approval like Step 1.
+
+**The queue.** When enrolling (or any request) creates a Step 2 to 4 Draft slot, one `pending`
+item is queued in `ai_batch_items` in the same transaction: owner `drafting`, route
+`draft_sequence`, target the Enrollment. The daily `submit_bulk_ai` (the **Bulk AI submit time**
+setting, 14:00 by default) sends it. There is no AI budget check: drafting is `essential`.
+
+**The route.** Follow-ups need the `draft_sequence` **v2** candidate (prompt
+`prompts/draft_sequence/v2.md`, schema 2: a `steps` list, each with its subject, body, claims
+and angle fact). It is the route's default from this release; v1 is kept unchanged. One prompt
+writes either Step 1 alone or Steps 2 to 4; Step 1 on v2 must answer exactly one Step, Step 1.
+Like v1, the v2 tuple serves only after it passes the drafting smoke set. Until a schema-2
+tuple is active, the follow-ups fail `no_route` (no call).
+
+**What it reads.** The Step 2, 3 and 4 briefs of the Enrollment's Sequence version, each with
+its Segment and Market angle (for Law-PrivateAI Step 2: ABA Formal Opinion 512 in the US, the
+SRA notice in the UK), the allowed facts, the Variant's Step 2 to 4 angle notes and the English
+spelling; then Step 1's current text (subject and body, as an untrusted `earlier_step` block,
+since you may have edited it), and the Lead's live Evidence, Signals and Contact as for Step 1.
+
+**The submit.** Per Enrollment only the newest pending item is kept (older ones become
+`stale`). A stopped or completed Enrollment, a Contact that may not be reached, or no open
+follow-up Draft makes the item `stale`; a paused Enrollment, or a Step 1 not drafted yet, leaves
+it `pending` for a later day. Each item stores a fingerprint: the route tuple, Step 1's Draft
+and revision, each Evidence id sent and each allowed fact version (never any text). Batch
+requests never carry the refusal `fallbacks`.
+
+**Settling.** `poll_ai_batches` (every 15 minutes) applies an ended batch's answer only while
+the Enrollment is active, the Contact may still be reached and the fingerprint is unchanged.
+Code checks it: exactly Steps 2, 3 and 4; non-empty bodies; every claim citing one input
+Evidence item or allowed fact version; each Step built on its own angle fact, never one Step 1
+cites or another follow-up uses, and a `regulation` fact where the Step's brief has an angle for
+the Campaign's Segment and Market. A good answer becomes revision 1 of each follow-up Draft
+still waiting (Step 1's subject, since follow-ups reply in its thread; its claims' Evidence and
+facts, then its angle fact; no Signal), each with its grounding result and `check_grounding`
+job at `soon` (`applied`). An answer the code check rejects stores nothing and the Drafts
+record `invalid_proposal` (`failed`); an answer that doesn't fit the schema records `invalid`
+(unless the Enrollment has stopped or the Contact may no longer be reached: then `stale`,
+nothing written). Step 1 edited since the submit, or the Enrollment paused: the result is
+dropped (`stale`) and a new item is queued. A stopped Enrollment or a blocked Contact: `stale`,
+nothing written. A model refusal (`LlmRefused`), or a truncated, errored, expired or missing
+item, re-runs as a direct call. A batch is still fetched until it ends before it is deleted,
+even when its items were settled early. The one exception: a batch whose route tuple no longer
+resolves can't be read, so it is neither fetched nor deleted at the provider; its open items
+re-run as direct calls and the batch is marked `deleted` locally.
+
+**The 07:00 deadline.** The **Follow-up drafting deadline** setting (Engine section, default
+07:00 in the sender's timezone) is checked by every poll. An Enrollment's deadline is the first
+deadline time after the first submit time after it was created (created at 10:00: 07:00 the next
+morning). At the first poll at or after it, an item not yet applied, of an active Enrollment
+whose Step 1 is drafted, becomes `stale` (a later batch result writes nothing) and the direct
+job runs instead. A paused Enrollment's item, or one whose Step 1 isn't drafted yet, waits;
+if it becomes ready after its deadline, the next submit runs the direct job instead of sending
+it in a batch.
+
+**The direct job.** `draft_step:<enrollment id>:2` (interactive lane, `soon`) drafts Steps 2 to
+4 in one direct call with the server-side fallbacks, the same inputs and the same checks. If
+Step 1, the route tuple, the Evidence or the facts changed during the call, it writes nothing and
+queues a new item. Its failures record the same reasons on Drafts 2 to 4 as Step 1's; jobs for Step 3
+or 4 alone do nothing.
+
+**Where it lives.** `nextron.app.drafting.batches.DraftingBatches` (the drafting owner, beside
+`ResearchBatches`), the follow-up builder and checks in `nextron.app.drafting.generation` and
+`nextron.domain.step_drafting`. No migration.
 
 ## Leads list and Lead page
 

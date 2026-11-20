@@ -1365,7 +1365,9 @@ def _run_drafting_case(
     framing: Framing = case_framing(case, context.brief, variant)
     drafted = llm.run(route_tuple, blocks, urgency, framing=framing)
     cost = drafted.usage.cost_micros
-    scored = draft_flags(case, _answer(drafted), context.brief, segments)
+    scored = draft_flags(
+        case, _answer(drafted), context.brief, segments, route_tuple.schema_version
+    )
     codes = scored.codes
     if scored.proposal is not None:
         checked: Mapping[str, Any] | str | None = None

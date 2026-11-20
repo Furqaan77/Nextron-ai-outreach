@@ -13,11 +13,13 @@ from nextron.adapters.ai import pricing, routes
 from nextron.adapters.ai.routes import CANDIDATES, Candidate, candidates, default_candidate, find
 from nextron.adapters.ai.schemas import (
     DRAFT_SEQUENCE_V1,
+    DRAFT_SEQUENCE_V2,
     EXTRACT_PEOPLE_V1,
     EXTRACT_SIGNALS_V1,
     GROUNDING_CHECK_V1,
     SIGNAL_INBOX_PARSE_V1,
     DraftSequenceV1,
+    DraftSequenceV2,
     ExtractPeopleV1,
     ExtractSignalsV1,
     GroundingCheckV1,
@@ -104,6 +106,20 @@ TABLE: Final = [
         True,
         True,
     ),
+    (  # Story 4.18: the default, first
+        "draft_sequence",
+        "claude-opus-5-5",
+        Effort.MEDIUM,
+        "v2",
+        DraftSequenceV2,
+        2,
+        True,
+        8_000,
+        16_000,
+        BudgetClass.ESSENTIAL,
+        True,
+        True,
+    ),
     (  # Story 4.15
         "draft_sequence",
         "claude-opus-5-5",
@@ -164,6 +180,7 @@ def test_the_candidates_are_exactly_the_specified_table() -> None:
     assert SIGNAL_INBOX_PARSE_V1 == OutputSchema(1, SignalInboxParseV1)
     assert GROUNDING_CHECK_V1 == OutputSchema(1, GroundingCheckV1)
     assert DRAFT_SEQUENCE_V1 == OutputSchema(1, DraftSequenceV1)
+    assert DRAFT_SEQUENCE_V2 == OutputSchema(2, DraftSequenceV2)
 
 
 def test_each_candidate_is_filed_under_its_own_route() -> None:
@@ -300,6 +317,7 @@ def test_only_an_opus_candidate_carries_server_fallbacks_batchable_or_not() -> N
     assert [c.name for r in CANDIDATES.values() for c in r if c.server_fallbacks] == [
         "grounding_check_fallback",
         "draft_sequence",
+        "draft_sequence",  # Story 4.18: v2 and v1
     ]
     # Story 4.15: a batchable Opus candidate may carry them; only its direct request does
     assert replace(opus, batchable=True).server_fallbacks

@@ -576,3 +576,21 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-17-send-bulk-ai-work-through-message-batches.md`
   summary: When an `extract_people` batch item goes `stale` with no newer item or run for the Lead, re-run it directly or enqueue the chain's next stage, so the Lead's research chain doesn't wait for its next crawl.
   evidence: Review pass 1 of Story 4.17 (BH10; decision 8). A stale item writes and enqueues nothing.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
+  summary: Draft the follow-ups of Sequences with other than four Steps (derive the follow-up Steps from the bound Sequence instead of the fixed Steps 2–4).
+  evidence: Review pass 1 of Story 4.18 (EC1, EC2). A 2–3 Step Sequence fails `not_composable`; Steps 5–6 of a longer one are never drafted. Only the 4-Step default is seeded today.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
+  summary: When one follow-up Draft's `_append` fails while the others are written, requeue that Draft (or fail the whole set) instead of settling the item `applied`.
+  evidence: Review pass 1 of Story 4.18 (EC3). Needs a composition error after the pre-checks pass; rare.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
+  summary: Delete (or record for cleanup) a provider batch whose route tuple no longer resolves; today both owners mark the row deleted locally and the batch stays at the provider until it expires.
+  evidence: Review pass 1 of Story 4.18 (EC4, BH8); same as Story 4.17's accepted review #3.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
+  summary: Re-queue follow-ups that failed `no_route` (no schema-2 `draft_sequence` tuple) once a v2 tuple is activated, together with the 4.15 Step 1 recovery item.
+  evidence: Review pass 1 of Story 4.18 (BH1). Before the first v2 gate run every Enrollment's follow-ups fail `no_route` and nothing re-tries them.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
+  summary: Retry or surface follow-ups whose batch answer was invalid or code-refused (today the item is `failed` and Drafts 2–4 stay empty until Regenerate, 4.20).
+  evidence: Review pass 1 of Story 4.18 (BH3).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
+  summary: Extend the drafting smoke gate so a `draft_sequence` v2 tuple is also tested in follow-up mode (distinct angles, regulation angle, citations) before it activates.
+  evidence: Review pass 1 of Story 4.18 (BH4). `drafting_smoke.draft_flags` reads Step 1 only.

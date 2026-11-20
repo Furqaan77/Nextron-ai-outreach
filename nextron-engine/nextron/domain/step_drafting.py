@@ -53,21 +53,58 @@ and ``cited_signal_id`` is in ``live_events`` (the Lead's live Event Signals). `
 gives the claims as ``grounding_rules.Claim``\\ s, and ``citations_of`` the revision's
 traceability: the Evidence ids and the ``(fact_id, version)`` pairs the claims cite, each once,
 in first-appearance order.
+
+**Story 4.18: schema 2 and the follow-ups.** ``FIRST_STEP`` is 1, ``FOLLOW_UP_STEPS`` (2, 3, 4)
+and ``FOLLOW_UP_SCHEMA`` 2 (the ``draft_sequence`` schema that can write follow-ups).
+
+- ``read_step_1(parsed, schema_version) -> Proposal | None``: schema 1 as ``read_proposal``;
+  schema 2 needs exactly one ``steps`` entry with ``step`` 1 (its angle fact is ignored), read
+  into a ``Proposal``; anything else is ``None`` (discarded).
+- ``follow_up_framing(briefs, segment, market, facts, angle_notes, english_variant)``: the brief
+  is a ``# Steps to write`` heading ("Write Steps 2, 3 and 4 ...") then ``brief_section`` of the
+  Step 2, 3 and 4 briefs (``ValueError`` for any other briefs); the facts as ``framing``'s; the
+  note: ``Campaign angle for Step <n>: <note>`` per Step 2 to 4 note, then the English line.
+- ``regulation_steps(briefs, segment, market)``: the Steps whose brief has an angle for that
+  Segment in that Market (each must take a ``regulation`` fact as its angle).
+- ``follow_up_blocks(subject_key, step_1_subject, step_1_body, evidence, signals, contact)``:
+  an ``earlier_step`` / ``step_1`` block (``subject: <subject>``, a blank line, the body), then
+  ``input_blocks``.
+- ``read_follow_ups(parsed) -> FollowUpProposal`` of ``FollowUp(step, subject, body, claims,
+  angle_fact_id, angle_fact_version)``; ``validate_follow_ups(proposal, *, evidence_ids, facts,
+  step_1_fact_ids, regulation_steps, regulation_facts) -> bool``: exactly Steps 2, 3 and 4 once
+  each; each body non-empty; each claim cites one input Evidence id or input fact version; each
+  Step's angle is an input fact version whose fact id Step 1's current revision doesn't cite
+  and no other follow-up takes; a Step in ``regulation_steps`` takes a ``regulation_facts``
+  version. ``follow_up_citations`` (the claims' citations, then the angle fact when no claim
+  cites it) and ``follow_up_claims`` give a follow-up revision's traceability and claims.
+- ``follow_up_fingerprint(route_tuple_key, step_1_draft_id, step_1_rev, evidence_ids, facts)``:
+  an ``ai_batch.Fingerprint`` of the tuple key, ``step_1:<draft id>`` at its rev, each
+  ``evidence:<id>`` and each ``fact:<id>`` at its version.
+- ``next_slot(after, at, timezone)``: the first UTC instant after ``after`` whose local time in
+  ``timezone`` is ``at``; ``draft_deadline_of(created_at, submit_at, deadline, timezone)``: the
+  first ``deadline`` after the first ``submit_at`` slot after ``created_at``.
 """
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from nextron.domain.ai import Framing, UntrustedBlock
+from nextron.domain.ai_batch import Fingerprint
 from nextron.domain.grounding_rules import Claim
 from nextron.domain.markets import EnglishVariant
 from nextron.domain.pseudonymise import mask_contact_details
 from nextron.domain.sequences import StepBrief, WordComparison, max_words
 
 DRAFT_SEQUENCE_ROUTE: Final = "draft_sequence"
+FIRST_STEP: Final = 1
+FOLLOW_UP_STEPS: Final = (2, 3, 4)  # Story 4.18: drafted together, in one call
+FOLLOW_UP_SCHEMA: Final = 2  # the draft_sequence schema version that can write follow-ups
+EARLIER_STEP_SOURCE: Final = "earlier_step"
+STEP_1_BLOCK_ID: Final = "step_1"
 DRAFT_STEP_JOB: Final = "draft_step"
 ENROLLMENT_ID_FIELD: Final = "enrollment_id"
 STEP_FIELD: Final = "step"
@@ -399,3 +436,273 @@ def citations_of(
             facts.setdefault((claim.fact_id, claim.fact_version))
     return tuple(evidence), tuple(facts)
 
+
+# Step 1 by schema version (Story 4.18) ------------------------------------------------------
+
+
+def _claims(rows: object) -> tuple[ProposedClaim, ...]:
+    claims = []
+    for row in rows if isinstance(rows, list | tuple) else ():
+        if not isinstance(row, Mapping):
+            continue
+        claims.append(
+            ProposedClaim(
+                span=row.get("span") if isinstance(row.get("span"), str) else "",
+                evidence_id=_text(row.get("evidence_id")),
+                fact_id=_text(row.get("fact_id")),
+                fact_version=_int(row.get("fact_version")),
+            )
+        )
+    return tuple(claims)
+
+
+def _int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def read_step_1(parsed: Mapping[str, Any], schema_version: int) -> Proposal | None:
+    """The Step 1 proposal of a validated ``draft_sequence`` answer, read by the tuple's schema
+    version: schema 1 as ``read_proposal``; schema 2 needs exactly one ``steps`` entry, with
+    ``step`` 1 (its angle fact is ignored); anything else is ``None`` (discarded)."""
+    if not isinstance(parsed, Mapping):
+        raise TypeError("read_step_1 takes the parsed answer")
+    if schema_version == 1:
+        return read_proposal(parsed)
+    if schema_version != FOLLOW_UP_SCHEMA:
+        return None
+    steps = parsed.get("steps")
+    if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], Mapping):
+        return None
+    only = steps[0]
+    if _int(only.get("step")) != FIRST_STEP:
+        return None
+    subject, body, explanation = only.get("subject"), only.get("body"), parsed.get("explanation")
+    return Proposal(
+        subject=subject if isinstance(subject, str) else "",
+        body=body if isinstance(body, str) else "",
+        claims=_claims(only.get("claims")),
+        cited_signal_id=_text(parsed.get("cited_signal_id")),
+        explanation=explanation if isinstance(explanation, str) else "",
+    )
+
+
+# The follow-ups (Story 4.18) ----------------------------------------------------------------
+
+
+def follow_up_framing(
+    briefs: Sequence[StepBrief],
+    segment: str,
+    market: str,
+    facts: Iterable[DraftFact],
+    angle_notes: Mapping[int, str],
+    english_variant: EnglishVariant,
+) -> Framing:
+    """The follow-up call's trusted framing: a heading naming the Steps to write, then the Step
+    2, 3 and 4 briefs (``brief_section``, each with its Segment x Market angle); the allowed
+    facts; the note: each Variant angle note for Steps 2 to 4, then the English variant."""
+    chosen = tuple(briefs)
+    if [brief.step for brief in chosen] != list(FOLLOW_UP_STEPS):
+        raise ValueError("follow_up_framing takes the Step 2, 3 and 4 briefs, in order")
+    heading = (
+        "# Steps to write\n\nWrite Steps 2, 3 and 4 of the Sequence: one email each, in one "
+        "answer, in Step order. Each Step brief below governs its own email."
+    )
+    sections = [heading, *(brief_section(brief, segment, market) for brief in chosen)]
+    lines = []
+    for step in FOLLOW_UP_STEPS:
+        note = angle_notes.get(step)
+        if note is not None and note.strip():
+            lines.append(f"Campaign angle for Step {step}: {note.strip()}")
+    lines.append(f"English: {ENGLISH[EnglishVariant(english_variant)]}")
+    return Framing(
+        brief=mask("\n\n".join(sections)), facts=facts_section(facts), note=mask("\n".join(lines))
+    )
+
+
+def regulation_steps(briefs: Iterable[StepBrief], segment: str, market: str) -> frozenset[int]:
+    """The Steps whose brief has an angle for ``segment`` in ``market``: each must take a
+    ``regulation`` fact as its angle."""
+    return frozenset(
+        brief.step
+        for brief in briefs
+        if any(
+            found.segment == segment and found.market == market for found in brief.segment_angles
+        )
+    )
+
+
+def follow_up_blocks(
+    subject_key: str,
+    step_1_subject: str,
+    step_1_body: str,
+    evidence: Iterable[DraftEvidence],
+    signals: Iterable[DraftSignal],
+    contact: DraftContact,
+) -> list[UntrustedBlock]:
+    """The follow-up call's untrusted blocks: Step 1's current revision (``earlier_step`` /
+    ``step_1``: a ``subject`` line, a blank line, then the body; it is model output and may be
+    Operator-edited), then ``input_blocks`` exactly as Step 1's."""
+    first = UntrustedBlock(
+        subject_key,
+        EARLIER_STEP_SOURCE,
+        STEP_1_BLOCK_ID,
+        mask(f"subject: {step_1_subject}\n\n{step_1_body}"),
+    )
+    return [first, *input_blocks(subject_key, evidence, signals, contact)]
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUp:
+    """One follow-up of the model's proposal."""
+
+    step: int
+    subject: str
+    body: str
+    claims: tuple[ProposedClaim, ...]
+    angle_fact_id: str | None
+    angle_fact_version: int | None
+
+    @property
+    def angle(self) -> tuple[str, int] | None:
+        """``(angle_fact_id, angle_fact_version)``, or ``None`` when either is missing."""
+        if self.angle_fact_id is None or self.angle_fact_version is None:
+            return None
+        return self.angle_fact_id, self.angle_fact_version
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUpProposal:
+    """The model's follow-up proposal (schema 2)."""
+
+    steps: tuple[FollowUp, ...]
+    cited_signal_id: str | None
+    explanation: str
+
+
+def read_follow_ups(parsed: Mapping[str, Any]) -> FollowUpProposal:
+    """The follow-up proposal of a validated ``DraftSequenceV2`` answer."""
+    if not isinstance(parsed, Mapping):
+        raise TypeError("read_follow_ups takes the parsed answer")
+    steps = []
+    rows = parsed.get("steps")
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, Mapping):
+            continue
+        step = _int(row.get("step"))
+        subject, body = row.get("subject"), row.get("body")
+        steps.append(
+            FollowUp(
+                step=-1 if step is None else step,
+                subject=subject if isinstance(subject, str) else "",
+                body=body if isinstance(body, str) else "",
+                claims=_claims(row.get("claims")),
+                angle_fact_id=_text(row.get("angle_fact_id")),
+                angle_fact_version=_int(row.get("angle_fact_version")),
+            )
+        )
+    explanation = parsed.get("explanation")
+    return FollowUpProposal(
+        steps=tuple(steps),
+        cited_signal_id=_text(parsed.get("cited_signal_id")),
+        explanation=explanation if isinstance(explanation, str) else "",
+    )
+
+
+def validate_follow_ups(
+    proposal: FollowUpProposal,
+    *,
+    evidence_ids: Collection[str],
+    facts: Collection[tuple[str, int]],
+    step_1_fact_ids: Collection[str],
+    regulation_steps: Collection[int],
+    regulation_facts: Collection[tuple[str, int]],
+) -> bool:
+    """Whether code accepts the follow-ups (AD-18): exactly Steps 2, 3 and 4, each once; every
+    body non-empty after strip; every claim cites exactly one input Evidence id or input fact
+    version; every Step has an angle fact that is an input fact version, whose fact id is none
+    Step 1's current revision cites and none another follow-up takes; and a Step in
+    ``regulation_steps`` takes a fact version in ``regulation_facts``. The caller also checks
+    each body with Step 1's subject (``api._check_text``). Word limits and the other rules are
+    ``grounding_rules``' (flagged, not discarded)."""
+    if not isinstance(proposal, FollowUpProposal):
+        raise TypeError("validate_follow_ups takes a FollowUpProposal")
+    if sorted(step.step for step in proposal.steps) != list(FOLLOW_UP_STEPS):
+        return False
+    taken: set[str] = set(step_1_fact_ids)
+    for step in sorted(proposal.steps, key=lambda found: found.step):
+        if not step.body.strip():
+            return False
+        if not all(_cites(claim, evidence_ids, facts) for claim in step.claims):
+            return False
+        angle = step.angle
+        if angle is None or angle not in facts or angle[0] in taken:
+            return False
+        if step.step in regulation_steps and angle not in regulation_facts:
+            return False
+        taken.add(angle[0])
+    return True
+
+
+def _as_proposal(step: FollowUp) -> Proposal:
+    return Proposal(step.subject, step.body, step.claims, None, "")
+
+
+def follow_up_citations(
+    step: FollowUp,
+) -> tuple[tuple[str, ...], tuple[tuple[str, int], ...]]:
+    """A follow-up revision's traceability: the Evidence ids and fact versions its claims cite,
+    each once, in first-appearance order, then its angle fact when no claim cites it (so a later
+    Step's ``repeated_angle`` rule sees it)."""
+    evidence, facts = citations_of(_as_proposal(step))
+    angle = step.angle
+    if angle is not None and angle not in facts:
+        facts = (*facts, angle)
+    return evidence, facts
+
+
+def follow_up_claims(step: FollowUp) -> tuple[Claim, ...]:
+    """A follow-up's claims as ``grounding_rules.Claim``\\ s."""
+    return claims_of(_as_proposal(step))
+
+
+def follow_up_fingerprint(
+    route_tuple_key: str,
+    step_1_draft_id: str,
+    step_1_rev: int,
+    evidence_ids: Iterable[str],
+    facts: Iterable[tuple[str, int]],
+) -> Fingerprint:
+    """What a follow-up request is built from (``ai_batch.Fingerprint``): the tuple key; Step
+    1's ``(draft id, current_rev)``; each live Evidence id sent; each allowed ``(fact_id,
+    version)``. Each input id is prefixed by its kind, so no two kinds collide."""
+    inputs: list[tuple[str, str | int]] = [(f"step_1:{step_1_draft_id}", step_1_rev)]
+    inputs += [(f"evidence:{found}", 0) for found in evidence_ids]
+    inputs += [(f"fact:{fact_id}", version) for fact_id, version in facts]
+    return Fingerprint(route_tuple_key, tuple(inputs))
+
+
+# The deadline (Story 4.18) ------------------------------------------------------------------
+
+
+def next_slot(after: datetime, at: time, timezone: str) -> datetime:
+    """The earliest UTC instant after ``after`` whose local time in ``timezone`` is ``at``."""
+    if not isinstance(after, datetime) or after.utcoffset() is None:
+        raise TypeError("after must be an aware datetime")
+    if not isinstance(at, time):
+        raise TypeError("at must be a datetime.time")
+    zone = ZoneInfo(timezone)
+    day = after.astimezone(zone).date()
+    slot = datetime.combine(day, at, tzinfo=zone).astimezone(UTC)
+    while slot <= after:
+        day += timedelta(days=1)
+        slot = datetime.combine(day, at, tzinfo=zone).astimezone(UTC)
+    return slot
+
+
+def draft_deadline_of(
+    created_at: datetime, submit_at: time, deadline: time, timezone: str
+) -> datetime:
+    """An Enrollment's follow-up drafting deadline: the first ``deadline`` (``draft_deadline``)
+    after the first ``submit_at`` (``bulk_ai_submit_at``) slot after its ``created_at``, both
+    local times in ``timezone``."""
+    return next_slot(next_slot(created_at, submit_at, timezone), deadline, timezone)

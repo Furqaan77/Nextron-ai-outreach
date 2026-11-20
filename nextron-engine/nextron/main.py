@@ -271,8 +271,11 @@ retry limit 3, ``handlers.draft_step(step_drafts)``, ``other``; never budget-gat
 ``poll_ai_batches`` (bulk only, priority 30, ``max_runtime`` 30 minutes and 2 hours (each re-run
 item is a direct Claude call), retry limit 3, concurrency key ``ai_batches`` (one at a time),
 ``handlers.submit_bulk_ai(ai_batches)`` and ``handlers.poll_ai_batches(ai_batches)``,
-``other``; ``build_app`` passes ``lambda: (research_batches,)``, the ``research`` service's
-``ResearchBatches(clock, meter, llm, extractions, people)``) last. ``SignalInbox(clock, meter, llm, discovery, research,
+``other``; ``build_app`` passes one ``BatchJobs`` over the ``research`` service's
+``ResearchBatches(clock, meter, llm, extractions, people)`` and (Story 4.18) the ``drafting``
+service's ``DraftingBatches(clock, llm, queue, step_drafts)``, in that order, so each job calls
+one use case; the latter's poll also re-runs, as ``draft_step:<enrollment>:2`` jobs, the
+follow-up items not applied by the ``draft_deadline`` setting) last. ``SignalInbox(clock, meter, llm, discovery, research,
 queue)`` (``nextron.app.discovery.signal_inbox``) runs those jobs, reached through
 ``signal_inbox=lambda: signal_inbox``, and the dashboard gets it (``create_app(...,
 signal_inbox=...)``) for the Signal Inbox page. ``Rechecks(clock, meter, crawls, job_boards,
@@ -909,6 +912,7 @@ from nextron.app.discovery.signal_inbox import SignalInbox
 from nextron.app.discovery.topup import DiscoveryTopUp
 from nextron.app.drafting import api as drafting_api
 from nextron.app.drafting.api import Drafting
+from nextron.app.drafting.batches import DraftingBatches
 from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue import api as jobqueue_api
@@ -946,7 +950,7 @@ from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.research.api import ContactMarkets, Research, WebsiteCrawls
-from nextron.app.research.batches import BulkAiSchedule, ResearchBatches
+from nextron.app.research.batches import ResearchBatches
 from nextron.app.research.extraction import LeadSignals, SignalExtractions
 from nextron.app.research.finding import EmailFinding
 from nextron.app.research.job_boards import JobBoards
@@ -998,7 +1002,7 @@ from nextron.db.repos.ops.restore import (
     swap_in,
 )
 from nextron.db.repos.ops.snapshot import INTEGRITY_PASSED, discard, inspect_copy, snapshot
-from nextron.db.uow import Subscribers, UnitOfWorkFactory
+from nextron.db.uow import Subscribers, UnitOfWorkFactory, use_case
 from nextron.domain import seed_yaml, settings_schema
 from nextron.domain.alert import SEND_ALERT_JOB, Channel
 from nextron.domain.backup import (
@@ -1037,6 +1041,7 @@ from nextron.domain.ai_batch import (
     DEFAULT_BULK_AI_SUBMIT_AT,
     POLL_AI_BATCHES_JOB,
     SUBMIT_BULK_AI_JOB,
+    BulkAiSchedule,
 )
 from nextron.domain.health import HealthIssues, IssueSource
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
@@ -1412,7 +1417,7 @@ def build_app(
         registry_discovery=lambda: registry_discovery,
         rechecks=lambda: rechecks,
         step_drafts=lambda: step_drafts,
-        ai_batches=lambda: batch_owners,
+        ai_batches=lambda: (batch_jobs,),
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1437,7 +1442,12 @@ def build_app(
     step_drafts = StepDrafts(clock, llm, queue)  # Story 4.15: the draft_step jobs
     extractions = SignalExtractions(clock, meter, llm, research, people)
     # Story 4.17: the bulk extraction work as Message Batches (submit_bulk_ai, poll_ai_batches)
-    batch_owners = (ResearchBatches(clock, meter, llm, extractions, people),)
+    # Story 4.18: and the follow-up Steps 2 to 4, with the draft_deadline sweep
+    batch_owners = (
+        ResearchBatches(clock, meter, llm, extractions, people),
+        DraftingBatches(clock, llm, queue, step_drafts),
+    )
+    batch_jobs = BatchJobs(batch_owners)  # one use case per job over every owner (AD-3)
     primary_contacts = PrimaryContacts(clock, research, queue)
     site_dns = dns if dns is not None else DnspythonDns(meter=meter)
     domain_checks = DomainChecks(clock, site_dns, queue)
@@ -2549,6 +2559,33 @@ def read_backup_schedule(units: Units, backups: Backups) -> DailyRun:
         return DailyRun(found.at, found.timezone, catch_up=found.missed)
 
     return contextvars.Context().run(read)
+
+
+class RunningBatches(Protocol):
+    """What ``BatchJobs`` needs of a batch owner (Story 4.18)."""
+
+    def submit_queued(self) -> int: ...
+
+    def poll_open(self) -> int: ...
+
+
+class BatchJobs:
+    """Every batch owner's submit and poll as the one use case of a ``submit_bulk_ai`` or
+    ``poll_ai_batches`` job (Story 4.18, AD-3: a job's entry point calls exactly one use case;
+    the owners, ``research`` and ``drafting``, sit side by side in the app DAG, so the
+    composition root joins them): ``submit_bulk()`` and ``poll()`` call each owner's
+    ``submit_queued()`` / ``poll_open()`` in order and return the sum."""
+
+    def __init__(self, owners: Sequence[RunningBatches]) -> None:
+        self._owners = tuple(owners)
+
+    @use_case
+    def submit_bulk(self) -> int:
+        return sum(owner.submit_queued() for owner in self._owners)
+
+    @use_case
+    def poll(self) -> int:
+        return sum(owner.poll_open() for owner in self._owners)
 
 
 class ScheduledBatching(Protocol):
