@@ -3,13 +3,15 @@
 Import rule: ``nextron.domain``, this package and the standard library.
 
 **``Candidate(name, model, effort, prompt_version, output_schema, batchable, max_tokens,
-max_tokens_cap, budget_class, uses_playbook=False, server_fallbacks=False)``** is one version of
+max_tokens_cap, budget_class, uses_playbook=False, server_fallbacks=False,
+accepts_instruction=False)``** is one version of
 a route. It is frozen, and refused at construction (``TypeError`` or ``ValueError`` from
 ``nextron.domain.ai``) unless its route fields are valid, ``0 <
 max_tokens <= max_tokens_cap <= MAX_TOKENS_CEILING`` (16,000, which keeps every request under
 the SDK's non-streaming limit), ``uses_playbook`` is a ``bool``, and ``server_fallbacks`` is a
 ``bool`` that is ``True`` only on an Opus model (``OPUS``) (AD-8: Haiku has no server-side
-fallback). A batchable Opus candidate may carry it (Story 4.15): only the direct request adds
+fallback), and ``accepts_instruction`` is a ``bool``. A batchable Opus candidate may carry it
+(Story 4.15): only the direct request adds
 the fallbacks, and a batch request (Story 4.17) never does.
 ``budget_class`` is a ``nextron.domain.budget.BudgetClass``: the calling service passes a
 ``blockable`` one to ``domain.budget.allow`` before the call (an ``essential`` route is never
@@ -31,6 +33,13 @@ refusal fallbacks on every direct request of the candidate.
   ``claims`` as v1's, ``angle_fact_id`` and ``angle_fact_version``), ``cited_signal_id`` and
   ``explanation``. One prompt serves Step 1 alone and the follow-ups 2 to 4; the framing's Step
   brief names the Steps to write. v1 stays, unchanged (a shipped candidate never changes).
+- ``draft_sequence`` **v3** (Story 4.20), its default since, first in ``CANDIDATES``: v2's
+  settings and schema (``DraftSequenceV2``, schema 2), prompt ``v3``: v2's text plus a third
+  mode, rewriting the one Step the brief names, from a ``current_draft`` block (the other
+  Steps' current emails as ``earlier_step`` blocks) and an optional ``<operator_instruction>``
+  that can't override the Step brief, the grounding rules or the law and platform rules. It is
+  the only candidate with ``accepts_instruction`` (``prompting`` refuses a non-blank
+  ``Framing.instruction`` on any other). v1 and v2 stay, unchanged.
 
 **``CANDIDATES``**, by route. The first candidate of each route is its default. Only the Opus
 routes (``grounding_check_fallback``, ``draft_sequence``) carry server-side ``fallbacks``: Haiku
@@ -99,6 +108,7 @@ from nextron.domain.ai import (
     Effort,
     RouteSpec,
     RouteTuple,
+    check_accepts_instruction,
     check_route_fields,
     check_server_fallbacks,
     check_token_limits,
@@ -127,6 +137,7 @@ class Candidate:
     budget_class: BudgetClass
     uses_playbook: bool = False
     server_fallbacks: bool = False
+    accepts_instruction: bool = False  # Story 4.20: may carry an Operator instruction
 
     def __post_init__(self) -> None:
         version = getattr(self.output_schema, "version", None)
@@ -134,6 +145,7 @@ class Candidate:
         check_token_limits(self.max_tokens, self.max_tokens_cap, MAX_TOKENS_CEILING)
         check_uses_playbook(self.uses_playbook)
         check_server_fallbacks(self.server_fallbacks, self.model, self.batchable, OPUS)
+        check_accepts_instruction(self.accepts_instruction)
 
 
 CANDIDATES: Final[Mapping[str, tuple[Candidate, ...]]] = MappingProxyType(
@@ -207,7 +219,21 @@ CANDIDATES: Final[Mapping[str, tuple[Candidate, ...]]] = MappingProxyType(
             ),
         ),
         "draft_sequence": (
-            Candidate(  # Story 4.18: the default; Step 1 alone, or the follow-ups 2 to 4
+            Candidate(  # Story 4.20: the default; v2 plus the one-Step rewrite (regenerate)
+                name="draft_sequence",
+                model=OPUS,
+                effort=Effort.MEDIUM,
+                prompt_version="v3",
+                output_schema=DRAFT_SEQUENCE_V2,
+                batchable=True,
+                max_tokens=8_000,
+                max_tokens_cap=16_000,
+                budget_class=BudgetClass.ESSENTIAL,
+                uses_playbook=True,
+                server_fallbacks=True,
+                accepts_instruction=True,
+            ),
+            Candidate(  # Story 4.18: shipped, kept unchanged; Step 1 alone, or the follow-ups
                 name="draft_sequence",
                 model=OPUS,
                 effort=Effort.MEDIUM,

@@ -37,7 +37,8 @@ argument checks, before any read or write.
    ``1``, payload ``{"v": 1, "enrollment_id": <id>, "step": 1}``) on the lane of ``urgency``:
    ``bulk`` on the bulk lane, else the interactive lane (``enroll`` passes ``soon``). The job
    drafts at ``bulk`` on the bulk lane and at ``soon`` on the interactive lane.
-   ``StepDrafts`` (``nextron.app.drafting.generation``) runs it.
+   ``StepDrafts`` (``nextron.app.drafting.generation``) runs it. ``enqueue_step_1_job(queue,
+   enrollment_id, lane)`` enqueues it (Story 4.20's "Retry drafting" reuses it).
 5. **The follow-ups' batch item** (Story 4.18): when it created any of Steps 2 to 4's slots, in
    the same unit of work, one ``pending`` drafting item (``nextron.db.ai_batches.queue_item``,
    owner ``drafting``, route ``draft_sequence``, target the Enrollment, ``rev`` the next for
@@ -84,7 +85,9 @@ unit:
    ``current_rev + 1`` (1 when there is none) with the traceability given, its one
    ``grounding_results`` row (``fail`` with the flags, each ``source`` ``rules``, when any rule
    flags, else ``pending``; the ``RULES_VERSION``; checked at ``at``), and
-   ``drafts.current_rev`` moved to it (``updated_at`` the clock's now).
+   ``drafts.current_rev`` moved to it (``updated_at`` the clock's now). A revision of origin
+   ``generated`` or ``regenerated`` also sets ``drafts.stale`` back to 0 (Story 4.20): its text
+   was written from the inputs as they stand now.
 6. **The AI check** (Story 4.14): in the same unit of work, a ``check_grounding`` job
    (``nextron.domain.grounding_check.CHECK_GROUNDING_JOB``; scope the Draft id, discriminator
    the new ``rev``, payload ``{"v": 1, "draft_id": <id>, "rev": <rev>}``) on the lane of
@@ -112,6 +115,13 @@ subject, body and traceability, only when the new ``text_hash`` differs from the
 ``LookupError`` or ``InvalidMarkets`` from the checks) is logged (``recompose_skipped``, with
 the Draft id and the error type) and skipped, before any write. ``approved``, ``sent`` and every
 other status are untouched. Each new revision's ``check_grounding`` job runs on the bulk lane.
+
+**``@command flag_stale(n: EvidenceChanged)``** (Story 4.20, AD-3, AD-7), ``EvidenceChanged``'s
+subscriber (``main.build_subscribers``): every ``ready`` Draft whose current revision's
+``evidence_ids`` holds ``n.evidence_id`` gets ``drafts.stale = 1`` in the publisher's
+transaction (``drafts_repo.set_stale``); every other Draft, and every other status, is untouched.
+``nextron.domain.grounding.is_stale`` stays the only staleness test: the flag only records that a
+cited Evidence row changed, and the Lead page tests the revision live.
 
 - ``ERASURE`` and ``@command erase_pii(n: ContactErased)`` (Story 3.13, AD-17): ``draft_revisions``
   is tombstoned: every revision of every Draft of each of the Contact's Enrollments gets
@@ -175,7 +185,7 @@ from nextron.domain.grounding_rules import (
 from nextron.domain.grounding_rules import check as check_grounding
 from nextron.domain.job import VERSION_FIELD, Lane
 from nextron.domain.markets import InvalidMarkets
-from nextron.domain.notifications import ContactErased, FooterChanged
+from nextron.domain.notifications import ContactErased, EvidenceChanged, FooterChanged
 from nextron.domain.segments import SignalClass
 from nextron.domain.sending_policy import step_due_at
 from nextron.domain.signals import EventSignal, strongest_event
@@ -433,6 +443,22 @@ def _checked_steps(steps: object) -> tuple[int, ...]:
     return found
 
 
+def enqueue_step_1_job(queue: JobQueue, enrollment_id: str, lane: Lane) -> None:
+    """The Step 1 drafting job, in the caller's transaction: ``draft_step:<enrollment>:1``
+    (payload ``step`` 1) on ``lane``."""
+    queue.enqueue(
+        DRAFT_STEP_JOB,
+        scope=enrollment_id,
+        discriminator=str(FIRST_STEP),
+        payload={
+            VERSION_FIELD: PAYLOAD_VERSION,
+            ENROLLMENT_ID_FIELD: enrollment_id,
+            STEP_FIELD: FIRST_STEP,
+        },
+        lane=lane,
+    )
+
+
 class Drafting:
     """Draft slots and their due times; see the module docstring."""
 
@@ -517,16 +543,10 @@ class Drafting:
                 at=now,
             )
         if FIRST_STEP in wanted:  # Story 4.15: draft Step 1 now
-            queue.enqueue(
-                DRAFT_STEP_JOB,
-                scope=enrollment.id,
-                discriminator=str(FIRST_STEP),
-                payload={
-                    VERSION_FIELD: PAYLOAD_VERSION,
-                    ENROLLMENT_ID_FIELD: enrollment.id,
-                    STEP_FIELD: FIRST_STEP,
-                },
-                lane=Lane.BULK if urgency is Urgency.BULK else Lane.INTERACTIVE,
+            enqueue_step_1_job(
+                queue,
+                enrollment.id,
+                Lane.BULK if urgency is Urgency.BULK else Lane.INTERACTIVE,
             )
         if any(step in FOLLOW_UP_STEPS for step in wanted):  # Story 4.18: the afternoon batch
             ai_batches.queue_item(
@@ -610,6 +630,8 @@ class Drafting:
             at,
         )
         drafts_repo.set_current_rev(draft.id, rev, at)
+        if origin in (RevisionOrigin.GENERATED, RevisionOrigin.REGENERATED):  # Story 4.20
+            drafts_repo.set_stale(draft.id, False, at)
         queue.enqueue(
             CHECK_GROUNDING_JOB,
             scope=draft.id,
@@ -683,6 +705,16 @@ class Drafting:
                 prepared,
                 urgency=Urgency.BULK,
             )
+
+    @command
+    def flag_stale(self, n: EvidenceChanged) -> None:
+        """``EvidenceChanged``'s subscriber: flag every ``ready`` Draft whose current revision
+        cites the changed Evidence ``stale``; see the module docstring."""
+        now = self._clock.now()
+        for draft in drafting_queries.ready_with_text():
+            found = drafting_queries.current_revision(draft)
+            if found is not None and n.evidence_id in found.evidence_ids:
+                drafts_repo.set_stale(draft.id, True, now)
 
 
 # Erasure (Story 3.13) -------------------------------------------------------------------------

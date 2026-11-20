@@ -273,7 +273,8 @@ def test_a_follow_up_drafting_item_is_sent_framed_on_v2_without_fallbacks() -> N
     api = Api()
     gateway, _ = gateway_on(api)
     tuple_ = route("draft_sequence")
-    assert (tuple_.prompt_version, tuple_.schema_version) == ("v2", 2)
+    # Story 4.20: the default is v3 since, v2's schema and settings (the same request shape)
+    assert (tuple_.prompt_version, tuple_.schema_version) == ("v3", 2)
     blocks = (
         UntrustedBlock(f"lead:{LEAD_A}", "earlier_step", "step_1", "subject: Hi\n\nStep 1."),
         block(),

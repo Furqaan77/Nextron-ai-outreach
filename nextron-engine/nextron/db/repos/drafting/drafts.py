@@ -27,7 +27,9 @@ writes them (AD-3), and ``insert_slots`` leaves them to their server defaults (`
 - ``mark_draft_failed(draft_id, reason, at) -> bool`` (Story 4.15): ``draft_failed_at`` = ``at``,
   ``draft_failed_reason`` = ``reason`` and ``updated_at``; whether a row changed;
 - ``clear_draft_failed(draft_id, at) -> bool`` (Story 4.15): both back to NULL (and
-  ``updated_at``) on a Draft that has them set; whether a row changed.
+  ``updated_at``) on a Draft that has them set; whether a row changed;
+- ``set_stale(draft_id, stale, at) -> bool`` (Story 4.20): ``stale`` (and ``updated_at``) on a
+  Draft whose flag differs; whether a row changed.
 """
 
 from collections.abc import Sequence
@@ -209,6 +211,17 @@ def mark_draft_failed(draft_id: str, reason: str, at: datetime) -> bool:
         update_rows(DraftRecord)
         .where(DraftRecord.id == draft_id)
         .values(draft_failed_at=at, draft_failed_reason=reason, updated_at=at)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+
+def set_stale(draft_id: str, stale: bool, at: datetime) -> bool:
+    """Set the Draft's ``stale`` flag to ``stale``, at ``at``, when it differs; whether a row
+    changed (Story 4.20)."""
+    result = current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id, DraftRecord.stale != stale)
+        .values(stale=stale, updated_at=at)
     )
     return int(result.rowcount) == 1  # type: ignore[attr-defined]
 

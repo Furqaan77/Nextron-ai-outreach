@@ -20,8 +20,10 @@ builds no client.
 
 1. A tuple that ``routes.find`` doesn't know raises ``AdapterError(False,
    "llm_unknown_route")``: a deployment mismatch.
-2. ``urgency`` must be an ``Urgency`` (``TypeError``), and ``prompting.user_turn`` checks the
-   blocks (``TypeError`` or ``ValueError``): a caller's bug.
+2. ``urgency`` must be an ``Urgency`` (``TypeError``), ``prompting.check_instruction`` refuses
+   a non-blank Operator instruction the candidate doesn't accept (``ValueError``, Story 4.20),
+   and ``prompting.user_turn`` checks the blocks (``TypeError`` or ``ValueError``): a caller's
+   bug.
 3. ``read_credential(secrets, CredentialKey.CLAUDE)`` reads the key (``anthropic/api_key``) on
    every call and never keeps it; its errors (``credential_not_set``, ``keyring_failed``)
    propagate.
@@ -431,6 +433,7 @@ class ClaudeGateway:
             ) from None
         check_urgency(urgency)
         check_framing(framing)
+        prompting.check_instruction(candidate, framing)  # Story 4.20: ValueError, no request
         prompting.user_turn(inputs)  # a caller's bad inputs raise here, before any request
         client = self._anthropic()
         tally = _Tally(route_tuple, self._meter)

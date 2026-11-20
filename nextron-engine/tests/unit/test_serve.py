@@ -46,6 +46,7 @@ from nextron.domain.notifications import (
     NOTIFICATIONS,
     ContactErased,
     Enrolled,
+    EvidenceChanged,
     FooterChanged,
     LeadsMerged,
     MessageSent,
@@ -827,6 +828,10 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
     assert is_command(footer)
     assert footer.__name__ == "recompose_ready"
     assert type(getattr(footer, "__self__", None)) is Drafting
+    [stale] = subscribers.subscribers_of(EvidenceChanged)  # Story 4.20
+    assert is_command(stale)
+    assert stale.__name__ == "flag_stale"
+    assert type(getattr(stale, "__self__", None)) is Drafting
     registered = (
         LeadsMerged,
         SubjectSuppressed,
@@ -834,6 +839,7 @@ def test_build_subscribers_registers_reparent_lead_close_suppressed_and_erase_pi
         Enrolled,
         MessageSent,
         FooterChanged,
+        EvidenceChanged,
     )
     others = [kind for kind in NOTIFICATIONS if kind not in registered]
     assert all(subscribers.subscribers_of(kind) == () for kind in others)
@@ -850,10 +856,11 @@ def test_build_subscribers_gives_its_services_the_clock() -> None:
         *subscribers.subscribers_of(Enrolled),
         *subscribers.subscribers_of(MessageSent),
         *subscribers.subscribers_of(FooterChanged),
+        *subscribers.subscribers_of(EvidenceChanged),  # Story 4.20
     ]
     clocks = [getattr(subscriber, "__self__")._clock for subscriber in found]
 
-    assert clocks == [clock] * 13
+    assert clocks == [clock] * 14
     erasures = getattr(subscribers.subscribers_of(ContactErased)[0], "__self__")
     assert erasures._compliance._clock is clock
 
@@ -1170,7 +1177,7 @@ def test_a_first_start_stores_the_prompts_and_activates_each_route(dev: Path) ->
     [synced] = [line for line in lines if line["event"] == "prompts_synced"]
     assert (synced["logger"], synced["stored_count"], synced["activated_count"]) == (
         "nextron.app.playbook.api",
-        7,  # Story 4.15: draft_sequence's prompt too; Story 4.18: and its v2
+        8,  # Story 4.15: draft_sequence's prompt too; Story 4.18: its v2; Story 4.20: its v3
         3,
     )
 
@@ -1184,7 +1191,7 @@ def test_a_restart_changes_no_prompt_row(dev: Path) -> None:
 
     assert prompt_rows(dev / "nextron.db") == before
     synced = [line for line in log_lines(dev) if line["event"] == "prompts_synced"]
-    assert [(line["unchanged_count"], line["kept_count"]) for line in synced] == [(0, 0), (7, 3)]
+    assert [(line["unchanged_count"], line["kept_count"]) for line in synced] == [(0, 0), (8, 3)]
 
 
 def test_the_loader_runs_outside_any_unit_of_work(dev: Path) -> None:
@@ -1340,7 +1347,7 @@ def test_a_first_start_stores_the_playbook_and_records_the_tuples_and_the_check(
     snapshots, tuples, checks = playbook_rows(dev / "nextron.db")
     assert snapshots == [(read.version, read.sha256)]
     assert tuples == [
-        ("draft_sequence", "v2", read.sha256),  # Story 4.15, v2 since 4.18: pinned to it
+        ("draft_sequence", "v3", read.sha256),  # Story 4.15, v2 4.18, v3 4.20: pinned to it
         ("extract_people", "v1", None),
         ("extract_signals", "v1", None),
         ("grounding_check", "v1", read.sha256),  # Story 4.14: pinned to the Playbook read

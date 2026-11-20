@@ -95,6 +95,7 @@ from nextron import main
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.drafting.regeneration import Regenerations
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -345,6 +346,7 @@ class Dashboard:
     erasures: Erasures = field(init=False)
     email_finding: EmailFinding = field(init=False)
     lead_scores: LeadScores = field(init=False)
+    regenerations: Regenerations = field(init=False)
 
     def __post_init__(self) -> None:
         self.entry = DashboardEntry(self.secrets, self.clock)
@@ -435,6 +437,7 @@ class Dashboard:
             self.clock, Scoring(self.clock, Pipeline(self.clock), self.research), self.queue
         )
         self.test_runs = AiTestRuns(self.clock, meter, self.llm, self.queue)
+        self.regenerations = Regenerations(self.clock, self.llm, self.queue)  # Story 4.20
         self.lead_imports = LeadImports(
             self.clock,
             Discovery(self.clock, Pipeline(self.clock), self.queue),
@@ -471,6 +474,7 @@ class Dashboard:
             domain_checks=self.domain_checks,
             email_finding=self.email_finding,
             lead_scores=self.lead_scores,
+            regenerations=self.regenerations,
             units=self.units,
             **extra,
         )

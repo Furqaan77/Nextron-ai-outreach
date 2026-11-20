@@ -445,3 +445,16 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-18-draft-follow-up-steps-in-the-afternoon-batch-with-a-07-00-deadline.md`
   summary: Extend the drafting smoke gate so a `draft_sequence` v2 tuple is also tested in follow-up mode (distinct angles, regulation angle, citations) before it activates.
   evidence: Review pass 1 of Story 4.18 (BH4). `drafting_smoke.draft_flags` reads Step 1 only.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-20-regenerate-a-draft-and-flag-stale-ones.md`
+  summary: A Step 1 regenerate can change the subject Steps 2-4 carry (they reply in Step 1's thread) and can state a fact a follow-up already uses as its angle; nothing flags the follow-ups.
+  evidence: Review row 14; the frozen spec validates a Step 1 regenerate "as 4.15" and 4.18 stores Step 1's subject at follow-up time. Fix needs a spec change (validate Step 1 against follow-up angles, or flag/recompose follow-ups).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-20-regenerate-a-draft-and-flag-stale-ones.md`
+  summary: Staleness (live `is_stale` and `drafts.stale`) is shown only on the Lead page; the approval queue cards (5.1-5.3, on main) and the approve path don't show or check it.
+  evidence: Review row 15; merge touchpoint with Epic 5.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-20-regenerate-a-draft-and-flag-stale-ones.md`
+  summary: No test renders the badge from the `drafts.stale` flag alone (live reason None).
+  evidence: Review row 16; the live reason gives the same text in every current test.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-20-regenerate-a-draft-and-flag-stale-ones.md`
+  summary: Drafts that failed `no_route` (4.15/4.18) still aren't re-queued automatically when a draft_sequence tuple activates; 4.20's "Retry drafting" is the manual recovery.
+  evidence: Spec decision 3.

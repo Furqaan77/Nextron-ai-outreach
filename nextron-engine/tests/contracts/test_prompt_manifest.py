@@ -265,6 +265,7 @@ SHIPPED_CANDIDATES: Final = (
     ("grounding_check_fallback", "claude-opus-5-5", "medium", "v1", 1),  # Story 4.14
     ("draft_sequence", "claude-opus-5-5", "medium", "v1", 1),  # Story 4.15
     ("draft_sequence", "claude-opus-5-5", "medium", "v2", 2),  # Story 4.18
+    ("draft_sequence", "claude-opus-5-5", "medium", "v3", 2),  # Story 4.20
 )
 # The shipped routes whose candidates pin a Sales Playbook snapshot (uses_playbook): add-only too,
 # so a candidate never silently flips uses_playbook.

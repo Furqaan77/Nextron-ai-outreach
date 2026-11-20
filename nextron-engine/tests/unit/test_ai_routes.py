@@ -106,7 +106,21 @@ TABLE: Final = [
         True,
         True,
     ),
-    (  # Story 4.18: the default, first
+    (  # Story 4.20: the default, first (v2 plus the one-Step rewrite)
+        "draft_sequence",
+        "claude-opus-5-5",
+        Effort.MEDIUM,
+        "v3",
+        DraftSequenceV2,
+        2,
+        True,
+        8_000,
+        16_000,
+        BudgetClass.ESSENTIAL,
+        True,
+        True,
+    ),
+    (  # Story 4.18
         "draft_sequence",
         "claude-opus-5-5",
         Effort.MEDIUM,
@@ -311,6 +325,16 @@ def test_every_candidate_model_has_a_price() -> None:
     assert models <= set(pricing.PRICES)
 
 
+def test_only_draft_sequence_v3_accepts_an_operator_instruction() -> None:
+    accepting = [
+        (c.name, c.prompt_version) for r in CANDIDATES.values() for c in r if c.accepts_instruction
+    ]
+
+    assert accepting == [("draft_sequence", "v3")]  # Story 4.20
+    with pytest.raises(TypeError, match="accepts_instruction"):
+        replace(CANDIDATES["draft_sequence"][0], accepts_instruction=1)
+
+
 def test_only_an_opus_candidate_carries_server_fallbacks_batchable_or_not() -> None:
     opus = CANDIDATES["grounding_check_fallback"][0]
 
@@ -318,6 +342,7 @@ def test_only_an_opus_candidate_carries_server_fallbacks_batchable_or_not() -> N
         "grounding_check_fallback",
         "draft_sequence",
         "draft_sequence",  # Story 4.18: v2 and v1
+        "draft_sequence",  # Story 4.20: v3
     ]
     # Story 4.15: a batchable Opus candidate may carry them; only its direct request does
     assert replace(opus, batchable=True).server_fallbacks
@@ -344,4 +369,5 @@ def test_the_candidate_fields_are_exactly_these() -> None:
         "budget_class",
         "uses_playbook",
         "server_fallbacks",
+        "accepts_instruction",  # Story 4.20
     ]

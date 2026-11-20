@@ -2802,7 +2802,8 @@ setting, 14:00 by default) sends it. There is no AI budget check: drafting is `e
 
 **The route.** Follow-ups need the `draft_sequence` **v2** candidate (prompt
 `prompts/draft_sequence/v2.md`, schema 2: a `steps` list, each with its subject, body, claims
-and angle fact). It is the route's default from this release; v1 is kept unchanged. One prompt
+and angle fact). v2 was the route's default from this release until Story 4.20 made v3 (the
+same schema) the default; v1 is kept unchanged. One prompt
 writes either Step 1 alone or Steps 2 to 4; Step 1 on v2 must answer exactly one Step, Step 1.
 Like v1, the v2 tuple serves only after it passes the drafting smoke set. Until a schema-2
 tuple is active, the follow-ups fail `no_route` (no call).
@@ -2857,6 +2858,68 @@ or 4 alone do nothing.
 **Where it lives.** `nextron.app.drafting.batches.DraftingBatches` (the drafting owner, beside
 `ResearchBatches`), the follow-up builder and checks in `nextron.app.drafting.generation` and
 `nextron.domain.step_drafting`. No migration.
+
+## Regenerating a Draft and stale Drafts
+
+Story 4.20 (FR-21, FR-22, AD-6, AD-7, AD-8, AD-16, AD-17, AD-18) lets you ask for a new version
+of a `ready` Draft, retry one whose drafting failed, and see when what a Draft cites has changed.
+Nothing is sent: a regenerated Draft waits for its grounding check and your approval like any
+other.
+
+**Regenerate.** On the Lead page each `ready` Draft with text has a **Regenerate** form, with an
+optional instruction (at most 200 characters, one line), such as "shorter" or "warmer tone". It
+runs at once as a direct `interactive` call with the server-side refusal fallbacks (never in a
+batch, never budget-checked) and appends revision `n + 1` of origin `regenerated`, with your
+instruction stored on that revision. Revision 1 is never touched. While it runs the button is
+disabled and "Regenerating…" shows; the answer replaces the Draft on the page with a notice:
+"Regenerated: revision 2.", "Draft is approved" (only a `ready` Draft can be regenerated),
+"Regenerate failed: <reason>." (the model declined, its answer was cut off or malformed, it cited
+something it may not, or no tested drafting model is active), "Regenerate blocked: this Contact
+can't be contacted." or "Regenerate failed: the AI service is unavailable". A failed regenerate
+keeps the current revision and records nothing. The new revision's grounding check runs on the
+interactive lane, and the Draft refreshes itself every 3 seconds until its badge leaves
+`pending`.
+
+**What the model sees.** Regenerate needs the `draft_sequence` **v3** candidate (prompt
+`prompts/draft_sequence/v3.md`, v2's schema and settings), the route's default from this
+release; v1 and v2 are kept unchanged and can't regenerate (until a v3 tuple passes the drafting
+smoke set, Regenerate answers `no_route`). v3 is v2's prompt plus a third mode, rewriting the one
+Step its brief names: the Step's current email as an untrusted `current_draft` block (for a
+follow-up, the other Steps' current emails as `earlier_step` blocks), then the Lead's Evidence,
+Signals and Contact as for Step 1. Your instruction comes last, after every untrusted block, in
+an `<operator_instruction>` block (every `<` and every look-alike bracket escaped, email addresses and phone numbers masked);
+the prompt says it can never override the Step brief, the grounding rules or the law and
+platform rules. Crawled text can't fake that block: an `<operator_instruction>` or
+`<campaign_note>` tag (or a look-alike) inside an untrusted block is escaped like `<untrusted>`. The answer is checked like a first draft: Step 1 must open with a live Event and
+cite only input Evidence or allowed facts; a follow-up keeps Step 1's subject and needs its own
+angle fact, never one another Step's current text cites (and a `regulation` fact where its brief
+has an angle for the Segment and Market). A price, a link or an audit the model writes anyway is
+stored and fails grounding, so it can't be approved. The instruction is never logged or put in a
+job.
+
+**Retry drafting.** A Draft whose drafting failed and that has no text shows **Retry drafting**
+(no instruction). It clears the failure (for a follow-up, on every Step 2 to 4 Draft of the
+Enrollment that still has no text, since one job drafts them together) and queues the original drafting job again on the
+interactive lane (`draft_step:<enrollment>:1` for Step 1, `draft_step:<enrollment>:2` for the
+follow-ups); the Draft says "Drafting again…" and refreshes itself until the text arrives or the
+attempt fails. Nothing retries a failed Draft on its own.
+
+**Stale Drafts.** `nextron.domain.grounding.is_stale` is the only staleness test: a cited
+Evidence item superseded, retracted or gone; a cited fact version no longer current, or no longer
+allowed for the Campaign's Segment and Market; or the cited Event retracted or no longer live. The
+Lead page tests each `ready` Draft live and shows "Stale: <reason>" (for example "Stale: a cited
+fact was edited or retracted"). When research supersedes or retracts Evidence (`EvidenceChanged`), every
+`ready` Draft whose current revision cites it is flagged `stale` in the same transaction ("Stale:
+Evidence changed"); a generated or regenerated revision clears the flag. Stale Drafts aren't
+regenerated automatically yet: regenerate them yourself.
+
+**SM-7.** `queries.drafting.regenerated_count(draft_id)` counts a Draft's regenerated revisions.
+
+**Where it lives.** `nextron.app.drafting.regeneration` (`Regenerations.regenerate`, the live
+`stale_reason`), `Drafting.flag_stale` (the `EvidenceChanged` subscriber), the builders and checks
+in `nextron.domain.step_drafting`, `nextron.domain.grounding`, and the per-Draft fragment
+`lead_draft.html` (`POST /leads/{lead}/drafts/{draft}/regenerate`, `GET
+/leads/{lead}/drafts/{draft}`). No migration.
 
 ## Leads list and Lead page
 

@@ -307,6 +307,7 @@ from starlette.routing import BaseRoute
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
+from nextron.app.drafting.regeneration import RegenerateOutcome, Regenerations
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import Backups, Budget, DashboardEntry, EngineHealth, RestoreTests
@@ -346,8 +347,9 @@ from nextron.app.setup.api import (
 from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.company_facts import InvalidFact
 from nextron.domain.contacts import PrimaryRefusal, PrimaryRefused
-from nextron.domain.data_subject_request import check_request_ref
 from nextron.domain.credentials import InvalidCredentialValue
+from nextron.domain.data_subject_request import check_request_ref
+from nextron.domain.draft import DraftStatus
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
 from nextron.domain.ids import is_ulid
 from nextron.domain.lead_import import ImportRefused
@@ -357,11 +359,12 @@ from nextron.domain.open_code import CodeCheck
 from nextron.domain.playbook import SyncTrigger
 from nextron.domain.prompts import InvalidPrompts
 from nextron.domain.recovery import RECOVERY_BANNER
-from nextron.domain.render import footer_complete
+from nextron.domain.render import FooterCheck, footer_complete
 from nextron.domain.segments import InvalidSegments
 from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
+from nextron.domain.step_drafting import check_instruction
 from nextron.domain.suppression_list import (
     ADDED,
     FILE_TOO_LARGE,
@@ -375,6 +378,7 @@ from nextron.domain.suppression_list import (
     search_key,
 )
 from nextron.domain.unsub_token import UnsubKeyInUse
+from nextron.ports.errors import AdapterError
 from nextron.web import ai_content_page as ai_rows
 from nextron.web import campaigns_page as campaign_rows
 from nextron.web import credentials_page as credential_rows
@@ -566,6 +570,7 @@ def create_app(
     erasures: Erasures,
     domain_checks: DomainChecks,
     lead_scores: LeadScores,
+    regenerations: Regenerations,
     units: Units,
     email_finding: EmailFinding | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -586,7 +591,9 @@ def create_app(
     ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
-    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``compliance`` runs the
+    answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``regenerations`` (Story 4.20)
+    runs each Draft's Regenerate and "Retry drafting" and tests its live staleness; ``compliance``
+    runs the
     Suppression List panel's add, import and Reverse, and
     evaluates each Contact's live Eligibility on the Lead page and its Contacts panel (that only
     reads); ``erasures`` erases a Contact from the Lead page's erase step and answers its
@@ -1577,44 +1584,104 @@ def create_app(
             contact.id for contact in contacts if contact.erased_at is not None
         )
 
+    def enrollment_footing(
+        enrollment: sequencing_queries.StoredEnrollment,
+    ) -> tuple[str | None, FooterCheck | None]:
+        """The Enrollment's Contact's to-address (``None`` when erased) and its Market's
+        footer check now (``None`` when the Market can't be read)."""
+        contact = research_queries.contact(enrollment.contact_id)
+        check = None
+        if contact is not None and contact.market_id is not None:
+            try:
+                market = setup_queries.market_by_id(contact.market_id)
+            except InvalidMarkets:  # unreadable: no footer check to show
+                market = None
+            if market is not None:
+                check = footer_complete(setup_queries.footer_settings(), market.definition)
+        erased = contact is None or contact.erased_at is not None
+        return (None if erased or contact is None else contact.email), check
+
+    def draft_source(
+        lead_id: str,
+        draft: drafting_queries.DraftView,
+        to_address: str | None,
+        check: FooterCheck | None,
+    ) -> lead_rows.DraftSource:
+        """What the Lead page shows of one Draft (Stories 4.12, 4.14 and 4.20)."""
+        revisions = drafting_queries.revisions(draft.id)
+        current = next((each for each in revisions if each.rev == draft.current_rev), None)
+        footer = (
+            None if current is None else drafting_queries.footer_snapshot(current.footer_snapshot_id)
+        )
+        return lead_rows.DraftSource(
+            draft,
+            revisions,
+            footer,
+            to_address,
+            check,
+            None if current is None else drafting_queries.grounding_result(draft.id, current.rev),
+            lead_id=lead_id,
+            # Story 4.20: the live staleness test (AD-7), for a ready Draft with text only
+            stale=(
+                regenerations.stale(draft)
+                if current is not None and draft.status is DraftStatus.READY
+                else None
+            ),
+        )
+
     def lead_drafts(lead_id: str) -> tuple[lead_rows.DraftSource, ...]:
         """What the Lead page's Drafts section shows of each Draft of the Lead's Enrollments
         (Story 4.12), oldest Enrollment first, each by Step, with its current revision's
-        grounding result (Story 4.14)."""
-        settings = setup_queries.footer_settings()
+        grounding result (Story 4.14) and its live staleness (Story 4.20)."""
         found: list[lead_rows.DraftSource] = []
         for enrollment in sequencing_queries.enrollments_of_lead(lead_id):
-            contact = research_queries.contact(enrollment.contact_id)
-            check = None
-            if contact is not None and contact.market_id is not None:
-                try:
-                    market = setup_queries.market_by_id(contact.market_id)
-                except InvalidMarkets:  # unreadable: no footer check to show
-                    market = None
-                if market is not None:
-                    check = footer_complete(settings, market.definition)
-            erased = contact is None or contact.erased_at is not None
-            for draft in drafting_queries.drafts_of(enrollment.id):
-                revisions = drafting_queries.revisions(draft.id)
-                current = next((each for each in revisions if each.rev == draft.current_rev), None)
-                footer = (
-                    None
-                    if current is None
-                    else drafting_queries.footer_snapshot(current.footer_snapshot_id)
-                )
-                found.append(
-                    lead_rows.DraftSource(
-                        draft,
-                        revisions,
-                        footer,
-                        None if erased or contact is None else contact.email,
-                        check,
-                        None
-                        if current is None
-                        else drafting_queries.grounding_result(draft.id, current.rev),
-                    )
-                )
+            to_address, check = enrollment_footing(enrollment)
+            found.extend(
+                draft_source(lead_id, draft, to_address, check)
+                for draft in drafting_queries.drafts_of(enrollment.id)
+            )
         return tuple(found)
+
+    def lead_draft(
+        lead_id: str, draft_id: str
+    ) -> tuple[str, sequencing_queries.StoredEnrollment, drafting_queries.DraftView] | None:
+        """The Lead's survivor id, and the Enrollment and the Draft when the Draft belongs to
+        one of the Lead's Enrollments; else ``None``."""
+        lead = discovery_queries.survivor_of(lead_id)
+        draft = drafting_queries.draft(draft_id)
+        if lead is None or draft is None or draft.enrollment_id is None:
+            return None
+        enrollment = next(
+            (
+                found
+                for found in sequencing_queries.enrollments_of_lead(lead.id)
+                if found.id == draft.enrollment_id
+            ),
+            None,
+        )
+        return None if enrollment is None else (lead.id, enrollment, draft)
+
+    def draft_answer(
+        request: Request,
+        lead_id: str,
+        draft_id: str,
+        *,
+        notice: lead_rows.Notice | None = None,
+        retrying: bool = False,
+    ) -> Response:
+        """One Draft's fragment (Story 4.20), or the 404 text when it isn't the Lead's."""
+        found = lead_draft(lead_id, draft_id)
+        if found is None:  # never echoes an id
+            return not_found_text(lead_rows.DRAFT_MISSING)
+        survivor, enrollment, draft = found
+        to_address, check = enrollment_footing(enrollment)
+        row = lead_rows.draft_row(
+            draft_source(survivor, draft, to_address, check),
+            notice=notice,
+            fragment=True,
+            retrying=retrying,
+        )
+        return page(request, lead_rows.DRAFT_TEMPLATE, draft=row)
 
     def missing_lead(request: Request) -> HTMLResponse:
         missing = page(request, lead_rows.MISSING_TEMPLATE)  # never echoes an id
@@ -1776,6 +1843,50 @@ def create_app(
             **context,
             export_forms=export_rows.lead_forms(contacts),
         )
+
+    @app.get("/leads/{lead_id}/drafts/{draft_id}", name="lead_draft")
+    @personal_data(True)  # the Draft's text names the Contact
+    def lead_draft_fragment(request: Request, lead_id: str, draft_id: str) -> Response:
+        retrying = request.query_params.get(lead_rows.RETRY_PARAM) == "1"
+        return draft_answer(request, lead_id, draft_id, retrying=retrying)
+
+    @app.post("/leads/{lead_id}/drafts/{draft_id}/regenerate", name="draft_regenerate")
+    @personal_data(True)  # the Draft's text names the Contact
+    def draft_regenerate(
+        request: Request,
+        lead_id: str,
+        draft_id: str,
+        fields: Annotated[FormFields, Depends(form_fields)],
+    ) -> Response:
+        raw = lead_rows.submitted_instruction(fields)
+        with units.open(read_only=True):
+            if lead_draft(lead_id, draft_id) is None:  # never echoes an id
+                return not_found_text(lead_rows.DRAFT_MISSING)
+        retrying = False
+        try:
+            instruction = check_instruction(raw)
+        except ValueError as refused:  # nothing ran
+            notice = lead_rows.instruction_refused(str(refused))
+        else:
+            try:
+                with units.open():
+                    result = regenerations.regenerate(draft_id, instruction)
+            except AdapterError as error:  # nothing was written
+                log.warning(
+                    "draft_regenerate_unavailable",
+                    extra={"draft_id": draft_id, "error_code": error.code},
+                )
+                notice = lead_rows.regenerate_unavailable()
+            else:
+                notice = lead_rows.regenerate_notice(
+                    str(result.outcome),
+                    result.rev,
+                    result.status,
+                    None if result.failure is None else str(result.failure),
+                )
+                retrying = result.outcome is RegenerateOutcome.RETRY_QUEUED
+        with units.open(read_only=True):  # 200, so HTMX swaps the Draft in
+            return draft_answer(request, lead_id, draft_id, notice=notice, retrying=retrying)
 
     @app.post("/leads/{lead_id}/rescore", name="lead_rescore")
     @personal_data(True)  # the Lead page's panel; a Lead's name can be a sole trader's name

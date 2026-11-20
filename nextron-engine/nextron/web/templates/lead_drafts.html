@@ -1,66 +1,14 @@
 {#- The Lead page's Drafts section (nextron.web.leads_page, Story 4.12): included in lead.html.
-    Each Draft of the Lead's Enrollments shows its kind, Step, status and due time, the current
-    composed message exactly as the prospect would receive it (plain text, autoescaped through
-    |plain), "Sending blocked: footer incomplete (...)" when its Market's footer check fails, the
-    Playbook version, the current revision's grounding badge (pass, fail or pending; Story 4.14)
-    with each flag of a fail (its code, its span in <mark>, autoescaped, and its explanation) and
-    the revision history, and "Drafting failed: <reason>. Regenerate to retry." for a Draft whose
-    drafting stored no revision (Story 4.15). A Draft's text is AI-written from crawled data:
-    the whole section carries hx-disable and holds no HTMX action. -#}
-<section class="lead-drafts" id="lead-drafts" aria-labelledby="drafts-heading" hx-disable>
+    Each Draft of the Lead's Enrollments renders from lead_draft.html (Story 4.20), which keeps
+    its AI-written text inside an element carrying hx-disable and its Regenerate form outside it,
+    so the section itself carries no hx-disable. -#}
+<section class="lead-drafts" id="lead-drafts" aria-labelledby="drafts-heading">
 <h2 id="drafts-heading">Drafts</h2>
 {%- if not drafts %}
 <p>No Drafts yet.</p>
 {%- else %}
 {%- for draft in drafts %}
-<article class="draft" data-draft="{{ draft.draft_id|plain }}">
-<h3>{{ draft.kind|plain }}{% if draft.step %}: {{ draft.step|plain }}{% endif %}</h3>
-<dl class="draft-facts">
-<dt>Status</dt>
-<dd>{{ draft.status|plain }}</dd>
-<dt>Due</dt>
-<dd>{{ draft.due|plain }}</dd>
-<dt>Playbook version</dt>
-<dd>{{ draft.playbook_version|plain }}</dd>
-<dt>Grounding</dt>
-<dd><span class="grounding-badge grounding-{{ draft.grounding|plain }}">{{ draft.grounding|plain }}</span></dd>
-</dl>
-{%- if draft.grounding_flags %}
-<ul class="grounding-flags">
-{%- for flag in draft.grounding_flags %}
-<li class="grounding-flag"><code>{{ flag.code|plain }}</code>{% if flag.span %} <mark>{{ flag.span|plain }}</mark>{% endif %} {{ flag.explanation|plain }}</li>
-{%- endfor %}
-</ul>
-{%- endif %}
-{%- if draft.blocked %}
-<p class="draft-blocked" role="alert">{{ draft.blocked|plain }}</p>
-{%- endif %}
-{%- if draft.draft_failed %}
-<p class="draft-failed" role="alert">{{ draft.draft_failed|plain }}</p>
-{%- endif %}
-{%- if draft.message %}
-<div class="draft-message">
-<p class="draft-to">To: {{ draft.message.to_address|plain }}</p>
-<p class="draft-subject">Subject: {{ draft.message.subject|plain }}</p>
-<pre class="draft-body">{{ draft.message.body|plain }}</pre>
-</div>
-{%- else %}
-<p class="draft-no-text">No text yet</p>
-{%- endif %}
-{%- if draft.revisions %}
-<table class="lead-table revision-table">
-<caption>Revision history</caption>
-<thead>
-<tr><th scope="col">Revision</th><th scope="col">Origin</th><th scope="col">Time</th><th scope="col">Hash</th></tr>
-</thead>
-<tbody>
-{%- for revision in draft.revisions %}
-<tr class="revision-row"><td>{{ revision.rev }}</td><td>{{ revision.origin|plain }}</td><td>{{ revision.at|plain }}</td><td><code>{{ revision.short_hash|plain }}</code></td></tr>
-{%- endfor %}
-</tbody>
-</table>
-{%- endif %}
-</article>
+{% include "lead_draft.html" %}
 {%- endfor %}
 {%- endif %}
 </section>

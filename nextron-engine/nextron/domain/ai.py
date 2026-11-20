@@ -57,7 +57,10 @@ adds around the route's prompt: ``brief`` (the Step brief section) and ``facts``
 Approved Company Facts section) join the cached system prompt, and ``note`` (the Campaign note:
 the Variant's angle and the Market's English variant) opens the user turn. It is frozen; each
 field is a ``str`` that encodes as UTF-8 and never shows in its ``repr``. A call without one is
-built exactly as before.
+built exactly as before. ``instruction`` (Story 4.20, default ``""``) is the Operator's
+regenerate instruction: the request appends it after the untrusted blocks, in an
+``<operator_instruction>`` block, and only a candidate that ``accepts_instruction`` may carry a
+non-blank one.
 
 **Checks the gateway shares** (an adapter raises only ``AdapterError``, so a caller's bug is
 raised here):
@@ -67,7 +70,11 @@ raised here):
   block, when the blocks name more than one subject, or when a ``block_id`` repeats.
 - ``check_urgency(urgency)`` returns ``urgency``, or raises ``TypeError`` unless it is an
   ``Urgency``; ``check_framing(framing)`` (Story 4.15) returns ``framing``, or raises
-  ``TypeError`` unless it is a ``Framing`` or ``None``.
+  ``TypeError`` unless it is a ``Framing`` or ``None``; ``check_accepts_instruction(value)``
+  (Story 4.20) raises ``TypeError`` unless ``value`` is a ``bool``, and
+  ``check_instruction_allowed(accepts_instruction, framing, *, batched=False)`` raises
+  ``ValueError`` for a non-blank ``Framing.instruction`` on a candidate that doesn't accept one,
+  or on any batch request.
 - ``check_route_fields(route, model, effort, prompt_version, schema_version)`` checks the
   fields a ``RouteTuple`` and a route candidate share, and ``check_uses_playbook(value)`` that a
   candidate's ``uses_playbook`` is a ``bool`` (Story 4.4).
@@ -207,6 +214,27 @@ def check_urgency(urgency: object) -> Urgency:
     return urgency
 
 
+def check_accepts_instruction(value: object) -> bool:
+    """``value``, or ``TypeError`` unless it is a ``bool`` (Story 4.20)."""
+    if not isinstance(value, bool):
+        raise TypeError("accepts_instruction must be a bool")
+    return value
+
+
+def check_instruction_allowed(
+    accepts_instruction: bool, framing: object, *, batched: bool = False
+) -> None:
+    """``ValueError`` when ``framing`` carries a non-blank Operator instruction that a request
+    may not: a candidate without ``accepts_instruction``, or any batch request (Story 4.20)."""
+    instruction = getattr(framing, "instruction", "")
+    if not isinstance(instruction, str) or not instruction.strip():
+        return
+    if batched:
+        raise ValueError("an Operator instruction is never batched")
+    if not accepts_instruction:
+        raise ValueError("this route candidate takes no Operator instruction")
+
+
 def check_framing(framing: object) -> "Framing | None":
     """``framing``, or ``TypeError`` unless it is a ``Framing`` or ``None``."""
     if framing is not None and not isinstance(framing, Framing):
@@ -326,8 +354,10 @@ class Framing:
     brief: str = field(repr=False)
     facts: str = field(repr=False)
     note: str = field(repr=False)
+    instruction: str = field(default="", repr=False)  # Story 4.20: the Operator's instruction
 
     def __post_init__(self) -> None:
         _utf8("brief", self.brief)
         _utf8("facts", self.facts)
         _utf8("note", self.note)
+        _utf8("instruction", self.instruction)

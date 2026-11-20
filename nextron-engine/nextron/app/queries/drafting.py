@@ -22,6 +22,8 @@ Story 4.12 (a Draft's text):
   ``current_revision(draft)``: the revision a ``DraftView``'s ``current_rev`` names, or
   ``None`` without one;
 - ``ready_with_text()``: every ``ready`` Draft that has a revision, by ``id``;
+- ``regenerated_count(draft_id) -> int`` (Story 4.20, SM-7): how many of the Draft's revisions
+  are of origin ``regenerated`` (0 for a text that isn't a ULID);
 - ``footer_snapshot(snapshot_id)``: the stored footer snapshot, or ``None``;
 - ``export_pii(contact_id) -> {"draft_revisions": tuple[dict, ...]}`` (Story 3.15's subject
   access exporter, added at the merge of Story 4.12): every column of each revision of the
@@ -200,6 +202,11 @@ def current_revision(found: DraftView) -> RevisionView | None:
 def ready_with_text() -> tuple[DraftView, ...]:
     """Every ``ready`` Draft that has a revision, by ``id``."""
     return tuple(_view(stored) for stored in drafts_repo.ready_with_text())
+
+
+def regenerated_count(draft_id: str) -> int:
+    """How many of the Draft's revisions a regenerate wrote (SM-7, Story 4.20)."""
+    return sum(1 for found in revisions(draft_id) if found.origin is RevisionOrigin.REGENERATED)
 
 
 def footer_snapshot(snapshot_id: str) -> StoredFooterSnapshot | None:

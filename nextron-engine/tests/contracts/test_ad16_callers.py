@@ -35,6 +35,13 @@ violation.
   ``DraftingBatches.apply_draft_sequence_result``, a follow-up batch result's apply) applies an
   Enrollment's item before Step 1 has a revision: its one gate call (the Contact, email, cold)
   comes before its one write (the next ``pending`` item), and ``Blocked`` writes nothing.
+  ``drafting.regenerate`` (Story 4.20: ``Regenerations.regenerate``, the Lead page's
+  Regenerate) retries a Step 1 whose drafting failed ``no_route``: its one gate call (the
+  Contact, email, cold) comes before its writes (the failure cleared, the ``draft_step`` job
+  queued), and ``Blocked`` writes nothing at all. A Draft with text is gated before any AI call
+  and again before its write
+  (``test_a_regenerate_with_text_is_gated_before_the_call_and_the_write``, fakes only: a
+  blocked Contact gets no call; one blocked during the call gets no revision).
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -79,7 +86,7 @@ violation.
 import ast
 import importlib.util
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -99,6 +106,8 @@ from nextron.app.drafting.api import Drafting, Traceability
 from nextron.app.drafting.batches import DraftingBatches
 from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
+from nextron.app.drafting import regeneration as regeneration_module
+from nextron.app.drafting.regeneration import RegenerateOutcome, Regenerations
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
 from nextron.app.queries import drafting as drafting_queries
@@ -118,7 +127,7 @@ from nextron.db.uow import UnitOfWorkFactory, current, use_case
 from nextron.domain import seed_yaml
 from nextron.domain.address_class import ASSIGNMENT
 from nextron.domain.ai_batch import BatchOwner
-from nextron.domain.ai import Urgency
+from nextron.domain.ai import Effort, RouteTuple, UntrustedBlock, Urgency
 from nextron.domain.job import Lane
 from nextron.domain.contactability import (
     Allowed,
@@ -138,7 +147,7 @@ from nextron.domain.markets import validate_markets
 from nextron.domain.offers import validate_offers
 from nextron.domain.segments import validate_segments
 from nextron.domain.sequences import validate_sequences
-from nextron.ports.llm import LlmOk, LlmUsage
+from nextron.ports.llm import LlmInvalid, LlmOk, LlmResult, LlmUsage
 from tests.app.test_signal_extraction import HAIKU as RESEARCH_MODEL
 from tests.app.test_signal_extraction import HOME_HTML as RESEARCH_HOME_HTML
 from tests.app.test_signal_extraction import build_world as research_world
@@ -246,6 +255,8 @@ MANIFEST: Final = (
         ("app/drafting/",),
         r"DraftingBatches\.apply_draft_sequence_result",
     ),
+    # Story 4.20: no regenerate (an AI call) nor retry for a subject that may not be reached
+    Caller("drafting.regenerate", ("app/drafting/",), r"Regenerations\.regenerate"),
     # Story 4.17: a Message Batch result applies only while the Lead may still be reached
     Caller(
         "research.batch_apply",
@@ -1433,6 +1444,157 @@ def _follow_up_apply(world: World, tag: str) -> tuple[Callable[[], object], Expe
     return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
 
 
+def _regenerate(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 4.20: "Retry drafting" on a Step 1 whose drafting failed ``no_route``: one gate
+    call before its writes (the failure cleared, the ``draft_step`` job queued)."""
+    contact_id, campaign_id = _enrollable_contact(world, tag)
+    clock = FrozenClock(T0)
+    queue = queue_on(clock)
+    enrolled = world.transact(
+        lambda: Sequencing(clock, queue).enroll(
+            contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
+        )
+    )
+    assert isinstance(enrolled, NewEnrollment)
+    llm = ScriptedLlm()  # never called
+    with world.units.open():  # no tuple is active: no_route
+        StepDrafts(clock, llm, queue).draft(enrolled.enrollment_id, 1, Urgency.SOON)
+    with world.engine.connect() as connection:
+        draft_id = str(
+            connection.exec_driver_sql(
+                "SELECT id FROM drafts WHERE enrollment_id = ?", (enrolled.enrollment_id,)
+            ).scalar_one()
+        )
+    regenerations = Regenerations(clock, llm, queue)
+    _RETRIED[tag] = draft_id
+
+    def action() -> object:
+        with world.units.open():
+            return regenerations.regenerate(draft_id)
+
+    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+_RETRIED: dict[str, str] = {}  # the ``_regenerate`` case's tag -> its Draft id
+
+
+def _regenerate_retried(world: World) -> None:
+    """The allowed retry cleared its own Draft's failure; the blocked one kept its own."""
+    retried = dict(_RETRIED)
+    _RETRIED.clear()
+    assert {tag.rsplit("-", 1)[1] for tag in retried} == {"allowed", "blocked"}
+    with world.engine.connect() as connection:
+        for tag, draft_id in retried.items():
+            row = tuple(
+                connection.exec_driver_sql(
+                    "SELECT draft_failed_at, draft_failed_reason, current_rev FROM drafts "
+                    "WHERE id = ?",
+                    (draft_id,),
+                ).one()
+            )
+            if tag.endswith("-allowed"):
+                assert row == (None, None, None)
+            else:
+                assert row[1:] == ("no_route", None)
+                assert row[0] is not None
+
+
+class _Regenerating(ScriptedLlm):
+    """Records the call, runs ``during`` (no transaction open), and answers ``LlmInvalid``: the
+    apply's gate comes before the result is read."""
+
+    def __init__(self, during: Callable[[], None]) -> None:
+        super().__init__()
+        self.during = during
+
+    def run(
+        self,
+        route_tuple: RouteTuple,
+        inputs: Sequence[UntrustedBlock],
+        urgency: Urgency,
+        *,
+        framing: object = None,
+    ) -> LlmResult:
+        self.calls.append((route_tuple, tuple(inputs), urgency))
+        self.during()
+        return LlmInvalid(model=route_tuple.model, usage=LlmUsage(requests=1, cost_micros=1))
+
+
+def test_a_regenerate_with_text_is_gated_before_the_call_and_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 4.20, ``drafting.regenerate`` on a Draft with text (fakes only: the gate, the LLM
+    and the active v3 tuple): ``Blocked`` before the call means no call and no write; ``Blocked``
+    while the call is out means no revision."""
+    v3 = RouteTuple("draft_sequence", "claude-opus-5-5", Effort.HIGH, "v3", 2, "Draft it.")
+    queries = regeneration_module.playbook_queries
+    monkeypatch.setattr(queries, "active_tuple", lambda route: v3)
+    monkeypatch.setattr(queries, "active_tuple_id", lambda route: "tuple-v3")
+    with world_at(tmp_path / "db") as world:
+        contact_id, campaign_id = _enrollable_contact(world, "regen-text")
+        clock = FrozenClock(T0)
+        queue = queue_on(clock)
+        enrolled = world.transact(
+            lambda: Sequencing(clock, queue).enroll(
+                contact_id, campaign_id, EnrollmentOrigin.SELECTION, (1,)
+            )
+        )
+        assert isinstance(enrolled, NewEnrollment)
+        with world.units.open():
+            Setup(clock).save(GROUNDING_FOOTER)
+        with world.engine.connect() as connection:
+            draft_id = str(
+                connection.exec_driver_sql(
+                    "SELECT id FROM drafts WHERE enrollment_id = ?", (enrolled.enrollment_id,)
+                ).scalar_one()
+            )
+
+        def write() -> int:
+            view = drafting_queries.draft(draft_id)
+            assert view is not None
+            return Drafting(clock, queue)._append(
+                view,
+                "A question about intake",
+                "Hi Jane,\n\nA short note about your intake.",
+                RevisionOrigin.GENERATED,
+                Traceability((), (), None, None, None, None, None, None),
+                clock.now(),
+                urgency=Urgency.SOON,
+            )
+
+        assert world.transact(write) == 1
+        gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+
+        def regenerate(llm: ScriptedLlm) -> object:
+            with world.units.open():
+                return Regenerations(clock, llm, queue).regenerate(draft_id, "shorter")
+
+        # Blocked before the call: no AI call and no write
+        before = table_counts(world.engine)
+        unused = ScriptedLlm()
+        with recording(world.engine, monkeypatch, BLOCKED) as recorder:
+            outcome = regenerate(unused)
+        assert getattr(outcome, "outcome", None) is RegenerateOutcome.BLOCKED
+        assert unused.calls == []
+        assert recorder.calls == [gate]
+        assert not any(isinstance(entry, Write) for entry in recorder.log)
+        assert table_counts(world.engine) == before
+
+        # Allowed before the call, Blocked while it is out: no revision written
+        with recording(world.engine, monkeypatch, Allowed()) as recorder:
+
+            def block() -> None:
+                recorder.answer = BLOCKED
+
+            racing = _Regenerating(block)
+            outcome = regenerate(racing)
+        assert getattr(outcome, "outcome", None) is RegenerateOutcome.BLOCKED
+        assert len(racing.calls) == 1
+        assert recorder.calls == [gate, gate]
+        assert not any(isinstance(entry, Write) for entry in recorder.log)
+        assert table_counts(world.engine) == before
+
+
 def _follow_up_requeued(world: World) -> None:
     """The allowed apply queued the next item; the blocked one wrote nothing and no Draft has a
     revision (the scenario isn't vacuous)."""
@@ -1596,6 +1758,8 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             after_blocked=_draft_step_recorded,
         ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
+        # Story 4.20: Blocked writes nothing at all
+        "drafting.regenerate": Scenario((_regenerate,), after_blocked=_regenerate_retried),
         # Story 4.18: Blocked writes nothing at all: the item goes stale in the caller's write
         "drafting.batch_apply": Scenario((_follow_up_apply,), after_blocked=_follow_up_requeued),
         # Story 4.17: Blocked writes nothing at all: the item goes stale in the caller's write
@@ -1703,6 +1867,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.draft_step",  # Story 4.15
         "research.batch_apply",  # Story 4.17
         "drafting.batch_apply",  # Story 4.18
+        "drafting.regenerate",  # Story 4.20
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

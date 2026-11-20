@@ -129,6 +129,7 @@ FILES = [
     "nextron/domain/grounding_rules.py",
     "nextron/domain/grounding_check.py",
     "nextron/domain/step_drafting.py",
+    "nextron/domain/grounding.py",  # Story 4.20
     "nextron/domain/ai_batch.py",
     "nextron/domain/drafting_smoke.py",
     "nextron/db/__init__.py",
@@ -270,6 +271,7 @@ FILES = [
     "nextron/app/research/finding.py",
     "nextron/app/research/batches.py",
     "nextron/app/drafting/batches.py",  # Story 4.18
+    "nextron/app/drafting/regeneration.py",  # Story 4.20
     "nextron/app/scoring/lead_scores.py",
     "nextron/app/discovery/places.py",
     "nextron/adapters/__init__.py",
@@ -286,6 +288,7 @@ FILES = [
     "nextron/adapters/ai/prompts/grounding_check_fallback/v1.md",
     "nextron/adapters/ai/prompts/draft_sequence/v1.md",
     "nextron/adapters/ai/prompts/draft_sequence/v2.md",  # Story 4.18
+    "nextron/adapters/ai/prompts/draft_sequence/v3.md",  # Story 4.20
     "nextron/adapters/backup_target/__init__.py",
     "nextron/adapters/clock/__init__.py",
     "nextron/adapters/companies_house/__init__.py",
@@ -358,6 +361,7 @@ FILES = [
     "nextron/web/templates/lead.html",
     "nextron/web/templates/lead_contacts.html",
     "nextron/web/templates/lead_drafts.html",
+    "nextron/web/templates/lead_draft.html",  # Story 4.20
     "nextron/web/templates/contact_erase.html",
     "nextron/web/templates/contact_erase_panel.html",
     "nextron/web/templates/lead_legal_form.html",

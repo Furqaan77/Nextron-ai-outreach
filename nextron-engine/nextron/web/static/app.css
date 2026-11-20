@@ -942,3 +942,30 @@ button.secondary {
   border-bottom: 1px solid var(--line);
   overflow-wrap: anywhere;
 }
+
+/* Story 4.20: a Draft's Regenerate form, its progress indicator and the stale badge. The
+   indicator shows only while HTMX runs the form's request (includeIndicatorStyles is off). */
+.draft-regenerate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.5rem 0 0;
+}
+
+.draft-regenerate input[type="text"] {
+  min-width: 16rem;
+}
+
+.htmx-indicator {
+  opacity: 0;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+.stale-badge {
+  font-weight: 600;
+}

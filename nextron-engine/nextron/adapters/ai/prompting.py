@@ -17,11 +17,13 @@ live only in the system prompt.
 
 **Escaping** (``escape(text)``). A delimiter look-alike is ``<`` or one of its look-alikes
 (U+FF1C, U+FE64, U+2039, U+2329, U+27E8, U+3008), then optional whitespace and an optional
-``/`` (with optional whitespace after it), then ``untrusted`` in any case, each letter ASCII or
-fullwidth. Its bracket becomes ``&lt;``; nothing else in the text changes, so ``&``, quotation
-marks and any other ``<`` stay verbatim. ``</untrusted>``, ``< / UnTrUsted >`` and
-``＜ｕｎｔｒｕｓｔｅｄ`` therefore all start with ``&lt;``, and ``Smith & Jones <b>`` stays as it
-is.
+``/`` (with optional whitespace after it), then a delimiter name in any case, each letter ASCII
+or fullwidth (and its ``_`` ASCII or fullwidth): ``untrusted``, ``operator_instruction`` or
+``campaign_note`` (Story 4.20: crawled text can't fake the Operator's instruction block or the
+Campaign note). Its bracket becomes ``&lt;``; nothing else in the text changes, so ``&``,
+quotation marks and any other ``<`` stay verbatim. ``</untrusted>``, ``< / UnTrUsted >``,
+``＜ｕｎｔｒｕｓｔｅｄ`` and ``<operator_instruction>`` therefore all start with ``&lt;``, and
+``Smith & Jones <b>`` stays as it is.
 
 **``build_request(route_tuple, candidate, blocks, max_tokens, *, framing=None)``** returns the
 keyword arguments for ``messages.create``, and nothing else:
@@ -40,6 +42,12 @@ keyword arguments for ``messages.create``, and nothing else:
   only on the last; and the user turn starts with ``<campaign_note>``, the escaped
   ``framing.note``, ``</campaign_note>`` and a blank line (left out when the note is blank),
   followed by ``user_turn(blocks)``. Without one, the request is exactly as before;
+- with a non-blank ``framing.instruction`` (Story 4.20, the Operator's regenerate instruction):
+  the user turn ends, after ``user_turn(blocks)`` (so after the last ``</untrusted>``), with a
+  blank line, ``<operator_instruction>``, the instruction with every ``<`` and every
+  look-alike bracket (the set above) turned into ``&lt;``, and ``</operator_instruction>`` (``instruction_block``). A blank instruction adds
+  nothing. Only a candidate with ``accepts_instruction`` (``draft_sequence`` v3) may carry a
+  non-blank one: any other raises ``ValueError`` before any request (``check_instruction``);
 - ``messages``: one user message, ``user_turn(blocks)``;
 - ``output_config``: the tuple's ``effort``, and ``format`` ``json_schema`` with the
   candidate's wire schema (``schemas.wire_schema``), never in the system text.
@@ -60,6 +68,8 @@ candidate's ``max_tokens``, except that the cached prefix's last block carries
 ``cache_control`` ``{"type": "ephemeral", "ttl": "1h"}`` (a batch may take longer than the
 5-minute cache) and it **never** carries ``extra_headers``, ``extra_body`` or ``fallbacks``,
 whatever ``server_fallbacks`` says: the Batches API rejects a request with ``fallbacks``.
+A non-blank ``framing.instruction`` raises ``ValueError`` there, whatever the candidate (an
+Operator regenerate is never batched, Story 4.20).
 """
 
 import re
@@ -68,12 +78,22 @@ from typing import Any, Final
 
 from nextron.adapters.ai.routes import Candidate
 from nextron.adapters.ai.schemas import wire_schema
-from nextron.domain.ai import Framing, RouteTuple, UntrustedBlock, check_blocks, check_framing
+from nextron.domain.ai import (
+    Framing,
+    RouteTuple,
+    UntrustedBlock,
+    check_blocks,
+    check_framing,
+    check_instruction_allowed,
+)
 from nextron.domain.playbook import playbook_section
 
 # "<" and the characters that render like it.
 BRACKETS: Final = "<＜﹤‹〈⟨〈"
 WORD: Final = "untrusted"
+# Story 4.20: every delimiter name the request uses, so none can be faked inside a block.
+DELIMITERS: Final = (WORD, "operator_instruction", "campaign_note")
+UNDERSCORES: Final = "_＿"  # "_" and its fullwidth form
 FULLWIDTH_SMALL_A: Final = 0xFF41
 FULLWIDTH_CAPITAL_A: Final = 0xFF21
 FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
@@ -96,9 +116,20 @@ def _letter(letter: str) -> str:
     return "[" + "".join(variants) + "]"
 
 
+def _name(word: str) -> str:
+    """A pattern for the delimiter name ``word``: each letter as ``_letter``, each ``_`` ASCII
+    or fullwidth."""
+    return "".join("[" + UNDERSCORES + "]" if c == "_" else _letter(c) for c in word)
+
+
 LOOKALIKE: Final = re.compile(
-    "[" + re.escape(BRACKETS) + r"](?=\s*/?\s*" + "".join(_letter(c) for c in WORD) + ")"
+    "["
+    + re.escape(BRACKETS)
+    + r"](?=\s*/?\s*(?:"
+    + "|".join(_name(word) for word in DELIMITERS)
+    + "))"
 )
+ANY_BRACKET: Final = re.compile("[" + re.escape(BRACKETS) + "]")
 ESCAPED_BRACKET: Final = "&lt;"
 
 
@@ -126,6 +157,22 @@ def _note(note: str) -> str:
     return f"<campaign_note>\n{escape(note)}\n</campaign_note>\n\n" if note.strip() else ""
 
 
+def instruction_block(instruction: str) -> str:
+    """The Operator instruction block that ends a regenerate's user turn (Story 4.20), or
+    ``""`` for a blank instruction: every ``<`` and every look-alike bracket in it becomes
+    ``&lt;``."""
+    if not instruction.strip():
+        return ""
+    escaped = ANY_BRACKET.sub(ESCAPED_BRACKET, instruction)
+    return f"\n\n<operator_instruction>\n{escaped}\n</operator_instruction>"
+
+
+def check_instruction(candidate: Candidate, framing: Framing | None) -> None:
+    """``ValueError`` when ``framing`` carries a non-blank instruction ``candidate`` doesn't
+    accept (Story 4.20)."""
+    check_instruction_allowed(candidate.accepts_instruction, framing)
+
+
 def _params(
     route_tuple: RouteTuple,
     candidate: Candidate,
@@ -136,6 +183,7 @@ def _params(
 ) -> dict[str, Any]:
     """The request keys a direct call and a batch item share."""
     check_framing(framing)
+    check_instruction(candidate, framing)
     texts = [route_tuple.system_prompt]
     if framing is not None and framing.brief.strip():
         texts.append(framing.brief)
@@ -147,7 +195,7 @@ def _params(
     system[-1]["cache_control"] = dict(cache_control)  # the cached prefix ends here
     content = user_turn(blocks)
     if framing is not None:
-        content = _note(framing.note) + content
+        content = _note(framing.note) + content + instruction_block(framing.instruction)
     return {
         "model": route_tuple.model,
         "max_tokens": max_tokens,
@@ -185,6 +233,7 @@ def build_batch_params(
 ) -> dict[str, Any]:
     """The ``params`` of one Message Batch item (Story 4.17): never any fallback keys; see the
     module docstring."""
+    check_instruction_allowed(candidate.accepts_instruction, framing, batched=True)
     return _params(
         route_tuple, candidate, blocks, candidate.max_tokens, framing, BATCH_CACHE_CONTROL
     )

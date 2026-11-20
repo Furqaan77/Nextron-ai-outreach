@@ -80,13 +80,38 @@ and ``FOLLOW_UP_SCHEMA`` 2 (the ``draft_sequence`` schema that can write follow-
 - ``follow_up_fingerprint(route_tuple_key, step_1_draft_id, step_1_rev, evidence_ids, facts)``:
   an ``ai_batch.Fingerprint`` of the tuple key, ``step_1:<draft id>`` at its rev, each
   ``evidence:<id>`` and each ``fact:<id>`` at its version.
+**Story 4.20: regenerating one Step.** ``REGENERATE_PROMPTS`` (``{"v3"}``) are the
+``draft_sequence`` prompt versions that know the rewrite mode, the ``current_draft`` block and
+the ``<operator_instruction>``; ``MAX_INSTRUCTION`` is 200.
+
+- ``check_instruction(instruction) -> str | None``: ``None`` stays ``None``; else a ``str``
+  (``TypeError``), stripped, blank is ``None``; longer than ``MAX_INSTRUCTION`` or holding any
+  character of category ``Cc``, ``Cf``, ``Zl`` or ``Zp`` (line breaks, U+2028/U+2029, bidi
+  and zero-width format characters) raises ``ValueError``.
+- ``regenerate_framing(brief, segment, market, facts, angle_note, english_variant,
+  instruction)``: ``framing``'s (the one Step's brief with its Segment x Market angle, the
+  allowed facts, the Variant's note for that Step and the English line), with ``instruction``
+  masked (``[email]``, ``[phone]``) as ``Framing.instruction`` (``""`` for ``None``).
+- ``regenerate_blocks(subject_key, step, current_subject, current_body, other_steps, evidence,
+  signals, contact)``: a ``current_draft`` block (id ``step_<n>``: ``subject: <subject>``, a
+  blank line, the body); then, for a follow-up (``step`` 2 or more), one ``earlier_step`` block
+  (id ``step_<n>``, the same layout) per ``RegenStep(step, subject, body)`` in
+  ``other_steps`` (the other Steps' current revisions, by Step); then ``input_blocks``.
+- ``read_follow_up(parsed, step) -> FollowUp | None``: exactly one ``steps`` entry, for
+  ``step``; else ``None``. ``validate_follow_up(found, *, evidence_ids, facts, other_fact_ids,
+  needs_regulation, regulation_facts) -> bool``: the body non-empty after strip, every claim
+  cites one input Evidence id or input fact version, the angle is an input fact version whose
+  fact id ``other_fact_ids`` (every fact id another Step's current revision cites) doesn't
+  hold, and a regulation fact version when ``needs_regulation``.
+
 - ``next_slot(after, at, timezone)``: the first UTC instant after ``after`` whose local time in
   ``timezone`` is ``at``; ``draft_deadline_of(created_at, submit_at, deadline, timezone)``: the
   first ``deadline`` after the first ``submit_at`` slot after ``created_at``.
 """
 
+import unicodedata
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any, Final
@@ -109,6 +134,12 @@ DRAFT_STEP_JOB: Final = "draft_step"
 ENROLLMENT_ID_FIELD: Final = "enrollment_id"
 STEP_FIELD: Final = "step"
 MAX_REASON: Final = 32
+REGENERATE_PROMPTS: Final = frozenset({"v3"})  # Story 4.20: the prompts that know a rewrite
+CURRENT_DRAFT_SOURCE: Final = "current_draft"
+MAX_INSTRUCTION: Final = 200
+# Unicode categories an instruction may not hold: control, format (bidi, zero-width) and the
+# line and paragraph separators.
+REFUSED_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 EVIDENCE_SOURCE: Final = "evidence"
 SIGNAL_SOURCE: Final = "signal"
@@ -679,6 +710,121 @@ def follow_up_fingerprint(
     inputs += [(f"evidence:{found}", 0) for found in evidence_ids]
     inputs += [(f"fact:{fact_id}", version) for fact_id, version in facts]
     return Fingerprint(route_tuple_key, tuple(inputs))
+
+
+# Regenerating one Step (Story 4.20) ---------------------------------------------------------
+
+
+def check_instruction(instruction: object) -> str | None:
+    """The Operator's regenerate instruction, stripped, or ``None`` when absent or blank; see
+    the module docstring."""
+    if instruction is None:
+        return None
+    if not isinstance(instruction, str):
+        raise TypeError("the instruction must be a str or None")
+    chosen = instruction.strip()
+    if not chosen:
+        return None
+    if len(chosen) > MAX_INSTRUCTION:
+        raise ValueError(f"the instruction must be at most {MAX_INSTRUCTION} characters")
+    if any(unicodedata.category(character) in REFUSED_CATEGORIES for character in chosen):
+        raise ValueError("the instruction must be one line without control characters")
+    return chosen
+
+
+def regenerate_framing(
+    brief: StepBrief,
+    segment: str,
+    market: str,
+    facts: Iterable[DraftFact],
+    angle_note: str | None,
+    english_variant: EnglishVariant,
+    instruction: str | None,
+) -> Framing:
+    """A regenerate's trusted framing: ``framing``'s, with the masked instruction."""
+    base = framing(brief, segment, market, facts, angle_note, english_variant)
+    return replace(base, instruction="" if instruction is None else mask(instruction))
+
+
+def step_block_id(step: int) -> str:
+    """``step_<n>``: the block id of Step ``step``'s email."""
+    return f"step_{step}"
+
+
+@dataclass(frozen=True, slots=True)
+class RegenStep:
+    """Another Step's current email, as a regenerate shows it."""
+
+    step: int
+    subject: str
+    body: str
+
+
+def regenerate_blocks(
+    subject_key: str,
+    step: int,
+    current_subject: str,
+    current_body: str,
+    other_steps: Iterable[RegenStep],
+    evidence: Iterable[DraftEvidence],
+    signals: Iterable[DraftSignal],
+    contact: DraftContact,
+) -> list[UntrustedBlock]:
+    """A regenerate's untrusted blocks; see the module docstring."""
+    blocks = [
+        UntrustedBlock(
+            subject_key,
+            CURRENT_DRAFT_SOURCE,
+            step_block_id(step),
+            mask(f"subject: {current_subject}\n\n{current_body}"),
+        )
+    ]
+    if step != FIRST_STEP:
+        blocks += [
+            UntrustedBlock(
+                subject_key,
+                EARLIER_STEP_SOURCE,
+                step_block_id(other.step),
+                mask(f"subject: {other.subject}\n\n{other.body}"),
+            )
+            for other in sorted(other_steps, key=lambda found: found.step)
+            if other.step != step
+        ]
+    return [*blocks, *input_blocks(subject_key, evidence, signals, contact)]
+
+
+def read_follow_up(parsed: Mapping[str, Any], step: int) -> FollowUp | None:
+    """The one follow-up of a regenerate's validated ``DraftSequenceV2`` answer: exactly one
+    ``steps`` entry, for ``step``; else ``None``."""
+    proposal = read_follow_ups(parsed)
+    if len(proposal.steps) != 1 or proposal.steps[0].step != step:
+        return None
+    rows = parsed.get("steps")
+    if not isinstance(rows, list) or len(rows) != 1:
+        return None
+    return proposal.steps[0]
+
+
+def validate_follow_up(
+    found: FollowUp,
+    *,
+    evidence_ids: Collection[str],
+    facts: Collection[tuple[str, int]],
+    other_fact_ids: Collection[str],
+    needs_regulation: bool,
+    regulation_facts: Collection[tuple[str, int]],
+) -> bool:
+    """Whether code accepts one regenerated follow-up; see the module docstring."""
+    if not isinstance(found, FollowUp):
+        raise TypeError("validate_follow_up takes a FollowUp")
+    if not found.body.strip():
+        return False
+    if not all(_cites(claim, evidence_ids, facts) for claim in found.claims):
+        return False
+    angle = found.angle
+    if angle is None or angle not in facts or angle[0] in other_fact_ids:
+        return False
+    return not needs_regulation or angle in regulation_facts
 
 
 # The deadline (Story 4.18) ------------------------------------------------------------------

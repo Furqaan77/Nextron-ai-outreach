@@ -1,0 +1,76 @@
+{#- One Draft of the Lead page (nextron.web.leads_page, Stories 4.12, 4.14, 4.15 and 4.20):
+    included once per Draft by lead_drafts.html, and the whole answer to
+    POST /leads/{lead_id}/drafts/{draft_id}/regenerate and GET /leads/{lead_id}/drafts/{draft_id},
+    which HTMX swaps in for this article. Its kind, Step, status and due time, the Playbook
+    version, the grounding badge (pass, fail or pending) with each flag of a fail, the
+    "Stale: <reason>" badge, the current composed message exactly as the prospect would receive
+    it (plain text, autoescaped through |plain), "Sending blocked: footer incomplete (...)", the
+    drafting failure notice and the revision history all sit inside the draft-content element,
+    which carries hx-disable: a Draft's text is AI-written from crawled data. The regenerate
+    notice and the Regenerate (or "Retry drafting") form sit outside it. A fragment whose
+    grounding is pending, or whose retry is drafting, re-fetches itself every 3 s. -#}
+<article class="draft" id="draft-{{ draft.draft_id|plain }}" data-draft="{{ draft.draft_id|plain }}"{% if draft.poll %} hx-get="{{ draft.poll }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+<div class="draft-content" hx-disable>
+<h3>{{ draft.kind|plain }}{% if draft.step %}: {{ draft.step|plain }}{% endif %}</h3>
+<dl class="draft-facts">
+<dt>Status</dt>
+<dd>{{ draft.status|plain }}</dd>
+<dt>Due</dt>
+<dd>{{ draft.due|plain }}</dd>
+<dt>Playbook version</dt>
+<dd>{{ draft.playbook_version|plain }}</dd>
+<dt>Grounding</dt>
+<dd><span class="grounding-badge grounding-{{ draft.grounding|plain }}">{{ draft.grounding|plain }}</span></dd>
+</dl>
+{%- if draft.stale %}
+<p class="draft-stale" role="status"><span class="stale-badge">{{ draft.stale|plain }}</span></p>
+{%- endif %}
+{%- if draft.grounding_flags %}
+<ul class="grounding-flags">
+{%- for flag in draft.grounding_flags %}
+<li class="grounding-flag"><code>{{ flag.code|plain }}</code>{% if flag.span %} <mark>{{ flag.span|plain }}</mark>{% endif %} {{ flag.explanation|plain }}</li>
+{%- endfor %}
+</ul>
+{%- endif %}
+{%- if draft.blocked %}
+<p class="draft-blocked" role="alert">{{ draft.blocked|plain }}</p>
+{%- endif %}
+{%- if draft.draft_failed %}
+<p class="draft-failed" role="alert">{{ draft.draft_failed|plain }}</p>
+{%- endif %}
+{%- if draft.message %}
+<div class="draft-message">
+<p class="draft-to">To: {{ draft.message.to_address|plain }}</p>
+<p class="draft-subject">Subject: {{ draft.message.subject|plain }}</p>
+<pre class="draft-body">{{ draft.message.body|plain }}</pre>
+</div>
+{%- else %}
+<p class="draft-no-text">No text yet</p>
+{%- endif %}
+{%- if draft.revisions %}
+<table class="lead-table revision-table">
+<caption>Revision history</caption>
+<thead>
+<tr><th scope="col">Revision</th><th scope="col">Origin</th><th scope="col">Time</th><th scope="col">Hash</th></tr>
+</thead>
+<tbody>
+{%- for revision in draft.revisions %}
+<tr class="revision-row"><td>{{ revision.rev }}</td><td>{{ revision.origin|plain }}</td><td>{{ revision.at|plain }}</td><td><code>{{ revision.short_hash|plain }}</code></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+</div>
+{%- if draft.notice %}
+<p class="notice draft-notice{% if draft.notice.role == 'alert' %} notice-refused{% endif %}" role="{{ draft.notice.role }}">{{ draft.notice.text|plain }}</p>
+{%- endif %}
+{%- if draft.regenerate %}
+<form class="draft-regenerate" method="post" action="{{ draft.regenerate }}" hx-post="{{ draft.regenerate }}" hx-target="#draft-{{ draft.draft_id|plain }}" hx-swap="outerHTML" hx-sync="this:drop" hx-disabled-elt="find button">{{ csrf_field() }}
+{%- if not draft.retry %}
+<label>Instruction (optional) <input type="text" name="instruction" maxlength="200" autocomplete="off"></label>
+{%- endif %}
+<button type="submit" class="secondary">{% if draft.retry %}Retry drafting{% else %}Regenerate{% endif %}</button>
+<span class="htmx-indicator" role="status">Regenerating…</span>
+</form>
+{%- endif %}
+</article>

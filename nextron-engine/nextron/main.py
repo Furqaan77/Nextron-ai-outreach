@@ -133,8 +133,15 @@ data); ``Enrolled`` -> ``Pipeline(clock).on_enrolled`` (Story 4.8: a ``new`` Lea
 Market's ``ready`` Drafts get a ``footer_change`` revision; Story 4.14: each new revision's
 ``check_grounding`` job is enqueued in the same transaction, through a ``JobQueue`` on
 ``enqueue_only_job_types()``, ``build_job_types`` with every service unwired, so the job type's
-lanes and priority are the runner's own; the runner's registry runs the job). Each uses
-``SystemClock()`` when no clock is given.
+lanes and priority are the runner's own; the runner's registry runs the job); ``EvidenceChanged``
+-> ``Drafting(clock, queue).flag_stale`` (Story 4.20: the ``ready`` Drafts whose current
+revision cites the changed Evidence are flagged ``stale``). Each uses ``SystemClock()`` when no
+clock is given.
+
+**Regenerate (Story 4.20).** ``build_app`` builds the ``drafting`` service's
+``Regenerations(clock, llm, queue)`` (``nextron.app.drafting.regeneration``) on the one LLM
+gateway and hands it to the dashboard (``create_app(..., regenerations=...)``): each Draft's
+Regenerate and "Retry drafting", and its live stale badge.
 
 **Erasure (Story 3.13).** ``build_app`` builds one ``Erasures(clock, compliance,
 queue=queue)`` (``nextron.app.compliance.erasure``), on the one ``Compliance(clock)`` the
@@ -802,6 +809,7 @@ from nextron.app.drafting.api import Drafting
 from nextron.app.drafting.batches import DraftingBatches
 from nextron.app.drafting.generation import StepDrafts
 from nextron.app.drafting.grounding import GroundingChecks
+from nextron.app.drafting.regeneration import Regenerations
 from nextron.app.jobqueue import api as jobqueue_api
 from nextron.app.jobqueue.api import JobQueue, error_code
 from nextron.app.notify import api as notify_api
@@ -921,6 +929,7 @@ from nextron.domain.markets import InvalidMarkets, validate_markets
 from nextron.domain.notifications import (
     ContactErased,
     Enrolled,
+    EvidenceChanged,
     FooterChanged,
     LeadsMerged,
     MessageSent,
@@ -1286,6 +1295,7 @@ def build_app(
     people = PeopleExtractions(clock, meter, llm, research, queue)
     grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
     step_drafts = StepDrafts(clock, llm, queue)  # Story 4.15: the draft_step jobs
+    regenerations = Regenerations(clock, llm, queue)  # Story 4.20: the Lead page's Regenerate
     extractions = SignalExtractions(clock, meter, llm, research, people)
     # Story 4.17: the bulk extraction work as Message Batches (submit_bulk_ai, poll_ai_batches)
     # Story 4.18: and the follow-up Steps 2 to 4, with the draft_deadline sweep
@@ -1432,6 +1442,7 @@ def build_app(
         domain_checks=domain_checks,
         email_finding=email_finding,
         lead_scores=lead_scores,
+        regenerations=regenerations,
         units=units,
         lifespan=engine_lifespan(
             runner,
@@ -2423,6 +2434,8 @@ def build_subscribers(clock: Clock | None = None) -> Subscribers:
     # Story 4.12: a footer change recomposes the Market's ready Drafts
     # (Story 4.14: each new revision's check_grounding job, through an enqueue-only queue)
     enqueue_only = JobQueue(chosen, enqueue_only_job_types())
+    # Story 4.20: a changed Evidence row flags the ready Drafts that cite it stale (AD-3)
+    subscribers.register_subscriber(EvidenceChanged, Drafting(chosen, enqueue_only).flag_stale)
     subscribers.register_subscriber(FooterChanged, Drafting(chosen, enqueue_only).recompose_ready)
     subscribers.freeze()
     return subscribers

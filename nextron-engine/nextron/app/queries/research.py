@@ -107,6 +107,8 @@ Story 3.14 (an erasure's receipt):
 
 - ``evidence_history(lead_id)``: every Evidence row of the Lead, live, superseded or retracted,
   oldest first (a stored quote is held whether or not it is live).
+- ``signal_of(lead_id, signal_id)`` (Story 4.20): the Lead's Signal ``signal_id``, retracted or
+  not, or ``None`` (a staleness test reads a cited Event this way).
 - ``other_contacts_with_keys(contact_id, keys)``: the ids, sorted, of the Contacts other than
   ``contact_id``, on any Lead, that aren't erased and whose address key or profile key
   (``contactability.person_keys`` of their email and LinkedIn URL) is one of the address or
@@ -326,6 +328,20 @@ def evidence(lead_id: str) -> tuple[StoredEvidence, ...]:
 def evidence_history(lead_id: str) -> tuple[StoredEvidence, ...]:
     """Every Evidence row of the Lead, live or not, oldest first."""
     return signals_repo.evidence(lead_id, live_only=False) if is_ulid(lead_id) else ()
+
+
+def signal_of(lead_id: str, signal_id: str) -> StoredSignal | None:
+    """The Lead's Signal ``signal_id``, retracted or not, or ``None`` (Story 4.20)."""
+    if not is_ulid(lead_id) or not is_ulid(signal_id):
+        return None
+    return next(
+        (
+            found
+            for found in signals_repo.signals(lead_id, current_only=False)
+            if found.id == signal_id
+        ),
+        None,
+    )
 
 
 _MATCHED_KINDS = (KeyKind.ADDRESS, KeyKind.PROFILE)

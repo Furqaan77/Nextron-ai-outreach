@@ -217,6 +217,37 @@ explanation. A result stored for an older revision never shows.
 revision shows "Drafting failed: <reason text>. Regenerate to retry." (``draft_failed``;
 ``nextron.domain.step_drafting.failure_text`` of its ``draft_failed_reason``, autoescaped
 through ``|plain``); with a revision, or no failure, it shows nothing.
+
+**Regenerate and stale Drafts (Story 4.20).** Each Draft renders alone from ``lead_draft.html``
+(``DRAFT_TEMPLATE``, an ``<article id="draft-<id>">``), which ``lead_drafts.html`` includes once
+per Draft and ``POST /leads/{lead_id}/drafts/{draft_id}/regenerate`` and ``GET
+/leads/{lead_id}/drafts/{draft_id}`` answer alone (HTMX swaps the article). Its AI-written text
+(the message, the grounding flags) sits in a ``<div class="draft-content">`` carrying
+``hx-disable``; the section itself no longer does, so the Regenerate form, outside that
+container, posts. Each ``DraftSource`` also carries ``lead_id`` and ``stale``, the live
+``domain.grounding.is_stale`` reason of a ``ready`` Draft's current revision
+(``Regenerations.stale``). Its ``DraftRow`` shows:
+
+- ``stale``: "Stale: <reason text>" (``grounding.stale_text``), else "Stale: Evidence changed"
+  when only ``drafts.stale`` is set (a ``ready`` Draft with a revision), else nothing;
+- ``regenerate``: the form's path (``/leads/<lead>/drafts/<draft>/regenerate``) for a ``ready``
+  Draft with a revision (an optional instruction, ``maxlength`` 200, and "Regenerate") or with
+  no revision and a drafting failure (``retry``: "Retry drafting", no instruction field); else
+  ``None`` (no form). The form carries ``method="post"``, ``hx-post``, ``{{ csrf_field() }}``
+  and ``hx-disabled-elt``, and a "Regenerating…" indicator shows while it runs;
+- ``notice``: the POST's answer (``regenerate_notice``): "Regenerated: revision <n>.", "Drafting
+  again…", "Draft is <status>", "Regenerate failed: <failure text>.", "Regenerate blocked: this
+  Contact can't be contacted.", "This Draft has no text yet: retry without an instruction.",
+  "This Draft is still being drafted.", "The Draft changed while it was regenerated; nothing
+  was saved.", "Regenerate failed: the AI service is unavailable" (``REGENERATE_UNAVAILABLE``)
+  or the instruction's refusal (``instruction_refused``);
+- ``poll``: only on a fragment the two routes answer, the GET path (``?retry=1`` while a retry
+  drafts) when the current revision's grounding is ``pending`` or a retry is drafting (no
+  revision, no failure, ``ready``): the article then re-fetches itself every 3 s
+  (``hx-trigger="every 3s"``). The full Lead page never polls.
+
+``submitted_instruction(fields)`` reads the Regenerate form: the CSRF token and at most one
+``instruction`` (``MalformedForm`` otherwise; ``""`` without one).
 """
 
 import re
@@ -259,9 +290,11 @@ from nextron.domain.contacts import (
     ProvenanceSubject,
     provenance_recorded,
 )
+from nextron.domain.draft import DraftStatus
 from nextron.domain.eligibility import Decision
 from nextron.domain.email_finding import EmailSearchOutcome
 from nextron.domain.extraction import EvidenceSource, FactKind
+from nextron.domain.grounding import StaleReason, stale_text
 from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.legal_form import (
     COMPANY_NUMBER_PATTERN,
@@ -1497,6 +1530,34 @@ FAIL_GROUNDING: Final = GroundingStatus.FAIL.value
 # Drafts (Story 4.12) ----------------------------------------------------------------------------
 
 DRAFTS_TEMPLATE: Final = "lead_drafts.html"
+DRAFT_TEMPLATE: Final = "lead_draft.html"  # Story 4.20: one Draft, alone or in the section
+INSTRUCTION_FIELD: Final = "instruction"
+STALE_LINE: Final = "Stale: {reason}"
+STALE_FLAGGED: Final = "Stale: Evidence changed"
+REGENERATE_PATH: Final = "/leads/{lead_id}/drafts/{draft_id}/regenerate"
+DRAFT_PATH: Final = "/leads/{lead_id}/drafts/{draft_id}"
+RETRY_PARAM: Final = "retry"
+RETRY_QUERY: Final = f"?{RETRY_PARAM}=1"
+DRAFT_MISSING: Final = "No such Draft on this Lead."
+REGENERATED_NOTICE: Final = "Regenerated: revision {rev}."
+RETRY_QUEUED_NOTICE: Final = "Drafting again…"
+NOT_READY_NOTICE: Final = "Draft is {status}"
+REGENERATE_FAILED: Final = "Regenerate failed: {reason}."
+REGENERATE_UNAVAILABLE: Final = "Regenerate failed: the AI service is unavailable"
+# nextron.app.drafting.regeneration.RegenerateOutcome's values (the view reads only queries)
+REGENERATED: Final = "regenerated"
+RETRY_QUEUED: Final = "retry_queued"
+NOT_READY: Final = "not_ready"
+FAILED: Final = "failed"
+REGENERATE_NOTICES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "blocked": "Regenerate blocked: this Contact can't be contacted.",
+        "needs_text": "This Draft has no text yet: retry without an instruction.",
+        "in_progress": "This Draft is still being drafted.",
+        "changed": "The Draft changed while it was regenerated; nothing was saved.",
+        "unknown": "This Draft no longer exists.",
+    }
+)
 NO_TEXT: Final = "No text yet"
 AFTER_STEP: Final = "after Step {step} is sent"
 DRAFTING_FAILED: Final = "Drafting failed: {reason}. Regenerate to retry."
@@ -1542,6 +1603,8 @@ class DraftSource:
     to_address: str | None  # None for an erased Contact
     footer_check: render.FooterCheck | None  # None when the Market can't be read
     grounding: GroundingResultView | None = None  # the current revision's (Story 4.14)
+    lead_id: str = ""  # Story 4.20: the Lead page's id, for the Regenerate form's path
+    stale: StaleReason | None = None  # Story 4.20: the live staleness of a ready Draft
 
 
 @dataclass(frozen=True, slots=True)
@@ -1579,6 +1642,11 @@ class DraftRow:
     grounding: str = PENDING_GROUNDING  # pass, fail or pending (Story 4.14)
     grounding_flags: tuple[GroundingFlagRow, ...] = ()
     draft_failed: str | None = None  # Story 4.15: the drafting failure notice
+    stale: str | None = None  # Story 4.20: "Stale: <reason>"
+    regenerate: str | None = None  # Story 4.20: the Regenerate form's path, or no form
+    retry: bool = False  # Story 4.20: the form is "Retry drafting", with no instruction
+    notice: Notice | None = None  # Story 4.20: the regenerate POST's answer
+    poll: str | None = None  # Story 4.20: the path the fragment re-fetches every 3 s
 
 
 def draft_failed_notice(draft: DraftView, current: RevisionView | None) -> str | None:
@@ -1621,8 +1689,75 @@ def revision_row(revision: RevisionView) -> RevisionRow:
     )
 
 
-def draft_row(source: DraftSource) -> DraftRow:
-    """The ``DraftRow`` of ``source``; see the module docstring."""
+def stale_badge(
+    draft: DraftView, current: RevisionView | None, reason: StaleReason | None
+) -> str | None:
+    """"Stale: <reason>" for a ``ready`` Draft with a revision; see the module docstring."""
+    if current is None or draft.status is not DraftStatus.READY:
+        return None
+    if reason is not None:
+        return STALE_LINE.format(reason=stale_text(reason))
+    return STALE_FLAGGED if draft.stale else None
+
+
+def regenerate_notice(
+    outcome: str, rev: int | None, status: str | None, failure: str | None
+) -> Notice:
+    """The Regenerate POST's answer for a ``RegenerateResult``'s fields; see the module
+    docstring."""
+    if outcome == REGENERATED:
+        return Notice(Role.STATUS, REGENERATED_NOTICE.format(rev=rev))
+    if outcome == RETRY_QUEUED:
+        return Notice(Role.STATUS, RETRY_QUEUED_NOTICE)
+    if outcome == NOT_READY:
+        return Notice(Role.ALERT, NOT_READY_NOTICE.format(status=status or ""))
+    if outcome == FAILED:
+        return Notice(Role.ALERT, REGENERATE_FAILED.format(reason=failure_text(failure or "")))
+    return Notice(Role.ALERT, REGENERATE_NOTICES.get(outcome, outcome))
+
+
+def regenerate_unavailable() -> Notice:
+    """The Regenerate POST's answer when the AI service couldn't be reached."""
+    return Notice(Role.ALERT, REGENERATE_UNAVAILABLE)
+
+
+def instruction_refused(reason: str) -> Notice:
+    """The Regenerate POST's answer for an instruction its checks refused."""
+    return Notice(Role.ALERT, f"Not regenerated: {reason}.")
+
+
+def submitted_instruction(fields: FormFields) -> str:
+    """The Regenerate form's ``instruction`` (``""`` without one); ``MalformedForm`` for any
+    other field or a repeated one."""
+    if set(fields) - {CSRF_FIELD, INSTRUCTION_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+    values = fields.get(INSTRUCTION_FIELD, [""])
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    return values[0]
+
+
+def _poll(
+    source: DraftSource, current: RevisionView | None, grounding: str, retrying: bool
+) -> str | None:
+    """The path a fragment re-fetches every 3 s, or ``None``; see the module docstring."""
+    draft = source.draft
+    path = DRAFT_PATH.format(lead_id=source.lead_id, draft_id=draft.id)
+    if current is not None:
+        return path if grounding == PENDING_GROUNDING else None
+    drafting = retrying and draft.status is DraftStatus.READY and draft.draft_failed_at is None
+    return path + RETRY_QUERY if drafting else None
+
+
+def draft_row(
+    source: DraftSource,
+    *,
+    notice: Notice | None = None,
+    fragment: bool = False,
+    retrying: bool = False,
+) -> DraftRow:
+    """The ``DraftRow`` of ``source``; see the module docstring. ``fragment`` (a route's
+    answer for the one Draft) lets it poll; ``retrying`` says a retry was queued."""
     draft = source.draft
     current = next((each for each in source.revisions if each.rev == draft.current_rev), None)
     message = (
@@ -1637,6 +1772,13 @@ def draft_row(source: DraftSource) -> DraftRow:
         else None
     )
     grounding, flags = grounding_of(current, source.grounding)
+    ready = draft.status is DraftStatus.READY
+    retry = ready and current is None and draft.draft_failed_at is not None
+    regenerate = (
+        REGENERATE_PATH.format(lead_id=source.lead_id, draft_id=draft.id)
+        if source.lead_id and ready and (current is not None or retry)
+        else None
+    )
     return DraftRow(
         draft_id=draft.id,
         kind=DRAFT_KIND_LABELS.get(draft.kind, str(draft.kind)),
@@ -1654,4 +1796,9 @@ def draft_row(source: DraftSource) -> DraftRow:
         grounding=grounding,
         grounding_flags=flags,
         draft_failed=draft_failed_notice(draft, current),
+        stale=stale_badge(draft, current, source.stale),
+        regenerate=regenerate,
+        retry=retry,
+        notice=notice,
+        poll=_poll(source, current, grounding, retrying) if fragment else None,
     )

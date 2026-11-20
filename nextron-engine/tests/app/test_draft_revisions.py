@@ -725,8 +725,10 @@ def test_the_lead_page_shows_each_draft_and_its_history(world: World) -> None:
     page = lead_page(world, lead_id)
 
     section = page.find("section", class_="lead-drafts")
-    assert "hx-disable" in section.attrs
     first_draft, second, third = section.find_all("article", class_="draft")
+    # Story 4.20: each Draft's AI-written text sits in its own hx-disable container
+    for article in (first_draft, second, third):
+        assert "hx-disable" in article.find("div", class_="draft-content").attrs
     assert first_draft.find("h3").text == "Sequence Step: Step 1"
     facts = [node.text for node in first_draft.find_all("dd")]
     assert facts[0] == "Ready"

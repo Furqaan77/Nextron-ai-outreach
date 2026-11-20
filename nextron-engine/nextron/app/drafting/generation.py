@@ -90,6 +90,10 @@ answer with ``step_drafting.read_step_1`` (exactly one ``steps`` entry, Step 1; 
 
 ``requeue_follow_ups`` and ``enqueue_follow_up_job`` are shared with
 ``nextron.app.drafting.batches.DraftingBatches``, which batches the same call.
+
+``lead_inputs(lead_id, contact, now)`` (the Lead's blocks' inputs), ``campaign_of(enrollment)``
+and ``allowed_versions(enrollment)`` are shared with Story 4.20's
+``nextron.app.drafting.regeneration``.
 """
 
 import logging
@@ -213,7 +217,7 @@ class _Call:
 
 
 @dataclass(frozen=True, slots=True)
-class _LeadInputs:
+class LeadInputs:
     """The Lead's untrusted inputs, as Step 1 and the follow-ups send them."""
 
     subject_key: str
@@ -386,57 +390,17 @@ class StepDrafts:
             live_events=lead.live_events,
         )
 
-    def _lead(self, lead_id: str, contact: research_queries.StoredContact) -> _LeadInputs:
+    def _lead(self, lead_id: str, contact: research_queries.StoredContact) -> LeadInputs:
         """The Lead's live Evidence, current Signals and the Contact as the prompt shows them;
         shared by Step 1 and the follow-ups."""
-        evidence = research_queries.evidence(lead_id)
-        linked = research_queries.signal_evidence_ids(lead_id)
-        signals = research_queries.signals(lead_id)
-        now = self._clock.now()
-        live_events = frozenset(
-            signal.id
-            for signal in signals
-            if signal.signal_class == SignalClass.EVENT
-            and is_live(
-                SignalClass.EVENT,
-                signal.tier,
-                age_days(signal.event_date, signal.first_seen_at, now),
-            )
-        )
-        return _LeadInputs(
-            subject_key=f"lead:{lead_id}",
-            evidence=tuple(
-                DraftEvidence(row.id, row.type, _evidence_text(row)) for row in evidence
-            ),
-            signals=tuple(
-                DraftSignal(
-                    signal.id,
-                    signal.signal_type,
-                    signal.signal_class,
-                    signal.tier,
-                    signal.event_date,
-                    linked.get(signal.id, ()),
-                )
-                for signal in signals
-            ),
-            contact=DraftContact(contact.name, contact.role),
-            evidence_ids=frozenset(row.id for row in evidence),
-            live_events=live_events,
-        )
+        return lead_inputs(lead_id, contact, self._clock.now())
 
     @staticmethod
     def _campaign(enrollment: StoredEnrollment) -> setup_queries.SeededCampaign:
-        campaign = setup_queries.campaign(enrollment.campaign_id)
-        if campaign is None:
-            raise LookupError("the Enrollment's Campaign is unknown")
-        return campaign
+        return campaign_of(enrollment)
 
     def _allowed(self, enrollment: StoredEnrollment) -> frozenset[tuple[str, int]]:
-        campaign = self._campaign(enrollment)
-        return frozenset(
-            (found.fact_id, found.version)
-            for found in playbook_queries.allowed_facts(campaign.segment_id, campaign.market_id)
-        )
+        return allowed_versions(enrollment)
 
     def _framing(self, enrollment: StoredEnrollment) -> Framing:
         """The call's framing; ``LookupError`` when its context is gone."""
@@ -802,7 +766,63 @@ class StepDrafts:
         return StepDraftOutcome.BLOCKED
 
 
-# Shared with the batches (Story 4.18) -----------------------------------------------------------
+# Shared with the batches (Story 4.18) and the regenerate (Story 4.20) ---------------------------
+
+
+def lead_inputs(
+    lead_id: str, contact: research_queries.StoredContact, now: datetime
+) -> LeadInputs:
+    """The Lead's live Evidence, current Signals (with their live Evidence ids) and the
+    Contact as the prompt shows them, and the Lead's live Event Signals at ``now``."""
+    evidence = research_queries.evidence(lead_id)
+    linked = research_queries.signal_evidence_ids(lead_id)
+    signals = research_queries.signals(lead_id)
+    live_events = frozenset(
+        signal.id
+        for signal in signals
+        if signal.signal_class == SignalClass.EVENT
+        and is_live(
+            SignalClass.EVENT,
+            signal.tier,
+            age_days(signal.event_date, signal.first_seen_at, now),
+        )
+    )
+    return LeadInputs(
+        subject_key=f"lead:{lead_id}",
+        evidence=tuple(DraftEvidence(row.id, row.type, _evidence_text(row)) for row in evidence),
+        signals=tuple(
+            DraftSignal(
+                signal.id,
+                signal.signal_type,
+                signal.signal_class,
+                signal.tier,
+                signal.event_date,
+                linked.get(signal.id, ()),
+            )
+            for signal in signals
+        ),
+        contact=DraftContact(contact.name, contact.role),
+        evidence_ids=frozenset(row.id for row in evidence),
+        live_events=live_events,
+    )
+
+
+def campaign_of(enrollment: StoredEnrollment) -> setup_queries.SeededCampaign:
+    """The Enrollment's Campaign; ``LookupError`` when it is unknown."""
+    campaign = setup_queries.campaign(enrollment.campaign_id)
+    if campaign is None:
+        raise LookupError("the Enrollment's Campaign is unknown")
+    return campaign
+
+
+def allowed_versions(enrollment: StoredEnrollment) -> frozenset[tuple[str, int]]:
+    """The ``(fact_id, version)`` pairs allowed for the Enrollment's Campaign's Segment and
+    Market; ``LookupError`` when the Campaign is unknown."""
+    campaign = campaign_of(enrollment)
+    return frozenset(
+        (found.fact_id, found.version)
+        for found in playbook_queries.allowed_facts(campaign.segment_id, campaign.market_id)
+    )
 
 
 def requeue_follow_ups(
