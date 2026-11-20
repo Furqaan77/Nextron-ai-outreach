@@ -69,10 +69,12 @@ Its ``Erasures`` (``erasures``, Story 3.13) is ``Erasures(clock, Compliance(cloc
 queue=queue)`` (Story 3.14: an erasure enqueues its ``erase_external`` jobs on the dashboard's
 queue, which nothing runs here); the Lead page's erase step runs it, on real units of work.
 
-Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env)``; the Sending Inboxes panel
-registers through it. The default ``env`` is ``dev``, so a panel test that registers an inbox
-saves ``sink_allowlist`` (and ``sender_name``) through ``setup.save`` first, on real units of
-work.
+Its ``Sending`` (``sending``, Story 4.7) is ``Sending(clock, env=env, compliance=Compliance(clock,
+codec=FakeTokenCodec()))`` (Story 5.4: codec-bearing, so an approval's ``enqueue`` issues its
+token); the Sending Inboxes panel registers through it. The default ``env`` is ``dev``, so a
+panel test that registers an inbox saves ``sink_allowlist`` (and ``sender_name``) through
+``setup.save`` first, on real units of work. Its ``Approval`` (``approval``, Story 5.4) is
+``Approval(clock, sending=sending)``: the queue card's Approve runs it.
 
 Its ``DomainChecks`` (``domain_checks``, Story 6.5) is ``DomainChecks(clock, dns, queue)`` on
 ``dns``, a ``FakeDns`` unless a test passes another; the Sending Inboxes page's authentication
@@ -92,6 +94,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI
 
 from nextron import main
+from nextron.app.approval.api import Approval
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
@@ -140,6 +143,7 @@ from tests.fakes.email_syntax import FakeEmailSyntax
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.secrets import InMemorySecrets
+from tests.fakes.token_codec import FakeTokenCodec
 from tests.fakes.units import FakeUnits
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
@@ -336,6 +340,7 @@ class Dashboard:
     restore_tests: RestoreTests = field(init=False)
     lead_imports: LeadImports = field(init=False)
     sending: Sending = field(init=False)
+    approval: Approval = field(init=False)
     domain_checks: DomainChecks = field(init=False)
     compliance: Compliance = field(init=False)
     research: Research = field(init=False)
@@ -407,7 +412,11 @@ class Dashboard:
             notify=self.notify,
             queue=self.queue,
         )
-        self.sending = Sending(self.clock, env=self.env)
+        # Story 5.4: a codec-bearing Compliance, so the Approve form's enqueue can issue tokens
+        self.sending = Sending(
+            self.clock, env=self.env, compliance=Compliance(self.clock, codec=FakeTokenCodec())
+        )
+        self.approval = Approval(self.clock, sending=self.sending)
         self.domain_checks = DomainChecks(self.clock, self.dns, self.queue)
         self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
@@ -464,6 +473,7 @@ class Dashboard:
             restore_tests=self.restore_tests,
             lead_imports=self.lead_imports,
             sending=self.sending,
+            approval=self.approval,
             lead_signals=LeadSignals(self.clock),
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,

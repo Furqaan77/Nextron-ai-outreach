@@ -58,6 +58,12 @@ footer template (``nextron.domain.markets``, Story 3.1) and the footer settings
   the to-address, LF, the inbox id, LF, ``canon(subject)``, two LFs and ``canon(body)``, where
   ``body`` is the composed body. What an approval binds to (AD-6); transport headers are
   outside it. A value that isn't a ``str`` raises ``TypeError``.
+
+**Edit ratio (Story 5.4).** ``edit_ratio(first, approved)``: ``levenshtein`` (character edits;
+common prefix and suffix trimmed, then Myers' bit-parallel algorithm, no dependency) between
+revision 1's and the approved revision's ``subject + "\\n" + body``, divided by revision 1's
+length, capped at 1.0; equal texts give 0.0. Stored as ``approvals.edit_ratio`` (above 0.20 is a
+major edit).
 """
 
 import hashlib
@@ -274,3 +280,64 @@ def text_hash(to_address: str, inbox_id: str, subject: str, body: str) -> str:
         )
     )
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+# Edit ratio (Story 5.4) -------------------------------------------------------------------------
+
+MAX_EDIT_RATIO: Final = 1.0
+
+
+def levenshtein(a: str, b: str) -> int:
+    """The character Levenshtein distance between ``a`` and ``b``: the common prefix and suffix
+    are trimmed, then Myers' bit-parallel algorithm (Hyyrö's global-distance form) runs over the
+    shorter text as the pattern, one machine-word step per character of the longer one."""
+    if a == b:
+        return 0
+    start = 0
+    limit = min(len(a), len(b))
+    while start < limit and a[start] == b[start]:
+        start += 1
+    end_a, end_b = len(a), len(b)
+    while end_a > start and end_b > start and a[end_a - 1] == b[end_b - 1]:
+        end_a -= 1
+        end_b -= 1
+    a, b = a[start:end_a], b[start:end_b]
+    if len(a) > len(b):
+        a, b = b, a
+    if not a:
+        return len(b)
+    size = len(a)
+    mask = (1 << size) - 1
+    last = 1 << (size - 1)
+    peq: dict[str, int] = {}
+    for index, char in enumerate(a):
+        peq[char] = peq.get(char, 0) | (1 << index)
+    pv, mv, score = mask, 0, size
+    for char in b:
+        eq = peq.get(char, 0)
+        xv = eq | mv
+        xh = ((((eq & pv) + pv) & mask) ^ pv) | eq
+        ph = (mv | ~(xh | pv)) & mask
+        mh = pv & xh
+        if ph & last:
+            score += 1
+        elif mh & last:
+            score -= 1
+        ph = ((ph << 1) | 1) & mask
+        mh = (mh << 1) & mask
+        pv = (mh | ~(xv | ph)) & mask
+        mv = ph & xv
+    return score
+
+
+def edit_ratio(first: RevisionText, approved: RevisionText) -> float:
+    """How much the approved text differs from revision 1 (FR-55, AD-4 analytics): the
+    character Levenshtein distance between their ``subject + "\\n" + body``, divided by
+    revision 1's length and capped at 1.0. Equal texts (both empty included) give 0.0."""
+    original = _str(first.subject, "revision 1's subject") + LF + _str(first.body, "its body")
+    final = _str(approved.subject, "the approved subject") + LF + _str(approved.body, "its body")
+    if original == final:
+        return 0.0
+    if not original:
+        return MAX_EDIT_RATIO
+    return min(MAX_EDIT_RATIO, levenshtein(original, final) / len(original))

@@ -125,7 +125,7 @@ development_status:
   5-1-show-due-drafts-in-queue-order-one-focused-card-at-a-time: review
   5-2-hold-each-approved-draft-as-exactly-one-queued-outboundmessa: review
   5-3-show-the-evidence-facts-and-grounding-result-behind-every-ca: review
-  5-4-approve-a-draft-bound-to-the-exact-text-shown: backlog
+  5-4-approve-a-draft-bound-to-the-exact-text-shown: review
   5-5-reject-with-a-reason-skip-or-regenerate-a-card: backlog
   5-6-edit-a-draft-then-approve-it-once-the-recheck-passes: backlog
   5-7-decide-every-card-from-the-keyboard-with-the-next-card-in-un: backlog

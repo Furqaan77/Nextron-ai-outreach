@@ -493,7 +493,9 @@ first beat).
 ``Sending(clock, env=config.env, compliance=compliance)`` (``nextron.app.sending.api``; Story
 5.2: on the one codec-bearing ``Compliance``, so ``enqueue`` can issue unsubscribe tokens)
 and hands it to ``create_app(..., sending=sending)``: the Sending Inboxes panel registers
-inboxes through it.
+inboxes through it. Story 5.4: the dashboard also gets ``Approval(clock, sending=sending)``
+(``create_app(..., approval=...)``) for the Approval Queue's Approve, whose ``enqueue`` runs on
+that same ``Sending``.
 Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
 external service.
 
@@ -1365,6 +1367,7 @@ def build_app(
         issues=build_health_issues(budget=budget, clock=clock, ledger=ledger_file.path),
         readiness=functools.partial(run_checks, build_doctor_checks(), context),
     )
+    sending = Sending(clock, env=config.env, compliance=compliance)
     app = create_app(
         env=config.env,
         version=__version__,
@@ -1385,7 +1388,8 @@ def build_app(
         backups=backups,
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
-        sending=Sending(clock, env=config.env, compliance=compliance),
+        sending=sending,
+        approval=Approval(clock, sending=sending),  # Story 5.4: the queue's Approve
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,

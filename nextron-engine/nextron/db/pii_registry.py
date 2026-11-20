@@ -603,6 +603,26 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "cancelled_at": PiiClass.NONE,
         "sent_at": PiiClass.NONE,
     },
+    # Story 5.4. An approval holds ids, numbers, times and the message's text_hash (a SHA-256
+    # that, like outbound_messages.approved_hash, is kept as plain data: no lookup reads it, so
+    # it needs no keyed hash); a session holds only times and counts.
+    "approvals": {
+        "id": PiiClass.NONE,
+        "draft_id": PiiClass.NONE,
+        "rev": PiiClass.NONE,
+        "text_hash": PiiClass.NONE,
+        "approved_by": PiiClass.NONE,
+        "approved_at": PiiClass.NONE,
+        "review_ms": PiiClass.NONE,
+        "edit_ratio": PiiClass.NONE,
+    },
+    "approval_sessions": {
+        "id": PiiClass.NONE,
+        "started_at": PiiClass.NONE,
+        "ended_at": PiiClass.NONE,
+        "decisions": PiiClass.NONE,
+        "active_ms": PiiClass.NONE,
+    },
     # Story 3.8. Only the token's hash is stored, never the token, the address or its hash:
     # the token is the only way to its address hash, and that needs k_tok.
     "unsub_tokens": {

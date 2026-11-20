@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0048_5_2_outbound_messages"
+HEAD = "0049_5_4_approvals"
 
 
 @pytest.fixture

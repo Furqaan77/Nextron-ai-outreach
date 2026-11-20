@@ -66,6 +66,13 @@ take (it takes only ``step`` and ``recontact``, ``BINDABLE_KINDS``).
 - ``revision``: the ``RevisionView`` itself.
 
 A card without a revision gets empty details.
+
+**Approving (Story 5.4).** ``card_of(draft_id) -> QueueCard | None``: the one Draft's card built
+exactly as ``due_queue`` builds it (same message, footer notice, ``inbox_id`` and
+``shown_hash``), whatever its status or due time; ``None`` for an unknown Draft. ``approve``
+checks a posted ``shown_hash`` against it. ``approval_of(draft_id) -> ApprovalRow(id, draft_id,
+rev, approved_at, text_hash) | None``: the Draft's latest ``approvals`` row while the Draft is
+``approved``, else ``None`` (what Story 6.9's send gate reads).
 """
 
 from collections.abc import Callable
@@ -81,10 +88,11 @@ from nextron.app.queries import scoring as scoring_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
+from nextron.db.repos.approval import approvals as approvals_repo
 from nextron.db.repos.approval import drafts as drafts_repo
 from nextron.domain import render
 from nextron.domain.company_facts import InvalidCompanyFacts
-from nextron.domain.draft import RESPONSIVE_KINDS, DraftKind
+from nextron.domain.draft import RESPONSIVE_KINDS, DraftKind, DraftStatus
 from nextron.domain.eligibility import Decision
 from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.markets import InvalidMarkets
@@ -523,6 +531,59 @@ def card_details(card: QueueCard) -> CardDetails:
         grounding=drafting_queries.grounding_result(card.draft_id, revision.rev),
         revision=revision,
     )
+
+
+def card_of(draft_id: str) -> QueueCard | None:
+    """The card of the Draft ``draft_id`` exactly as ``due_queue`` would build it (the same
+    message, footer notice, binding and ``shown_hash``), whatever its status or due time, or
+    ``None`` for an unknown Draft (Story 5.4: what an approval is checked against)."""
+    draft = drafting_queries.draft(draft_id)
+    if draft is None:
+        return None
+    enrollment = (
+        None if draft.enrollment_id is None else sequencing_queries.enrollment(draft.enrollment_id)
+    )
+    candidate = drafts_repo.QueueCandidate(
+        id=draft.id,
+        kind=str(draft.kind),
+        step_no=draft.step_no,
+        due_at=draft.due_at,
+        created_at=draft.created_at,
+        enrollment_id=draft.enrollment_id,
+        enrollment_status=None if enrollment is None else str(enrollment.status),
+        lead_id=None if enrollment is None else enrollment.lead_id,
+        contact_id=None if enrollment is None else enrollment.contact_id,
+    )
+    # a card reads no time and no Eligibility (only the queue's order and held-back list do)
+    reader = _Reader(_NO_TIME, _no_eligibility, setup_queries.footer_settings())
+    return _card(reader, candidate, draft)
+
+
+def _no_eligibility(contact_id: str) -> Decision:
+    raise AssertionError("card_of never asks for Eligibility")  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRow:
+    """The current approval of an ``approved`` Draft (Story 5.4; what 6.9's gate reads)."""
+
+    id: str
+    draft_id: str
+    rev: int
+    approved_at: datetime
+    text_hash: str
+
+
+def approval_of(draft_id: str) -> ApprovalRow | None:
+    """The Draft's latest ``approvals`` row when the Draft is ``approved``, else ``None`` (an
+    unknown Draft or a text that isn't a ULID included)."""
+    draft = drafting_queries.draft(draft_id)
+    if draft is None or draft.status != DraftStatus.APPROVED:
+        return None
+    found = approvals_repo.latest_of(draft.id)
+    if found is None:
+        return None
+    return ApprovalRow(found.id, found.draft_id, found.rev, found.approved_at, found.text_hash)
 
 
 def _group(card: QueueCard) -> str:

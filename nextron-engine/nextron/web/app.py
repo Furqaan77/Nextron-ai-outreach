@@ -20,11 +20,21 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   else ``?card=k``, clamped; Story 5.3), the Held back list, the empty state and the session's
   elapsed time (``SessionStore.started_at``). For the focused card only it also reads
   ``approval_queries.card_details`` (its Evidence, facts, earlier Steps and grounding result,
-  Story 5.3). Read-only.
+  Story 5.3). Read-only; Story 5.4: it stamps the focused card's serve for the session, in
+  memory (``SessionStore.mark_served``), and the page loads ``/static/queue-keys.js``.
+- ``POST /queue/approve`` (``queue_approve``, ``@personal_data(True)``; Story 5.4): the card's
+  Approve form, exactly ``draft_id``, ``rev`` and ``shown_hash`` (``queue_page.
+  submitted_approval``; anything else ``MalformedForm``, 400). It runs ``approval.approve`` in its
+  own unit of work with the session's serve stamps (``served_at`` of that Draft and
+  ``first_served_at``), then answers 200 with the queue page in a read-only one: approved, the
+  card at the same position (``?card=<k>`` on the form's URL: the next card) or "Queue clear";
+  ``stale`` or ``blocked``, that Draft's card (``?draft=``), re-read, with the result's notices
+  ("This Draft changed since you opened it", "Already approved", ...). An unknown Draft answers
+  404 "Draft not found"; a GET is 405 and a bad CSRF token 403, both changing nothing.
 - ``GET /health`` (``health``): the environment, the engine version and the process uptime in
   whole seconds, and nothing else.
-- ``GET /static/{name}`` (``static``): the vendored HTMX build and ``app.css``, read once when
-  the app is built; any other name is 404.
+- ``GET /static/{name}`` (``static``): the vendored HTMX build, ``app.css`` and (Story 5.4)
+  ``queue-keys.js``, read once when the app is built; any other name is 404.
 - ``GET /settings`` (``settings_page``) and ``POST /settings`` (``settings_save``): the Settings
   page and its save, both ``@personal_data(True)``; see ``nextron.web.settings_page``. The POST
   saves through ``setup`` (``Setup.save``) in its own unit of work. The page also includes the
@@ -313,6 +323,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from jinja2 import Environment, FileSystemLoader
 from starlette.routing import BaseRoute
 
+from nextron.app.approval.api import Approval, ApproveOutcome, UnknownDraft
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import ImportRequest, ImportStopped, LeadImports
@@ -437,7 +448,9 @@ STATIC_DIR: Final = WEB_DIR / "static"
 STATIC_TYPES: Final = {
     "htmx-2.0.11.min.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
+    "queue-keys.js": "text/javascript; charset=utf-8",  # Story 5.4: the queue's keymap
 }
+DRAFT_NOT_FOUND: Final = "Draft not found"
 # (route name, label), in navigation order
 NAV_SECTIONS: Final = (
     ("queue_page", "Queue"),
@@ -572,6 +585,7 @@ def create_app(
     restore_tests: RestoreTests,
     lead_imports: LeadImports,
     sending: Sending,
+    approval: Approval,
     lead_signals: LeadSignals,
     compliance: Compliance,
     primary_contacts: PrimaryContacts,
@@ -606,7 +620,7 @@ def create_app(
     subject access export; ``domain_checks`` reads the Sending Domain authentication section
     and queues its Recheck.
     ``now`` is the app clock's ``now`` (Story 5.1): the Approval Queue's time and each session's
-    start.
+    start. ``approval`` (Story 5.4) runs the queue card's Approve.
     ``monotonic`` is injectable so tests control the uptime and the export tickets' 60 s.
     ``lifespan`` goes to ``FastAPI(lifespan=...)``: ``nextron.main`` passes the one that starts
     and stops the job runner, the scheduler and the heartbeat writer (``engine_lifespan``).
@@ -671,35 +685,85 @@ def create_app(
     def home(request: Request) -> HTMLResponse:
         return page(request, "home.html")
 
-    def session_started(request: Request) -> datetime | None:
-        """When the request's session started: the first ``nextron_session`` cookie value that
-        names a live session, as the guard reads it."""
+    def session_token(request: Request) -> str | None:
+        """The request's session token: the first ``nextron_session`` cookie value that names a
+        live session, as the guard reads it."""
         for header in request.headers.getlist("cookie"):
             for value in session_cookie_values(header):
-                found = sessions.started_at(value)
-                if found is not None:
-                    return found
+                if sessions.csrf_token(value) is not None:
+                    return value
         return None
 
-    @app.get("/queue", name="queue_page")
-    @personal_data(True)  # a card shows a Contact's name, address and message
-    def queue_page(request: Request) -> HTMLResponse:
+    def queue_answer(
+        request: Request,
+        *,
+        card_param: str | None,
+        draft_param: str | None,
+        notices: tuple[str, ...] = (),
+    ) -> HTMLResponse:
+        """The Approval Queue page, read in the current read-only unit of work; the focused
+        card's serve is stamped for the session (in memory, Story 5.4)."""
         at = now()
         queue = approval_queries.due_queue(at, compliance.evaluate_eligibility)
         try:
             zone_name: str | None = str(setup_queries.get(Key.SENDER_TIMEZONE))
         except DomainError:  # unset or unreadable: the next due time shows in UTC
             zone_name = None
+        token = session_token(request)
         context = queue_rows.queue_context(
             queue,
-            request.query_params.get(queue_rows.CARD_PARAM),
+            card_param,
             at,
-            session_started(request),
+            None if token is None else sessions.started_at(token),
             zone_name,
-            draft_param=request.query_params.get(queue_rows.DRAFT_PARAM),
+            draft_param=draft_param,
             details_of=lambda card: approval_queries.card_details(card),  # the focused card only
+            notices=notices,
         )
+        shown = context["card"]
+        if token is not None and isinstance(shown, queue_rows.CardRow):
+            sessions.mark_served(token, shown.draft_id, at)
         return page(request, queue_rows.TEMPLATE, **context)
+
+    @app.get("/queue", name="queue_page")
+    @personal_data(True)  # a card shows a Contact's name, address and message
+    def queue_page(request: Request) -> HTMLResponse:
+        return queue_answer(
+            request,
+            card_param=request.query_params.get(queue_rows.CARD_PARAM),
+            draft_param=request.query_params.get(queue_rows.DRAFT_PARAM),
+        )
+
+    @app.post(queue_rows.APPROVE_PATH, name="queue_approve")
+    @personal_data(True)  # the answer is the queue page
+    def queue_approve(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        draft_id, rev, shown_hash = queue_rows.submitted_approval(fields)
+        token = session_token(request)
+        served_at = None if token is None else sessions.served_at(token, draft_id)
+        first_served_at = None if token is None else sessions.first_served_at(token)
+        try:
+            with units.open():
+                result = approval.approve(
+                    draft_id,
+                    rev,
+                    shown_hash,
+                    served_at=served_at,
+                    first_served_at=first_served_at,
+                )
+        except UnknownDraft:  # only an unknown Draft is a 404
+            return not_found_text(DRAFT_NOT_FOUND)
+        with units.open(read_only=True):
+            if result.outcome is ApproveOutcome.APPROVED:  # the next card takes its place
+                return queue_answer(
+                    request,
+                    card_param=request.query_params.get(queue_rows.CARD_PARAM),
+                    draft_param=None,
+                )
+            return queue_answer(
+                request, card_param=None, draft_param=draft_id, notices=result.reasons
+            )
 
     @app.get("/health", name="health")
     @personal_data(False)

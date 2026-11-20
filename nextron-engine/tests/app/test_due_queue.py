@@ -590,7 +590,10 @@ def test_the_page_shows_headers_one_card_and_held_back(world: World) -> None:
     assert "hx-disable" in held.attrs
     [row] = held.find_all("li", class_="held-back-row")
     assert row.find("span", class_="held-back-name").text == "Held Firm"
-    assert not page.find_all("form")
+    # Story 5.4: the one form is the Approve form, without its submit button here
+    [approve_form] = page.find_all("form")
+    assert "queue-approve-form" in str(approve_form.attrs["class"]).split()
+    assert not approve_form.find_all("button")
     # Story 5.3: no grounding result yet, so only a disabled Approve button renders
     [button] = page.find_all("button")
     assert "disabled" in button.attrs and "queue-approve" in str(button.attrs["class"]).split()

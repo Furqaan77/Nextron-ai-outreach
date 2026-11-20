@@ -12,6 +12,13 @@ cookie.
 Story 5.1: the store is built with the app's clock (``now``) and records each session's start,
 the clock's time at ``create``; ``started_at(session_token)`` returns it (``None`` for no live
 session, or a store built without a clock). The Approval Queue shows the time since.
+
+Story 5.4: serve stamps, in memory only (a GET writes nothing to the database).
+``mark_served(session_token, draft_id, at)`` records that a live session was served a Draft's
+card (the last serve wins; at most ``MAX_SERVE_STAMPS`` Drafts per session, the oldest dropped);
+``served_at(session_token, draft_id)`` and ``first_served_at(session_token)`` read them back
+(``None`` when there is none). The Approve POST turns them into ``review_ms`` and the approval
+session's start.
 """
 
 import hashlib
@@ -22,6 +29,7 @@ from datetime import datetime
 from typing import Final
 
 SESSION_COOKIE: Final = "nextron_session"
+MAX_SERVE_STAMPS: Final = 1000  # per session: the newest Drafts served
 
 
 def session_cookie_values(header: str) -> Iterator[str]:
@@ -44,6 +52,8 @@ class SessionStore:
     def __init__(self, now: Callable[[], datetime] | None = None) -> None:
         self._csrf_tokens: dict[bytes, str] = {}
         self._started: dict[bytes, datetime] = {}
+        self._served: dict[bytes, dict[str, datetime]] = {}
+        self._first_served: dict[bytes, datetime] = {}
         self._now = now
         self._lock = threading.Lock()
 
@@ -75,3 +85,39 @@ class SessionStore:
         digest = _digest(session_token)
         with self._lock:
             return self._started.get(digest)
+
+    # Serve stamps (Story 5.4) -------------------------------------------------------------------
+
+    def mark_served(self, session_token: str, draft_id: str, at: datetime) -> None:
+        """Record that the live session ``session_token`` was served the Draft's card at
+        ``at`` (its last serve wins); nothing for no live session. In memory only."""
+        if not session_token:
+            return
+        digest = _digest(session_token)
+        with self._lock:
+            if digest not in self._csrf_tokens:
+                return
+            served = self._served.setdefault(digest, {})
+            served.pop(draft_id, None)  # newest last, so the oldest is dropped first
+            served[draft_id] = at
+            while len(served) > MAX_SERVE_STAMPS:
+                del served[next(iter(served))]
+            first = self._first_served.get(digest)
+            if first is None or at < first:
+                self._first_served[digest] = at
+
+    def served_at(self, session_token: str, draft_id: str) -> datetime | None:
+        """When the session last served the Draft's card, or ``None``."""
+        if not session_token:
+            return None
+        digest = _digest(session_token)
+        with self._lock:
+            return self._served.get(digest, {}).get(draft_id)
+
+    def first_served_at(self, session_token: str) -> datetime | None:
+        """When the session first served any card, or ``None``."""
+        if not session_token:
+            return None
+        digest = _digest(session_token)
+        with self._lock:
+            return self._first_served.get(digest)

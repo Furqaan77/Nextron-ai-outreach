@@ -82,6 +82,10 @@ reorders a footer line (``tests/contracts/test_footer_contracts.py``).
 ``lead_score_signal_weight``, ``integer`` in Engine, 0 to 100, default 50 each (whole percents:
 50 means 0.5). That they add up to 100 spans two keys, so ``nextron.app.setup.api.Setup``
 checks it (rule ``weights_sum``, ``nextron.domain.scoring.WEIGHTS_SUM_RULE``), not a ``Rule``.
+
+**The approval session idle time** (Story 5.4): ``approval_session_idle``, ``duration`` in
+Engine, default ``PT15M`` (``DEFAULT_APPROVAL_SESSION_IDLE``), at least ``PT1M``: an approval
+session with no decision for that long is closed at its last decision.
 """
 
 import re
@@ -124,6 +128,7 @@ MAX_TEXT_LENGTH: Final = 1000
 MAX_ITEMS: Final = 200
 MAX_INTEGER: Final = 10**18 - 1  # 18 digits
 MAX_DURATION_DAYS: Final = 999_999  # the canonical text's day count has at most 6 digits
+DEFAULT_APPROVAL_SESSION_IDLE: Final = timedelta(minutes=15)  # Story 5.4
 MICROS_PER_DOLLAR: Final = 1_000_000
 MAX_MONEY: Final = 10**9 * MICROS_PER_DOLLAR - 1  # $999,999,999.999999
 WEEKDAYS: Final = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -192,6 +197,8 @@ class Key(StrEnum):
     LEAD_SCORE_FIT_WEIGHT = "lead_score_fit_weight"
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
+    # The Approval Queue's session idle time (Story 5.4).
+    APPROVAL_SESSION_IDLE = "approval_session_idle"
 
 
 class _Required(Enum):
@@ -1359,6 +1366,21 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default="",
         rules=(max_length(MAX_HOST_LENGTH), WORKER_HOST_RULE),
+    ),
+    # The Approval Queue's sessions (Story 5.4, AD-4 analytics): a session with no decision for
+    # this long is closed at its last decision when the next one comes.
+    Setting(
+        key=Key.APPROVAL_SESSION_IDLE,
+        type=SettingType.DURATION,
+        section=Section.ENGINE,
+        label="Approval session idle time",
+        unit=(
+            "An ISO 8601 duration such as PT15M. An approval session with no decision for this "
+            "long ends at its last decision; the next decision starts a new one. Only the "
+            "review-time statistics use it."
+        ),
+        default=DEFAULT_APPROVAL_SESSION_IDLE,
+        rules=(minimum(timedelta(minutes=1), "PT1M"),),
     ),
 )
 

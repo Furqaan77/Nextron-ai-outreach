@@ -148,6 +148,7 @@ def test_no_route_handler_is_async_at_run_time() -> None:
         "/enter",
         "/",
         "/queue",  # Story 5.1
+        "/queue/approve",  # Story 5.4
         "/health",
         "/static/{name}",
         "/settings",

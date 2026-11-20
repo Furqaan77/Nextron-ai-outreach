@@ -4,7 +4,7 @@
   ``place_lng`` and ``place_coords_at``, and no column of any table is named like a Places
   field (a name holding ``display_name``, ``website_uri`` or ``formatted_address``, or a
   ``phone``, ``rating``, ``review`` or ``reviews`` token), unless ``ALLOWED_COLUMNS`` lists it
-  with its reason (none so far).
+  with its reason (so far only Story 5.4's ``approvals.review_ms``, the Operator's review time).
 - **Imports.** ``nextron.ports.places`` and ``nextron.adapters.places`` (which carry the
   transient ``PlaceCandidate``), and the names ``PlaceCandidate`` and ``PlaceSearchPage``
   themselves (relative imports resolved), are imported only by the
@@ -48,7 +48,12 @@ PLACE_COLUMNS: Final = frozenset({"place_id", "place_lat", "place_lng", "place_c
 FORBIDDEN_FRAGMENTS: Final = ("display_name", "website_uri", "formatted_address")
 FORBIDDEN_TOKENS: Final = frozenset({"phone", "rating", "review", "reviews"})
 # (table, column) -> why a column named like a Places field holds no Places content
-ALLOWED_COLUMNS: Final[dict[tuple[str, str], str]] = {}
+ALLOWED_COLUMNS: Final[dict[tuple[str, str], str]] = {
+    ("approvals", "review_ms"): (
+        "Story 5.4 (AD-4): the Operator's review time in milliseconds before approving a Draft; "
+        "no Places review"
+    ),
+}
 
 PLACES_MODULES: Final = ("nextron.ports.places", "nextron.adapters.places")
 PLACES_NAMES: Final = frozenset({"PlaceCandidate", "PlaceSearchPage"})

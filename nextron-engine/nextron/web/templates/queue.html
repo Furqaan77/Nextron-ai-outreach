@@ -10,11 +10,25 @@
     (rule code, span, explanation) of a fail result with their spans marked in the message
     (segments built in Python), a disabled Approve button with its notices when approval is
     blocked, the cited Evidence, the fact versions and Playbook version, and the earlier sent
-    Steps (each body in a native <details>). Every source URL renders through safe_link. The
-    page holds no form and no POST. -#}
+    Steps (each body in a native <details>). Every source URL renders through safe_link.
+    Story 5.4: the page loads the self-hosted keymap /static/queue-keys.js (A approves); the
+    decision's notices show above the card; the hidden draft_id, rev and shown_hash sit in the
+    Approve form (csrf_field, hx-post /queue/approve) after the hx-disable article, so HTMX
+    processes it; its enabled Approve button renders only when approval isn't blocked. The
+    answer is the whole page, of which HTMX takes <main>. -#}
 {% block title %}Nextron: Queue{% endblock %}
+{% block scripts %}
+<script src="/static/queue-keys.js" defer></script>
+{%- endblock %}
 {% block content %}
 <h1>Approval Queue</h1>
+{%- if notices %}
+<div class="queue-notices" role="alert">
+{%- for notice in notices %}
+<p class="queue-notice">{{ notice|plain }}</p>
+{%- endfor %}
+</div>
+{%- endif %}
 {%- if elapsed %}
 <p class="queue-elapsed">Session time: {{ elapsed|plain }}</p>
 {%- endif %}
@@ -36,8 +50,6 @@
 <article class="queue-card{% if card.failing %} grounding-fail{% endif %}" data-draft="{{ card.draft_id|plain }}" hx-disable>
 <h2>{{ card.lead_name|plain }}</h2>
 <p class="queue-badges">{% for badge in card.badges %}{% if not loop.first %} {% endif %}<span class="queue-badge {{ badge.classes|plain }}">{{ badge.text|plain }}</span>{% endfor %}</p>
-<input type="hidden" name="rev" value="{{ card.rev|plain }}">
-<input type="hidden" name="shown_hash" value="{{ card.shown_hash|plain }}">
 <dl class="queue-card-facts">
 <dt>Draft</dt>
 <dd>{{ card.kind|plain }}{% if card.step %}: {{ card.step|plain }}{% endif %}</dd>
@@ -134,6 +146,15 @@
 </section>
 {%- endif %}
 </article>
+<form class="queue-approve-form" method="post" action="{{ approve_action|plain }}" hx-post="{{ approve_action|plain }}" hx-target="main" hx-select="main" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="draft_id" value="{{ card.draft_id|plain }}">
+<input type="hidden" name="rev" value="{{ card.rev|plain }}">
+<input type="hidden" name="shown_hash" value="{{ card.shown_hash|plain }}">
+{%- if not card.approve_disabled %}
+<button type="submit" class="queue-approve" aria-keyshortcuts="A">Approve</button>
+{%- endif %}
+</form>
 {%- else %}
 <section class="queue-empty">
 <p class="queue-clear">Queue clear</p>

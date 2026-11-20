@@ -506,7 +506,9 @@ def test_a_failing_card_is_red_with_its_spans_marked_and_approval_disabled(world
     assert [node.text for node in article.find_all("p", class_="queue-approve-notice")] == [
         "Edit this Draft to remove the failing claims before approving"
     ]
-    assert not page.find_all("form")
+    # Story 5.4: the Approve form holds the binding fields but no submit button here
+    [approve_form] = page.find_all("form")
+    assert not approve_form.find_all("button")
 
 
 @pytest.mark.parametrize("state", ["pending", "none"])
@@ -534,7 +536,7 @@ def test_a_pending_or_missing_result_says_pending_and_disables_approval(
     assert not article.find_all("mark")
 
 
-def test_a_passing_card_shows_a_pass_badge_and_no_approve_control(world: World) -> None:
+def test_a_passing_card_shows_a_pass_badge_and_the_enabled_approve_control(world: World) -> None:
     _, _, _, [draft_id] = slot(world)
     set_grounding(world, draft_id, "pass")
 
@@ -543,7 +545,9 @@ def test_a_passing_card_shows_a_pass_badge_and_no_approve_control(world: World) 
     article = page.find("article", class_="queue-card")
     assert [node.text for node in article.find_all("span", class_="queue-badge")] == ["pass"]
     assert "grounding-pass" in str(article.find("span", class_="queue-badge").attrs["class"])
-    assert not page.find_all("button") and not page.find_all("form")
+    assert not article.find_all("button")  # Story 5.4: the button sits in the Approve form
+    [button] = page.find("form", class_="queue-approve-form").find_all("button")
+    assert button.attrs["type"] == "submit" and "disabled" not in button.attrs
     assert not article.find_all("p", class_="queue-approve-notice")
 
 

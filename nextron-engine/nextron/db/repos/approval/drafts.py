@@ -13,6 +13,8 @@ Draft machine. It reads the content group's ``enrollment_id`` and ``kind`` and, 
   ``step_no``, then ``id``;
 - ``ready_of_ended_enrollments()``: the ``ready`` Drafts whose Enrollment is ``stopped`` or
   ``completed``, in the same order;
+- ``approved_of(enrollment_ids)`` and ``approved_of_ended_enrollments()`` (Story 5.4's
+  cascade): the same two reads for ``approved`` Drafts;
 - ``set_status(draft_id, from_status, to_status, at) -> bool``: moves the Draft from
   ``from_status`` to ``to_status`` and sets ``status_at`` (a conditional update); whether it
   changed a row.
@@ -44,6 +46,7 @@ from nextron.db.uow import current
 from nextron.domain.draft import RESPONSIVE_KINDS, STEP_KINDS
 
 READY: Final = "ready"
+APPROVED: Final = "approved"
 ACTIVE: Final = "active"
 ENDED: Final = ("stopped", "completed")
 _ORDER: Final = (DraftRecord.enrollment_id, DraftRecord.step_no, DraftRecord.id)
@@ -75,6 +78,31 @@ def ready_of_ended_enrollments() -> list[ReadyDraft]:
         select(DraftRecord.id, DraftRecord.enrollment_id)
         .join(EnrollmentRecord, EnrollmentRecord.id == DraftRecord.enrollment_id)
         .where(DraftRecord.status == READY, EnrollmentRecord.status.in_(ENDED))
+        .order_by(*_ORDER)
+    )
+    return [ReadyDraft(str(i), str(e)) for i, e in current().session.execute(statement)]
+
+
+def approved_of(enrollment_ids: Sequence[str]) -> list[ReadyDraft]:
+    """The ``approved`` Drafts of the Enrollments ``enrollment_ids`` (Story 5.4's cascade)."""
+    if not enrollment_ids:
+        return []
+    statement = (
+        select(DraftRecord.id, DraftRecord.enrollment_id)
+        .where(
+            DraftRecord.enrollment_id.in_(list(enrollment_ids)), DraftRecord.status == APPROVED
+        )
+        .order_by(*_ORDER)
+    )
+    return [ReadyDraft(str(i), str(e)) for i, e in current().session.execute(statement)]
+
+
+def approved_of_ended_enrollments() -> list[ReadyDraft]:
+    """The ``approved`` Drafts whose Enrollment has ended (Story 5.4's cascade)."""
+    statement = (
+        select(DraftRecord.id, DraftRecord.enrollment_id)
+        .join(EnrollmentRecord, EnrollmentRecord.id == DraftRecord.enrollment_id)
+        .where(DraftRecord.status == APPROVED, EnrollmentRecord.status.in_(ENDED))
         .order_by(*_ORDER)
     )
     return [ReadyDraft(str(i), str(e)) for i, e in current().session.execute(statement)]

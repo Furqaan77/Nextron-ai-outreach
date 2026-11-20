@@ -41,6 +41,10 @@ requested)``: the creation ``events`` row has no ``from`` status.
 **Revision origins** (``RevisionOrigin``, Story 4.12): why a Draft revision was written:
 ``generated`` (revision 1, the AI's original text), ``regenerated``, ``operator_edit`` and
 ``footer_change``.
+
+**Purpose (Story 5.4).** ``contact_purpose(kind, step_no)``: AD-16's purpose for emailing a
+Draft: ``cold`` (Step 1), ``follow_up`` (a later Step), ``recontact``, ``reply``, ``rebook``;
+``None`` for ``channel``.
 """
 
 from collections.abc import Iterable, Mapping
@@ -48,6 +52,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
+from nextron.domain.contactability import Purpose
 from nextron.domain.machines import IllegalTransition, Transition
 
 MACHINE: Final = "draft"
@@ -155,3 +160,25 @@ def transition(
     if event == DraftEvent.LOG_TOUCH and kind != DraftKind.CHANNEL:
         raise IllegalTransition(MACHINE, event, current)
     return found
+
+
+FIRST_STEP: Final = 1
+
+
+def contact_purpose(kind: DraftKind | str, step_no: int | None) -> Purpose | None:
+    """AD-16's purpose for emailing a Draft of ``kind`` (Story 5.4; the one definition approval
+    and sending use): ``cold`` for a Step 1 ``step``, ``follow_up`` for a later Step,
+    ``recontact``, ``reply`` and ``rebook`` for those kinds; ``None`` for ``channel`` (never
+    emailed) or a kind that isn't one."""
+    if kind == DraftKind.STEP:
+        return Purpose.COLD if step_no == FIRST_STEP else Purpose.FOLLOW_UP
+    return _PURPOSES.get(str(kind))
+
+
+_PURPOSES: Final[Mapping[str, Purpose]] = MappingProxyType(
+    {
+        DraftKind.RECONTACT: Purpose.RECONTACT,
+        DraftKind.REPLY: Purpose.REPLY,
+        DraftKind.REBOOK: Purpose.REBOOK,
+    }
+)

@@ -35,8 +35,8 @@ details_of=None)`` turns ``nextron.app.queries.approval.DueQueue`` into what
 - ``approve_disabled`` and ``approve_notices``: approval is disabled when grounding is ``fail``
   ("Edit this Draft to remove the failing claims before approving") or ``pending``
   ("Grounding check pending"), the card has no ``shown_hash`` ("This Draft can't be approved
-  yet"), or the card is ``blocked`` (its footer notice joins the notices); otherwise no approve
-  control renders (Story 5.4 adds it);
+  yet"), or the card is ``blocked`` (its footer notice joins the notices); otherwise the page
+  renders the enabled Approve button (Story 5.4);
 - ``evidence`` (``EvidenceRow``s: type label, text, the ``fact: value`` line of a Quote, the
   pages an Absence checked, the source URL, the retrieval time, "AI-extracted" and
   "superseded"/"retracted"; "Evidence not found" with the id when missing), ``facts``
@@ -47,10 +47,22 @@ details_of=None)`` turns ``nextron.app.queries.approval.DueQueue`` into what
   with an Enrollment; the page then says "No earlier Step sent yet" when there are none).
 
 Every value is plain text; the template autoescapes it inside an ``hx-disable`` container and
-renders every source URL through ``safe_link``. The page has no form and no POST: deciding a
-card comes in later stories.
+renders every source URL through ``safe_link``.
+
+**Approve (Story 5.4).** ``queue_context(..., notices=())`` also gives ``notices`` (the decision's
+outcome texts, shown above the card; when the ``draft`` named isn't a due card, e.g. approved
+already or held back, the first is prefixed "The Draft you approved: ", so it doesn't read as about the card shown)
+and ``approve_action``, ``/queue/approve?card=<k>`` for the
+focused card ``k`` (after an approval the page focuses card ``k`` again: the next one). The
+template puts the hidden ``draft_id``, ``rev`` and ``shown_hash`` and ``csrf_field()`` in a
+``<form method="post" hx-post=... class="queue-approve-form">`` outside the ``hx-disable``
+article, with the enabled ``Approve`` submit button whenever ``approve_disabled`` is false.
+``submitted_approval(fields) -> (draft_id, rev, shown_hash)`` reads that form: exactly those
+fields (plus ``csrf_token``), each once, at most ``MAX_FIELD_LENGTH`` characters, ``rev`` 1 to 9
+digits; anything else raises ``MalformedForm`` (400).
 """
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
@@ -72,6 +84,7 @@ from nextron.domain.draft import DraftKind
 from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.render import Composed
 from nextron.domain.segments import EvidenceType
+from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 from nextron.web.leads_page import (
     EVIDENCE_TYPE_LABELS,
     FAIL_GROUNDING,
@@ -82,8 +95,14 @@ from nextron.web.leads_page import (
 
 TEMPLATE: Final = "queue.html"
 QUEUE_PATH: Final = "/queue"
+APPROVE_PATH: Final = "/queue/approve"
+APPROVE_FIELDS: Final = ("draft_id", "rev", "shown_hash")
+CSRF_FIELD: Final = "csrf_token"
+MAX_FIELD_LENGTH: Final = 128
+REV_PATTERN: Final = re.compile(r"[0-9]{1,9}")  # matched with fullmatch
 CARD_PARAM: Final = "card"
 DRAFT_PARAM: Final = "draft"
+SUBMITTED_PREFIX: Final = "The Draft you approved: "  # a refusal for a Draft no longer due
 NO_VALUE: Final = "—"
 UNKNOWN_NAME: Final = "Unknown Lead"
 NOTHING_SCHEDULED: Final = "Nothing scheduled"
@@ -427,6 +446,26 @@ def card_row(
     )
 
 
+def submitted_approval(fields: FormFields) -> tuple[str, int, str]:
+    """The Approve form's ``draft_id``, ``rev`` and ``shown_hash`` (Story 5.4); anything else
+    raises ``MalformedForm``: other fields, a repeated one, a ``rev`` that isn't 1 to 9 digits,
+    or a value longer than ``MAX_FIELD_LENGTH``."""
+    if set(fields) - {CSRF_FIELD} != set(APPROVE_FIELDS):
+        raise MalformedForm(WRONG_FIELDS)
+    values = []
+    for name in APPROVE_FIELDS:
+        found = fields[name]
+        if len(found) != 1:
+            raise MalformedForm(REPEATED_FIELD)
+        if len(found[0]) > MAX_FIELD_LENGTH:
+            raise MalformedForm(WRONG_FIELDS)
+        values.append(found[0])
+    draft_id, rev, shown_hash = values
+    if not REV_PATTERN.fullmatch(rev):
+        raise MalformedForm(WRONG_FIELDS)
+    return draft_id, int(rev), shown_hash
+
+
 def focused_index(
     cards: tuple[QueueCard, ...], card_param: str | None, draft_param: str | None
 ) -> int:
@@ -452,11 +491,18 @@ def queue_context(
     *,
     draft_param: str | None = None,
     details_of: Callable[[QueueCard], CardDetails] | None = None,
+    notices: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """What ``queue.html`` renders; see the module docstring."""
     cards = queue.cards
     total = len(cards)
     index = focused_index(cards, card_param, draft_param)
+    if draft_param and all(card.draft_id != draft_param for card in cards):
+        # the Draft just submitted isn't a due card: the notices are about it, not the card shown
+        notices = tuple(
+            f"{SUBMITTED_PREFIX}{notice}" if at == 0 else notice
+            for at, notice in enumerate(notices)
+        )
     focused = None
     if total:
         shown = cards[index - 1]
@@ -466,6 +512,8 @@ def queue_context(
         "groups": tuple(GroupRow(group.key, group.label, len(group.cards)) for group in queue.groups),
         "card": focused,
         "total": total,
+        "notices": notices,
+        "approve_action": f"{APPROVE_PATH}?{CARD_PARAM}={index}",
         "position": f"{index} of {total}" if total else None,
         "previous_href": _href(cards[index - 2]) if total and index > 1 else None,
         "next_href": _href(cards[index]) if total and index < total else None,

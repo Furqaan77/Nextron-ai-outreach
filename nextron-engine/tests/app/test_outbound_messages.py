@@ -562,6 +562,37 @@ def test_cancel_of_an_unknown_om_is_a_lookup_error(held: Held) -> None:
             held.cancel(unknown)
 
 
+@pytest.mark.parametrize("status", [None, "cancelled", "sending", "unknown", "sent"])
+def test_cancel_for_cascade_refuses_quietly_and_the_transaction_goes_on(
+    held: Held, status: str | None
+) -> None:
+    """Story 5.4: an unknown id or an OM past ``queued`` is ``False`` with no write, and a later
+    write in the same transaction (another OM's cancel) still commits."""
+    world = held.world
+    _, [step_1, _] = approved(held)
+    _, [other, _] = approved(held)
+    om_id = held.enqueue(step_1, approve(world, step_1))
+    other_om = held.enqueue(other, approve(world, other))
+    target = new_id() if status is None else om_id
+    if status == "cancelled":
+        assert held.cancel(om_id) is True
+    elif status is not None:
+        world.sql("UPDATE outbound_messages SET status = ? WHERE id = ?", (status, om_id))
+    before = held.counts()
+    expected = held.om(om_id)["status"]
+
+    def both() -> tuple[bool, bool]:
+        first = sending_api.cancel_for_cascade(world.clock, target)
+        return first, sending_api.cancel_for_cascade(world.clock, other_om)
+
+    assert world.transact(both) == (False, True)
+
+    assert held.om(om_id)["status"] == expected
+    assert held.om(other_om)["status"] == "cancelled"
+    after = held.counts()
+    assert after == {**before, "events": before["events"] + 1}  # only the other OM's move
+
+
 # Erasure ------------------------------------------------------------------------------------------
 
 
@@ -587,6 +618,9 @@ def test_erasing_the_contact_tombstones_the_copy_and_keeps_the_rest(held: Held) 
         now = held.om(om_id)
         copy = [now[c] for c in ("to_address", "subject", "body", "unsub_token")]
         assert copy == ["[erased]"] * 4
+        if om_id == queued:  # Story 5.4: the erasure's stop cascade cancelled the queued OM
+            assert (now["status"], now["cancelled_at"]) == ("cancelled", now["created_at"])
+            was = {**was, "status": "cancelled", "cancelled_at": now["created_at"]}
         assert {c: now[c] for c in kept} == {c: was[c] for c in kept}
     assert held.om(other)["to_address"] != "[erased]"  # another Contact's: kept
     rows = world.sql("SELECT * FROM outbound_messages ORDER BY id")

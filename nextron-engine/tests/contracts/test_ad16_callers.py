@@ -11,7 +11,7 @@ violation.
   the AST finds such a def; the patterns are loose (``*find*email*``, ``*verify*email*``,
   ``*enroll*``, ``*approve*``), so a later name like ``approve_draft`` can't skip forever.
   ``find_contact_email`` (Story 2.13) also covers every ``EmailFinding`` method. Not built yet:
-  ``verify_contact_email``, the Signal Inbox chain, replies, ``approval.approve``, the pipeline
+  ``verify_contact_email``, the Signal Inbox chain, replies, the pipeline
   Tasks and call sheets and ``compliance.assert_sendable``: their stories add a scenario here
   when they build them. ``sequencing.enroll`` (Story 4.8) runs on the shipped seeds with
   Law-PrivateAI x US active and one Sending Inbox: an eligible US Contact's first two gate calls
@@ -25,7 +25,11 @@ violation.
   ``Blocked`` makes no AI call and only records that ``fail`` (an ``UPDATE`` of
   ``grounding_results``). ``sending.enqueue`` (Story 5.2: ``Sending.enqueue``) holds that
   revision, ``approved`` by plain SQL, as an OutboundMessage: its gate call (purpose ``cold``)
-  comes before its first write, and ``Blocked`` writes nothing.
+  comes before its first write, and ``Blocked`` writes nothing. ``approval.approve`` (Story 5.4:
+  ``Approval.approve``, a use case, run in its own unit of work) approves that revision with a
+  ``pass`` grounding result (plain SQL) bound to its card's ``shown_hash``: its own gate call
+  (purpose ``cold``) comes before its first write and ``enqueue``'s before the OM insert;
+  ``Blocked`` refuses before any write.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -70,6 +74,7 @@ violation.
 import ast
 import importlib.util
 import re
+import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -84,6 +89,7 @@ import sqlalchemy
 from sqlalchemy import Engine, event
 
 from nextron import main
+from nextron.app.approval.api import Approval
 from nextron.app.compliance import api as compliance_api
 from nextron.app.compliance.api import Compliance
 from nextron.app.discovery.api import Discovery, ImportRequest, ImportSummary, LeadImports
@@ -91,6 +97,7 @@ from nextron.app.drafting.api import Drafting, Traceability
 from nextron.app.drafting.grounding import GroundingChecks
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.pipeline.api import Pipeline
+from nextron.app.queries import approval as approval_queries
 from nextron.app.queries import drafting as drafting_queries
 from nextron.app.research.api import AddedContact, Research
 from nextron.app.research.finding import EmailFinding
@@ -1303,6 +1310,47 @@ def _enqueue(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
 
 
+def _approve(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 5.4: Step 1's revision 1 with a ``pass`` grounding result (set by plain SQL,
+    unrecorded), approved bound to its card's ``shown_hash``: approve's own gate call (purpose
+    ``cold``) before its first write, then ``enqueue``'s before the OM insert. ``Blocked``
+    refuses before any write."""
+    contact_id, draft_id, clock = _revised_step_1(world, tag)
+    database = world.engine.url.database
+    assert database
+    connection = sqlite3.connect(database, isolation_level=None)  # no foreign keys: a stand-in
+    try:
+        connection.execute(
+            "UPDATE grounding_results SET status = 'pass', flags = '[]', route_tuple_id = ?, "
+            "served_model = 'claude-haiku-5-5', ai_checked_at = ? WHERE draft_id = ?",
+            (new_id(), "2026-11-18T09:00:00.000000Z", draft_id),
+        )
+    finally:
+        connection.close()
+    with world.units.open(read_only=True):
+        card = approval_queries.card_of(draft_id)
+    assert card is not None and card.shown_hash
+    sending = Sending(clock, env="prod", compliance=Compliance(clock, codec=FakeTokenCodec()))
+    approval = Approval(clock, sending=sending)
+
+    def action() -> object:
+        with world.units.open():
+            return approval.approve(draft_id, 1, card.shown_hash)
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate)
+
+
+def _approved(world: World) -> None:
+    """The allowed approval added one approval and one ``queued`` OM, the blocked one
+    neither (the scenario isn't vacuous)."""
+    with world.engine.connect() as connection:
+        approvals = connection.exec_driver_sql("SELECT COUNT(*) FROM approvals").scalar_one()
+        statuses = connection.exec_driver_sql("SELECT status FROM outbound_messages").all()
+    assert approvals == 1
+    assert [row[0] for row in statuses] == ["queued"]
+
+
 def _enqueued(world: World) -> None:
     """The allowed enqueue added one ``queued`` OM (the scenario isn't vacuous)."""
     with world.engine.connect() as connection:
@@ -1477,6 +1525,11 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
         ),
         # Story 5.2: Blocked raises before any write, so nothing at all is added
         "sending.enqueue": Scenario((_enqueue,), after_blocked=_enqueued),
+        # Story 5.4: approve gates before its first write; enqueue gates again before the OM
+        # insert. Blocked refuses before any write, so nothing at all is added
+        "approval.approve": Scenario(
+            (_approve,), gates_first=False, gates_before_first_write=1, after_blocked=_approved
+        ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1579,6 +1632,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.request_*",  # Story 4.9
         "drafting.grounding_check",  # Story 4.14
         "sending.enqueue",  # Story 5.2
+        "approval.approve",  # Story 5.4
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding
@@ -1645,8 +1699,11 @@ def test_a_built_caller_without_a_scenario_fails(tmp_path: Path) -> None:
         },
     )
 
-    # Story 4.8's real scenario left out, so the probe's enroll has none
-    without_enroll = [name for name in SCENARIOS if name != "sequencing.enroll"]
+    # Story 4.8's and Story 5.4's real scenarios left out, so the probe's enroll and approve
+    # have none
+    without_enroll = [
+        name for name in SCENARIOS if name not in ("sequencing.enroll", "approval.approve")
+    ]
     assert scenario_problems(index, without_enroll) == [
         "verify_contact_email is built (app/research/api.py Research.verify_address_email) but "
         "has no scenario",

@@ -12,7 +12,8 @@ the real subscriber registry, the shipped seeds, Law-PrivateAI x US active):
   Enrollment after the last Step; an unknown Draft is a no-op.
 - **Lifecycle.** ``pause``/``resume`` and ``delay_until``.
 - **Cancel.** Every stop (operator, suppression, Lead close, erasure) cancels the ``ready``
-  Drafts in the same transaction, one event each; an ``approved`` one is left alone.
+  Drafts in the same transaction, one event each; since Story 5.4 an ``approved`` one without
+  a live OutboundMessage is cancelled too (``tests/app/test_approve.py`` covers the rest).
 - **Capacity.** ``_follow_ups_due`` counts a live Enrollment's due follow-ups per inbox.
 - **The table.** Its CHECKs and unique index, and no stored "stalled".
 """
@@ -506,7 +507,7 @@ def assert_cancelled(world: World, enrollment_id: str) -> None:
     ) == {(stamp(LATER),)}
 
 
-def test_an_operator_stop_cancels_the_ready_drafts_and_leaves_an_approved_one(
+def test_an_operator_stop_cancels_the_ready_drafts_and_an_approved_one_without_a_message(
     world: World,
 ) -> None:
     _, _, enrollment_id = enrolled(world)
@@ -515,7 +516,16 @@ def test_an_operator_stop_cancels_the_ready_drafts_and_leaves_an_approved_one(
 
     world.stop(enrollment_id)
 
-    assert [row[6] for row in slots(world, enrollment_id)] == ["approved"] + ["cancelled"] * 3
+    # Story 5.4: an approved Draft with no live OutboundMessage is cancelled too
+    assert [row[6] for row in slots(world, enrollment_id)] == ["cancelled"] * 4
+    assert world.events("drafts", step_1)[-1] == (
+        "approved",
+        "cancelled",
+        "sequence_stopped",
+        enrollment_id,
+        "system:approval",
+        stamp(LATER),
+    )
     for draft_id in rest:
         assert world.events("drafts", draft_id) == [
             (None, "ready", "requested", enrollment_id, "system:drafting", stamp(LATER)),
@@ -597,9 +607,10 @@ def test_follow_ups_due_counts_unsent_follow_ups_of_live_enrollments(world: Worl
     send(world, step_1, friday)
     stopped_1, stopped_2, *_ = draft_ids(world, stopped_id)
     send(world, stopped_1, friday)
-    # approved, so the stop leaves it pending: only the live-Enrollment filter drops it
-    world.sql("UPDATE drafts SET status = 'approved' WHERE id = ?", (stopped_2,))
+    # approved after the stop (an OM in flight would keep it so, Story 5.4), so it is still
+    # pending: only the live-Enrollment filter drops it
     world.stop(stopped_id)
+    world.sql("UPDATE drafts SET status = 'approved' WHERE id = ?", (stopped_2,))
     assert world.sql("SELECT status FROM drafts WHERE id = ?", (stopped_2,)) == [("approved",)]
     step_2_due = datetime.fromisoformat(str(due(world, step_2)).replace("Z", "+00:00"))
 

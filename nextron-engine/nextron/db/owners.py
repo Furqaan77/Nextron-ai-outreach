@@ -436,6 +436,22 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "status_at",
         ),
     },
+    # Story 5.4
+    "approvals": {
+        "approval": (
+            "id",
+            "draft_id",
+            "rev",
+            "text_hash",
+            "approved_by",
+            "approved_at",
+            "review_ms",
+            "edit_ratio",
+        ),
+    },
+    "approval_sessions": {
+        "approval": ("id", "started_at", "ended_at", "decisions", "active_ms"),
+    },
     "crawl_runs": {
         "research": (
             "id",

@@ -420,3 +420,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-3-show-the-evidence-facts-and-grounding-result-behind-every-card.md`
   summary: Decide whether a follow-up card's Earlier Steps should also list the Enrollment's OMs at `unknown` (and `sending`), labelled "send unconfirmed", since the prospect may have received them; today only `sent` OMs are listed, as the 5.3 AC says.
   evidence: Review pass 1 of Story 5.3 (BH3, EC2, medium). `outbound_messages.sent_of_enrollment` filters `status = 'sent'`. Nothing sends before Epic 6; Story 6.10 (unknown outcomes) should settle it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-4-approve-a-draft-bound-to-the-exact-text-shown.md`
+  summary: Move the "queue clear" session-close check out of the approve `BEGIN IMMEDIATE` unit (or make it cheap), so each Approve doesn't hold the write lock while `due_queue` evaluates live Eligibility for every due card.
+  evidence: Review pass 1 of Story 5.4 (BH8, medium). `Approval._count_decision` calls `due_queue(now, Compliance(clock).evaluate_eligibility)` after the writes; Story 5.7 owns the 150 ms p95 server-time budget and should measure and settle it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-4-approve-a-draft-bound-to-the-exact-text-shown.md`
+  summary: Add a behavioural (browser) test of `static/queue-keys.js`: `A` submits only when an enabled `button.queue-approve` exists, and is ignored with modifiers, on repeat, or while typing.
+  evidence: Review pass 1 of Story 5.4 (BH11, VG4, low). Only source-text checks exist; the repo has no JS harness. Story 5.7 (keymap and Playwright timing) should add it.

@@ -2702,8 +2702,9 @@ explanation.
 ## The Approval Queue
 
 Story 5.1 (FR-26, AD-13, AD-16) adds **Queue** to the dashboard's navigation (`/queue`): the
-Drafts due for your review, one focused card at a time. The page only reads; deciding a card
-(approve, reject, edit, skip, regenerate) and the keyboard keys come in later stories.
+Drafts due for your review, one focused card at a time. Loading the page only reads; Story 5.4
+adds **Approve** (and its **A** key); reject, edit, skip, regenerate and the other keys come in
+later stories.
 
 **What is due.** A `ready` Draft that has text. A Sequence Step or re-contact also needs a due
 time no later than 24 hours from now and an `active` Enrollment (a paused, stopped or completed
@@ -2750,7 +2751,7 @@ the Evidence, facts, earlier Steps and grounding flags are read for the focused 
 - **Approve.** When the grounding is `fail` or `pending`, or the card can't be bound (below), a
   greyed-out **Approve** button shows with the reason ("Edit this Draft to remove the failing
   claims before approving", "Grounding check pending", "This Draft can't be approved yet"). A
-  card that passed shows no Approve control yet: Story 5.4 adds it.
+  card that passed shows the enabled **Approve** button (Story 5.4, below).
 - **Evidence.** Each Evidence item the revision cites, in order: Quote (with its "fact: value"
   when it has one), Absence (what was sought and each page checked) or Count (the number and
   what was counted); its source (a link only for `http`/`https` addresses, "—" without one);
@@ -2803,6 +2804,53 @@ already being sent, sent, or in doubt (`unknown`) can't be cancelled: "already s
 each of their messages with `[erased]`; the ids, statuses, times, hash and snapshot stay. The
 subject access export lists their messages under `sending.outbound_messages`, without the
 unsubscribe token. A Lead merge moves the messages to the surviving Lead.
+
+### Approve a card (Story 5.4)
+
+Story 5.4 (FR-26, FR-55, AD-4, AD-6, AD-16) adds the **Approve** button to a card that passed
+its grounding check, and the **A** key (press it with no Ctrl, Alt, Shift or Cmd, and not while
+typing in a field). Approving never sends anything: it holds the message as one queued
+OutboundMessage (above) for delivery in Epic 6.
+
+**What an approval binds to.** The card's hidden `rev` and `shown_hash` are posted with the
+Draft id. The engine re-checks everything, in this order, and the first failure decides:
+
+1. the Draft must still be waiting ("Already approved", or "This Draft is no longer in the
+   queue");
+2. the revision must still be current, else "This Draft changed since you opened it" and the
+   card shows its new text;
+3. the grounding result must be `pass` ("Grounding check failed" / "Grounding check pending");
+4. the footer must be complete (the same "Sending blocked: footer incomplete (...)" notice);
+5. the Contact must still be contactable ("Contact is suppressed" plus the reason);
+6. the Draft must be a Sequence Step or re-contact with an address ("This Draft can't be
+   approved yet": Reply and Rebook Drafts wait for Epic 7);
+7. the message composed now must hash exactly to what you saw (a changed email address, for
+   example, also gives "This Draft changed since you opened it").
+
+A refusal writes nothing; the same card shows again with the reason above it. When that Draft
+is no longer a card in the queue (already approved, cancelled or held back), the reason is
+shown above the page as "The Draft you approved: ...", so it doesn't read as about the card now
+shown. On success, one
+transaction records the approval (`approvals`, migration `0049_5_4_approvals`), moves the Draft
+to `approved` and holds the message; if holding it fails (for example, the unsubscribe key is
+missing), all of it is rolled back and the card shows why. Then the next card shows, or "Queue
+clear".
+
+**Review statistics.** Each approval records how long the card was open before you approved it
+(`review_ms`, from the last time this dashboard session showed that card; empty when it never
+did) and how much the approved text differs from the AI's first version (`edit_ratio`: 0 means
+unchanged, above 0.20 is a major edit, 1 is the cap). Approvals are grouped into
+`approval_sessions`: a session starts with the first card you were shown (or, after an earlier
+session in the same dashboard login has ended, with the card you approve), counts its decisions
+and review time (each decision adds at most the idle time below), and ends at "Queue clear" or,
+after **Approval session idle time** (Settings, Engine; default `PT15M`) without a decision, at
+its last decision.
+
+**Un-approving on a stop.** When a Sequence stops (a stop, suppression, Lead close or erasure),
+an approved Draft's queued message is cancelled and the Draft becomes `cancelled`. A message
+already being sent (or in doubt) is left alone: the Draft stays approved and the message id is
+logged (`approval_cascade_in_flight`); the send gate (Story 6.9) still blocks it. A message
+already sent is left alone too, without a log line.
 
 ## Leads list and Lead page
 

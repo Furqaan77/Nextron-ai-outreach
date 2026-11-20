@@ -92,6 +92,11 @@ never the Draft.
   ``cancel``, cause ``unapproved``, ``cause_ref`` the OM's ``approval_id``, actor
   ``system:sending``): ``True``. Already ``cancelled``: ``False``, no write. ``sending``, ``unknown`` or ``sent``: ``AlreadySending`` ("already
   sending"), unchanged. An unknown id: ``LookupError``.
+- the module-level ``@command cancel_for_cascade(clock, om_id) -> bool`` (Story 5.4): the same
+  cancel of a ``queued`` OM (``True``) for ``approval``'s stop and suppression cascades, which
+  must never raise (an exception leaving a command dooms the transaction): an unknown OM, one
+  past ``queued`` or already ``cancelled``, or a lost race changes nothing and gives ``False``.
+  It needs no ``Sending`` instance (no ``env`` or codec).
 - the module-level ``@command reparent_lead(n: LeadsMerged)`` (AD-3; ``main`` subscribes it):
   the merged Lead's OMs name the survivor (``lead_id`` is a reference, not part of the copy;
   the triggers allow it to change).
@@ -109,7 +114,7 @@ sends email (no ``MailPort``) or runs warm-up exchanges.
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from types import MappingProxyType
 from typing import Final, Protocol
 
@@ -122,7 +127,7 @@ from nextron.app.queries import scoring as scoring_queries
 from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
-from nextron.app.queries.sending import InboxCapView
+from nextron.app.queries.sending import InboxCapView, OutboundMessageView
 from nextron.db import eventlog
 from nextron.db.repos.sending import domains as domains_repo
 from nextron.db.repos.sending import inboxes as inboxes_repo
@@ -132,7 +137,7 @@ from nextron.db.uow import command, current, use_case
 from nextron.domain import outbound_message as om_machine
 from nextron.domain import render
 from nextron.domain.contactability import Blocked, BlockReason, ContactSubject, Purpose
-from nextron.domain.draft import DraftKind, DraftStatus
+from nextron.domain.draft import DraftKind, DraftStatus, contact_purpose
 from nextron.domain.erasure import Coverage, TableErasure
 from nextron.domain.errors import DomainError
 from nextron.domain.ids import is_ulid
@@ -272,11 +277,12 @@ class _Addressed:
 
 
 def _purpose(kind: str, step_no: int | None) -> Purpose:
-    """AD-16's purpose for a Step Draft: ``recontact``, else ``cold`` for Step 1 and
-    ``follow_up`` for a later Step."""
-    if kind == DraftKind.RECONTACT:
-        return Purpose.RECONTACT
-    return Purpose.COLD if step_no == 1 else Purpose.FOLLOW_UP
+    """AD-16's purpose for a Step Draft (``domain.draft.contact_purpose``): ``recontact``, else
+    ``cold`` for Step 1 and ``follow_up`` for a later Step."""
+    found = contact_purpose(kind, step_no)
+    if found is None:  # enqueue takes only step and recontact Drafts, checked before
+        raise UnsupportedKind(f"enqueue: a {kind} Draft has no purpose")
+    return found
 
 
 class Sending:
@@ -393,20 +399,8 @@ class Sending:
             return False
         if found.status != OmStatus.QUEUED:
             raise AlreadySending(ALREADY_SENDING)
-        moved = om_machine.transition(found.status, OmEvent.CANCEL)
-        now = self._clock.now()
-        if not outbound_repo.set_status(found.id, found.status, moved.to, now):
+        if not _cancel_queued(found, self._clock.now()):
             raise AlreadySending(ALREADY_SENDING)
-        eventlog.append(
-            entity=OM_ENTITY,
-            entity_id=found.id,
-            from_status=found.status,
-            to_status=moved.to,
-            cause=moved.cause,
-            cause_ref=found.approval_id,
-            actor=OM_ACTOR,
-            at=now,
-        )
         return True
 
     # Sending Inboxes (Story 4.7) ----------------------------------------------------------------
@@ -551,6 +545,37 @@ class Sending:
             timezone = FALLBACK_TIMEZONE
         today = local_date(self._clock.now(), timezone)
         return InboxCaps(today, sending_queries.inbox_caps(today))
+
+
+def _cancel_queued(found: OutboundMessageView, now: datetime) -> bool:
+    """Move a ``queued`` OM to ``cancelled`` (conditional) with its ``events`` row; whether it
+    moved (``False``: it left ``queued`` first, nothing written)."""
+    moved = om_machine.transition(found.status, OmEvent.CANCEL)
+    if not outbound_repo.set_status(found.id, found.status, moved.to, now):
+        return False
+    eventlog.append(
+        entity=OM_ENTITY,
+        entity_id=found.id,
+        from_status=found.status,
+        to_status=moved.to,
+        cause=moved.cause,
+        cause_ref=found.approval_id,
+        actor=OM_ACTOR,
+        at=now,
+    )
+    return True
+
+
+@command
+def cancel_for_cascade(clock: Clock, om_id: str) -> bool:
+    """Un-approve's cancel for a cascade (Story 5.4, AD-6): like ``Sending.cancel`` but never
+    raises, so the caller's transaction stays whole: a ``queued`` OM moves to ``cancelled``
+    (``True``); an unknown OM, or one ``cancelled``, ``sending``, ``unknown`` or ``sent``, or a
+    lost race, changes nothing (``False``). It needs no ``env`` or codec."""
+    found = sending_queries.outbound_message(om_id)
+    if found is None or found.status != OmStatus.QUEUED:
+        return False
+    return _cancel_queued(found, clock.now())
 
 
 # Erasure (Story 5.2) ----------------------------------------------------------------------------
