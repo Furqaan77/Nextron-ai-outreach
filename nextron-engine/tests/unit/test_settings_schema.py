@@ -546,6 +546,7 @@ def test_the_declared_keys_in_order() -> None:
         "away_periods",
         "bulk_ai_submit_at",  # Story 4.17
         "draft_deadline",  # Story 4.18
+        "dnsbl_zones",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -591,6 +592,7 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.AWAY_PERIODS),
         setting(Key.BULK_AI_SUBMIT_AT),
         setting(Key.DRAFT_DEADLINE),
+        setting(Key.DNSBL_ZONES),
     )
 
 
@@ -1380,7 +1382,7 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
             "bulk_ai_submit_at, bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, discovery_daily_lead_target, discovery_pool_days, "
-            "discovery_requery_days, draft_deadline, lead_score_fit_weight, "
+            "discovery_requery_days, dnsbl_zones, draft_deadline, lead_score_fit_weight, "
             "lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
@@ -1548,3 +1550,23 @@ def test_encode_checks_the_away_rules_too() -> None:
     with pytest.raises(InvalidSettingValue) as raised:
         encode(found, ("2027-01-04 to 2026-12-21",))
     assert raised.value.rule == "away_order"
+
+
+# The DNSBL zones (Story 6.6) --------------------------------------------------------------------
+
+
+def test_the_dnsbl_zones_default_to_spamhaus_dbl_and_never_switch_the_guard_off() -> None:
+    found = setting(Key.DNSBL_ZONES)
+
+    assert (found.type, found.section, found.default) == (
+        SettingType.LIST,
+        Section.SENDING,
+        ("dbl.spamhaus.org",),
+    )
+    assert parse(found, "multi.uribl.com\ndbl.spamhaus.org") == (
+        "multi.uribl.com",
+        "dbl.spamhaus.org",
+    )
+    for refused in ("", "zen.spamhaus.org", "dbl.spamhaus.org\nexample.com"):
+        with pytest.raises(InvalidSettingValue):
+            parse(found, refused)

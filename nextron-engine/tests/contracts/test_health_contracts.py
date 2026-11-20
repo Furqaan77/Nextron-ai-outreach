@@ -132,9 +132,14 @@ def test_the_registry_ships_frozen_with_the_nine_owner_sources(
     budget = main.Budget(FrozenClock(), meter, notify=None)  # type: ignore[arg-type]
     clock = FrozenClock()
     read_at: list[object] = []
-    monkeypatch.setattr(
-        main.sending_queries, "health_issues", lambda now: read_at.append(now) or ()
-    )
+    grants: list[object] = []
+
+    def sending_issues(now: object, grant_missing: object) -> tuple[()]:
+        read_at.append(now)
+        grants.append(grant_missing)
+        return ()
+
+    monkeypatch.setattr(main.sending_queries, "health_issues", sending_issues)
     compliance_reads: list[tuple[object, bool]] = []
     monkeypatch.setattr(
         main.compliance_queries,
@@ -148,7 +153,12 @@ def test_the_registry_ships_frozen_with_the_nine_owner_sources(
         main.discovery_queries, "health_issues", lambda found: assessed.append(found) or ()
     )
 
-    issues = main.build_health_issues(budget=budget, clock=clock)
+    def grant_missing() -> bool:
+        return True
+
+    issues = main.build_health_issues(
+        budget=budget, clock=clock, postmaster_grant_missing=grant_missing
+    )
 
     assert isinstance(issues, HealthIssues)
     assert issues.frozen
@@ -164,6 +174,7 @@ def test_the_registry_ships_frozen_with_the_nine_owner_sources(
     assert playbook.read is main.playbook_queries.health_issues
     assert tuple(sending.read()) == ()
     assert read_at == [clock.now()]  # Story 6.5: the Sending Domains, read at the clock's now
+    assert grants == [grant_missing]  # Story 6.6: the Postmaster grant check, passed through
     assert erasure.read is main.compliance_queries.health_issues
     assert tuple(unsub_poll.read()) == ()
     assert compliance_reads == [(clock.now(), True)]  # Story 3.12: the poll, at the clock's now

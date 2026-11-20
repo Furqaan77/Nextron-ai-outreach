@@ -420,6 +420,9 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "aligned_ok",
             "passed",
             "details",
+            "dnsbl_result",
+            "spam_rate",
+            "spam_rate_status",
         ),
     },
     # Story 5.2: each approved Draft's one live OutboundMessage

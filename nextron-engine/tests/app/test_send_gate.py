@@ -53,6 +53,7 @@ from nextron.domain.contactability import Blocked, BlockReason
 from nextron.domain.domain_auth import AuthItem, AuthReason, encode_details
 from nextron.domain.enrollment import PauseCause
 from nextron.domain.markets import validate_markets
+from nextron.domain.reputation import DEFAULT_ZONES, SpamStatus, ZoneOutcome, encode_dnsbl
 from nextron.domain.send_gate import (
     COLD_KINDS,
     PREDICATES,
@@ -163,6 +164,9 @@ class Gate:
                 details=encode_details(
                     reasons if passed else {**reasons, AuthItem.SPF: AuthReason.SPF_MISSING}
                 ),
+                dnsbl_result=encode_dnsbl({zone: ZoneOutcome.CLEAN for zone in DEFAULT_ZONES}),
+                spam_rate=None,
+                spam_rate_status=SpamStatus.NO_DATA,
             )
         )
 

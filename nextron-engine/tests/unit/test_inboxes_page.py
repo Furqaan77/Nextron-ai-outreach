@@ -39,6 +39,7 @@ from tests.asgi import Reply
 from tests.dashboard import FORM, Dashboard, form
 from tests.fakes.clock import FrozenClock
 from tests.fakes.dns import FakeDns
+from tests.fakes.postmaster import FakePostmaster
 from tests.fakes.secrets import InMemorySecrets
 from tests.fakes.units import FakeUnits
 
@@ -546,6 +547,8 @@ AUTH_HEADINGS = [
     "DKIM",
     "DMARC",
     "Alignment",
+    "DNSBL",
+    "Spam rate",
     "Cold sends",
     "Recheck",
 ]
@@ -721,7 +724,7 @@ def test_a_listed_domain_never_checked_is_blocked_with_a_recheck_form(
     assert "<title>" not in reply.text  # the section alone, swapped in by HTMX
     assert section.rows == [
         AUTH_HEADINGS,
-        [DOMAIN, *["Not checked yet"] * 5, "Cold sends blocked: not checked yet", "Recheck"],
+        [DOMAIN, *["Not checked yet"] * 7, "Cold sends blocked: not checked yet", "Recheck"],
     ]
     assert section.blocked == ["Cold sends blocked: not checked yet"]
     [(attrs, inputs)] = section.forms
@@ -758,6 +761,8 @@ def test_the_section_shows_a_newly_recorded_result(
         "Pass",
         "Pass",
         "Pass",
+        "Clean",
+        "No data",
         "Cold sends allowed",
         "Recheck",
     ]
@@ -776,10 +781,37 @@ def test_the_section_shows_a_newly_recorded_result(
         "Pass",
         f"Fail: {REASON_TEXTS[AuthReason.DMARC_MISSING]}",
         "Pass",
+        "Clean",
+        "No data",
         "Cold sends blocked: SPF, DMARC failing",
         "Recheck",
     ]
     assert failing.blocked == ["Cold sends blocked: SPF, DMARC failing"]
+
+
+def test_a_listing_and_a_pausing_spam_rate_are_highlighted(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(ready, session, FIRST)
+    found_id = domain_id(units)
+    dns, postmaster = ready.dns, ready.postmaster
+    assert isinstance(dns, FakeDns)
+    assert isinstance(postmaster, FakePostmaster)
+    dns.txt_answers.update(
+        {
+            DOMAIN: [SPF_OK],
+            f"google._domainkey.{DOMAIN}": [DKIM_OK],
+            f"_dmarc.{DOMAIN}": [DMARC_OK],
+        }
+    )
+    dns.a_answers[f"{DOMAIN}.dbl.spamhaus.org"] = ("127.0.1.2",)
+    postmaster.rates[DOMAIN] = 3000
+    recorded_check(ready, units, found_id)
+
+    section = auth_of(get_auth(ready, session[0]))
+
+    assert section.rows[1][6:8] == ["Listed (dbl.spamhaus.org)", "0.30%"]
+    assert section.blocked == ["Listed (dbl.spamhaus.org)", "0.30%"]
 
 
 def test_a_recheck_queues_one_job_and_says_so_each_time(

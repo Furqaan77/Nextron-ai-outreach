@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0066_5_2_outbound_messages"
+HEAD = "0067_6_6_reputation"
 
 
 @pytest.fixture
@@ -2084,3 +2084,69 @@ def test_0064_keeps_every_draft_and_adds_the_failure_columns(tmp_path: Path) -> 
         f"UPDATE drafts SET draft_failed_at = '{at}', draft_failed_reason = 'refused' "
         f"WHERE id = '{REPLY_DRAFT}'",
     )
+
+
+def test_0067_keeps_every_check_with_its_rowid_and_adds_the_reputation_columns(
+    tmp_path: Path,
+) -> None:
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0066_5_2_outbound_messages":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (
+            None,
+            "0066_5_2_outbound_messages",
+        )
+    at = "2026-11-18T09:00:00.000000Z"
+    domain = "01JD3QZ8X5V9K2M7N4P6R8T0E0"
+    details = '{"alignment":"ok","dkim":"ok","dmarc":"ok","spf":"ok"}'
+    run_sql(
+        path,
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{domain}', "
+        f"'nextron-ai.com', '{at}')",
+        # rowid order differs from id order: the newest check is the last inserted
+        "INSERT INTO domain_checks (rowid, id, sending_domain_id, checked_at, spf_ok, dkim_ok, "
+        f"dmarc_ok, aligned_ok, passed, details) VALUES (9, '01JD3QZ8X5V9K2M7N4P6R8T0C1', "
+        f"'{domain}', '{at}', 1, 1, 1, 1, 1, '{details}')",
+        "INSERT INTO domain_checks (rowid, id, sending_domain_id, checked_at, spf_ok, dkim_ok, "
+        f"dmarc_ok, aligned_ok, passed, details) VALUES (4, '01JD3QZ8X5V9K2M7N4P6R8T0C2', "
+        f"'{domain}', '{at}', 1, 1, 1, 1, 1, '{details}')",
+    )
+    reader = sqlite3.connect(path)
+    try:
+        before = reader.execute("SELECT rowid, * FROM domain_checks ORDER BY rowid").fetchall()
+    finally:
+        reader.close()
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0066_5_2_outbound_messages", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute("SELECT rowid, * FROM domain_checks ORDER BY rowid").fetchall()
+        info = {row[1]: row for row in reader.execute("PRAGMA table_info(domain_checks)")}
+        indexes = {row[1] for row in reader.execute("PRAGMA index_list(domain_checks)")}
+        keys = reader.execute("PRAGMA foreign_key_list(domain_checks)").fetchall()
+    finally:
+        reader.close()
+    assert [row[: len(before[0])] for row in rows] == before  # every row, rowid and column kept
+    assert [row[len(before[0]) :] for row in rows] == [(None, None, None)] * 2
+    assert {
+        name: (info[name][2], info[name][3])
+        for name in ("dnsbl_result", "spam_rate", "spam_rate_status")
+    } == {
+        "dnsbl_result": ("TEXT", 0),
+        "spam_rate": ("INTEGER", 0),
+        "spam_rate_status": ("VARCHAR(16)", 0),
+    }
+    assert "ix_domain_checks_sending_domain_id_checked_at" in indexes
+    assert [(key[2], key[3], key[4]) for key in keys] == [
+        ("sending_domains", "sending_domain_id", "id")
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        run_sql(path, "UPDATE domain_checks SET spam_rate_status = 'zero'")
+    with pytest.raises(sqlite3.IntegrityError):
+        run_sql(path, "UPDATE domain_checks SET passed = 0")
+    run_sql(path, "UPDATE domain_checks SET spam_rate_status = 'no_data'")

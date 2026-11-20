@@ -5,7 +5,8 @@ the current unit of work's session (``nextron.db.uow.current()``): reads work in
 unit of work too, writes only inside the running use case's transaction. It checks nothing;
 ``nextron.app.sending`` does.
 
-- ``StoredCheck``: one row;
+- ``StoredCheck``: one row (Story 6.6 adds ``dnsbl_result``, ``spam_rate`` and
+  ``spam_rate_status``, ``None`` in rows recorded before migration ``0067_6_6_reputation``);
 - ``insert(...) -> id``: a new row;
 - ``newest(sending_domain_id)``: the domain's newest check, or ``None``;
 - ``newest_times(sending_domain_ids)``: each domain's newest check's ``checked_at``, ``None`` for
@@ -44,6 +45,9 @@ class StoredCheck:
     aligned_ok: bool
     passed: bool
     details: str
+    dnsbl_result: str | None
+    spam_rate: int | None
+    spam_rate_status: str | None
 
 
 def insert(
@@ -56,6 +60,9 @@ def insert(
     aligned_ok: bool,
     passed: bool,
     details: str,
+    dnsbl_result: str,
+    spam_rate: int | None,
+    spam_rate_status: str,
 ) -> str:
     """Store one check; return its new ULID."""
     check_id = new_id()
@@ -70,6 +77,9 @@ def insert(
             aligned_ok=aligned_ok,
             passed=passed,
             details=details,
+            dnsbl_result=dnsbl_result,
+            spam_rate=spam_rate,
+            spam_rate_status=spam_rate_status,
         )
     )
     return check_id
@@ -90,6 +100,9 @@ def newest(sending_domain_id: str) -> StoredCheck | None:
                 DomainCheckRecord.aligned_ok,
                 DomainCheckRecord.passed,
                 DomainCheckRecord.details,
+                DomainCheckRecord.dnsbl_result,
+                DomainCheckRecord.spam_rate,
+                DomainCheckRecord.spam_rate_status,
             )
             .where(DomainCheckRecord.sending_domain_id == sending_domain_id)
             .order_by(ROWID.desc())

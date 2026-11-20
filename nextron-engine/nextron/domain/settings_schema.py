@@ -161,6 +161,9 @@ from nextron.domain.place_discovery import (
     is_location_item,
 )
 from nextron.domain.prices import names_price
+from nextron.domain.reputation import DEFAULT_ZONES as DEFAULT_DNSBL_ZONES
+from nextron.domain.reputation import KNOWN_ZONES as KNOWN_DNSBL_ZONES
+from nextron.domain.reputation import is_zone_list
 from nextron.domain.scoring import DEFAULT_WEIGHT as LEAD_SCORE_DEFAULT_WEIGHT
 from nextron.domain.scoring import DEFAULT_MIN_LEAD_SCORE, MAX_SCORE
 from nextron.domain.scoring import WEIGHT_TOTAL as LEAD_SCORE_WEIGHT_TOTAL
@@ -265,6 +268,7 @@ class Key(StrEnum):
     AWAY_PERIODS = "away_periods"
     BULK_AI_SUBMIT_AT = "bulk_ai_submit_at"
     DRAFT_DEADLINE = "draft_deadline"
+    DNSBL_ZONES = "dnsbl_zones"
 
 
 class _Required(Enum):
@@ -1012,6 +1016,14 @@ LOCATION_RULE: Final = Rule(
     lambda value: all(is_location_item(item) for item in value),
 )
 
+# The DNSBL zones each daily domain check queries (Story 6.6, FR-38, AD-9): at least one, each
+# a zone nextron.domain.reputation knows how to read, so no value switches the guard off.
+DNSBL_ZONES_RULE: Final = Rule(
+    "dnsbl_zones",
+    "needs at least one line, each one of " + ", ".join(KNOWN_DNSBL_ZONES),
+    is_zone_list,
+)
+
 # The website crawl (Story 2.5, FR-10, NFR-6): at most 15 pages per Lead, homepage included.
 MAX_CRAWL_PAGES: Final = 15
 # The scheduled re-check (Story 8.7, FR-11): a full crawl every 30 days, the ATS boards every 7.
@@ -1679,6 +1691,22 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=DEFAULT_DRAFT_DEADLINE,
         timezone_key=Key.SENDER_TIMEZONE,
+    ),
+    # The domain blocklists each daily Sending Domain check queries (Story 6.6, FR-38, AD-9). A
+    # listing pauses the domain's active inboxes; a refused or unrecognised answer only warns.
+    Setting(
+        key=Key.DNSBL_ZONES,
+        type=SettingType.LIST,
+        section=Section.SENDING,
+        label="DNSBL zones",
+        unit=(
+            "One zone per line, at least one, each one of "
+            + ", ".join(KNOWN_DNSBL_ZONES)
+            + ". Each daily domain check asks these blocklists about every Sending Domain; a "
+            "listing pauses the domain's active inboxes."
+        ),
+        default=DEFAULT_DNSBL_ZONES,
+        rules=(DNSBL_ZONES_RULE,),
     ),
 )
 

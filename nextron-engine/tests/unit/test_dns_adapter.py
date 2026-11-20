@@ -37,6 +37,10 @@ def mx(*texts: str) -> list[Any]:
     return [dns.rdata.from_text("IN", "MX", text) for text in texts]
 
 
+def a(*texts: str) -> list[Any]:
+    return [dns.rdata.from_text("IN", "A", text) for text in texts]
+
+
 class RecordingResolver:
     """Answers ``resolve`` from ``answers`` by ``(name, type)``: a list of rdatas is returned,
     an exception raised; records every call."""
@@ -118,6 +122,80 @@ def test_mx_is_sorted_lower_cased_without_the_final_dot_and_a_null_mx_is_empty()
     assert dns_port.mx("null.example.") == (MxRecord(0, ""),)
     assert [call[1] for call in resolver.calls] == [dns.rdatatype.MX, dns.rdatatype.MX]
     assert meter.calls == [ok("mx"), ok("mx")]
+
+
+def test_a_answers_sorted_dotted_ipv4_addresses() -> None:  # Story 6.6, the DNSBL queries
+    name = f"{DOMAIN}.dbl.spamhaus.org"
+    dns_port, resolver, meter = adapter({(name, "A"): a("127.0.1.5", "127.0.1.2")}, lifetime=2.5)
+
+    assert dns_port.a(name) == ("127.0.1.2", "127.0.1.5")
+    [(qname, rdtype, lifetime, search)] = resolver.calls
+    assert qname == dns.name.from_text(name)
+    assert (rdtype, lifetime, search) == (dns.rdatatype.A, 2.5, False)
+    assert meter.calls == [ok("a")]
+
+
+@pytest.mark.parametrize(
+    "error", [dns.resolver.NXDOMAIN(), dns.resolver.NoAnswer()], ids=["nxdomain", "nodata"]
+)
+def test_an_a_query_with_nxdomain_or_nodata_answers_nothing(
+    error: dns.exception.DNSException,
+) -> None:
+    dns_port, _, meter = adapter({(DOMAIN, "A"): error})
+
+    assert dns_port.a(DOMAIN) == ()
+    assert meter.calls == [ok("a")]
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (dns.exception.Timeout(), "dns_timeout"),
+        (
+            dns.resolver.NoNameservers(request=dns.message.make_query(DOMAIN, "A"), errors=[]),
+            "dns_unavailable",
+        ),
+        (dns.resolver.YXDOMAIN(), "dns_failed"),
+    ],
+    ids=["timeout", "no_nameservers", "yxdomain"],
+)
+def test_an_a_query_fails_as_txt_does(error: BaseException, code: str) -> None:
+    dns_port, _, meter = adapter({(DOMAIN, "A"): error})
+
+    with pytest.raises(AdapterError) as caught:
+        dns_port.a(DOMAIN)
+
+    assert caught.value.code == code
+    assert meter.calls == [failed("a", code)]
+
+
+def test_an_a_query_of_an_invalid_name_is_refused_unmetered() -> None:
+    dns_port, resolver, meter = adapter()
+
+    with pytest.raises(AdapterError) as caught:
+        dns_port.a("a..b")
+
+    assert caught.value.code == "dns_invalid_name"
+    assert (resolver.calls, meter.calls) == ([], [])
+
+
+def test_the_fake_answers_a_queries_from_its_script() -> None:
+    from tests.fakes.dns import FakeDns  # noqa: PLC0415
+
+    fake = FakeDns(
+        a={"X.Example.com.": ["127.0.1.9", "127.0.1.2"]},
+        errors={"down.example": AdapterError(True, "dns_timeout", "timed out")},
+    )
+
+    assert fake.a("x.example.com") == ("127.0.1.2", "127.0.1.9")
+    assert fake.a("other.example") == ()
+    with pytest.raises(AdapterError):
+        fake.a("down.example")
+    assert fake.queries == [
+        ("a", "x.example.com"),
+        ("a", "other.example"),
+        ("a", "down.example"),
+    ]
 
 
 @pytest.mark.parametrize(

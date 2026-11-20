@@ -1,4 +1,4 @@
-"""The ``DnsPort`` (FR-64, NFR-4, NFR-20, AD-9): TXT and MX lookups.
+"""The ``DnsPort`` (FR-64, FR-38, NFR-4, NFR-20, AD-9): TXT, MX and A lookups.
 
 ``nextron.adapters.dns.DnspythonDns`` implements it over dnspython; tests use
 ``tests.fakes.dns.FakeDns``. Story 6.5 reads the TXT records of a Sending Domain's SPF, DKIM and
@@ -9,6 +9,8 @@ DMARC names through it; Story 2.14 (MX checks) and Story 6.6 (DNSBL) reuse it.
 - **``mx(name) -> tuple[MxRecord, ...]``**: one ``MxRecord(preference, exchange)`` per MX
   record, sorted by ``(preference, exchange)``. ``exchange`` is lower-case with no final dot; a
   null MX (RFC 7505, ``.``) has ``exchange == ""``.
+- **``a(name) -> tuple[str, ...]``** (Story 6.6, the DNSBL queries): one dotted IPv4 address per
+  A record, the tuple sorted.
 
 A name that doesn't exist (NXDOMAIN) and a name with no record of the type (NODATA) both answer
 ``()``. A name that isn't a ``str`` raises ``TypeError``.
@@ -80,4 +82,8 @@ class DnsPort(Protocol):
     def mx(self, name: str) -> tuple[MxRecord, ...]:
         """The MX records at ``name``, sorted by ``(preference, exchange)``; ``()`` for
         none."""
+        ...
+
+    def a(self, name: str) -> tuple[str, ...]:
+        """The A records at ``name`` as dotted IPv4 addresses, sorted; ``()`` for none."""
         ...

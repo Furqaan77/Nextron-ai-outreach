@@ -2659,8 +2659,8 @@ the retryable `dns_unavailable`, so the job retries. Each query makes one `resol
 lifetime=5.0, search=False)`
 call on the absolute name and records one `api_usage` row (provider `dns`, operation `txt` or
 `mx`); a name that isn't a DNS name is refused (`dns_invalid_name`) before any query and
-records nothing. `DnsPort.mx` is there for Story 2.14's MX checks; Story 6.6 adds the DNSBL
-lookup.
+records nothing. `DnsPort.mx` is there for Story 2.14's MX checks; `DnsPort.a` (operation `a`)
+is Story 6.6's DNSBL lookup.
 
 **On the dashboard.** The Sending Inboxes page (`/inboxes`) shows a "Sending Domain
 authentication" section under the inboxes, refreshed every 30 seconds from `GET /inboxes/auth`:
@@ -2670,6 +2670,53 @@ Sender's timezone), SPF, DKIM, DMARC and Alignment (each `Pass`,
 **Recheck** button. Recheck (`POST /inboxes/auth/recheck`, the one field `sending_domain_id`)
 queues the check and says "Recheck queued for <domain>; the result appears here when it
 lands."; a domain with no listed inbox gets "That Sending Domain has no inboxes to check.".
+
+### Blocklist and spam-rate guardrails
+
+Story 6.6 (FR-38, FR-58, AD-9). Each domain check (daily, on Recheck and on connect) also asks
+domain blocklists about the Sending Domain and reads its Gmail spam rate, and pauses the
+domain's inboxes before a bad reputation burns it.
+
+**DNSBL.** The `dnsbl_zones` setting (Settings page, Sending section; one zone per line,
+default `dbl.spamhaus.org`) must hold at least one of `dbl.spamhaus.org`, `multi.uribl.com`
+and `multi.surbl.org`, and nothing else, so no setting turns the guard off. For each zone the
+check makes one A query of `<domain>.<zone>` (outside any transaction). No answer is `clean`;
+an answer in `127.255.255.0/24` is `query_refused` (Spamhaus refuses public resolvers with
+`127.255.255.254`); an answer among the zone's listing codes (DBL `127.0.1.2`–`127.0.1.106`,
+URIBL the even `127.0.0.2`–`127.0.0.14`, SURBL `127.0.0.2`–`127.0.0.254`) is `listed`;
+anything else (`127.0.0.1`, a resolver's hijacked NXDOMAIN) is `unrecognised`. The worst
+outcome wins. Only `listed` pauses; `query_refused` and `unrecognised` are a health warning
+(`dnsbl_query_refused`) and pause nothing.
+
+**Postmaster spam rate.** The check reads Google Postmaster Tools v1 `trafficStats` for the UTC
+day before the check, under the `postmaster` Google grant (Credentials page), through
+**the Postmaster adapter** (`nextron/adapters/postmaster`, `GooglePostmaster(token=...,
+meter=...)`, the only module that names the API; one `api_usage` row per request, provider
+`postmaster`, operation `traffic_stats`). `userReportedSpamRatio` is stored in parts per million
+(`round(ratio × 1,000,000)`): under 0.1% is `ok`, 0.1% to under 0.3% `alert`, 0.3% or more
+`pause`. No ratio, a 404, a 403, or no usable grant (`google_not_granted`,
+`google_needs_reconsent`, `google_client_not_imported`) is `no_data`: stored as NULL, never 0%,
+and it never pauses or alerts. A Postmaster outage (network, 429, 5xx) or any other error fails
+the check: nothing is recorded and the job retries, as a DNS timeout does.
+
+**Pausing and alerts.** In the transaction that records the check, a `listed` outcome moves
+every `active` inbox of the domain to `paused` (never a `connecting` one), each with an
+`events` row (cause `blocklist`, `cause_ref` the check's id, actor `system:sending`), and raises
+a `domain_blocklisted` alert; a spam status `pause` does the same with cause `spam_rate` and a
+`spam_rate_pause` alert (an inbox the blocklist just paused isn't paused twice); `alert` raises
+`spam_rate_high`. Alerts go to Telegram and the dashboard, carry the domain's id and counts
+only, and are deduplicated per kind, domain and UTC day, so a condition that persists alerts
+once a day. An inbox resumed while the condition persists is paused again by the next check,
+without a second alert that day. The spam rate read is the previous UTC day's, so a resume or
+Recheck on the same day pauses again; a resume holds once a newer day's rate is below 0.30%. A paused inbox fails the send gate's `inbox_ready` and
+dispatch, closed. There is no resume command yet (Story 6.3).
+
+**On the dashboard.** The authentication section gains DNSBL ("Clean", "Listed
+(dbl.spamhaus.org)", "Query refused", "Unrecognised answer") and Spam rate ("0.12%" or "No
+data") columns; a result that paused inboxes is highlighted. The health panel shows
+`domain_blocklisted`, `dnsbl_query_refused`, `spam_rate_high` or `spam_rate_pause` from each
+listed domain's newest check, and one "Postmaster grant missing" issue while a domain is
+listed and the `postmaster` grant isn't stored and usable.
 
 ## Send gate (Story 6.9)
 
@@ -3872,6 +3919,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0064_4_15_draft_failed` | rebuilds `drafts` (from its exact table, every row, check, index and foreign key kept) to add the nullable `draft_failed_at` and `draft_failed_reason` with `ck_drafts_draft_failed` | `drafting` |
 | `0065_4_17_ai_batches` | creates `ai_batches` and `ai_batch_items` (the Message Batch tables, shared by row owner `drafting` or `research`; no personal data) | `research`, `drafting` |
 | `0066_5_2_outbound_messages` | creates `outbound_messages` (one row per approved Draft: its copy, unsubscribe token and AD-4 snapshot), its partial unique index on the live Draft and four triggers keeping the copy fixed and `sent`/`cancelled` final | `sending` |
+| `0067_6_6_reputation` | rebuilds `domain_checks` (from 0033's exact table, copying every row with its `rowid`, so the newest check stays the last inserted) with three nullable columns: `dnsbl_result` (each DNSBL zone's outcome, as JSON), `spam_rate` (the Postmaster spam rate in parts per million, NULL for no data) and `spam_rate_status` (`ck_domain_checks_spam_rate_status`: `ok`, `alert`, `pause` or `no_data`); rows from before it keep NULL (see [Blocklist and spam-rate guardrails](#blocklist-and-spam-rate-guardrails)) | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

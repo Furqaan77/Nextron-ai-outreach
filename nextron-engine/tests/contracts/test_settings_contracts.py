@@ -144,7 +144,7 @@ def test_the_schema_check_catches_a_bad_probe() -> None:
             "bulk_ai_submit_at, bulk_threads, "
             "call_outcome_prompt_delay, "
             "crawl_max_pages, discovery_daily_lead_target, discovery_pool_days, "
-            "discovery_requery_days, draft_deadline, lead_score_fit_weight, "
+            "discovery_requery_days, dnsbl_zones, draft_deadline, lead_score_fit_weight, "
             "lead_score_signal_weight, legal_name, "
             "linkedin_owner_chat, min_lead_score, optout_line, places_discovery_locations, "
             "places_max_pages_per_run, postal_address, privacy_notice_url, quota_hunter_credits, "
