@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0065_4_17_ai_batches"
+HEAD = "0066_5_2_outbound_messages"
 
 
 @pytest.fixture

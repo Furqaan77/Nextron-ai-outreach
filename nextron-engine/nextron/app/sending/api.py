@@ -3,9 +3,13 @@
 Other services and the delivery layers change ``sending`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-``Sending(clock, *, env, gap_source=None)`` owns the ``sending_domains`` and ``sending_inboxes``
-tables and the SendingInbox machine (``nextron.domain.sending_inbox``). ``env`` is the engine's
-environment: outside ``prod`` only allowlisted test inboxes can be registered (AD-14).
+``Sending(clock, *, env, gap_source=None, compliance=None)`` owns the ``sending_domains``,
+``sending_inboxes`` and ``outbound_messages`` tables, the SendingInbox machine
+(``nextron.domain.sending_inbox``) and the OutboundMessage machine
+(``nextron.domain.outbound_message``). ``env`` is the engine's environment: outside ``prod``
+only allowlisted test inboxes can be registered (AD-14). ``compliance`` is the codec-bearing
+``Compliance`` that issues unsubscribe tokens; ``enqueue`` raises ``TypeError`` without one
+(``main`` passes its own).
 
 - ``@use_case register_inbox(address, label) -> RegisteredInbox(inbox_id, sending_domain_id,
   domain, domain_created)``:
@@ -82,28 +86,92 @@ draw itself is ``sending_policy.draw_gap``'s. No planned send slot is stored: on
   0, which ``pick_dispatch`` turns into no pick (fail closed). A naive ``now`` raises
   ``ValueError``.
 
-This service registers inboxes, records their warm-up and paces their cold sends: the Gmail
-connection, pause, resume and remove commands arrive with later Epic 6 stories, and enrollment
-(Story 4.8) binds a Sequence to one of ``queries.sending.inboxes_for_binding()``. Nothing here
-sends email or runs warm-up exchanges.
+**OutboundMessages (Story 5.2, AD-6).** An approval's message waits as exactly one
+OutboundMessage (OM) holding its own copy of the approved text; delivery (Epic 6) reads the OM,
+never the Draft.
+
+- ``@command enqueue(draft, approval) -> om_id`` joins the caller's unit of work (5.4's approve).
+  ``draft`` is anything with an ``id`` (or the id itself); ``approval`` anything with
+  ``approval_id``, ``draft_id``, ``rev`` and ``text_hash`` (``ApprovalRef``; Story 5.4 adds the
+  ``approvals`` table). It re-reads the Draft by id (``LookupError`` when it, its revision, its
+  footer snapshot, its Contact or Lead is unknown; ``ValueError`` when ``approval_id`` isn't a
+  ULID). Then, before any write, it raises, dooming the whole transaction, when:
+
+  1. the kind isn't ``step``/``recontact`` or there is no Enrollment (``UnsupportedKind``:
+     Reply and rebook inboxes come from Threads, Story 6.7 and Epic 7);
+  2. the Draft isn't ``approved``, or the approval names another Draft or a revision other than
+     its ``current_rev`` (``NotApproved``);
+  3. the Draft already has an OM that isn't ``cancelled`` (``AlreadyQueued``);
+  4. ``compliance_api.assert_contactable(ContactSubject, "email", purpose)`` is ``Blocked``
+     (``ContactBlocked``, ``.reasons``); purpose ``cold`` for Step 1, ``follow_up`` for a later
+     Step, ``recontact`` for a ``recontact`` Draft (AD-16);
+  5. the copy's ``render.text_hash`` differs from ``approval.text_hash`` (``HashMismatch``; a
+     Contact without an email address too). The copy is ``render.compose(current revision, its
+     footer snapshot, the Contact's current email)`` sent from the Enrollment's
+     ``sending_inbox_id``.
+
+  Then: a new OM id; ``compliance.issue_unsub_token`` for it and the copy's address; one
+  ``queued`` row (``approved_hash`` the approval's ``text_hash``; snapshot: scoring's stored
+  ``tier`` and Lead Score or NULL, the Enrollment's ``variant_id``, the Lead's ``segment_id``,
+  the Contact's ``market_id``, the Draft's ``step_no``); one ``events`` row (entity
+  ``outbound_messages``, ``None`` to ``queued``, cause ``enqueued``, ``cause_ref`` the approval
+  id, actor ``system:sending``). It returns the OM id. The partial unique index and the insert
+  trigger refuse a second live OM for one Draft whatever the caller.
+- ``@command cancel(om_id) -> bool`` (un-approve, AD-6): a ``queued`` OM moves to ``cancelled``
+  (conditional on ``status = 'queued'``) with ``cancelled_at`` and an ``events`` row (event
+  ``cancel``, cause ``unapproved``, ``cause_ref`` the OM's ``approval_id``, actor
+  ``system:sending``): ``True``. Already ``cancelled``: ``False``, no write. ``sending``, ``unknown`` or ``sent``: ``AlreadySending`` ("already
+  sending"), unchanged. An unknown id: ``LookupError``.
+- the module-level ``@command reparent_lead(n: LeadsMerged)`` (AD-3; ``main`` subscribes it):
+  the merged Lead's OMs name the survivor (``lead_id`` is a reference, not part of the copy;
+  the triggers allow it to change).
+- ``ERASURE`` and the module-level ``@command erase_pii(n: ContactErased)`` (AD-17): every OM of
+  the erased Contact gets ``to_address``, ``subject``, ``body`` and ``unsub_token`` ``[erased]``;
+  ids, statuses, times, ``approved_hash`` and the snapshot stay. The contactability gate blocks
+  an erased Contact's ``queued`` OM, and Story 5.4's cascade cancels it.
+
+This service registers inboxes, records their warm-up, paces their cold sends and holds approved
+messages: the Gmail connection, pause, resume and remove commands arrive with later Epic 6
+stories, and enrollment (Story 4.8) binds a Sequence to one of
+``queries.sending.inboxes_for_binding()``. Nothing here sends email (no ``MailPort``) or runs
+warm-up exchanges.
 """
 
 import logging
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Final
+from types import MappingProxyType
+from typing import Final, Protocol
 
+from nextron.app.compliance import api as compliance_api
+from nextron.app.compliance.api import Compliance
+from nextron.app.queries import discovery as discovery_queries
+from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import replies as replies_queries
+from nextron.app.queries import research as research_queries
+from nextron.app.queries import scoring as scoring_queries
 from nextron.app.queries import sending as sending_queries
+from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.sending import InboxCapView
 from nextron.db import eventlog
 from nextron.db.repos.sending import domains as domains_repo
 from nextron.db.repos.sending import inboxes as inboxes_repo
+from nextron.db.repos.sending import outbound_messages as outbound_repo
+from nextron.db.repos.sending.outbound_messages import NewOutboundMessage
 from nextron.db.uow import command, current, use_case
+from nextron.domain import outbound_message as om_machine
+from nextron.domain import render
+from nextron.domain.contactability import Blocked, BlockReason, ContactSubject, Purpose
+from nextron.domain.draft import DraftKind, DraftStatus
+from nextron.domain.erasure import Coverage, TableErasure
+from nextron.domain.errors import DomainError
 from nextron.domain.ids import is_ulid
+from nextron.domain.notifications import ContactErased, LeadsMerged
+from nextron.domain.outbound_message import OmEvent, OmKind, OmStatus
 from nextron.domain.sending_inbox import (
     CREATION,
     InboxAddress,
@@ -160,14 +228,238 @@ class InboxCaps:
     caps: tuple[InboxCapView, ...]
 
 
-class Sending:
-    """Sending Inboxes and their Sending Domains; see the module docstring."""
+# OutboundMessages (Story 5.2) -------------------------------------------------------------------
 
-    def __init__(self, clock: Clock, *, env: str, gap_source: GapSource | None = None) -> None:
+OM_ENTITY: Final = "outbound_messages"
+OM_ACTOR: Final = "system:sending"
+EMAIL_CHANNEL: Final = "email"
+ENQUEUE_KINDS: Final = (DraftKind.STEP, DraftKind.RECONTACT)
+ALREADY_SENDING: Final = "already sending"
+
+
+class OmRefused(DomainError, abstract=True):
+    """An OutboundMessage command refused; nothing was written."""
+
+
+class UnsupportedKind(OmRefused):
+    """The Draft's kind isn't ``step`` or ``recontact``, or it has no Enrollment."""
+
+    code = "om_unsupported_kind"
+
+
+class NotApproved(OmRefused):
+    """The Draft isn't ``approved``, or the approval isn't bound to its current revision."""
+
+    code = "om_not_approved"
+
+
+class AlreadyQueued(OmRefused):
+    """The Draft already has an OutboundMessage that isn't ``cancelled``."""
+
+    code = "om_already_queued"
+
+
+class ContactBlocked(OmRefused):
+    """The contactability gate (AD-16) blocks the Draft's Contact; ``reasons`` says why."""
+
+    code = "om_contact_blocked"
+
+    def __init__(self, reasons: tuple[BlockReason, ...]) -> None:
+        super().__init__("the Contact may not be emailed: " + ", ".join(map(str, reasons)))
+        self.reasons = reasons
+
+
+class HashMismatch(OmRefused):
+    """The message composed now isn't the text the approval is bound to."""
+
+    code = "om_hash_mismatch"
+
+
+class AlreadySending(OmRefused):
+    """The OutboundMessage is past ``queued``: it can no longer be cancelled."""
+
+    code = "om_already_sending"
+
+
+class DraftRef(Protocol):
+    """What ``enqueue`` reads of a Draft: its id (it re-reads the rest)."""
+
+    @property
+    def id(self) -> str: ...
+
+
+class ApprovalRef(Protocol):
+    """What ``enqueue`` reads of an approval (Story 5.4's ``approvals`` row)."""
+
+    @property
+    def approval_id(self) -> str: ...
+
+    @property
+    def draft_id(self) -> str: ...
+
+    @property
+    def rev(self) -> int: ...
+
+    @property
+    def text_hash(self) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _Addressed:
+    """An OM's id and To address: what ``issue_unsub_token`` reads."""
+
+    id: str
+    to_address: str
+
+
+def _purpose(kind: str, step_no: int | None) -> Purpose:
+    """AD-16's purpose for a Step Draft: ``recontact``, else ``cold`` for Step 1 and
+    ``follow_up`` for a later Step."""
+    if kind == DraftKind.RECONTACT:
+        return Purpose.RECONTACT
+    return Purpose.COLD if step_no == 1 else Purpose.FOLLOW_UP
+
+
+class Sending:
+    """Sending Inboxes, their Sending Domains and OutboundMessages; see the module docstring."""
+
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        env: str,
+        gap_source: GapSource | None = None,
+        compliance: Compliance | None = None,
+    ) -> None:
         self._clock = clock
         self._env = env
         self._gaps: GapSource = random.SystemRandom() if gap_source is None else gap_source
         self.process_started_at: Final[datetime] = clock.now()
+        self._compliance = compliance
+
+    # OutboundMessages (Story 5.2) ---------------------------------------------------------------
+
+    @command
+    def enqueue(self, draft: DraftRef | str, approval: ApprovalRef) -> str:
+        """Hold the approved Draft as one ``queued`` OutboundMessage; see the module
+        docstring."""
+        compliance = self._compliance
+        if compliance is None:
+            raise TypeError("enqueue needs the codec-bearing Compliance")
+        draft_id = draft if isinstance(draft, str) else draft.id
+        if not is_ulid(approval.approval_id):
+            raise ValueError("enqueue: approval.approval_id must be a ULID")
+        found = drafting_queries.draft(draft_id)
+        if found is None:
+            raise LookupError("enqueue: the Draft is unknown")
+        if found.kind not in ENQUEUE_KINDS or found.enrollment_id is None:
+            raise UnsupportedKind(f"enqueue: a {found.kind} Draft has no bound inbox")
+        enrollment = sequencing_queries.enrollment(found.enrollment_id)
+        if enrollment is None:
+            raise UnsupportedKind("enqueue: the Draft's Enrollment is unknown")
+        if (
+            found.status != DraftStatus.APPROVED
+            or approval.draft_id != found.id
+            or approval.rev != found.current_rev
+        ):
+            raise NotApproved("enqueue: the Draft isn't approved at this revision")
+        if outbound_repo.live_of_draft(found.id) is not None:
+            raise AlreadyQueued("enqueue: the Draft already has a live OutboundMessage")
+        verdict = compliance_api.assert_contactable(
+            ContactSubject(enrollment.contact_id),
+            EMAIL_CHANNEL,
+            _purpose(found.kind, found.step_no),
+        )
+        if isinstance(verdict, Blocked):
+            raise ContactBlocked(verdict.reasons)
+        revision = drafting_queries.current_revision(found)
+        if revision is None:
+            raise LookupError("enqueue: the Draft's revision is unknown")
+        snapshot = drafting_queries.footer_snapshot(revision.footer_snapshot_id)
+        if snapshot is None:
+            raise LookupError("enqueue: the revision's footer snapshot is unknown")
+        contact = research_queries.contact(enrollment.contact_id)
+        if contact is None:
+            raise LookupError("enqueue: the Draft's Contact is unknown")
+        if contact.email is None:
+            raise HashMismatch("enqueue: the Contact has no email address")
+        lead = discovery_queries.lead(enrollment.lead_id)
+        if lead is None:
+            raise LookupError("enqueue: the Draft's Lead is unknown")
+        copy = render.compose(revision, snapshot, contact.email)
+        digest = render.text_hash(
+            copy.to_address, enrollment.sending_inbox_id, copy.subject, copy.body
+        )
+        if digest != approval.text_hash:
+            raise HashMismatch("enqueue: the message changed since it was approved")
+        om_id = outbound_repo.new_om_id()
+        token = compliance.issue_unsub_token(_Addressed(om_id, copy.to_address))
+        score = scoring_queries.stored(lead.id)
+        now = self._clock.now()
+        outbound_repo.insert(
+            om_id,
+            NewOutboundMessage(
+                draft_id=found.id,
+                approval_id=approval.approval_id,
+                kind=str(OmKind(found.kind)),
+                to_address=copy.to_address,
+                inbox_id=enrollment.sending_inbox_id,
+                contact_id=contact.id,
+                lead_id=lead.id,
+                enrollment_id=enrollment.id,
+                subject=copy.subject,
+                body=copy.body,
+                approved_hash=approval.text_hash,
+                unsub_token=token,
+                tier=None if score is None or score.tier is None else str(score.tier),
+                lead_score=None if score is None else score.lead,
+                variant_id=enrollment.variant_id,
+                segment_id=lead.segment_id,
+                market_id=contact.market_id,
+                step_no=found.step_no,
+            ),
+            status=om_machine.CREATION.to,
+            created_at=now,
+        )
+        eventlog.append(
+            entity=OM_ENTITY,
+            entity_id=om_id,
+            from_status=None,
+            to_status=om_machine.CREATION.to,
+            cause=om_machine.CREATION.cause,
+            cause_ref=approval.approval_id,
+            actor=OM_ACTOR,
+            at=now,
+        )
+        return om_id
+
+    @command
+    def cancel(self, om_id: str) -> bool:
+        """Cancel a ``queued`` OutboundMessage (un-approve); see the module docstring."""
+        found = sending_queries.outbound_message(om_id)
+        if found is None:
+            raise LookupError("cancel: the OutboundMessage is unknown")
+        if found.status == OmStatus.CANCELLED:
+            return False
+        if found.status != OmStatus.QUEUED:
+            raise AlreadySending(ALREADY_SENDING)
+        moved = om_machine.transition(found.status, OmEvent.CANCEL)
+        now = self._clock.now()
+        if not outbound_repo.set_status(found.id, found.status, moved.to, now):
+            raise AlreadySending(ALREADY_SENDING)
+        eventlog.append(
+            entity=OM_ENTITY,
+            entity_id=found.id,
+            from_status=found.status,
+            to_status=moved.to,
+            cause=moved.cause,
+            cause_ref=found.approval_id,
+            actor=OM_ACTOR,
+            at=now,
+        )
+        return True
+
+    # Sending Inboxes (Story 4.7) ----------------------------------------------------------------
 
     @use_case
     def register_inbox(self, address: str, label: str) -> RegisteredInbox:
@@ -370,3 +662,32 @@ class Sending:
             cold_sent_today=sending_queries.cold_sent_on(inbox_id, today),
             cold_cap=sending_queries.cold_daily_caps(today).get(inbox_id, 0),
         )
+
+
+# Erasure (Story 5.2) ----------------------------------------------------------------------------
+
+# What sending's erase_pii does to each of its tables with a personal-data column.
+ERASURE: Final[Mapping[str, TableErasure]] = MappingProxyType(
+    {
+        "outbound_messages": TableErasure(
+            Coverage.TOMBSTONED,
+            "the recipient, subject, body and unsubscribe token of every OutboundMessage of the "
+            "Contact become [erased]; ids, statuses, times, the approved hash and the snapshot "
+            "stay (Story 5.2)",
+        ),
+    }
+)
+
+
+@command
+def erase_pii(n: ContactErased) -> None:
+    """``sending``'s ``ContactErased`` subscriber (AD-17, Story 5.2): tombstone the copy of every
+    OutboundMessage of the Contact (``ERASURE``)."""
+    outbound_repo.tombstone_contact(n.contact_id)
+
+
+@command
+def reparent_lead(n: LeadsMerged) -> None:
+    """``sending``'s ``LeadsMerged`` subscriber (AD-3, Story 5.2): move the merged Lead's
+    OutboundMessages to the survivor; the copy and the snapshot stay."""
+    outbound_repo.move_lead(n.merged_lead_id, n.survivor_lead_id)

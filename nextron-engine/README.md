@@ -3270,6 +3270,41 @@ or 4 alone do nothing.
 `ResearchBatches`), the follow-up builder and checks in `nextron.app.drafting.generation` and
 `nextron.domain.step_drafting`. No migration.
 
+### Approved messages wait as OutboundMessages (Story 5.2)
+
+Story 5.2 (FR-26, AD-4, AD-6, AD-16, AD-17) adds the place an approved message waits for
+delivery: the `outbound_messages` table (migration `0066_5_2_outbound_messages`), owned by
+`sending`. Nothing in the dashboard changes yet: Story 5.4's **Approve** is what creates them,
+and nothing here sends anything.
+
+**One message per approval.** `Sending.enqueue(draft, approval)` runs inside the approval's
+own transaction. It copies the exact approved message into one `queued` OutboundMessage: the
+recipient, the Enrollment's Sending Inbox, the subject and the body with its signature and
+footer, the approval's hash and a fresh unsubscribe token. It also keeps a snapshot for
+analytics: the Lead's Tier and Lead Score (empty while unscored), the Variant, Segment, Market
+and Step number. Delivery (Epic 6) will read this copy, never the Draft.
+
+**When it refuses.** Nothing is written at all when:
+
+- the Draft is a Reply, Rebook or channel Draft, or has no Enrollment;
+- the Draft isn't approved, or the approval was for another revision;
+- the Draft already has a message waiting (cancel it first);
+- the Contact may no longer be emailed (suppressed, erased, the Lead closed);
+- the message composed now differs from what was approved (for example, the Contact's email
+  changed after approval).
+
+The database also refuses a second waiting message for one Draft, deleting a message, and any
+change to its copy or snapshot.
+
+**Cancelling.** `Sending.cancel(om_id)` (used by Story 5.4's un-approve) cancels a `queued`
+message; a cancelled one stays as a record, and the Draft can then be approved again. A message
+already being sent, sent, or in doubt (`unknown`) can't be cancelled: "already sending".
+
+**Erasure and export.** Erasing a Contact replaces the recipient, subject, body and token of
+each of their messages with `[erased]`; the ids, statuses, times, hash and snapshot stay. The
+subject access export lists their messages under `sending.outbound_messages`, without the
+unsubscribe token. A Lead merge moves the messages to the surviving Lead.
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.
@@ -3802,6 +3837,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0063_6_11_inbox_pacing` | adds the nullable `sending_inboxes.next_send_at` and `last_sent_at` in place (no rebuild; every row, check and index kept) for cold-send pacing | `sending` |
 | `0064_4_15_draft_failed` | rebuilds `drafts` (from its exact table, every row, check, index and foreign key kept) to add the nullable `draft_failed_at` and `draft_failed_reason` with `ck_drafts_draft_failed` | `drafting` |
 | `0065_4_17_ai_batches` | creates `ai_batches` and `ai_batch_items` (the Message Batch tables, shared by row owner `drafting` or `research`; no personal data) | `research`, `drafting` |
+| `0066_5_2_outbound_messages` | creates `outbound_messages` (one row per approved Draft: its copy, unsubscribe token and AD-4 snapshot), its partial unique index on the live Draft and four triggers keeping the copy fixed and `sent`/`cancelled` final | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

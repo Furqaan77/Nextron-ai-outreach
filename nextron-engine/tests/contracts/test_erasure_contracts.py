@@ -76,6 +76,7 @@ COVERAGE = {  # the spec's I/O matrix, coverage row
     "footer_snapshots": ("drafting", Coverage.NOT_HELD),
     "draft_revisions": ("drafting", Coverage.TOMBSTONED),  # Story 4.12
     "grounding_results": ("drafting", Coverage.TOMBSTONED),  # Story 4.13
+    "outbound_messages": ("sending", Coverage.TOMBSTONED),  # Story 5.2
     "jobs": ("jobqueue", Coverage.NOT_HELD),
     "backups": ("ops", Coverage.NOT_HELD),
     "restore_tests": ("ops", Coverage.NOT_HELD),

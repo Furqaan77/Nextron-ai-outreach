@@ -135,6 +135,7 @@ FILES = [
     "nextron/domain/data/disposable_domains.txt",
     "nextron/domain/scoring.py",
     "nextron/domain/draft.py",
+    "nextron/domain/outbound_message.py",
     "nextron/domain/places.py",
     "nextron/domain/place_discovery.py",
     "nextron/domain/recheck.py",  # Story 8.7
@@ -242,6 +243,7 @@ FILES = [
     "nextron/db/alembic/versions/0063_6_11_inbox_pacing.py",
     "nextron/db/alembic/versions/0064_4_15_draft_failed.py",
     "nextron/db/alembic/versions/0065_4_17_ai_batches.py",
+    "nextron/db/alembic/versions/0066_5_2_outbound_messages.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",
@@ -289,6 +291,7 @@ FILES = [
     "nextron/db/repos/sending/domains.py",
     "nextron/db/repos/sending/inboxes.py",
     "nextron/db/repos/sending/checks.py",
+    "nextron/db/repos/sending/outbound_messages.py",
     "nextron/db/repos/compliance/suppression_entries.py",
     "nextron/db/repos/compliance/unsub_tokens.py",
     "nextron/db/repos/compliance/unsub_requests.py",

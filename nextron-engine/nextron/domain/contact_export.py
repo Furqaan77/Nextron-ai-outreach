@@ -42,6 +42,8 @@ Table                      Owner        Exported as / why not
                                         that mention the Contact)
 ``grounding_results``      drafting     ``grounding_results`` (Story 4.13: each revision's
                                         grounding result; its flags quote Draft text)
+``outbound_messages``      sending      ``outbound_messages`` (Story 5.2: the Contact's
+                                        approved messages; ``unsub_token`` withheld)
 ``settings``               setup        Nextron's own settings
 ``footer_snapshots``       drafting     Nextron's own footer text
 ``channel_permissions``    pipeline     ``channel_permissions`` (Story 10.7)
@@ -204,6 +206,16 @@ COVERAGE: Final[Mapping[str, Coverage]] = MappingProxyType(
             shown_as=MappingProxyType({"text": "text_excerpts"}),
         ),
         "grounding_results": Exported("drafting", "grounding_results"),  # Story 4.13
+        "outbound_messages": Exported(  # Story 5.2
+            "sending",
+            "outbound_messages",
+            withheld=MappingProxyType(
+                {
+                    "unsub_token": "the unsubscribe token: it decodes to the person's address "
+                    "hash and works as an opt-out link"
+                }
+            ),
+        ),
         "settings": NotAboutAContact(
             "setup", "Nextron's own settings: staff addresses, the sender and the postal address"
         ),

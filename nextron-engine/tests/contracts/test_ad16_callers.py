@@ -53,6 +53,9 @@ violation.
   ``DraftingBatches.apply_draft_sequence_result``, a follow-up batch result's apply) applies an
   Enrollment's item before Step 1 has a revision: its one gate call (the Contact, email, cold)
   comes before its one write (the next ``pending`` item), and ``Blocked`` writes nothing.
+  ``sending.enqueue`` (Story 5.2: ``Sending.enqueue``) holds that revision, ``approved`` by
+  plain SQL, as an OutboundMessage: its gate call (purpose ``cold``) comes before its first
+  write, and ``Blocked`` writes nothing.
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -143,13 +146,14 @@ from nextron.app.research.people import PeopleExtractions
 from nextron.app.research.recheck import Rechecks
 from nextron.app.research.verification import EmailVerification
 from nextron.app.scoring.selection import Selection
-from nextron.app.sending.api import Sending
+from nextron.app.sending.api import ContactBlocked, Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup.api import Campaigns, Setup, check_seed
 from nextron.db import ai_batches
 from nextron.db.engine import create_engine
 from nextron.db.models.base import new_id
 from nextron.db.migrations import ensure_current
+from nextron.db.models.base import new_id
 from nextron.db.repos.discovery import runs as runs_repo
 from nextron.db.repos.research import contacts as contacts_repo
 from nextron.db.repos.research import crawl as crawl_repo
@@ -203,6 +207,7 @@ from tests.fakes.llm import ScriptedLlm
 from tests.fakes.places import ScriptedPlaces
 from tests.fakes.registry import ScriptedRegistry
 from tests.fakes.renderer import ScriptedRenderer
+from tests.fakes.token_codec import FakeTokenCodec
 from tests.fakes.usage_meter import InMemoryUsageMeter
 
 GUARDED_TABLES: Final = frozenset(
@@ -350,6 +355,13 @@ MANIFEST: Final = (
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
     # Story 4.10: the Operator's picks enroll through sequencing.enroll
     Caller("scoring.pick", ("app/scoring/",), r"Selection\.pick"),
+    # Story 5.2: the OM insert (AD-16's insert scan guards outbound_messages)
+    Caller(
+        "sending.enqueue",
+        ("app/sending/",),
+        ANY + "enqueue",
+        inserts=frozenset({"outbound_messages"}),
+    ),
     Caller(
         "pipeline.tasks_and_call_sheets",
         ("app/pipeline/",),
@@ -1436,6 +1448,62 @@ def _request_steps(world: World, tag: str) -> tuple[Callable[[], object], Expect
 def _grounding_check(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     """Story 4.14: Step 1's revision 1 checked with no active grounding tuple: one gate call
     before the one write that records the fail-closed result."""
+    contact_id, draft_id, clock = _revised_step_1(world, tag)
+    checks = GroundingChecks(clock, ScriptedLlm())  # no tuple is active: never called
+
+    def action() -> object:
+        with world.units.open():
+            return checks.check(draft_id, 1, Urgency.INTERACTIVE)
+
+    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+@dataclass(frozen=True, slots=True)
+class _Approval:
+    """What Story 5.4's ``approvals`` row will carry."""
+
+    approval_id: str
+    draft_id: str
+    rev: int
+    text_hash: str
+
+
+def _enqueue(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 5.2: Step 1's revision 1, ``approved`` by plain SQL (unrecorded), enqueued: one
+    gate call before the first write (the unsubscribe token, the OM and its ``events`` row)."""
+    contact_id, draft_id, clock = _revised_step_1(world, tag)
+    with world.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE drafts SET status = 'approved' WHERE id = ?", (draft_id,)
+        )
+        digest = str(
+            connection.exec_driver_sql(
+                "SELECT text_hash FROM draft_revisions WHERE draft_id = ? AND rev = 1",
+                (draft_id,),
+            ).scalar_one()
+        )
+    approval = _Approval(new_id(), draft_id, 1, digest)
+    sending = Sending(clock, env="prod", compliance=Compliance(clock, codec=FakeTokenCodec()))
+
+    def action() -> object:
+        try:
+            return world.transact(lambda: sending.enqueue(draft_id, approval))
+        except ContactBlocked as blocked:  # a Blocked answer refuses, writing nothing
+            return blocked
+
+    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+
+
+def _enqueued(world: World) -> None:
+    """The allowed enqueue added one ``queued`` OM (the scenario isn't vacuous)."""
+    with world.engine.connect() as connection:
+        statuses = connection.exec_driver_sql("SELECT status FROM outbound_messages").all()
+    assert [row[0] for row in statuses] == ["queued"]
+
+
+def _revised_step_1(world: World, tag: str) -> tuple[str, str, FrozenClock]:
+    """An enrolled Contact's Step 1 Draft with revision 1 written (unrecorded): (contact id,
+    draft id, clock)."""
     contact_id, campaign_id = _enrollable_contact(world, tag)
     clock = FrozenClock(T0)
     enrolled = world.transact(
@@ -1468,13 +1536,7 @@ def _grounding_check(world: World, tag: str) -> tuple[Callable[[], object], Expe
         )
 
     assert world.transact(write) == 1
-    checks = GroundingChecks(clock, ScriptedLlm())  # no tuple is active: never called
-
-    def action() -> object:
-        with world.units.open():
-            return checks.check(draft_id, 1, Urgency.INTERACTIVE)
-
-    return action, lambda: (GateCall(ContactSubject(contact_id), EMAIL, "cold"),)
+    return contact_id, draft_id, clock
 
 
 def _draft_step(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
@@ -2227,6 +2289,8 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
             blocked_writes=frozenset({("INSERT", "events")}),
             after_blocked=_draft_step_recorded,
         ),
+        # Story 5.2: Blocked raises before any write, so nothing at all is added
+        "sending.enqueue": Scenario((_enqueue,), after_blocked=_enqueued),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         # Story 4.18: Blocked writes nothing at all: the item goes stale in the caller's write
         "drafting.batch_apply": Scenario((_follow_up_apply,), after_blocked=_follow_up_requeued),
@@ -2349,6 +2413,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.draft_step",  # Story 4.15
         "research.batch_apply",  # Story 4.17
         "drafting.batch_apply",  # Story 4.18
+        "sending.enqueue",  # Story 5.2
     }
     assert {d.qualname for d in found["compliance.assert_sendable"]} == {"assert_sendable"}
     finding = {d.qualname for d in found["find_contact_email"]}
@@ -2480,17 +2545,22 @@ def test_the_insert_scan_finds_the_guarded_repository_inserts() -> None:
     assert found[("db/repos/research/contacts.py", "insert")] == {"contacts"}
     assert found[("db/repos/sequencing/enrollments.py", "insert")] == {"enrollments"}  # 4.8
     assert found[("db/repos/drafting/drafts.py", "insert_slots")] == {"drafts"}  # 4.9
+    assert found[("db/repos/sending/outbound_messages.py", "insert")] == {
+        "outbound_messages"
+    }  # 5.2
     assert set(found.values()) <= {
         frozenset({"leads"}),
         frozenset({"contacts"}),
         frozenset({"enrollments"}),
         frozenset({"drafts"}),
+        frozenset({"outbound_messages"}),
     }
     assert guarded_models(package_index()) == {
         "LeadRecord": "leads",
         "ContactRecord": "contacts",
         "EnrollmentRecord": "enrollments",
         "DraftRecord": "drafts",
+        "OutboundMessageRecord": "outbound_messages",
     }
 
 

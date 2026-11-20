@@ -526,7 +526,13 @@ def test_build_app_builds_sending_on_its_clock_and_environment(
     main.build_app(load_bootstrap(), units=FakeUnits())
 
     [clock] = clocks
-    assert given == [(clock, {"env": "test"})]
+    # Story 5.2: enqueue issues unsubscribe tokens, so Sending holds the codec-bearing Compliance
+    [(given_clock, kwargs)] = given
+    assert given_clock is clock
+    assert set(kwargs) == {"env", "compliance"}
+    assert kwargs["env"] == "test"
+    assert isinstance(kwargs["compliance"], main.Compliance)
+    assert kwargs["compliance"]._codec is not None
 
 
 # Sending Domain authentication (Story 6.5) ------------------------------------------------------

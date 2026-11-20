@@ -180,7 +180,8 @@ The two reapply writers (their caller is ``nextron.app.compliance.ledger.Erasure
   notes of its Lead and of every Lead merged into it, ``queries.discovery.merged_lead_ids``,
   that mention it, by ``mention_terms(name, email)``; Story 10.7: its Channel Permissions),
   ``queries.discovery.export_pii`` (the Signal Inbox items that mention the Contact, Story
-  2.16) and
+  2.16), ``queries.sending.export_pii`` (the Contact's OutboundMessages, ``unsub_token``
+  withheld, Story 5.2) and
   ``eventlog.history("contacts", contact_id)`` (the Address Class history); then
   ``contact_export.assemble`` at the clock's now and ``render``. The file is named
   ``contact_export.filename(contact_id)``.
@@ -279,6 +280,7 @@ from nextron.app.queries import notify as notify_queries
 from nextron.app.queries import pipeline as pipeline_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
+from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db import eventlog
@@ -864,6 +866,7 @@ class Compliance:
                         if address is not None
                     ],
                 ),
+                "sending": sending_queries.export_pii(contact_id),  # Story 5.2
                 EVENT_LOG: {"contact_history": eventlog.history(CONTACTS_ENTITY, contact_id)},
             },
         )

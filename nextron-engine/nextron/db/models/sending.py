@@ -38,16 +38,43 @@ depth (FR-32). Every column but the three warm-up record columns and the two pac
 NULL; every column is PII class ``none``: these are Nextron's own sender
 identity, never a data subject's. Story 6.4 added the warm-up columns (migration
 ``0039_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story 6.2 will add the
-Gmail connection.
+Gmail connection. (Those three tables only: ``outbound_messages`` below holds personal data.)
+
+- ``outbound_messages`` (Story 5.2, migration ``0066_5_2_outbound_messages``): one row per
+  approved message (``nextron.domain.outbound_message``): its own copy of the recipient
+  (``to_address``), the Enrollment's bound inbox (``inbox_id``), ``subject``, ``body``,
+  ``approved_hash`` and ``unsub_token``; the ``draft_id``, ``approval_id`` (no foreign key until
+  Story 5.4), ``contact_id``, ``lead_id`` and nullable ``enrollment_id``; the AD-4 snapshot
+  (``kind``, ``tier``, ``lead_score``, ``variant_id``, ``segment_id``, ``market_id``,
+  ``step_no``; no foreign keys on the snapshot ids); ``status``, ``created_at``,
+  ``cancelled_at`` (``ck_outbound_messages_cancelled``: set exactly when ``cancelled``) and
+  ``sent_at``. The partial unique index ``uq_outbound_messages_live_draft`` allows one
+  non-``cancelled`` OM per Draft. Triggers (in the migration) refuse a ``DELETE``, a duplicate
+  live insert and any ``UPDATE`` of the copy or snapshot but the erasure tombstone
+  (``[erased]``) of ``to_address``, ``subject``, ``body`` and ``unsub_token``, the four
+  ``redact`` columns; every other column is PII class ``none``.
 """
 
+from collections.abc import Iterable
 from datetime import date, datetime
 from typing import Final
 
-from sqlalchemy import Boolean, CheckConstraint, Date, ForeignKey, Index, Integer, String, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from nextron.db.models.base import Base, Ulid, UtcDateTime, ulid_pk
+from nextron.domain.outbound_message import OmKind, OmStatus
+from nextron.domain.scoring import Tier
 from nextron.domain.sending_inbox import (
     BRAND_DOMAIN,
     MAX_LABEL_LENGTH,
@@ -165,3 +192,73 @@ class DomainCheckRecord(Base):
     aligned_ok: Mapped[bool] = mapped_column(Boolean)
     passed: Mapped[bool] = mapped_column(Boolean)
     details: Mapped[str] = mapped_column(String(DETAILS_LENGTH))
+
+
+# Story 5.2 ----------------------------------------------------------------------------------------
+
+SHA256_LENGTH: Final = 64
+TIER_LENGTH: Final = 1
+
+
+def _one_of(column: str, values: Iterable[str]) -> str:
+    return "{} IN ({})".format(column, ",".join(f"'{value}'" for value in values))
+
+
+OM_KIND_CHECK: Final = _one_of("kind", OmKind)
+OM_STATUS_CHECK: Final = _one_of("status", OmStatus)
+OM_CANCELLED_CHECK: Final = "(cancelled_at IS NOT NULL) = (status = 'cancelled')"
+OM_APPROVED_HASH_CHECK: Final = (
+    "length(approved_hash) = 64 AND approved_hash NOT GLOB '*[^0-9a-f]*'"
+)
+OM_TIER_CHECK: Final = f"tier IS NULL OR {_one_of('tier', Tier)}"
+OM_STEP_NO_CHECK: Final = "step_no IS NULL OR step_no >= 1"
+OM_STEP_SLOT_CHECK: Final = (
+    "kind NOT IN ('step','recontact') OR (enrollment_id IS NOT NULL AND step_no IS NOT NULL)"
+)
+OM_LIVE_WHERE: Final = f"status <> '{OmStatus.CANCELLED}'"
+
+
+class OutboundMessageRecord(Base):
+    """One approved message: its own copy of the approved text and the AD-4 snapshot."""
+
+    __tablename__ = "outbound_messages"
+    __table_args__ = (
+        Index(
+            "uq_outbound_messages_live_draft",
+            "draft_id",
+            unique=True,
+            sqlite_where=text(OM_LIVE_WHERE),
+        ),
+        Index("ix_outbound_messages_contact_id", "contact_id"),
+        CheckConstraint(OM_KIND_CHECK, name="kind"),
+        CheckConstraint(OM_STATUS_CHECK, name="status"),
+        CheckConstraint(OM_CANCELLED_CHECK, name="cancelled"),
+        CheckConstraint(OM_APPROVED_HASH_CHECK, name="approved_hash"),
+        CheckConstraint(OM_TIER_CHECK, name="tier"),
+        CheckConstraint(OM_STEP_NO_CHECK, name="step_no"),
+        CheckConstraint(OM_STEP_SLOT_CHECK, name="step_slot"),
+    )
+
+    id: Mapped[str] = ulid_pk()
+    draft_id: Mapped[str] = mapped_column(Ulid, ForeignKey("drafts.id"))
+    approval_id: Mapped[str] = mapped_column(Ulid)
+    kind: Mapped[str] = mapped_column(String(STATUS_LENGTH))
+    status: Mapped[str] = mapped_column(String(STATUS_LENGTH))
+    to_address: Mapped[str] = mapped_column(String(ADDRESS_LENGTH))
+    inbox_id: Mapped[str] = mapped_column(Ulid, ForeignKey("sending_inboxes.id"))
+    contact_id: Mapped[str] = mapped_column(Ulid, ForeignKey("contacts.id"))
+    lead_id: Mapped[str] = mapped_column(Ulid, ForeignKey("leads.id"))
+    enrollment_id: Mapped[str | None] = mapped_column(Ulid, ForeignKey("enrollments.id"))
+    subject: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    approved_hash: Mapped[str] = mapped_column(String(SHA256_LENGTH))
+    unsub_token: Mapped[str] = mapped_column(Text)
+    tier: Mapped[str | None] = mapped_column(String(TIER_LENGTH))
+    lead_score: Mapped[int | None] = mapped_column(Integer)
+    variant_id: Mapped[str | None] = mapped_column(Ulid)
+    segment_id: Mapped[str] = mapped_column(Ulid)
+    market_id: Mapped[str | None] = mapped_column(Ulid)
+    step_no: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    cancelled_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    sent_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
