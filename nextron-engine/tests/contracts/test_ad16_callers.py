@@ -29,7 +29,11 @@ violation.
   ``Approval.approve``, a use case, run in its own unit of work) approves that revision with a
   ``pass`` grounding result (plain SQL) bound to its card's ``shown_hash``: its own gate call
   (purpose ``cold``) comes before its first write and ``enqueue``'s before the OM insert;
-  ``Blocked`` refuses before any write.
+  ``Blocked`` refuses before any write. ``approval.complete_pending`` (Story 5.6:
+  ``Approval.complete_pending``, the ``complete_pending_approval`` job's use case) completes a
+  pending approval of that revision (set by plain SQL, bound to its card's ``shown_hash``, with
+  a ``pass`` result): the same two gate calls as ``approve``, approve's before its first write;
+  ``Blocked`` only clears the pending approval (an ``UPDATE`` of ``drafts``).
 - **Scenarios.** A built entry without a scenario fails; an unbuilt one is skipped with "not
   built yet: <name>". Each scenario's cases (for ``add_contact``: a new Contact, and a stored
   Contact matched by name; one entry per ``CONTACT_SOURCES`` source, every Provenance source but
@@ -233,6 +237,8 @@ MANIFEST: Final = (
     # Story 4.14: no AI grounding call for a subject that may no longer be reached
     Caller("drafting.grounding_check", ("app/drafting/",), r"GroundingChecks\.check"),
     Caller("approval.approve", ("app/approval/",), ANY + r"\w*approve\w*"),
+    # Story 5.6: the edit's pending approval completes through approve's own checks
+    Caller("approval.complete_pending", ("app/approval/",), r"Approval\.complete_pending"),
     # Story 5.2: the OM insert (AD-16's insert scan guards outbound_messages)
     Caller(
         "sending.enqueue",
@@ -1341,6 +1347,54 @@ def _approve(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
     return action, lambda: (gate, gate)
 
 
+def _complete_pending(world: World, tag: str) -> tuple[Callable[[], object], Expect]:
+    """Story 5.6: Step 1's revision 1 with a ``pass`` grounding result and a pending approval
+    bound to its card's ``shown_hash`` (both plain SQL, unrecorded), completed: approve's gate
+    call (purpose ``cold``) before its first write, then ``enqueue``'s before the OM insert.
+    ``Blocked`` clears the pending approval and writes nothing else."""
+    contact_id, draft_id, clock = _revised_step_1(world, tag)
+    database = world.engine.url.database
+    assert database
+    connection = sqlite3.connect(database, isolation_level=None)  # no foreign keys: a stand-in
+    try:
+        connection.execute(
+            "UPDATE grounding_results SET status = 'pass', flags = '[]', route_tuple_id = ?, "
+            "served_model = 'claude-haiku-5-5', ai_checked_at = ? WHERE draft_id = ?",
+            (new_id(), "2026-11-18T09:00:00.000000Z", draft_id),
+        )
+    finally:
+        connection.close()
+    with world.units.open(read_only=True):
+        card = approval_queries.card_of(draft_id)
+    assert card is not None and card.shown_hash
+    with world.engine.begin() as written:
+        written.exec_driver_sql(
+            "UPDATE drafts SET pending_approval_rev = 1, pending_approval_hash = ?, "
+            "pending_review_ms = 0 WHERE id = ?",
+            (card.shown_hash, draft_id),
+        )
+    sending = Sending(clock, env="prod", compliance=Compliance(clock, codec=FakeTokenCodec()))
+    approval = Approval(clock, sending=sending)
+
+    def action() -> object:
+        with world.units.open():
+            return approval.complete_pending(draft_id, 1)
+
+    gate = GateCall(ContactSubject(contact_id), EMAIL, "cold")
+    return action, lambda: (gate, gate)
+
+
+def _pending_cleared(world: World) -> None:
+    """The allowed completion added one approval and one ``queued`` OM, and both runs cleared
+    the pending approval (the scenario isn't vacuous)."""
+    _approved(world)
+    with world.engine.connect() as connection:
+        pending = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM drafts WHERE pending_approval_rev IS NOT NULL"
+        ).scalar_one()
+    assert pending == 0
+
+
 def _approved(world: World) -> None:
     """The allowed approval added one approval and one ``queued`` OM, the blocked one
     neither (the scenario isn't vacuous)."""
@@ -1530,6 +1584,14 @@ SCENARIOS: Final[Mapping[str, Scenario]] = MappingProxyType(
         "approval.approve": Scenario(
             (_approve,), gates_first=False, gates_before_first_write=1, after_blocked=_approved
         ),
+        # Story 5.6: the same checks as approve; Blocked only clears the pending approval
+        "approval.complete_pending": Scenario(
+            (_complete_pending,),
+            gates_first=False,
+            gates_before_first_write=1,
+            blocked_writes=frozenset({("UPDATE", "drafts")}),
+            after_blocked=_pending_cleared,
+        ),
         "discovery.csv_import": Scenario((_csv,), gates_first=False),
         "research.people_extraction": Scenario(
             (_people,),
@@ -1633,6 +1695,7 @@ def test_the_built_callers_are_the_epic_2_paths() -> None:
         "drafting.grounding_check",  # Story 4.14
         "sending.enqueue",  # Story 5.2
         "approval.approve",  # Story 5.4
+        "approval.complete_pending",  # Story 5.6
     }
     finding = {d.qualname for d in found["find_contact_email"]}
     assert {"EmailFinding.find_contact_email", "EmailFinding._write"} <= finding

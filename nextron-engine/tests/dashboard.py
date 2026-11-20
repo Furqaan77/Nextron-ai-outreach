@@ -74,7 +74,8 @@ codec=FakeTokenCodec()))`` (Story 5.4: codec-bearing, so an approval's ``enqueue
 token); the Sending Inboxes panel registers through it. The default ``env`` is ``dev``, so a
 panel test that registers an inbox saves ``sink_allowlist`` (and ``sender_name``) through
 ``setup.save`` first, on real units of work. Its ``Approval`` (``approval``, Story 5.4) is
-``Approval(clock, sending=sending)``: the queue card's Approve runs it.
+``Approval(clock, sending=sending, drafting=Drafting(clock, queue))``: the queue card's Approve
+and (Story 5.6) its edit run it.
 
 Its ``DomainChecks`` (``domain_checks``, Story 6.5) is ``DomainChecks(clock, dns, queue)`` on
 ``dns``, a ``FakeDns`` unless a test passes another; the Sending Inboxes page's authentication
@@ -98,6 +99,7 @@ from nextron.app.approval.api import Approval
 from nextron.app.compliance.api import Compliance
 from nextron.app.compliance.erasure import Erasures
 from nextron.app.discovery.api import Discovery, LeadImports
+from nextron.app.drafting.api import Drafting
 from nextron.app.jobqueue.api import JobQueue
 from nextron.app.notify.api import Notify
 from nextron.app.ops.api import (
@@ -416,7 +418,9 @@ class Dashboard:
         self.sending = Sending(
             self.clock, env=self.env, compliance=Compliance(self.clock, codec=FakeTokenCodec())
         )
-        self.approval = Approval(self.clock, sending=self.sending)
+        self.approval = Approval(
+            self.clock, sending=self.sending, drafting=Drafting(self.clock, self.queue)
+        )
         self.domain_checks = DomainChecks(self.clock, self.dns, self.queue)
         self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)

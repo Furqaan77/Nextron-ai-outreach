@@ -32,7 +32,12 @@ and ``status_at`` (when ``approval`` last moved the status). Indexes on ``due_at
 column of ``drafts`` holds no personal data: IDs, codes, numbers, flags and times. Since Story
 4.12 (migration ``0045_4_12_draft_revisions``) (``id``, ``current_rev``) references
 ``draft_revisions`` (``draft_id``, ``rev``), so ``current_rev`` names an existing revision of the
-same Draft or nothing.
+same Draft or nothing. Story 5.6 (migration ``0050_5_6_pending_approval``) adds three
+nullable columns to the status group, the pending approval of an Operator's edit:
+``pending_approval_rev`` (``ck_drafts_pending_approval_rev``: at least 1),
+``pending_approval_hash`` (``ck_drafts_pending_approval_hash``: 64 lowercase hex, the
+``shown_hash`` bound at the edit) and ``pending_review_ms`` (``ck_drafts_pending_review_ms``: at
+least 0); PII class ``none``.
 
 ``draft_revisions`` (FR-20, AD-6, Story 4.12) holds a Draft's text, one immutable row per
 revision, written only by ``nextron.db.repos.drafting.revisions``: a ULID ``id``; ``draft_id``
@@ -106,6 +111,13 @@ STEP_SLOT_CHECK: Final = (
 STEP_NO_CHECK: Final = "step_no IS NULL OR step_no >= 1"
 DAY_OFFSET_CHECK: Final = "day_offset IS NULL OR day_offset >= 0"
 CURRENT_REV_CHECK: Final = "current_rev IS NULL OR current_rev >= 1"
+# Story 5.6: the pending approval of an Operator's edit
+PENDING_APPROVAL_REV_CHECK: Final = "pending_approval_rev IS NULL OR pending_approval_rev >= 1"
+PENDING_APPROVAL_HASH_CHECK: Final = (
+    "pending_approval_hash IS NULL OR (length(pending_approval_hash) = 64 AND "
+    "pending_approval_hash NOT GLOB '*[^0-9a-f]*')"
+)
+PENDING_REVIEW_MS_CHECK: Final = "pending_review_ms IS NULL OR pending_review_ms >= 0"
 ORIGIN_LENGTH: Final = 16
 PLAYBOOK_VERSION_LENGTH: Final = 32  # nextron.domain.playbook.VERSION_PATTERN
 PROMPT_VERSION_LENGTH: Final = 5  # v1 to v9999
@@ -174,6 +186,9 @@ class DraftRecord(Base):
         CheckConstraint(STEP_NO_CHECK, name="step_no"),
         CheckConstraint(DAY_OFFSET_CHECK, name="day_offset"),
         CheckConstraint(CURRENT_REV_CHECK, name="current_rev"),
+        CheckConstraint(PENDING_APPROVAL_REV_CHECK, name="pending_approval_rev"),
+        CheckConstraint(PENDING_APPROVAL_HASH_CHECK, name="pending_approval_hash"),
+        CheckConstraint(PENDING_REVIEW_MS_CHECK, name="pending_review_ms"),
         # Story 4.12: current_rev names an existing revision of this Draft
         ForeignKeyConstraint(
             ["id", "current_rev"],
@@ -202,6 +217,10 @@ class DraftRecord(Base):
     event_expired: Mapped[bool] = _flag()
     skipped_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     status_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    # Story 5.6: the pending approval of an Operator's edit
+    pending_approval_rev: Mapped[int | None] = mapped_column(Integer)
+    pending_approval_hash: Mapped[str | None] = mapped_column(String(SHA256_LENGTH))
+    pending_review_ms: Mapped[int | None] = mapped_column(Integer)
 
 
 class DraftRevisionRecord(Base):

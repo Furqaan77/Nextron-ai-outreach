@@ -616,6 +616,7 @@ def test_build_job_types_is_frozen_and_registers_the_job_types_in_order() -> Non
         "recompute_tiers",
         "poll_unsubscribes",
         "check_grounding",
+        "complete_pending_approval",
     )
     send_alert = job_types.get("send_alert")
     assert (

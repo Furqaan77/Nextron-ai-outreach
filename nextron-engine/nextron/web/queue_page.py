@@ -60,6 +60,36 @@ article, with the enabled ``Approve`` submit button whenever ``approve_disabled`
 ``submitted_approval(fields) -> (draft_id, rev, shown_hash)`` reads that form: exactly those
 fields (plus ``csrf_token``), each once, at most ``MAX_FIELD_LENGTH`` characters, ``rev`` 1 to 9
 digits; anything else raises ``MalformedForm`` (400).
+
+**Edit then approve (Story 5.6).** ``card_row`` also gives:
+
+- ``editable``: the Draft is ``ready`` or ``approved`` and the card has a message and a
+  ``shown_hash``; the page then renders the editor, a native ``<details class="queue-edit">``
+  holding a POST form to ``edit_action`` (``/queue/edit?card=<k>``) with the hidden
+  ``draft_id``, ``rev`` and ``shown_hash``, an ``<input name="subject">`` and a
+  ``<textarea name="body">`` holding ``edit_subject`` and ``edit_body`` (the current revision's
+  own subject and body), and ``footer_text`` (the signature, footer and UK privacy line) shown
+  read-only below them;
+- the pending approval's state: when ``pending_rev`` is the card's ``rev`` and grounding is
+  ``pending``, a "Recheck pending" badge and approve notice (approval stays disabled); when
+  ``pending_rev`` is older than ``rev``, the ``stale`` badge and ``pending_notice`` "This Draft
+  changed since you opened it" (the card shows the newest text);
+- an ``approved`` Draft's approval is disabled with "Already approved".
+
+``submitted_edit(fields) -> (draft_id, rev, shown_hash, subject, body)`` reads the edit form:
+exactly those fields (plus ``csrf_token``), each once; ``draft_id``, ``rev`` and
+``shown_hash`` as in ``submitted_approval``; ``subject`` at most ``MAX_EDIT_SUBJECT`` and
+``body`` at most ``MAX_EDIT_BODY`` characters (looser than drafting's own 200 and 10,000, which
+answer with a message instead of a 400). The body's line breaks (``\r\n`` or ``\r``, as a
+browser sends a textarea) become ``\n``.
+
+``queue_context(..., focus=None, approved=(), submitted_prefix=SUBMITTED_PREFIX)``: ``focus``
+is a card to show when ``draft_param`` names no due card (the Draft just edited, or one from
+the approved list): it is shown with ``position`` "Outside the due queue" and no neighbour
+links, and the notices are not prefixed. ``approved`` (``ApprovedUnsent`` rows) becomes
+``approved_rows`` (``ApprovedRow``: name, Step, OM status, ``/queue?draft=<id>``), the
+"Approved, not yet sent" list. ``submitted_prefix`` is the prefix of a refusal's first notice
+when the Draft named is no longer a due card.
 """
 
 import re
@@ -72,6 +102,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from nextron.app.queries.approval import (
     EVIDENCE_RETRACTED,
     EVIDENCE_SUPERSEDED,
+    ApprovedUnsent,
     CardDetails,
     CardEvidence,
     CardFact,
@@ -80,7 +111,7 @@ from nextron.app.queries.approval import (
     QueueCard,
     has_earlier_steps,
 )
-from nextron.domain.draft import DraftKind
+from nextron.domain.draft import DraftKind, DraftStatus
 from nextron.domain.grounding_rules import GroundingStatus
 from nextron.domain.render import Composed
 from nextron.domain.segments import EvidenceType
@@ -97,12 +128,22 @@ TEMPLATE: Final = "queue.html"
 QUEUE_PATH: Final = "/queue"
 APPROVE_PATH: Final = "/queue/approve"
 APPROVE_FIELDS: Final = ("draft_id", "rev", "shown_hash")
+EDIT_PATH: Final = "/queue/edit"
+EDIT_FIELDS: Final = ("draft_id", "rev", "shown_hash", "subject", "body")
+MAX_EDIT_SUBJECT: Final = 1_000  # drafting refuses above 200 with a message
+MAX_EDIT_BODY: Final = 40_000  # drafting refuses above 10,000 with a message
 CSRF_FIELD: Final = "csrf_token"
 MAX_FIELD_LENGTH: Final = 128
 REV_PATTERN: Final = re.compile(r"[0-9]{1,9}")  # matched with fullmatch
 CARD_PARAM: Final = "card"
 DRAFT_PARAM: Final = "draft"
 SUBMITTED_PREFIX: Final = "The Draft you approved: "  # a refusal for a Draft no longer due
+EDITED_PREFIX: Final = "The Draft you edited: "  # Story 5.6: the same for an edit
+OUTSIDE_QUEUE: Final = "Outside the due queue"
+ALREADY_APPROVED_NOTICE: Final = "Already approved"
+RECHECK_NOTICE: Final = "Recheck pending"
+CHANGED_NOTICE: Final = "This Draft changed since you opened it"
+NO_OUTBOUND: Final = "no message held"
 NO_VALUE: Final = "—"
 UNKNOWN_NAME: Final = "Unknown Lead"
 NOTHING_SCHEDULED: Final = "Nothing scheduled"
@@ -221,11 +262,27 @@ class CardRow:
     playbook_version: str = NO_VALUE
     has_earlier_steps: bool = False
     earlier_steps: tuple[EarlierStepRow, ...] = ()
+    # Story 5.6: the editor and the pending approval
+    editable: bool = False
+    edit_subject: str = ""
+    edit_body: str = ""
+    footer_text: str = ""
+    pending_notice: str | None = None
 
     @property
     def failing(self) -> bool:
         """Whether the revision's grounding result is ``fail``."""
         return self.grounding == FAIL_GROUNDING
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedRow:
+    """One approved Draft whose message isn't sent yet (Story 5.6)."""
+
+    name: str
+    step: str | None
+    om_status: str
+    href: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,13 +436,20 @@ def earlier_step_row(step: EarlierStep, zone_name: str | None) -> EarlierStepRow
 
 
 def _approval_block(
-    grounding: str, shown_hash: str, blocked: str | None
+    grounding: str,
+    shown_hash: str,
+    blocked: str | None,
+    *,
+    approved: bool = False,
+    rechecking: bool = False,
 ) -> tuple[bool, tuple[str, ...]]:
     notices = []
+    if approved:
+        notices.append(ALREADY_APPROVED_NOTICE)
     if grounding == FAIL_GROUNDING:
         notices.append(FAIL_NOTICE)
     elif grounding != GroundingStatus.PASS:
-        notices.append(PENDING_NOTICE)
+        notices.append(RECHECK_NOTICE if rechecking else PENDING_NOTICE)
     if not shown_hash:
         notices.append(UNBOUND_NOTICE)
     if blocked:
@@ -403,9 +467,19 @@ def card_row(
     else:
         grounding, flags = grounding_of(found.revision, found.grounding)
     badges = [Badge(f"grounding-badge grounding-{grounding}", grounding)]
+    rechecking = (
+        card.pending_rev is not None
+        and card.pending_rev == card.rev
+        and grounding == PENDING_GROUNDING
+    )
+    superseded = (
+        card.pending_rev is not None and card.rev is not None and card.pending_rev < card.rev
+    )
+    if rechecking:
+        badges.append(Badge("badge-recheck", RECHECK_NOTICE))
     if card.generic:
         badges.append(Badge(f"badge-{GENERIC_BADGE}", GENERIC_BADGE))
-    if card.stale:
+    if card.stale or superseded:
         badges.append(Badge(f"badge-{STALE_BADGE}", STALE_BADGE))
     subject_segments: tuple[Segment, ...] = ()
     body_segments: tuple[Segment, ...] = ()
@@ -414,7 +488,13 @@ def card_row(
         subject_segments, body_segments = highlight(
             card.message.subject, card.message.body, spans
         )
-    disabled, notices = _approval_block(grounding, card.shown_hash, card.blocked)
+    disabled, notices = _approval_block(
+        grounding,
+        card.shown_hash,
+        card.blocked,
+        approved=card.status == DraftStatus.APPROVED,
+        rechecking=rechecking,
+    )
     return CardRow(
         draft_id=card.draft_id,
         kind=KIND_LABELS.get(card.kind, str(card.kind)),
@@ -443,6 +523,15 @@ def card_row(
         playbook_version=_text(found.playbook_version),
         has_earlier_steps=has_earlier_steps(card),
         earlier_steps=tuple(earlier_step_row(each, zone_name) for each in found.earlier_steps),
+        editable=(
+            card.status in (DraftStatus.READY, DraftStatus.APPROVED)
+            and card.message is not None
+            and bool(card.shown_hash)
+        ),
+        edit_subject=card.edit_subject,
+        edit_body=card.edit_body,
+        footer_text=card.footer_text,
+        pending_notice=CHANGED_NOTICE if superseded else None,
     )
 
 
@@ -464,6 +553,41 @@ def submitted_approval(fields: FormFields) -> tuple[str, int, str]:
     if not REV_PATTERN.fullmatch(rev):
         raise MalformedForm(WRONG_FIELDS)
     return draft_id, int(rev), shown_hash
+
+
+def _one_value(fields: FormFields, name: str, limit: int) -> str:
+    found = fields[name]
+    if len(found) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    if len(found[0]) > limit:
+        raise MalformedForm(WRONG_FIELDS)
+    return found[0]
+
+
+def submitted_edit(fields: FormFields) -> tuple[str, int, str, str, str]:
+    """The edit form's ``draft_id``, ``rev``, ``shown_hash``, ``subject`` and ``body`` (Story
+    5.6); see the module docstring. Anything else raises ``MalformedForm``."""
+    if set(fields) - {CSRF_FIELD} != set(EDIT_FIELDS):
+        raise MalformedForm(WRONG_FIELDS)
+    draft_id = _one_value(fields, "draft_id", MAX_FIELD_LENGTH)
+    rev = _one_value(fields, "rev", MAX_FIELD_LENGTH)
+    shown_hash = _one_value(fields, "shown_hash", MAX_FIELD_LENGTH)
+    subject = _one_value(fields, "subject", MAX_EDIT_SUBJECT)
+    body = _one_value(fields, "body", MAX_EDIT_BODY)
+    if not REV_PATTERN.fullmatch(rev):
+        raise MalformedForm(WRONG_FIELDS)
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
+    return draft_id, int(rev), shown_hash, subject, body
+
+
+def approved_row(row: ApprovedUnsent) -> ApprovedRow:
+    """One "Approved, not yet sent" row (Story 5.6)."""
+    return ApprovedRow(
+        name=row.name or UNKNOWN_NAME,
+        step=None if row.step_no is None else f"Step {row.step_no}",
+        om_status=NO_OUTBOUND if row.om_status is None else str(row.om_status),
+        href=f"{QUEUE_PATH}?{DRAFT_PARAM}={row.draft_id}",
+    )
 
 
 def focused_index(
@@ -492,31 +616,49 @@ def queue_context(
     draft_param: str | None = None,
     details_of: Callable[[QueueCard], CardDetails] | None = None,
     notices: tuple[str, ...] = (),
+    focus: QueueCard | None = None,
+    approved: tuple[ApprovedUnsent, ...] = (),
+    submitted_prefix: str = SUBMITTED_PREFIX,
 ) -> dict[str, object]:
     """What ``queue.html`` renders; see the module docstring."""
     cards = queue.cards
     total = len(cards)
     index = focused_index(cards, card_param, draft_param)
-    if draft_param and all(card.draft_id != draft_param for card in cards):
+    outside = (
+        focus is not None
+        and focus.draft_id == draft_param
+        and all(card.draft_id != draft_param for card in cards)
+    )
+    if draft_param and not outside and all(card.draft_id != draft_param for card in cards):
         # the Draft just submitted isn't a due card: the notices are about it, not the card shown
         notices = tuple(
-            f"{SUBMITTED_PREFIX}{notice}" if at == 0 else notice
+            f"{submitted_prefix}{notice}" if at == 0 else notice
             for at, notice in enumerate(notices)
         )
     focused = None
-    if total:
+    shown: QueueCard | None = None
+    if outside:
+        shown = focus
+    elif total:
         shown = cards[index - 1]
+    if shown is not None:
         details = None if details_of is None else details_of(shown)
         focused = card_row(shown, details, zone_name)
+    if outside:
+        position: str | None = OUTSIDE_QUEUE
+    else:
+        position = f"{index} of {total}" if total else None
     return {
         "groups": tuple(GroupRow(group.key, group.label, len(group.cards)) for group in queue.groups),
         "card": focused,
         "total": total,
         "notices": notices,
         "approve_action": f"{APPROVE_PATH}?{CARD_PARAM}={index}",
-        "position": f"{index} of {total}" if total else None,
-        "previous_href": _href(cards[index - 2]) if total and index > 1 else None,
-        "next_href": _href(cards[index]) if total and index < total else None,
+        "edit_action": f"{EDIT_PATH}?{CARD_PARAM}={index}",
+        "position": position,
+        "previous_href": _href(cards[index - 2]) if total and index > 1 and not outside else None,
+        "next_href": _href(cards[index]) if total and index < total and not outside else None,
+        "approved_rows": tuple(approved_row(row) for row in approved),
         "no_earlier_step": NO_EARLIER_STEP,
         "evidence_not_found": EVIDENCE_NOT_FOUND,
         "fact_not_found": FACT_NOT_FOUND,

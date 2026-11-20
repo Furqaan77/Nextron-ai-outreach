@@ -1,5 +1,6 @@
 """The ``drafts`` status group's repository (AD-3, AD-4; Story 4.9): the only code that writes
-``status``, ``reapproval_required``, ``event_expired``, ``skipped_at`` and ``status_at``.
+``status``, ``reapproval_required``, ``event_expired``, ``skipped_at``, ``status_at`` and
+(Story 5.6) the three ``pending_*`` columns.
 
 Every function runs one explicit Core statement through the current unit of work's session
 (``nextron.db.uow.current()``): reads work in a read-only unit of work too, writes only inside
@@ -30,6 +31,16 @@ Story 5.1 (the Approval Queue) adds two reads; they also read ``current_rev``, `
   of a Step kind with ``due_at`` set, ``due_at <= end`` and an ``active`` Enrollment;
 - ``earliest_ready_due()``: the earliest ``due_at`` among every ``ready`` Draft that has one
   (any Enrollment status, revision or not), or ``None``.
+
+Story 5.6 (edit then approve) adds the pending approval of an edit, written only here:
+
+- ``PendingApproval(rev, text_hash, review_ms)``; ``pending_of(draft_id)``: the Draft's pending
+  approval, or ``None`` when it has none (or the Draft is unknown);
+- ``set_pending(draft_id, rev, text_hash, review_ms)``: records it (``pending_approval_rev``,
+  ``pending_approval_hash``, ``pending_review_ms``);
+- ``clear_pending(draft_id) -> bool``: sets the three back to NULL; whether a pending approval
+  was cleared;
+- ``approved_ids()``: the ids of every ``approved`` Draft, by ``status_at``, then ``id``.
 """
 
 from collections.abc import Sequence
@@ -189,3 +200,59 @@ def earliest_ready_due() -> datetime | None:
     )
     found: datetime | None = current().session.execute(statement).scalar_one()
     return found
+
+
+# Edit then approve (Story 5.6) -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PendingApproval:
+    """The pending approval an Operator's edit recorded on a Draft."""
+
+    rev: int
+    text_hash: str
+    review_ms: int | None
+
+
+def pending_of(draft_id: str) -> PendingApproval | None:
+    """The Draft's pending approval, or ``None``."""
+    statement = select(
+        DraftRecord.pending_approval_rev,
+        DraftRecord.pending_approval_hash,
+        DraftRecord.pending_review_ms,
+    ).where(DraftRecord.id == draft_id)
+    row = current().session.execute(statement).one_or_none()
+    if row is None or row[0] is None or row[1] is None:
+        return None
+    return PendingApproval(int(row[0]), str(row[1]), None if row[2] is None else int(row[2]))
+
+
+def set_pending(draft_id: str, *, rev: int, text_hash: str, review_ms: int | None) -> None:
+    """Record the Draft's pending approval."""
+    current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id)
+        .values(
+            pending_approval_rev=rev, pending_approval_hash=text_hash, pending_review_ms=review_ms
+        )
+    )
+
+
+def clear_pending(draft_id: str) -> bool:
+    """Clear the Draft's pending approval; whether it had one."""
+    result = current().session.execute(
+        update_rows(DraftRecord)
+        .where(DraftRecord.id == draft_id, DraftRecord.pending_approval_rev.is_not(None))
+        .values(pending_approval_rev=None, pending_approval_hash=None, pending_review_ms=None)
+    )
+    return int(result.rowcount) == 1  # type: ignore[attr-defined]
+
+
+def approved_ids() -> list[str]:
+    """The ids of every ``approved`` Draft, by ``status_at``, then ``id``."""
+    statement = (
+        select(DraftRecord.id)
+        .where(DraftRecord.status == APPROVED)
+        .order_by(DraftRecord.status_at, DraftRecord.id)
+    )
+    return [str(found) for found in current().session.execute(statement).scalars()]

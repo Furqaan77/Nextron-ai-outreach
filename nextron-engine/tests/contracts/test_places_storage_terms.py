@@ -4,7 +4,8 @@
   ``place_lng`` and ``place_coords_at``, and no column of any table is named like a Places
   field (a name holding ``display_name``, ``website_uri`` or ``formatted_address``, or a
   ``phone``, ``rating``, ``review`` or ``reviews`` token), unless ``ALLOWED_COLUMNS`` lists it
-  with its reason (so far only Story 5.4's ``approvals.review_ms``, the Operator's review time).
+  with its reason (so far only Story 5.4's ``approvals.review_ms`` and Story 5.6's
+  ``drafts.pending_review_ms``, the Operator's review time).
 - **Imports.** ``nextron.ports.places`` and ``nextron.adapters.places`` (which carry the
   transient ``PlaceCandidate``), and the names ``PlaceCandidate`` and ``PlaceSearchPage``
   themselves (relative imports resolved), are imported only by the
@@ -52,6 +53,10 @@ ALLOWED_COLUMNS: Final[dict[tuple[str, str], str]] = {
     ("approvals", "review_ms"): (
         "Story 5.4 (AD-4): the Operator's review time in milliseconds before approving a Draft; "
         "no Places review"
+    ),
+    ("drafts", "pending_review_ms"): (
+        "Story 5.6 (AD-4): the Operator's review time in milliseconds measured at an edit, kept "
+        "for the approval that completes it; no Places review"
     ),
 }
 

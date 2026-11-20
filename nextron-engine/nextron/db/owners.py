@@ -434,6 +434,10 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "event_expired",
             "skipped_at",
             "status_at",
+            # Story 5.6: the pending approval of an edit
+            "pending_approval_rev",
+            "pending_approval_hash",
+            "pending_review_ms",
         ),
     },
     # Story 5.4

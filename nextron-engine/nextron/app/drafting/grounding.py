@@ -1,7 +1,8 @@
 """The AI grounding check of a Draft revision (FR-21, AD-6, AD-7, AD-8, AD-16, AD-18; Story
 4.14): the ``check_grounding`` job's use case, owned by ``drafting``.
 
-**``GroundingChecks(clock, llm).check(draft_id, rev, urgency) -> GroundingCheckOutcome``**
+**``GroundingChecks(clock, llm, queue=None).check(draft_id, rev, urgency) ->
+GroundingCheckOutcome``**
 (``@use_case``) checks the revision ``rev`` of the Draft ``draft_id``, which ``Drafting._append``
 enqueued with it. It never calls ``nextron.domain.budget.allow``: both grounding routes are
 ``essential``. Prepare transaction, then the call(s) with no transaction open, then the apply
@@ -43,6 +44,15 @@ transaction (AD-2):
    and ``ai_checked_at`` = now, only while ``ai_checked_at`` is NULL. A result for a revision that
    is no longer current is stored on that revision's row only.
 
+**Completing an edit's pending approval (Story 5.6).** Whenever a result (``pass`` or
+``fail``, fail-closed ones included) is recorded for the revision that is the Draft's
+``pending_approval_rev`` (read through ``queries.approval.pending_approval``), the same
+transaction enqueues ``complete_pending_approval`` (``domain.draft.COMPLETE_PENDING_APPROVAL_JOB``;
+scope the Draft id, discriminator the ``rev``, payload ``{"v": 1, "draft_id", "rev"}``) on the
+interactive lane through ``queue``; ``approval.complete_pending`` then approves or clears it.
+``drafting`` never writes the pending approval itself (AD-3). Recording such a result with no
+``queue`` raises ``RuntimeError``, which rolls the result back.
+
 It logs ``grounding_checked`` (``draft_id``, ``rev``, ``status``, ``flag_count``,
 ``served_model``, ``fallback``) or ``grounding_check_skipped`` (``draft_id``, ``rev``,
 ``reason``). No prompt or answer text is stored or logged.
@@ -56,6 +66,8 @@ from typing import Final
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.drafting.api import _grounding
+from nextron.app.jobqueue.api import JobQueue
+from nextron.app.queries import approval as approval_queries
 from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import playbook as playbook_queries
 from nextron.app.queries import research as research_queries
@@ -67,14 +79,16 @@ from nextron.db.repos.drafting.grounding_results import StoredFlag, StoredGround
 from nextron.db.uow import current, use_case
 from nextron.domain.ai import RouteTuple, UntrustedBlock, Urgency, check_urgency
 from nextron.domain.contactability import Blocked, ContactSubject
-from nextron.domain.draft import STEP_KINDS
+from nextron.domain.draft import COMPLETE_PENDING_APPROVAL_JOB, STEP_KINDS
 from nextron.domain.grounding_check import (
+    DRAFT_ID_FIELD,
     GROUNDING_CHECK_ROUTE,
     GROUNDING_FALLBACK_ROUTE,
     UNAVAILABLE_FAILED,
     UNAVAILABLE_NO_ANSWER,
     UNAVAILABLE_NO_TUPLE,
     UNAVAILABLE_NOT_CONTACTABLE,
+    REV_FIELD,
     CheckedFlag,
     FlagSource,
     GroundingEarlierStep,
@@ -88,6 +102,7 @@ from nextron.domain.grounding_check import (
     unavailable,
 )
 from nextron.domain.grounding_rules import Claim, GroundingStatus, RevisionInput
+from nextron.domain.job import VERSION_FIELD, Lane
 from nextron.ports.clock import Clock
 from nextron.ports.errors import AdapterError
 from nextron.ports.llm import LlmFailed, LlmOk, LlmPort, LlmResult
@@ -101,6 +116,7 @@ PURPOSE: Final = "cold"
 QUOTE: Final = "quote"
 ABSENCE: Final = "absence"
 COUNT: Final = "count"
+PAYLOAD_VERSION: Final = 1
 
 
 class GroundingCheckOutcome(StrEnum):
@@ -222,8 +238,9 @@ def _record(
     tuple_id: str | None,
     served_model: str | None,
     at: datetime,
+    queue: JobQueue | None,
 ) -> bool:
-    return grounding_results_repo.record_ai_result(
+    recorded = grounding_results_repo.record_ai_result(
         draft_id,
         rev,
         status=str(status),
@@ -235,14 +252,35 @@ def _record(
         served_model=served_model,
         at=at,
     )
+    if recorded:
+        _complete_pending(draft_id, rev, queue)
+    return recorded
+
+
+def _complete_pending(draft_id: str, rev: int, queue: JobQueue | None) -> None:
+    """Enqueue ``complete_pending_approval`` when ``rev`` is the Draft's pending-approval
+    revision (Story 5.6); see the module docstring."""
+    pending = approval_queries.pending_approval(draft_id)
+    if pending is None or pending.rev != rev:
+        return
+    if queue is None:
+        raise RuntimeError("these GroundingChecks were built without a job queue")
+    queue.enqueue(
+        COMPLETE_PENDING_APPROVAL_JOB,
+        scope=draft_id,
+        discriminator=str(rev),
+        payload={VERSION_FIELD: PAYLOAD_VERSION, DRAFT_ID_FIELD: draft_id, REV_FIELD: rev},
+        lane=Lane.INTERACTIVE,
+    )
 
 
 class GroundingChecks:
     """The ``check_grounding`` jobs; see the module docstring."""
 
-    def __init__(self, clock: Clock, llm: LlmPort) -> None:
+    def __init__(self, clock: Clock, llm: LlmPort, queue: JobQueue | None = None) -> None:
         self._clock = clock
         self._llm = llm
+        self._queue = queue
 
     @use_case
     def check(self, draft_id: str, rev: int, urgency: Urgency) -> GroundingCheckOutcome:
@@ -271,7 +309,9 @@ class GroundingChecks:
     ) -> GroundingCheckOutcome:
         """Record a fail-closed result with no call."""
         status, flags = combine(_stored_rules(row), (unavailable(reason),), checked=False)
-        recorded = _record(row.draft_id, row.rev, status, flags, tuple_id, None, self._clock.now())
+        recorded = _record(
+            row.draft_id, row.rev, status, flags, tuple_id, None, self._clock.now(), self._queue
+        )
         self._log(row.draft_id, row.rev, status, flags, None, fallback=False)
         return GroundingCheckOutcome.RECORDED if recorded else GroundingCheckOutcome.SKIPPED
 
@@ -372,7 +412,9 @@ class GroundingChecks:
                 rerun = {(flag.code, flag.span) for flag in rules}
                 kept = (*rules, *(f for f in stored if (f.code, f.span) not in rerun))
                 status, flags = combine(kept, read.flags, checked=True)
-        recorded = _record(draft_id, rev, status, flags, answer.tuple_id, answer.served_model, now)
+        recorded = _record(
+            draft_id, rev, status, flags, answer.tuple_id, answer.served_model, now, self._queue
+        )
         self._log(draft_id, rev, status, flags, answer.served_model, fallback=answer.fallback)
         return GroundingCheckOutcome.RECORDED if recorded else GroundingCheckOutcome.SKIPPED
 

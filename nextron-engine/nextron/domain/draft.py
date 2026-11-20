@@ -34,6 +34,11 @@ cancel                  ready, approved     cancelled   sequence_stopped
 log_touch               ready               sent        touch_logged
 ======================  ==================  ==========  ================
 
+**Edit then approve (Story 5.6).** ``COMPLETE_PENDING_APPROVAL_JOB``
+(``complete_pending_approval``) is the job ``drafting`` enqueues when the grounding result of a
+Draft's pending-approval revision is recorded (key ``complete_pending_approval:<draft id>:<rev>``,
+payload ``draft_id`` and ``rev``); ``approval.complete_pending`` runs it.
+
 ``log_touch`` is allowed only for kind ``channel`` (``kind`` must be given and be ``channel``;
 otherwise ``IllegalTransition``). **Creation.** ``CREATION`` is ``Transition(ready,
 requested)``: the creation ``events`` row has no ``from`` status.
@@ -182,3 +187,7 @@ _PURPOSES: Final[Mapping[str, Purpose]] = MappingProxyType(
         DraftKind.REBOOK: Purpose.REBOOK,
     }
 )
+
+
+# Story 5.6: the job that completes an edit's pending approval once its recheck is recorded
+COMPLETE_PENDING_APPROVAL_JOB: Final = "complete_pending_approval"

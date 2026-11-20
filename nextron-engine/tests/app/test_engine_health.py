@@ -367,6 +367,7 @@ def test_the_real_registry_groups_the_backup_jobs_as_backup_and_send_alert_as_ot
                 LastRun("run_ai_test_sets", None),
                 LastRun("erase_external", None),
                 LastRun("check_grounding", None),  # Story 4.14
+                LastRun("complete_pending_approval", None),  # Story 5.6
             ),
         ),
     )

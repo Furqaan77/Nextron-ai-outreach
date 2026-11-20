@@ -73,6 +73,20 @@ exactly as ``due_queue`` builds it (same message, footer notice, ``inbox_id`` an
 checks a posted ``shown_hash`` against it. ``approval_of(draft_id) -> ApprovalRow(id, draft_id,
 rev, approved_at, text_hash) | None``: the Draft's latest ``approvals`` row while the Draft is
 ``approved``, else ``None`` (what Story 6.9's send gate reads).
+
+**Edit then approve (Story 5.6).** A card also holds ``status`` (the Draft's), ``edit_subject``
+and ``edit_body`` (the current revision's own subject and body, for the editor; ``""`` without
+a revision), ``footer_text`` (its footer snapshot's text: the signature, footer and UK privacy
+line, shown read-only; ``""`` without one) and ``pending_rev`` (the Draft's
+``pending_approval_rev``, ``None`` without a pending approval).
+
+- ``pending_approval(draft_id) -> PendingApproval(rev, text_hash, review_ms) | None``: the
+  Draft's pending approval (``None`` for none, an unknown Draft or a text that isn't a ULID);
+  ``drafting`` reads it to decide whether a recorded grounding result completes one.
+- ``approved_unsent() -> tuple[ApprovedUnsent, ...]``: every ``approved`` Draft whose live
+  OutboundMessage isn't ``sent`` (``ApprovedUnsent(draft_id, name, step_no, om_status)``: the
+  Lead's name, else the Contact's, else ``None``; the live OM's status, ``None`` without one),
+  by ``status_at``, then id.
 """
 
 from collections.abc import Callable
@@ -90,12 +104,15 @@ from nextron.app.queries import sequencing as sequencing_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.db.repos.approval import approvals as approvals_repo
 from nextron.db.repos.approval import drafts as drafts_repo
+from nextron.db.repos.approval.drafts import PendingApproval
 from nextron.domain import render
 from nextron.domain.company_facts import InvalidCompanyFacts
 from nextron.domain.draft import RESPONSIVE_KINDS, DraftKind, DraftStatus
 from nextron.domain.eligibility import Decision
 from nextron.domain.grounding_rules import GroundingStatus
+from nextron.domain.ids import is_ulid
 from nextron.domain.markets import InvalidMarkets
+from nextron.domain.outbound_message import OmStatus
 from nextron.domain.scoring import Tier
 from nextron.domain.segments import InvalidSegments, SignalClass
 from nextron.domain.signals import age_days, is_live
@@ -164,6 +181,12 @@ class QueueCard:
     generic: bool = False
     stale: bool = False
     grounding_status: GroundingStatus = GroundingStatus.PENDING
+    # Story 5.6: the editor's text and the pending approval
+    status: DraftStatus = DraftStatus.READY
+    edit_subject: str = field(default="", repr=False)
+    edit_body: str = field(default="", repr=False)
+    footer_text: str = field(default="", repr=False)
+    pending_rev: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +376,8 @@ def _card(
     reader: _Reader, candidate: drafts_repo.QueueCandidate, draft: drafting_queries.DraftView
 ) -> QueueCard:
     grounding = _grounding_status(draft)
+    pending = drafts_repo.pending_of(draft.id)
+    pending_rev = None if pending is None else pending.rev
     bare = QueueCard(
         draft_id=draft.id,
         kind=draft.kind,
@@ -364,6 +389,8 @@ def _card(
         generic=draft.generic,
         stale=draft.stale,
         grounding_status=grounding,
+        status=draft.status,
+        pending_rev=pending_rev,
     )
     lead_id, contact_id = candidate.lead_id, candidate.contact_id
     if lead_id is None or contact_id is None:
@@ -375,10 +402,12 @@ def _card(
         None if contact is None or contact.market_id is None else reader.market(contact.market_id)
     )
     message = None
+    footer_text = ""
     current = drafting_queries.current_revision(draft)
     if current is not None:
         footer = drafting_queries.footer_snapshot(current.footer_snapshot_id)
         if footer is not None:
+            footer_text = footer.text
             recipient = "" if contact is None or contact.email is None else contact.email
             message = render.compose(current, footer, recipient)
     blocked = None
@@ -412,6 +441,11 @@ def _card(
         generic=draft.generic,
         stale=draft.stale,
         grounding_status=grounding,
+        status=draft.status,
+        edit_subject="" if current is None else current.subject,
+        edit_body="" if current is None else current.body,
+        footer_text=footer_text,
+        pending_rev=pending_rev,
     )
 
 
@@ -584,6 +618,57 @@ def approval_of(draft_id: str) -> ApprovalRow | None:
     if found is None:
         return None
     return ApprovalRow(found.id, found.draft_id, found.rev, found.approved_at, found.text_hash)
+
+
+def pending_approval(draft_id: str) -> PendingApproval | None:
+    """The Draft's pending approval (Story 5.6), or ``None``."""
+    if not isinstance(draft_id, str) or not is_ulid(draft_id):
+        return None
+    return drafts_repo.pending_of(draft_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedUnsent:
+    """An ``approved`` Draft whose message isn't sent yet (Story 5.6)."""
+
+    draft_id: str
+    name: str | None
+    step_no: int | None
+    om_status: OmStatus | None
+
+
+def approved_unsent() -> tuple[ApprovedUnsent, ...]:
+    """Every ``approved`` Draft whose live OutboundMessage isn't ``sent``; see the module
+    docstring."""
+    found = []
+    for draft_id in drafts_repo.approved_ids():
+        live = sending_queries.live_outbound_of_draft(draft_id)
+        if live is not None and live.status == OmStatus.SENT:
+            continue
+        draft = drafting_queries.draft(draft_id)
+        if draft is None:  # pragma: no cover - read in the same transaction
+            continue
+        name = None
+        enrollment = (
+            None
+            if draft.enrollment_id is None
+            else sequencing_queries.enrollment(draft.enrollment_id)
+        )
+        if enrollment is not None:
+            lead = discovery_queries.lead(enrollment.lead_id)
+            contact = research_queries.contact(enrollment.contact_id)
+            name = (lead.name if lead is not None else None) or (
+                contact.name if contact is not None else None
+            )
+        found.append(
+            ApprovedUnsent(
+                draft_id=draft.id,
+                name=name,
+                step_no=draft.step_no,
+                om_status=None if live is None else live.status,
+            )
+        )
+    return tuple(found)
 
 
 def _group(card: QueueCard) -> str:

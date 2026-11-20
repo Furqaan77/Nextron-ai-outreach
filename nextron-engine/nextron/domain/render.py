@@ -62,8 +62,9 @@ footer template (``nextron.domain.markets``, Story 3.1) and the footer settings
 **Edit ratio (Story 5.4).** ``edit_ratio(first, approved)``: ``levenshtein`` (character edits;
 common prefix and suffix trimmed, then Myers' bit-parallel algorithm, no dependency) between
 revision 1's and the approved revision's ``subject + "\\n" + body``, divided by revision 1's
-length, capped at 1.0; equal texts give 0.0. Stored as ``approvals.edit_ratio`` (above 0.20 is a
-major edit).
+length, capped at 1.0; equal texts give 0.0. Stored as ``approvals.edit_ratio``. Story 5.6:
+``MAJOR_EDIT_RATIO`` (0.20) and ``is_major_edit(ratio)``, true only above it (0.21 is major, 0.20
+isn't).
 """
 
 import hashlib
@@ -285,6 +286,7 @@ def text_hash(to_address: str, inbox_id: str, subject: str, body: str) -> str:
 # Edit ratio (Story 5.4) -------------------------------------------------------------------------
 
 MAX_EDIT_RATIO: Final = 1.0
+MAJOR_EDIT_RATIO: Final = 0.20  # Story 5.6: an edit ratio above it is a major edit
 
 
 def levenshtein(a: str, b: str) -> int:
@@ -341,3 +343,10 @@ def edit_ratio(first: RevisionText, approved: RevisionText) -> float:
     if not original:
         return MAX_EDIT_RATIO
     return min(MAX_EDIT_RATIO, levenshtein(original, final) / len(original))
+
+
+def is_major_edit(ratio: float) -> bool:
+    """Whether an edit ratio counts as a major edit: above ``MAJOR_EDIT_RATIO`` (Story 5.6)."""
+    if not isinstance(ratio, int | float) or isinstance(ratio, bool):
+        raise TypeError("is_major_edit takes a number")
+    return ratio > MAJOR_EDIT_RATIO

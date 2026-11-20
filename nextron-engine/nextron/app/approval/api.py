@@ -61,6 +61,39 @@ OM, no session change) and the result is ``blocked`` with the error's message. T
   with the live Eligibility of ``Compliance.evaluate_eligibility``) has no card left, the
   session closes at now, or at its start if the clock moved back (``queue_clear`` true).
 
+**Edit then approve (Story 5.6, AD-6).** ``Approval(clock, *, sending=None, drafting=None)``:
+``drafting`` is the queue-bearing ``Drafting`` whose ``revise`` stores an edit (``edit`` raises
+``TypeError`` without it). The Draft's pending approval lives in its ``pending_approval_rev``,
+``pending_approval_hash`` and ``pending_review_ms`` (``nextron.db.repos.approval.drafts``);
+only this service writes them: ``edit`` sets them; ``approve``, ``complete_pending`` and the
+cascades clear them for each Draft they move.
+
+- ``@use_case edit(draft_id, rev, shown_hash, subject, body, *, served_at=None,
+  first_served_at=None) -> ApproveResult``. One transaction; every refusal writes nothing.
+  Checks, in order: an unknown Draft raises ``UnknownDraft``; a status other than ``ready`` or
+  ``approved`` is ``blocked`` "This Draft is no longer in the queue"; ``rev`` not the current
+  one is ``stale``; a card without a ``shown_hash`` is ``blocked`` "This Draft can't be approved
+  yet"; ``shown_hash`` not the card's is ``stale``; a stripped subject and a body equal to the
+  current revision's are ``blocked`` "Nothing changed". For an ``approved`` Draft its live OM
+  must be ``queued`` and is cancelled (``sending.api.cancel_for_cascade``), else ``blocked``
+  "Already sending" (nothing written); then the Draft moves ``approved -> ready`` (cause
+  ``edited``, actor ``operator``, ``cause_ref`` its approval). Then ``drafting.revise`` stores
+  the new revision (origin ``operator_edit``, its ``check_grounding`` job on the interactive
+  lane); a ``ValueError`` (the text rules) rolls everything back as ``blocked`` with its message
+  (first letter upper-cased), a ``LookupError`` as ``blocked`` "This Draft can't be approved
+  yet". The pending approval records the new ``rev``, the new card's ``shown_hash`` and
+  ``review_ms``; the decision counts in the session as in ``approve``. The result is
+  ``pending`` "Recheck pending".
+- ``@use_case complete_pending(draft_id, rev) -> ApproveResult | None``, the
+  ``complete_pending_approval`` job's use case (``drafting`` enqueues it once the grounding
+  result of the pending revision is recorded). ``None``, writing nothing, when the Draft has no
+  pending approval for ``rev``. Otherwise ``_check(draft_id, rev, pending_approval_hash)``, the
+  very checks ``approve`` runs: all pass -> the approval is recorded exactly as ``approve`` does
+  (``review_ms`` the pending one, no session change) and the pending fields are cleared;
+  ``stale`` -> nothing written; ``blocked`` -> the pending fields are cleared and nothing else
+  (a grounding result still ``pending`` writes nothing). A failed enqueue rolls the unit back and
+  raises ``PendingApprovalFailed``, so the job retries.
+
 Nothing here sends anything or touches ``MailPort``.
 
 **Cascades (Story 4.9; Story 5.4 adds ``approved`` Drafts).**
@@ -90,6 +123,7 @@ from typing import Final
 
 from nextron.app.compliance import api as compliance_api
 from nextron.app.compliance.api import Compliance
+from nextron.app.drafting.api import Drafting
 from nextron.app.queries import approval as approval_queries
 from nextron.app.queries import drafting as drafting_queries
 from nextron.app.queries import sending as sending_queries
@@ -133,10 +167,16 @@ GROUNDING_PENDING: Final = "Grounding check pending"
 SUPPRESSED: Final = "Contact is suppressed"
 UNBINDABLE: Final = "This Draft can't be approved yet"
 NOT_QUEUED: Final = "The message couldn't be queued"
+NOTHING_CHANGED: Final = "Nothing changed"
+ALREADY_SENDING: Final = "Already sending"
+RECHECK_PENDING: Final = "Recheck pending"
 
 DRAFT_APPROVED: Final = "draft_approved"
 APPROVE_REFUSED: Final = "draft_approve_refused"
 CASCADE_IN_FLIGHT: Final = "approval_cascade_in_flight"
+DRAFT_EDITED: Final = "draft_edited"
+EDIT_REFUSED: Final = "draft_edit_refused"
+PENDING_COMPLETED: Final = "pending_approval_completed"
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +185,7 @@ class ApproveOutcome(StrEnum):
     APPROVED = "approved"
     STALE = "stale"
     BLOCKED = "blocked"
+    PENDING = "pending"  # Story 5.6: an edit waits for its recheck
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +223,10 @@ class UnknownDraft(LookupError):
     """``approve`` was given a Draft id that names no Draft (or isn't a ULID)."""
 
 
+class PendingApprovalFailed(RuntimeError):
+    """``complete_pending`` rolled back (the enqueue failed); the job retries."""
+
+
 class _RolledBack(Exception):
     """Ends the approval's transaction with a rollback; ``message`` is the Operator's notice."""
 
@@ -199,6 +244,11 @@ def _error_message(error: BaseException) -> str:
     if isinstance(error, DomainError) and str(error):
         return str(error)
     return f"{NOT_QUEUED} ({type(error).__name__})"
+
+
+def _sentence(text: str) -> str:
+    """``text`` with its first letter upper-cased (a refusal's message as the card shows it)."""
+    return text[:1].upper() + text[1:]
 
 
 def _review_ms(served_at: datetime | None, now: datetime) -> int | None:
@@ -226,9 +276,16 @@ def _session_start(
 class Approval:
     """The status of Drafts and their approvals; see the module docstring."""
 
-    def __init__(self, clock: Clock, *, sending: Sending | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        sending: Sending | None = None,
+        drafting: Drafting | None = None,
+    ) -> None:
         self._clock = clock
         self._sending = sending
+        self._drafting = drafting
 
     # Approve (Story 5.4) ------------------------------------------------------------------------
 
@@ -285,8 +342,8 @@ class Approval:
         if session is not None:
             latest = approvals_repo.latest_at_since(session.started_at)
             last_activity = session.started_at if latest is None else max(latest, session.started_at)
-        approval_id, om_id = self._record(checked, rev, now, served_at)
         review_ms = _review_ms(served_at, now)
+        approval_id, om_id = self._record(checked, rev, now, review_ms)
         queue_clear = self._count_decision(
             session, last_activity, now, review_ms, first_served_at, served_at
         )
@@ -345,9 +402,10 @@ class Approval:
         return _Checked(draft, card)
 
     def _record(
-        self, checked: _Checked, rev: int, now: datetime, served_at: datetime | None
+        self, checked: _Checked, rev: int, now: datetime, review_ms: int | None
     ) -> tuple[str, str]:
-        """The approval row, the Draft's move and the enqueue; ``_RolledBack`` on failure."""
+        """The approval row, the Draft's move (its pending approval cleared) and the enqueue;
+        ``_RolledBack`` on failure."""
         sending = self._sending
         assert sending is not None  # checked by approve
         draft, card = checked.draft, checked.card
@@ -364,7 +422,7 @@ class Approval:
                 text_hash=card.shown_hash,
                 approved_by=OPERATOR,
                 approved_at=now,
-                review_ms=_review_ms(served_at, now),
+                review_ms=review_ms,
                 edit_ratio=render.edit_ratio(first or approved, approved),
             ),
         )
@@ -373,6 +431,7 @@ class Approval:
             draft.id, from_status=str(DraftStatus.READY), to_status=str(change.to), at=now
         ):
             raise _RolledBack(NOT_IN_QUEUE)
+        drafts_repo.clear_pending(draft.id)
         eventlog.append(
             entity=ENTITY,
             entity_id=draft.id,
@@ -427,6 +486,176 @@ class Approval:
         except (SettingNotSet, InvalidSettingValue):
             return DEFAULT_APPROVAL_SESSION_IDLE
         return found if isinstance(found, timedelta) else DEFAULT_APPROVAL_SESSION_IDLE
+
+    # Edit then approve (Story 5.6) ------------------------------------------------------------
+
+    @use_case
+    def edit(
+        self,
+        draft_id: str,
+        rev: int,
+        shown_hash: str,
+        subject: str,
+        body: str,
+        *,
+        served_at: datetime | None = None,
+        first_served_at: datetime | None = None,
+    ) -> ApproveResult:
+        """Store the Operator's edit of the Draft shown as ``rev``/``shown_hash`` and record a
+        pending approval of it; see the module docstring."""
+        if self._drafting is None:
+            raise TypeError("edit needs the Drafting that stores revisions")
+        if not all(isinstance(value, str) for value in (draft_id, shown_hash, subject, body)):
+            raise TypeError("edit takes a str draft_id, shown_hash, subject and body")
+        if not isinstance(rev, int) or isinstance(rev, bool):
+            raise TypeError("edit takes an int rev")
+        try:
+            with current().transaction():
+                result = self._edit(
+                    draft_id, rev, shown_hash, subject, body, served_at, first_served_at
+                )
+        except _RolledBack as failed:
+            result = _refused(ApproveOutcome.BLOCKED, draft_id, failed.message)
+        if result.outcome is ApproveOutcome.PENDING:
+            log.info(DRAFT_EDITED, extra={"draft_id": draft_id})
+        else:
+            log.info(EDIT_REFUSED, extra={"draft_id": draft_id, "outcome": str(result.outcome)})
+        return result
+
+    def _edit(
+        self,
+        draft_id: str,
+        rev: int,
+        shown_hash: str,
+        subject: str,
+        body: str,
+        served_at: datetime | None,
+        first_served_at: datetime | None,
+    ) -> ApproveResult:
+        drafting = self._drafting
+        assert drafting is not None  # checked by edit
+        draft = drafting_queries.draft(draft_id)
+        if draft is None:
+            raise UnknownDraft("edit: the Draft is unknown")
+        if draft.status not in (DraftStatus.READY, DraftStatus.APPROVED):
+            return _refused(ApproveOutcome.BLOCKED, draft.id, NOT_IN_QUEUE)
+        if draft.current_rev is None:
+            return _refused(ApproveOutcome.BLOCKED, draft.id, UNBINDABLE)
+        if rev != draft.current_rev:
+            return _refused(ApproveOutcome.STALE, draft.id, CHANGED)
+        card = approval_queries.card_of(draft.id)
+        if card is None:  # read just above in the same transaction
+            raise UnknownDraft("edit: the Draft is unknown")
+        if not card.shown_hash:
+            return _refused(ApproveOutcome.BLOCKED, draft.id, UNBINDABLE)
+        if shown_hash != card.shown_hash:
+            return _refused(ApproveOutcome.STALE, draft.id, CHANGED)
+        previous = drafting_queries.current_revision(draft)
+        if previous is None:  # current_rev names an existing revision (its foreign key)
+            return _refused(ApproveOutcome.BLOCKED, draft.id, UNBINDABLE)
+        if subject.strip() == previous.subject and body == previous.body:
+            return _refused(ApproveOutcome.BLOCKED, draft.id, NOTHING_CHANGED)
+        now = self._clock.now()
+        if draft.status == DraftStatus.APPROVED:
+            refused = self._return_for_edit(draft.id, now)
+            if refused is not None:
+                return refused
+        session = sessions_repo.open_session()
+        last_activity = None
+        if session is not None:
+            latest = approvals_repo.latest_at_since(session.started_at)
+            last_activity = session.started_at if latest is None else max(latest, session.started_at)
+        try:
+            new_rev = drafting.revise(draft.id, subject, body)
+        except ValueError as error:  # the text rules: the whole unit rolls back
+            raise _RolledBack(_sentence(str(error)) or UNBINDABLE) from error
+        except LookupError as error:  # the Contact, Market or brief is gone
+            raise _RolledBack(UNBINDABLE) from error
+        edited = approval_queries.card_of(draft.id)
+        if edited is None or not edited.shown_hash or edited.rev != new_rev:
+            raise _RolledBack(UNBINDABLE)
+        review_ms = _review_ms(served_at, now)
+        drafts_repo.set_pending(
+            draft.id, rev=new_rev, text_hash=edited.shown_hash, review_ms=review_ms
+        )
+        queue_clear = self._count_decision(
+            session, last_activity, now, review_ms, first_served_at, served_at
+        )
+        return ApproveResult(
+            ApproveOutcome.PENDING, draft.id, (RECHECK_PENDING,), queue_clear=queue_clear
+        )
+
+    def _return_for_edit(self, draft_id: str, now: datetime) -> ApproveResult | None:
+        """Un-approve an ``approved`` Draft for an edit: cancel its ``queued`` live OM, then
+        move it ``approved -> ready``; a refusal (nothing written) when the OM is past
+        ``queued``."""
+        live = sending_queries.live_outbound_of_draft(draft_id)
+        if live is not None and (
+            live.status != OmStatus.QUEUED
+            or not sending_api.cancel_for_cascade(self._clock, live.id)
+        ):
+            return _refused(ApproveOutcome.BLOCKED, draft_id, ALREADY_SENDING)
+        approval = approval_queries.approval_of(draft_id)
+        change = transition(DraftStatus.APPROVED, DraftEvent.RETURN_EDITED)
+        if not drafts_repo.set_status(
+            draft_id, from_status=str(DraftStatus.APPROVED), to_status=str(change.to), at=now
+        ):
+            raise _RolledBack(NOT_IN_QUEUE)  # the OM may have been cancelled: roll it back
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=draft_id,
+            from_status=str(DraftStatus.APPROVED),
+            to_status=str(change.to),
+            cause=str(change.cause),
+            cause_ref=None if approval is None else approval.id,
+            actor=OPERATOR,
+            at=now,
+        )
+        return None
+
+    @use_case
+    def complete_pending(self, draft_id: str, rev: int) -> ApproveResult | None:
+        """Complete the Draft's pending approval of ``rev`` now that its grounding result is
+        recorded; see the module docstring."""
+        if self._sending is None:
+            raise TypeError("complete_pending needs the Sending that holds approved messages")
+        if not isinstance(draft_id, str):
+            raise TypeError("complete_pending takes a str draft_id")
+        if not isinstance(rev, int) or isinstance(rev, bool):
+            raise TypeError("complete_pending takes an int rev")
+        try:
+            with current().transaction():
+                result = self._complete_pending(draft_id, rev)
+        except _RolledBack as failed:  # the enqueue failed: the job retries
+            raise PendingApprovalFailed(failed.message) from failed
+        if result is not None:
+            log.info(
+                PENDING_COMPLETED,
+                extra={
+                    "draft_id": draft_id,
+                    "rev": rev,
+                    "outcome": str(result.outcome),
+                    "approval_id": result.approval_id,
+                    "om_id": result.om_id,
+                },
+            )
+        return result
+
+    def _complete_pending(self, draft_id: str, rev: int) -> ApproveResult | None:
+        pending = approval_queries.pending_approval(draft_id)
+        if pending is None or pending.rev != rev:
+            return None
+        checked = self._check(draft_id, rev, pending.text_hash)
+        if isinstance(checked, ApproveResult):
+            if checked.outcome is ApproveOutcome.BLOCKED and checked.reasons != (
+                GROUNDING_PENDING,
+            ):
+                drafts_repo.clear_pending(draft_id)
+            return checked
+        approval_id, om_id = self._record(checked, rev, self._clock.now(), pending.review_ms)
+        return ApproveResult(
+            ApproveOutcome.APPROVED, draft_id, approval_id=approval_id, om_id=om_id
+        )
 
     # Cascades (Stories 4.9, 5.4) ----------------------------------------------------------------
 
@@ -484,6 +713,7 @@ class Approval:
         )
         if not moved:
             return False
+        drafts_repo.clear_pending(draft.id)  # Story 5.6: a cancelled Draft approves nothing
         eventlog.append(
             entity=ENTITY,
             entity_id=draft.id,

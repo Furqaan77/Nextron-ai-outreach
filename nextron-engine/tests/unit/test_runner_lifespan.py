@@ -243,6 +243,7 @@ def test_serving_registers_send_alert_and_builds_no_adapter_or_client(
         "recompute_tiers",
         "poll_unsubscribes",
         "check_grounding",  # Story 4.14
+        "complete_pending_approval",  # Story 5.6
     )
     assert built == []  # no role adapter, so no Telegram client and no request
     with units.open(read_only=True):

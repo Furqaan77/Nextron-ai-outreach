@@ -154,7 +154,9 @@ def raw_text(node: Node) -> str:
 
 
 def hidden(page: Tree, name: str) -> str:
-    [found] = [node for node in page.find_all("input") if node.attrs.get("name") == name]
+    """The Approve form's hidden field ``name`` (Story 5.6's edit form repeats the binding)."""
+    approve_form = page.find("form", class_="queue-approve-form")
+    [found] = [node for node in approve_form.find_all("input") if node.attrs.get("name") == name]
     assert found.attrs["type"] == "hidden"
     return str(found.attrs.get("value") or "")
 
@@ -507,7 +509,7 @@ def test_a_failing_card_is_red_with_its_spans_marked_and_approval_disabled(world
         "Edit this Draft to remove the failing claims before approving"
     ]
     # Story 5.4: the Approve form holds the binding fields but no submit button here
-    [approve_form] = page.find_all("form")
+    [approve_form] = page.find_all("form", class_="queue-approve-form")
     assert not approve_form.find_all("button")
 
 

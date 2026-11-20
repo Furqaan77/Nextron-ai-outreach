@@ -15,7 +15,12 @@
     decision's notices show above the card; the hidden draft_id, rev and shown_hash sit in the
     Approve form (csrf_field, hx-post /queue/approve) after the hx-disable article, so HTMX
     processes it; its enabled Approve button renders only when approval isn't blocked. The
-    answer is the whole page, of which HTMX takes <main>. -#}
+    answer is the whole page, of which HTMX takes <main>. Story 5.6: the editor, a native
+    <details class="queue-edit"> after the Approve form, holds the edit form (csrf_field,
+    hx-post /queue/edit, the hidden binding fields); its subject input, body textarea and the
+    read-only footer text (prospect and AI text) sit in an hx-disable container. queue-keys.js
+    opens it with E and submits it with Ctrl+Enter. A pending-approval notice shows in the card,
+    and the "Approved, not yet sent" list (hx-disable) links each such Draft's card. -#}
 {% block title %}Nextron: Queue{% endblock %}
 {% block scripts %}
 <script src="/static/queue-keys.js" defer></script>
@@ -47,7 +52,7 @@
 <a class="queue-next" href="{{ next_href|plain }}">Next</a>
 {%- endif %}
 </nav>
-<article class="queue-card{% if card.failing %} grounding-fail{% endif %}" data-draft="{{ card.draft_id|plain }}" hx-disable>
+<article class="queue-card{% if card.failing %} grounding-fail{% endif %}" data-draft="{{ card.draft_id|plain }}" tabindex="-1" hx-disable>
 <h2>{{ card.lead_name|plain }}</h2>
 <p class="queue-badges">{% for badge in card.badges %}{% if not loop.first %} {% endif %}<span class="queue-badge {{ badge.classes|plain }}">{{ badge.text|plain }}</span>{% endfor %}</p>
 <dl class="queue-card-facts">
@@ -79,6 +84,9 @@
 </div>
 {%- else %}
 <p class="draft-no-text">No text yet</p>
+{%- endif %}
+{%- if card.pending_notice %}
+<p class="queue-pending-notice" role="status">{{ card.pending_notice|plain }}</p>
 {%- endif %}
 {%- if card.grounding_flags %}
 <ul class="grounding-flags">
@@ -155,12 +163,46 @@
 <button type="submit" class="queue-approve" aria-keyshortcuts="A">Approve</button>
 {%- endif %}
 </form>
+{%- if card.editable %}
+<details class="queue-edit">
+<summary>Edit (E)</summary>
+<form class="queue-edit-form" method="post" action="{{ edit_action|plain }}" hx-post="{{ edit_action|plain }}" hx-target="main" hx-select="main" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="draft_id" value="{{ card.draft_id|plain }}">
+<input type="hidden" name="rev" value="{{ card.rev|plain }}">
+<input type="hidden" name="shown_hash" value="{{ card.shown_hash|plain }}">
+<div class="queue-edit-fields" hx-disable>
+<label for="queue-edit-subject">Subject</label>
+<input id="queue-edit-subject" class="queue-edit-subject" type="text" name="subject" value="{{ card.edit_subject|plain }}" autocomplete="off">
+<label for="queue-edit-body">Body</label>
+<textarea id="queue-edit-body" class="queue-edit-body" name="body" rows="14">
+{{ card.edit_body|plain }}</textarea>
+<p class="queue-edit-readonly">Signature, footer and privacy line (not editable):</p>
+<pre class="queue-edit-footer">{{ card.footer_text|plain }}</pre>
+</div>
+<button type="submit" class="queue-edit-submit" aria-keyshortcuts="Control+Enter">Save, then approve once the recheck passes</button>
+<p class="queue-edit-help">Ctrl+Enter saves; Esc cancels.</p>
+</form>
+</details>
+{%- endif %}
 {%- else %}
 <section class="queue-empty">
 <p class="queue-clear">Queue clear</p>
 <p class="queue-next-due">{% if next_due %}Next due: {{ next_due|plain }}{% else %}{{ nothing_scheduled|plain }}{% endif %}</p>
 </section>
 {%- endif %}
+<section class="queue-approved" aria-labelledby="approved-heading" hx-disable>
+<h2 id="approved-heading">Approved, not yet sent</h2>
+{%- if approved_rows %}
+<ul>
+{%- for row in approved_rows %}
+<li class="approved-row"><a class="approved-link" href="{{ row.href|plain }}">{{ row.name|plain }}</a>{% if row.step %} ({{ row.step|plain }}){% endif %}: <span class="approved-om-status">{{ row.om_status|plain }}</span></li>
+{%- endfor %}
+</ul>
+{%- else %}
+<p>Nothing approved is waiting.</p>
+{%- endif %}
+</section>
 <section class="queue-held-back" aria-labelledby="held-back-heading" hx-disable>
 <h2 id="held-back-heading">Held back</h2>
 {%- if held_back %}

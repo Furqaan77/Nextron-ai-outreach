@@ -100,6 +100,13 @@ handler runs in.
   never budget-gated (the grounding routes are ``essential``), and a timeout or an unreachable
   API is recorded as a grounding ``fail`` by the use case, not retried.
 
+- ``complete_pending_approval(approval)`` (Story 5.6): ``approval`` returns the ``approval``
+  service's ``Approval`` (``nextron.main`` passes ``lambda: approval``). The payload's
+  ``draft_id`` must be a ULID and its ``rev`` a positive ``int`` (not a ``bool``), else
+  ``InvalidJob``; it calls ``approval().complete_pending(draft_id, rev)`` once and returns
+  ``None``. It is never budget-gated. A failed enqueue raises, so the runner retries the job and
+  then marks it ``dead`` (the health panel).
+
 A payload field that is missing or isn't a ULID raises ``InvalidJob`` naming the field.
 """
 
@@ -541,3 +548,23 @@ def check_grounding(checks: Callable[[], CheckingGrounding]) -> Handler:
         checks().check(draft_id, rev, urgency)
 
     return handle_check_grounding
+
+
+class CompletingPendingApproval(Protocol):
+    """What ``complete_pending_approval`` needs of the ``approval`` service's ``Approval``."""
+
+    def complete_pending(self, draft_id: str, rev: int) -> object: ...
+
+
+def complete_pending_approval(approval: Callable[[], CompletingPendingApproval]) -> Handler:
+    """The ``complete_pending_approval`` job's handler (Story 5.6): complete the payload's Draft
+    revision's pending approval through ``approval()``."""
+
+    def handle_complete_pending_approval(job: Job) -> None:
+        draft_id = _ulid_field(job, DRAFT_ID_FIELD)
+        rev = job.payload.get(REV_FIELD)
+        if not isinstance(rev, int) or isinstance(rev, bool) or rev < 1:
+            raise InvalidJob(f"{job.type}: the {REV_FIELD} field must be a positive int")
+        approval().complete_pending(draft_id, rev)
+
+    return handle_complete_pending_approval

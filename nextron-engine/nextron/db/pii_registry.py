@@ -428,6 +428,10 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         "event_expired": PiiClass.NONE,
         "skipped_at": PiiClass.NONE,
         "status_at": PiiClass.NONE,
+        # Story 5.6: a revision number, a hash of the shown message and a duration
+        "pending_approval_rev": PiiClass.NONE,
+        "pending_approval_hash": PiiClass.NONE,
+        "pending_review_ms": PiiClass.NONE,
     },
     # Story 2.5. A page's visible text may quote a person, so an erasure nulls it (Story 3.13);
     # the URLs are of an organization's public pages, and the rest are IDs, codes, counts,

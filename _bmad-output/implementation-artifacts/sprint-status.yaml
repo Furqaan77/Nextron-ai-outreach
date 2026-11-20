@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-15-2026 01:53
-last_updated: 2026-11-19
+last_updated: 2026-11-20
 project: Nextron AI outreach
 project_key: NOKEY
 tracking_system: file-system
@@ -127,7 +127,7 @@ development_status:
   5-3-show-the-evidence-facts-and-grounding-result-behind-every-ca: review
   5-4-approve-a-draft-bound-to-the-exact-text-shown: review
   5-5-reject-with-a-reason-skip-or-regenerate-a-card: backlog
-  5-6-edit-a-draft-then-approve-it-once-the-recheck-passes: backlog
+  5-6-edit-a-draft-then-approve-it-once-the-recheck-passes: in-progress
   5-7-decide-every-card-from-the-keyboard-with-the-next-card-in-un: backlog
   5-8-batch-approve-grounding-passed-follow-ups-from-a-compact-lis: backlog
   5-9-expire-stale-approvals-and-pull-back-step-1s-whose-event-clo: backlog

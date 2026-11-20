@@ -206,6 +206,7 @@ FILES = [
     "nextron/db/alembic/versions/0047_4_14_ai_grounding.py",
     "nextron/db/alembic/versions/0048_5_2_outbound_messages.py",
     "nextron/db/alembic/versions/0049_5_4_approvals.py",
+    "nextron/db/alembic/versions/0050_5_6_pending_approval.py",
     "nextron/db/repos/__init__.py",
     "nextron/db/repos/setup/settings.py",
     "nextron/db/repos/setup/segments.py",

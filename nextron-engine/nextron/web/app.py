@@ -31,6 +31,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   ``stale`` or ``blocked``, that Draft's card (``?draft=``), re-read, with the result's notices
   ("This Draft changed since you opened it", "Already approved", ...). An unknown Draft answers
   404 "Draft not found"; a GET is 405 and a bad CSRF token 403, both changing nothing.
+- Story 5.6: ``GET /queue`` also lists the "Approved, not yet sent" Drafts
+  (``approval_queries.approved_unsent``), and ``?draft=<id>`` naming one of them shows its card
+  (``approval_queries.card_of``; approve disabled, "Already approved", with the editor).
+  ``POST /queue/edit`` (``queue_edit``, ``@personal_data(True)``): the card's edit form, exactly
+  ``draft_id``, ``rev``, ``shown_hash``, ``subject`` and ``body`` (``queue_page.submitted_edit``;
+  anything else 400). It runs ``approval.edit`` in its own unit of work with the session's serve
+  stamps, then answers 200 with the queue page focused on that Draft (``?draft=``; shown even
+  when it isn't a due card, while it is ``ready`` or ``approved``) with the result's notices
+  ("Recheck pending", "Nothing changed", "Already sending", a text rule's message, ...). An
+  unknown Draft answers 404 "Draft not found".
 - ``GET /health`` (``health``): the environment, the engine version and the process uptime in
   whole seconds, and nothing else.
 - ``GET /static/{name}`` (``static``): the vendored HTMX build, ``app.css`` and (Story 5.4)
@@ -368,6 +378,7 @@ from nextron.domain.campaign import CampaignRefused, InvalidCampaigns
 from nextron.domain.company_facts import InvalidFact
 from nextron.domain.contacts import PrimaryRefusal, PrimaryRefused
 from nextron.domain.data_subject_request import check_request_ref
+from nextron.domain.draft import DraftStatus
 from nextron.domain.credentials import InvalidCredentialValue
 from nextron.domain.errors import DomainError
 from nextron.domain.google_oauth import ClientNotImported, InvalidClientFile
@@ -700,11 +711,25 @@ def create_app(
         card_param: str | None,
         draft_param: str | None,
         notices: tuple[str, ...] = (),
+        show_draft: bool = False,
+        show_listed: bool = True,
+        submitted_prefix: str = queue_rows.SUBMITTED_PREFIX,
     ) -> HTMLResponse:
         """The Approval Queue page, read in the current read-only unit of work; the focused
-        card's serve is stamped for the session (in memory, Story 5.4)."""
+        card's serve is stamped for the session (in memory, Story 5.4). Story 5.6: a ``draft``
+        that is no due card is shown anyway when it is approved and not yet sent (unless
+        ``show_listed`` is off: an approve refusal keeps Story 5.4's prefixed notice), or, with
+        ``show_draft``, when it is ``ready`` or ``approved``."""
         at = now()
         queue = approval_queries.due_queue(at, compliance.evaluate_eligibility)
+        approved = approval_queries.approved_unsent()
+        focus = None
+        if draft_param and all(card.draft_id != draft_param for card in queue.cards):
+            listed = any(row.draft_id == draft_param for row in approved)
+            wanted = show_draft or (listed and show_listed)
+            found = approval_queries.card_of(draft_param) if wanted else None
+            if found is not None and found.status in (DraftStatus.READY, DraftStatus.APPROVED):
+                focus = found
         try:
             zone_name: str | None = str(setup_queries.get(Key.SENDER_TIMEZONE))
         except DomainError:  # unset or unreadable: the next due time shows in UTC
@@ -719,6 +744,9 @@ def create_app(
             draft_param=draft_param,
             details_of=lambda card: approval_queries.card_details(card),  # the focused card only
             notices=notices,
+            focus=focus,
+            approved=approved,
+            submitted_prefix=submitted_prefix,
         )
         shown = context["card"]
         if token is not None and isinstance(shown, queue_rows.CardRow):
@@ -762,7 +790,43 @@ def create_app(
                     draft_param=None,
                 )
             return queue_answer(
-                request, card_param=None, draft_param=draft_id, notices=result.reasons
+                request,
+                card_param=None,
+                draft_param=draft_id,
+                notices=result.reasons,
+                show_listed=False,
+            )
+
+    @app.post(queue_rows.EDIT_PATH, name="queue_edit")
+    @personal_data(True)  # the answer is the queue page
+    def queue_edit(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> Response:
+        draft_id, rev, shown_hash, subject, body = queue_rows.submitted_edit(fields)
+        token = session_token(request)
+        served_at = None if token is None else sessions.served_at(token, draft_id)
+        first_served_at = None if token is None else sessions.first_served_at(token)
+        try:
+            with units.open():
+                result = approval.edit(
+                    draft_id,
+                    rev,
+                    shown_hash,
+                    subject,
+                    body,
+                    served_at=served_at,
+                    first_served_at=first_served_at,
+                )
+        except UnknownDraft:  # only an unknown Draft is a 404
+            return not_found_text(DRAFT_NOT_FOUND)
+        with units.open(read_only=True):
+            return queue_answer(
+                request,
+                card_param=None,
+                draft_param=draft_id,
+                notices=result.reasons,
+                show_draft=True,
+                submitted_prefix=queue_rows.EDITED_PREFIX,
             )
 
     @app.get("/health", name="health")

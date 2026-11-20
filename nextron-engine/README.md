@@ -2852,6 +2852,39 @@ already being sent (or in doubt) is left alone: the Draft stays approved and the
 logged (`approval_cascade_in_flight`); the send gate (Story 6.9) still blocks it. A message
 already sent is left alone too, without a log line.
 
+### Edit a card, then approve it once the recheck passes (Story 5.6)
+
+Story 5.6 (FR-27, FR-55, AD-6, AD-16, AD-18) lets you fix a Draft instead of rejecting it.
+Press **E** (or open **Edit (E)** under the card) to edit the subject and body; the signature,
+footer and UK privacy line show below them, read-only. **Ctrl+Enter** saves; **Esc** drops the
+changes, closes the editor and returns to the card. Other shortcuts are off while you type.
+
+**What saving does.** Saving is "edit, then approve": the engine checks the card you saw is
+still current (else "This Draft changed since you opened it"), refuses an edit that changes
+nothing ("Nothing changed"; press **A** instead) and text that breaks the drafting rules (an
+empty or over-long subject, a body over 10,000 characters: the reason shows, nothing is
+saved). Otherwise it stores your text as a new revision (origin `operator_edit`; revision 1, the
+AI's text, never changes), queues its grounding recheck at interactive urgency and records a
+**pending approval** of exactly that message (migration `0050_5_6_pending_approval`). The card
+then shows **Recheck pending**.
+
+**When the recheck finishes.** If it passes, the job `complete_pending_approval` approves the
+edit through the very same checks as **Approve** (Story 5.4): one approval with the review time
+measured when you saved, the Draft `approved`, one queued message. If it fails (for example, an
+added URL, email address or phone number that isn't one of your Settings values, or a claim
+the check can't support), the pending approval is dropped and the card turns red with the
+failing claims. If the Draft changed again in the meantime (a footer change or a regenerate),
+or the Contact's address changed, nothing is approved and the card shows `stale` with "This
+Draft changed since you opened it" and the newest text. A suppressed Contact also drops it.
+Nothing is ever sent from here.
+
+**Approved, not yet sent.** The queue page lists approved Drafts whose message hasn't been
+sent, with the message's status; follow one to see its card ("Already approved", with the
+editor). Editing it first cancels its queued message and returns the Draft to the queue; a
+message already being sent (or in doubt) can't be pulled back: "Already sending".
+
+An edit ratio above 0.20 counts as a major edit (`domain.render.is_major_edit`).
+
 ## Leads list and Lead page
 
 **The Leads list (`/leads`, UX-DR18).** Follow **Leads/Pipeline** in the dashboard's navigation.

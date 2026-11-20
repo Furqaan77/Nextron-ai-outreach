@@ -244,9 +244,12 @@ default, or interactive, priority 40, 5 minutes, retry limit 3, ``handlers.score
 limit 3, ``handlers.poll_unsubscribes(unsubscribes)``, ``unsubscribe_poll``; never budget-gated)
 and Story 4.14's ``check_grounding`` (interactive by default, or bulk, priority 50,
 ``max_runtime`` 25 minutes (up to four Claude requests of 300 s each), retry limit 3,
-``handlers.check_grounding(grounding)``, ``other``; never budget-gated) are registered last.
-``domain_checks``, ``unsubscribes`` and ``grounding`` are optional services: each defaults
-to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
+``handlers.check_grounding(grounding)``, ``other``; never budget-gated) and Story 5.6's
+``complete_pending_approval`` (the interactive lane only, priority 60, ``max_runtime`` 2
+minutes, retry limit 3, ``handlers.complete_pending_approval(approval)``, ``other``; never
+budget-gated) are registered last.
+``domain_checks``, ``unsubscribes``, ``grounding`` and ``approval`` are optional services: each
+defaults to a provider that raises ``RuntimeError`` when called, so a registry built without it (only
 tests do) fails its job; ``build_app`` always passes the real one. ``build_app`` builds one
 ``JobQueue(clock, job_types)`` and one ``Runner(units, queue, job_types,
 dead_jobs=DeadJobAlerts(notify))`` (``nextron.jobs.runner``).
@@ -495,7 +498,9 @@ first beat).
 and hands it to ``create_app(..., sending=sending)``: the Sending Inboxes panel registers
 inboxes through it. Story 5.4: the dashboard also gets ``Approval(clock, sending=sending)``
 (``create_app(..., approval=...)``) for the Approval Queue's Approve, whose ``enqueue`` runs on
-that same ``Sending``.
+that same ``Sending``. Story 5.6: that ``Approval`` also holds ``Drafting(clock, queue)`` for
+the queue's edit, and the runner's ``complete_pending_approval`` jobs call it; the runner's
+``GroundingChecks(clock, llm, queue)`` enqueues them.
 Outside ``prod`` it registers only addresses on the ``sink_allowlist`` setting. It calls no
 external service.
 
@@ -890,6 +895,7 @@ from nextron.domain.erasure_receipt import ERASE_EXTERNAL_JOB
 from nextron.domain.extraction import EXTRACT_LEAD_JOB
 from nextron.domain.grounding_check import CHECK_GROUNDING_JOB
 from nextron.domain.health import HealthIssues, IssueSource
+from nextron.domain.draft import COMPLETE_PENDING_APPROVAL_JOB
 from nextron.domain.job import JobGroup, JobType, JobTypes, Lane
 from nextron.domain.legal_form import CHECK_LEGAL_FORM_JOB
 from nextron.domain.markets import InvalidMarkets, validate_markets
@@ -1214,8 +1220,8 @@ def build_app(
     )
     # recovery_runner, notify, backups, restore_tests, contact_markets, crawls, discovery,
     # research, extractions, primary_contacts, test_runs, domain_checks, job_boards, legal_forms,
-    # erasure_stores, email_finding, lead_scores, unsubscribes and grounding_checks are bound just
-    # below
+    # erasure_stores, email_finding, lead_scores, unsubscribes, grounding_checks and approval are
+    # bound just below
     job_types = build_job_types(
         alerts=lambda: notify,
         backups=lambda: backups,
@@ -1236,6 +1242,7 @@ def build_app(
         scores=lambda: lead_scores,
         unsubscribes=lambda: unsubscribes,
         grounding=lambda: grounding_checks,
+        approval=lambda: approval,
     )
     queue = JobQueue(clock, job_types)
     # one HttpCrawler fetches for the crawl, the renderer and the ATS boards, so they share one
@@ -1256,7 +1263,8 @@ def build_app(
 
         llm = ClaudeGateway(secrets, meter=meter)
     people = PeopleExtractions(clock, meter, llm, research, queue)
-    grounding_checks = GroundingChecks(clock, llm)  # Story 4.14: the check_grounding jobs
+    # Story 4.14: the check_grounding jobs; Story 5.6: they enqueue complete_pending_approval
+    grounding_checks = GroundingChecks(clock, llm, queue)
     extractions = SignalExtractions(clock, meter, llm, research, people)
     primary_contacts = PrimaryContacts(clock, research, queue)
     domain_checks = DomainChecks(
@@ -1368,6 +1376,8 @@ def build_app(
         readiness=functools.partial(run_checks, build_doctor_checks(), context),
     )
     sending = Sending(clock, env=config.env, compliance=compliance)
+    # Story 5.4: the queue's Approve; Story 5.6: its edit and the complete_pending_approval jobs
+    approval = Approval(clock, sending=sending, drafting=Drafting(clock, queue))
     app = create_app(
         env=config.env,
         version=__version__,
@@ -1389,7 +1399,7 @@ def build_app(
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=sending,
-        approval=Approval(clock, sending=sending),  # Story 5.4: the queue's Approve
+        approval=approval,
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,
@@ -1496,6 +1506,7 @@ def build_job_types(
     finding: Callable[[], handlers.FindingEmail] | None = None,
     unsubscribes: Callable[[], handlers.PollingUnsubscribes] | None = None,
     grounding: Callable[[], handlers.CheckingGrounding] | None = None,
+    approval: Callable[[], handlers.CompletingPendingApproval] | None = None,
 ) -> JobTypes:
     """The job type registry (AD-10), frozen: register each story's job type with
     ``register_job_type(JobType(..., group=JobGroup.X))`` before ``freeze()``. ``alerts``
@@ -1523,11 +1534,14 @@ def build_job_types(
     ``recompute_tiers`` jobs call, and ``unsubscribes`` the ``compliance`` service's
     ``UnsubscribePolls`` that ``poll_unsubscribes`` jobs call (``None``: a provider that raises
     ``RuntimeError``, as for ``domain_checks``), and ``grounding`` the ``drafting`` service's
-    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise)."""
+    ``GroundingChecks`` that ``check_grounding`` jobs call (Story 4.14; ``None``: likewise), and
+    ``approval`` the ``approval`` service's ``Approval`` that ``complete_pending_approval`` jobs
+    call (Story 5.6; ``None``: likewise)."""
     checks = domain_checks if domain_checks is not None else no_domain_checks
     found = finding if finding is not None else _no_finding
     polls = unsubscribes if unsubscribes is not None else no_unsubscribes
     checks_grounding = grounding if grounding is not None else no_grounding
+    approving = approval if approval is not None else no_approval
     job_types = JobTypes()
     job_types.register_job_type(
         JobType(
@@ -1819,6 +1833,18 @@ def build_job_types(
             group=JobGroup.OTHER,
         )
     )
+    job_types.register_job_type(
+        JobType(
+            name=COMPLETE_PENDING_APPROVAL_JOB,
+            default_lane=Lane.INTERACTIVE,  # the Operator's edit waits on it
+            lanes=frozenset({Lane.INTERACTIVE}),
+            priority=60,
+            max_runtime=timedelta(minutes=2),  # one local transaction, no network call
+            retry_limit=3,  # a failed enqueue retries, then the job goes dead (health panel)
+            handler=handlers.complete_pending_approval(approving),
+            group=JobGroup.OTHER,
+        )
+    )
     job_types.freeze()
     return job_types
 
@@ -1854,6 +1880,7 @@ def enqueue_only_job_types() -> JobTypes:
         finding=_unwired,
         unsubscribes=_unwired,
         grounding=_unwired,
+        approval=_unwired,
     )
 
 
@@ -1861,6 +1888,12 @@ def no_grounding() -> handlers.CheckingGrounding:
     """``build_job_types``'s default ``grounding``: a registry built without the service fails a
     ``check_grounding`` job instead of checking nothing."""
     raise RuntimeError("this job type registry was built without grounding")
+
+
+def no_approval() -> handlers.CompletingPendingApproval:
+    """``build_job_types``'s default ``approval``: a registry built without the service fails a
+    ``complete_pending_approval`` job instead of completing nothing."""
+    raise RuntimeError("this job type registry was built without approval")
 
 
 def no_domain_checks() -> handlers.DomainChecking:
