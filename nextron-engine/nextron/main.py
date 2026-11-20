@@ -520,6 +520,19 @@ health registry gets ``postmaster_grant_missing=functools.partial(postmaster_gra
 google)`` (whether ``GoogleAccess.check_stored_grant("postmaster")`` raises; it never calls
 Google).
 
+**Connecting Sending Inboxes (Story 6.2; FR-32, AD-12, AD-14).** ``Sending`` is built with
+``domain_checks=`` and ``notify=`` (its ``connect_inbox`` queues the domain check, its
+``mark_auth_failed`` raises the ``inbox_auth_failed`` alert). ``build_app(..., gmail=None)``
+builds one ``GmailProfiles(meter=meter)`` (``nextron.adapters.gmail``) unless a ``gmail=`` is
+injected; it builds no Gmail service until its first profile read. ``InboxConnections(secrets,
+clock, oauth=<GoogleAccess's GoogleOAuthPort>, listen=LoopbackListener, browser=<the same
+browser>, gmail=gmail, env=config.env, sending=sending, open_unit=units.open)``
+(``nextron.app.sending.connect``) reuses Epic 1's loopback pieces and goes to ``create_app(...,
+inbox_connections=...)`` for the panel's Connect and Reconnect, and into ``DoctorContext`` for
+the ``sending_inbox_grants`` check. ``doctor`` builds its own (with ``GmailProfiles(meter=
+DoctorMeter())`` and no consent flow), so it refreshes each connected inbox's grant and reads
+its Gmail profile; the health panel's form reads Credential Manager only.
+
 **The Suppression List panel (Story 3.5; AD-16, FR-50, FR-41).** ``build_app`` builds one
 ``Compliance(clock, codec=TokenCodec(secrets), ledger=...)`` (``nextron.app.compliance.api``;
 ``nextron.adapters.crypto.unsub_token``, which reads no key until it decodes) and hands it to
@@ -777,6 +790,7 @@ from nextron.adapters.crypto.unsub_token import TokenCodec
 from nextron.adapters.dns import DnspythonDns
 from nextron.adapters.postmaster import GooglePostmaster
 from nextron.adapters.email_syntax import EmailValidatorSyntax
+from nextron.adapters.gmail import GmailProfiles
 from nextron.adapters.google_oauth import GoogleOAuthClient, LocalClientFiles, LoopbackListener
 from nextron.adapters.hunter import HunterFinder
 from nextron.adapters.places import GooglePlaces, OfflinePlaces
@@ -836,6 +850,7 @@ from nextron.app.scoring.api import Scoring
 from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
+from nextron.app.sending.connect import InboxConnections
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.setup import api as setup_api
 from nextron.app.setup.api import (
@@ -951,6 +966,7 @@ from nextron.domain.recovery import (
 from nextron.domain.restore_test import DEFAULT_RESTORE_TEST_TIME, RESTORE_TEST_JOB
 from nextron.domain.seed_yaml import SeedSyntaxError
 from nextron.domain.segments import InvalidSegments, validate_segments
+from nextron.domain.sending_inbox import InboxStatus
 from nextron.domain.sequences import InvalidSequences, validate_sequences
 from nextron.domain.settings_schema import Key
 from nextron.domain.sink import sink_applies
@@ -970,6 +986,7 @@ from nextron.ports.crawler import CrawlerPort
 from nextron.ports.dns import DnsPort
 from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort
 from nextron.ports.errors import AdapterError
+from nextron.ports.gmail import GmailPort
 from nextron.ports.google_oauth import GoogleOAuthPort
 from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
@@ -993,6 +1010,7 @@ from nextron.startup_checks import (
     PYTHON_VERSION,
     REQUIRED_CREDENTIALS,
     REQUIRED_SETTINGS,
+    SENDING_INBOX_GRANTS,
     SQLITE_VERSION,
     TZDATA,
     UNSUB_TOKEN_KEYS,
@@ -1013,6 +1031,7 @@ from nextron.startup_checks import (
     check_python_version,
     check_required_credentials,
     check_required_settings,
+    check_sending_inbox_grants,
     check_sqlite_version,
     check_tzdata,
     check_unsub_token_keys,
@@ -1165,6 +1184,7 @@ def build_app(
     unsubscribe: UnsubscribePort | None = None,
     places: PlacesPort | None = None,
     postmaster: PostmasterPort | None = None,
+    gmail: GmailPort | None = None,
 ) -> FastAPI:
     """The dashboard app; its handlers open their units of work through ``units``. One secrets
     object, keyring unless injected, serves the entry code, the credentials and the Google
@@ -1214,17 +1234,23 @@ def build_app(
     searched through ``places`` (``build_places(config.env, secrets, meter)`` unless injected),
     kept with its ``PlaceSearches`` on ``app.state.place_searches``. The domain checks read
     Postmaster spam rates through ``postmaster`` (``GooglePostmaster`` on the ``postmaster``
-    grant's access token unless injected), which builds its HTTP client on its first read."""
+    grant's access token unless injected), which builds its HTTP client on its first read.
+    ``InboxConnections`` connects Sending Inboxes through Gmail OAuth on the same Google port,
+    listener and browser, and reads each inbox's Gmail profile through ``gmail``
+    (``GmailProfiles(meter=meter)`` unless injected), which builds no Gmail service until its
+    first read (Story 6.2)."""
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
     meter = UsageMeter(units, clock, after_record=lambda: check_usage(units, budget))
+    oauth = google_oauth if google_oauth is not None else GoogleOAuthClient(meter=meter)
+    consent_browser = browser if browser is not None else open_in_browser
     google = GoogleAccess(
         secrets,
         clock,
-        oauth=google_oauth if google_oauth is not None else GoogleOAuthClient(meter=meter),
+        oauth=oauth,
         listen=LoopbackListener,
         files=LocalClientFiles(),
-        browser=browser if browser is not None else open_in_browser,
+        browser=consent_browser,
         env=config.env,
         allowlist=functools.partial(read_sink_allowlist, units),
     )
@@ -1355,7 +1381,19 @@ def build_app(
         notify,
     )
     test_runs = AiTestRuns(clock, meter, llm, queue)
-    sending = Sending(clock, env=config.env)  # Story 6.11: built now, so it knows process start
+    # Story 6.11: built now, so it knows process start; Story 6.2: it connects inboxes
+    sending = Sending(clock, env=config.env, domain_checks=domain_checks, notify=notify)
+    inbox_connections = InboxConnections(
+        secrets,
+        clock,
+        oauth=oauth,
+        listen=LoopbackListener,
+        browser=consent_browser,
+        gmail=gmail if gmail is not None else GmailProfiles(meter=meter),
+        env=config.env,
+        sending=sending,
+        open_unit=units.open,
+    )
     startup_steps = (
         ("sync_erasure_ledger", functools.partial(sync_erasure_ledger, units, erasure_ledger)),
         ("queue_contact_markets", functools.partial(queue_contact_markets, units, contact_markets)),
@@ -1383,6 +1421,7 @@ def build_app(
         google,
         EngineDatabase(config.data_dir / DB_FILE_NAME),
         in_engine=True,
+        inbox_connections=inbox_connections,
     )
     health = EngineHealth(
         clock,
@@ -1416,6 +1455,7 @@ def build_app(
         restore_tests=restore_tests,
         lead_imports=LeadImports(clock, discovery, research, EmailValidatorSyntax()),
         sending=sending,
+        inbox_connections=inbox_connections,
         lead_signals=LeadSignals(clock),
         compliance=compliance,
         primary_contacts=primary_contacts,
@@ -2638,7 +2678,8 @@ class ReadinessDatabase(Protocol):
     ``unsub_token_keys`` checks read: whether the database file exists, its revision (``None``
     when empty; a database that isn't this engine's raises ``CheckFailed``), the required
     settings that are unset or no longer valid, the ``backup_offpc_dir`` setting and the
-    ``unsub_active_kid`` setting."""
+    ``unsub_active_kid`` setting; and for ``sending_inbox_grants`` (Story 6.2) the
+    ``gmail_internal_app_confirmed`` setting and the connected inboxes."""
 
     def exists(self) -> bool: ...
 
@@ -2649,6 +2690,36 @@ class ReadinessDatabase(Protocol):
     def offpc_dir(self) -> str: ...
 
     def unsub_active_kid(self) -> int: ...
+
+    def gmail_app_confirmed(self) -> bool: ...
+
+    def connected_inboxes(self) -> tuple[ConnectedInboxRow, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectedInboxRow:
+    """A Sending Inbox whose grant doctor checks: neither ``removed`` nor ``connecting``."""
+
+    inbox_id: str
+    address: str = field(repr=False)
+
+
+def _gmail_app_confirmed() -> bool:
+    """The ``gmail_internal_app_confirmed`` setting, read in the current unit of work; unset or
+    unreadable is ``False``, as the connect gate treats it."""
+    try:
+        return setup_queries.get(Key.GMAIL_INTERNAL_APP_CONFIRMED) is True
+    except (settings_schema.SettingNotSet, settings_schema.InvalidSettingValue):
+        return False
+
+
+def _connected_inboxes() -> tuple[ConnectedInboxRow, ...]:
+    """The inboxes neither ``removed`` nor ``connecting``, read in the current unit of work."""
+    return tuple(
+        ConnectedInboxRow(view.id, view.address)
+        for view in sending_queries.inboxes()
+        if view.status is not InboxStatus.CONNECTING
+    )
 
 
 class DoctorDatabase:
@@ -2708,6 +2779,22 @@ class DoctorDatabase:
         with self._read_only_units().open(read_only=True):
             return int(setup_queries.get(Key.UNSUB_ACTIVE_KID))
 
+    def gmail_app_confirmed(self) -> bool:
+        """The ``gmail_internal_app_confirmed`` setting: ``False`` when there is no database
+        file, else read in a read-only unit of work (an error propagates)."""
+        if not self.exists():
+            return False
+        with self._read_only_units().open(read_only=True):
+            return _gmail_app_confirmed()
+
+    def connected_inboxes(self) -> tuple[ConnectedInboxRow, ...]:
+        """The inboxes whose grant doctor checks: none when there is no database file, else
+        read in a read-only unit of work (an error propagates)."""
+        if not self.exists():
+            return ()
+        with self._read_only_units().open(read_only=True):
+            return _connected_inboxes()
+
     def close(self) -> None:
         """Dispose the read-only engine, if one was built."""
         units, self._units = self._units, None
@@ -2748,6 +2835,14 @@ class EngineDatabase:
         """The ``unsub_active_kid`` setting, read in the current unit of work."""
         return int(setup_queries.get(Key.UNSUB_ACTIVE_KID))
 
+    def gmail_app_confirmed(self) -> bool:
+        """The ``gmail_internal_app_confirmed`` setting, read in the current unit of work."""
+        return _gmail_app_confirmed()
+
+    def connected_inboxes(self) -> tuple[ConnectedInboxRow, ...]:
+        """The inboxes whose grant the panel checks, read in the current unit of work."""
+        return _connected_inboxes()
+
 
 @dataclass(frozen=True, slots=True)
 class DoctorContext:
@@ -2764,17 +2859,19 @@ class DoctorContext:
     google: GoogleAccess
     database: ReadinessDatabase = field(repr=False)
     in_engine: bool = False
+    inbox_connections: InboxConnections | None = field(default=None, repr=False)
 
 
 def build_doctor_checks() -> DoctorChecks[DoctorContext]:
     """The doctor check registry (FR-56), frozen: the eleven checks of Story 1.14, Story 1.17's
     ``offpc_backup`` (after ``internal_notify_grant``), Story 3.16's ``erasure_ledger`` (after
-    ``offpc_backup``; it only looks at the file, never at the database's contents) and Story
-    3.8's ``unsub_token_keys`` (last, after ``database_revision``), fourteen in all, in the
-    order doctor prints them (the health panel shows the same list). With
-    ``DoctorContext.in_engine``, ``port_free`` and ``internal_notify_grant`` take their
-    no-probe, no-network forms. Later stories register their checks here, before
-    ``freeze()``.
+    ``offpc_backup``; it only looks at the file, never at the database's contents), Story
+    3.8's ``unsub_token_keys`` (after ``database_revision``) and Story 6.2's
+    ``sending_inbox_grants`` (last: it reads the database, then Credential Manager), fifteen
+    in all, in the order doctor prints them (the health panel shows the same list). With
+    ``DoctorContext.in_engine``, ``port_free``, ``internal_notify_grant`` and
+    ``sending_inbox_grants`` take their no-probe, no-network forms. Later stories register
+    their checks here, before ``freeze()``.
 
     The order rule: the health panel runs this registry inside a GET's read-only unit of work,
     where the first check that reads the database (``offpc_backup``'s setting read, then
@@ -2844,10 +2941,31 @@ def build_doctor_checks() -> DoctorChecks[DoctorContext]:
             UNSUB_TOKEN_KEYS,
             lambda c: check_unsub_token_keys(c.secrets.read, c.database.unsub_active_kid),
         ),
+        DoctorCheck(SENDING_INBOX_GRANTS, _sending_inbox_grants),
     ):
         checks.register_check(check)
     checks.freeze()
     return checks
+
+
+def _sending_inbox_grants(c: DoctorContext) -> CheckResult:
+    """Story 6.2: ``doctor`` refreshes each inbox's grant and reads its Gmail profile; the
+    engine reads Credential Manager only."""
+    network = not c.in_engine
+    connections = c.inbox_connections
+    check = None
+    if connections is not None:
+
+        def check(address: str) -> str | None:
+            problem = connections.check_grant(address, network=network)
+            return None if problem is None else str(problem)
+
+    return check_sending_inbox_grants(
+        c.database.gmail_app_confirmed,
+        lambda: [(row.inbox_id, row.address) for row in c.database.connected_inboxes()],
+        check,
+        network=network,
+    )
 
 
 def _internal_notify_grant(c: DoctorContext) -> CheckResult:
@@ -2862,6 +2980,11 @@ def _never_open_browser(url: str) -> bool:
     return False
 
 
+def _no_unit_of_work(*, read_only: bool = False) -> contextlib.AbstractContextManager[object]:
+    """``doctor``'s ``InboxConnections`` opens no unit of work: it only checks grants."""
+    raise RuntimeError("doctor's inbox grant check opens no unit of work")
+
+
 def doctor(
     *,
     env: str | None = None,
@@ -2872,11 +2995,13 @@ def doctor(
     clock: Clock | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
+    gmail: GmailPort | None = None,
 ) -> int:
     """Run every doctor check for ``env`` (``NEXTRON_ENV`` unless given) and print the results
     as a table, or as JSON with ``as_json``; return 0 when nothing is ``fail``, 1 otherwise and
     2 for an invalid bootstrap config. Secrets are keyring, Google is ``GoogleOAuthClient`` with
-    a ``DoctorMeter`` and the clock is the system clock, unless injected."""
+    a ``DoctorMeter``, Gmail is ``GmailProfiles`` with another, and the clock is the system
+    clock, unless injected."""
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     try:
@@ -2887,10 +3012,13 @@ def doctor(
     probes = probes if probes is not None else Probes.system()
     clock = clock if clock is not None else SystemClock()
     secrets = secrets if secrets is not None else KeyringSecrets(config.env)
+    doctor_oauth = (
+        google_oauth if google_oauth is not None else GoogleOAuthClient(meter=DoctorMeter())
+    )
     google = GoogleAccess(
         secrets,
         clock,
-        oauth=google_oauth if google_oauth is not None else GoogleOAuthClient(meter=DoctorMeter()),
+        oauth=doctor_oauth,
         listen=LoopbackListener,
         files=LocalClientFiles(),
         browser=_never_open_browser,
@@ -2898,6 +3026,17 @@ def doctor(
         allowlist=tuple,  # doctor never starts a consent flow, so it reads no allowlist
     )
     database = DoctorDatabase(config.data_dir / DB_FILE_NAME)
+    connections = InboxConnections(  # Story 6.2: check_grant only, never a consent flow
+        secrets,
+        clock,
+        oauth=doctor_oauth,
+        listen=LoopbackListener,
+        browser=_never_open_browser,
+        gmail=gmail if gmail is not None else GmailProfiles(meter=DoctorMeter()),
+        env=config.env,
+        sending=Sending(clock, env=config.env),
+        open_unit=_no_unit_of_work,
+    )
     context = DoctorContext(
         config=config,
         env_source=ENV_SOURCE_FLAG if env is not None else ENV_SOURCE_VARIABLE,
@@ -2905,6 +3044,7 @@ def doctor(
         secrets=secrets,
         google=google,
         database=database,
+        inbox_connections=connections,
     )
     try:
         results = run_checks(build_doctor_checks(), context)

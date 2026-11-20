@@ -104,4 +104,21 @@
 </table>
 <p class="health-readiness-counts">{{ readiness_counts }}</p>
 </section>
+<section aria-labelledby="health-inboxes-heading">
+<h2 id="health-inboxes-heading">Sending Inboxes</h2>
+{%- if inbox_rows %}
+<table class="health-table">
+<thead>
+<tr><th scope="col">Inbox</th><th scope="col">Status</th><th scope="col">Last connected</th></tr>
+</thead>
+<tbody>
+{%- for row in inbox_rows %}
+<tr{% if row.attention %} class="health-inbox-attention"{% endif %}><td>{{ row.label }}</td><td>{{ row.status }}</td><td>{{ row.connected }}</td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- else %}
+<p>{{ no_inboxes }}</p>
+{%- endif %}
+</section>
 </div>

@@ -74,11 +74,14 @@ from datetime import UTC
 from typing import Final
 
 from nextron.app.queries.sending import DomainAuthView, InboxCapView, SendingInboxView
+from nextron.app.sending.connect import ConnectStatus, Revocation
 from nextron.domain.domain_auth import REASON_TEXTS, AuthItem, AuthReason
 from nextron.domain.ids import is_ulid
 from nextron.domain.reputation import SpamStatus, ZoneOutcome, dnsbl_text, spam_rate_text
 from nextron.domain.sending_inbox import (
+    CONNECT_MESSAGES,
     CONNECTING_NOTE,
+    ConnectRefused,
     InboxRefused,
     InboxStatus,
     WarmupRefused,
@@ -126,6 +129,8 @@ WARMUP_SAVED: Final = "Warm-up saved."
 NOT_RECORDED: Final = "Not recorded"
 NOT_ACTIVE: Final = " (inbox not active)"
 WARMUP_FACTS: Final = ("Recorded warm-up", "Today's cap", "Cap used", "Ceiling")
+CONNECT_ACTION: Final = "Connect"
+RECONNECT_ACTION: Final = "Reconnect"
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +158,8 @@ class InboxRow:
     id: str
     facts: tuple[tuple[str, str], ...]
     warmup: WarmupForm
+    connected: str = ""  # Story 6.2: when it was last connected, or ""
+    action: str | None = None  # Story 6.2: "Connect" or "Reconnect", or None
 
 
 def _text(value: object) -> str:
@@ -202,8 +209,30 @@ def inbox_row(
     note = CONNECTING_NOTE if inbox.status is InboxStatus.CONNECTING else None
     warmup = typed if typed is not None and typed.inbox_id == inbox.id else stored_warmup(inbox)
     facts = () if cap is None else warmup_facts(inbox, cap)
+    status = str(inbox.status)
+    if inbox.status is InboxStatus.PAUSED and inbox.pause_cause is not None:
+        status = f"{status} ({inbox.pause_cause})"
+    connected = (
+        ""
+        if inbox.connected_at is None
+        else f"{inbox.connected_at.astimezone(UTC):{CONNECTED_AT_FORMAT}}"
+    )
+    action = None
+    if inbox.status is InboxStatus.CONNECTING:
+        action = CONNECT_ACTION
+    elif inbox.status is InboxStatus.AUTH_FAILED:
+        action = RECONNECT_ACTION
     return InboxRow(
-        inbox.label, inbox.address, inbox.domain, str(inbox.status), note, inbox.id, facts, warmup
+        inbox.label,
+        inbox.address,
+        inbox.domain,
+        status,
+        note,
+        inbox.id,
+        facts,
+        warmup,
+        connected,
+        action,
     )
 
 
@@ -211,7 +240,7 @@ def registered() -> Notice:
     return Notice(Role.STATUS, REGISTERED)
 
 
-def refused(refusal: InboxRefused | WarmupRefused) -> Notice:
+def refused(refusal: InboxRefused | WarmupRefused | ConnectRefused) -> Notice:
     return Notice(Role.ALERT, refusal.message)
 
 
@@ -227,14 +256,18 @@ def panel_context(
     address: str = "",
     label: str = "",
     typed_warmup: WarmupForm | None = None,
+    connect: ConnectStatus | None = None,
+    connect_refused: ConnectRefused | None = None,
 ) -> dict[str, object]:
-    """What ``inboxes_panel.html`` renders: the notice, the crowding warnings, the form's values
-    and the rows, each with its warm-up facts (from ``caps``) and form (``typed_warmup`` for
-    the inbox whose save was refused)."""
+    """What ``inboxes_panel.html`` renders: the notice, the connect status (Story 6.2), the
+    crowding warnings, the form's values and the rows, each with its warm-up facts (from
+    ``caps``) and form (``typed_warmup`` for the inbox whose save was refused)."""
     listed = list(inboxes)
     by_inbox = {cap.inbox_id: cap for cap in caps}
     crowded = crowded_domains(inbox.domain for inbox in listed)
+    status = connect if connect is not None else ConnectStatus(None, None, None)
     return {
+        **connect_context(status, refused=connect_refused),
         "notice": notice,
         "warnings": [crowding_warning(domain) for domain in crowded],
         "address": address,
@@ -242,6 +275,79 @@ def panel_context(
         "rows": [inbox_row(inbox, by_inbox.get(inbox.id), typed_warmup) for inbox in listed],
         "no_inboxes": NO_INBOXES,
     }
+
+
+# Connecting through Gmail OAuth (Story 6.2) --------------------------------------------------
+
+CONNECT_TEMPLATE: Final = "inbox_connect_status.html"
+CONNECT_POLL: Final = "every 2s"
+WAITING: Final = (
+    "Waiting for Google sign-in for {address} in your browser, until {until}. Sign in as that "
+    "inbox and allow Gmail access."
+)
+CONNECTED: Final = "Connected {address}."
+CONNECTED_PAUSED: Final = "Connected {address}; it was paused at once ({cause})."
+REVOKE_HINT: Final = (
+    " The new grant couldn't be revoked; remove Nextron's access at myaccount.google.com."
+)
+RELOAD: Final = "Reload the page to see its status."
+CONNECTED_AT_FORMAT: Final = "%Y-%m-%d %H:%M UTC"
+CONNECT_STATUSES: Final = frozenset({InboxStatus.CONNECTING, InboxStatus.AUTH_FAILED})
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectView:
+    """The connect status section: the notice, whether a flow waits (so HTMX polls), and
+    whether the page should be reloaded to see a new connection."""
+
+    notice: Notice | None
+    waiting: bool
+    reload: bool
+
+
+def connect_view(
+    status: ConnectStatus, *, refused: ConnectRefused | None = None
+) -> ConnectView:
+    """What ``inbox_connect_status.html`` renders for ``status``, or for a ``refused`` start."""
+    if refused is not None:
+        return ConnectView(Notice(Role.ALERT, refused.message), False, False)
+    if status.waiting_until is not None and status.waiting_for is not None:
+        until = f"{status.waiting_until.astimezone(UTC):{CONNECTED_AT_FORMAT}}"
+        text = WAITING.format(address=status.waiting_for, until=until)
+        return ConnectView(Notice(Role.STATUS, text), True, False)
+    outcome = status.outcome
+    if outcome is None:
+        return ConnectView(None, False, False)
+    if outcome.failure is None:
+        if outcome.paused is None:
+            text = CONNECTED.format(address=outcome.address)
+        else:
+            text = CONNECTED_PAUSED.format(address=outcome.address, cause=outcome.paused)
+        return ConnectView(Notice(Role.STATUS, f"{text} {RELOAD}"), False, True)
+    text = CONNECT_MESSAGES[outcome.failure]
+    if outcome.revocation is Revocation.FAILED:
+        text += REVOKE_HINT
+    return ConnectView(Notice(Role.ALERT, text), False, False)
+
+
+def connect_context(
+    status: ConnectStatus, *, refused: ConnectRefused | None = None
+) -> dict[str, object]:
+    """What ``inbox_connect_status.html`` renders."""
+    return {"connect": connect_view(status, refused=refused), "connect_poll": CONNECT_POLL}
+
+
+def submitted_reconnect(fields: FormFields) -> str:
+    """The one ``inbox_id`` ULID a Connect or Reconnect form posts; ``MalformedForm``
+    otherwise."""
+    if set(fields) - {CSRF_FIELD} != {INBOX_ID_FIELD}:
+        raise MalformedForm(WRONG_FIELDS)
+    values = fields[INBOX_ID_FIELD]
+    if len(values) != 1:
+        raise MalformedForm(REPEATED_FIELD)
+    if not is_ulid(values[0]):
+        raise MalformedForm(WRONG_FIELDS)
+    return values[0]
 
 
 def submitted_inbox(fields: FormFields) -> tuple[str, str]:

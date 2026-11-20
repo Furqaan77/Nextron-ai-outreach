@@ -25,6 +25,12 @@
   (``nextron.domain.sending_policy``): ``next_send_at`` (the earliest time the inbox's next
   cold send may go) and ``last_sent_at`` (its last cold send), both nullable UTC times, NULL
   until set. No planned send slot is stored (AD-11).
+
+  Story 6.2 (migration ``0048_6_2_inbox_connect``) adds the Gmail connection times:
+  ``status_changed_at`` (NOT NULL; when ``status`` last changed, backfilled from
+  ``created_at``) and ``connected_at`` (nullable; when the inbox was last connected or
+  reconnected through Gmail OAuth). The refresh token never touches the database: it lives in
+  keyring as ``gmail/<address>`` (AD-12).
 - ``domain_checks``: one row per authentication check that ran (append-only: the repository
   only inserts and reads): ``id``, its ``sending_domain_id``
   (``fk_domain_checks_sending_domain_id_sending_domains``, no cascade), ``checked_at``, the
@@ -40,11 +46,11 @@
   (``ck_domain_checks_spam_rate_status``: ``ok``, ``alert``, ``pause`` or ``no_data``).
 
 The nextronai.com checks repeat ``nextron.domain.sending_inbox.check_address`` as defence in depth
-(FR-32). Every column but the three warm-up record columns, the two pacing columns and the three
-reputation columns is NOT NULL; every column is PII class ``none``: these are Nextron's own sender
-identity, never a data subject's. Story 6.4 added the warm-up columns (migration
-``0039_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story 6.2 will add the Gmail
-connection.
+(FR-32). Every column but the three warm-up record columns, the two pacing columns,
+``connected_at`` and the three reputation columns is NOT NULL; every column is PII class ``none``:
+these are Nextron's own sender identity, never a data subject's. Story 6.4 added the warm-up
+columns (migration ``0039_6_4_inbox_warmup``), Story 6.5 the ``domain_checks`` table, and Story
+6.2 the Gmail connection times.
 """
 
 from datetime import date, datetime
@@ -164,6 +170,8 @@ class SendingInboxRecord(Base):
     )
     next_send_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     last_sent_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    status_changed_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    connected_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class DomainCheckRecord(Base):

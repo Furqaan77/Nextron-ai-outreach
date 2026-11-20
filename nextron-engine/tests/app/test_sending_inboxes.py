@@ -387,8 +387,18 @@ def raw_inbox(
         )
     inbox_id = new_id()
     world.sql(
-        f"INSERT INTO sending_inboxes ({INBOX_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (inbox_id, address, address.split("@")[0], domain_id, SENDER, status, created_at),
+        f"INSERT INTO sending_inboxes ({INBOX_COLUMNS}, status_changed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            inbox_id,
+            address,
+            address.split("@")[0],
+            domain_id,
+            SENDER,
+            status,
+            created_at,
+            created_at,
+        ),
     )
     return inbox_id
 
@@ -448,7 +458,9 @@ def test_the_views_carry_every_field(world: World) -> None:
         ramp_step=5,
         ramp_target=30,
         next_send_at=view.next_send_at,
+        status_changed_at=T0,  # Story 6.2: set to created_at at registration
     )
+    assert view.connected_at is None and view.pause_cause is None
     assert world.read(sending_queries.inboxes_for_binding) == (view,)
 
 
@@ -471,6 +483,7 @@ def test_with_no_inboxes_both_reads_are_empty(world: World) -> None:
         {"label": None},
         {"from_name": None},
         {"created_at": None},
+        {"status_changed_at": None},  # Story 6.2
         {"sending_domain_id": new_id()},  # no such Sending Domain
     ],
 )
@@ -490,6 +503,7 @@ def test_a_raw_inbox_write_that_breaks_a_rule_raises_integrity_error(
         "from_name": SENDER,
         "status": "connecting",
         "created_at": STAMP,
+        "status_changed_at": STAMP,
         **changes,
     }
 
@@ -510,8 +524,8 @@ def test_the_status_defaults_to_connecting(world: World) -> None:
     )
     world.sql(
         "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
-        "created_at) VALUES (?, 'mac@d.com', 'Main', ?, ?, ?)",
-        (new_id(), domain_id, SENDER, STAMP),
+        "created_at, status_changed_at) VALUES (?, 'mac@d.com', 'Main', ?, ?, ?, ?)",
+        (new_id(), domain_id, SENDER, STAMP, STAMP),
     )
 
     assert [row[5] for row in world.inboxes()] == ["connecting"]

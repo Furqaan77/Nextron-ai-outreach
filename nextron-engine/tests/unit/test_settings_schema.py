@@ -532,6 +532,7 @@ def test_the_declared_keys_in_order() -> None:
         "lead_score_signal_weight",
         "unsub_worker_host",
         "dnsbl_zones",
+        "gmail_internal_app_confirmed",
     ]
     assert declared() == (
         setting(Key.SENDER_NAME),
@@ -563,7 +564,20 @@ def test_the_declared_keys_in_order() -> None:
         setting(Key.LEAD_SCORE_SIGNAL_WEIGHT),
         setting(Key.UNSUB_WORKER_HOST),
         setting(Key.DNSBL_ZONES),
+        setting(Key.GMAIL_INTERNAL_APP_CONFIRMED),
     )
+
+
+def test_the_gmail_gate_is_a_boolean_sending_setting_off_by_default() -> None:
+    found = setting(Key.GMAIL_INTERNAL_APP_CONFIRMED)
+
+    assert found.type is SettingType.BOOLEAN
+    assert found.section is Section.SENDING
+    assert found.default is False and not found.required
+    assert parse(found, "true") is True
+    assert parse(found, "false") is False
+    with pytest.raises(InvalidSettingValue):
+        parse(found, "yes")
 
 
 # Row: Setting (alert_chat_id) -------------------------------------------------------------------
@@ -1294,8 +1308,8 @@ def test_schema_problems_holds_the_real_schema_to_key() -> None:
         (
             "Key members not declared: ai_budget_alert_pct, ai_budget_monthly, alert_chat_id, "
             "ats_hosts, backup_offpc_dir, backup_rotation_days, backup_time, bulk_threads, "
-            "crawl_max_pages, dnsbl_zones, lead_score_fit_weight, lead_score_signal_weight, "
-            "legal_name, "
+            "crawl_max_pages, dnsbl_zones, gmail_internal_app_confirmed, lead_score_fit_weight, "
+            "lead_score_signal_weight, legal_name, "
             "optout_line, postal_address, privacy_notice_url, quota_hunter_credits, "
             "quota_job_aggregator, quota_places_enterprise, quota_places_pro, "
             "quota_prospeo_credits, sender_name, sender_signature, sender_timezone, "

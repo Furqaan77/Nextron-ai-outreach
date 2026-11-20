@@ -316,7 +316,7 @@ class DomainChecks:
         paused = []
         for inbox_id in inboxes_repo.active_ids_of(sending_domain_id):
             if not inboxes_repo.set_status(
-                inbox_id, from_status=InboxStatus.ACTIVE, to_status=moved.to
+                inbox_id, from_status=InboxStatus.ACTIVE, to_status=moved.to, at=now
             ):
                 continue  # no longer active: nothing to pause
             eventlog.append(

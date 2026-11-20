@@ -2501,6 +2501,66 @@ data") columns; a result that paused inboxes is highlighted. The health panel sh
 listed domain's newest check, and one "Postmaster grant missing" issue while a domain is
 listed and the `postmaster` grant isn't stored and usable.
 
+## Connecting a Sending Inbox (Story 6.2)
+
+A Sending Inbox sends only from Furqaan's own Gmail mailbox on a lookalike Sending Domain,
+connected through Gmail OAuth with the `gmail.modify` scope only (FR-32, AD-12, AD-14).
+
+**The gate (OQ-A2).** Spike 6.1 must first confirm that the Workspace allows an Internal OAuth
+app for the Desktop client and that every Sending Domain is in that Workspace. Until then the
+`gmail_internal_app_confirmed` setting (Settings page, Sending section, `false` by default)
+stays `false`: Connect refuses with "Connecting inboxes waits for the Gmail spike (Story 6.1) to
+confirm the Internal OAuth app" and starts nothing, and doctor's `sending_inbox_grants` warns.
+Set it to `true` only after the spike.
+
+**Connecting.** On the Sending Inboxes page (`/inboxes`), type the address and a label and click
+**Connect inbox** (or **Connect** on a registered inbox's row, **Reconnect** on an
+`auth_failed` one). Both are CSRF-checked POSTs (`POST /inboxes/connect`, `POST
+/inboxes/reconnect`); no GET starts a flow. The engine first checks, without Google: the gate;
+the address (never nextronai.com or a subdomain, never a role address such as `sales@`, `+tag`
+ignored); outside `prod`, the `sink_allowlist`; the Sender's name; that the inbox isn't already
+`active`, `paused` or removed; and that the Google Desktop client is imported (Credentials
+page). Then it opens Google's consent page in your browser (the same loopback flow as the
+Credentials page's grants: PKCE S256, a random `state`, a one-shot `127.0.0.1` listener, 5
+minutes). Sign in as that inbox and allow Gmail access. The panel polls `GET /inboxes/connect`
+every 2 seconds while it waits. One flow runs at a time: a new Connect replaces a waiting one.
+
+**The identity check**, after Google answers: the `gmail.modify` scope was granted and a refresh
+token came back (at most 1,280 characters); Gmail's `users.getProfile` (not an ID token) returns
+the requested address (ASCII case ignored), else "Signed in as a different account"; it isn't
+on nextronai.com ("Sending Inboxes can't be on nextronai.com") or a role address ("Role
+addresses can't send"); and, outside `prod`, it is allowlisted. Any refusal or failure revokes
+the new grant and stores nothing (an unexpected crash in those checks too).
+
+**On success** the refresh token goes to Credential Manager as `gmail/<address>` (access tokens
+stay in memory), then one transaction finds or creates the Sending Domain, creates the inbox if
+it isn't registered, moves it `connecting → active` (cause `connected`) or `auth_failed →
+active` (`reconsented`) with an `events` row, refreshes its From name from the Sender's name,
+sets `status_changed_at` and `connected_at`, and queues a `check_domains` job for its domain. If
+the domain's newest check is a DNSBL listing or a spam rate `pause`, the inbox is paused at once
+with that cause. If that transaction fails, the keyring entry is deleted and the grant revoked.
+A replaced refresh token is overwritten, not revoked: it is the same Google account and client,
+and Google's revoke could end the new grant too. An inbox that was paused (any cause) when its
+grant failed is paused again at once on reconnect, with its newest pause cause.
+
+**invalid_grant.** When Google refuses an inbox's refresh token (`google_invalid_grant`), the
+inbox moves `active`/`paused → auth_failed` (cause `invalid_grant`) with one `events` row and one
+`inbox_auth_failed` ops alert (Telegram and dashboard, the inbox's id only). Reconnect it. A
+Gmail 401 or 403 only drops the cached access token.
+
+**The panel and health.** Each row shows its status (with the pause cause, read from the newest
+pause event), when it was last connected and its Connect or Reconnect button. The health panel
+lists every inbox's status and last connection, and its errors include `inbox_paused` and
+`inbox_auth_failed`. Doctor's `sending_inbox_grants` (last) refreshes each connected inbox's
+grant and reads its Gmail profile; the health panel's form only checks the keyring entry.
+
+**The Gmail adapter** (`nextron/adapters/gmail`, `GmailProfiles(meter=...)`) reads the profile
+with `google-api-python-client` (`static_discovery=True`, no discovery request, no cache file),
+one service object per thread, metered as provider `gmail`, operation `get_profile`. Its errors
+are `gmail_unauthorized` (401/403), `gmail_unavailable` (retryable: network, 429, 5xx) and
+`gmail_bad_response`. It never sends mail: sending, sync and reconciliation arrive with Stories
+6.7 to 6.12.
+
 ## Send gate (Story 6.9)
 
 Every approved OutboundMessage (OM) passes one closed gate immediately before it leaves (FR-31,
@@ -3179,6 +3239,7 @@ mode](#restore-and-recovery-mode)), and the log line carries the copy's `file` n
 | `0044_8_2_place_coords` | adds to `leads`, in place with no check, the nullable `place_lat` and `place_lng` (floats) and `place_coords_at` (UTC text), purged after 30 days (see [Google Places search](#google-places-search)) | `discovery` |
 | `0045_4_12_draft_revisions` | `draft_revisions` (a foreign key to `drafts`, `footer_snapshots`, `signals` and `ai_route_tuples` with no cascade; the unique pair `uq_draft_revisions_draft_id_rev`; rev, origin, first-revision, instruction, JSON-list and hash checks; three triggers keeping a revision immutable except for the erasure tombstone), and rebuilds `drafts` (from 0042's exact table, every row, check and index kept) to add `fk_drafts_id_current_rev_draft_revisions` (see [Draft text, revisions and the hash](#draft-text-revisions-and-the-hash)) | `drafting` |
 | `0047_6_6_reputation` | rebuilds `domain_checks` (from 0033's exact table, copying every row with its `rowid`, so the newest check stays the last inserted) with three nullable columns: `dnsbl_result` (each DNSBL zone's outcome, as JSON), `spam_rate` (the Postmaster spam rate in parts per million, NULL for no data) and `spam_rate_status` (`ck_domain_checks_spam_rate_status`: `ok`, `alert`, `pause` or `no_data`); rows from before it keep NULL (see [Blocklist and spam-rate guardrails](#blocklist-and-spam-rate-guardrails)) | `sending` |
+| `0048_6_2_inbox_connect` | adds to `sending_inboxes` `status_changed_at` (UTC text, NOT NULL: added in place, backfilled from `created_at`, then the table is rebuilt from 0046's exact table to make it NOT NULL, every row, check and index kept) and the nullable `connected_at` (when the inbox was last connected through Gmail OAuth); no token, address or label is added (see [Connecting a Sending Inbox](#connecting-a-sending-inbox-story-62)) | `sending` |
 
 **Migrations are forward-only.** Every `downgrade()` raises `NotImplementedError`; a downgrade
 could drop the append-only `events` audit trail. Recover from a bad upgrade by restoring the

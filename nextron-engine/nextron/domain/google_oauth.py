@@ -55,6 +55,10 @@ what the path was.
 ``openid email``), ``state``, ``code_challenge``, ``code_challenge_method=S256``,
 ``access_type=offline`` and ``prompt=select_account consent`` (so every grant returns a refresh
 token and Mac picks the account). There is no ``include_granted_scopes``.
+``authorization_url_for_scope(client_id, scope, redirect_uri, state, challenge)`` (Story 6.2)
+has the same parameters in the same order, with ``scope`` exactly the one given (no
+``openid email``): a Sending Inbox asks for ``gmail.modify`` only and reads its address from
+``users.getProfile``.
 
 **The answer.**
 
@@ -64,7 +68,8 @@ token and Mac picks the account). There is no ``include_granted_scopes``.
   equal to ``client_id``, ``exp`` after ``now``, ``email_verified`` exactly ``true``, and an
   ``email`` that ``nextron.domain.sink.is_sink_recipient`` accepts and that holds an ``@``.
 - ``scope_granted(scope_text, spec)``: whether the grant's scope is among the space-separated
-  scopes Google returned (under granular consent Mac can untick it).
+  scopes Google returned (under granular consent Mac can untick it); ``has_scope(scope_text,
+  scope)`` is the same test for any one scope.
 - ``account_problem(spec, account, env, allowlist)``: ``not_internal_domain`` when an
   ``internal_notify`` account's part after its last ``@``, ASCII-lowercased, isn't exactly
   ``nextronai.com`` (no subdomains); ``not_allowlisted`` when the sink applies to ``env``
@@ -370,12 +375,29 @@ def authorization_url(
     client_id: str, spec: GrantSpec, redirect_uri: str, state: str, challenge: str
 ) -> str:
     """The consent page URL for ``spec``; see the module docstring for its parameters."""
+    return _consent_url(
+        client_id, " ".join((spec.scope, *IDENTITY_SCOPES)), redirect_uri, state, challenge
+    )
+
+
+def authorization_url_for_scope(
+    client_id: str, scope: str, redirect_uri: str, state: str, challenge: str
+) -> str:
+    """The consent page URL asking for exactly ``scope`` (no ``openid email``), with the same
+    parameters as ``authorization_url`` otherwise (Story 6.2: a Sending Inbox's
+    ``gmail.modify``)."""
+    return _consent_url(client_id, scope, redirect_uri, state, challenge)
+
+
+def _consent_url(
+    client_id: str, scope_text: str, redirect_uri: str, state: str, challenge: str
+) -> str:
     query = urlencode(
         [
             ("response_type", "code"),
             ("client_id", client_id),
             ("redirect_uri", redirect_uri),
-            ("scope", " ".join((spec.scope, *IDENTITY_SCOPES))),
+            ("scope", scope_text),
             ("state", state),
             ("code_challenge", challenge),
             ("code_challenge_method", "S256"),
@@ -431,7 +453,12 @@ def id_token_account(id_token: object, client_id: str, now: datetime) -> str | N
 
 def scope_granted(scope_text: object, spec: GrantSpec) -> bool:
     """Whether ``spec.scope`` is among the space-separated scopes of ``scope_text``."""
-    return isinstance(scope_text, str) and spec.scope in scope_text.split(" ")
+    return has_scope(scope_text, spec.scope)
+
+
+def has_scope(scope_text: object, scope: str) -> bool:
+    """Whether ``scope`` is among the space-separated scopes of ``scope_text``."""
+    return isinstance(scope_text, str) and scope in scope_text.split(" ")
 
 
 def _ascii_lower(text: str) -> str:

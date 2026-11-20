@@ -4,8 +4,8 @@
   ``DoctorChecks`` or calls ``register_check``, under any alias (the same AST check as the job
   and trigger registries, ``tests/contracts/test_job_contracts.py``).
 - **It ships frozen** with exactly Story 1.14's eleven checks, Story 1.17's ``offpc_backup``,
-  Story 3.16's ``erasure_ledger`` and Story 3.8's ``unsub_token_keys`` (fourteen), in the order
-  doctor prints them; each later story that adds a check extends ``CHECKS``.
+  Story 3.16's ``erasure_ledger``, Story 3.8's ``unsub_token_keys`` and Story 6.2's
+  ``sending_inbox_grants`` (fifteen), in the order doctor prints them; each later story that adds a check extends ``CHECKS``.
 
 The AST check's proofs run it on a temporary copy of the tree with a probe module
 (``tests/contracts/support.py``), never on the real tree.
@@ -45,6 +45,7 @@ CHECKS = (
     "required_settings",
     "database_revision",
     "unsub_token_keys",
+    "sending_inbox_grants",  # Story 6.2
 )
 UNUSED = '"""unused"""\n'
 
@@ -110,7 +111,7 @@ def test_the_registry_check_catches_another_function_in_main(tmp_path: Path) -> 
     assert all(problem.startswith(f"{MAIN}:") for problem in problems)
 
 
-def test_the_registry_ships_frozen_with_the_fourteen_checks_in_order() -> None:
+def test_the_registry_ships_frozen_with_the_fifteen_checks_in_order() -> None:
     checks = main.build_doctor_checks()
 
     assert isinstance(checks, DoctorChecks)

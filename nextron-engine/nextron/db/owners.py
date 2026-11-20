@@ -347,6 +347,8 @@ TABLES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "ramp_target",
             "next_send_at",
             "last_sent_at",
+            "status_changed_at",
+            "connected_at",
         ),
     },
     "domain_checks": {

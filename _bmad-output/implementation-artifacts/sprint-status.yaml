@@ -137,7 +137,7 @@ development_status:
 
   epic-6: in-progress
   6-1-spike-gmail-send-path-header-reconciliation-and-internal-oau: backlog
-  6-2-connect-a-sending-inbox-through-gmail-oauth-with-an-identity: backlog
+  6-2-connect-a-sending-inbox-through-gmail-oauth-with-an-identity: review
   6-3-pause-resume-and-remove-sending-inboxes: backlog
   6-4-record-warm-up-and-ramp-each-inbox-s-daily-cap-under-a-total: review
   6-5-check-sending-domain-authentication-on-connect-and-daily: review

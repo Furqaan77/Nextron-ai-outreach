@@ -36,7 +36,7 @@ from tests.migration_chains import (
     tables,
 )
 
-HEAD = "0047_6_6_reputation"
+HEAD = "0048_6_2_inbox_connect"
 
 
 @pytest.fixture
@@ -1292,3 +1292,94 @@ def test_0047_keeps_every_check_with_its_rowid_and_adds_the_reputation_columns(
     with pytest.raises(sqlite3.IntegrityError):
         run_sql(path, "UPDATE domain_checks SET passed = 0")
     run_sql(path, "UPDATE domain_checks SET spam_rate_status = 'no_data'")
+
+
+def test_0048_backfills_status_changed_at_and_keeps_every_inbox(tmp_path: Path) -> None:
+    """Every inbox stored before 0048 (Story 6.2) keeps its row and rowid, reads
+    ``status_changed_at`` as its own ``created_at`` text and ``connected_at`` as NULL, and keeps
+    its checks, foreign key and unique address; it still reads through
+    ``queries.sending.inboxes()``."""
+    from nextron.app.queries import sending as sending_queries
+    from nextron.db.uow import Subscribers, UnitOfWorkFactory
+
+    location = chain(tmp_path)
+    for revision in sorted((SCRIPT_LOCATION / "versions").glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if revision.stem <= "0047_6_6_reputation":
+            shutil.copy2(revision, location / "versions" / revision.name)
+    path = tmp_path / "nextron.db"
+    with engine_on(path) as engine:
+        assert ensure_current(engine, script_location=location) == (None, "0047_6_6_reputation")
+    first, second = "2026-11-18T09:00:00.000000Z", "2026-11-18T10:30:00.123456Z"
+    domain = "01JD3QZ8X5V9K2M7N4P6R8T0E0"
+    inboxes = "01JD3QZ8X5V9K2M7N4P6R8T0E1", "01JD3QZ8X5V9K2M7N4P6R8T0E2"
+    run_sql(
+        path,
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{domain}', "
+        f"'nextron-ai.com', '{first}')",
+        # rowid order differs from id order
+        "INSERT INTO sending_inboxes (rowid, id, address, label, sending_domain_id, from_name, "
+        f"status, created_at) VALUES (7, '{inboxes[0]}', 'furqaan@nextron-ai.com', 'Main', "
+        f"'{domain}', 'Furqaan Ahmed', 'active', '{first}')",
+        "INSERT INTO sending_inboxes (rowid, id, address, label, sending_domain_id, from_name, "
+        f"status, created_at) VALUES (3, '{inboxes[1]}', 'mac@nextron-ai.com', 'Second', "
+        f"'{domain}', 'Furqaan Ahmed', 'connecting', '{second}')",
+    )
+    reader = sqlite3.connect(path)
+    try:
+        before = reader.execute("SELECT rowid, * FROM sending_inboxes ORDER BY rowid").fetchall()
+    finally:
+        reader.close()
+
+    with engine_on(path) as engine:
+        assert ensure_current(engine) == ("0047_6_6_reputation", HEAD)
+
+    reader = sqlite3.connect(path)
+    try:
+        rows = reader.execute("SELECT rowid, * FROM sending_inboxes ORDER BY rowid").fetchall()
+        times = reader.execute(
+            "SELECT status_changed_at = created_at, typeof(status_changed_at), connected_at "
+            "FROM sending_inboxes ORDER BY rowid"
+        ).fetchall()
+        info = {row[1]: row for row in reader.execute("PRAGMA table_info(sending_inboxes)")}
+        indexes = {row[1] for row in reader.execute("PRAGMA index_list(sending_inboxes)")}
+        keys = reader.execute("PRAGMA foreign_key_list(sending_inboxes)").fetchall()
+    finally:
+        reader.close()
+    # Every row and column kept, in rowid order; the rebuild renumbers rowids (nothing reads an
+    # inbox's rowid: its key is the ULID ``id``).
+    assert [row[1 : len(before[0])] for row in rows] == [row[1:] for row in before]
+    assert [row[len(before[0]) :] for row in rows] == [(second, None), (first, None)]
+    assert times == [(1, "text", None)] * 2  # the same stored text as created_at
+    assert (info["status_changed_at"][2], info["status_changed_at"][3]) == ("VARCHAR(27)", 1)
+    assert (info["connected_at"][2], info["connected_at"][3]) == ("VARCHAR(27)", 0)
+    assert "uq_sending_inboxes_address" in indexes
+    assert [(key[2], key[3], key[4]) for key in keys] == [
+        ("sending_domains", "sending_domain_id", "id")
+    ]
+    for assignment, check in (
+        ("status = 'warming'", "status"),
+        ("address = 'x@nextronai.com'", "not_brand"),
+        ("ramp_step = 0", "warmup_ranges"),
+        ("warm_level = 12", "warmup_record"),
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match=rf"ck_sending_inboxes_{check}$"):
+            run_sql(path, f"UPDATE sending_inboxes SET {assignment} WHERE id = '{inboxes[0]}'")
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+        run_sql(path, "UPDATE sending_inboxes SET status_changed_at = NULL")
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+        run_sql(
+            path,
+            f"UPDATE sending_inboxes SET address = 'furqaan@nextron-ai.com' "
+            f"WHERE id = '{inboxes[1]}'",
+        )
+
+    subscribers = Subscribers()
+    subscribers.freeze()
+    with engine_on(path) as engine:
+        with UnitOfWorkFactory(engine, subscribers).open(read_only=True):
+            views = sending_queries.inboxes()
+    by_id = {view.id: view for view in views}
+    assert set(by_id) == set(inboxes)
+    found = by_id[inboxes[1]]
+    assert found.connected_at is None and found.status_changed_at is not None
+    assert found.status_changed_at.isoformat() == "2026-11-18T10:30:00.123456+00:00"

@@ -109,6 +109,8 @@ APPROVED_EXTRA_PORTS: Final[dict[str, str]] = {
     "ClientFilePort": "Story 2.3: reading the Google client secrets file",
     "DomainSearchPort": "Story 2.13: AD-9's EmailFinderPort Domain Search, its own Protocol",
     "SinkFilesPort": "Story 3.14: erasing a person's lines from the dev and test sink files",
+    "GmailPort": "Story 6.2: a Sending Inbox's Gmail profile (users.getProfile) for the identity "
+    "check, before MailPort and MailboxPort arrive with Stories 6.8 to 6.10",
 }
 
 

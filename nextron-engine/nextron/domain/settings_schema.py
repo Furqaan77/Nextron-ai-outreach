@@ -196,6 +196,7 @@ class Key(StrEnum):
     LEAD_SCORE_SIGNAL_WEIGHT = "lead_score_signal_weight"
     UNSUB_WORKER_HOST = "unsub_worker_host"
     DNSBL_ZONES = "dnsbl_zones"
+    GMAIL_INTERNAL_APP_CONFIRMED = "gmail_internal_app_confirmed"
 
 
 class _Required(Enum):
@@ -1387,6 +1388,21 @@ SCHEMA: Mapping[str, Setting] = _declare(
         ),
         default=DEFAULT_DNSBL_ZONES,
         rules=(DNSBL_ZONES_RULE,),
+    ),
+    # The OQ-A2 decision (Story 6.2, AD-12): whether Spike 6.1 confirmed the Internal OAuth app
+    # for the Desktop client and the Sending Domains' Workspace org. While false, no Sending
+    # Inbox connect starts a consent flow and doctor's sending_inbox_grants check warns.
+    Setting(
+        key=Key.GMAIL_INTERNAL_APP_CONFIRMED,
+        type=SettingType.BOOLEAN,
+        section=Section.SENDING,
+        label="Gmail Internal app confirmed",
+        unit=(
+            "true or false. Set it to true only after the Gmail spike (Story 6.1) confirms the "
+            "Workspace allows the Internal OAuth app for the Desktop client and every Sending "
+            "Domain is in that Workspace. Until then, Sending Inboxes can't be connected."
+        ),
+        default=False,
     ),
 )
 

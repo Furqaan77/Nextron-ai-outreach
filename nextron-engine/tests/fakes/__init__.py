@@ -22,6 +22,9 @@ by name (``()`` for a name not scripted), raises the scripted ``AdapterError`` f
 ``errors`` and records every query. ``FakePostmaster`` (``postmaster``) fakes
 ``PostmasterPort``: it answers each domain's scripted spam rate (no data when not scripted),
 raises the scripted ``AdapterError`` for a domain in ``errors`` and records every query.
+``FakeGmail`` (``gmail``) fakes ``GmailPort``: it answers each access token's scripted profile
+address, raises the scripted ``AdapterError`` for a token in ``errors`` (``gmail_unauthorized``
+for a token not scripted) and records every call.
 
 ``ScriptedFinder`` and ``ScriptedDomainSearch`` (``email_finder``) fake ``EmailFinderPort`` and
 ``DomainSearchPort``: each answers with the next scripted answer or ``AdapterError``, and with
@@ -44,6 +47,7 @@ from nextron.ports.crawler import CrawlerPort
 from nextron.ports.dns import DnsPort
 from nextron.ports.email_finder import DomainSearchPort, EmailFinderPort
 from nextron.ports.email_syntax import EmailSyntaxPort
+from nextron.ports.gmail import GmailPort
 from nextron.ports.google_oauth import ClientFilePort, ConsentListener, GoogleOAuthPort
 from nextron.ports.job_board import JobBoardPort
 from nextron.ports.llm import LlmPort
@@ -64,6 +68,7 @@ from tests.fakes.crawler import ScriptedCrawler
 from tests.fakes.dns import FakeDns
 from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
+from tests.fakes.gmail import FakeGmail
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.job_board import ScriptedJobBoards
 from tests.fakes.llm import ScriptedLlm
@@ -103,5 +108,6 @@ PORT_FAKES: Final[Mapping[type, type]] = MappingProxyType(
         UnsubscribePort: ScriptedUnsubscribe,
         PlacesPort: ScriptedPlaces,
         PostmasterPort: FakePostmaster,
+        GmailPort: FakeGmail,
     }
 )

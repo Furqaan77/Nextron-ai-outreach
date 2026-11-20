@@ -61,8 +61,10 @@ CHECKS = [
     "required_settings",
     "database_revision",
     "unsub_token_keys",
+    "sending_inbox_grants",  # Story 6.2
 ]
-ALL_OK = dict.fromkeys(CHECKS, "ok")
+# Story 6.2: sending_inbox_grants warns while gmail_internal_app_confirmed is false (OQ-A2)
+ALL_OK = dict.fromkeys(CHECKS, "ok") | {"sending_inbox_grants": "warn"}
 
 PLANTED_CREDENTIAL = "QZXPLANTEDCREDENTIAL"
 PLANTED_REFRESH = "1//QZXPLANTEDREFRESH"
@@ -231,10 +233,10 @@ def test_all_ok_prints_fourteen_ok_rows_and_changes_no_database_byte(healthy: Pa
     width = len("data_dir_outside_onedrive")
     assert lines[0] == f"status  {'check':<{width}}  message"
     assert [(status, check) for status, check, _ in table_rows(out)] == [
-        ("ok", check) for check in CHECKS
+        (ALL_OK[check], check) for check in CHECKS
     ]
-    assert lines[-1] == "14 ok, 0 warn, 0 fail"
-    assert len(lines) == 16
+    assert lines[-1] == "14 ok, 1 warn, 0 fail"  # the OQ-A2 gate is off (Story 6.2)
+    assert len(lines) == 17
     assert out.endswith("\n") and not out.endswith("\n\n")
     assert sha256(healthy) == before
     assert stored_revisions(healthy) == [head_revision()]
@@ -1060,3 +1062,59 @@ def test_the_doctor_database_reads_revision_and_settings(healthy: Path) -> None:
         assert database.required_unset() == ()
     finally:
         database.close()
+
+
+# Row: Sending Inbox grants with the OQ-A2 gate on (Story 6.2) --------------------------------------
+
+
+def test_with_the_gate_on_each_connected_inbox_is_refreshed_and_profile_read(
+    data_dir: Path,
+) -> None:
+    from tests.fakes.gmail import FakeGmail
+
+    path = make_database(data_dir, SETTINGS | {"gmail_internal_app_confirmed": "true"})
+    stamp = "2026-11-17T09:00:00.000000Z"
+    domain = "01JD3QZ8X5V9K2M7N4P6R8T0D0"
+    connected, waiting = "furqaan@nextron-mail.com", "new@nextron-mail.com"
+    run_sql(
+        path,
+        f"INSERT INTO sending_domains (id, domain, created_at) VALUES ('{domain}', "
+        f"'nextron-mail.com', '{stamp}')",
+        *(
+            "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
+            f"status, created_at, status_changed_at) VALUES ('{inbox_id}', '{address}', "
+            f"'{label}', '{domain}', 'Furqaan Ahmed', '{status}', '{stamp}', '{stamp}')"
+            for inbox_id, address, label, status in (
+                ("01JD3QZ8X5V9K2M7N4P6R8T0E1", connected, "Main", "active"),
+                ("01JD3QZ8X5V9K2M7N4P6R8T0E2", waiting, "New", "connecting"),
+            )
+        ),
+    )
+    before = sha256(path)
+    secrets = healthy_secrets()
+    secrets.write(f"gmail/{connected}", "1//inbox-refresh")
+    oauth = FakeGoogleOAuth()
+    gmail = FakeGmail(profiles={"ya29.fake-access": connected})
+    out, err = io.StringIO(), io.StringIO()
+
+    code = main.doctor(
+        as_json=True,
+        probes=fake_probes(),
+        secrets=secrets,
+        google_oauth=oauth,
+        clock=FrozenClock(),
+        out=out,
+        err=err,
+        gmail=gmail,
+    )
+
+    assert (code, err.getvalue()) == (0, "")
+    results = {row["id"]: (row["status"], row["message"]) for row in json.loads(out.getvalue())}
+    assert {check: status for check, (status, _) in results.items()} == dict.fromkeys(
+        CHECKS, "ok"
+    )
+    # the notify grant, then the one connected inbox; the connecting inbox is skipped
+    assert oauth.calls == [("refresh", PLANTED_REFRESH), ("refresh", "1//inbox-refresh")]
+    assert gmail.calls == ["ya29.fake-access"]
+    assert connected not in out.getvalue() and waiting not in out.getvalue()
+    assert sha256(path) == before  # doctor changes no status

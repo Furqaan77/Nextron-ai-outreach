@@ -145,6 +145,16 @@ runs in a read-only unit of work and every POST is CSRF-checked (``dashboard_rou
   work, then renders the panel again in a read-only one, with "Warm-up saved." or the
   ``WarmupRefused`` message and that inbox's typed values. The panel shows each inbox's
   warm-up facts and caps from ``Sending.inbox_caps()``.
+- ``POST /inboxes/connect`` (``inbox_connect``), ``POST /inboxes/reconnect``
+  (``inbox_reconnect``) and ``GET /inboxes/connect`` (``inbox_connect_status``), all
+  ``@personal_data(True)``: connecting a Sending Inbox through Gmail OAuth (Story 6.2, FR-32,
+  AD-12). Only the two POSTs (CSRF-checked) start a consent flow, through
+  ``inbox_connections`` (``InboxConnections.start_connect(address, label)``, fields exactly as
+  ``POST /inboxes``; ``start_reconnect(inbox_id)``, exactly one ``inbox_id`` ULID), which open
+  their own units of work; then the panel is rendered again in a read-only one, with the
+  connect status or the ``ConnectRefused`` message (and, for Connect inbox, the typed values).
+  The GET renders the in-memory connect status alone (``inbox_connect_status.html``), which
+  HTMX polls every 2 s while a flow waits; it starts nothing.
 - ``GET /inboxes/auth`` (``inbox_auth_panel``) and ``POST /inboxes/auth/recheck``
   (``inbox_auth_recheck``), both ``@personal_data(False)`` (domain names and check results
   only): the Sending Domain authentication section (Story 6.5, FR-64), which HTMX re-fetches
@@ -350,6 +360,7 @@ from nextron.app.scoring.lead_scores import LeadScores, RescoreRequest
 from nextron.app.sending.api import Sending
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.sending.checks import DomainChecks
+from nextron.app.sending.connect import InboxConnections
 from nextron.app.setup.api import (
     Campaigns,
     Credentials,
@@ -374,7 +385,7 @@ from nextron.domain.prompts import InvalidPrompts
 from nextron.domain.recovery import RECOVERY_BANNER
 from nextron.domain.render import footer_complete
 from nextron.domain.segments import InvalidSegments
-from nextron.domain.sending_inbox import InboxRefused, WarmupRefused
+from nextron.domain.sending_inbox import ConnectRefused, InboxRefused, WarmupRefused
 from nextron.domain.sequences import InvalidSequences
 from nextron.domain.settings_schema import InvalidSettings
 from nextron.domain.suppression_list import (
@@ -575,6 +586,7 @@ def create_app(
     restore_tests: RestoreTests,
     lead_imports: LeadImports,
     sending: Sending,
+    inbox_connections: InboxConnections,
     lead_signals: LeadSignals,
     compliance: Compliance,
     primary_contacts: PrimaryContacts,
@@ -599,7 +611,8 @@ def create_app(
     ``health`` gives the health panel its report and the notification area its error count;
     ``queue`` dismisses a dead job; ``backups`` queues the health panel's "Back up now" and
     ``restore_tests`` its "Run restore test now"; ``lead_imports`` runs the CSV Lead import;
-    ``sending`` registers the Sending Inboxes panel's inboxes; ``lead_signals`` gives the Lead
+    ``sending`` registers the Sending Inboxes panel's inboxes and ``inbox_connections`` connects
+    them through Gmail OAuth (Story 6.2); ``lead_signals`` gives the Lead
     page its Signals, Evidence and headquarters zone, ``primary_contacts`` runs its "Make
     primary" and ``email_finding`` its "Find email" (Story 2.13; without one, "Find email"
     answers 503) and ``lead_scores`` its "Re-score" (Story 2.15); ``compliance`` runs the
@@ -1177,7 +1190,10 @@ def create_app(
         restore_notice: str | None = None,
     ) -> HTMLResponse:
         context = health_rows.panel_context(
-            engine_health.report(), notice=notice, restore_notice=restore_notice
+            engine_health.report(),
+            notice=notice,
+            restore_notice=restore_notice,
+            inboxes=sending_queries.inboxes(),  # Story 6.2: the inbox status list
         )
         return page(request, template, **context)
 
@@ -1278,6 +1294,7 @@ def create_app(
         address: str = "",
         label: str = "",
         typed_warmup: inbox_rows.WarmupForm | None = None,
+        connect_refused: ConnectRefused | None = None,
     ) -> HTMLResponse:
         context = inbox_rows.panel_context(
             sending_queries.inboxes(),
@@ -1286,6 +1303,8 @@ def create_app(
             address=address,
             label=label,
             typed_warmup=typed_warmup,
+            connect=inbox_connections.status(),
+            connect_refused=connect_refused,
         )
         if template == inbox_rows.PAGE_TEMPLATE:
             context.update(inbox_rows.auth_context(domain_checks.auths()))
@@ -1357,6 +1376,52 @@ def create_app(
             return inboxes_answer(
                 request, inbox_rows.PANEL_TEMPLATE, notice=inbox_rows.warmup_saved()
             )
+
+    @app.post("/inboxes/connect", name="inbox_connect")
+    @personal_data(True)  # answers with the whole panel, which shows inbox addresses
+    def inbox_connect(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        address, label = inbox_rows.submitted_inbox(fields)
+        try:
+            # the only call that starts a consent flow for a new address; it opens its own
+            # units of work, so none is open here
+            inbox_connections.start_connect(address, label)
+        except ConnectRefused as refused:  # nothing started; the typed values stay
+            with units.open(read_only=True):
+                return inboxes_answer(
+                    request,
+                    inbox_rows.PANEL_TEMPLATE,
+                    address=address,
+                    label=label,
+                    connect_refused=refused,
+                )
+        with units.open(read_only=True):
+            return inboxes_answer(request, inbox_rows.PANEL_TEMPLATE)
+
+    @app.post("/inboxes/reconnect", name="inbox_reconnect")
+    @personal_data(True)  # answers with the whole panel, which shows inbox addresses
+    def inbox_reconnect(
+        request: Request, fields: Annotated[FormFields, Depends(form_fields)]
+    ) -> HTMLResponse:
+        inbox_id = inbox_rows.submitted_reconnect(fields)
+        refused: ConnectRefused | None = None
+        try:
+            inbox_connections.start_reconnect(inbox_id)  # opens its own units of work
+        except ConnectRefused as caught:
+            refused = caught
+        with units.open(read_only=True):
+            return inboxes_answer(request, inbox_rows.PANEL_TEMPLATE, connect_refused=refused)
+
+    @app.get("/inboxes/connect", name="inbox_connect_status")
+    @personal_data(True)  # the waiting notice names the inbox's address
+    def inbox_connect_status(request: Request) -> HTMLResponse:
+        # reads the in-memory flow status only: no GET starts a consent flow
+        return page(
+            request,
+            inbox_rows.CONNECT_TEMPLATE,
+            **inbox_rows.connect_context(inbox_connections.status()),
+        )
 
     @app.get("/inboxes/auth", name="inbox_auth_panel")
     @personal_data(False)  # Sending Domain names and their check results only

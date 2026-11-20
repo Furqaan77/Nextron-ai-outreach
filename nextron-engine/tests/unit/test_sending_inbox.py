@@ -18,8 +18,11 @@ from nextron.domain.machines import IllegalTransition, Transition
 from nextron.domain.sending_inbox import (
     BINDABLE_STATUSES,
     BRAND_DOMAIN,
+    CONNECT_MESSAGES,
     CONNECTING_NOTE,
     CREATION,
+    GMAIL_SCOPE,
+    INBOX_AUTH_FAILED,
     MACHINE,
     MAX_INBOXES_PER_DOMAIN,
     MAX_LABEL_LENGTH,
@@ -30,6 +33,8 @@ from nextron.domain.sending_inbox import (
     TERMINAL_STATUSES,
     TRANSITIONS,
     WARMUP_MESSAGES,
+    ConnectFailure,
+    ConnectRefused,
     InboxAddress,
     InboxCause,
     InboxEvent,
@@ -41,11 +46,15 @@ from nextron.domain.sending_inbox import (
     WarmupRefusal,
     WarmupRefused,
     allowlist_refusal,
+    auth_failed_text,
     check_address,
     check_label,
     check_warmup,
+    connect_failure,
     crowded_domains,
     crowding_warning,
+    gmail_secret_name,
+    identity_problem,
     transition,
 )
 from nextron.domain.settings_schema import (
@@ -645,3 +654,137 @@ def test_every_warmup_refusal_has_a_message_naming_its_field() -> None:
 def test_check_warmup_refuses_a_non_str() -> None:
     with pytest.raises(TypeError):
         check_warmup(1, "manual", "1", "0", "5", "30", today=TODAY)  # type: ignore[arg-type]
+
+
+# Connecting through Gmail OAuth (Story 6.2) ------------------------------------------------------
+
+
+REQUESTED = "furqaan@nextron-mail.com"
+ALLOWED = [REQUESTED, "sales@nextron-mail.com", "furqaan@mail.nextronai.com"]
+
+
+def test_the_connect_transitions_are_exactly_ad4s() -> None:
+    assert transition(InboxStatus.CONNECTING, InboxEvent.CONNECT) == Transition(
+        InboxStatus.ACTIVE, InboxCause.CONNECTED
+    )
+    assert transition(InboxStatus.AUTH_FAILED, InboxEvent.RECONSENT) == Transition(
+        InboxStatus.ACTIVE, InboxCause.RECONSENTED
+    )
+    for source in (InboxStatus.ACTIVE, InboxStatus.PAUSED):
+        assert transition(source, InboxEvent.AUTH_FAIL) == Transition(
+            InboxStatus.AUTH_FAILED, InboxCause.INVALID_GRANT
+        )
+    for source in (InboxStatus.ACTIVE, InboxStatus.PAUSED, InboxStatus.REMOVED):
+        with pytest.raises(IllegalTransition):
+            transition(source, InboxEvent.CONNECT)
+    for source in (InboxStatus.CONNECTING, InboxStatus.AUTH_FAILED, InboxStatus.REMOVED):
+        with pytest.raises(IllegalTransition):
+            transition(source, InboxEvent.AUTH_FAIL)
+
+
+def test_the_scope_and_keyring_name() -> None:
+    assert GMAIL_SCOPE == "https://www.googleapis.com/auth/gmail.modify"
+    assert gmail_secret_name(REQUESTED) == "gmail/furqaan@nextron-mail.com"
+    with pytest.raises(TypeError):
+        gmail_secret_name(None)  # type: ignore[arg-type]
+
+
+def test_the_same_address_passes_whatever_its_ascii_case() -> None:
+    assert identity_problem(REQUESTED, REQUESTED, "dev", ALLOWED) is None
+    assert identity_problem(REQUESTED, "Furqaan@Nextron-Mail.COM", "dev", ALLOWED) is None
+    assert identity_problem(REQUESTED, REQUESTED, "prod", []) is None  # no allowlist in prod
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["other@nextron-mail.com", "furqaan@nextron-mail.co", "", None, 7, "furqaan@nextron-mail.com "],
+)
+def test_another_account_is_a_different_account(profile: object) -> None:
+    assert identity_problem(REQUESTED, profile, "prod", []) is ConnectFailure.DIFFERENT_ACCOUNT
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["furqaan@nextronai.com", "furqaan@mail.nextronai.com", "Furqaan@MAIL.NEXTRONAI.COM"],
+)
+def test_the_brand_domain_and_its_subdomains_are_refused_after_consent(address: str) -> None:
+    assert identity_problem(address, address, "prod", []) is ConnectFailure.BRAND_DOMAIN
+    assert identity_problem(address, address, "dev", ALLOWED) is ConnectFailure.BRAND_DOMAIN
+
+
+@pytest.mark.parametrize("address", ["sales@nextron-mail.com", "sales+cold@nextron-mail.com"])
+def test_a_role_address_is_refused_after_consent_with_or_without_a_tag(address: str) -> None:
+    assert identity_problem(address, address, "prod", []) is ConnectFailure.ROLE_ADDRESS
+
+
+def test_the_identity_check_order_is_account_then_brand_then_role_then_allowlist() -> None:
+    assert (
+        identity_problem("team@nextronai.com", "other@nextronai.com", "dev", [])
+        is ConnectFailure.DIFFERENT_ACCOUNT
+    )
+    assert identity_problem("team@nextronai.com", "team@nextronai.com", "dev", []) is (
+        ConnectFailure.BRAND_DOMAIN
+    )
+    assert identity_problem("info@x-mail.com", "info@x-mail.com", "dev", []) is (
+        ConnectFailure.ROLE_ADDRESS
+    )
+
+
+@pytest.mark.parametrize("env", ["dev", "test"])
+def test_outside_prod_an_address_off_the_allowlist_is_refused(env: str) -> None:
+    assert identity_problem(REQUESTED, REQUESTED, env, []) is ConnectFailure.NOT_ALLOWLISTED
+    assert identity_problem(REQUESTED, REQUESTED, env, ALLOWED) is None
+
+
+def test_identity_problem_takes_a_str_requested_address() -> None:
+    with pytest.raises(TypeError):
+        identity_problem(None, REQUESTED, "prod", [])  # type: ignore[arg-type]
+
+
+def test_every_connect_failure_has_a_message_and_the_spec_texts() -> None:
+    assert set(CONNECT_MESSAGES) == set(ConnectFailure)
+    assert isinstance(CONNECT_MESSAGES, MappingProxyType)
+    assert CONNECT_MESSAGES[ConnectFailure.DIFFERENT_ACCOUNT] == "Signed in as a different account"
+    assert CONNECT_MESSAGES[ConnectFailure.BRAND_DOMAIN] == (
+        "Sending Inboxes can't be on nextronai.com"
+    )
+    assert CONNECT_MESSAGES[ConnectFailure.ROLE_ADDRESS] == "Role addresses can't send"
+    assert CONNECT_MESSAGES[ConnectFailure.GATE_OFF] == (
+        "Connecting inboxes waits for the Gmail spike (Story 6.1) to confirm the Internal "
+        "OAuth app"
+    )
+    for failure in (
+        ConnectFailure.TIMED_OUT,
+        ConnectFailure.STATE_MISMATCH,
+        ConnectFailure.STORE_FAILED,
+    ):
+        assert CONNECT_MESSAGES[failure].startswith("Consent failed")
+
+
+def test_connect_refused_carries_its_failure_and_never_the_address() -> None:
+    refused = ConnectRefused(ConnectFailure.ROLE_ADDRESS)
+    assert isinstance(refused, DomainError)
+    assert refused.code == "connect_refused"
+    assert refused.failure is ConnectFailure.ROLE_ADDRESS
+    assert str(refused) == "Role addresses can't send"
+    for failure in ConnectFailure:
+        assert REQUESTED not in CONNECT_MESSAGES[failure]
+
+
+def test_each_registration_refusal_maps_onto_its_connect_failure() -> None:
+    assert {refusal: connect_failure(refusal) for refusal in Refusal} == {
+        Refusal.INVALID_ADDRESS: ConnectFailure.INVALID_ADDRESS,
+        Refusal.INVALID_LABEL: ConnectFailure.INVALID_LABEL,
+        Refusal.BRAND_DOMAIN: ConnectFailure.BRAND_DOMAIN,
+        Refusal.ROLE_ADDRESS: ConnectFailure.ROLE_ADDRESS,
+        Refusal.NOT_ALLOWLISTED: ConnectFailure.NOT_ALLOWLISTED,
+        Refusal.ALREADY_REGISTERED: ConnectFailure.ALREADY_CONNECTED,
+        Refusal.SENDER_NAME_UNSET: ConnectFailure.SENDER_NAME_UNSET,
+    }
+
+
+def test_the_auth_failed_alert_holds_the_inbox_id_only() -> None:
+    inbox_id = "01JD3QZ8X5V9K2M7N4P6R8T0E1"
+    assert INBOX_AUTH_FAILED == "inbox_auth_failed"
+    text = auth_failed_text(inbox_id)
+    assert inbox_id in text and "@" not in text

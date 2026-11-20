@@ -34,4 +34,8 @@ entries and a count of the malformed ones; ``nextron.adapters.unsubscribe`` impl
 the place ID be stored for good and the coordinates for 30 days; the rest never reaches a store,
 a log or a prompt. ``nextron.adapters.places`` implements it (``GooglePlaces``, metered by SKU,
 and the no-request ``OfflinePlaces``).
+
+``GmailPort`` (``gmail``, Story 6.2) reads a Sending Inbox's Gmail profile under its own
+``gmail.modify`` grant: ``get_profile(access_token)`` returns the account's ``emailAddress``;
+``nextron.adapters.gmail`` implements it with ``google-api-python-client``, metered.
 """

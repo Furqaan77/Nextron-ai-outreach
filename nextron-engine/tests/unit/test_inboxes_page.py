@@ -57,7 +57,7 @@ PANEL_FORM = {
     "hx-swap": "outerHTML",
     "hx-sync": "this:drop",  # a double click doesn't queue a second POST
 }
-HEADINGS = ["Label", "Address", "Sending Domain", "Status"]
+HEADINGS = ["Label", "Address", "Sending Domain", "Status", "Connected", "Gmail"]
 
 
 class Panel(HTMLParser):
@@ -233,7 +233,7 @@ def test_with_no_inboxes_the_page_says_so_and_offers_the_form(
     assert "<title>Nextron: Sending Inboxes</title>" in reply.text
     assert "No Sending Inboxes registered yet." in panel.paragraphs
     assert panel.rows == [] and panel.notices == [] and panel.warnings == []
-    [(attrs, inputs)] = panel.forms
+    [(attrs, inputs)] = panel.forms  # no inbox, so no row Connect form
     assert attrs == PANEL_FORM
     assert [field.get("name") for field in inputs] == ["csrf_token", "address", "label"]
     assert inputs[0] == {"type": "hidden", "name": "csrf_token", "value": session[1]}
@@ -251,8 +251,15 @@ def test_the_page_lists_the_inboxes_with_the_connecting_note(
 
     assert panel.rows == [
         HEADINGS,
-        ["Main", FIRST, "nextron-ai.com", f"connecting {CONNECTING_NOTE}"],
-        ["Second", "mac@nextron-ai.com", "nextron-ai.com", f"connecting {CONNECTING_NOTE}"],
+        ["Main", FIRST, "nextron-ai.com", f"connecting {CONNECTING_NOTE}", "", "Connect"],
+        [
+            "Second",
+            "mac@nextron-ai.com",
+            "nextron-ai.com",
+            f"connecting {CONNECTING_NOTE}",
+            "",
+            "Connect",
+        ],
     ]
     assert panel.warnings == []
     assert "No Sending Inboxes registered yet." not in panel.paragraphs
@@ -274,7 +281,7 @@ def test_an_active_inbox_has_no_connecting_note_and_a_removed_one_is_not_listed(
 
     panel = panel_of(get(ready, session[0]))
 
-    assert panel.rows == [HEADINGS, ["Main", FIRST, "nextron-ai.com", "active"]]
+    assert panel.rows == [HEADINGS, ["Main", FIRST, "nextron-ai.com", "active", "", ""]]
 
 
 def test_the_page_needs_a_session(dashboard: Dashboard) -> None:
@@ -293,7 +300,14 @@ def test_a_registration_says_so_and_clears_the_form(
     assert "<title>" not in reply.text  # the panel alone, swapped in by HTMX
     assert panel.notices == [("status", "Inbox registered.")]
     assert panel.value("address") == "" and panel.value("label") == ""
-    assert panel.rows[1] == ["Main", FIRST, "nextron-ai.com", f"connecting {CONNECTING_NOTE}"]
+    assert panel.rows[1] == [
+        "Main",
+        FIRST,
+        "nextron-ai.com",
+        f"connecting {CONNECTING_NOTE}",
+        "",
+        "Connect",
+    ]
     assert stored(units) == [(FIRST, "Main", "connecting")]
 
 
@@ -380,8 +394,8 @@ def test_a_removed_inbox_is_left_out_of_the_crowding_count(
         [(domain_id,)] = connection.exec_driver_sql("SELECT id FROM sending_domains").all()
         connection.exec_driver_sql(
             "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
-            "status, created_at) VALUES (?, ?, 'Gone', ?, ?, 'removed', ?)",
-            (new_id(), FIRST, domain_id, SENDER, "2026-11-17T09:00:00.000000Z"),
+            "status, created_at, status_changed_at) VALUES (?, ?, 'Gone', ?, ?, 'removed', ?, ?)",
+            (new_id(), FIRST, domain_id, SENDER, *["2026-11-17T09:00:00.000000Z"] * 2),
         )
         connection.commit()
 
@@ -469,7 +483,7 @@ def test_a_hostile_label_renders_as_escaped_text(
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in reply.text
     # only the forms' own: the panel's, the inbox's warm-up (Story 6.4) and the domain's
     # Recheck (Story 6.5)
-    assert reply.text.count('hx-post="') == 3
+    assert reply.text.count('hx-post="') == 5  # with Connect inbox and the row's Connect
     assert panel_of(reply).rows[1][0] == hostile
 
 
@@ -527,7 +541,10 @@ def test_build_app_builds_sending_on_its_clock_and_environment(
     main.build_app(load_bootstrap(), units=FakeUnits())
 
     [clock] = clocks
-    assert given == [(clock, {"env": "test"})]
+    [(given_clock, kwargs)] = given
+    assert given_clock is clock
+    assert kwargs["env"] == "test"
+    assert set(kwargs) == {"env", "domain_checks", "notify"}  # Story 6.2: connect needs both
 
 
 # Sending Domain authentication (Story 6.5) ------------------------------------------------------
@@ -920,8 +937,9 @@ def test_a_hostile_stored_domain_renders_as_escaped_text(
         )
         connection.exec_driver_sql(
             "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
-            "status, created_at) VALUES (?, 'a@b.example', 'Main', ?, 'F', 'active', ?)",
-            (new_id(), stored_id, "2026-11-17T09:00:00.000000Z"),
+            "status, created_at, status_changed_at) "
+            "VALUES (?, 'a@b.example', 'Main', ?, 'F', 'active', ?, ?)",
+            (new_id(), stored_id, *["2026-11-17T09:00:00.000000Z"] * 2),
         )
         connection.commit()
 
@@ -1228,3 +1246,311 @@ def panel_of_text(text: str) -> Panel:
     found = Panel(text)
     assert found.panels == 1
     return found
+
+
+# Connecting through Gmail OAuth (Story 6.2) ---------------------------------------------------
+
+CONNECT = "/inboxes/connect"
+RECONNECT = "/inboxes/reconnect"
+CONNECT_BUTTON = {"type": "submit", "hx-post": CONNECT}
+
+
+class ConnectStatus(HTMLParser):
+    """The ``#inbox-connect-status`` div: its attributes and its notices (role and text)."""
+
+    def __init__(self, html: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.attrs: list[dict[str, str | None]] = []
+        self.notices: list[tuple[str | None, str]] = []
+        self._inside = False
+        self._role: str | None = None
+        self._text: list[str] | None = None
+        self.feed(html)
+        self.close()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        found = dict(attrs)
+        if tag == "div" and found.get("id") == "inbox-connect-status":
+            self.attrs.append(found)
+            self._inside = True
+        elif self._inside and tag == "p" and "notice" in (found.get("class") or "").split():
+            self._role, self._text = found.get("role"), []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "p" and self._text is not None:
+            self.notices.append((self._role, " ".join("".join(self._text).split())))
+            self._text = None
+        elif tag == "div" and self._inside:
+            self._inside = False
+
+    def handle_data(self, data: str) -> None:
+        if self._text is not None:
+            self._text.append(data)
+
+
+@pytest.fixture
+def gated(ready: Dashboard, units: UnitOfWorkFactory) -> Dashboard:
+    """``ready`` with the OQ-A2 gate on and the Desktop client imported."""
+    from nextron.domain.google_oauth import CLIENT_SECRET_NAME, ClientConfig, encode_client_config
+    from tests.fakes.google_oauth import CLIENT_ID
+
+    with units.open():
+        Setup(ready.clock).save({"gmail_internal_app_confirmed": "true"})
+    ready.secrets.write(
+        CLIENT_SECRET_NAME, encode_client_config(ClientConfig(CLIENT_ID, "GOCSPX-secret"))
+    )
+    return ready
+
+
+def connect(
+    dashboard: Dashboard, session: tuple[bytes, str], address: str = FIRST, label: str = "Main"
+) -> Reply:
+    cookie, token = session
+    reply = dashboard.post(
+        CONNECT,
+        cookie=cookie,
+        token=token,
+        headers=[(b"content-type", FORM)],
+        body=form(csrf_token=token, address=address, label=label),
+    )
+    assert reply.status == 200, reply
+    assert reply.header(b"cache-control") == b"no-store"
+    return reply
+
+
+def test_the_form_has_a_connect_inbox_button(
+    dashboard: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = get(dashboard, session[0])
+
+    assert '<button type="submit" hx-post="/inboxes/connect">Connect inbox</button>' in reply.text
+    [status] = ConnectStatus(reply.text).attrs
+    assert status == {"id": "inbox-connect-status"}  # nothing waits: no polling
+
+
+def test_connect_inbox_starts_one_flow_and_the_panel_polls_while_it_waits(
+    gated: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    reply = connect(gated, session)
+
+    assert len(gated.browser.urls) == 1 and len(gated.listeners) == 1 and len(gated.jobs) == 1
+    status = ConnectStatus(reply.text)
+    assert status.attrs == [
+        {
+            "id": "inbox-connect-status",
+            "hx-get": CONNECT,
+            "hx-trigger": "every 2s",
+            "hx-swap": "outerHTML",
+        }
+    ]
+    [(role, text)] = status.notices
+    assert role == "status" and text.startswith(f"Waiting for Google sign-in for {FIRST}")
+    assert stored(units) == []  # nothing is stored before Google answers
+    polled = gated.get(CONNECT, cookie=session[0])
+    assert polled.status == 200 and polled.header(b"cache-control") == b"no-store"
+    assert ConnectStatus(polled.text).notices == status.notices
+    assert len(gated.listeners) == 1  # the GET started nothing
+
+
+def test_a_completed_connect_shows_connected_and_stops_polling(
+    gated: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from nextron.domain.sending_inbox import GMAIL_SCOPE
+    from nextron.ports.google_oauth import TokenSet
+
+    connect(gated, session)
+    state = parse_qs(urlsplit(gated.browser.urls[-1]).query)["state"][0]
+    gated.listeners[-1].answer = {"state": (state,), "code": ("4/code",)}
+    gated.oauth.exchanges.append(
+        TokenSet(access_token="ya29.a", expires_in=3599, scope=GMAIL_SCOPE, refresh_token="1//r")
+    )
+    gated.gmail.profiles["ya29.a"] = FIRST
+    gated.run_jobs()
+
+    polled = gated.get(CONNECT, cookie=session[0])
+    status = ConnectStatus(polled.text)
+    assert status.attrs == [{"id": "inbox-connect-status"}]
+    assert status.notices == [
+        ("status", f"Connected {FIRST}. Reload the page to see its status.")
+    ]
+    assert stored(units) == [(FIRST, "Main", "active")]
+    panel = panel_of(get(gated, session[0]))
+    assert panel.rows[1][3:] == ["active", "2026-11-17 09:00 UTC", ""]
+
+
+def test_a_refused_connect_shows_its_message_keeps_the_values_and_starts_nothing(
+    gated: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    reply = connect(gated, session, "sales@nextron-ai.com", "Team")
+
+    assert ConnectStatus(reply.text).notices == [("alert", "Role addresses can't send")]
+    panel = panel_of(reply)
+    assert panel.value("address") == "sales@nextron-ai.com" and panel.value("label") == "Team"
+    assert gated.browser.urls == [] and gated.listeners == [] and stored(units) == []
+
+
+def test_with_the_gate_off_connect_inbox_is_refused(
+    ready: Dashboard, session: tuple[bytes, str]
+) -> None:
+    reply = connect(ready, session)
+
+    assert ConnectStatus(reply.text).notices == [
+        (
+            "alert",
+            "Connecting inboxes waits for the Gmail spike (Story 6.1) to confirm the Internal "
+            "OAuth app",
+        )
+    ]
+    assert ready.browser.urls == [] and ready.listeners == []
+
+
+def test_a_connecting_row_reconnects_through_its_own_form(
+    gated: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory
+) -> None:
+    register(gated, session, FIRST, "Main")
+    panel = panel_of(get(gated, session[0]))
+    [(attrs, inputs)] = [entry for entry in panel.forms if entry[0].get("hx-post") == RECONNECT]
+    assert attrs["method"] == "post" and attrs["hx-target"] == "#inboxes-panel"
+    inbox_id = inbox_id_of(units)
+    assert [field.get("name") for field in inputs] == ["csrf_token", "inbox_id"]
+    assert inputs[1]["value"] == inbox_id
+
+    cookie, token = session
+    reply = gated.post(
+        RECONNECT,
+        cookie=cookie,
+        token=token,
+        headers=[(b"content-type", FORM)],
+        body=form(csrf_token=token, inbox_id=inbox_id),
+    )
+
+    assert reply.status == 200
+    assert len(gated.listeners) == 1
+    assert ConnectStatus(reply.text).notices[0][1].startswith("Waiting for Google sign-in")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"inbox_id": "not-a-ulid"},
+        {"inbox_id": "01JD3QZ8X5V9K2M7N4P6R8T0E1", "address": "x@y.com"},
+        {},
+    ],
+)
+def test_a_malformed_reconnect_is_refused_with_400(
+    gated: Dashboard, session: tuple[bytes, str], body: dict[str, str]
+) -> None:
+    cookie, token = session
+    reply = gated.post(
+        RECONNECT,
+        cookie=cookie,
+        token=token,
+        headers=[(b"content-type", FORM)],
+        body=form(csrf_token=token, **body),
+    )
+
+    assert reply.status == 400 and reply.body == MALFORMED
+    assert gated.listeners == []
+
+
+@pytest.mark.parametrize("path", [CONNECT, RECONNECT])
+def test_a_connect_post_without_the_csrf_token_is_refused_with_403(
+    gated: Dashboard, session: tuple[bytes, str], path: str
+) -> None:
+    reply = gated.post(
+        path,
+        cookie=session[0],
+        headers=[(b"content-type", FORM)],
+        body=form(address=FIRST, label="Main"),
+    )
+
+    assert reply.status == 403 and reply.body == REFUSED
+    assert gated.listeners == [] and gated.browser.urls == []
+
+
+def test_no_get_route_starts_a_flow(gated: Dashboard, session: tuple[bytes, str]) -> None:
+    for path in (PAGE, CONNECT, "/inboxes/auth"):
+        gated.get(path, cookie=session[0])
+    assert gated.listeners == [] and gated.browser.urls == []
+    reply = gated.get(RECONNECT, cookie=session[0])
+    assert reply.status in (404, 405)  # POST only
+    assert gated.listeners == []
+
+def test_an_auth_failed_row_reconnects_and_a_paused_row_shows_its_cause(
+    ready: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    from nextron.db import eventlog
+    from nextron.db.uow import current, use_case
+
+    register(ready, session, FIRST, "Main")
+    register(ready, session, "mac@nextron-ai.com", "Second")
+    failed_id = inbox_id_of(units)
+    paused_id = inbox_id_of(units, "mac@nextron-ai.com")
+    with db_engine.connect() as connection:
+        connection.exec_driver_sql(
+            "UPDATE sending_inboxes SET status = 'auth_failed' WHERE label = 'Main'"
+        )
+        connection.exec_driver_sql(
+            "UPDATE sending_inboxes SET status = 'paused' WHERE label = 'Second'"
+        )
+        connection.commit()
+
+    @use_case
+    def paused_by_operator() -> None:
+        with current().transaction():
+            eventlog.append(
+                entity="sending_inboxes",
+                entity_id=paused_id,
+                from_status="active",
+                to_status="paused",
+                cause="operator",
+                cause_ref=None,
+                actor="operator",
+                at=T,
+            )
+
+    with units.open():
+        paused_by_operator()
+
+    panel = panel_of(get(ready, session[0]))
+
+    by_label = {row[0]: row for row in panel.rows[1:]}
+    assert by_label["Main"][3:] == ["auth_failed", "", "Reconnect"]
+    assert by_label["Second"][3:] == ["paused (operator)", "", ""]
+    [(attrs, inputs)] = [entry for entry in panel.forms if entry[0].get("hx-post") == RECONNECT]
+    assert attrs["method"] == "post"
+    assert [(field.get("name"), field.get("value")) for field in inputs][1:] == [
+        ("inbox_id", failed_id)
+    ]
+
+
+def test_the_connect_notices_for_a_failed_revoke_and_a_pause_at_once() -> None:
+    from nextron.app.sending.connect import ConnectOutcome, Revocation
+    from nextron.app.sending.connect import ConnectStatus as Status
+    from nextron.domain.sending_inbox import ConnectFailure, PauseCause
+    from nextron.web.inboxes_page import connect_view
+
+    failed = connect_view(
+        Status(
+            None,
+            None,
+            ConnectOutcome(
+                FIRST, ConnectFailure.DIFFERENT_ACCOUNT, revocation=Revocation.FAILED
+            ),
+        )
+    )
+    assert failed.notice is not None and failed.notice.role == "alert"
+    assert failed.notice.text == (
+        "Signed in as a different account The new grant couldn't be revoked; remove Nextron's "
+        "access at myaccount.google.com."
+    )
+    assert failed.notice.text.endswith("remove Nextron's access at myaccount.google.com.")
+    paused = connect_view(
+        Status(None, None, ConnectOutcome(FIRST, None, new_id(), PauseCause.BLOCKLIST))
+    )
+    assert paused.notice is not None and paused.reload
+    assert paused.notice.text == (
+        f"Connected {FIRST}; it was paused at once (blocklist). Reload the page to see its status."
+    )

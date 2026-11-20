@@ -22,6 +22,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
+from sqlalchemy import Engine
 
 from nextron.app.ops.api import DeadJobAlerts, Heartbeat, OffpcOutcome, Recovery, TakenBackup
 from nextron.db.repos.ops.snapshot import Snapshot
@@ -366,6 +367,8 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "Other",
         "Readiness (nextron doctor)",
         "13 ok, 0 warn, 0 fail",
+        "Sending Inboxes",  # Story 6.2
+        "No Sending Inboxes registered yet.",
     ]
     assert panel.tables == [*NEVER_RUN, READINESS_TABLE]
     assert panel.forms == [
@@ -380,6 +383,7 @@ def test_a_fresh_engine_shows_each_section_in_order(
         "health-errors-heading",
         "health-runs-heading",
         "health-readiness-heading",
+        "health-inboxes-heading",  # Story 6.2
     ]
 
 
@@ -422,6 +426,8 @@ def test_a_running_worker_its_last_success_and_a_dead_job_with_its_dismiss_form(
         "Other",
         "Readiness (nextron doctor)",
         "13 ok, 0 warn, 0 fail",
+        "Sending Inboxes",  # Story 6.2
+        "No Sending Inboxes registered yet.",
     ]
     assert panel.tables[:6] == [
         NEVER_RUN[0],
@@ -516,7 +522,7 @@ def test_the_readiness_list_counts_warnings_and_failures(
         ["fail", "required_settings", "required settings not set: <x>"],
         ["warn", "database_revision", "will migrate on next start"],
     ]
-    assert panel.texts[-1] == "9 ok, 1 warn, 1 fail"
+    assert panel.texts[-3] == "9 ok, 1 warn, 1 fail"  # then the Sending Inboxes section
 
 
 def test_a_hostile_last_error_renders_as_escaped_text(
@@ -1359,6 +1365,7 @@ def test_while_recovery_mode_is_on_the_section_lists_the_steps(
         "health-errors-heading",
         "health-runs-heading",
         "health-readiness-heading",
+        "health-inboxes-heading",  # Story 6.2
     ]
 
 
@@ -1395,3 +1402,72 @@ def test_a_hostile_source_name_renders_as_escaped_text(
 
     assert "<img src=x" not in reply.text
     assert "&lt;img src=x onerror=alert(1)&gt;.db" in reply.text
+
+
+# Sending Inboxes (Story 6.2) -------------------------------------------------------------------
+
+
+def test_seeded_inboxes_render_by_label_with_status_cause_and_connection(
+    dashboard: Dashboard, session: tuple[bytes, str], units: UnitOfWorkFactory, db_engine: Engine
+) -> None:
+    from nextron.db import eventlog
+
+    domain = "01JD3QZ8X5V9K2M7N4P6R8T0D0"
+    stamp = "2026-11-17T08:00:00.000000Z"
+    rows = [  # id, address, label, status, connected_at; oldest first
+        (SUBJECTS[0], "a@nextron-mail.com", "Active one", "active", stamp),
+        (SUBJECTS[1], "b@nextron-mail.com", "Paused one", "paused", stamp),
+        (SUBJECTS[2], "c@nextron-mail.com", "Failed one", "auth_failed", stamp),
+        (SUBJECTS[3], "d@nextron-mail.com", "New one", "connecting", None),
+    ]
+    with db_engine.connect() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO sending_domains (id, domain, created_at) VALUES (?, ?, ?)",
+            (domain, "nextron-mail.com", stamp),
+        )
+        for minute, (inbox_id, address, label, status, connected) in enumerate(rows):
+            created = f"2026-11-17T07:0{minute}:00.000000Z"
+            connection.exec_driver_sql(
+                "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
+                "status, created_at, status_changed_at, connected_at) "
+                "VALUES (?, ?, ?, ?, 'Furqaan Ahmed', ?, ?, ?, ?)",
+                (inbox_id, address, label, domain, status, created, created, connected),
+            )
+        connection.commit()
+
+    @use_case
+    def paused_by_operator() -> None:
+        with current().transaction():
+            eventlog.append(
+                entity="sending_inboxes",
+                entity_id=SUBJECTS[1],
+                from_status="active",
+                to_status="paused",
+                cause="operator",
+                cause_ref=None,
+                actor="operator",
+                at=T,
+            )
+
+    with units.open():
+        paused_by_operator()
+
+    reply = get(dashboard, PAGE, session[0])
+    panel = Panel(reply.text)
+
+    assert panel.tables[-1] == [
+        ["Inbox", "Status", "Last connected"],
+        ["Active one", "active", "2026-11-17 08:00:00 UTC"],
+        ["Paused one", "paused (operator)", "2026-11-17 08:00:00 UTC"],
+        ["Failed one", "auth_failed", "2026-11-17 08:00:00 UTC"],
+        ["New one", "connecting", "not connected"],
+    ]
+    assert "@nextron-mail.com" not in reply.text  # labels, never addresses
+    attention = [
+        attrs.get("class")
+        for tag, attrs in Texts(reply.text).tags
+        if tag == "tr" and "health-inbox" in (attrs.get("class") or "")
+    ]
+    assert attention == ["health-inbox-attention"] * 2  # the paused and auth_failed rows
+    assert '<tr class="health-inbox-attention"><td>Paused one</td>' in reply.text
+    assert '<tr class="health-inbox-attention"><td>Failed one</td>' in reply.text

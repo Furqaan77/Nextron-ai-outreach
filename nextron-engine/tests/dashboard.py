@@ -80,6 +80,12 @@ postmaster=postmaster, notify=notify)`` on ``dns``, a ``FakeDns``, and ``postmas
 page's authentication section reads it and its Recheck queues through it, and the job types'
 ``check_domains`` calls it. The health-issue registry reads the Sending Domains on the
 dashboard's clock.
+
+Its ``Sending`` also gets ``domain_checks`` and ``notify`` (Story 6.2), and its
+``InboxConnections`` (``inbox_connections``) uses the same secrets, clock, ``oauth``, ``listen``,
+``browser`` and ``start`` (``jobs.append``) as ``google``, with ``gmail`` (a ``FakeGmail``
+unless a test passes one) and the dashboard's units of work; the Sending Inboxes panel's
+Connect and Reconnect start its flows, and ``run_jobs()`` completes them.
 """
 
 import json
@@ -119,6 +125,7 @@ from nextron.app.scoring.lead_scores import LeadScores
 from nextron.app.sequencing.api import Sequencing
 from nextron.app.sending.api import Sending
 from nextron.app.sending.checks import DomainChecks
+from nextron.app.sending.connect import InboxConnections
 from nextron.app.setup.api import Campaigns, Credentials, GoogleAccess, Setup
 from nextron.db.repos.ops.snapshot import CopyInspection, Snapshot, inspect_copy
 from nextron.domain.ai import RouteSpec
@@ -141,6 +148,7 @@ from tests.fakes.clock import FrozenClock
 from tests.fakes.dns import FakeDns
 from tests.fakes.email_finder import ScriptedDomainSearch, ScriptedFinder
 from tests.fakes.email_syntax import FakeEmailSyntax
+from tests.fakes.gmail import FakeGmail
 from tests.fakes.google_oauth import FakeClientFiles, FakeConsentListener, FakeGoogleOAuth
 from tests.fakes.llm import ScriptedLlm
 from tests.fakes.postmaster import FakePostmaster
@@ -319,6 +327,7 @@ class Dashboard:
     email_syntax: EmailSyntaxPort = field(default_factory=FakeEmailSyntax)
     dns: DnsPort = field(default_factory=FakeDns)
     postmaster: PostmasterPort = field(default_factory=FakePostmaster)
+    gmail: FakeGmail = field(default_factory=FakeGmail)
     ai_content: Callable[
         [], tuple[Sequence[PromptFile], Sequence[RouteSpec], PlaybookSnapshot | PlaybookProblem]
     ] = shipped_ai_content
@@ -342,6 +351,7 @@ class Dashboard:
     restore_tests: RestoreTests = field(init=False)
     lead_imports: LeadImports = field(init=False)
     sending: Sending = field(init=False)
+    inbox_connections: InboxConnections = field(init=False)
     domain_checks: DomainChecks = field(init=False)
     compliance: Compliance = field(init=False)
     research: Research = field(init=False)
@@ -413,9 +423,23 @@ class Dashboard:
             notify=self.notify,
             queue=self.queue,
         )
-        self.sending = Sending(self.clock, env=self.env)
         self.domain_checks = DomainChecks(
             self.clock, self.dns, self.queue, postmaster=self.postmaster, notify=self.notify
+        )
+        self.sending = Sending(
+            self.clock, env=self.env, domain_checks=self.domain_checks, notify=self.notify
+        )
+        self.inbox_connections = InboxConnections(
+            self.secrets,
+            self.clock,
+            oauth=self.oauth,
+            listen=self.listen,
+            browser=self.browser,
+            gmail=self.gmail,
+            env=self.env,
+            sending=self.sending,
+            open_unit=self.units.open,
+            start=self.jobs.append,
         )
         self.compliance = Compliance(self.clock)
         meter = self.meter if self.meter is not None else InMemoryUsageMeter(self.clock)
@@ -472,6 +496,7 @@ class Dashboard:
             restore_tests=self.restore_tests,
             lead_imports=self.lead_imports,
             sending=self.sending,
+            inbox_connections=self.inbox_connections,
             lead_signals=LeadSignals(self.clock),
             compliance=self.compliance,
             primary_contacts=self.primary_contacts,

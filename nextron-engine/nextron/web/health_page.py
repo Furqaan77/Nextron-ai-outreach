@@ -60,21 +60,29 @@ In order, the panel shows:
 7. **Last successful runs**: one table per job group (Job type, Last success), "never" for a
    type that has not succeeded;
 8. **Readiness (nextron doctor)**: a table (Status, Check, Message) and "<n> ok, <n> warn, <n>
-   fail".
+   fail";
+9. **Sending Inboxes** (Story 6.2): a table (Inbox, Status, Last connected) of every listed
+   inbox by its label, oldest first: the status with its pause cause (``paused
+   (blocklist)``) and the last connection time or "not connected"; a ``paused`` or
+   ``auth_failed`` row gets the ``health-inbox-attention`` class. With none: "No Sending
+   Inboxes registered yet.". Last sync arrives with Story 6.8.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
 from nextron.app.ops.api import HealthReport, Worker
 from nextron.app.queries.ops import BackupRow, RecoveryRow, RestoreTestRow
+from nextron.app.queries.sending import SendingInboxView
 from nextron.domain.alert import JOB_DEAD
 from nextron.domain.backup import BackupKind, BackupStatus, OffpcStatus
 from nextron.domain.ids import is_ulid
 from nextron.domain.readiness import tally
 from nextron.domain.recovery import RecoveryMode
 from nextron.domain.restore_test import CheckOutcome, RestoreCheck, RestoreResult, RestoreTestKind
+from nextron.domain.sending_inbox import InboxStatus
 from nextron.web.csrf import CSRF_FIELD
 from nextron.web.forms import REPEATED_FIELD, WRONG_FIELDS, FormFields, MalformedForm
 
@@ -91,6 +99,8 @@ BACKUP_ALREADY_QUEUED: Final = "A backup is already queued or running."
 NO_RESTORE_TEST: Final = "No restore test yet."
 RESTORE_TEST_QUEUED: Final = "Restore test queued; its result shows here when it finishes."
 RESTORE_TEST_ALREADY_QUEUED: Final = "A restore test is already queued or running."
+NO_INBOXES: Final = "No Sending Inboxes registered yet."
+NOT_CONNECTED: Final = "not connected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,11 +230,39 @@ def recovery_steps(recovery: RecoveryRow | None) -> list[StepRow]:
     return [StepRow(step.label, status.label) for step, status in recovery.steps]
 
 
+@dataclass(frozen=True, slots=True)
+class InboxStatusRow:
+    """One Sending Inbox in the health panel's status list (Story 6.2)."""
+
+    label: str
+    status: str
+    connected: str
+    attention: bool  # paused or auth_failed
+
+
+def inbox_status_rows(inboxes: Iterable[SendingInboxView]) -> list[InboxStatusRow]:
+    """Each listed inbox's label, status (with its pause cause) and last connection."""
+    rows = []
+    for inbox in inboxes:
+        status = str(inbox.status)
+        if inbox.status is InboxStatus.PAUSED and inbox.pause_cause is not None:
+            status = f"{status} ({inbox.pause_cause})"
+        connected = NOT_CONNECTED if inbox.connected_at is None else shown_time(inbox.connected_at)
+        attention = inbox.status in (InboxStatus.PAUSED, InboxStatus.AUTH_FAILED)
+        rows.append(InboxStatusRow(inbox.label, status, connected, attention))
+    return rows
+
+
 def panel_context(
-    report: HealthReport, *, notice: str | None = None, restore_notice: str | None = None
+    report: HealthReport,
+    *,
+    notice: str | None = None,
+    restore_notice: str | None = None,
+    inboxes: Iterable[SendingInboxView] = (),
 ) -> dict[str, object]:
     """What ``health_panel.html`` renders for ``report``, with the "Back up now" ``notice``
-    and the "Run restore test now" ``restore_notice`` when there is one."""
+    and the "Run restore test now" ``restore_notice`` when there is one, and the Sending Inbox
+    status list from ``inboxes`` (Story 6.2)."""
     issues = [
         IssueItem(issue.text, issue.detail, issue.subject if issue.kind == JOB_DEAD else None)
         for issue in report.issues
@@ -265,6 +303,8 @@ def panel_context(
         "groups": groups,
         "readiness": readiness,
         "readiness_counts": f"{ok} ok, {warn} warn, {fail} fail",
+        "inbox_rows": inbox_status_rows(inboxes),
+        "no_inboxes": NO_INBOXES,
     }
 
 

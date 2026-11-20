@@ -285,6 +285,36 @@ def test_the_postmaster_url_asks_for_its_scope() -> None:
     )
 
 
+def test_the_scope_only_url_asks_for_exactly_its_scope_with_the_same_parameters() -> None:
+    gmail = "https://www.googleapis.com/auth/gmail.modify"
+    url = g.authorization_url_for_scope(
+        CLIENT_ID, gmail, "http://127.0.0.1:53682/", "the-state", "the-challenge"
+    )
+
+    parts = urlsplit(url)
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == g.AUTH_URI
+    assert parse_qsl(parts.query, keep_blank_values=True, strict_parsing=True) == [
+        ("response_type", "code"),
+        ("client_id", CLIENT_ID),
+        ("redirect_uri", "http://127.0.0.1:53682/"),
+        ("scope", gmail),  # no openid email: the address comes from users.getProfile
+        ("state", "the-state"),
+        ("code_challenge", "the-challenge"),
+        ("code_challenge_method", "S256"),
+        ("access_type", "offline"),
+        ("prompt", "select_account consent"),
+    ]
+    assert "openid" not in url and "include_granted_scopes" not in url
+
+
+def test_has_scope_finds_one_scope_among_the_granted_ones() -> None:
+    gmail = "https://www.googleapis.com/auth/gmail.modify"
+    assert g.has_scope(f"openid {gmail}", gmail)
+    assert not g.has_scope("https://www.googleapis.com/auth/gmail.readonly", gmail)
+    assert not g.has_scope(f"{gmail}x", gmail)
+    assert not g.has_scope(None, gmail)
+
+
 # The ID token -----------------------------------------------------------------------------------
 
 

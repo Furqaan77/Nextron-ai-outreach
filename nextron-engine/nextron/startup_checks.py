@@ -103,6 +103,13 @@ The doctor checks here, in the order ``doctor`` runs them:
   key (``nextron.domain.unsub_token.parse_key``) or can't be read, naming each such keyring
   entry, or when the two are the same key (Cloudflare would then hold the decryption key);
   otherwise it is ``ok``.
+- ``sending_inbox_grants`` (Story 6.2, AD-12, OQ-A2): runs last. It reads the
+  ``gmail_internal_app_confirmed`` setting and the inboxes neither ``removed`` nor
+  ``connecting`` (the database), then each inbox's grant (``check_sending_inbox_grants``):
+  ``warn`` while the setting is false or Google can't be reached, ``fail`` naming each inbox
+  id whose grant is missing, refused or for another account, ``ok`` otherwise. ``doctor``
+  refreshes each grant and reads its Gmail profile; the health panel reads Credential Manager
+  only.
 """
 
 import hmac
@@ -114,7 +121,7 @@ import sqlite3
 import sys
 import time
 import zoneinfo
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePath
 from typing import Any, Final
@@ -586,6 +593,88 @@ def check_internal_notify_grant(
         INTERNAL_NOTIFY_GRANT,
         Status.OK,
         f"{grant} is granted and Google refreshed its access token",
+    )
+
+
+SENDING_INBOX_GRANTS: Final = "sending_inbox_grants"
+GATE_SETTING: Final = "gmail_internal_app_confirmed"
+INBOX_GRANT_UNREACHABLE: Final = "unreachable"  # a problem that only warns
+INBOX_GRANT_FIX: Final = "reconnect each one on the Sending Inboxes page"
+
+
+def check_sending_inbox_grants(
+    confirmed: Callable[[], bool],
+    inboxes: Callable[[], Sequence[tuple[str, str]]],
+    check: Callable[[str], str | None] | None,
+    *,
+    network: bool,
+) -> CheckResult:
+    """Story 6.2's ``sending_inbox_grants``: each connected inbox's Gmail grant.
+
+    ``confirmed`` reads the ``gmail_internal_app_confirmed`` setting and ``inboxes`` the
+    ``(inbox id, address)`` of every inbox neither ``removed`` nor ``connecting`` (both the
+    database, read first); ``check(address)`` is the grant's problem code or ``None``
+    (``InboxConnections.check_grant``: Credential Manager only, or with ``network`` a refresh and
+    a profile read too). ``warn`` while the setting is false (OQ-A2, Spike 6.1) or when Google
+    can't be reached (``unreachable``); ``fail`` naming each inbox id and its problem; ``ok``
+    otherwise. No message holds an address."""
+    try:
+        gate = confirmed()
+        listed = tuple(inboxes())
+    except Exception as exc:  # noqa: BLE001 - a read failure fails the check, not a crash
+        return CheckResult(
+            SENDING_INBOX_GRANTS,
+            Status.FAIL,
+            f"the Sending Inboxes could not be read ({type(exc).__name__})",
+        )
+    if not gate:
+        return CheckResult(
+            SENDING_INBOX_GRANTS,
+            Status.WARN,
+            f"{GATE_SETTING} is false: connecting Sending Inboxes waits for the Gmail spike "
+            "(Story 6.1, OQ-A2); set it on the Settings page once the Internal OAuth app is "
+            "confirmed",
+        )
+    if not listed:
+        return CheckResult(SENDING_INBOX_GRANTS, Status.OK, "no Sending Inbox is connected")
+    if check is None:
+        return CheckResult(
+            SENDING_INBOX_GRANTS, Status.WARN, "the inbox grants can't be checked here"
+        )
+    problems: list[str] = []
+    unreachable: list[str] = []
+    for inbox_id, address in listed:
+        try:
+            problem = check(address)
+        except Exception as exc:  # noqa: BLE001 - one inbox's crash is that inbox's problem
+            problem = f"check crashed ({type(exc).__name__})"
+        if problem == INBOX_GRANT_UNREACHABLE:
+            unreachable.append(inbox_id)
+        elif problem is not None:
+            problems.append(f"{inbox_id}: {problem}")
+    if problems:
+        return CheckResult(
+            SENDING_INBOX_GRANTS,
+            Status.FAIL,
+            f"Sending Inbox grants: {'; '.join(problems)}; {INBOX_GRANT_FIX}",
+        )
+    if unreachable:
+        return CheckResult(
+            SENDING_INBOX_GRANTS,
+            Status.WARN,
+            f"Google could not be reached for {', '.join(unreachable)}; run doctor again later",
+        )
+    if not network:
+        return CheckResult(
+            SENDING_INBOX_GRANTS,
+            Status.OK,
+            f"{len(listed)} Sending Inbox grant(s) stored; the health panel doesn't refresh "
+            "them (nextron doctor does)",
+        )
+    return CheckResult(
+        SENDING_INBOX_GRANTS,
+        Status.OK,
+        f"{len(listed)} Sending Inbox grant(s) refreshed and each Gmail profile matches",
     )
 
 

@@ -3,7 +3,7 @@
 Other services and the delivery layers change ``sending`` data only through this module (AD-3).
 Commands join the caller's unit of work and never begin, commit or roll back.
 
-``Sending(clock, *, env, gap_source=None)`` owns the ``sending_domains`` and ``sending_inboxes``
+``Sending(clock, *, env, gap_source=None, domain_checks=None, notify=None)`` owns the ``sending_domains`` and ``sending_inboxes``
 tables and the SendingInbox machine (``nextron.domain.sending_inbox``). ``env`` is the engine's
 environment: outside ``prod`` only allowlisted test inboxes can be registered (AD-14).
 
@@ -82,17 +82,54 @@ draw itself is ``sending_policy.draw_gap``'s. No planned send slot is stored: on
   0, which ``pick_dispatch`` turns into no pick (fail closed). A naive ``now`` raises
   ``ValueError``.
 
-This service registers inboxes, records their warm-up and paces their cold sends: the Gmail
-connection, pause, resume and remove commands arrive with later Epic 6 stories, and enrollment
+**Connecting through Gmail OAuth (Story 6.2, FR-32, AD-4, AD-12).** ``Sending`` takes
+``domain_checks`` (``DomainChecks``: its ``queue_check`` command) and ``notify`` (``Notify``:
+its ``alert`` command); ``nextron.app.sending.connect.InboxConnections`` runs the consent flow
+and the identity check, then calls these in a unit of work of its own:
+
+- ``@use_case connect_inbox(address, label, *, now) -> ConnectedInbox(inbox_id,
+  sending_domain_id, created, from_status, paused, check_queued)``: ``check_address`` and
+  ``check_label`` (``label`` may be ``None`` for a registered inbox) first, as
+  ``ConnectRefused`` with their connect failure; then one transaction, in order: the allowlist
+  outside ``prod`` (``not_allowlisted``); ``from_name`` from the Sender's name
+  (``sender_name_unset``); the inbox by address, registered as ``register_inbox`` does (its
+  ``registered`` event, actor ``operator``) when there is none (``invalid_label`` without a
+  label); its status: ``connecting`` moves by ``connect`` (cause ``connected``),
+  ``auth_failed`` by ``reconsent`` (``reconsented``), ``active`` and ``paused`` are
+  ``already_connected``, ``removed`` ``inbox_removed``; the move is fenced on the status read
+  (``repos.sending.inboxes.mark_connected``: status, ``status_changed_at`` and ``connected_at``
+  both ``now``, ``from_name``; a miss is ``store_failed``) with one ``events`` row (actor
+  ``operator``); ``domain_checks.queue_check(sending_domain_id)``; and when the domain's newest
+  check (``repos.sending.checks.newest``) has a DNSBL ``listed`` outcome, or else a spam rate
+  status ``pause``, the inbox moves on to ``paused`` with that cause (``blocklist`` or
+  ``spam_rate``, ``cause_ref`` the check's id, actor ``system:sending``); else, for an
+  ``auth_failed`` inbox that was ``paused`` before its grant failed (the newest ``auth_fail``
+  event's ``from_status``), it moves on to ``paused`` again with its newest pause event's cause
+  (any cause, e.g. ``operator``; actor ``system:sending``, no ``cause_ref``); that cause is
+  ``ConnectedInbox.paused``. Any refusal rolls the
+  whole transaction back. It logs ``sending_inbox_connected`` with ids only.
+- ``@use_case mark_auth_failed(inbox_id) -> bool``: one transaction; an ``active`` or
+  ``paused`` inbox moves by ``auth_fail`` to ``auth_failed`` (cause ``invalid_grant``, fenced,
+  ``status_changed_at`` set) with one ``events`` row (actor ``system:sending``) and one
+  ``inbox_auth_failed`` alert (subject the event's id; Telegram and dashboard; the inbox's id
+  only); any other status, an unknown id or one that isn't a ULID returns ``False`` and changes
+  nothing. It logs ``sending_inbox_auth_failed`` (``inbox_id``).
+
+``repos.sending.inboxes.set_status`` also sets ``status_changed_at`` (Story 6.6's pauses pass
+their time).
+
+This service registers and connects inboxes, records their warm-up and paces their cold sends:
+the pause, resume and remove commands arrive with Story 6.3, and enrollment
 (Story 4.8) binds a Sequence to one of ``queries.sending.inboxes_for_binding()``. Nothing here
 sends email or runs warm-up exchanges.
 """
 
 import logging
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Final
+from typing import Final, Protocol
 
 from nextron.app.queries import ops as ops_queries
 from nextron.app.queries import replies as replies_queries
@@ -100,23 +137,35 @@ from nextron.app.queries import sending as sending_queries
 from nextron.app.queries import setup as setup_queries
 from nextron.app.queries.sending import InboxCapView
 from nextron.db import eventlog
+from nextron.db.repos.sending import checks as checks_repo
 from nextron.db.repos.sending import domains as domains_repo
 from nextron.db.repos.sending import inboxes as inboxes_repo
 from nextron.db.uow import command, current, use_case
+from nextron.domain.alert import Channel
 from nextron.domain.ids import is_ulid
+from nextron.domain.reputation import SpamStatus, ZoneOutcome, decode_dnsbl, overall
 from nextron.domain.sending_inbox import (
     CREATION,
+    INBOX_AUTH_FAILED,
+    PAUSE_EVENTS,
+    ConnectFailure,
+    ConnectRefused,
     InboxAddress,
+    InboxEvent,
     InboxRefused,
     InboxStatus,
+    PauseCause,
     Refusal,
     WarmupRecord,
     WarmupRefusal,
     WarmupRefused,
     allowlist_refusal,
+    auth_failed_text,
     check_address,
     check_label,
     check_warmup,
+    connect_failure,
+    transition,
 )
 from nextron.domain.sending_policy import (
     GapSource,
@@ -137,8 +186,48 @@ WARMUP_RECORDED: Final = "sending_warmup_recorded"
 WARMUP_REFUSED: Final = "sending_warmup_refused"
 COLD_SENDS_REPACED: Final = "cold_sends_repaced"
 FALLBACK_TIMEZONE: Final = "UTC"
+SYSTEM_ACTOR: Final = "system:sending"
+INBOX_CONNECTED: Final = "sending_inbox_connected"
+INBOX_AUTH_FAILED_LOG: Final = "sending_inbox_auth_failed"
+ALERT_CHANNELS: Final = (Channel.TELEGRAM, Channel.DASHBOARD)
+# What connecting does from each status: the machine's event, or the refusal.
+CONNECT_EVENTS: Final = {
+    InboxStatus.CONNECTING: InboxEvent.CONNECT,
+    InboxStatus.AUTH_FAILED: InboxEvent.RECONSENT,
+}
+CONNECT_REFUSALS: Final = {
+    InboxStatus.ACTIVE: ConnectFailure.ALREADY_CONNECTED,
+    InboxStatus.PAUSED: ConnectFailure.ALREADY_CONNECTED,
+    InboxStatus.REMOVED: ConnectFailure.INBOX_REMOVED,
+}
 
 log = logging.getLogger(__name__)
+
+
+class QueueCheck(Protocol):
+    """What connecting needs of ``DomainChecks``: its ``queue_check`` command."""
+
+    def queue_check(self, sending_domain_id: str) -> bool: ...
+
+
+class Alerts(Protocol):
+    """What ``mark_auth_failed`` needs of the ``notify`` service."""
+
+    def alert(self, kind: str, subject: str, text: str, channels: Iterable[Channel]) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectedInbox:
+    """A connected inbox: its id and Sending Domain, whether it was created by this connect, the
+    status it came from, and the pause cause if it was paused at once (its domain's newest
+    check, or the pause it had before its grant failed)."""
+
+    inbox_id: str
+    sending_domain_id: str
+    created: bool
+    from_status: InboxStatus
+    paused: PauseCause | None
+    check_queued: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,10 +252,20 @@ class InboxCaps:
 class Sending:
     """Sending Inboxes and their Sending Domains; see the module docstring."""
 
-    def __init__(self, clock: Clock, *, env: str, gap_source: GapSource | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        *,
+        env: str,
+        gap_source: GapSource | None = None,
+        domain_checks: QueueCheck | None = None,
+        notify: Alerts | None = None,
+    ) -> None:
         self._clock = clock
         self._env = env
         self._gaps: GapSource = random.SystemRandom() if gap_source is None else gap_source
+        self._domain_checks = domain_checks
+        self._notify = notify
         self.process_started_at: Final[datetime] = clock.now()
 
     @use_case
@@ -238,6 +337,177 @@ class Sending:
             return tuple(setup_queries.get(Key.SINK_ALLOWLIST))
         except InvalidSettingValue:
             return ()
+
+    # Connecting through Gmail OAuth (Story 6.2) -------------------------------------------------
+
+    @use_case
+    def connect_inbox(self, address: str, label: str | None, *, now: datetime) -> ConnectedInbox:
+        """Record a verified Gmail connection of ``address``; see the module docstring."""
+        checks = self._domain_checks
+        if checks is None:
+            raise RuntimeError("Sending was built without domain_checks; it can't connect")
+        try:
+            checked = check_address(address)
+            shown_label = None if label is None else check_label(label)
+        except InboxRefused as refused:
+            raise ConnectRefused(connect_failure(refused.refusal)) from None
+        with current().transaction():
+            connected = self._connect(checked, shown_label, now, checks)
+        log.info(
+            INBOX_CONNECTED,
+            extra={
+                "inbox_id": connected.inbox_id,
+                "sending_domain_id": connected.sending_domain_id,
+                "created": connected.created,
+                "from_status": str(connected.from_status),
+                "paused": None if connected.paused is None else str(connected.paused),
+            },
+        )
+        return connected
+
+    def _connect(
+        self, checked: InboxAddress, label: str | None, now: datetime, checks: QueueCheck
+    ) -> ConnectedInbox:
+        allowlist = self._allowlist() if sink_applies(self._env) else ()
+        refusal = allowlist_refusal(checked.address, self._env, allowlist)
+        if refusal is not None:
+            raise ConnectRefused(connect_failure(refusal))
+        try:
+            from_name = str(setup_queries.get(Key.SENDER_NAME))
+        except (SettingNotSet, InvalidSettingValue):
+            raise ConnectRefused(ConnectFailure.SENDER_NAME_UNSET) from None
+        inbox_id = inboxes_repo.id_by_address(checked.address)
+        created = inbox_id is None
+        if inbox_id is None:
+            if label is None:
+                raise ConnectRefused(ConnectFailure.INVALID_LABEL)
+            try:
+                inbox_id = self._register(checked, label).inbox_id
+            except InboxRefused as refused:
+                raise ConnectRefused(connect_failure(refused.refusal)) from None
+        stored = inboxes_repo.by_id(inbox_id)
+        if stored is None:
+            raise ConnectRefused(ConnectFailure.UNKNOWN_INBOX)
+        status = InboxStatus(stored.status)
+        if status in CONNECT_REFUSALS:
+            raise ConnectRefused(CONNECT_REFUSALS[status])
+        moved = transition(status, CONNECT_EVENTS[status])
+        if not inboxes_repo.mark_connected(
+            inbox_id, from_status=status, to_status=moved.to, at=now, from_name=from_name
+        ):
+            raise ConnectRefused(ConnectFailure.STORE_FAILED)  # changed meanwhile
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=inbox_id,
+            from_status=str(status),
+            to_status=str(moved.to),
+            cause=str(moved.cause),
+            cause_ref=None,
+            actor=ACTOR,
+            at=now,
+        )
+        check_queued = checks.queue_check(stored.sending_domain_id)
+        paused = self._repause(inbox_id, stored.sending_domain_id, now)
+        if paused is None and status is InboxStatus.AUTH_FAILED:
+            paused = self._restore_pause(inbox_id, now)
+        return ConnectedInbox(
+            inbox_id, stored.sending_domain_id, created, status, paused, check_queued
+        )
+
+    @staticmethod
+    def _repause(inbox_id: str, sending_domain_id: str, now: datetime) -> PauseCause | None:
+        """Pause the just-connected inbox when its domain's newest check pauses (a DNSBL
+        listing first, then a spam rate ``pause``); the cause, or ``None``."""
+        newest = checks_repo.newest(sending_domain_id)
+        if newest is None:
+            return None
+        cause: PauseCause | None = None
+        if (
+            newest.dnsbl_result is not None
+            and overall(decode_dnsbl(newest.dnsbl_result).values()) is ZoneOutcome.LISTED
+        ):
+            cause = PauseCause.BLOCKLIST
+        elif newest.spam_rate_status == SpamStatus.PAUSE:
+            cause = PauseCause.SPAM_RATE
+        if cause is None:
+            return None
+        moved = transition(InboxStatus.ACTIVE, PAUSE_EVENTS[cause])
+        if not inboxes_repo.set_status(
+            inbox_id, from_status=InboxStatus.ACTIVE, to_status=moved.to, at=now
+        ):
+            return None
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=inbox_id,
+            from_status=str(InboxStatus.ACTIVE),
+            to_status=str(moved.to),
+            cause=str(moved.cause),
+            cause_ref=newest.id,
+            actor=SYSTEM_ACTOR,
+            at=now,
+        )
+        return cause
+
+    @staticmethod
+    def _restore_pause(inbox_id: str, now: datetime) -> PauseCause | None:
+        """Pause the just-reconsented inbox again when it was ``paused`` before its grant failed
+        (the newest ``auth_fail`` event's ``from_status``), with its newest pause cause; the
+        cause, or ``None``."""
+        failed = inboxes_repo.newest_event_into(inbox_id, InboxStatus.AUTH_FAILED)
+        if failed is None or failed[0] != InboxStatus.PAUSED:
+            return None
+        newest = inboxes_repo.newest_event_into(inbox_id, InboxStatus.PAUSED)
+        if newest is None or newest[1] not in PauseCause:
+            return None
+        cause = PauseCause(newest[1])
+        moved = transition(InboxStatus.ACTIVE, PAUSE_EVENTS[cause])
+        if not inboxes_repo.set_status(
+            inbox_id, from_status=InboxStatus.ACTIVE, to_status=moved.to, at=now
+        ):
+            return None
+        eventlog.append(
+            entity=ENTITY,
+            entity_id=inbox_id,
+            from_status=str(InboxStatus.ACTIVE),
+            to_status=str(moved.to),
+            cause=str(moved.cause),
+            cause_ref=None,
+            actor=SYSTEM_ACTOR,
+            at=now,
+        )
+        return cause
+
+    @use_case
+    def mark_auth_failed(self, inbox_id: str) -> bool:
+        """Move an ``active`` or ``paused`` inbox to ``auth_failed`` (Google answered
+        ``invalid_grant``); see the module docstring."""
+        notify = self._notify
+        if notify is None:
+            raise RuntimeError("Sending was built without notify; it can't mark auth_failed")
+        with current().transaction():
+            status = inboxes_repo.status_of(inbox_id) if is_ulid(inbox_id) else None
+            if status not in (InboxStatus.ACTIVE, InboxStatus.PAUSED):
+                return False
+            current_status = InboxStatus(status)
+            moved = transition(current_status, InboxEvent.AUTH_FAIL)
+            now = self._clock.now()
+            if not inboxes_repo.set_status(
+                inbox_id, from_status=current_status, to_status=moved.to, at=now
+            ):
+                return False
+            event_id = eventlog.append(
+                entity=ENTITY,
+                entity_id=inbox_id,
+                from_status=str(current_status),
+                to_status=str(moved.to),
+                cause=str(moved.cause),
+                cause_ref=None,
+                actor=SYSTEM_ACTOR,
+                at=now,
+            )
+            notify.alert(INBOX_AUTH_FAILED, event_id, auth_failed_text(inbox_id), ALERT_CHANNELS)
+        log.warning(INBOX_AUTH_FAILED_LOG, extra={"inbox_id": inbox_id})
+        return True
 
     # Warm-up (Story 6.4) ----------------------------------------------------------------------
 

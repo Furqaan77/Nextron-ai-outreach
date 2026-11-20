@@ -60,6 +60,22 @@ Every refusal raises ``InboxRefused`` (code ``inbox_refused``) with ``.refusal``
 ``Refusal``); its message is exactly ``REFUSAL_MESSAGES[refusal]``, and no message ever holds
 the address or the label. A non-``str`` argument raises ``TypeError``.
 
+**Connecting (Story 6.2, FR-32, AD-12, AD-14).** An inbox connects through Gmail OAuth with
+``GMAIL_SCOPE`` (``gmail.modify``) only; its refresh token lives in keyring at
+``gmail_secret_name(address)`` (``gmail/<address>``).
+
+- ``ConnectFailure`` names every way a connect stores nothing; ``ConnectRefused`` (code
+  ``connect_refused``, ``.failure``) carries one, its message exactly
+  ``CONNECT_MESSAGES[failure]`` (never an address, a label or a token). The generic consent
+  failures start with ``CONSENT_FAILED`` ("Consent failed"); ``gate_off`` is the OQ-A2 gate's
+  text. ``connect_failure(refusal)`` maps a registration ``Refusal`` onto its connect failure
+  (``already_registered`` is ``already_connected``).
+- ``identity_problem(requested, profile, env, allowlist)``, after the token exchange, in
+  order: ``different_account`` unless ``profile`` is ``requested`` after ASCII lowercasing
+  (``google_oauth.same_account``); ``check_address(profile)``'s ``invalid_address``,
+  ``brand_domain`` (nextronai.com or a subdomain) or ``role_address`` (``+tag`` ignored); then
+  ``not_allowlisted`` outside ``prod`` (``allowlist_refusal``); else ``None``.
+
 **Warm-up (Story 6.4, FR-33, FR-34).** ``check_warmup(started_on, method, warm_level,
 tool_daily, ramp_step, ramp_target, *, today) -> WarmupRecord`` reads the warm-up form's six
 texts (each stripped) into typed values, with the ranges of ``nextron.domain.sending_policy``:
@@ -94,6 +110,7 @@ from typing import Final
 
 from nextron.domain import identity
 from nextron.domain.errors import DomainError
+from nextron.domain.google_oauth import same_account
 from nextron.domain.machines import IllegalTransition, Transition
 from nextron.domain.sending_policy import (
     RAMP_STEP_RANGE,
@@ -357,6 +374,162 @@ def crowding_warning(domain: str) -> str:
     return (
         f"More than {MAX_INBOXES_PER_DOMAIN} inboxes on {domain} raises deliverability risk"
     )
+
+
+# Connecting through Gmail OAuth (Story 6.2) ------------------------------------------------------
+
+GMAIL_SCOPE: Final = "https://www.googleapis.com/auth/gmail.modify"
+GMAIL_SECRET_PREFIX: Final = "gmail/"
+
+
+def gmail_secret_name(address: str) -> str:
+    """The keyring entry holding the refresh token of the inbox ``address``: ``gmail/<address>``
+    (AD-12)."""
+    return GMAIL_SECRET_PREFIX + _require_str(address, "gmail_secret_name")
+
+
+class ConnectFailure(StrEnum):
+    """Why connecting a Sending Inbox through Gmail OAuth stored nothing."""
+
+    GATE_OFF = "gate_off"
+    INVALID_ADDRESS = "invalid_address"
+    INVALID_LABEL = "invalid_label"
+    BRAND_DOMAIN = "brand_domain"
+    ROLE_ADDRESS = "role_address"
+    NOT_ALLOWLISTED = "not_allowlisted"
+    SENDER_NAME_UNSET = "sender_name_unset"
+    CLIENT_NOT_IMPORTED = "client_not_imported"
+    UNKNOWN_INBOX = "unknown_inbox"
+    INBOX_REMOVED = "inbox_removed"
+    ALREADY_CONNECTED = "already_connected"
+    TIMED_OUT = "timed_out"
+    STATE_MISMATCH = "state_mismatch"
+    DECLINED = "declined"
+    EXCHANGE_FAILED = "exchange_failed"
+    SCOPE_NOT_GRANTED = "scope_not_granted"
+    NO_REFRESH_TOKEN = "no_refresh_token"
+    TOKEN_TOO_LONG = "token_too_long"
+    PROFILE_FAILED = "profile_failed"
+    DIFFERENT_ACCOUNT = "different_account"
+    STORE_FAILED = "store_failed"
+    BROWSER_FAILED = "browser_failed"
+    LISTENER_FAILED = "listener_failed"
+    CRASHED = "crashed"
+
+
+CONSENT_FAILED: Final = "Consent failed"
+GATE_OFF_MESSAGE: Final = (
+    "Connecting inboxes waits for the Gmail spike (Story 6.1) to confirm the Internal OAuth app"
+)
+
+CONNECT_MESSAGES: Final[Mapping[ConnectFailure, str]] = MappingProxyType(
+    {
+        ConnectFailure.GATE_OFF: GATE_OFF_MESSAGE,
+        ConnectFailure.INVALID_ADDRESS: REFUSAL_MESSAGES[Refusal.INVALID_ADDRESS],
+        ConnectFailure.INVALID_LABEL: REFUSAL_MESSAGES[Refusal.INVALID_LABEL],
+        ConnectFailure.BRAND_DOMAIN: "Sending Inboxes can't be on nextronai.com",
+        ConnectFailure.ROLE_ADDRESS: "Role addresses can't send",
+        ConnectFailure.NOT_ALLOWLISTED: (
+            "Outside prod, only allowlisted test inboxes can be connected"
+        ),
+        ConnectFailure.SENDER_NAME_UNSET: REFUSAL_MESSAGES[Refusal.SENDER_NAME_UNSET],
+        ConnectFailure.CLIENT_NOT_IMPORTED: (
+            "Import the Google Desktop client on the Credentials page first"
+        ),
+        ConnectFailure.UNKNOWN_INBOX: "That inbox isn't registered",
+        ConnectFailure.INBOX_REMOVED: "That inbox has been removed",
+        ConnectFailure.ALREADY_CONNECTED: "That inbox is already connected",
+        ConnectFailure.TIMED_OUT: f"{CONSENT_FAILED}: no answer from Google within 5 minutes",
+        ConnectFailure.STATE_MISMATCH: (
+            f"{CONSENT_FAILED}: the answer didn't match this request"
+        ),
+        ConnectFailure.DECLINED: f"{CONSENT_FAILED}: access was declined",
+        ConnectFailure.EXCHANGE_FAILED: f"{CONSENT_FAILED}: Google refused the sign-in",
+        ConnectFailure.SCOPE_NOT_GRANTED: (
+            f"{CONSENT_FAILED}: Gmail access (gmail.modify) wasn't granted"
+        ),
+        ConnectFailure.NO_REFRESH_TOKEN: f"{CONSENT_FAILED}: Google returned no refresh token",
+        ConnectFailure.TOKEN_TOO_LONG: (
+            f"{CONSENT_FAILED}: the refresh token is too long for Credential Manager"
+        ),
+        ConnectFailure.PROFILE_FAILED: (
+            f"{CONSENT_FAILED}: the Gmail profile couldn't be read"
+        ),
+        ConnectFailure.DIFFERENT_ACCOUNT: "Signed in as a different account",
+        ConnectFailure.STORE_FAILED: f"{CONSENT_FAILED}: the connection couldn't be saved",
+        ConnectFailure.BROWSER_FAILED: f"{CONSENT_FAILED}: the browser couldn't be opened",
+        ConnectFailure.LISTENER_FAILED: (
+            f"{CONSENT_FAILED}: the local sign-in listener couldn't start"
+        ),
+        ConnectFailure.CRASHED: f"{CONSENT_FAILED}: an unexpected error",
+    }
+)
+
+# A registration refusal and the connect failure it is when connecting.
+_REFUSAL_FAILURES: Final[Mapping[Refusal, ConnectFailure]] = MappingProxyType(
+    {
+        Refusal.INVALID_ADDRESS: ConnectFailure.INVALID_ADDRESS,
+        Refusal.INVALID_LABEL: ConnectFailure.INVALID_LABEL,
+        Refusal.BRAND_DOMAIN: ConnectFailure.BRAND_DOMAIN,
+        Refusal.ROLE_ADDRESS: ConnectFailure.ROLE_ADDRESS,
+        Refusal.NOT_ALLOWLISTED: ConnectFailure.NOT_ALLOWLISTED,
+        Refusal.SENDER_NAME_UNSET: ConnectFailure.SENDER_NAME_UNSET,
+        Refusal.ALREADY_REGISTERED: ConnectFailure.ALREADY_CONNECTED,
+    }
+)
+
+
+def connect_failure(refusal: Refusal) -> ConnectFailure:
+    """The connect failure a registration ``refusal`` is."""
+    return _REFUSAL_FAILURES[Refusal(refusal)]
+
+
+class ConnectRefused(DomainError):
+    """A connect that can't start or finish; the message is ``CONNECT_MESSAGES[failure]`` and
+    never holds the address, the label or a token."""
+
+    code = "connect_refused"
+
+    def __init__(self, failure: ConnectFailure) -> None:
+        failure = ConnectFailure(failure)
+        super().__init__(CONNECT_MESSAGES[failure])
+        self.failure = failure
+
+
+INBOX_AUTH_FAILED: Final = "inbox_auth_failed"  # the ops alert's kind and the health issue's
+INBOX_PAUSED: Final = "inbox_paused"  # the health issue's kind
+RECONNECT_HINT: Final = "Reconnect it on the Sending Inboxes page; it sends nothing until then."
+RESUME_HINT: Final = (
+    "It sends nothing while paused. Fix the cause; a Resume button comes with Story 6.3."
+)
+
+
+def auth_failed_text(inbox_id: str) -> str:
+    """The ``inbox_auth_failed`` ops alert: the inbox's id only (AD-15)."""
+    return (
+        f"Sending Inbox {_require_str(inbox_id, 'auth_failed_text')} lost its Gmail grant "
+        "(invalid_grant); reconnect it on the Sending Inboxes page"
+    )
+
+
+def identity_problem(
+    requested: str, profile: object, env: str, allowlist: Iterable[object]
+) -> ConnectFailure | None:
+    """Why the Gmail profile address ``profile`` can't connect as the requested inbox
+    ``requested`` in ``env``, or ``None``. In order: ``different_account`` unless the two are the
+    same address after ASCII lowercasing (``google_oauth.same_account``); then
+    ``check_address(profile)``'s refusal as ``invalid_address``, ``brand_domain`` (nextronai.com
+    or a subdomain) or ``role_address`` (``+tag`` ignored); then ``not_allowlisted`` outside
+    ``prod`` when the address isn't on ``allowlist`` (AD-14)."""
+    _require_str(requested, "identity_problem")
+    if not isinstance(profile, str) or not same_account(requested, profile):
+        return ConnectFailure.DIFFERENT_ACCOUNT
+    try:
+        checked = check_address(profile)
+    except InboxRefused as refused:
+        return connect_failure(refused.refusal)
+    refusal = allowlist_refusal(checked.address, env, allowlist)
+    return None if refusal is None else connect_failure(refusal)
 
 
 # Warm-up (Story 6.4) ----------------------------------------------------------------------------

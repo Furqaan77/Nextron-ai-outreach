@@ -542,6 +542,7 @@ DOCTOR_IDS = [
     "required_settings",
     "database_revision",
     "unsub_token_keys",
+    "sending_inbox_grants",  # Story 6.2
 ]
 REFRESH_TOKEN = "1//stored-refresh-token"
 
@@ -748,6 +749,69 @@ def test_the_built_health_panel_runs_doctor_in_the_engine_without_a_side_effect(
             "unsubscribe token keys of key id 1: unsub/k_tok/1 is not set; unsub/k_edge/1 is "
             "not set; enter them in Unsubscribe token keys on the Credentials page",
         )
+    finally:
+        units.engine.dispose()
+
+
+def test_with_the_gate_on_the_built_panel_checks_inbox_grants_without_google_or_gmail() -> None:
+    """Story 6.2: in the engine, ``sending_inbox_grants`` reads only Credential Manager for each
+    connected inbox; no refresh and no Gmail profile read."""
+    from tests.fakes.gmail import FakeGmail
+
+    config = load_bootstrap()
+    config.data_dir.mkdir(parents=True)
+    units, _ = main.open_database(config)
+    try:
+        clock, secrets = FrozenClock(T), InMemorySecrets("test")
+        oauth, gmail = FakeGoogleOAuth(), FakeGmail(profiles={"ya29.fake-access": "x@y.com"})
+        address = "furqaan@nextron-mail.com"
+        secrets.write(
+            CLIENT_SECRET_NAME,
+            encode_client_config(ClientConfig(CLIENT_ID, "Cs4Vq8Lp2Xz6Nw1Rt5Hy")),
+        )
+        secrets.write(f"gmail/{address}", REFRESH_TOKEN)
+        with units.open():
+            Setup(clock).save({"gmail_internal_app_confirmed": "true"})
+        stamp = "2026-11-17T09:00:00.000000Z"
+        domain = "01JD3QZ8X5V9K2M7N4P6R8T0D0"
+        raw_query(
+            units,
+            "INSERT INTO sending_domains (id, domain, created_at) VALUES (?, ?, ?)",
+            (domain, "nextron-mail.com", stamp),
+        )
+        raw_query(
+            units,
+            "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
+            "status, created_at, status_changed_at, connected_at) "
+            "VALUES (?, ?, 'Main', ?, 'Furqaan Ahmed', 'active', ?, ?, ?)",
+            ("01JD3QZ8X5V9K2M7N4P6R8T0E1", address, domain, stamp, stamp, stamp),
+        )
+        app = main.build_app(
+            config,
+            units=units,
+            secrets=secrets,
+            clock=clock,
+            google_oauth=oauth,
+            gmail=gmail,
+            probes=fake_probes(port=PortProbe()),
+        )
+        code = main.build_entry(config, secrets=secrets, clock=clock).issue_code()
+        host = f"127.0.0.1:{config.port}".encode()
+        entered = request(app, "/enter", query=b"t=" + code.encode(), headers=[(b"host", host)])
+        cookie = entered.header(b"set-cookie")
+        assert entered.status == 303 and cookie is not None
+
+        reply = request(
+            app, "/health/panel", headers=[(b"host", host), (b"cookie", cookie.split(b";")[0])]
+        )
+
+        assert reply.status == 200
+        page = Rows(reply.text)
+        statuses = {row[1]: row[0] for row in page.rows if len(row) == 3 and row[1] in DOCTOR_IDS}
+        assert statuses["sending_inbox_grants"] == "ok"
+        assert ["Main", "active", "2026-11-17 09:00:00 UTC"] in page.rows  # the inbox table
+        assert oauth.calls == [] and gmail.calls == []  # no refresh, no profile read
+        assert address not in reply.text
     finally:
         units.engine.dispose()
 

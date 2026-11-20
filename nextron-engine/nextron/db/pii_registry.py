@@ -372,6 +372,10 @@ PII: Final[dict[str, dict[str, PiiClass]]] = {
         # Story 6.11: the inbox's cold-send pacing (two times), about Nextron's own inbox.
         "next_send_at": PiiClass.NONE,
         "last_sent_at": PiiClass.NONE,
+        # Story 6.2: when the inbox's status last changed and when it was last connected
+        # through Gmail OAuth (two times), about Nextron's own inbox.
+        "status_changed_at": PiiClass.NONE,
+        "connected_at": PiiClass.NONE,
     },
     # Story 6.5. A Sending Domain's DNS authentication results: IDs, flags, reason codes and a
     # time, about Nextron's own domains.

@@ -5,9 +5,13 @@ Import rule: ``nextron.domain`` and ``nextron.db.repos.sending``, plus one read 
 
 The inbox reads return ``SendingInboxView(id, address, label, sending_domain_id, domain,
 from_name, status, created_at, warmup_started_on, warmup_method, warm_level, warmup_tool_daily,
-ramp_step, ramp_target, next_send_at, last_sent_at)`` tuples, oldest first (by ``created_at``,
-then ``id``); ``.plan`` is the inbox's ``sending_policy.WarmupPlan``, and ``next_send_at`` and
-``last_sent_at`` its cold-send pacing (Story 6.11, each ``None`` until set):
+ramp_step, ramp_target, next_send_at, last_sent_at, status_changed_at, connected_at,
+pause_cause)`` tuples, oldest first (by ``created_at``, then ``id``); ``.plan`` is the inbox's
+``sending_policy.WarmupPlan``, and ``next_send_at`` and ``last_sent_at`` its cold-send pacing
+(Story 6.11, each ``None`` until set). Story 6.2 adds ``status_changed_at``, ``connected_at``
+(``None`` until connected) and ``pause_cause``: for a ``paused`` inbox the cause of its newest
+``events`` row into ``paused`` (``repos.sending.inboxes.pause_causes``), else ``None``. Also
+``address_registered(address)``: whether an inbox at any status holds it.
 
 - ``inboxes()``: every Sending Inbox that isn't ``removed`` (the Sending Inboxes panel);
 - ``inboxes_for_binding()``: only the inboxes at a ``BINDABLE_STATUSES`` status (``connecting``
@@ -43,7 +47,11 @@ reported.
   isn't a listed Sending Domain (unknown, not a ULID, or every inbox removed). It is the send
   gate's read (Story 6.9): ``None`` means cold sends are blocked, so the gate fails closed.
   "Newest" is the last check recorded (``repos.sending.checks``), whatever its stamp.
-- ``health_issues(now, postmaster_grant_missing=None)``: one ``HealthIssue("domain_auth_failing",
+- ``health_issues(now, postmaster_grant_missing=None)``: first ``inbox_health_issues()`` (Story
+  6.2): one ``HealthIssue("inbox_paused", <inbox id>, "Sending Inbox <id> is paused
+  (<cause>)", detail=RESUME_HINT)`` per ``paused`` inbox and one ``inbox_auth_failed`` (detail
+  ``RECONNECT_HINT``) per ``auth_failed`` inbox, oldest first; then one
+  ``HealthIssue("domain_auth_failing",
   <id>, "<domain>: <verdict text>", detail=RECHECK_HINT)`` per listed Sending Domain whose
   verdict is blocked, by domain; then the reputation issues (Story 6.6), below.
 
@@ -117,7 +125,16 @@ from nextron.domain.reputation import (
     spam_rate_text,
     zones_with,
 )
-from nextron.domain.sending_inbox import BINDABLE_STATUSES, TERMINAL_STATUSES, InboxStatus
+from nextron.domain.sending_inbox import (
+    BINDABLE_STATUSES,
+    INBOX_AUTH_FAILED,
+    INBOX_PAUSED,
+    RECONNECT_HINT,
+    RESUME_HINT,
+    TERMINAL_STATUSES,
+    InboxStatus,
+    PauseCause,
+)
 from nextron.domain.sending_policy import WarmupPlan, cold_cap, daily_cap, tool_send_figure
 from nextron.domain.sending_policy import warmup_days as count_warmup_days
 from nextron.domain.settings_schema import InvalidSettingValue, Key
@@ -147,6 +164,9 @@ class SendingInboxView:
     ramp_target: int
     next_send_at: datetime | None = None
     last_sent_at: datetime | None = None
+    status_changed_at: datetime | None = None
+    connected_at: datetime | None = None
+    pause_cause: PauseCause | None = None
 
     @property
     def plan(self) -> WarmupPlan:
@@ -160,7 +180,19 @@ class SendingInboxView:
         )
 
 
-def _view(row: StoredInbox) -> SendingInboxView:
+def _pause_cause(text: str | None) -> PauseCause | None:
+    try:
+        return None if text is None else PauseCause(text)
+    except ValueError:
+        return None
+
+
+def _views(rows: list[StoredInbox]) -> tuple[SendingInboxView, ...]:
+    causes = inboxes_repo.pause_causes(row.id for row in rows if row.status == InboxStatus.PAUSED)
+    return tuple(_view(row, _pause_cause(causes.get(row.id))) for row in rows)
+
+
+def _view(row: StoredInbox, pause_cause: PauseCause | None = None) -> SendingInboxView:
     return SendingInboxView(
         id=row.id,
         address=row.address,
@@ -178,17 +210,53 @@ def _view(row: StoredInbox) -> SendingInboxView:
         ramp_target=row.ramp_target,
         next_send_at=row.next_send_at,
         last_sent_at=row.last_sent_at,
+        status_changed_at=row.status_changed_at,
+        connected_at=row.connected_at,
+        pause_cause=pause_cause,
     )
 
 
 def inboxes() -> tuple[SendingInboxView, ...]:
     """Every Sending Inbox that isn't ``removed``, oldest first."""
-    return tuple(_view(row) for row in inboxes_repo.listed(LISTED_STATUSES))
+    return _views(inboxes_repo.listed(LISTED_STATUSES))
 
 
 def inboxes_for_binding() -> tuple[SendingInboxView, ...]:
     """The Sending Inboxes a new Sequence may bind to (``BINDABLE_STATUSES``), oldest first."""
-    return tuple(_view(row) for row in inboxes_repo.listed(BINDABLE_STATUSES))
+    return _views(inboxes_repo.listed(BINDABLE_STATUSES))
+
+
+def address_registered(address: str) -> bool:
+    """Whether an inbox at any status, ``removed`` included, holds ``address`` (Story 6.2)."""
+    return inboxes_repo.id_by_address(address) is not None
+
+
+def inbox_health_issues() -> tuple[HealthIssue, ...]:
+    """One ``inbox_paused`` issue (with its pause cause) per ``paused`` inbox and one
+    ``inbox_auth_failed`` issue per ``auth_failed`` inbox, oldest first; inbox IDs only
+    (Story 6.2)."""
+    issues: list[HealthIssue] = []
+    for inbox in inboxes():
+        if inbox.status is InboxStatus.PAUSED:
+            cause = "unknown cause" if inbox.pause_cause is None else str(inbox.pause_cause)
+            issues.append(
+                HealthIssue(
+                    INBOX_PAUSED,
+                    inbox.id,
+                    f"Sending Inbox {inbox.id} is paused ({cause})",
+                    detail=RESUME_HINT,
+                )
+            )
+        elif inbox.status is InboxStatus.AUTH_FAILED:
+            issues.append(
+                HealthIssue(
+                    INBOX_AUTH_FAILED,
+                    inbox.id,
+                    f"Sending Inbox {inbox.id} lost its Gmail grant (invalid_grant)",
+                    detail=RECONNECT_HINT,
+                )
+            )
+    return tuple(issues)
 
 
 # Daily Caps (Story 6.4) -----------------------------------------------------------------------
@@ -389,10 +457,12 @@ def _reputation_issues(view: DomainAuthView) -> list[HealthIssue]:
 def health_issues(
     now: datetime, postmaster_grant_missing: Callable[[], bool] | None = None
 ) -> tuple[HealthIssue, ...]:
-    """One ``domain_auth_failing`` issue per listed Sending Domain whose cold sends are
-    blocked, by domain, then the reputation issues (see the module docstring)."""
+    """The inbox issues (``inbox_health_issues``), then one ``domain_auth_failing`` issue per
+    listed Sending Domain whose cold sends are blocked, by domain, then the reputation issues
+    (see the module docstring)."""
     views = domain_auths(now)
-    issues = [
+    issues = [*inbox_health_issues()]
+    issues += [
         HealthIssue(
             DOMAIN_AUTH_FAILING,
             view.sending_domain_id,

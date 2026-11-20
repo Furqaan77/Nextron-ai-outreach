@@ -136,8 +136,9 @@ class World:
         for address, status in inboxes:
             self.sql(
                 "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
-                "status, created_at) VALUES (?, ?, 'Main', ?, 'Furqaan Ahmed', ?, ?)",
-                (new_id(), address, domain_id, status, STAMP),
+                "status, created_at, status_changed_at) "
+                "VALUES (?, ?, 'Main', ?, 'Furqaan Ahmed', ?, ?, ?)",
+                (new_id(), address, domain_id, status, STAMP, STAMP),
             )
 
     def check(self, domain_id: str = DOMAIN_ID) -> Any:
@@ -644,7 +645,8 @@ def test_the_reads_list_only_listed_domains_sorted_by_domain(world: World) -> No
     assert world.auth(GONE_ID) is None
     assert world.auth(UNKNOWN_ID) is None
     assert world.auth("not-a-ulid") is None
-    assert [issue.subject for issue in world.issues()] == [DOMAIN_ID, OTHER_ID]
+    domain_issues = [issue for issue in world.issues() if issue.kind != "inbox_auth_failed"]
+    assert [issue.subject for issue in domain_issues] == [DOMAIN_ID, OTHER_ID]
 
 
 def test_the_page_read_uses_the_services_clock(listed: World) -> None:

@@ -153,6 +153,7 @@ def test_every_port_has_a_fake_that_satisfies_it() -> None:
         "DomainSearchPort",
         "EmailFinderPort",
         "EmailSyntaxPort",
+        "GmailPort",
         "GoogleOAuthPort",
         "JobBoardPort",
         "LlmPort",
@@ -438,6 +439,7 @@ def test_every_adapter_package_is_classified_once() -> None:
         "crypto",
         "dns",
         "email_syntax",
+        "gmail",
         "google_oauth",
         "hunter",
         "prospeo",
@@ -483,6 +485,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "crypto",
         "dns",
         "email_syntax",
+        "gmail",
         "google_oauth",
         "hunter",
         "prospeo",
@@ -493,7 +496,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "sink",
         "unsubscribe",
     )
-    for name in (*names, "telegram", "gmail"):
+    for name in (*names, "telegram", "mailbox"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "__init__.py").write_text("")
     (tmp_path / "ai" / "gateway.py").write_text("")
@@ -517,7 +520,8 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
         "nextron.adapters.sink": package_modules("nextron.adapters.sink"),
         "nextron.adapters.telegram": package_modules("nextron.adapters.telegram"),
         "nextron.adapters.unsubscribe": package_modules("nextron.adapters.unsubscribe"),
-        "nextron.adapters.gmail": [probe_module("nextron.adapters.gmail", "x = 1")],
+        "nextron.adapters.gmail": package_modules("nextron.adapters.gmail"),
+        "nextron.adapters.mailbox": [probe_module("nextron.adapters.mailbox", "x = 1")],
     }
     classified = {
         **ADAPTER_PACKAGES,
@@ -536,7 +540,7 @@ def test_the_classification_check_catches_probe_packages(tmp_path: Path) -> None
     )
 
     assert problems == [
-        "gmail is not classified",
+        "mailbox is not classified",
         "ai is not built yet but defines ['nextron.adapters.ai.route']",
         "ai is not built yet but holds ['__init__.py', 'gateway.py']",
         "clock gives no reason it reaches no external system",

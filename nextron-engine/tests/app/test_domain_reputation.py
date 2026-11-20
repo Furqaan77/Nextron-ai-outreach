@@ -122,8 +122,9 @@ class World:
             self.inboxes[address] = inbox_id
             self.sql(
                 "INSERT INTO sending_inboxes (id, address, label, sending_domain_id, from_name, "
-                "status, created_at) VALUES (?, ?, 'Main', ?, 'Furqaan Ahmed', ?, ?)",
-                (inbox_id, address, DOMAIN_ID, status, STAMP),
+                "status, created_at, status_changed_at) "
+                "VALUES (?, ?, 'Main', ?, 'Furqaan Ahmed', ?, ?, ?)",
+                (inbox_id, address, DOMAIN_ID, status, STAMP, STAMP),
             )
 
     def check(self) -> Any:
@@ -333,7 +334,8 @@ def test_each_spam_rate_boundary(
     assert [found[0] for found in three.alerts()] == ([] if alert is None else [alert])
     assert (three.statuses()[f"a@{DOMAIN}"] == "paused") is paused
     issue_kinds = [issue[0] for issue in three.issues()]
-    assert issue_kinds == ([] if alert is None else [alert])
+    paused_issues = ["inbox_paused"] * 2 if paused else []  # Story 6.2: each paused inbox
+    assert issue_kinds == paused_issues + ([] if alert is None else [alert])
     if paused:
         assert {event[4] for event in three.pause_events()} == {"spam_rate"}
         assert three.alerts()[0][2] == (

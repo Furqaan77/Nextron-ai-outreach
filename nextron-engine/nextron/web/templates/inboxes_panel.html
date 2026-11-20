@@ -1,10 +1,12 @@
 {#- The Sending Inboxes panel (nextron.web.inboxes_page): rendered inside inboxes.html, and alone
-    as the answer to POST /inboxes, which HTMX swaps in for this whole panel.
+    as the answer to POST /inboxes, /inboxes/warmup, /inboxes/connect and /inboxes/reconnect,
+    which HTMX swaps in for this whole panel.
     Every value is autoescaped; nothing here is marked safe. -#}
 <div id="inboxes-panel">
 {%- if notice %}
 <p class="notice{% if notice.role == 'alert' %} notice-refused{% endif %}" role="{{ notice.role }}">{{ notice.text }}</p>
 {%- endif %}
+{% include "inbox_connect_status.html" %}
 {%- for warning in warnings %}
 <p class="inbox-warning">{{ warning }}</p>
 {%- endfor %}
@@ -21,16 +23,25 @@
 <p class="hint" id="inbox-label-hint">1 to 80 characters on one line, such as Main inbox.</p>
 </div>
 <button type="submit">Add inbox</button>
+<button type="submit" hx-post="/inboxes/connect">Connect inbox</button>
+<p class="hint">Connect inbox opens Google's sign-in in your browser: sign in as this inbox and allow Gmail access (gmail.modify only). Add inbox only registers it.</p>
 </form>
 {%- if rows %}
 <table class="inbox-table">
 <thead>
-<tr><th scope="col">Label</th><th scope="col">Address</th><th scope="col">Sending Domain</th><th scope="col">Status</th></tr>
+<tr><th scope="col">Label</th><th scope="col">Address</th><th scope="col">Sending Domain</th><th scope="col">Status</th><th scope="col">Connected</th><th scope="col">Gmail</th></tr>
 </thead>
 <tbody>
 {%- for row in rows %}
 <tr><td>{{ row.label }}</td><td>{{ row.address }}</td><td>{{ row.domain }}</td><td>{{ row.status }}
-{%- if row.note %}<p class="inbox-note">{{ row.note }}</p>{% endif %}</td></tr>
+{%- if row.note %}<p class="inbox-note">{{ row.note }}</p>{% endif %}</td><td>{{ row.connected }}</td><td>
+{%- if row.action %}
+<form method="post" hx-post="/inboxes/reconnect" hx-target="#inboxes-panel" hx-swap="outerHTML" hx-sync="this:drop">
+{{ csrf_field() }}
+<input type="hidden" name="inbox_id" value="{{ row.id }}">
+<button type="submit">{{ row.action }}</button>
+</form>
+{%- endif %}</td></tr>
 {%- endfor %}
 </tbody>
 </table>

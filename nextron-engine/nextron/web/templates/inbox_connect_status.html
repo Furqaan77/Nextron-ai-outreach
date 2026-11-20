@@ -1,0 +1,12 @@
+{#- The Sending Inbox connect status (nextron.web.inboxes_page.connect_view, Story 6.2): inside
+    inboxes_panel.html, and alone as the answer to GET /inboxes/connect, which HTMX polls every
+    2 seconds only while a consent flow waits. Every value is autoescaped; nothing here is
+    marked safe. -#}
+<div id="inbox-connect-status"{% if connect.waiting %} hx-get="/inboxes/connect" hx-trigger="{{ connect_poll }}" hx-swap="outerHTML"{% endif %}>
+{%- if connect.notice %}
+<p class="notice{% if connect.notice.role == 'alert' %} notice-refused{% endif %}" role="{{ connect.notice.role }}">{{ connect.notice.text }}</p>
+{%- endif %}
+{%- if connect.reload %}
+<p><a href="/inboxes">Reload</a></p>
+{%- endif %}
+</div>
